@@ -18,6 +18,9 @@ import json
 import logging
 import os
 import socket
+import subprocess
+import sys
+import textwrap
 import time
 from contextlib import nullcontext
 from copy import deepcopy
@@ -123,6 +126,8 @@ from responses_api_models.vllm_model.app import (
     _redacted_error_repr,
     _transport_images,
     _transport_log_context,
+    apply_sampling_overrides,
+    merge_chat_extra_body,
 )
 
 
@@ -7505,10 +7510,91 @@ class TestSamplingOverrides:
         out = server._preprocess_chat_completion_create_params(
             MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 262144}
         )
-        assert out["max_completion_tokens"] is None
+        assert "max_completion_tokens" not in out
         assert "max_tokens" not in out
         # Not a Chat Completions field, and stricter endpoints reject it.
         assert "max_output_tokens" not in out
+
+    def test_a_null_override_removes_the_parameter(self) -> None:
+        """A null pin sends no value, so the engine's default replaces the request's and ``extra_body``'s."""
+        server = self._server({"temperature": None, "top_k": None, "top_p": 1.0}, extra_body={"top_k": 20})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2, "top_p": 0.5}
+        )
+        assert "temperature" not in out
+        assert "top_k" not in out
+        assert out["top_p"] == 1.0
+
+    @mark.parametrize("api", ["chat", "completions", "responses"])
+    @mark.parametrize("pinned_name", ["max_tokens", "max_completion_tokens", "max_output_tokens"])
+    def test_a_null_limit_pin_sends_no_limit_on_any_endpoint(self, api: str, pinned_name: str) -> None:
+        """A null limit pin removes the request's limit under every name and sends none, on every endpoint."""
+        server = self._server({pinned_name: None})
+        body = {"temperature": 0.2, "max_tokens": 500, "max_completion_tokens": 500, "max_output_tokens": 500}
+        assert server._apply_sampling_overrides(body, api=api) == {"temperature": 0.2}
+
+    @mark.parametrize("is_responses_native", [False, True])
+    def test_a_null_max_tokens_pin_lifts_a_responses_request_limit(self, is_responses_native: bool) -> None:
+        """A ``/v1/responses`` request that sets ``max_output_tokens`` reaches the engine with no limit under any name,
+        whether the server forwards it to the Chat endpoint or to the Responses endpoint."""
+        server = self._server({"max_tokens": None}, is_responses_native=is_responses_native)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+        )
+        provider.create_response = AsyncMock(
+            return_value={
+                "id": "resp_1",
+                "object": "response",
+                "created_at": FIXED_TIME,
+                "model": "dummy_model",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        server._clients = [provider]
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"input": "hi", "max_output_tokens": 500}
+        )
+
+        assert response.status_code == 200
+        call = provider.create_response if is_responses_native else provider.create_chat_completion
+        assert not {"max_tokens", "max_completion_tokens", "max_output_tokens"} & call.await_args.kwargs.keys()
+
+    def test_a_non_null_limit_pin_is_sent_next_to_a_null_one(self) -> None:
+        """The first pinned name in ``_OUTPUT_BUDGET_KEYS`` order still decides the limit. Here that name carries 200,
+        so every endpoint sends 200 and the null under the other name changes nothing."""
+        server = self._server({"temperature": 1.0, "max_tokens": None, "max_completion_tokens": 200})
+        sent = [
+            server._apply_sampling_overrides({"temperature": 0.2, "max_tokens": 500}, api=api)
+            for api in ("chat", "completions", "responses")
+        ]
+        assert sent == [
+            {"temperature": 1.0, "max_completion_tokens": 200},
+            {"temperature": 1.0, "max_tokens": 200},
+            {"temperature": 1.0, "max_output_tokens": 200},
+        ]
+
+    def test_a_null_limit_pin_under_the_first_name_sends_no_limit(self, caplog) -> None:
+        """The first pinned name in ``_OUTPUT_BUDGET_KEYS`` order decides the limit also when its value is null:
+        no endpoint sends a limit, the 200 under the later name is not sent, and the start-up warning says so."""
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            server = self._server({"max_completion_tokens": None, "max_tokens": 200})
+        sent = [
+            server._apply_sampling_overrides({"max_tokens": 500}, api=api)
+            for api in ("chat", "completions", "responses")
+        ]
+        assert sent == [{}, {}, {}]
+        assert "every endpoint sends no limit, because max_completion_tokens is null" in caplog.text
 
     def test_pinned_limit_reaches_the_responses_native_path_as_max_output_tokens(self) -> None:
         """vLLM's Responses endpoint reads only ``max_output_tokens``, so a Chat-spelled pin is sent under that name."""
@@ -7638,6 +7724,25 @@ class TestSamplingOverrides:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
             self._server({"max_output_tokens": None, "max_tokens": None, "max_completion_tokens": None})
         assert "different values under different names" not in caplog.text
+
+    @mark.parametrize("api", ["chat", "completions", "responses"])
+    def test_a_null_limit_pin_removes_every_limit_name_and_keeps_the_other_pins(self, api: str) -> None:
+        """Other pins still apply, the limit is removed under every name, and the caller's pins are not mutated."""
+        pins = {"temperature": 1.0, "max_tokens": None}
+        body = {"temperature": 0.2, "max_tokens": 500, "max_completion_tokens": 500, "max_output_tokens": 500}
+        assert apply_sampling_overrides(body, sampling_overrides=pins, api=api) == {"temperature": 1.0}
+        assert pins == {"temperature": 1.0, "max_tokens": None}
+
+    def test_a_request_limit_beats_an_extra_body_limit_under_either_chat_name(self) -> None:
+        """extra_body's limit is a default: it applies only when the request sets no limit of its own."""
+        extra_body = {"max_completion_tokens": 64, "temperature": 0.5}
+        assert merge_chat_extra_body({"max_tokens": 500}, extra_body=extra_body) == {
+            "max_tokens": 500,
+            "temperature": 0.5,
+        }
+        assert merge_chat_extra_body({}, extra_body=extra_body) == extra_body
+        # A null request limit sets no limit, so the default still applies.
+        assert merge_chat_extra_body({"max_tokens": None}, extra_body=extra_body) == {**extra_body, "max_tokens": None}
 
     def test_transport_log_records_the_request_the_engine_receives(
         self, monkeypatch: MonkeyPatch, tmp_path, capsys
@@ -8894,7 +8999,9 @@ class TestUnrepresentableRequestFields:
     BODY = {"input": "hi", "include": ["reasoning.encrypted_content"]}
 
     @staticmethod
-    def _client(monkeypatch: MonkeyPatch, *, drop: bool) -> tuple[TestClient, dict[str, Any]]:
+    def _client(
+        monkeypatch: MonkeyPatch, *, drop: bool, inline_tool_output_images: bool = False
+    ) -> tuple[TestClient, dict[str, Any]]:
         """A test client for a model server, plus the dict that records the converted chat params."""
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -8907,6 +9014,7 @@ class TestUnrepresentableRequestFields:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             drop_unrepresentable_request_fields=drop,
+            inline_tool_output_images=inline_tool_output_images,
         )
         server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         captured: dict[str, Any] = {}
@@ -8954,6 +9062,37 @@ class TestUnrepresentableRequestFields:
         assert response.headers["content-type"].startswith("text/event-stream")
         assert "event: response.completed" in response.text
         assert "include" not in captured["value"].model_dump(exclude_unset=True)
+
+    IMAGE_OUTPUT_BODY = {
+        "input": [
+            {"type": "function_call", "call_id": "c1", "name": "view_image", "arguments": '{"path":"a.png"}'},
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": [{"type": "input_image", "image_url": "data:image/png;base64,YWJj"}],
+            },
+        ]
+    }
+
+    @mark.parametrize("stream", [False, True])
+    @mark.parametrize(
+        ("drop", "inline_tool_output_images", "expected_part"),
+        [
+            (True, False, {"type": "text", "text": "[image omitted from tool output]"}),
+            (False, True, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}}),
+            (True, True, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}}),
+        ],
+        ids=["placeholder", "image", "image_wins_over_placeholder"],
+    )
+    def test_tool_output_image(
+        self, monkeypatch: MonkeyPatch, stream: bool, drop: bool, inline_tool_output_images: bool, expected_part: dict
+    ) -> None:
+        # `inline_tool_output_images` passes Codex's `view_image` output to the backend as an image part
+        # of the tool message; without it the image becomes the placeholder.
+        client, captured = self._client(monkeypatch, drop=drop, inline_tool_output_images=inline_tool_output_images)
+
+        assert client.post("/v1/responses", json={**self.IMAGE_OUTPUT_BODY, "stream": stream}).status_code == 200
+        assert captured["value"].messages[-1] == {"role": "tool", "tool_call_id": "c1", "content": [expected_part]}
 
 
 class TestPreserveEnvelopeIdFollowsCaptureContext:
@@ -9464,6 +9603,50 @@ class TestCodexRequests:
         "call_id": "call_img",
         "output": [{"type": "input_image", "image_url": PNG_URL, "detail": "high"}],
     }
+
+    THINKING_BLOCKS = [{"type": "thinking", "thinking": "Read the test first.", "signature": "EqQBCkgIBhAB-sig"}]
+
+    def test_preserve_thinking_blocks_needs_the_chat_path(self) -> None:
+        with raises(ValueError, match="requires is_responses_native=false"):
+            self._server(preserve_thinking_blocks=True, is_responses_native=True)
+        with raises(ValueError, match="requires use_completions_api=false"):
+            self._server(preserve_thinking_blocks=True, use_completions_api=True)
+
+    def test_preserve_thinking_blocks_round_trips_through_the_server(self) -> None:
+        # An Anthropic model behind LiteLLM: signed thinking blocks on the answer must come back, verbatim, on the
+        # assistant message of the next turn, or the provider rejects the tool-call continuation.
+        server, client = self._server(**self.CODEX_FIELDS, preserve_thinking_blocks=True)
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "shell_command", "arguments": json.dumps({"command": "ls"})},
+        }
+        answer = {
+            "role": "assistant",
+            "content": None,
+            "reasoning": self.REASONING_TEXT,
+            "provider_specific_fields": {"thinking_blocks": self.THINKING_BLOCKS},
+            "tool_calls": [call],
+        }
+        client.create_chat_completion = AsyncMock(return_value=self._completion(answer))
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+        assert first.status_code == 200
+        items = [event["item"] for event in self._events(first.text) if event["type"] == "response.output_item.done"]
+        reasoning = next(item for item in items if item["type"] == "reasoning")
+        assert reasoning["encrypted_content"]
+
+        client.create_chat_completion.reset_mock()
+        tool_output = {"type": "function_call_output", "call_id": "call_1", "output": "a.py"}
+        second = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER, *items, tool_output]))
+        assert second.status_code == 200
+        messages = [
+            message if isinstance(message, dict) else dict(message)
+            for message in client.create_chat_completion.await_args.kwargs["messages"]
+        ]
+        assistant = next(message for message in messages if message["role"] == "assistant")
+        assert assistant["thinking_blocks"] == self.THINKING_BLOCKS
 
     def test_inline_tool_output_images_needs_the_chat_path(self) -> None:
         with raises(ValueError, match="requires is_responses_native=false"):
@@ -10551,3 +10734,31 @@ def test_messages_repetition_capture_does_not_invent_a_bound_response(tmp_path: 
     digest = _health_for_messages_call(tmp_path, call, bound=False)
     assert digest.responses is None
     assert "model_call_runaway_generation" in digest.unobserved
+
+
+@mark.parametrize(
+    ("old_name", "new_name"),
+    [
+        ("VLLMConverter", "ChatCompletionsConverter"),
+        ("VLLMConverterResponsesToChatCompletionsState", "ChatCompletionsConverterState"),
+    ],
+)
+def test_converter_aliases_resolve_from_this_module_with_a_warning(old_name: str, new_name: str) -> None:
+    # In a fresh interpreter: each old path warns only on its first use in a process.
+    code = textwrap.dedent(
+        f"""
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from responses_api_models.vllm_model.app import {old_name} as old
+        from nemo_gym.models.chat_completions_converter import {new_name} as new
+        assert old is new, (old, new)
+        messages = [str(w.message) for w in caught if w.category is DeprecationWarning and "{old_name}`" in str(w.message)]
+        assert len(messages) == 1, messages
+        (message,) = messages
+        assert "chat_completions_converter.{new_name}`" in message, message
+        assert "removed in nemo_gym 0.10.0" in message, message
+        """
+    )
+    # The repository root puts responses_api_models on the path, wherever pytest was started.
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=PARENT_DIR)

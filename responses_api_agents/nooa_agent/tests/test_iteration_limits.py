@@ -13,6 +13,8 @@ from fastapi import HTTPException
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
+from nooa.strategies import CodeActV2
+from nooa.strategies.codeact import CodeActSession
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
@@ -65,10 +67,37 @@ class TextOnlyLimitedAgent(Agent):
         ...
 
 
-async def invoke_text(
-    agent: IterationLimitedAgent | TextOnlyLimitedAgent | CallLimitedAgent | RetryingAgent,
-    request: NeMoGymResponseCreateParamsNonStreaming,
-) -> str:
+class DefaultTextOnlyGuardAgent(Agent):
+    # The strategy and default text-only limit (3) that BenchAgent runs.
+    @strategy(CodeActV2())
+    async def analyze(self, text: str) -> str:
+        """Work on the task using python_cell."""
+        ...
+
+
+class TextOnlyBelowLimitAgent(Agent):
+    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=2, max_consecutive_text_only=3)))
+    async def analyze(self, text: str) -> str:
+        """Work on the task using execute_python."""
+        ...
+
+
+class TextOnlyGuardDisabledAgent(Agent):
+    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=1, max_consecutive_text_only=0)))
+    async def analyze(self, text: str) -> str:
+        """Work on the task using execute_python."""
+        ...
+
+
+TEXT_ONLY_AGENTS = {
+    "text_only": TextOnlyLimitedAgent,
+    "text_only_default_guard": DefaultTextOnlyGuardAgent,
+    "text_only_below_limit": TextOnlyBelowLimitAgent,
+    "text_only_guard_disabled": TextOnlyGuardDisabledAgent,
+}
+
+
+async def invoke_text(agent: Agent, request: NeMoGymResponseCreateParamsNonStreaming) -> str:
     return await agent.analyze(str(request.input))
 
 
@@ -80,7 +109,7 @@ def iteration_agent(*, scenario: str = "iterations", sentinel: Path | None = Non
         assert server_name == "policy"
         assert url_path.endswith("/v1/responses")
         model_calls.append(json)
-        if len(model_calls) > 1:
+        if len(model_calls) > 1 and scenario not in TEXT_ONLY_AGENTS:
             if scenario == "output_then_success":
                 return FakeHTTPResponse(
                     model_response(
@@ -109,7 +138,7 @@ def iteration_agent(*, scenario: str = "iterations", sentinel: Path | None = Non
                 content=[NeMoGymResponseOutputText(annotations=[], text="working on the task", logprobs=[])],
             ),
         ]
-        if scenario not in {"text_only", "output_text"}:
+        if scenario not in {*TEXT_ONLY_AGENTS, "output_text"}:
             arguments = json_dumps({"code": code})
             if scenario == "output_partial_tool":
                 arguments = arguments[:-1]
@@ -121,15 +150,15 @@ def iteration_agent(*, scenario: str = "iterations", sentinel: Path | None = Non
                     arguments=arguments,
                 )
             )
-        response = model_response(*output)
+        response = model_response(*output, response_id=f"resp-{len(model_calls)}")
         if scenario.startswith("output_"):
             response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
         return FakeHTTPResponse(response)
 
     client.post = AsyncMock(side_effect=post)
     agent_class = IterationLimitedAgent
-    if scenario == "text_only":
-        agent_class = TextOnlyLimitedAgent
+    if scenario in TEXT_ONLY_AGENTS:
+        agent_class = TEXT_ONLY_AGENTS[scenario]
     elif scenario == "calls":
         agent_class = CallLimitedAgent
     elif scenario in {"output_then_success", "output_then_outage"}:
@@ -154,6 +183,7 @@ LIMIT_SCENARIOS = [
     ("output_tool", NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED),
     ("output_partial_tool", NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED),
 ]
+PARTIAL_SCENARIOS = [*LIMIT_SCENARIOS, ("text_only", NOOATerminationReason.INVALID_POLICY_OUTPUT)]
 
 
 def assert_partial_evidence(response: NeMoGymResponse, *, scenario: str) -> None:
@@ -162,7 +192,7 @@ def assert_partial_evidence(response: NeMoGymResponse, *, scenario: str) -> None
     assert any(item.type == "reasoning" for item in response.output)
     assert any(item.type == "message" and item.content[0].text == "working on the task" for item in response.output)
     calls = [item for item in response.output if item.type == "function_call" and item.call_id == "call-1"]
-    if scenario == "output_text":
+    if scenario in {"output_text", "text_only"}:
         assert not calls
     else:
         assert len(calls) == 1
@@ -172,14 +202,14 @@ def assert_partial_evidence(response: NeMoGymResponse, *, scenario: str) -> None
     if scenario.startswith("output_"):
         assert response.incomplete_details.reason == "max_output_tokens"
         assert not any(item.type == "function_call_output" and item.call_id == "call-1" for item in response.output)
-    else:
+    elif scenario != "text_only":
         assert any(
             item.type == "function_call_output" and item.call_id == "call-1" and "partial progress" in item.output
             for item in response.output
         )
 
 
-@pytest.mark.parametrize(("scenario", "reason"), LIMIT_SCENARIOS)
+@pytest.mark.parametrize(("scenario", "reason"), PARTIAL_SCENARIOS)
 async def test_real_codeact_response_retains_partial_evidence_without_verification(
     scenario: str, reason: NOOATerminationReason, tmp_path: Path
 ) -> None:
@@ -200,7 +230,7 @@ async def test_real_codeact_response_retains_partial_evidence_without_verificati
 
 @pytest.mark.parametrize(
     ("scenario", "reason"),
-    [*LIMIT_SCENARIOS, ("output_then_success", None), ("output_then_outage", None), ("model_outage", None)],
+    [*PARTIAL_SCENARIOS, ("output_then_success", None), ("output_then_outage", None), ("model_outage", None)],
 )
 async def test_real_codeact_environment_verifies_partial_response_once(
     scenario: str, reason: NOOATerminationReason | None, tmp_path: Path
@@ -254,7 +284,7 @@ async def test_real_codeact_environment_verifies_partial_response_once(
     assert _paths(client)[-3:] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
 
 
-@pytest.mark.parametrize("scenario", ["retries", "text_only", "model_outage"])
+@pytest.mark.parametrize("scenario", ["retries", "model_outage"])
 async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation(scenario: str) -> None:
     instance, model_calls = iteration_agent(scenario=scenario)
     req = await open_session(instance)
@@ -271,11 +301,51 @@ async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation
     assert NOOATerminationReason.MAX_ITERATIONS_EXCEEDED not in gaps
 
 
-async def test_matching_generation_error_message_is_not_a_gradable_execution_limit() -> None:
+@pytest.mark.parametrize(
+    ("scenario", "reason", "model_call_count"),
+    [
+        ("text_only_default_guard", NOOATerminationReason.INVALID_POLICY_OUTPUT, 3),
+        ("text_only_below_limit", NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, 2),
+        ("text_only_guard_disabled", NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, 1),
+    ],
+)
+async def test_text_only_replies_are_invalid_output_only_when_codeact_guard_stops(
+    scenario: str, reason: NOOATerminationReason, model_call_count: int
+) -> None:
+    instance, model_calls = iteration_agent(scenario=scenario)
+    req = await open_session(instance)
+    try:
+        response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        assert response.status == "incomplete"
+        assert response.error is None
+        assert len(model_calls) == model_call_count
+    finally:
+        receipt = await close(instance)
+    gaps = {gap.code for gap in receipt.agent_observations.gaps}
+    assert reason in gaps
+    assert NOOATerminationReason.INFRASTRUCTURE_ERROR not in gaps
+    if reason is not NOOATerminationReason.INVALID_POLICY_OUTPUT:
+        assert NOOATerminationReason.INVALID_POLICY_OUTPUT not in gaps
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.",
+        "CodeAct aborted: LLM returned plain text without a tool call {count} times in a row "
+        "(max_consecutive_text_only={count}) for `analyze`.",
+    ],
+)
+async def test_generation_error_outside_codeact_frame_is_not_a_gradable_execution_limit(message: str) -> None:
     instance, model_calls = iteration_agent()
 
     async def invoke_error(agent: object, request: object) -> object:
-        raise GenerationError("Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.")
+        # Bind the exhausted locals both CodeAct recognizers read, so only the raising frame differs.
+        session = CodeActSession(max_iterations=1, max_retries=1, target_method_name="analyze", event_manager=None)
+        session.record_iteration()
+        session.record_text_only()
+        max_text_only = session.consecutive_text_only
+        raise GenerationError(message.format(count=max_text_only))
 
     req = await open_session(instance)
     instance._require_agent_session("session").runner._invocation_adapter = invoke_error
@@ -316,10 +386,19 @@ async def test_cancellation_after_limit_stays_cancelled_in_agent_session(scenari
     assert not sentinel.exists()
 
 
-async def test_codeact_cleanup_failure_after_iteration_exhaustion_skips_verification(
+@pytest.mark.parametrize(
+    ("scenario", "reason"),
+    [
+        ("iterations", NOOATerminationReason.MAX_ITERATIONS_EXCEEDED),
+        ("text_only", NOOATerminationReason.INVALID_POLICY_OUTPUT),
+    ],
+)
+async def test_codeact_cleanup_failure_after_policy_stop_skips_verification(
     monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    reason: NOOATerminationReason,
 ) -> None:
-    instance, model_calls = iteration_agent()
+    instance, model_calls = iteration_agent(scenario=scenario)
     environment, client = _environment(instance)
     cleanup_failure = ConnectionError("sandbox cleanup connection lost")
     cleanup = AsyncMock(side_effect=cleanup_failure)
@@ -337,5 +416,5 @@ async def test_codeact_cleanup_failure_after_iteration_exhaustion_skips_verifica
     saved_reply = next(iter(instance._fenced_session_records.values())).close_response
     gaps = {gap.code for gap in saved_reply.agent_observations.gaps}
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in gaps
-    assert NOOATerminationReason.MAX_ITERATIONS_EXCEEDED not in gaps
+    assert reason not in gaps
     assert saved_reply.agent_observations.records

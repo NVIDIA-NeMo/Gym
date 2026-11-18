@@ -84,7 +84,7 @@ from nemo_gym.environment.validation import (
 from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
 from nemo_gym.server_runtime.server_status import StatusCommand
 from nemo_gym.server_runtime.supervisor.server_supervisor import (
-    RunHelper,
+    ServerSupervisor,
     _configured_servers,
     _resolve_server_dir,
 )
@@ -204,7 +204,7 @@ def prefetch(
         print(f"Pre-warming venv for: {dir_path}")
 
         # Run only the setup (venv creation + dep install) — no server start.
-        # Serial execution reduces uv cache size (same reasoning as dry_run in RunHelper.start).
+        # Serial execution reduces uv cache size (same reasoning as dry_run in ServerSupervisor.start).
         setup_cmd = setup_env_command(dir_path, global_config_dict, top_level_path)
         process = run_command(setup_cmd, dir_path, server_name=top_level_path)
         returncode = process.wait()
@@ -241,9 +241,9 @@ def run(
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    rh = RunHelper()
-    rh.start(global_config_dict_parser_config)
-    rh.run_forever()
+    supervisor = ServerSupervisor()
+    supervisor.start(global_config_dict_parser_config)
+    supervisor.run_forever()
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
@@ -1202,12 +1202,20 @@ def _inspect_environment(
         domain=entry.domain or parsed["domain"],
         description=description,
         details=details,
-        usage=(
-            f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
-            if entry.resources_server_selector
-            else f"gym env start --{entry.kind} {name} --model-type vllm_model"
-        ),
+        usage=_inspect_usage(name, entry),
     )
+
+
+def _inspect_usage(name: str, entry: EnvironmentCatalogEntry) -> str:
+    """The example command an inspected entry shows: a Harbor-backed one runs through `gym eval run`, which composes
+    its Harbor environment server; `gym env start` does not."""
+    if entry.harbor_target and entry.kind == "benchmark":
+        return f"gym eval run --benchmark {name} --sandbox <provider> --model-type vllm_model"
+    if entry.harbor_target:
+        return f"gym eval run {entry.harbor_target} --agent <harness> --sandbox <provider> --model-type vllm_model"
+    if entry.resources_server_selector:
+        return f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
+    return f"gym env start --{entry.kind} {name} --model-type vllm_model"
 
 
 def _entry_servers(

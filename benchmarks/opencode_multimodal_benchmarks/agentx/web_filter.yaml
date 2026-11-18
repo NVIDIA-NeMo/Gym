@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The stock sandbox uploader writes these files before the stock plugin loader starts OpenCode.
+# Keep the implementation here as the single source; no host-side plugin installer is needed.
+visual_agent:
+  responses_api_agents:
+    opencode_agent:
+      plugins:
+      - /opt/nemo-gym/web-filter.mjs
+      sandbox_config:
+        files:
+          /opt/nemo-gym/web-filter.json: |
+            {
+              "url_substrings": ["mbzuai-oryx/agent-x", "tajamul21/agent-x"],
+              "content_substrings": [
+                "mbzuai-oryx/agent-x", "tajamul21/agent-x",
+                "agent-x benchmark", "agentx benchmark", "agent-x:"
+              ]
+            }
+          /opt/nemo-gym/web-filter.mjs: |
+            // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+            // SPDX-License-Identifier: Apache-2.0
+            // Best-effort filtering for native OpenCode 1.17.11 tools, not an egress boundary.
+            // Shell-created files, encoded content and concurrent readers can bypass this filter.
+            import {createReadStream} from "node:fs";
+            import {readFile, writeFile} from "node:fs/promises";
+
+            const EMPTY = "No content available.";
+            const TOOLS = new Set(["bash", "websearch", "webfetch"]);
+
+            export default async function webFilter() {
+              const policy = JSON.parse(await readFile(new URL("./web-filter.json", import.meta.url), "utf8"));
+              for (const key of ["url_substrings", "content_substrings"]) {
+                if (!Array.isArray(policy[key]) || policy[key].some(x => typeof x !== "string" || !x.trim())) {
+                  throw new Error("Invalid web filter policy: " + key);
+                }
+              }
+              const urls = policy.url_substrings.map(x => x.toLowerCase());
+              const contents = policy.content_substrings.map(x => x.toLowerCase());
+              const overlap = Math.max(4096, ...urls.map(x => x.length), ...contents.map(x => x.length));
+              function log(tool, phase, rule) {
+                // Record rule IDs, never page text, URLs, queries or task references.
+                process.stderr.write("[gym-web-filter] " + JSON.stringify({tool, phase, rule}) + "\n");
+              }
+              function urlRule(value) {
+                let text = value.toLowerCase();
+                for (let i = 0; i < 4; i++) {
+                  const index = urls.findIndex(x => text.includes(x));
+                  if (index >= 0) return "url:" + index;
+                  try {
+                    const decoded = decodeURIComponent(text);
+                    if (decoded === text) break;
+                    text = decoded;
+                  } catch { break; }
+                }
+              }
+              function contentRule(text) {
+                const lower = text.toLowerCase();
+                const index = contents.findIndex(x => lower.includes(x));
+                if (index >= 0) return "content:" + index;
+                for (const match of text.matchAll(/https?:\/\/[^\s<>"'`]+/gi)) {
+                  const rule = urlRule(match[0]);
+                  if (rule) return rule;
+                }
+              }
+              async function savedOutputRule(path) {
+                let tail = "";
+                for await (const chunk of createReadStream(path, {encoding: "utf8"})) {
+                  const text = tail + chunk;
+                  const rule = contentRule(text);
+                  if (rule) return rule;
+                  tail = text.slice(-overlap);
+                }
+              }
+              log("plugin", "loaded", "v1");
+              return {
+                "tool.execute.before": async (input, output) => {
+                  if (!TOOLS.has(input.tool)) return;
+                  const args = output.args ?? {};
+                  const text = input.tool === "bash" ? String(args.command ?? "")
+                    : input.tool === "webfetch" ? String(args.url ?? "") : String(args.query ?? "");
+                  const rule = input.tool === "webfetch" ? urlRule(text) : contentRule(text);
+                  if (rule) {
+                    log(input.tool, "blocked_input", rule);
+                    throw new Error(EMPTY);
+                  }
+                },
+                "tool.execute.after": async (input, output) => {
+                  if (!TOOLS.has(input.tool)) return;
+                  // Native truncation precedes this hook. Scan the full spill, not just the preview,
+                  // and overwrite rejected spills before returning so the truncation link is not a bypass.
+                  const path = output.metadata?.outputPath;
+                  let rule = contentRule(JSON.stringify(output));
+                  if (typeof path === "string") {
+                    try { rule ??= await savedOutputRule(path); }
+                    catch { rule = "unreadable_output"; }
+                  }
+                  if (!rule) return;
+                  if (typeof path === "string") await writeFile(path, EMPTY, "utf8");
+                  const exit = output.metadata?.exit;
+                  output.output = EMPTY;
+                  output.title = "";
+                  output.metadata = {...(exit === undefined ? {} : {exit}), truncated: false};
+                  if ("attachments" in output) output.attachments = [];
+                  log(input.tool, "blocked_output", rule);
+                },
+              };
+            }

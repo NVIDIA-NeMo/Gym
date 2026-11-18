@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
 import hashlib
+import json
 
 import pytest
 
 from benchmarks.opencode_multimodal_benchmarks import canonical
+from benchmarks.opencode_multimodal_benchmarks.agentx_prepare import prepare, validate_rows
+from benchmarks.opencode_multimodal_benchmarks.agentx_source import reference_metadata
 from resources_servers.opencode_multimodal_benchmarks.mcq import infer_option
 
 
@@ -25,6 +28,59 @@ def test_verbose_option_does_not_require_judge(prediction):
 def test_verbose_option_must_be_available_and_api_failure_not_salvaged():
     assert infer_option("The answer is D. More explanation follows here.", {"A": "cat", "B": "dog"}) is None
     assert infer_option("Failed to obtain answer via API. The answer is B.", {"A": "cat", "B": "dog"}) is None
+
+
+@pytest.mark.parametrize(
+    "mutation", ["id", "label", "type", "question", "media", "missing_image", "assistant", "outside"]
+)
+def test_agentx_tampering_rejected_even_with_updated_checksum(tmp_path, monkeypatch, agentx_bundle, mutation):
+    path, media, image, rows = agentx_bundle
+    row = rows[-1]  # Even a sample outside the requested smoke limit must be checked.
+    if mutation == "id":
+        row["verifier_metadata"]["index"] = "1"  # Excluded generative ID.
+    elif mutation == "label":
+        row["verifier_metadata"]["GT_json"] = '{"value":"blue","justification":"changed"}'
+    elif mutation == "type":
+        row["verifier_metadata"]["query_type"] = "subjective"
+    elif mutation == "question":
+        row["responses_create_params"]["input"][0]["content"][0]["text"] = "Different question"
+    elif mutation == "media":
+        row["verifier_metadata"]["source_media_sha256"]["original.png"] = "0" * 64
+    elif mutation == "missing_image":
+        row["responses_create_params"]["input"][0]["content"].pop()
+    elif mutation == "assistant":
+        row["responses_create_params"]["input"][0]["role"] = "assistant"
+    elif mutation == "outside":
+        row["responses_create_params"]["input"][0]["content"][1]["image_url"] = str(image)
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError):
+        prepare(str(path), hashlib.sha256(path.read_bytes()).hexdigest(), media_root=str(media), limit=1)
+
+
+def test_arbitrary_605_rows_no_longer_accepted():
+    rows = [{"verifier_metadata": {"index": str(i)}} for i in range(605)]
+    with pytest.raises(ValueError, match="IDs differ"):
+        validate_rows(rows)
+
+
+def test_nested_public_reference_is_preserved():
+    reference = {
+        "query_type": "Objective",
+        "tool_metadata": {
+            "final_answer": {
+                "value": "192.5 minutes; DINNER; 7",
+                "justification": "timeline",
+            }
+        },
+    }
+    record = {"dialogs": [{"role": "user", "content": "Timeline question"}], "files": [{"type": "image"}]}
+    result = reference_metadata("522", record, reference)
+    assert result["answer"] == "192.5 minutes; DINNER; 7"
+    assert json.loads(result["GT_json"])["justification"] == "timeline"
+    reference["tool_metadata"] = {}
+    with pytest.raises(ValueError, match="Missing Agent-X reference"):
+        reference_metadata("522", record, reference)
 
 
 @pytest.mark.parametrize("benchmark", ["VStarBench", "HRBench8K"])

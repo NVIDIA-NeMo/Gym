@@ -1,11 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -14,6 +18,7 @@ from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
+    PROVIDER_IO_TIMEOUT,
     PROVIDER_OOM_KILLED,
     SESSION_LOST,
     VERIFIER_ERROR,
@@ -25,10 +30,13 @@ from nemo_gym.core import (
     RequestFailureLog,
     SandboxFailureDetails,
     TaskId,
+    choose_stage_outcome,
     failure_kinds,
     failure_report_for,
 )
-from nemo_gym.sandbox import SandboxResources
+from nemo_gym.core.outcome_policy import is_policy_counted_zero
+from nemo_gym.rollouts.rollout_recovery import applied_failure_class
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
@@ -36,6 +44,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from resources_servers.deepswe.app import (
+    TEST_DEADLINE,
     DeepSWEResourcesServer,
     DeepSWEResourcesServerConfig,
     DeepSWESeedSessionRequest,
@@ -45,6 +54,7 @@ from resources_servers.deepswe.app import (
     _resolve_task,
     _resolve_task_id,
 )
+from resources_servers.deepswe.prepare import DEFAULT_RIPGREP_PATH, RIPGREP_SHA256
 from resources_servers.deepswe.task_store import task_collect_hook, task_id, task_image
 
 
@@ -61,6 +71,7 @@ def _config(
     *,
     golden: bool = True,
     agent_policy: dict | None = None,
+    verification_policy: dict | None = None,
     classification: dict | None = None,
 ) -> DeepSWEResourcesServerConfig:
     return DeepSWEResourcesServerConfig(
@@ -72,7 +83,16 @@ def _config(
         expected_task_count=1,
         is_verifying_golden_patch=golden,
         outcome_policy={
-            **({"by_stage": {"agent": agent_policy}} if agent_policy else {}),
+            **(
+                {
+                    "by_stage": {
+                        **({"agent": agent_policy} if agent_policy else {}),
+                        **({"verification": verification_policy} if verification_policy else {}),
+                    }
+                }
+                if agent_policy or verification_policy
+                else {}
+            ),
             **({"classification": classification} if classification else {}),
         },
         sandbox_provider="test",
@@ -525,7 +545,7 @@ async def test_verifier_reward_json_must_hold_a_binary_reward(
         artifacts["reward.json"] = reward_json
 
     async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
-        if command == "bash /tests/test.sh":
+        if command.endswith("bash /tests/test.sh; fi"):
             return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
         assert command.startswith("test -f /logs/verifier/")
         return SimpleNamespace(return_code=0 if command.rsplit("/", 1)[1] in artifacts else 1, error_type=None)
@@ -919,7 +939,7 @@ async def test_confirmed_agent_sandbox_oom_applies_policy_without_collecting_or_
     assert response.failure_report.failure_id == (None if counted else original_id)
     fields = response.model_dump(mode="json")
     from nemo_gym.core import FailureReportRow
-    from nemo_gym.orchestration.recovery import _scored_kind, status_fault_kind
+    from nemo_gym.eval.recovery.trials import _scored_kind, status_fault_kind
 
     # Persist the applied decision without changing canonical facts or inferring model fault.
     saved_row = fields | FailureReportRow.fields(response.failure_report)
@@ -1089,7 +1109,9 @@ async def test_verifier_status_timeout_propagates_without_scoring(
 
     assert caught.value is error
     sandbox.exec.assert_awaited_once_with(
-        "bash /tests/test.sh", cwd="/app", timeout_s=task.config.verifier.timeout_sec
+        app_module._verifier_command(task.config.verifier.timeout_sec),
+        cwd="/app",
+        timeout_s=task.config.verifier.timeout_sec + 90,
     )
 
 
@@ -1109,7 +1131,9 @@ async def test_unclassified_verifier_timeout_preserves_its_exception(
         await server._run_verifier(sandbox, task, b"valid patch\n", tmp_path)
     assert caught.value is error
     sandbox.exec.assert_awaited_once_with(
-        "bash /tests/test.sh", cwd="/app", timeout_s=task.config.verifier.timeout_sec
+        app_module._verifier_command(task.config.verifier.timeout_sec),
+        cwd="/app",
+        timeout_s=task.config.verifier.timeout_sec + 90,
     )
 
 
@@ -1135,7 +1159,7 @@ async def test_non_oom_verifier_failure_never_returns_an_unmasked_main_row(
 
         async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
             return SimpleNamespace(
-                return_code=0 if command == "bash /tests/test.sh" else 1,
+                return_code=0 if command.endswith("bash /tests/test.sh; fi") else 1,
                 error_type=None,
                 stdout="",
                 stderr="",
@@ -1185,7 +1209,7 @@ async def test_verifier_requires_completed_command_and_valid_artifacts(
     sandbox = AsyncMock()
 
     async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
-        if command == "bash /tests/test.sh":
+        if command.endswith("bash /tests/test.sh; fi"):
             return SimpleNamespace(return_code=return_code, error_type=error_type, stdout="", stderr="")
         assert command.startswith("test -f /logs/verifier/")
         return SimpleNamespace(return_code=0, error_type=None)
@@ -1207,6 +1231,224 @@ async def test_verifier_requires_completed_command_and_valid_artifacts(
     else:
         assert expected_error in (result.verifier_error or "")
     assert sandbox.download.await_count == (0 if error_type == "timeout" else 3)
+
+
+TIMEOUT_NOTICE = "timeout: sending signal TERM to command \u2018bash\u2019"
+
+
+def _test_run(return_code: int, *, error_type: str | None = None, notice: bool = True):
+    """A fake verifier sandbox exec: the test command ends as given, and no verifier artifact exists."""
+
+    async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
+        if command.startswith("test -f /logs/verifier/"):
+            return SimpleNamespace(return_code=1, error_type=None)
+        assert command.endswith("bash /tests/test.sh; fi")
+        output = "tests/test_mux.py::TestFlowControl::test_sender_pauses \n"
+        return SimpleNamespace(
+            return_code=return_code,
+            error_type=error_type,
+            stdout=output + (TIMEOUT_NOTICE + "\n" if notice else ""),
+            stderr=None,
+        )
+
+    return execute
+
+
+@pytest.mark.parametrize("return_code", [124, 137], ids=["term", "term-then-kill"])
+@pytest.mark.parametrize("golden", [False, True], ids=["model-patch", "golden-patch"])
+async def test_tests_stopped_at_their_limit_score_the_model_patch_zero_and_leave_a_golden_patch_ungraded(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch, golden: bool, return_code: int
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=golden), server_client=MagicMock(spec=ServerClient)
+    )
+    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = _test_run(return_code)
+    task = server._task_store.get("example-task")
+    limit = task.config.verifier.timeout_sec
+
+    result = await server._run_verifier(sandbox, task, b"patch", tmp_path)
+
+    command = sandbox.exec.await_args_list[0]
+    assert command.args[0] == (
+        f"if command -v timeout >/dev/null 2>&1; then exec timeout --verbose --kill-after=30 {limit:g} "
+        "bash /tests/test.sh; else exec bash /tests/test.sh; fi"
+    )
+    assert command.kwargs["timeout_s"] == limit + 90
+    assert result.reward == 0.0
+    assert result.verifier_exit_code == return_code
+    assert TIMEOUT_NOTICE in (result.test_output or "")
+    sandbox.download.assert_not_awaited()
+    if golden:
+        assert result.evaluation_completed is False
+        assert result.verifier_error == f"Tests did not finish within {limit:g}s on the golden patch"
+        assert result.verifier_timeout_s is None
+    else:
+        assert result.evaluation_completed is True
+        assert result.verifier_error is None
+        assert result.verifier_timeout_s == limit
+
+
+@pytest.mark.parametrize(
+    "return_code,error_type,notice",
+    [
+        (124, "timeout", False),  # a provider timeout, which may mean the command never ran (Daytona, OpenShell)
+        (124, "timeout", True),
+        (124, None, False),  # exit 124 without the timeout notice: not a confirmed deadline (no timeout binary)
+        (137, None, False),  # killed by something else, for example the OOM killer
+    ],
+    ids=["provider-timeout", "provider-timeout-with-notice", "exit-124-without-notice", "kill-without-notice"],
+)
+async def test_an_unconfirmed_deadline_stays_an_ungraded_masked_result(
+    task_assets: Path, monkeypatch: MonkeyPatch, return_code: int, error_type: str | None, notice: bool
+) -> None:
+    server, verifier_sandbox = _verify_server(task_assets, monkeypatch)
+    verifier_sandbox.exec.side_effect = _test_run(return_code, error_type=error_type, notice=notice)
+
+    response, _ = await _verify(server)
+
+    assert response.evaluation_completed is False and response.mask_sample is True
+    assert response.failure_kind == VERIFIER_ERROR
+    assert response.verifier_timeout_s is None
+
+
+def _verify_server(task_assets: Path, monkeypatch: MonkeyPatch, **policy: dict) -> tuple:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False, **policy), server_client=MagicMock(spec=ServerClient)
+    )
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/app"}
+    verifier_sandbox = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=[agent_sandbox, *[verifier_sandbox] * 3]))
+    monkeypatch.setattr(server, "_collect_model_patch", AsyncMock(return_value=b"agent patch\n"))
+    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    return server, verifier_sandbox
+
+
+def _assert_deadline_observed(response: DeepSWEVerifyResponse, log, server: DeepSWEResourcesServer) -> None:
+    """The same deadline evidence is recorded whichever action the policy selects."""
+    limit = server._task_store.get("example-task").config.verifier.timeout_sec
+    assert response.reward == 0.0
+    assert response.failure_kind == TEST_DEADLINE
+    assert response.failure_reason == f"Tests did not finish within {limit:g}s on the model's patch"
+    assert response.verifier_timeout_s == limit
+    assert response.verification_attempts == 1 and response.inconclusive_attempts == []
+    assert [(event.failure_kind, event.stage) for event in log.report.events.values()] == [
+        (TEST_DEADLINE, "verification")
+    ]
+
+
+async def test_a_model_patch_that_hangs_the_tests_is_a_counted_zero_by_default(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, verifier_sandbox = _verify_server(task_assets, monkeypatch)
+    verifier_sandbox.exec.side_effect = _test_run(124)
+
+    response, log = await _verify(server)
+
+    assert response.evaluation_completed is True and response.mask_sample is False
+    assert response.failure_outcome_action == OutcomeAction.COUNT_AS_ZERO
+    assert response.failure_outcome_attribution == FailureClass.MODEL
+    _assert_deadline_observed(response, log, server)
+    verifier_sandbox.stop.assert_awaited_once()
+    # The saved row keeps the applied decision, so a reader does not infer it from the evidence. Read it back
+    # from its JSON, as the collection does: these are the facts the accounting counts as a scored zero.
+    row = json.loads(response.model_dump_json())
+    assert is_policy_counted_zero(row) and applied_failure_class(row) == FailureClass.MODEL
+    assert row["failure_kind"] == TEST_DEADLINE and row["evaluation_completed"] is True
+    assert (row["failure_outcome_action"], row["failure_outcome_attribution"]) == ("count_as_zero", "model")
+    assert row["mask_sample"] is False and row["reward"] == 0.0 and row.get("_ng_failure_class") is None
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"default_action": "fail"},  # the configuration of the review, verbatim
+        {"by_failure_class": {"model": "fail"}},
+        {"default_action": "fail", "by_failure_class": {"evaluation": "retry"}},
+    ],
+    ids=["default-action-fail", "model-class-fail", "default-action-fail-with-other-rules"],
+)
+async def test_an_explicit_fail_for_the_stage_leaves_a_test_deadline_ungraded(
+    task_assets: Path, monkeypatch: MonkeyPatch, policy: dict
+) -> None:
+    server, verifier_sandbox = _verify_server(task_assets, monkeypatch, verification_policy=policy)
+    verifier_sandbox.exec.side_effect = _test_run(124)
+
+    response, log = await _verify(server)
+
+    assert response.evaluation_completed is False and response.mask_sample is True
+    assert response.failure_outcome_action == OutcomeAction.FAIL
+    _assert_deadline_observed(response, log, server)
+    row = json.loads(response.model_dump_json())
+    assert not is_policy_counted_zero(row) and applied_failure_class(row) == FailureClass.MODEL
+    assert row["mask_sample"] is True and row["evaluation_completed"] is False
+
+
+@pytest.mark.parametrize(
+    "policy,action",
+    [
+        ({"default_action": "retry"}, "count_as_zero"),  # the shared default; a deadline is never run again
+        ({"by_failure_class": {"model": "retry"}}, "count_as_zero"),
+        ({"default_action": "fail", "by_failure_kind": {TEST_DEADLINE: "count_as_zero"}}, "count_as_zero"),
+        ({"by_failure_kind": {TEST_DEADLINE: "fail"}}, "fail"),
+        ({"default_action": "retry", "by_failure_kind": {TEST_DEADLINE: "fail"}}, "fail"),
+    ],
+    ids=["default-retry", "model-class-retry", "kind-rule-beats-fail", "kind-rule-fail", "kind-rule-beats-retry"],
+)
+async def test_the_deadlines_own_rule_and_an_explicit_fail_decide_over_the_boundary_default(
+    task_assets: Path, monkeypatch: MonkeyPatch, policy: dict, action: str
+) -> None:
+    server, verifier_sandbox = _verify_server(task_assets, monkeypatch, verification_policy=policy)
+    verifier_sandbox.exec.side_effect = _test_run(124)
+
+    response, _ = await _verify(server)
+
+    assert response.failure_outcome_action == action
+    assert response.mask_sample is (action == "fail")
+
+
+def test_the_deadline_default_is_a_counted_zero_without_any_policy_configured(task_assets: Path) -> None:
+    config = _config(task_assets).model_dump()
+    config.pop("outcome_policy")
+    built = DeepSWEResourcesServerConfig(**config)
+
+    decision = choose_stage_outcome(
+        failure_kind=TEST_DEADLINE, http_status=None, stage="verification", config=built.outcome_policy
+    )
+    assert (decision.action, decision.attribution) == (OutcomeAction.COUNT_AS_ZERO, FailureClass.MODEL)
+    # The stage's other rules keep the shared defaults for inconclusive attempts.
+    other = choose_stage_outcome(
+        failure_kind="verifier_error", http_status=None, stage="verification", config=built.outcome_policy
+    )
+    assert other.action == OutcomeAction.RETRY
+
+
+@pytest.mark.parametrize(
+    "policy,message",
+    [
+        ({"by_failure_kind": {TEST_DEADLINE: "retry"}}, "a confirmed test deadline is never run again"),
+        ({"by_failure_kind": {TEST_DEADLINE: "verify"}}, "a confirmed test deadline is never run again"),
+        ({"by_failure_kind": {"verifier_error": "count_as_zero"}}, "verification policy supports only fail, retry"),
+        ({"by_failure_class": {"model": "count_as_zero"}}, "verification policy supports only fail, retry"),
+        ({"default_action": "count_as_zero"}, "verification policy supports only fail, retry"),
+    ],
+)
+def test_a_verification_policy_cannot_retry_a_deadline_or_count_other_zeros(
+    task_assets: Path, policy: dict, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _config(task_assets, verification_policy=policy)
+
+
+def test_the_deadline_is_classified_as_the_models_and_a_classification_override_keeps_that(task_assets: Path) -> None:
+    kinds = _config(task_assets).outcome_policy.classification.by_stage["verification"].by_failure_kind
+    assert kinds == {TEST_DEADLINE: FailureClass.MODEL}
+    other = _config(
+        task_assets, classification={"by_stage": {"verification": {"by_failure_kind": {"custom:kind": "model"}}}}
+    ).outcome_policy.classification.by_stage["verification"]
+    assert other.by_failure_kind == {TEST_DEADLINE: FailureClass.MODEL, "custom:kind": FailureClass.MODEL}
 
 
 @pytest.mark.parametrize("status", [(1, None), (124, "timeout"), (2, None)])
@@ -1362,6 +1604,237 @@ async def test_failed_agent_git_setup_cannot_start_a_session(
     with pytest.raises(RuntimeError, match="DeepSWE agent git setup failed"):
         await setup(sandbox)
     assert "|| true" not in sandbox.exec.await_args.args[0]
+
+
+def test_opencode_recipe_uses_the_pinned_agent_ripgrep() -> None:
+    recipe_path = Path(__file__).resolve().parents[3] / "benchmarks" / "deepswe" / "opencode.yaml"
+    recipe = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    agent = recipe["deepswe_opencode_agent"]["responses_api_agents"]["opencode_agent"]
+    resources = recipe["deepswe_opencode_resources_server"]["resources_servers"]["deepswe"]
+
+    assert agent["sandbox_ripgrep_sha256"] == RIPGREP_SHA256
+    assert agent["sandbox_ripgrep_path"] == app_module.AGENT_RIPGREP
+    assert app_module.AGENT_RUNTIME_DIR in agent["sandbox_path_prefix"]
+    assert app_module.NEMO_GYM_ROOT / resources["agent_ripgrep_path"] == DEFAULT_RIPGREP_PATH
+
+
+async def test_ripgrep_is_staged_readable_into_the_agent_sandbox(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ripgrep = tmp_path / "rg"
+    ripgrep.write_bytes(b"rg")
+    config = _config(task_assets, golden=False)
+    config.agent_ripgrep_path = ripgrep
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
+    setup = sandbox.start_with_setup.await_args.args[1]
+    await setup(sandbox)
+    remote = sandbox.upload.await_args.args[1]
+    assert remote != app_module.AGENT_RIPGREP
+    sandbox.upload.assert_awaited_once_with(ripgrep, remote)
+    sandbox.assert_has_calls(
+        [
+            call.exec("mkdir -p /tmp/nemo-gym-deepswe", timeout_s=60),
+            call.upload(ripgrep, remote),
+            call.exec(
+                f"chmod 0755 /tmp/nemo-gym-deepswe {remote} && mv -f -- {remote} /tmp/nemo-gym-deepswe/rg",
+                timeout_s=60,
+            ),
+        ]
+    )
+
+
+async def test_ripgrep_uploads_are_limited_to_two_per_server(task_assets: Path, tmp_path: Path) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    entered = asyncio.Queue()
+    release = asyncio.Event()
+    active = 0
+    peak = 0
+
+    async def upload(source, destination):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        entered.put_nowait(destination)
+        try:
+            await release.wait()
+        finally:
+            active -= 1
+
+    sandboxes = [AsyncMock() for _ in range(3)]
+    for sandbox in sandboxes:
+        sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+        sandbox.upload.side_effect = upload
+    tasks = [asyncio.create_task(server._stage_agent_ripgrep(sandbox, tmp_path / "rg")) for sandbox in sandboxes]
+    try:
+        await asyncio.wait_for(entered.get(), 5)
+        await asyncio.wait_for(entered.get(), 5)
+        await asyncio.sleep(0)
+        assert peak == 2
+        assert entered.empty()
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 5)
+    assert peak == 2 and active == 0
+    assert sum(sandbox.upload.await_count for sandbox in sandboxes) == 3
+
+
+@pytest.mark.parametrize("typed", [False, True], ids=["timeout", "provider-io-timeout"])
+async def test_ripgrep_upload_timeout_retries_once_at_a_fresh_path_before_publication(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch, typed: bool
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    error = _sandbox_failure(PROVIDER_IO_TIMEOUT, "upload timed out") if typed else TimeoutError("upload timed out")
+    sandbox.upload.side_effect = [error, None]
+    sleep = AsyncMock()
+    monkeypatch.setattr(app_module.asyncio, "sleep", sleep)
+
+    await server._stage_agent_ripgrep(sandbox, tmp_path / "rg")
+
+    paths = [upload.args[1] for upload in sandbox.upload.await_args_list]
+    assert len(paths) == len(set(paths)) == 2
+    assert all(path != app_module.AGENT_RIPGREP for path in paths)
+    assert all(re.fullmatch(r"/tmp/nemo-gym-deepswe/\.rg-[0-9a-f]{32}", path) for path in paths)
+    assert sandbox.exec.await_args.args[0] == (
+        f"chmod 0755 {app_module.AGENT_RUNTIME_DIR} {paths[1]} && mv -f -- {paths[1]} {app_module.AGENT_RIPGREP}"
+    )
+    assert sandbox.exec.await_count == 2  # mkdir, then publication of only the successful attempt
+    sleep.assert_awaited_once()
+    assert 15 <= sleep.await_args.args[0] <= 30
+
+
+@pytest.mark.parametrize("typed", [False, True], ids=["timeout", "provider-io-timeout"])
+async def test_two_ripgrep_upload_timeouts_propagate_without_publication(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch, typed: bool
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    errors = [
+        _sandbox_failure(PROVIDER_IO_TIMEOUT, "upload timed out") if typed else TimeoutError("upload timed out")
+        for _ in range(2)
+    ]
+    sandbox.upload.side_effect = errors
+    sleep = AsyncMock()
+    monkeypatch.setattr(app_module.asyncio, "sleep", sleep)
+
+    with pytest.raises(type(errors[-1])) as caught:
+        await server._stage_agent_ripgrep(sandbox, tmp_path / "rg")
+
+    assert caught.value is errors[-1]
+    paths = [upload.args[1] for upload in sandbox.upload.await_args_list]
+    assert len(paths) == len(set(paths)) == 2
+    assert all("mv -f --" not in command.args[0] for command in sandbox.exec.await_args_list)
+    sleep.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure", ["ordinary", "provider", "other-boundary", "cancelled"])
+async def test_ripgrep_non_timeout_failure_is_not_retried_or_published(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch, failure: str
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    error = {
+        "ordinary": RuntimeError("upload refused"),
+        "provider": _sandbox_failure(PROVIDER_OOM_KILLED, "sandbox lost"),
+        "other-boundary": NgFailureEvent(
+            boundary=FailureBoundary.HARNESS, failure_kind=PROVIDER_IO_TIMEOUT, failure_reason="unrelated timeout"
+        ),
+        "cancelled": asyncio.CancelledError(),
+    }[failure]
+    sandbox.upload.side_effect = error
+    sleep = AsyncMock()
+    monkeypatch.setattr(app_module.asyncio, "sleep", sleep)
+
+    with pytest.raises(type(error)) as caught:
+        await server._stage_agent_ripgrep(sandbox, tmp_path / "rg")
+
+    assert caught.value is error
+    sandbox.upload.assert_awaited_once()
+    sleep.assert_not_awaited()
+    assert all("mv -f --" not in command.args[0] for command in sandbox.exec.await_args_list)
+
+
+@pytest.mark.parametrize("stage", ["mkdir", "promote"])
+@pytest.mark.parametrize("return_code,error_type", [(7, None), (0, "timeout")])
+async def test_ripgrep_setup_reports_exec_status_and_does_not_retry_failed_commands(
+    task_assets: Path, tmp_path: Path, stage: str, return_code: int, error_type: str | None
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    failed = SimpleNamespace(return_code=return_code, error_type=error_type, stderr="setup failed")
+    ok = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    sandbox.exec.side_effect = [failed] if stage == "mkdir" else [ok, failed]
+
+    with pytest.raises(RuntimeError) as caught:
+        await server._stage_agent_ripgrep(sandbox, tmp_path / "rg")
+
+    assert f"return_code={return_code}" in str(caught.value)
+    assert f"error_type={error_type!r}" in str(caught.value)
+    assert "setup failed" in str(caught.value)
+    if stage == "mkdir":
+        sandbox.upload.assert_not_awaited()
+    else:
+        sandbox.upload.assert_awaited_once()
+
+
+async def test_the_verifier_sandbox_gets_no_ripgrep(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ripgrep = tmp_path / "rg"
+    ripgrep.write_bytes(b"rg")
+    config = _config(task_assets, golden=False)
+    config.agent_ripgrep_path = ripgrep
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    await server._create_sandbox(server._task_store.get("example-task"), phase="verifier")
+    await sandbox.start_with_setup.await_args.args[1](sandbox)
+    sandbox.upload.assert_not_awaited()
+
+
+async def test_a_failed_ripgrep_staging_cannot_start_a_session(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ripgrep = tmp_path / "rg"
+    ripgrep.write_bytes(b"rg")
+    config = _config(task_assets, golden=False)
+    config.agent_ripgrep_path = ripgrep
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    ok = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    sandbox.exec.side_effect = [ok, ok, SimpleNamespace(return_code=1, error_type=None, stderr="read-only")]
+
+    async def start_with_setup(spec, setup):
+        return await AsyncSandbox.start_with_setup(sandbox, spec, setup)
+
+    sandbox.start_with_setup.side_effect = start_with_setup
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    with pytest.raises(RuntimeError, match="could not stage ripgrep"):
+        await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
+    sandbox.stop.assert_awaited_once()
+
+
+def test_a_missing_ripgrep_refuses_to_start_the_server(task_assets: Path, tmp_path: Path) -> None:
+    config = _config(task_assets, golden=False)
+    config.agent_ripgrep_path = tmp_path / "rg"
+    with pytest.raises(ValueError, match=re.escape("run `gym eval prepare --benchmark deepswe/opencode`")):
+        DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.mark.parametrize("return_code,error_type", [(1, None), (0, "timeout")])

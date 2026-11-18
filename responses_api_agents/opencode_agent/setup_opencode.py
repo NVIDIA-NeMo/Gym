@@ -13,18 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import logging
 import os
 import platform
 import shutil
 import subprocess
+import sys
 import tarfile
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
 
 from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
-from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
+from responses_api_agents.opencode_agent.runtime import OPENCODE_RELEASE_SHA256, OPENCODE_VERSION
 
 
 LOG = logging.getLogger(__name__)
@@ -37,6 +40,84 @@ _LOCAL_PREFIX = Path(__file__).parent / ".opencode_node"
 # Beside the toolchain directory rather than in it, because an interrupted install's cleanup removes that directory.
 _INSTALL_LOCK = _LOCAL_PREFIX.with_name(_LOCAL_PREFIX.name + ".lock")
 _INSTALL_RECORD = _LOCAL_PREFIX.with_name(_LOCAL_PREFIX.name + ".installed")
+# OpenCode 2 releases for local calls, one directory per version. OpenCode 2 is a separate npm package
+# (@opencode/cli) whose binary is also named `opencode`, so it cannot share the global install with OpenCode 1.
+_OPENCODE2_PREFIX = Path(__file__).parent / ".opencode_runtime"
+_OPENCODE2_RELEASE_URL = (
+    "https://github.com/anomalyco/opencode/releases/download/v{version}/opencode-linux-{arch}.tar.gz"
+)
+# Bounds on a release download, which runs under the install lock: a read that waits longer than the first fails, and
+# so does a download that takes longer than the second, so a stalled download cannot hold every local call.
+_DOWNLOAD_READ_TIMEOUT_S = 60
+_DOWNLOAD_TIMEOUT_S = 600
+
+
+def _reports_version(binary: Path, version: str) -> bool:
+    """Whether ``binary`` runs and reports ``version`` (OpenCode 2 prints ``opencode v<version>``)."""
+    try:
+        out = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=60)  # noqa: S603
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and out.stdout.strip() in (version, f"opencode v{version}")
+
+
+def _linux_release_arch() -> str:
+    """The OpenCode release asset for this Linux host, as the sandbox installer picks it."""
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        arch = "x64-baseline"
+    elif machine in ("aarch64", "arm64"):
+        arch = "arm64"
+    else:
+        raise RuntimeError(f"OpenCode releases cover Linux x86_64 and aarch64, not {machine}")
+    return arch if platform.libc_ver()[0] == "glibc" else f"{arch}-musl"
+
+
+def _download(url: str, target: Path) -> None:
+    """Write ``url`` to ``target`` within the download bounds, raising ``TimeoutError`` past either."""
+    deadline = time.monotonic() + _DOWNLOAD_TIMEOUT_S
+    with urllib.request.urlopen(url, timeout=_DOWNLOAD_READ_TIMEOUT_S) as response, target.open("wb") as file:  # noqa: S310
+        while chunk := response.read(1 << 20):
+            file.write(chunk)
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"Downloading {url} took longer than {_DOWNLOAD_TIMEOUT_S} s")
+
+
+def ensure_opencode2(version: str) -> str:
+    """Download the pinned OpenCode 2 release for this Linux host once, check it, and return the binary's path."""
+    binary = _OPENCODE2_PREFIX / version / "opencode"
+    if _reports_version(binary, version):
+        return str(binary)
+    if sys.platform != "linux":
+        raise RuntimeError(
+            f"Local OpenCode {version} calls download a Linux release; on {sys.platform}, set the agent's command "
+            f"to an OpenCode {version} binary"
+        )
+    digests = OPENCODE_RELEASE_SHA256.get(version)
+    if not digests:
+        raise RuntimeError(f"OpenCode {version} has no pinned release digest; set the agent's command to a binary")
+    arch = _linux_release_arch()
+    _OPENCODE2_PREFIX.mkdir(parents=True, exist_ok=True)
+    with install_lock(_OPENCODE2_PREFIX / f"{version}.lock"):
+        if _reports_version(binary, version):
+            return str(binary)
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=binary.parent) as staging:
+            archive = Path(staging) / "opencode.tar.gz"
+            LOG.info("downloading OpenCode %s (%s)", version, arch)
+            _download(_OPENCODE2_RELEASE_URL.format(version=version, arch=arch), archive)
+            with archive.open("rb") as file:
+                digest = hashlib.file_digest(file, "sha256").hexdigest()
+            if digest != digests[arch]:
+                raise RuntimeError(f"OpenCode {version} download has SHA-256 {digest}, not the pinned {digests[arch]}")
+            with tarfile.open(archive) as tar:
+                tar.extract("opencode", staging, filter="data")
+            staged = Path(staging) / "opencode"
+            staged.chmod(0o755)
+            if not _reports_version(staged, version):
+                raise RuntimeError(f"The downloaded OpenCode binary does not report version {version}")
+            staged.replace(binary)
+    return str(binary)
 
 
 def _npm_install(npm_bin: str, version: str | None) -> None:

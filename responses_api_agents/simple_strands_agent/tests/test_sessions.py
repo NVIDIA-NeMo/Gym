@@ -192,6 +192,16 @@ def test_iteration_limit_is_an_incomplete_graded_response():
 
 
 @pytest.mark.parametrize(
+    ("usage", "expected"), [({}, None), ({"cacheReadInputTokens": 0}, 0), ({"cacheReadInputTokens": 7}, 7)]
+)
+def test_cache_reads_are_reported_only_when_strands_reports_them(usage, expected):
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Fix the bug.")
+    usage = {"inputTokens": 10, "outputTokens": 2, **usage}
+    response = agent()._response(body, {"messages": [], "usage": usage}, "policy")
+    assert response.usage.input_tokens_details.cached_tokens == expected
+
+
+@pytest.mark.parametrize(
     "exec_mock",
     [
         AsyncMock(side_effect=ConnectionError("backend unavailable")),
