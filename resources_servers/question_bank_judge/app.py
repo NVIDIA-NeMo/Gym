@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Check the final boxed answer using Math-Verify or a structured semantic judge."""
+"""Grade the final boxed answer for non-math STEM questions."""
 
 import asyncio
 import json
@@ -33,11 +33,12 @@ from nemo_gym.verification import (
 )
 from resources_servers.question_bank_judge.answer_extraction import extract_last_boxed_answer
 from resources_servers.question_bank_judge.judgment import hash_text, parse_judgment
+from resources_servers.question_bank_judge.routing import grading_route
 
 
 class QuestionBankJudgeConfig(BaseResourcesServerConfig):
     name: str = "question_bank_judge"
-    grading_profile: Literal["math", "semantic"]
+    grading_profile: Literal["semantic"] = "semantic"
     judge_model_server: ModelServerRef
     judge_model_revision: str | None = None
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
@@ -48,8 +49,6 @@ class QuestionBankJudgeConfig(BaseResourcesServerConfig):
     judge_source_instructions: dict[str, str] = Field(default_factory=dict)
     judge_timeout_seconds: float | None = Field(default=300.0, gt=0, le=300, allow_inf_nan=False)
     judge_max_attempts: int = Field(default=2, ge=1, le=2)
-    library_verifier_timeout_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
-    library_verifier_max_concurrency: int = Field(default=8, gt=0)
     boxed_judge_input: Literal["box"] = "box"
     max_box_chars: int | None = Field(default=None, gt=0)
     max_answer_chars: int | None = Field(default=16000, gt=0)
@@ -139,18 +138,6 @@ class QuestionBankJudgeResourcesServer(SimpleResourcesServer):
 
         with open(self.config.shared_prompt_template_fpath) as f:
             self._shared_template = f.read().strip()
-        self._math_library = None
-        if self.config.grading_profile == "math":
-            from resources_servers.question_bank_judge.math_verifier import MathLibraryVerifier
-
-            self._math_library = MathLibraryVerifier(
-                server_client=self.server_client,
-                judge_model_server=self.config.judge_model_server,
-                judge_responses_create_params=self.config.judge_responses_create_params,
-                timeout_seconds=self.config.library_verifier_timeout_seconds,
-                max_concurrency=self.config.library_verifier_max_concurrency,
-            )
-
         # The pid suffix keeps server replicas from sharing one file; appends within
         # one process are serialized by the event loop (no await between open and close).
         self._gen_log_path: str | None = None
@@ -175,7 +162,7 @@ class QuestionBankJudgeResourcesServer(SimpleResourcesServer):
         final = raw_final.strip()
         evaluations: list[JudgeEvaluation] = []
         provenance: dict[str, Any] = {
-            "verifier_revision": "stem-shared-v3",
+            "verifier_revision": "question-bank-stem-v4",
             "grading_profile": profile,
             "grading_config_sha256": hash_text(cfg.model_dump_json()),
             "candidate_sha256": hash_text(raw_final),
@@ -248,6 +235,8 @@ class QuestionBankJudgeResourcesServer(SimpleResourcesServer):
             response = await failed(body)
             return finish("unresolved", reason, evidence=str(error), failure_fields=json.loads(response.body))
 
+        if grading_route(metadata.get("domain")) != "semantic":
+            return finish("unresolved", "unsupported_domain")
         extras = body.model_extra or {}
         if extras.get("task_contract") is not None or extras.get("rubric") is not None:
             return finish("unresolved", "unsupported_shared_grading_task")
@@ -306,23 +295,6 @@ class QuestionBankJudgeResourcesServer(SimpleResourcesServer):
         if cfg.max_answer_chars is not None and len(solution) > cfg.max_answer_chars:
             return finish("unresolved", "answer_exceeds_grading_limit")
         provenance["judged_candidate_sha256"] = hash_text(solution)
-        if profile == "math":
-            try:
-                proven = await self._math_library.verify(expected, solution)
-            except (ImportError, OSError, TimeoutError) as error:
-                return finish("unresolved", "math_library_unavailable", evidence=type(error).__name__)
-            provenance["math_library_match"] = proven
-            # An equivalence match cannot establish obligations added by overrides.
-            extra_obligations = bool(
-                metadata.get("policy_overrides_applied")
-                or cfg.judge_domain_instructions.get(str(metadata.get("domain", "")))
-                or cfg.judge_source_instructions.get(str(metadata.get("source", "")))
-            )
-            if extra_obligations:
-                provenance["math_match_requires_judge"] = True
-            elif proven:
-                provenance["route"] = "math_verify"
-                return finish("correct", "math_verify_match")
         if not cfg.judge_model_revision or cfg.judge_model_server.name == "policy_model":
             return finish("unresolved", "fixed_judge_not_configured")
 
@@ -354,7 +326,7 @@ class QuestionBankJudgeResourcesServer(SimpleResourcesServer):
             NeMoGymEasyInputMessage(role="user", content=prompt),
         ]
         provenance.update(
-            route="math_verify_then_judge" if profile == "math" else "semantic_judge",
+            route="semantic_judge",
             prompt_sha256=hash_text(system + "\n" + prompt),
             judge_request=params.model_dump(mode="json"),
             judge_max_attempts=cfg.judge_max_attempts,

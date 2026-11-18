@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from resources_servers.question_bank_judge.prepare import family_splits, prepare
 from resources_servers.question_bank_judge.prompts import SOLVER_INSTRUCTION
@@ -96,6 +97,8 @@ def test_routes_answers_without_per_row_contracts_and_keeps_exclusions(tmp_path:
     rows = [
         _row("math"),
         _row("semantic", domain="Biology"),
+        _row("humanities", domain="Humanities / Social Sciences"),
+        _row("unknown", domain="Other / Unlabeled"),
         _row("rubric"),
         _row("native", reference={"kind": "native_grader"}, expected_answer=None),
         _row("chemistry_native", domain="Chemistry / materials"),
@@ -113,6 +116,7 @@ def test_routes_answers_without_per_row_contracts_and_keeps_exclusions(tmp_path:
     receipt = prepare(source, output, development_ids={r["id"] for r in rows}, inventory_path=inventory)
     assert receipt["counts"] == {
         "evaluation_candidate": 2,
+        "excluded_unsupported_domain": 2,
         "excluded_rubric": 1,
         "excluded_native_pending_runner": 2,
     }
@@ -126,6 +130,12 @@ def test_routes_answers_without_per_row_contracts_and_keeps_exclusions(tmp_path:
         "question_bank_math_simple_agent",
         "question_bank_semantic_simple_agent",
     ]
+    config_path = Path(__file__).resolve().parents[1] / "configs/question_bank.yaml"
+    config = OmegaConf.load(config_path)
+    for row, component in zip(emitted, ["math_with_judge", "question_bank_judge"], strict=True):
+        agent = config[row["agent_ref"]["name"]].responses_api_agents.simple_agent
+        assert list(config[agent.resources_server.name].resources_servers) == [component]
+    assert config.question_bank_math.resources_servers.math_with_judge.should_use_judge is True
     assert all("task_contract" not in row for row in emitted)
     with pytest.raises(FileExistsError):
         prepare(source, output, development_ids=set(), inventory_path=inventory)
@@ -148,6 +158,7 @@ def test_policy_contains_only_selected_problem_and_shared_instructions(tmp_path:
 
     row = _row(
         "a",
+        domain="Physics",
         expected_answer="PRIVATE_REFERENCE",
         original={"problem": "ORIGINAL_QUESTION", "expected_answer": "ORIGINAL_REFERENCE"},
         version="deepseek_repaired",

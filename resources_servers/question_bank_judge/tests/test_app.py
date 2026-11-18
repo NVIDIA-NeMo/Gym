@@ -3,10 +3,10 @@
 """Shared grading profiles consume ordinary rows and only the last boxed answer."""
 
 import json
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import MonkeyPatch, mark
+from pydantic import ValidationError
+from pytest import MonkeyPatch, mark, raises
 
 from resources_servers.question_bank_judge.judgment import hash_text
 from resources_servers.question_bank_judge.tests.helpers import (
@@ -25,7 +25,7 @@ def shared_request(answer: str = r"\boxed{2}", *, expected: str = "2", **overrid
     response.status = "completed"
     row = {
         "uuid": "q1",
-        "question": "What is one plus one?",
+        "question": "A wave has period 0.5 seconds. Give the frequency in hertz as a number.",
         "metadata": {
             "domain": "physics",
             "source": "synthetic_source",
@@ -97,7 +97,7 @@ async def test_shared_prompt_default_and_replay_override_are_recorded(
     system = call.await_args.kwargs["json"].input[0].content
 
     assert system == path.read_text().strip()
-    assert result.grading_provenance["verifier_revision"] == "stem-shared-v3"
+    assert result.grading_provenance["verifier_revision"] == "question-bank-stem-v4"
     payload = call.await_args.kwargs["json"].input[-1].content
     assert result.grading_provenance["prompt_sha256"] == hash_text(system + "\n" + payload)
 
@@ -233,44 +233,6 @@ async def test_shared_profile_rejects_truncated_judge_response(monkeypatch):
 
 
 @mark.asyncio
-async def test_math_profile_accepts_library_match_without_judge(monkeypatch):
-    call, _ = judge(monkeypatch)
-    resource = server(grading_profile="math")
-    library = AsyncMock(return_value=True)
-    resource._math_library = SimpleNamespace(verify=library)
-    result = await resource.verify(shared_request(r"Intermediate \boxed{999}. Final \boxed{2}"))
-    library.assert_awaited_once_with("2", "2")
-    call.assert_not_awaited()
-    assert result.verdict == "correct" and result.reward == 1
-    assert result.evaluation_completed and not result.mask_sample
-
-
-@mark.asyncio
-async def test_math_profile_falls_back_on_same_selected_box(monkeypatch):
-    call, _ = judge(monkeypatch, verdict="incorrect")
-    resource = server(grading_profile="math")
-    library = AsyncMock(return_value=False)
-    resource._math_library = SimpleNamespace(verify=library)
-    result = await resource.verify(shared_request(r"Intermediate \boxed{2}. Final \boxed{3}"))
-    library.assert_awaited_once_with("2", "3")
-    payload = json.loads(call.await_args.kwargs["json"].input[-1].content)
-    assert payload["candidate"] == "3"
-    assert result.verdict == "incorrect" and not result.mask_sample
-
-
-@mark.asyncio
-async def test_math_profile_missing_dependency_does_not_become_incorrect(monkeypatch):
-    call, _ = judge(monkeypatch)
-    resource = server(grading_profile="math")
-    resource._math_library = SimpleNamespace(verify=AsyncMock(side_effect=ImportError("math-verify unavailable")))
-    result = await resource.verify(shared_request())
-    assert result.verdict == "unresolved" and result.mask_sample
-    assert not result.evaluation_completed
-    call.assert_not_awaited()
-
-
-@mark.asyncio
-@mark.parametrize("profile", ["math", "semantic"])
 @mark.parametrize(
     "metadata",
     [
@@ -286,74 +248,40 @@ async def test_math_profile_missing_dependency_does_not_become_incorrect(monkeyp
         {"declared_methods": ["NATIVE_CODE_TESTS"]},
     ],
 )
-async def test_shared_profile_rejects_known_unsupported_tasks_before_library_match(monkeypatch, profile, metadata):
+async def test_shared_profile_rejects_known_unsupported_tasks_before_judging(monkeypatch, metadata):
     call, _ = judge(monkeypatch)
-    resource = server(grading_profile=profile)
-    library = AsyncMock(return_value=True)
-    resource._math_library = SimpleNamespace(verify=library)
+    resource = server()
     body = shared_request()
     body.metadata.update(metadata)
     result = await resource.verify(body)
     assert result.verdict == "unresolved" and result.correctness is None
     assert result.grading_status == "unsupported_shared_grading_task"
     assert result.mask_sample and not result.evaluation_completed
-    library.assert_not_awaited()
     call.assert_not_awaited()
 
 
 @mark.asyncio
-async def test_answer_comparison_metadata_keeps_math_profile_available(monkeypatch):
+async def test_shared_profile_rejects_mismatched_original_question_hash(monkeypatch):
     call, _ = judge(monkeypatch)
-    resource = server(grading_profile="math")
-    library = AsyncMock(return_value=True)
-    resource._math_library = SimpleNamespace(verify=library)
-    body = shared_request()
-    body.metadata.update(
-        review_group="answer_comparison_review",
-        reference_kind="answer",
-        declared_methods=["EXACT_VALUE", "SYMBOLIC_EQUIVALENCE"],
-        problem_sha256=hash_text(body.question),
-    )
-    result = await resource.verify(body)
-    assert result.verdict == "correct" and not result.mask_sample
-    library.assert_awaited_once_with("2", "2")
-    call.assert_not_awaited()
-
-
-@mark.asyncio
-@mark.parametrize("profile", ["math", "semantic"])
-async def test_shared_profile_rejects_mismatched_original_question_hash(monkeypatch, profile):
-    call, _ = judge(monkeypatch)
-    resource = server(grading_profile=profile)
-    library = AsyncMock(return_value=True)
-    resource._math_library = SimpleNamespace(verify=library)
+    resource = server()
     body = shared_request()
     body.metadata["problem_sha256"] = hash_text("A different question.")
     result = await resource.verify(body)
     assert result.verdict == "unresolved" and result.grading_status == "question_hash_mismatch"
     assert result.mask_sample and not result.evaluation_completed
-    library.assert_not_awaited()
     call.assert_not_awaited()
 
 
+def test_custom_resource_rejects_math_profile() -> None:
+    with raises(ValidationError, match="grading_profile"):
+        server(grading_profile="math")
+
+
 @mark.asyncio
-@mark.parametrize(
-    "config_overrides, metadata",
-    [
-        ({"judge_domain_instructions": {"physics": "Require the requested physical direction."}}, {}),
-        ({"judge_source_instructions": {"synthetic_source": "Require every requested labeled component."}}, {}),
-        ({}, {"policy_overrides_applied": True}),
-    ],
-)
-async def test_math_library_match_cannot_bypass_additional_instructions(monkeypatch, config_overrides, metadata):
-    call, _ = judge(monkeypatch, verdict="incorrect")
-    resource = server(grading_profile="math", **config_overrides)
-    library = AsyncMock(return_value=True)
-    resource._math_library = SimpleNamespace(verify=library)
-    body = shared_request()
-    body.metadata.update(metadata)
-    result = await resource.verify(body)
-    library.assert_awaited_once_with("2", "2")
-    call.assert_awaited_once()
-    assert result.grading_provenance["math_library_match"] is True
-    assert result.verdict == "incorrect" and not result.mask_sample
+@mark.parametrize("domain", ["Mathematics", "math", "humanities / social sciences", "other / unlabeled", None])
+async def test_misrouted_row_is_masked_without_calling_stem_judge(monkeypatch, domain):
+    call, _ = judge(monkeypatch)
+    result = await server().verify(shared_request(metadata={"domain": domain} if domain else None))
+    assert result.verdict == "unresolved" and result.grading_status == "unsupported_domain"
+    assert result.mask_sample and not result.evaluation_completed
+    call.assert_not_awaited()

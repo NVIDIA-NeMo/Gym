@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Materialize question-bank evaluation rows using shared math and semantic routes.
+"""Materialize question-bank evaluation rows for Gym math and non-math STEM grading.
 
 The selected dataset and a version-bound triage inventory supply routing metadata;
 no per-question grading contract is required. Rubric/construction and native-test
@@ -22,11 +22,11 @@ from resources_servers.question_bank_judge.prompts import (
     build_policy_prompt,
     validate_prompt_overrides,
 )
+from resources_servers.question_bank_judge.routing import canonical_domain, grading_route
 
 
-ADAPTER_REVISION = "question-bank-shared-routes-v2"
+ADAPTER_REVISION = "question-bank-stem-routes-v3"
 SPLIT_SEED = "stem-judge-family-split-v1"
-DOMAIN_ALIASES = {"phys": "physics", "bio": "biology", "chem": "chemistry / materials"}
 
 
 def _json(value: object) -> str:
@@ -137,9 +137,9 @@ def _load_inventory(path: Path, rows: list[dict], hashes: list[str]) -> dict[str
         for field in ("version_sha256", "version"):
             if item.get(field) != row[field]:
                 raise ValueError(f"inventory {field} mismatch for {row['id']}")
-        domain = DOMAIN_ALIASES.get(row["domain"].casefold(), row["domain"].casefold())
-        inventory_domain = item.get("domain", "").casefold()
-        if DOMAIN_ALIASES.get(inventory_domain, inventory_domain) != domain:
+        domain = canonical_domain(row["domain"])
+        inventory_domain = canonical_domain(item.get("domain", ""))
+        if inventory_domain != domain:
             raise ValueError(f"inventory domain mismatch for {row['id']}")
         if item.get("source_row_sha256") != digest or item.get("dataset_line") != str(line_no):
             raise ValueError(f"inventory source row binding mismatch for {row['id']}")
@@ -225,7 +225,7 @@ def prepare(
             reference = row.get("expected_answer")
             reference_hash = _hash(reference) if isinstance(reference, str) else None
             triage = inventory[row["id"]]
-            domain = DOMAIN_ALIASES.get(row["domain"].casefold(), row["domain"].casefold())
+            domain = canonical_domain(row["domain"])
             source = (row.get("upstream") or {}).get("dataset") or triage.get("upstream_dataset") or "unknown"
             if not isinstance(source, str):
                 raise ValueError("upstream source name must be a string")
@@ -243,7 +243,9 @@ def prepare(
             else:
                 state = _selected_reference_state(row) or "evaluation_candidate"
                 if state == "evaluation_candidate":
-                    route = "math" if domain == "mathematics" else "semantic"
+                    route = grading_route(domain)
+                    if route is None:
+                        state = "excluded_unsupported_domain"
             lineage = {
                 key: row.get(key)
                 for key in ("original_question_sha256", "qa_variant_ids", "source_memberships", "upstream")
