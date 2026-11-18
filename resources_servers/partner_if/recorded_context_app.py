@@ -27,7 +27,12 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.models import ChatCompletionsConverter
-from nemo_gym.server_runtime import ReverifyMode, observe_llm_judge_grading, observe_verifier
+from nemo_gym.server_runtime import (
+    ResourcesSessionConflictError,
+    ReverifyMode,
+    observe_llm_judge_grading,
+    observe_verifier,
+)
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -211,7 +216,9 @@ class RecordedContextResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixi
             previous = self._episodes.get(session_id)
             if previous is not None:
                 if previous.closed_at is not None or previous.reset_sha256 != binding:
-                    raise HTTPException(409, "This recorded-context session is closed or bound to different task data")
+                    raise ResourcesSessionConflictError(
+                        "This recorded-context session is closed or bound to different task data"
+                    )
             else:
                 try:
                     contract = VerifierMetadata.model_validate(task_data["verifier_metadata"]).partner_if
@@ -259,19 +266,21 @@ class RecordedContextResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixi
         async with self._lock(session_id):
             episode = self._episodes.get(session_id)
             if episode is None:
-                raise HTTPException(409, "Recorded-context session was not reset or expired")
+                raise ResourcesSessionConflictError("Recorded-context session was not reset or expired")
             expected_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(episode.params).model_dump(
                 mode="json", exclude_none=True
             )
             if params != expected_params or task_data != episode.task_data:
-                raise HTTPException(409, "Frozen actor parameters or task data changed during the episode")
+                raise ResourcesSessionConflictError("Frozen actor parameters or task data changed during the episode")
             cached = episode.step_receipts.get(step_id)
             if cached is not None:
                 if cached[0] != binding:
-                    raise HTTPException(409, "This step request ID was already bound to a different response")
+                    raise ResourcesSessionConflictError(
+                        "This step request ID was already bound to a different response"
+                    )
                 return cached[1].model_copy(deep=True)
             if episode.closed_at is not None:
-                raise HTTPException(409, "Recorded-context session is already closed")
+                raise ResourcesSessionConflictError("Recorded-context session is already closed")
             if episode.in_progress is not None:
                 # The previous dispatch may have reached the judge. Never grant it a hidden second attempt.
                 reply = self._terminal(

@@ -56,11 +56,16 @@ single_agent_turn_legacy:
 - **Runtime.** Session setup installs a private Node.js 22.23.2 and the `prime-agent-0.7.0.tgz`
   release package with npm (`--ignore-scripts`) under `/tmp/nemo-gym-prime-runtime-0.7.0-node-22.23.2`,
   checks the version it reports, and reuses a ready runtime. The agent server downloads the official
-  Node.js build and the release package (GitHub release) once into its asset cache, checks the SHA-256 values pinned in
-  `sandbox.py`, and uploads them; the sandbox checks them again. The kernel's uv archive has no pinned checksum. Prime Agent runs as that Node with the
-  package's CLI, so the task's Node and `PATH` are untouched. The sandbox needs a glibc image, bash,
-  `sha256sum`, `tar`, `gzip`, `flock`, `mktemp` and network access to the npm registry and the release host (for the package's
-  own dependencies).
+  Node.js build and the four Prime Agent v0.7.0 GitHub release archives (`prime-agent`, `prime-agent-ai`,
+  `prime-agent-core` and `prime-agent-tui`) once into its asset cache and checks the SHA-256 values pinned in
+  `sandbox.py`. The `prime-agent` and `prime-agent-core` manifests fetch their Prime dependencies from a
+  separate release host, so the agent server rewrites only those URLs to the uploaded archives and refuses an
+  archive that still names a remote dependency. The sandbox checks Node.js and the kernel's Python against
+  their pinned values, and each uploaded Prime archive against the SHA-256 the agent server computed for the
+  rewritten copy, before npm runs. The kernel's uv archive has no pinned checksum. Prime Agent runs as that
+  Node with the package's CLI, so the task's Node and `PATH` are untouched. The sandbox needs a glibc image,
+  bash, `sha256sum`, `tar`, `gzip`, `flock`, `mktemp` and network access to the npm registry for the
+  remaining dependencies, which npm resolves from the manifests' version ranges.
 - **Kernel.** Prime Agent's only built-in tool is an IPython kernel. Setup also installs a private
   Python (the mini-SWE bootstrap build, uploaded with its uv) under the runtime's `kernel` directory,
   with the packages Prime Agent's own kernel bootstrap installs, pinned in `install_prime_runtime.sh`,
@@ -68,8 +73,8 @@ single_agent_turn_legacy:
   them from the package index, so the sandbox also needs network access to PyPI. The kernel takes about
   440 MB. IPython and Jupyter may write their state under the task's `HOME`.
 - **Network.** A sandbox the agent creates keeps the provider's egress: `network_access` accepts only
-  `inherit`, since setup needs the npm registry, the release host and PyPI. A borrowed sandbox keeps
-  its lender's network.
+  `inherit`, since setup needs the npm registry and PyPI. The Prime Agent release archives come from
+  GitHub through the agent server, not the sandbox. A borrowed sandbox keeps its lender's network.
 - **Isolation.** Models, tools and state live under `PRIME_AGENT_CODING_AGENT_DIR` in a private
   session directory, so tool shells keep the task's `HOME`. `SandboxAccess.env` is forwarded except
   `PRIME_AGENT_*`, `PI_*` and `OPENAI_*`. Close removes only the session directory.

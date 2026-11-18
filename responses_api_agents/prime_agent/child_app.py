@@ -18,6 +18,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionState,
     SandboxCommand,
     resolve_agent_timeout,
@@ -100,7 +101,7 @@ class PrimeChildAgent(PrimeAgent):
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(409, "Prime child mode requires a seeded agent session")
+            raise AgentSessionConflictError("Prime child mode requires a seeded agent session")
         return await self._session_response(request, session_id, body)
 
     async def _activate_session(

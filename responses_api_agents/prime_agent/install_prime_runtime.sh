@@ -4,7 +4,8 @@
 #
 # Install a private Node.js plus the pinned Prime Agent package, both uploaded by the agent server, into a runtime
 # directory inside the task sandbox, or reuse one that already reports the pinned version. npm installs the package's
-# dependencies from the registry. The task's own Node, npm and PATH are untouched: Prime Agent runs as
+# remaining dependencies from the registry. Pinned Prime release dependencies are uploaded local archives.
+# The task's own Node, npm and PATH are untouched: Prime Agent runs as
 # RUNTIME/bin/node RUNTIME/lib/node_modules/prime-agent/dist/bundle/cli.js. Needs bash, sha256sum, tar, gzip, mktemp
 # and flock, plus a glibc image.
 #
@@ -13,7 +14,7 @@
 # by the uploaded uv from the package index.
 #
 # usage: install_prime_runtime.sh RUNTIME VERSION NODE_ARCHIVE NODE_SHA256 PACKAGE PACKAGE_SHA256 PYTHON_ARCHIVE
-#        PYTHON_SHA256 UV_ARCHIVE
+#        PYTHON_SHA256 UV_ARCHIVE [DEPENDENCY_ARCHIVE DEPENDENCY_SHA256]...
 set -euo pipefail
 runtime=$1
 version=$2
@@ -24,6 +25,7 @@ package_sha256=$6
 python_archive=$7
 python_sha256=$8
 uv_archive=$9
+shift 9
 cli=lib/node_modules/prime-agent/dist/bundle/cli.js
 kernel_packages=(
     ipykernel==7.4.0 dill==0.4.1 nest-asyncio==1.6.0 tyro==1.0.16 requests==2.34.2 httpx==0.28.1 pyyaml==6.0.3
@@ -60,6 +62,12 @@ trap 'rm -rf "$staging"' EXIT
 echo "$node_sha256  $node_archive" | sha256sum -c -
 echo "$package_sha256  $package" | sha256sum -c -
 echo "$python_sha256  $python_archive" | sha256sum -c -
+# PACKAGE_SHA256 and each DEPENDENCY_SHA256 are checksums of the copies the agent server rewrote after checking the
+# release's pinned values.
+while [ "$#" -gt 0 ]; do
+    echo "$2  $1" | sha256sum -c -
+    shift 2
+done
 tar -xzf "$node_archive" -C "$staging" --strip-components=1
 # npm's cache and logs stay in the staging directory, out of the task's HOME. The package's optional postinstall only
 # pre-downloads tools that Prime Agent otherwise fetches on first use.

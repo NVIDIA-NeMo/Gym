@@ -49,6 +49,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -332,6 +333,41 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     return _dump_with_serialized_member(config, "agent", agent_json)
 
 
+_SUBAGENT_NAME = re.compile(r"[a-z][a-z0-9-]*")
+# OpenCode's own agents: `build` runs the session, `plan` is its other primary agent, and the rest are the roles
+# OpenCode runs itself. A session may limit `build`, hide a built-in subagent, and define its own subagents.
+_OPENCODE_OWN_AGENTS = frozenset(_OPENCODE_AGENTS["1.17.11"])
+_OPENCODE_BUILTIN_SUBAGENTS = frozenset({"general", "explore"})
+_SUBAGENT_KEYS = frozenset({"mode", "description", "prompt", "steps", "permission", "tools"})
+
+
+def _subagent_definition_error(name: str, definition: object) -> str | None:
+    """Return why ``agent.<name>`` is not a subagent a sandbox session can define, or ``None``.
+
+    A subagent runs in its own OpenCode session, started by the primary agent's ``task`` tool, with the session's
+    model, provider and sampling: the definition names what the primary agent is told about it (``description``),
+    its instructions (``prompt``), its step limit (``steps``) and its tool access (``permission``, ``tools``).
+    """
+    if not _SUBAGENT_NAME.fullmatch(name) or name in _OPENCODE_OWN_AGENTS:
+        return f"agent.{name} is not a subagent name (lowercase letters, digits and dashes, not one of OpenCode's)"
+    if not isinstance(definition, Mapping) or definition.get("mode") != "subagent":
+        return f"agent.{name} must be a subagent definition (mode: subagent)"
+    unsupported = sorted(definition.keys() - _SUBAGENT_KEYS)
+    if unsupported:
+        return (
+            f"agent.{name} supports mode, description, prompt, steps, permission and tools; unsupported: {unsupported}"
+        )
+    for key in ("description", "prompt"):
+        if key in definition and (not isinstance(definition[key], str) or not definition[key].strip()):
+            return f"agent.{name}.{key} must be a non-empty string"
+    if "steps" in definition and (type(definition["steps"]) is not int or definition["steps"] <= 0):
+        return f"agent.{name}.steps must be a positive integer"
+    for key in ("permission", "tools"):
+        if key in definition and not isinstance(definition[key], Mapping):
+            return f"agent.{name}.{key} must be a mapping"
+    return None
+
+
 def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | None:
     """Return why a sandbox session cannot use ``opencode_config``, or ``None``.
 
@@ -347,15 +383,20 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
-      Other agent fields would replace the adapter's prompt, model or sampling. Token capture recognizes that
+      Other ``build`` fields would replace the adapter's prompt, model or sampling. Token capture recognizes that
       message (``nemo_gym.models.token_capture.harness_notes``) and keeps the calls after it chained.
+    - ``agent.general`` and ``agent.explore`` set to ``{disable: true}``: hides a built-in subagent from the ``task``
+      tool, so the tool offers the session's own subagents alone.
+    - ``agent.<name>`` with ``mode: subagent``: a subagent of the session's own (``_subagent_definition_error``). It
+      runs on the session's model with the session's sampling; its calls are captured with the rollout's and carry
+      its own OpenCode session, which the observations report as a child invocation.
     """
     unsupported = sorted(
         opencode_config.keys() - {"permission", "tools", "snapshot", "attachment", "compaction", "agent"}
     )
     if unsupported:
         return (
-            "supports permission, tools, snapshot, attachment, compaction.auto and agent.build.steps only; "
+            "supports permission, tools, snapshot, attachment, compaction.auto, agent.build.steps and subagents only; "
             f"unsupported: {unsupported}"
         )
     if "snapshot" in opencode_config and type(opencode_config["snapshot"]) is not bool:
@@ -366,14 +407,31 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     if "auto" in compaction and not isinstance(compaction["auto"], bool):
         return "compaction.auto must be true or false"
     agent = opencode_config.get("agent", {})
-    if not isinstance(agent, Mapping) or agent.keys() - {"build"}:
-        return "agent supports only build, the agent a session runs"
-    build = agent.get("build", {})
-    if not isinstance(build, Mapping) or build.keys() - {"steps"}:
-        return "agent.build supports only steps"
-    if "steps" in build and (type(build["steps"]) is not int or build["steps"] <= 0):
-        return "agent.build.steps must be a positive integer"
+    if not isinstance(agent, Mapping):
+        return "agent must be a mapping of agent names to definitions"
+    for name, definition in agent.items():
+        if name == "build":
+            if not isinstance(definition, Mapping) or definition.keys() - {"steps"}:
+                return "agent.build supports only steps"
+            if "steps" in definition and (type(definition["steps"]) is not int or definition["steps"] <= 0):
+                return "agent.build.steps must be a positive integer"
+        elif name in _OPENCODE_BUILTIN_SUBAGENTS and definition == {"disable": True}:
+            continue
+        elif (error := _subagent_definition_error(str(name), definition)) is not None:
+            return error
     return None
+
+
+def _configured_subagents(opencode_config: Mapping[str, Any]) -> list[str]:
+    """The names of the subagents ``opencode_config`` defines (``agent.<name>.mode == "subagent"``)."""
+    agent = opencode_config.get("agent")
+    if not isinstance(agent, Mapping):
+        return []
+    return [
+        str(name)
+        for name, definition in agent.items()
+        if isinstance(definition, Mapping) and definition.get("mode") == "subagent"
+    ]
 
 
 def _build_step_limit(opencode_config: Mapping[str, Any]) -> int | None:
@@ -492,6 +550,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Either is a file already inside the sandbox and requires its SHA-256, which is checked there.
     sandbox_ripgrep_path: str | None = None
     sandbox_ripgrep_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # Sandbox sessions only. Without a pinned rg or one on the task PATH, setup fails; true lets OpenCode download
+    # ripgrep on demand instead, which works only where the sandbox can reach GitHub.
+    sandbox_ripgrep_download: bool = False
     sandbox_plugin_dependencies_path: str | None = None
     sandbox_plugin_dependencies_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     # Sandbox sessions only. Absolute sandbox directory, outside the task workdir, where each activation's capture
@@ -814,7 +875,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 db_path = translated
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
-                ([], {"input_tokens": 0, "output_tokens": 0})
+                ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None})
                 if timed_out
                 else parse_opencode_session(db_path, gym_reasoning=self.config.model_server is not None)
             )
@@ -950,7 +1011,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage.get("cached_tokens")),
                 output_tokens=output_tokens,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(
                     reasoning_tokens=usage.get("reasoning_tokens", 0)
@@ -977,7 +1038,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 verification_failure_fields(response)
                 return response
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-                raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
+                raise AgentSessionConflictError("OpenCode activation does not match the seeded session and rollout")
             if state.task is None:
                 # Parse only for a new activation: a retry is compared with the stored request instead,
                 # so its media are never decoded again.
@@ -987,7 +1048,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     self._session_response(state, state.activation_request, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "OpenCode sandbox sessions support one activation; retry the same request"
+                )
             response = (await asyncio.shield(state.task)).model_copy(deep=True)
             verification_failure_fields(response)
             return response
@@ -1200,8 +1263,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 self._check_sandbox_setup(command, result)
             installer = f"{directory}/{RUNTIME_INSTALLER_FILE}"
             await sandbox.upload(RUNTIME_INSTALLER_SOURCE, installer)
-            # A pinned rg (below) replaces the installer's best-effort package install of ripgrep.
-            command = "NG_OPENCODE_SKIP_RIPGREP=1 " if ripgrep is not None else ""
+            # A pinned rg (below) replaces the installer's package install of ripgrep.
+            if ripgrep is not None:
+                command = "NG_OPENCODE_SKIP_RIPGREP=1 "
+            elif self.config.sandbox_ripgrep_download:
+                command = "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD=1 "
+            else:
+                command = ""
             command += "bash " + " ".join(
                 quote(arg)
                 for arg in (
@@ -1820,9 +1888,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         }
         sampling = {name: value for name in ("temperature", "top_p") if (value := getattr(body, name)) is not None}
         if sampling:
-            # Merged into each agent, so a configured agent.build.steps stays.
+            # Merged into each agent, the session's own subagents included, so a configured agent.build.steps stays.
             agents = config.setdefault("agent", {})
-            for agent in _OPENCODE_AGENTS[self.config.opencode_version]:
+            for agent in (
+                *_OPENCODE_AGENTS[self.config.opencode_version],
+                *_configured_subagents(self.config.opencode_config),
+            ):
                 agents.setdefault(agent, {}).update(sampling)
             if "temperature" in sampling:
                 # OpenCode sends temperature only for models that declare the capability.

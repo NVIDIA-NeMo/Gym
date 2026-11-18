@@ -110,7 +110,7 @@ the runtime: set `sandbox_executable_path` and `sandbox_executable_sha256`, or u
 image that already holds the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
 (see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity)).
 Without either, the seed is accepted and each attempt then fails downloading OpenCode.
-Preinstall `rg` too, since OpenCode otherwise tries to download ripgrep on demand.
+Preinstall or pin `rg` too: without one, setup fails (see below).
 Under `model_only`, a required MCP grant is refused at seed with a 422, since the
 policy would block its host; under `model_and_tools`, a grant at an address the
 sandbox cannot reach, such as loopback, refuses the seed. A borrowed sandbox relies on
@@ -123,10 +123,12 @@ needs Linux and Bash; it does not need Python. Missing Bash can be installed wit
 apt-get or apk when running as root; otherwise preinstall it.
 Online installation needs GitHub access, curl, tar, gzip and a Debian or RHEL CA
 bundle. Missing required packages are installed with apt-get or apk as root;
-non-root images must preinstall them. System `rg` is a best-effort optimization:
-setup tries apt-get or apk as root, but only warns if it is unavailable. OpenCode
-can then download ripgrep on demand; offline images should preinstall it, or pin one
-(see [Owner extensions](#owner-extensions)). Cached matching OpenCode runtimes need no
+non-root images must preinstall them. OpenCode's grep and glob tools need `rg`:
+setup tries apt-get or apk as root and fails if `rg` is still missing, since those
+tools would otherwise fail inside the trajectory with no failure recorded. Preinstall
+it, pin one (see [Owner extensions](#owner-extensions)), or set
+`sandbox_ripgrep_download: true` to let OpenCode download ripgrep on demand, which
+needs GitHub access from the sandbox. Cached matching OpenCode runtimes need no
 runtime download. A pinned binary is never downloaded. Task dependencies are preserved.
 
 Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
@@ -198,9 +200,9 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits `permission`, `tools`, a boolean `snapshot`, `attachment`, `compaction.auto` and
-`agent.build.steps`, preserving Gym capture. With token capture on, a session refuses
-`agent.build.steps` (see below).
+Session `opencode_config` permits only `permission`, `tools`, a boolean `snapshot`, `attachment`,
+`compaction.auto`, `agent.build.steps` and subagents (below), preserving Gym capture. With token capture on,
+a session refuses `agent.build.steps` (see below).
 Omit `snapshot` to keep OpenCode's default. Setting it to `false` disables its file snapshot
 and undo history; record this setting when comparing benchmark runs.
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
@@ -218,6 +220,18 @@ and compaction does not restart the count. A response whose prompt reached the l
 `metadata.harness_step_limit_reached: "true"`. Token capture recognizes this message
 (`nemo_gym.models.token_capture.harness_notes`) and joins the calls after it to the earlier calls of
 the rollout.
+
+Subagents. The default permission profile leaves OpenCode's `task` tool enabled, which starts a child session
+with its own context; with no session configuration it offers OpenCode's built-in `general` and `explore`.
+A session defines its own with `agent.<name>` entries whose `mode` is `subagent` (`description`, what the
+primary agent is told about it; `prompt`; `steps`; `permission` and `tools`, its tool access) and hides a
+built-in one with `agent.general: {disable: true}` or `agent.explore: {disable: true}`; any other agent
+field (a model, sampling, OpenCode's own agent names) is refused, so a child runs on the session's model
+with the request's sampling. A child's model calls are captured with the rollout's and the observations
+report its session as a child invocation of the primary agent's (`parent_invocation_id`,
+`spawned_by_tool_call_id`); which of them train, and how a child's context is reconstructed, is the
+training framework's (Gym's local lineage treats a child's first call as a new root). The Agentic-VBench
+training entry's `subagents.yaml` is an example.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
@@ -401,7 +415,7 @@ killer's), is a retryable setup error.
 
 | Item | Fields | Where it goes | How to build it |
 | --- | --- | --- | --- |
-| ripgrep | `sandbox_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's best-effort package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
+| ripgrep | `sandbox_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
 | Plugin dependencies | `sandbox_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256` | Unpacked into `XDG_CONFIG_HOME/opencode` before launch by the sandbox's `tar`, once the agent server has checked a download of the verified copy: members must be files, folders or links that stay inside it, no member path or link target may pass through a link, and none may carry setuid, setgid or sticky bits; npm's `node_modules/.bin` links pass | See below |
 
 With any plugin configured (the adapter always configures `task_environment.mjs`),
