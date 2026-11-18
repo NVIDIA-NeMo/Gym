@@ -50,3 +50,19 @@ question_bank_semantic_simple_agent:
           type: example
           jsonl_fpath: resources_servers/question_bank_judge/data/example.jsonl
           license: Apache 2.0
+
+question_bank_math_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: question_bank_math_simple_agent
+
+question_bank_semantic_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: question_bank_semantic_simple_agent

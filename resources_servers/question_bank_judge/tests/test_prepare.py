@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
+from pydantic import ValidationError
 
+from nemo_gym.data import load_task_data_schema, validate_jsonl_rows
 from resources_servers.question_bank_judge.prepare import family_splits, prepare
 from resources_servers.question_bank_judge.prompts import SOLVER_INSTRUCTION
 
@@ -190,6 +192,15 @@ def test_policy_contains_only_selected_problem_and_shared_instructions(tmp_path:
     forwarded = SimpleAgentRunRequest.model_validate(gym_row).model_dump()
     verifier_row = QuestionBankJudgeRunRequest.model_validate(forwarded)
     assert verifier_row.expected_answer == row["expected_answer"]
+
+    schema = load_task_data_schema(Path(__file__).resolve().parents[1])
+    assert schema is not None
+    report = validate_jsonl_rows("question_bank_judge", schema, "development.gym.jsonl", [json.dumps(gym_row)])
+    assert report.clean, report.summary()
+
+    for validate in (schema.validate_python, QuestionBankJudgeRunRequest.model_validate):
+        with pytest.raises(ValidationError, match="answer_format"):
+            validate({**gym_row, "answer_format": "misspelled"})
 
 
 @pytest.mark.parametrize(

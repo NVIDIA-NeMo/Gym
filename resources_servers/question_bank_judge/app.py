@@ -23,6 +23,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import (
     JUDGE_FAILURES,
     JudgeError,
@@ -34,6 +35,7 @@ from nemo_gym.verification import (
 from resources_servers.question_bank_judge.answer_extraction import extract_last_boxed_answer
 from resources_servers.question_bank_judge.judgment import hash_text, parse_judgment
 from resources_servers.question_bank_judge.routing import grading_route
+from resources_servers.question_bank_judge.task_data import TaskData
 
 
 class QuestionBankJudgeConfig(BaseResourcesServerConfig):
@@ -56,13 +58,8 @@ class QuestionBankJudgeConfig(BaseResourcesServerConfig):
     generation_log_filename: str = "question_bank_judge_generations.jsonl"
 
 
-class QuestionBankJudgeRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-    question: str | None = None
-    expected_answer: str | None = None
-    metadata: dict[str, Any] | None = None
-    answer_format: Literal["free", "boxed"] | None = None
+class QuestionBankJudgeRunRequest(BaseRunRequest, TaskData):
+    pass
 
 
 class QuestionBankJudgeVerifyRequest(QuestionBankJudgeRunRequest, BaseVerifyRequest):
@@ -366,3 +363,5 @@ class QuestionBankJudgeResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     QuestionBankJudgeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = QuestionBankJudgeResourcesServer.run_webserver()  # noqa: F401
