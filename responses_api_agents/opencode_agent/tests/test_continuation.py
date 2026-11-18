@@ -664,18 +664,11 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
 
 
 @pytest.mark.parametrize(
-    "error_name,upstream_status,expected_status,expected_error_type",
-    [
-        # Activation 1 answered, so a 400 on activation 2's first model call is the model's own failure and stays
-        # gradable, not a request the endpoint refused before the run's model ever answered. The export holds only
-        # activation 2's messages, so the session has to keep activation 1's answer.
-        ("APIError", 400, "failed", "provider_error"),
-        ("APIError", 503, "failed", "provider_error"),
-        ("ContextOverflowError", 503, "incomplete", "context_limit"),
-    ],
+    "error_name,expected_status,expected_error_type",
+    [("APIError", "failed", "provider_error"), ("ContextOverflowError", "incomplete", "context_limit")],
 )
 def test_reported_error_retains_continuation_evidence(
-    setup, tmp_path, error_name, upstream_status, expected_status, expected_error_type
+    setup, tmp_path, error_name, expected_status, expected_error_type
 ):
     agent, sandbox = setup
     payloads = install_artifact_runner(sandbox, tmp_path)
@@ -689,7 +682,7 @@ def test_reported_error_retains_continuation_evidence(
         info["finish"] = "error" if error_name == "ContextOverflowError" else None
         info["error"] = {
             "name": error_name,
-            "data": {"statusCode": upstream_status, "message": "provider message", "responseBody": "private-body"},
+            "data": {"statusCode": 503, "message": "provider message", "responseBody": "private-body"},
         }
         sandbox.files[path] = json.dumps(export)
         return result
@@ -707,10 +700,10 @@ def test_reported_error_retains_continuation_evidence(
         assert result["metadata"]["activation_id"] == "2"
         assert result["metadata"]["harness_session_id"] == "opencode-session"
         if error_name == "APIError":
-            assert result["error"]["message"] == f"HTTP {upstream_status}: provider message"
+            assert result["error"]["message"] == "HTTP 503: provider message"
             assert json.loads(result["metadata"]["ng_agent_outcome"]) == {
                 "failure_kind": "model_request_error",
-                "status_code": upstream_status,
+                "status_code": 503,
             }
         else:
             assert result["error"] is None

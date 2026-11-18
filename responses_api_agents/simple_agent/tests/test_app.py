@@ -3710,59 +3710,6 @@ async def test_exhausted_model_retries_preserve_partial_work_without_repeating_t
         assert response.usage is None
 
 
-@pytest.mark.parametrize(
-    "detail,outcome",
-    [
-        # The run's own settings are invalid: a rejected request, which the Model Server's report now selects too.
-        (
-            "max_tokens is too large: 131072. This model supports at most 32768 completion tokens.",
-            AgentOutcome(failure_kind="model_request_rejected"),
-        ),
-        # Any other 400 stays a graded request error, with the report as the Model Server sent it.
-        ("controlled model failure", AgentOutcome(failure_kind="model_request_error", status_code=400)),
-    ],
-)
-async def test_a_configuration_refusal_is_a_rejected_request_whose_report_selects_it(detail, outcome) -> None:
-    model_error = FailureEvent(
-        event_id="model-attempt",
-        boundary=FailureBoundary.MODEL,
-        failure_kind="model_request_error",
-        failure_reason=detail,
-        operation="model_request",
-        operation_id="model-operation",
-        attempt_id="model-operation-1",
-        http_status=400,
-    )
-    forwarded = FailureReport(failure_id=model_error.event_id, events={model_error.event_id: model_error})
-    refused = _mock_response(status=400, content=json.dumps({"error": {"message": detail}}))
-    url = URL("http://model/v1/responses")
-    refused.raise_for_status.side_effect = ClientResponseError(
-        RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url),
-        (),
-        status=400,
-        message="model failure",
-        headers=FailureHeader.encode(forwarded),
-    )
-    server, client = _make_agent(True)
-    client.post = AsyncMock(return_value=refused)
-
-    response, _, _, _ = await server._create_episode(
-        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
-        model_url_path="/ng-rollout/rollout/v1/responses",
-        in_session=True,
-    )
-
-    assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
-    report = FailureReport.model_validate(response.model_extra["failure_report"])
-    selected = report.events[report.failure_id]
-    assert selected.failure_kind == outcome.failure_kind
-    # The Model Server's event keeps its id and every field either way.
-    assert report.events["model-attempt"] == model_error
-    if outcome.failure_kind == "model_request_rejected":
-        assert selected.http_status is None and selected.cause_id is not None
-        assert report.events[selected.cause_id].http_status == 400
-
-
 def _body_failure_report(http_status: int) -> FailureReport:
     attempt = FailureEvent(
         boundary=FailureBoundary.MODEL,

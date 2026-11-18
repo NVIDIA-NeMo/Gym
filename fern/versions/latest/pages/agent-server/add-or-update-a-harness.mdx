@@ -786,8 +786,9 @@ before returning a failed response; inheritance alone does not attach metadata.
 Keep text parsing in the classifier and document the tested runtime version.
 Pi, Codex, OpenCode and Hermes override it in their agent-session paths.
 
-`report_outcome` reports a `model_request_error` with status 400 as `model_request_rejected`
-when the response's error message says the run's own settings are invalid: an output limit
+On a run that sets `forward_configuration_refusals`, `report_outcome` reports a
+`model_request_error` with status 400 as `model_request_rejected` when the response's error
+message says the run's own settings are invalid: an output limit
 above the model's cap ("max_tokens is too large", "maximum allowed number of output tokens",
 "cannot be greater than max_model_len") or a parameter or value the model does not accept
 ("Unsupported parameter", "Unsupported value", "is not supported with this model"). Such a
@@ -797,9 +798,11 @@ the window is the model's own limit. Keep the provider's error text in the respo
 `error.message` so the rule can read it. When the reply carries the Model Server's
 `failure_report`, `report_outcome` also adds a selected `model_request_rejected` event caused by
 that 400 and keeps every original event, because an Environment Server fails a reply whose
-selected failure disagrees with its outcome. A harness that writes the outcome itself
-applies the same rule with `reject_configuration_refusal`, and its report with
-`report_rejected_request`.
+selected failure disagrees with its outcome. Only a task-folder run (`gym eval run <task folder>`)
+sets `forward_configuration_refusals`, and only for OpenCode and Pi
+(`CONFIGURATION_REFUSAL_HARNESSES` in `nemo_gym/data/tasks/harbor/prepare.py`), whose
+`report_outcome` passes on the provider's text; it also makes `openai_model` forward such a 400
+instead of answering HTTP 500. Every other run reports that 400 as a graded `model_request_error`.
 
 `AgentOutcome.failure_kind` accepts names registered in `nemo_gym/core/failure_kinds.py`
 or `unknown`; unregistered names are rejected. The shared names describe causes,
@@ -819,13 +822,12 @@ failed responses after closing the agent:
 | --- | --- | --- |
 | `agent_invalid_output`, `agent_limit`, or model request errors 400/413/422 | Yes | No |
 | Model request errors 408/425/429/5xx, `model_transport_error`, or `unknown` | No | Yes |
-| `model_request_rejected` (a 400 that names invalid run settings, such as an output limit above the model's cap) | No | No |
+| `model_request_rejected` (on a task-folder run, a 400 that names invalid run settings, such as an output limit above the model's cap) | No | No |
 | Other failures, including 401/403/404 or malformed metadata | No | No |
 
 Excluded attempts retain their partial response and observations in the existing
-failure flow. On `harbor`, an excluded attempt's failure names the reported cause as its
-`failure_kind`, with the upstream status of a model request error; `unknown` and malformed
-metadata name none. Retry eligibility does not force a retry; the collector's retry budget
+failure flow. On `harbor`, an excluded attempt whose cause is `model_request_rejected` names it
+as its `failure_kind`; any other cause stays an environment failure. Retry eligibility does not force a retry; the collector's retry budget
 still applies. Responses without this metadata keep the existing grading behavior,
 and completed or incomplete responses remain gradable. These decisions do not change
 native harness retries or model-adapter retries.
@@ -849,9 +851,7 @@ status rule matches; it does not override the default 400/408/413/422/425/429/5x
 Use `by_status_code: {503: fail}` to change 503 handling. Adding
 `by_status_code: {404: retry}` keeps the other default status rules, including 429 and 5xx.
 `model_request_rejected` carries no HTTP status, so a `by_status_code: {400: ...}` rule does
-not reach it; `by_failure_kind: {model_request_rejected: verify}` grades it again. In a
-multi-step `harbor` task, a step after a graded step routes a rejected request as the 400 it
-was, since the step's fresh session cannot see the earlier steps' answers.
+not reach it; `by_failure_kind: {model_request_rejected: verify}` grades it again.
 
 It applies to `single_agent_turn`, its legacy-response wrapper and `harbor`, not other
 Environment Server implementations or agents' own legacy `/run` methods.

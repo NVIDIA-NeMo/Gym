@@ -1632,7 +1632,9 @@ def run_target(args: argparse.Namespace, overrides: list[str], *, benchmark: Har
             f"{_listed(prepared.skipped)}\nUse --skip-unloadable to explicitly run only the loadable subset."
         )
     try:
-        config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
+        config_path, tokens = build_run(
+            prepared, agent, sandbox=sandbox, overrides=overrides, benchmark_run=benchmark is not None
+        )
     except (HarborTaskError, OSError) as exc:
         args._parser.error(str(exc))
     tokens = _merge_config_paths(tokens)
@@ -1744,7 +1746,8 @@ def _write_summary(
 # ("max_tokens: 64001 > 64000, which is the maximum allowed number of output tokens") word it. A parameter the model
 # does not take ("Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens' instead") is not one.
 _OUTPUT_LIMIT_REFUSAL = re.compile(
-    r"max_(?:completion_|output_|new_)?tokens\b.*?(?:too large|at most|maximum|exceed)", re.IGNORECASE | re.DOTALL
+    r"max_(?:completion_|output_|new_)?tokens\b.*?(?:too large|at most|maximum|exceed|cannot be greater than max_model_len)",
+    re.IGNORECASE | re.DOTALL,
 )
 
 

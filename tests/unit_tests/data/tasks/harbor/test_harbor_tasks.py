@@ -2514,6 +2514,33 @@ class TestCli:
         written = yaml.safe_load(path.read_text())
         assert written["use_absolute_ip"] is True
         assert written["absolute_ip_server_types"] == ["responses_api_models"]
+        # A laptop's hostname may not resolve; a task-folder run falls back to the default route's address.
+        assert written["absolute_ip_route_fallback"] is True
+
+    @pytest.mark.parametrize("agent_name", ["opencode_agent", "hermes_agent"])
+    def test_a_benchmark_run_keeps_the_task_folder_run_settings_out(self, tmp_path, agent_name):
+        """A Harbor-backed ``--benchmark`` run goes through ``build_run`` too, but behaves as any other benchmark run:
+        no default-route fallback, and the model server's configuration refusals stay as they always were."""
+        agent = resolve_agent(agent_name)
+        path, _ = build_run(self._prepared(tmp_path), agent, sandbox="docker", overrides=[], benchmark_run=True)
+        written = yaml.safe_load(path.read_text())
+        assert written["use_absolute_ip"] is True
+        assert "absolute_ip_route_fallback" not in written
+        assert "forward_configuration_refusals" not in written
+
+    @pytest.mark.parametrize(
+        "agent_name,forwarded",
+        [("opencode_agent", True), ("pi_agent", True), ("hermes_agent", False), ("harbor_oracle_agent", False)],
+    )
+    def test_build_run_forwards_configuration_refusals_only_for_harnesses_that_report_them(
+        self, tmp_path, agent_name, forwarded
+    ):
+        """OpenCode and Pi report a refusal of invalid run settings as a rejected request, given its 400; any other
+        harness keeps the 500 the model server always gave it."""
+        agent = AgentSelection(tmp_path / "agent.yaml", agent_name, agent_name)
+        path, _ = build_run(self._prepared(tmp_path), agent, sandbox="docker", overrides=[])
+        written = yaml.safe_load(path.read_text())
+        assert written.get("forward_configuration_refusals", False) is forwarded
 
     def test_build_run_leaves_host_side_agent_on_loopback(self, tmp_path):
         agent = AgentSelection(tmp_path / "agent.yaml", "harbor_oracle_agent", "harbor_oracle_agent")

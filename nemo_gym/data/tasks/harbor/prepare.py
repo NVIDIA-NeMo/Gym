@@ -34,6 +34,7 @@ import yaml
 
 from nemo_gym import component_search_roots
 from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.config.global_config import ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME, FORWARD_CONFIGURATION_REFUSALS_KEY_NAME
 from nemo_gym.data.tasks.harbor.build_options import (
     BuildOptions,
 )
@@ -119,6 +120,12 @@ CALLS_MODEL_FROM_SANDBOX_KEY = "calls_model_from_sandbox"
 USE_ABSOLUTE_IP_KEY = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY = "absolute_ip_server_types"
 SANDBOX_REACHABLE_SERVER_TYPES = ("responses_api_models",)
+# Harnesses whose `report_outcome` passes on the provider's refusal text. For them a task-folder run sets
+# `forward_configuration_refusals`: `openai_model` forwards a 400 that names invalid run settings (an output limit
+# above the model's cap, a parameter the model does not accept), and the harness reports it as an ungraded
+# `model_request_rejected`. Any other harness, and any other run (a Harbor-backed `--benchmark` run included), handles
+# that refusal as it always has.
+CONFIGURATION_REFUSAL_HARNESSES = frozenset({"opencode_agent", "pi_agent"})
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
 # `--max-output-tokens` sets `responses_create_params.max_output_tokens`, which a materialized task row cannot take:
 # the harness sends its own requests. A task-folder run hands the value to the harness's own output limit instead,
@@ -1166,6 +1173,7 @@ def build_run(
     *,
     sandbox: str | None,
     overrides: list[str],
+    benchmark_run: bool = False,
 ) -> tuple[Path, list[str]]:
     """Write ``run_config.yaml`` and return it with the Hydra overrides for collection.
 
@@ -1184,6 +1192,11 @@ def build_run(
     block's harness against it at dispatch. The oracle plays the reference solution, not a model, and is
     always admitted (``prepare_target`` checks no agent for it), so its run config carries the entry without
     the list: the list speaks of model harnesses, and the guard would otherwise refuse the validation run.
+
+    A task-folder run on a laptop also falls back to the default route's address for the model server
+    (``absolute_ip_route_fallback``) and asks for a harness's configuration refusals
+    (``forward_configuration_refusals``). A Harbor-backed ``--benchmark`` run (``benchmark_run``) sets neither and
+    behaves as any other benchmark run.
     """
     refuse_example_dataset(prepared.dataset)
     split = prepared.dataset.effective_type
@@ -1212,6 +1225,10 @@ def build_run(
     if agent.runs_in_sandbox:
         config[USE_ABSOLUTE_IP_KEY] = True
         config[ABSOLUTE_IP_SERVER_TYPES_KEY] = list(SANDBOX_REACHABLE_SERVER_TYPES)
+        if not benchmark_run:
+            config[ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME] = True
+    if not benchmark_run and agent.impl_name in CONFIGURATION_REFUSAL_HARNESSES:
+        config[FORWARD_CONFIGURATION_REFUSALS_KEY_NAME] = True
     # One file per agent, so a validate and an eval run on the same taskset do not overwrite each other.
     config_path = prepared.output_dir / f"run_config_{agent.instance_name}.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))

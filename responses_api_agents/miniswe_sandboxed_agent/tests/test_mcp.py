@@ -116,19 +116,17 @@ async def test_mcp_session_preserves_tool_state_across_cli_calls(monkeypatch):
             await asyncio.gather(daemon, return_exceptions=True)
 
 
-@pytest.mark.parametrize(
-    "argv", [["serve"], ["list"], ["call", "browser", "navigate", '{"url":"http://app"}']], ids=lambda argv: argv[0]
-)
-async def test_cli_dispatches_declared_tool_arguments(tmp_path, monkeypatch, capsys, argv):
-    operation = argv[0]
+@pytest.mark.parametrize("operation", ["serve", "list", "call"])
+async def test_cli_dispatches_declared_tool_arguments(tmp_path, monkeypatch, capsys, operation):
     monkeypatch.setattr(module, "__file__", str(tmp_path / "client.py"))
     servers = [{"name": "browser", "transport": "sse", "url": "http://sidecar/mcp"}]
     (tmp_path / "servers.json").write_text(json.dumps(servers))
+    monkeypatch.setattr(module.sys, "argv", ["client.py", operation, "browser", "navigate", '{"url":"http://app"}'])
     serve = AsyncMock()
     request = AsyncMock(return_value={"content": [{"type": "text", "text": "ok"}]})
     monkeypatch.setattr(module, "serve", serve)
     monkeypatch.setattr(module, "request", request)
-    await module.main(module.parse_args(argv))
+    await module.main()
     if operation == "serve":
         serve.assert_awaited_once_with(servers, str(tmp_path / "server.sock"))
         request.assert_not_awaited()
@@ -140,29 +138,6 @@ async def test_cli_dispatches_declared_tool_arguments(tmp_path, monkeypatch, cap
             else {"operation": "call", "server": "browser", "tool": "navigate", "arguments": {"url": "http://app"}}
         )
         request.assert_awaited_once_with(str(tmp_path / "server.sock"), expected)
-
-
-@pytest.mark.parametrize(
-    ("argv", "message"),
-    [
-        ([], "required: command"),
-        (["call", "counter"], "required: TOOL, JSON_ARGUMENTS"),
-        (["call", "counter", "increment"], "required: JSON_ARGUMENTS"),
-        (["call", "counter", "increment", "{name: World}"], "not valid JSON"),
-        # An unquoted object reaches the client split by the shell.
-        (["call", "counter", "increment", '{"name":', '"World"}'], "not valid JSON"),
-        (["call", "counter", "increment", '["World"]'], "must be a JSON object"),
-        (["increment"], "invalid choice"),
-        (["list", "counter"], "unrecognized arguments"),
-    ],
-)
-def test_malformed_cli_call_prints_usage_and_exits_2(capsys, argv, message):
-    with pytest.raises(SystemExit) as raised:
-        module.parse_args(argv)
-    assert raised.value.code == 2
-    stderr = capsys.readouterr().err
-    assert stderr.startswith("usage: ")
-    assert message in stderr
 
 
 async def test_http_transport_uses_aiohttp():
@@ -236,9 +211,6 @@ def test_client_run_by_another_python_reruns_under_its_venv():
                 called = cli("call", "counter", "increment", "{}")
                 assert called.returncode == 0, called.stderr
                 assert json.loads(called.stdout)["content"][0]["text"] == expected
-            malformed = cli("call", "counter", "increment", "{bad")
-            assert malformed.returncode == 2
-            assert "not valid JSON" in malformed.stderr and "Traceback" not in malformed.stderr
         finally:
             daemon.terminate()
             daemon.wait(10)

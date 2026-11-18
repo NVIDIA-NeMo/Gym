@@ -128,9 +128,10 @@ reason, and the collector retries them.
 For them, `gym eval run` makes the Model Server advertise the machine's network address instead of loopback, which
 a sandbox reaches only when the network routes to it and no firewall blocks the port.
 
-When the hostname does not resolve, or resolves to loopback, Gym advertises the address of the interface the
-default route uses, on a laptop often its Wi-Fi or VPN address. The run stops only when there is no such route, for
-example offline.
+On a task-folder run, when the hostname does not resolve, or resolves to loopback, Gym advertises the address of
+the interface the default route uses, on a laptop often its Wi-Fi or VPN address, and logs a warning naming it. The
+run stops only when there is no such route, for example offline. Any other run, a `--benchmark` run included, stops
+when the hostname gives no usable address, as it always has.
 
 **Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. When the default
 route's interface is not the one the sandboxes reach (a VPN, several networks), set the Model Server's own `host`,
@@ -147,10 +148,13 @@ servers stay on loopback. `+default_host` moves every server to the address, inc
 
 ## The model rejects every request
 
-**Symptom.** Every episode fails at the agent stage, ungraded, with a failure reason such as
-`HTTP 400: max_tokens is too large`. The terminal's dropped-rollout line reads `class=model_request_rejected`, and
-the run summary names `model_request_rejected` as each such task's `failure_kind`. When the reason is an output limit
-and the harness has one, the line after `Run summary written to` names `--max-output-tokens`.
+**Symptom.** With OpenCode (`opencode_agent`) or Pi (`pi_agent`), every episode fails at the agent stage, ungraded,
+with a failure reason such as `HTTP 400: max_tokens is too large`. The terminal's dropped-rollout line reads
+`class=model_request_rejected`, and the run summary names `model_request_rejected` as each such task's
+`failure_kind`. When the reason is an output limit, the line after `Run summary written to` names
+`--max-output-tokens`. Other harnesses, and `--benchmark` runs, handle such a refusal as on any other run:
+`openai_model` answers it with HTTP 500, and a Model Server that passes the 400 on, such as `vllm_model`, hands it to
+the harness, which reports it as a graded `model_request_error`.
 
 **Cause.** The endpoint refused the request because the run's own settings are invalid, so the episode is not
 graded. A common case is a harness output limit above the model's cap: OpenCode and Pi

@@ -53,8 +53,6 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
     confirmed_policy_response_timeout,
     failure_outcome_policy,
-    reject_configuration_refusal,
-    report_rejected_request,
 )
 from nemo_gym.agents.agent_outcome import POLICY_TIMEOUT_OPERATION, policy_timeout_failure
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
@@ -70,7 +68,6 @@ from nemo_gym.core import (
     AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
-    MODEL_REQUEST_REJECTED,
     TOOL_OUTPUT_IMAGES_KEY,
     EpisodeId,
     FailureBoundary,
@@ -613,16 +610,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
                     content = getattr(error, "response_content", b"")
                     detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
-                    message = f"Model HTTP {error.status}: {detail or error.message}"
-                    outcome = reject_configuration_refusal(
-                        AgentOutcome(
-                            failure_kind=reported_kind,
-                            status_code=error.status if reported_kind == MODEL_REQUEST_ERROR else None,
-                        ),
-                        error_message=message,
-                    )
-                    if outcome.failure_kind == MODEL_REQUEST_REJECTED:
-                        report = report_rejected_request(report)
                     invocation_status = "failed"
                     invocation_error_type = reported_kind
                     model_response = NeMoGymResponse(
@@ -633,13 +620,19 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         output=[],
                         status="failed",
                         failure_report=report.model_dump(mode="json"),
-                        error={"code": "server_error", "message": message},
+                        error={
+                            "code": "server_error",
+                            "message": f"Model HTTP {error.status}: {detail or error.message}",
+                        },
                         tools=body.tools,
                         tool_choice=body.tool_choice,
                         parallel_tool_calls=body.parallel_tool_calls,
                         metadata={
                             **(body.metadata or {}),
-                            AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(),
+                            AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
+                                failure_kind=reported_kind,
+                                status_code=error.status if reported_kind == MODEL_REQUEST_ERROR else None,
+                            ).model_dump_json(),
                         },
                     )
                     # No successful model response means known zero aggregate usage, not invented per-call usage.

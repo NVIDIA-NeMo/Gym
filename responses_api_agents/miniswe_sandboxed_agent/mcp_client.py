@@ -3,7 +3,6 @@
 
 """Small task-local CLI for mini-SWE's bash harness; no provider credentials."""
 
-import argparse
 import asyncio
 import json
 import os
@@ -105,42 +104,24 @@ async def request(socket_path, message):
         await writer.wait_closed()
 
 
-def json_object(text: str) -> dict:
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise argparse.ArgumentTypeError(f"not valid JSON ({error}); pass one JSON object in single quotes") from None
-    if not isinstance(value, dict):
-        raise argparse.ArgumentTypeError("must be a JSON object, such as '{}'")
-    return value
-
-
-def parse_args(argv: list[str]) -> argparse.Namespace:
-    # Usage errors exit 2 with the usage line, which the model reads, instead of an IndexError traceback.
-    parser = argparse.ArgumentParser(prog=f"{_VENV_PYTHON} {Path(__file__).resolve()}")
-    commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("serve")
-    commands.add_parser("list")
-    call = commands.add_parser("call")
-    call.add_argument("server", metavar="SERVER")
-    call.add_argument("tool", metavar="TOOL")
-    call.add_argument("arguments", metavar="JSON_ARGUMENTS", type=json_object)
-    return parser.parse_args(argv)
-
-
-async def main(args: argparse.Namespace) -> None:
+async def main():
     servers = json.loads(Path(__file__).with_name("servers.json").read_text())
     socket_path = str(Path(__file__).with_name("server.sock"))
-    if args.command == "serve":
+    if sys.argv[1] == "serve":
         await serve(servers, socket_path)
         return
-    if args.command == "list":
+    if sys.argv[1] == "list":
         message = {"operation": "list"}
     else:
-        message = {"operation": "call", "server": args.server, "tool": args.tool, "arguments": args.arguments}
+        message = {
+            "operation": "call",
+            "server": sys.argv[2],
+            "tool": sys.argv[3],
+            "arguments": json.loads(sys.argv[4]),
+        }
     result = await request(socket_path, message)
     print(json.dumps(result))
 
 
 if __name__ == "__main__":
-    asyncio.run(main(parse_args(sys.argv[1:])))
+    asyncio.run(main())

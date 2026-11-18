@@ -271,8 +271,7 @@ class MiniSWEHarness:
             timeout_s=self.context.setup_timeout_sec,
         )
         if result.return_code:
-            # stderr first: the failing pip or uv line is there, and callers truncate long details.
-            raise RuntimeError(f"mini-SWE installation failed: {result.stderr}\n{result.stdout}")
+            raise RuntimeError(f"mini-SWE installation failed: {result.stdout}\n{result.stderr}")
 
     async def close(self) -> None:
         """Stop the agent and its shell process groups before verification."""

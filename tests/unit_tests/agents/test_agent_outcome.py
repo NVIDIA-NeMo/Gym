@@ -16,6 +16,7 @@ from nemo_gym.agents.agent_outcome import (
 )
 from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client.server_client import ServerClient
+from nemo_gym.config.global_config import FORWARD_CONFIGURATION_REFUSALS_KEY_NAME
 from nemo_gym.core.failure_kinds import FAILURE_KINDS, MODEL_REQUEST_ERROR, MODEL_REQUEST_REJECTED
 from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.core.responses_api_types import NeMoGymResponse
@@ -145,10 +146,14 @@ class _StatusAgent(SimpleResponsesAPIAgent):
         return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=native_result["status"])
 
 
-def _report(status: int, message: str, *, error_as_dict: bool = False, failure_report: object = None):
+def _report(
+    status: int, message: str, *, error_as_dict: bool = False, failure_report: object = None, forwarded: bool = True
+):
+    client = MagicMock(spec=ServerClient)
+    # A task-folder run of a harness that reports a refusal of its own settings sets this key.
+    client.global_config_dict = {FORWARD_CONFIGURATION_REFUSALS_KEY_NAME: True} if forwarded else {}
     agent = _StatusAgent(
-        config=BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name=""),
-        server_client=MagicMock(spec=ServerClient),
+        config=BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name=""), server_client=client
     )
     error = {"code": "server_error", "message": message}
     response = NeMoGymResponse(
@@ -251,6 +256,23 @@ def test_a_400_that_names_invalid_run_settings_is_a_rejected_request(status, mes
     reported = _report(status, message, error_as_dict=error_as_dict)
     assert json.loads(reported.metadata[AGENT_OUTCOME_METADATA_KEY]) == expected
     assert agent_outcome_policy(reported) == action
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        OUTPUT_CAP_REJECTION,
+        "Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.",
+        "controlled model failure",
+    ],
+)
+def test_a_run_that_does_not_forward_configuration_refusals_keeps_every_400_a_graded_request_error(message):
+    """Only a task-folder run asks for the rejection; any other run reports the 400 and its report as it always has."""
+    original = _model_error_report().model_dump(mode="json")
+    reported = _report(400, message, failure_report=original, forwarded=False)
+    assert json.loads(reported.metadata[AGENT_OUTCOME_METADATA_KEY]) == REQUEST_ERROR_400
+    assert agent_outcome_policy(reported) == "verify"
+    assert reported.model_extra["failure_report"] == original
 
 
 def _model_error_report(http_status: int = 400) -> FailureReport:

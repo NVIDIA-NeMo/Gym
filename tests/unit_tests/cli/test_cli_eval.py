@@ -327,6 +327,7 @@ _REFUSED_LIMIT = (
             True,
             True,
         ),
+        ("model_request_rejected", "max_tokens=131072 cannot be greater than max_model_len=32768", True, True),
         # The harness has no limit of its own, so the flag would be refused.
         ("model_request_rejected", _REFUSED_LIMIT, False, False),
         # A parameter the model does not take, or another invalid setting, is no limit to lower.
@@ -345,7 +346,7 @@ _REFUSED_LIMIT = (
         # A graded request error is the model's own result.
         ("model_request_error", _REFUSED_LIMIT, True, False),
     ],
-    ids=["openai", "anthropic", "no-limit-setting", "unsupported-parameter", "other-setting", "other-kind"],
+    ids=["openai", "anthropic", "vllm", "no-limit-setting", "unsupported-parameter", "other-setting", "other-kind"],
 )
 def test_output_limit_hint_names_the_flag_only_for_a_refused_limit_the_harness_can_lower(
     kind, message, has_output_limit, hinted

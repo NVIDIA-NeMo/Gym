@@ -38,8 +38,8 @@ score, which is their sum, and the result names them as ``reward_components`` (k
 ``failure_kind``. Only a Gym-side failure (sandbox lost, transfer failed) masks the sample. A
 failed agent response whose harness classified the cause (``ng_agent_outcome``) goes through
 ``agent_outcome_policy`` before verification, as on ``single_agent_turn``: by default a
-transport or unknown cause is retried ungraded instead of scoring 0, and an ungraded attempt's failure names the
-reported cause, unless it is ``unknown``, as its ``failure_kind``. A task that cannot be set up is a handled episode
+transport or unknown cause is retried ungraded instead of scoring 0, and a request the endpoint refused for
+invalid run settings fails as ``model_request_rejected``. A task that cannot be set up is a handled episode
 failure: terminal when the task itself is at fault (unknown task, changed folder, unsupported
 settings), retryable when the sandbox provider failed.
 """
@@ -112,6 +112,7 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     EPISODE_FAILED,
+    MODEL_REQUEST_REJECTED,
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     FailureBoundary,
@@ -1360,10 +1361,9 @@ class HarborEnvironmentServer(
         handing test.sh a half-finished sandbox and recording a real 0. In a multi-step task this ends the
         episode at the turn that failed; a verify cause is graded as before.
 
-        The failure names the cause that decided its action, so the run summary and the dropped-rollout line say
-        why the episode was not graded (``model_request_rejected``, not a bare environment failure). A model
-        request error keeps its upstream HTTP status, which classifies a 5xx as the model server's fault, not the
-        model's. An ``unknown`` or malformed cause names none."""
+        A request the endpoint refused for invalid run settings names ``model_request_rejected`` as its failure kind,
+        so the run summary and the dropped-rollout line say why the episode was not graded; any other cause stays
+        the environment-side failure it always was."""
         action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
         if action != OutcomeAction.VERIFY:
             cause = _reported_cause(agent_response)
@@ -1374,8 +1374,9 @@ class HarborEnvironmentServer(
                 partial_response=agent_response,
                 agent_observations=handle.observations,
                 trajectory=handle.trajectory,
-                failure_kind=cause.failure_kind if cause else None,
-                http_status=cause.status_code if cause else None,
+                failure_kind=MODEL_REQUEST_REJECTED
+                if cause is not None and cause.failure_kind == MODEL_REQUEST_REJECTED
+                else None,
             )
 
     async def _require_turn_continuation(self) -> None:
@@ -2113,7 +2114,6 @@ class HarborEnvironmentServer(
         agent_observations: Any = None,
         trajectory: Any = None,
         failure_kind: str | None = None,
-        http_status: int | None = None,
     ) -> NgFailureEvent:
         # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
         # travels with the failure row, as it travels with a result.
@@ -2123,7 +2123,6 @@ class HarborEnvironmentServer(
             operation="episode",
             failure_reason=failure_reason[:2000],
             failure_kind=failure_kind,
-            http_status=http_status,
             terminal=terminal,
             evidence={
                 "partial_response": partial_response,

@@ -3,7 +3,6 @@
 
 """Agent-reported causes, independent of environment grading and retry policy."""
 
-import re
 from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from aiohttp import ClientResponseError
@@ -30,6 +29,7 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_UNAVAILABLE,
     FailureClassificationConfig,
     classify_failure,
+    is_configuration_refusal,
 )
 from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport, ModelFailureDetails
 from nemo_gym.core.failure_transport import FailureHeader
@@ -82,35 +82,6 @@ class AgentOutcome(BaseModel):
         return self
 
 
-# Words a model endpoint's refusal uses when the prompt does not fit the context window: OpenAI's error code (also what
-# vllm_model propagates), "maximum context length" (OpenAI, vLLM), "context window" (Codex's wording), "context size"
-# (llama.cpp), vLLM's "maximum model length" for a decoder prompt, and Anthropic's "prompt is too long".
-_CONTEXT_WINDOW_PHRASES = (
-    "context_length_exceeded",
-    "context length",
-    "context window",
-    "context size",
-    "maximum model length",
-    "prompt is too long",
-)
-# How an endpoint refuses a request that the run's own settings make invalid, the same way on every call whatever the
-# conversation holds: an output limit above the model's cap (OpenAI and LiteLLM's "max_tokens is too large: N. This
-# model supports at most M completion tokens", Anthropic's "max_tokens: N > M, which is the maximum allowed number of
-# output tokens", vLLM's "max_tokens=N cannot be greater than max_model_len=M"), or a parameter or value the model does
-# not accept (OpenAI's "Unsupported parameter: ..." and "Unsupported value: '...' does not support ...", and vLLM's
-# "Unexpected ... Supported types are ...", which vllm_model also reads as an invalid request parameter).
-_CONFIGURATION_REFUSALS = (
-    re.compile(
-        r"\bmax_(?:completion_|output_|new_)?tokens\b.{0,200}?"
-        r"(?:is too large|supports at most|maximum allowed number of output tokens|cannot be greater than max_model_len)",
-        re.IGNORECASE | re.DOTALL,
-    ),
-    re.compile(r"\bunsupported (?:parameter|value)\b", re.IGNORECASE),
-    re.compile(r"\bis not supported with this model\b", re.IGNORECASE),
-    re.compile(r"\bUnexpected [^.\n]{1,80}\. Supported (?:types|values) (?:are|is)\b"),
-)
-
-
 def reject_configuration_refusal(outcome: AgentOutcome, *, error_message: str) -> AgentOutcome:
     """``model_request_rejected`` for an HTTP 400 whose message says the run's own settings are invalid, else ``outcome``.
 
@@ -121,8 +92,7 @@ def reject_configuration_refusal(outcome: AgentOutcome, *, error_message: str) -
     if (
         outcome.failure_kind == MODEL_REQUEST_ERROR
         and outcome.status_code == 400
-        and any(pattern.search(error_message) for pattern in _CONFIGURATION_REFUSALS)
-        and not any(phrase in error_message.lower() for phrase in _CONTEXT_WINDOW_PHRASES)
+        and is_configuration_refusal(error_message)
     ):
         return AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED)
     return outcome
