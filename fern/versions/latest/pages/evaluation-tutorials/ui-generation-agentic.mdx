@@ -39,11 +39,12 @@ judge_model_name: ...
 No images are published for you. Build the three agent images from the Dockerfiles in the server's `docker/` folder (base images are pinned by digest, and the Next and Vite npm trees by committed lockfiles), push them to a registry your sandbox provider can pull from, and export the pushed digests:
 
 ```bash
-IMAGE_PREFIX=<registry>/<namespace>/ui-gen-agent \
-  resources_servers/ui_generation_agentic/docker/build_images.sh --push
-export UI_GEN_NEXT_IMAGE=<registry>/<namespace>/ui-gen-agent/ui-next@sha256:...
-export UI_GEN_VITE_IMAGE=<registry>/<namespace>/ui-gen-agent/ui-vite@sha256:...
-export UI_GEN_STATIC_IMAGE=<registry>/<namespace>/ui-gen-agent/ui-static@sha256:...
+export IMAGE_PREFIX=registry.example.com/my-team/ui-gen-agent  # your registry and namespace
+resources_servers/ui_generation_agentic/docker/build_images.sh --push
+# Replace each <digest> with the digest the script prints for that stack.
+export UI_GEN_NEXT_IMAGE="$IMAGE_PREFIX/ui-next@sha256:<digest>"
+export UI_GEN_VITE_IMAGE="$IMAGE_PREFIX/ui-vite@sha256:<digest>"
+export UI_GEN_STATIC_IMAGE="$IMAGE_PREFIX/ui-static@sha256:<digest>"
 ```
 
 The images bake in OpenCode 1.17.11 and ripgrep, checked by SHA-256. For the Codex composition, build them with `WITH_CODEX=1`, which also bakes in the Codex runtime; the default build leaves it out. Optionally pin each image's manifest with `UI_GEN_{NEXT,VITE,STATIC}_MANIFEST_SHA256`; a seed whose image does not match is refused.
