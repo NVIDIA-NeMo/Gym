@@ -24,6 +24,7 @@ import asyncio.subprocess
 import fcntl
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -391,6 +392,8 @@ class SingularityEnvironment(BaseEnvironment):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                # Own process group, so stop() can kill helpers that are reparented to init
+                start_new_session=True,
             )
 
             # Start background task to stream server output
@@ -596,8 +599,7 @@ class SingularityEnvironment(BaseEnvironment):
                     )
                     # Set flag BEFORE killing so exec() can check it
                     self._memory_limit_exceeded = error_msg
-                    # Kill the Singularity process - it will clean up internal processes
-                    self._server_process.kill()
+                    self._kill_server_group()
                     # Don't raise here - let exec() detect the error and raise properly
                     return
 
@@ -680,6 +682,11 @@ class SingularityEnvironment(BaseEnvironment):
             except Exception:
                 pass
 
+        # Also when the leader already exited: its group can still hold helpers reparented to init,
+        # e.g. Apptainer's FUSE mount daemons (squashfuse_ll, fuse-overlayfs), which `pkill -P` misses
+        if self._server_process:
+            self._kill_server_group()
+
         # Cancel stream task if running
         if hasattr(self, "_stream_task") and self._stream_task:
             self._stream_task.cancel()
@@ -687,6 +694,13 @@ class SingularityEnvironment(BaseEnvironment):
                 await self._stream_task
             except asyncio.CancelledError:
                 pass
+
+    def _kill_server_group(self) -> None:
+        """SIGKILL the server's process group (pgid == pid, see start_new_session)."""
+        try:
+            os.killpg(self._server_process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
     async def exec(
         self,
