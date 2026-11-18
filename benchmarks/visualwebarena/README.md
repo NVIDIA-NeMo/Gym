@@ -188,11 +188,11 @@ Both task-image readers allow 32 MiB, including the maintained task image
 that exceeds the previous 25 MiB default; input images are not resized to
 work around that limit.
 
-This composition enables `nano_omni_stop_at_step_budget`: the penultimate
-observation asks the model to terminate with failure and an empty answer,
-and the last two model
-requests disable thinking while retaining other template options. The shared
-agent's default remains disabled, and the option applies only to the Nano Omni
-protocol. This prompt/template change and the clean-state schedule define a
-new evaluation protocol; historical run records and scores retain their
-original configurations.
+This composition uses the shared agent's existing 100-step limit. If the model
+uses the entire budget without a terminal answer, the agent evaluates the
+observed state with no fabricated final answer before closing the session.
+The optional Nano budget prompt/template feature and automatic display
+allocation are reviewed in separate PRs; this integration uses the agent and
+browser runtime already available on `main`. Run records must retain the
+actual stop behavior and template options alongside the clean-state schedule.
+Historical scores retain their original configurations.
