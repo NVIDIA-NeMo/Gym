@@ -202,57 +202,50 @@ def _install_parent_compatible(
         subprocess.run(command, cwd=project, env=env, check=True)
 
 
-def _explicit_index_packages(project: Path) -> dict[str, str]:
-    """Map each locked package pinned to an explicit index to that index's URL."""
+def _package_indexes(project: Path) -> dict[str, str | None]:
+    """Map each locked package to its explicit index URL, or to None for the default index."""
     indexes = tomllib.loads((project / "pyproject.toml").read_text()).get("tool", {}).get("uv", {}).get("index", [])
     explicit = {index["url"].rstrip("/") for index in indexes if index.get("explicit")}
     packages = tomllib.loads((project / "uv.lock").read_text()).get("package", [])
-    return {
-        canonicalize_name(package["name"]): package["source"]["registry"]
-        for package in packages
-        if package.get("source", {}).get("registry", "").rstrip("/") in explicit
-    }
-
-
-def _split_requirements(text: str, pinned: dict[str, str]) -> tuple[str, dict[str, str]]:
-    """Separate exported requirement entries of index-pinned packages, grouped by index URL."""
-    rest, by_index, current = [], {}, None
-    for line in text.splitlines(keepends=True):
-        if line.strip() and not line[0].isspace() and not line.startswith(("#", "-")):
-            index = pinned.get(canonicalize_name(Requirement(line.rstrip(" \\\n")).name))
-            current = by_index.setdefault(index, []) if index else rest
-        (current if current is not None else rest).append(line)
-    return "".join(rest), {index: "".join(lines) for index, lines in by_index.items()}
+    registries = {package["name"]: package.get("source", {}).get("registry", "") for package in packages}
+    return {name: registry if registry.rstrip("/") in explicit else None for name, registry in registries.items()}
 
 
 def _sync_from_mirror(command: list[str], project: Path, venv: Path, env: dict[str, str]) -> None:
     """Install locked versions through the caller's package indexes, except index-pinned packages."""
     lock_env = {key: value for key, value in env.items() if key not in INDEX_VARIABLES}
+    export = [value for value in command[2:] if value != "--inexact"]
+    export[export.index("--python") : export.index("--python") + 2] = []
+    python = command[command.index("--python") + 1]
+    subprocess.run(["uv", "venv", "--allow-existing", "--seed", "--python", python, str(venv)], env=env, check=True)
+    packages = _package_indexes(project)
     with TemporaryDirectory(prefix="gym-mirror-") as directory:
-        requirements = Path(directory) / "requirements.txt"
-        export = [value for value in command[2:] if value != "--inexact"]
-        export[export.index("--python") : export.index("--python") + 2] = []
-        subprocess.run(
-            ["uv", "export", *export, "--output-file", str(requirements)],
-            env=lock_env,
-            cwd=project,
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-        python = command[command.index("--python") + 1]
-        subprocess.run(
-            ["uv", "venv", "--allow-existing", "--seed", "--python", python, str(venv)], env=env, check=True
-        )
-        rest, pinned = _split_requirements(requirements.read_text(), _explicit_index_packages(project))
-        requirements.write_text(rest)
-        install = ["uv", "pip", "install", "--python", str(venv / "bin/python"), "--no-deps"]
-        subprocess.run([*install, "-r", str(requirements)], env=env, cwd=project, check=True)
-        for number, (index, text) in enumerate(pinned.items()):
-            path = Path(directory) / f"pinned-{number}.txt"
-            path.write_text(text)
+        for number, index in enumerate(dict.fromkeys([None, *packages.values()])):
+            requirements = Path(directory) / f"requirements-{number}.txt"
+            flags = [f"--no-emit-package={name}" for name, other in packages.items() if other != index]
+            if index:
+                flags += ["--no-emit-project", "--no-emit-workspace"]
             subprocess.run(
-                [*install, "--default-index", index, "-r", str(path)], env=lock_env, cwd=project, check=True
+                ["uv", "export", *export, *flags, "--output-file", str(requirements)],
+                env=lock_env,
+                cwd=project,
+                check=True,
+                stdout=subprocess.DEVNULL,
             )
+            install = [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(venv / "bin/python"),
+                "--no-deps",
+                "-r",
+                str(requirements),
+            ]
+            if index:
+                install += ["--default-index", index]
+            # The caller's index variables would outrank --default-index.
+            subprocess.run(install, env=lock_env if index else env, cwd=project, check=True)
 
 
 def _compatibility_identity(project: Path, requirements: list[str], constraints: list[str], extras: tuple) -> str:

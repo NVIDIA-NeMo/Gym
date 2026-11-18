@@ -501,28 +501,13 @@ def test_mirror_sync_installs_index_pinned_packages_from_their_index(tmp_path: P
         f'[[package]]\nname = "torch"\nversion = "2.6.0+cpu"\nsource = {{ registry = "{index}" }}\n'
         '[[package]]\nname = "six"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" }\n'
     )
-    exported = (
-        "six==1 \\\n    --hash=sha256:aa\n    # via torch\ntorch==2.6.0+cpu \\\n    --hash=sha256:bb\n    # via p\n"
-    )
-    installed = []
-
-    def run(command, **kwargs):
-        if command[1] == "export":
-            Path(command[command.index("--output-file") + 1]).write_text(exported)
-        elif command[1:3] == ["pip", "install"]:
-            if "--default-index" in command:
-                assert "UV_EXTRA_INDEX_URL" not in kwargs["env"]
-            installed.append(
-                (
-                    command[command.index("--default-index") + 1] if "--default-index" in command else None,
-                    Path(command[-1]).read_text(),
-                )
-            )
-
+    run = Mock()
     monkeypatch.setattr(_locked_env.subprocess, "run", run)
     command = ["uv", "sync", "--python", "3.12", "--no-dev"]
     _locked_env._sync_from_mirror(command, tmp_path, tmp_path / "venv", {"UV_EXTRA_INDEX_URL": "https://mirror"})
-    assert installed == [
-        (None, "six==1 \\\n    --hash=sha256:aa\n    # via torch\n"),
-        (index, exported.split("    # via torch\n")[1]),
-    ]
+    _, export, install, pinned_export, pinned_install = run.call_args_list
+    assert "--no-emit-package=torch" in export.args[0]
+    assert "--default-index" not in install.args[0] and install.kwargs["env"]["UV_EXTRA_INDEX_URL"]
+    assert "--no-emit-package=six" in pinned_export.args[0] and "--no-emit-package=torch" not in pinned_export.args[0]
+    assert pinned_install.args[0][-2:] == ["--default-index", index]
+    assert "UV_EXTRA_INDEX_URL" not in pinned_install.kwargs["env"]
