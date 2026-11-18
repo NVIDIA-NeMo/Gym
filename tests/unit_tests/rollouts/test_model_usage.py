@@ -250,3 +250,9 @@ def test_offset_reads_from_an_append_boundary(tmp_path):
     store.path_for("rollout").unlink()
     with pytest.raises(FileNotFoundError):
         store.read_available("rollout", start_offset=end)
+
+
+async def test_enabled_capture_without_a_directory_gives_unknown_usage(tmp_path):
+    capture = await ModelUsageCapture.start({"observability_enabled": True}, rollout_id="rollout")
+    assert capture is not None and capture.store is None
+    assert await capture.usage() is None

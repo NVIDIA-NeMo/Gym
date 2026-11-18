@@ -82,8 +82,18 @@ class ModelUsageCapture:
 
     @classmethod
     async def start(cls, config: Mapping[str, object], *, rollout_id: str) -> "ModelUsageCapture | None":
-        """Checkpoint enabled capture; return None when observability is disabled."""
-        directories = model_call_capture_dirs_from_config(config)
+        """Checkpoint enabled capture; return None when observability is disabled.
+
+        An enabled capture this server cannot locate (for example, no ``model_call_capture_dir``)
+        gives unknown usage rather than failing the episode.
+        """
+        try:
+            directories = model_call_capture_dirs_from_config(config)
+        except ValueError:
+            logger.warning(
+                "Model-call capture is enabled but unusable; usage for %s is unknown", rollout_id, exc_info=True
+            )
+            return cls(rollout_id, None)
         if not directories:
             return None
 
