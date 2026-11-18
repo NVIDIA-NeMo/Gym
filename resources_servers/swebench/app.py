@@ -67,6 +67,7 @@ from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_sandbox,
+    patch_swebench_pytest_result_summary,
     patch_swebench_verified_env_vars,
     run_instance,
 )
@@ -413,6 +414,7 @@ class SwebenchResourcesServer(SandboxSessionResourcesServer):
             env_image_tag=LATEST,
         )
         restore_test_assets_from_staging(test_spec, body.test_assets())
+        patch_swebench_pytest_result_summary(test_spec)
         return test_spec
 
     async def seed_session(

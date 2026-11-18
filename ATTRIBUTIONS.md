@@ -11,6 +11,14 @@ All third-party software is used without modification unless otherwise noted
 
 ---
 
+## WildClawBench instruction prefix
+
+`responses_api_agents/wildclawbench_agent/worker.py` retains the actor instruction
+prefix from `eval/run_batch.py` in [internlm/WildClawBench](https://github.com/internlm/WildClawBench),
+revision `0c6551f798f8028bdfdd065f10d8d6b048a7fd06`, under MIT.
+The benchmark license and notice are in `benchmarks/wildclawbench/third-party-notices.md`.
+Native task execution is an external dependency, not vendored here.
+
 ## MiMo music scorer
 
 `resources_servers/mimo_music/scorer/` vendors the music scorer and
@@ -26,6 +34,28 @@ The environment invokes [abcMIDI](https://github.com/sshlien/abcmidi) as an
 external executable (GPL-2.0-or-later). Its source and binaries are **not**
 included in this repository. The optional Linux startup installer downloads
 revision `6441b478418350b338589cbfb1b4397fed4a490e` (abc2midi 4.88) into an ignored local directory.
+
+## SWE-bench Pro v2 example inputs
+
+`resources_servers/swebench_pro_v2/data/example.jsonl` packages five genuine inputs from
+[ScaleAI/SWE-bench_Pro, revision 2d52cb3df914a3fcf80c7f66738b3a88ae37fc50](https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro/tree/2d52cb3df914a3fcf80c7f66738b3a88ae37fc50)
+with unchanged task assets from
+[scaleapi/SWE-bench_Pro-os, revision 66f92766bba642462d4bbe5479e83f91f9211862](https://github.com/scaleapi/SWE-bench_Pro-os/tree/66f92766bba642462d4bbe5479e83f91f9211862/v2/tasks).
+The embedded files are each task's `instruction.md`, `solution/gold_patch.diff`, and
+`tests/{test.sh,run_script.sh,parser.py,config.json,test_patch.patch}`.
+The evaluation harness and tooling are MIT licensed, Copyright (c) 2026 Scale AI, Inc.;
+the original notice is retained in `resources_servers/swebench_pro_v2/data/LICENSE`.
+
+The selected task text and code patches originate from Teleport under Apache-2.0 at these exact bases:
+[4d7c51b4f535cecfd139625e6af1746c46abc712](https://github.com/gravitational/teleport/blob/4d7c51b4f535cecfd139625e6af1746c46abc712/LICENSE),
+[2e7b253d55a1b6da5673ea5846503c43fa53cf37](https://github.com/gravitational/teleport/blob/2e7b253d55a1b6da5673ea5846503c43fa53cf37/LICENSE),
+[6f2f17a7f6749418d0bb329169b9181dba446845](https://github.com/gravitational/teleport/blob/6f2f17a7f6749418d0bb329169b9181dba446845/LICENSE),
+[8ee8122b10b3a0a53cb369503ed64d25a6ad1f34](https://github.com/gravitational/teleport/blob/8ee8122b10b3a0a53cb369503ed64d25a6ad1f34/LICENSE), and
+[42beccb27e0e5797a10db05bf126e529273d2d95](https://github.com/gravitational/teleport/blob/42beccb27e0e5797a10db05bf126e529273d2d95/LICENSE).
+Their identical license text is retained in `resources_servers/swebench_pro_v2/data/LICENSE-TELEPORT`.
+Each row records its repository, base commit, upstream task path, image digest and immutable task-license URL.
+The task and verifier files are unmodified; local changes are JSONL packaging and provenance fields.
+The upstream task content is not attributed wholesale to the MIT harness license.
 
 ## ether0 reward overrides
 
@@ -253,6 +283,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | OpenCode max-steps prompt | MIT (vendored unmodified) | `nemo_gym/models/token_capture/harness_notes/opencode.py` (`OPENCODE_MAX_STEPS_PROMPT`, upstream `packages/core/src/session/runner/max-steps.ts`, verbatim) | https://github.com/anomalyco/opencode |
 | pycocotools (COCO API) | BSD-2-Clause (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/molmo2_videotrack/app.py` (`rle_runs`, a Python port of `rleFrString`) and `benchmarks/molmo2_videotrack/tests/synthetic.py` (`rle_string`, a Python port of `rleToString`), both from upstream `common/maskApi.c` | https://github.com/cocodataset/cocoapi |
 | Molmo2 | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/molmo2_videotrack/app.py` (`NATIVE_COORDS_PATTERN`, `NATIVE_ID_XY_PATTERN`, `NATIVE_FRAME_GROUP_PATTERN` and the frame-group branch of `_parse_native_markup`, from `coord_regex`, `points_regex`, `frame_regex` and `extract_multi_image_points` in upstream `olmo/preprocessing/point_formatter.py`) | https://github.com/allenai/molmo2 |
+| HLE with-tools blocklist | MIT (vendored unmodified) | `resources_servers/hle_web_tools/blocklist.json` (upstream `docs/blocklist.json` at revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`, byte-for-byte; its SHA-256 is pinned in `app.py` and verified at server start) | https://github.com/centerforaisafety/hle |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
@@ -266,6 +297,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 - OpenCode max-steps prompt: copied verbatim from upstream revision `67aec2212010d67775c35e696d8b8b54902eb338` (OpenCode 1.17.11, https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts), because token capture must recognize the exact text OpenCode sends at its step limit. Upstream is MIT; its license is reproduced in full in the OpenCode MIT License section below. The file header records the same source, revision and license.
 - pycocotools: adapted from upstream revision `8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9` (https://github.com/cocodataset/cocoapi/blob/8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9/common/maskApi.c#L204-L231), so that the verifier reads the dataset's compressed COCO masks without a compiled dependency. Upstream is BSD-2-Clause; its license is reproduced in full in the pycocotools BSD-2-Clause License section below. Both file headers record the same source, revision, license and copyright notice.
 - Molmo2: adapted from upstream revision `f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a` (https://github.com/allenai/molmo2/blob/f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a/olmo/preprocessing/point_formatter.py#L131-L179), so that answers in Molmo2's own point markup parse as that model's code parses them. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. NVIDIA modifications (whitespace after a frame delimiter, the `<tracks>` forms, overflow handling) are noted in-file. The file header records the same source, revision and license.
+- HLE with-tools blocklist: vendored, unmodified, from upstream revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`. Upstream is MIT, Copyright (c) 2025 centerforaisafety. The JSON must stay byte-exact for its digest check, so it carries no notice itself; the upstream `LICENSE` at that revision is reproduced unchanged in `resources_servers/hle_web_tools/LICENSE-HLE`. The server that applies it (`resources_servers/hle_web_tools/app.py`) is NVIDIA code under Apache-2.0.
 
 ---
 
@@ -22663,3 +22695,7 @@ VLMEvalKit source file with that name records helper-code provenance only.
 revision `7b9a3c154ef9fb40215bb67934afc43e6799de16`, under Apache-2.0.
 The scorer header retains the Databricks copyright, applicable upstream notice,
 and modification record. The scoring behavior is unchanged.
+
+## SaaS-Bench
+
+Source: https://github.com/UniPat-AI/SaaS-Bench at `48c22deb18b98c0ed78f81e7f3be82bc162de2c8`. Runtime: Apache-2.0; task data and verifiers: CC-BY-4.0. Original copyright: SaaS-Bench Authors. NVIDIA modifications are identified in each changed file; NVIDIA extensions are Apache-2.0. See [vendoring details](responses_api_agents/saas_bench_agent/benchmark/VENDORING.md).

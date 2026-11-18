@@ -21,6 +21,11 @@ and official agent timeout. An agent server connects to that sandbox and owns
 harness setup, model calls, and the rollout loop. `/verify` collects artifacts,
 runs the separate official verifier, and cleans up the task's resources.
 
+Collected directories are sanitized as Harbor sanitizes artifacts before a separate
+verifier reads them: symlinks that leave the artifact, FIFOs, sockets and device files
+are skipped one by one, and setuid/setgid bits are cleared. The rest of the directory
+is kept and graded. The artifact manifest lists each skipped entry under `refused`.
+
 Seed requests include `task_name`, `task_ref`, `dataset_ref`, and `rollout_id`.
 The task must match the configured manifest. The agent supplies a stable
 `client_session_id`, so identical seed retries share provisioning before the first
@@ -50,8 +55,12 @@ denominator. `sandbox_resource_limit` retains the resource and provider evidence
 in the rollout and trial result; `verifier_result.source` is
 `sandbox_resource_limit`, and test counts remain null. The original agent
 termination and diagnostics are preserved, but the result carries no
-infrastructure-failure marker. Recognition requires an explicit provider death
-report. Setup failures, node-pressure evictions, unrelated sandbox losses, and a
+infrastructure-failure marker: the harness's failure events (such as a process
+cleanup the dead sandbox could not confirm) stay on the row as observations,
+with none selected as its failure. Recognition requires an explicit provider
+death report. OpenSandbox's report of an unavailable sandbox names no container,
+so it counts only when it carries the pod's own ephemeral-storage-limit eviction.
+Setup failures, node-pressure evictions, unrelated sandbox losses, and a
 verifier that fails to start retain their existing infrastructure-error handling.
 
 An agent whose process was killed before it finished (`termination.reason:
@@ -172,7 +181,7 @@ endpoints are not supported in this mode.
 
 ## Other pinned Harbor datasets
 
-`manifest_path` selects the pinned dataset. It defaults to Terminal-Bench 4.0; a relative
+`manifest_path` selects the pinned dataset. It defaults to Terminal-Bench 4.1; a relative
 path is read from the repository root. Task names take the dataset's organization prefix, so
 [Terminal-Bench-Science](../../benchmarks/terminal_bench_science/README.md) serves
 `terminal-bench-science/<task>`. Its packages pass the same content-hash check.
@@ -221,7 +230,8 @@ at seed time: a terminal infrastructure failure that no retry repeats, with no s
 
 `/verify` also reports `partial_credit`: the fraction of reported tests that passed
 (`num_tests_passed / num_tests_total`, so skipped tests count as not passed), never below the
-official reward. Without usable test counts it equals the official reward. `reward` stays the
+official reward. Terminal-Bench 4.1 verifiers report their rewardkit criteria as these tests, so
+4.1 values do not compare with 4.0 ones, which counted pytest cases. Without usable test counts it equals the official reward. `reward` stays the
 official binary grade. When the official evaluation did not complete, both are 0, so a mean over
 the same rows uses the same denominator for both. `evaluation_completed: false` and
 `infrastructure_error` mark those rows, which are left out of the default aggregates unless

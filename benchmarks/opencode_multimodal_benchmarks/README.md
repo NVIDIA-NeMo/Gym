@@ -6,20 +6,24 @@ used independently of OpenCode:
 - [VStar](vstar/README.md)
 - [HRBench8K](hrbench8k/README.md)
 - [VTCBench](vtcbench/README.md)
+- [Agent-X reference-answer evaluation](agentx/README.md)
 - [ZeroBench](zerobench/README.md)
 
 Each entry documents its dataset and measurement contract. The catalog defaults
-to `simple_agent` with no external task tools. For OpenCode evaluation, use the
-provider-backed recipes below and configure the model and sandbox provider
-separately. Each recipe composes its catalog with
-[`opencode_sessions.yaml`](opencode_sessions.yaml); OpenCode runs inside the
-sandbox through Gym's shared agent-session lifecycle.
+to `opencode_agent`. Configure the model and sandbox provider separately. VStar,
+HRBench8K, VTCBench and ZeroBench include
+[`visual_eval_defaults.yaml`](visual_eval_defaults.yaml), which loads
+[`opencode_sessions.yaml`](opencode_sessions.yaml). Agent-X loads the session
+profile directly, with WebSearch, WebFetch and its benchmark-local web filter.
+OpenCode runs inside the sandbox through Gym's shared agent-session lifecycle.
+The `opencode.yaml` recipes remain aliases for these defaults.
 
 | Recipe | Network policy | WebFetch / WebSearch |
 | --- | --- | --- |
 | [VStar](vstar/opencode.yaml) | `model_only` | Disabled |
 | [HRBench8K](hrbench8k/opencode.yaml) | `model_only` | Disabled |
 | [VTCBench](vtcbench/opencode.yaml) | `model_only` | Disabled |
+| [Agent-X](agentx/opencode.yaml) | `inherit` | Enabled |
 | [ZeroBench](zerobench/opencode.yaml) | `model_only` | Disabled |
 
 This uses the same provider execution boundary as BrowseComp's OpenCode pairing.
@@ -40,7 +44,31 @@ Resume historical runs with their recorded Gym revision and configuration.
 ## Run configuration
 
 Supply a policy model using Gym's [model configuration guide](../../fern/versions/latest/pages/model-server/index.mdx).
-For judged tasks, explicitly configure the shared resources-server instance:
+Pass the deployment configuration to both `gym eval prepare` and `gym eval run`
+with `--config run.yaml`: preparation also validates the selected agent's configuration.
+For example, `run.yaml` can compose the OpenAI model adapter and set the required
+model and sandbox image:
+
+```yaml
+config_paths:
+- responses_api_models/openai_model/configs/openai_model.yaml
+policy_model_name: <vision-model-id>
+policy_base_url: ${oc.env:POLICY_BASE_URL}
+policy_api_key: ${oc.env:POLICY_API_KEY}
+visual_agent:
+  responses_api_agents:
+    opencode_agent:
+      sandbox_config:
+        image: <image-with-visual-tools-and-offline-opencode-assets>
+```
+
+Supply the model adapter's endpoint and credentials, and the OpenSandbox
+provider's `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`, through the runtime
+environment. See the agent session setup linked above for image requirements.
+VStar, HRBench8K and VTCBench default to `azure/openai/gpt-4o-mini` through
+`visual_judge`. Supply `GYM_JUDGE_BASE_URL` and `GYM_JUDGE_API_KEY` in the runtime
+environment. ZeroBench starts no judge. To select a different judge, configure
+the shared resources-server instance:
 
 ```yaml
 opencode_multimodal_benchmarks:
@@ -50,13 +78,26 @@ opencode_multimodal_benchmarks:
       judge_server: visual_judge
 ```
 
-Also configure the `visual_judge` model-server instance and its runtime credentials.
-This route captures judge calls with Gym's rollout correlation. Alternatively,
-set `judge_endpoint` and `judge_api_key_env` for direct HTTP judging. The catalog
-does not select a hosted model or endpoint. ZeroBench requires no judge.
+The configured `visual_judge` route captures judge calls with Gym's rollout
+correlation. For direct HTTP judging, also disable that imported model server.
+Pass these overrides to both preparation and evaluation (replace the endpoint
+and key-variable name with your deployment's values):
+
+```bash
+++visual_judge=null \
+++opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_server=null \
+++opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_endpoint=https://judge.example/v1/chat/completions \
+++opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_api_key_env=DIRECT_JUDGE_API_KEY
+```
+
+These settings can alternatively go in `env.yaml`. A plain `--config run.yaml`
+has lower priority than the selected benchmark and may have its judge route
+overwritten. With the overrides above, `GYM_JUDGE_BASE_URL` and
+`GYM_JUDGE_API_KEY` are unnecessary; only the selected direct judge's credential
+is needed. Endpoints and credentials remain deployment inputs.
 
 The shared verifier defaults to a 120-second timeout and three transport attempts
-per judge request. VTCBench additionally
+per judge request. Agent-X uses 300 seconds and ten attempts. VTCBench additionally
 uses the public five-verdict parsing schedule. Judge failures need resolution
 before a complete score is reported.
 
@@ -64,6 +105,23 @@ For each evaluation, retain the resolved config and inspect rollout health,
 coverage and judge failures. Enable model-call capture when collecting evidence.
 A valid manifest and passing verifier fixtures do not establish score parity or
 harness conformance.
+
+The rollout evidence in [PR #6187](https://github.com/NVIDIA-NeMo/Gym/pull/6187) records
+representative real Qwen requests for all four catalogs, image delivery, the
+32768-token request limit, verifier outputs and a VTCBench judge call. It labels
+unfinished evaluations as partial and records the limits of cleanup telemetry.
+These runs use the execution settings above; they predate the
+agent-replacement binding fix.
+
+For vLLM-compatible model endpoints, add
+`--config benchmarks/opencode_multimodal_benchmarks/default_eval.yaml` to preparation
+and evaluation. This model-independent profile uses the vLLM adapter, preserves history thinking
+(`truncate_history_thinking: false`), propagates context-overflow errors and pins
+temperature 0.6/top-p 0.95. Reasoning serialization retains the adapter default;
+no `reasoning_field` override is applied. Supply `policy_model_name` in `run.yaml`,
+`POLICY_BASE_URL` and `POLICY_API_KEY` in the environment, plus the sandbox deployment settings. With this profile, omit
+the OpenAI adapter from `run.yaml` and omit `--model-type openai_model` from the
+run command. Other policy adapters remain supported.
 
 ## Grading and recovery
 
@@ -88,11 +146,11 @@ reply, the score is retained but the grading operation remains `unknown`: an
 invalid reply is not falsely marked as a parsed verdict. Inspect these outcomes
 before claiming complete grading evidence.
 
-Headline completeness compares valid measurements with the resolved materialized
-attempt inventory, including runtime repeat overrides. An absent repeat remains
-in that inventory even when its failures are stored in a separate artifact.
-Without an inventory, aggregation reports partial scores rather than asserting
-that the surviving rows form a complete run.
+Headline completeness checks the expected task count and the attempts received by
+aggregation. It does not yet account for the full planned repeat inventory: a
+repeat missing for every task can go undetected when failures are saved separately.
+For repeated runs, check collection coverage and failure artifacts before treating
+a headline score as complete. Planned-repeat accounting is a separate follow-up.
 
 Catalog pairings have no whole-episode deadline by default. To set one, configure
 `visual_environment.environment_servers.single_agent_turn.default_episode_timeout_seconds`.
@@ -100,7 +158,9 @@ Catalog pairings have no whole-episode deadline by default. To set one, configur
 event loop's monotonic clock. Cleanup has a separate
 `cleanup_timeout_seconds` budget and runs after the episode deadline.
 
-The OpenCode overlay has a 131072-token context/output ceiling and requests a
+The four catalogs use a 131072-token context window, a 32768-token output limit,
+agent and collector concurrency of 64, judge concurrency of 16, and a two-second
+sandbox polling interval. OpenCode requests a
 final answer after 65 steps. This request is advisory; tools remain available. Its `timeout` setting (optionally narrowed by request metadata
 `agent_timeout_sec`) is a separate harness execution deadline, enforced
 by the shared OpenCode sandbox session using the monotonic clock; installation
@@ -147,7 +207,7 @@ the submitted run's health and recovery gates.
 
 ## Dataset identity
 
-VStar/HRBench8K and ZeroBench are checked against the pinned manifests or
+VStar/HRBench8K, Agent-X and ZeroBench are checked against the pinned manifests or
 source checksum. VTCBench TSV releases are caller-supplied: pass
 `prepare_script_args.sha256` for qualification and retain the preparation's
 `dataset.json` with its source and prepared-task hashes. Use a separate output
@@ -187,17 +247,34 @@ The benchmark verifier accepts only `tool_rewards: null` (the default) and never
 adds tool rewards. Non-null settings are rejected. Tool shaping is available only
 through the training adapters below; `tool_rewards: {}` selects their default schedule.
 The default applies penalties only to correct answers, with no positive bonuses.
-Zero to two bash attempts have no count penalty; three, four, five, and six or more
-attempts incur penalties of 0.025, 0.05, 0.075, and 0.10 respectively. Failed bash
-calls incur an additional 0.05 penalty; consecutive successful duplicate calls
-incur a 0.02 penalty. Other tools do not incur failure penalties. Override individual
-`tool_rewards` fields to change this schedule.
+Select one shell with `tool_rewards.shell_tool_name` (default `bash`), or several
+with `tool_rewards.shell_tool_names: [terminal, bash, shell, exec, exec_command]`.
+The list must contain nonempty names and shares one count and bonus schedule.
+Do not set a singular name together with a non-null list; omitted/null lists retain
+the singular setting. Identical commands sent to different tools are not duplicates.
+Zero to two shell attempts have no count penalty; three, four, five, and six or more
+attempts incur penalties of 0.025, 0.05, 0.075, and 0.10 respectively. Failed calls
+selected by `tool_rewards.invalid_tool_call_names` incur an additional 0.05 penalty; consecutive successful duplicate calls
+incur a 0.02 penalty. When omitted, `invalid_tool_call_names` follows the configured shell names;
+other tools do not incur failure penalties. An explicit list selects eligible tools,
+`null` includes all tools and `[]` disables failure penalties. For example:
+
+```yaml
+tool_rewards:
+  shell_tool_name: shell
+  # invalid_tool_call_names defaults to [shell].
+```
+
+A non-null shell name must be a nonempty string. Override individual `tool_rewards` fields
+to change this schedule.
 Scoring reads tool execution outcomes from the shared trajectory
 or observation bundle; it never interprets model-visible output as an exit status.
+A nonzero shell exit must be reported as a failed tool observation. The configured
+shell names control call counting, duplicate normalization and success bonuses.
 
-For existing math, MCQA, and string-match training tasks, use the
-`opencode_math_tool_rewards`, `opencode_mcqa_tool_rewards`, or
-`opencode_string_match_tool_rewards` Resources component, respectively, each with
+For existing math, MCQA, string-match, and generic LLM-judge training tasks, use the
+`math_tool_rewards`, `mcqa_tool_rewards`, `string_match_tool_rewards`, or
+`llm_judge_tool_rewards` Resources component, respectively, each with
 `entrypoint: app.py`. Each component owns its inherited grader's dataset schema,
 so strict dataset collation accepts native training rows without visual benchmark
 metadata. These thin adapters import the
@@ -206,7 +283,7 @@ existing graders and retain their task schemas. For example:
 ```yaml
 training_string:
   resources_servers:
-    opencode_string_match_tool_rewards:
+    string_match_tool_rewards:
       entrypoint: app.py
       tool_rewards: {}
 ```
@@ -227,3 +304,24 @@ stock-agent follow-ups; the default benchmark profile does not enable web tools.
 Training configurations previously selecting `*_tool_rewards.py` under
 `opencode_multimodal_benchmarks` must use the corresponding component above with
 `entrypoint: app.py`. Keep the instance name and environment bindings unchanged.
+
+The [generic LLM-judge overlay](../../resources_servers/llm_judge_tool_rewards/configs/llm_judge_tool_rewards.yaml)
+declares `llm_judge_with_tools`, backed by the existing `equivalence_llm_judge`
+grader. Configure a separate `training_judge` model server (for example,
+GPT-4o-mini), bind the chosen Environment Server's `resources_server` to
+`llm_judge_with_tools`, and set its `forward_agent_evidence: true`. Tool rewards
+are optional (`tool_rewards: null` disables them). The adapter preserves the
+original policy response and binds the final combined grade inside the judge's
+existing observation, including rescue and swap passes. It needs no Agent-X rows
+or Agent-X evaluator. It reuses the generic grader's verdict labels, rescue, and
+swap logic, while rejecting unusable judge replies before applying tool rewards.
+
+A recorded failed WebSearch with the native HTTP 429 envelope is exempt from
+failure and duplicate penalties, and its immediate retry is exempt from duplicate
+penalties too. Failure and rate-limit counts remain visible. Repeating a successful
+search remains penalized; the failed search is never rewarded as successful.
+
+The default `correct_only: true` suppresses tool adjustments on incorrect answers.
+Setting it to `false` allows the configured exploration rewards and tool penalties. Missing, conflicting, or truncated
+generic judge verdicts raise a judge failure before reward shaping and are masked
+by the shared verification boundary. They do not become ordinary incorrect answers.

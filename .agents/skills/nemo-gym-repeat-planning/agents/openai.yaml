@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Repeat Planning"
+  short_description: "Plan benchmark and suite repeats from complete-pass SDs"
+  default_prompt: "Use $nemo-gym-repeat-planning to plan a benchmark or suite experiment from historical SDs and compare repeat budgets."

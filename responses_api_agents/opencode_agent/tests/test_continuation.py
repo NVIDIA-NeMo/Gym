@@ -401,7 +401,7 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
         request = start(client)
         state = agent._require_agent_session(request.agent_session_id)
         assert state.is_continuation
-        assert state.conversation_directory is None and state.activation_id is None
+        assert state.session.session_dir == state.persistent_directory and state.activation_id is None
         results = []
         for index, prompt in enumerate(("First version", "Correction: handle empty inputs"), 1):
             response = activate(client, index, prompt)
