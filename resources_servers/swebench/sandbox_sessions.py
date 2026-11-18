@@ -45,7 +45,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, EpisodeId
-from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, stop_sandbox
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -334,7 +334,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         sandbox = self._session_id_to_sandbox.get(session_id)
         if sandbox is not None:
             # Forget the sandbox only once it stopped, so a failed stop can be retried.
-            await _stop(sandbox)
+            await stop_sandbox(sandbox, timeout_s=STOP_TIMEOUT_S)
             self._session_id_to_sandbox.pop(session_id, None)
         self._forget_task_sandbox_state(session_id)
 
@@ -370,7 +370,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         """Stop an owned verifier, retaining its handle when the provider cannot confirm cleanup."""
         sandbox = self._verifier_sandboxes.get(session_id)
         if sandbox is not None:
-            await _stop(sandbox)
+            await stop_sandbox(sandbox, timeout_s=STOP_TIMEOUT_S)
             self._verifier_sandboxes.pop(session_id, None)
 
     async def verify_task_sandbox_session[ResponseT: BaseVerifyResponse](
@@ -466,7 +466,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         # Restore ownership before awaiting the provider, including for legacy consumers that popped it.
         self._session_id_to_sandbox[session_id] = sandbox
         try:
-            await _stop(sandbox)
+            await stop_sandbox(sandbox, timeout_s=STOP_TIMEOUT_S)
             self._session_id_to_sandbox.pop(session_id, None)
             self._forget_task_sandbox_state(session_id)
         except BaseException as error:
@@ -477,13 +477,3 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
             record = self._task_sessions.get(session_id)
             if record is not None and record.release_done is not None:
                 record.release_done.set()
-
-
-async def _stop(sandbox: AsyncSandbox) -> None:
-    """Stop a sandbox within ``STOP_TIMEOUT_S``, even while the request that owns it is being cancelled.
-
-    A client that disconnects cancels its request handler, and every later await in it, so an unshielded
-    cleanup stop would never run and the sandbox would outlive every reference to it.
-    """
-    with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
-        await sandbox.stop()

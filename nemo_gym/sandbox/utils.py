@@ -21,11 +21,16 @@ import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from shlex import quote
+from typing import TYPE_CHECKING
 
 import anyio
 
 from nemo_gym.core.media import MediaFile
 from nemo_gym.sandbox.api import AsyncSandbox
+
+
+if TYPE_CHECKING:
+    from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
 
 
 LOGGER = logging.getLogger(__name__)
@@ -207,3 +212,33 @@ def rewrite_image(image: str | None, rewrites: list[dict[str, str]]) -> str | No
         if image.startswith(from_prefix):
             return to_prefix + image[len(from_prefix) :]
     return image
+
+
+# The one way an owner stops a sandbox it owns, so the stop survives the cancellation of the request that owns it.
+STOP_TIMEOUT_S = 120.0
+"""How long a stop may take before the owner gives up on it."""
+
+
+async def stop_sandbox(
+    sandbox: "AsyncSandbox | AsyncSandboxCompose", *, timeout_s: float | None = STOP_TIMEOUT_S
+) -> None:
+    """Stop ``sandbox``, or every sandbox of a Compose group, within ``timeout_s``, even under cancellation.
+
+    A client that disconnects cancels its request, and anyio then cancels every later await in that request.
+    An unshielded stop in the request's cleanup would raise before the provider closed the sandbox,
+    and the sandbox would run on until the provider's ``ttl_s`` reclaimed it.
+    The shield lets the stop finish, and the time limit keeps a hung provider from holding the request.
+
+    The shield holds against anyio cancel scopes, which is how a client disconnect cancels a request. It does not
+    hold against a native ``task.cancel()``, such as ``asyncio.timeout``, ``asyncio.wait_for`` or a checkpoint
+    retire that cancels the task. Only ``timeout_s`` bounds the stop: an enclosing anyio deadline is held off like
+    any other cancellation. ``None`` means no time limit.
+
+    Raises:
+        TimeoutError: The stop did not finish within ``timeout_s``.
+            Treat it like any other failed stop: keep the sandbox owned so a later close or the shutdown retries it,
+            and report it wherever the server reports a failed stop.
+        Exception: Whatever ``sandbox.stop()`` raised.
+    """
+    with anyio.CancelScope(shield=True), anyio.fail_after(timeout_s):
+        await sandbox.stop()

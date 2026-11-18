@@ -9,14 +9,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Literal
 
-import anyio
-
 from nemo_gym.client.server_client import get_server_url
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.episode_types import TaskId
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
+from nemo_gym.sandbox.utils import STOP_TIMEOUT_S, stop_sandbox
 from nemo_gym.server_runtime.base_resources_server import ResourcesSeedRejectedError
 from nemo_gym.utils.network_policy import restricted_network_policy
 
@@ -24,8 +23,6 @@ from nemo_gym.utils.network_policy import restricted_network_policy
 LOGGER = logging.getLogger(__name__)
 # Provider label values stay within the common 63-character limit.
 _LABEL_LIMIT = 63
-# A provider stop that hangs must not hold a close, a failed seed or the shutdown forever.
-STOP_TIMEOUT_S = 120.0
 # The supervisor gives a server about a second to exit, so shutdown stops sandboxes concurrently, this many at a time.
 SHUTDOWN_STOP_CONCURRENCY = 64
 
@@ -130,13 +127,14 @@ class LentSandboxes:
             )
         sandbox = AsyncSandbox(provider_config)
         try:
-            # start() stops the sandbox itself when delivering the files fails, but not under cancellation: its stop
-            # is cancelled with the request. _stop() then finishes it, and does nothing after a stop that finished.
+            # start() stops the sandbox itself when delivering the files fails, but not under cancellation.
+            # There its stop is cancelled with the request, so stop_sandbox() below finishes it.
+            # After a stop that did finish, stop_sandbox() does nothing.
             await sandbox.start(spec)
             access = await self._access(sandbox)
         except BaseException:
             try:
-                await _stop(sandbox)
+                await stop_sandbox(sandbox, timeout_s=STOP_TIMEOUT_S)
             except Exception:
                 LOGGER.exception(
                     "Failed to stop the sandbox of a failed seed for resources session %s; a later lend, release or "
@@ -157,7 +155,7 @@ class LentSandboxes:
         sandbox = self._sandboxes.get(resources_session_id)
         if sandbox is None:
             return
-        await _stop(sandbox)
+        await stop_sandbox(sandbox, timeout_s=STOP_TIMEOUT_S)
         self._sandboxes.pop(resources_session_id, None)
 
     async def release_all(self) -> None:
@@ -179,7 +177,7 @@ class LentSandboxes:
         sandbox = self._failed_seed_sandboxes.get(resources_session_id)
         if sandbox is None:
             return
-        await _stop(sandbox)
+        await stop_sandbox(sandbox, timeout_s=STOP_TIMEOUT_S)
         self._failed_seed_sandboxes.pop(resources_session_id, None)
 
     def _restricted_policy(self, provider_config: Mapping[str, object]) -> dict[str, object]:
@@ -205,13 +203,3 @@ class LentSandboxes:
             ),
             workdir=self._workdir,
         )
-
-
-async def _stop(sandbox: AsyncSandbox) -> None:
-    """Stop ``sandbox`` within ``STOP_TIMEOUT_S``, even while the request that owns it is being cancelled.
-
-    A client that disconnects cancels its request handler and every later await in it, so an unshielded stop would
-    never run, and the sandbox would outlive every reference to it.
-    """
-    with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
-        await sandbox.stop()
