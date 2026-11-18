@@ -1198,6 +1198,26 @@ class TestRequestValidationReport:
         assert "  row 2: responses_create_params.tools.0." in message
         assert "  row 1:" not in message
 
+    def test_error_mode_lists_every_failing_file_and_writes_no_sidecar(self, tmp_path: Path) -> None:
+        first_fpath = tmp_path / "first" / "train.jsonl"
+        second_fpath = tmp_path / "second" / "train.jsonl"
+        for data_fpath in (first_fpath, second_fpath):
+            data_fpath.parent.mkdir()
+            data_fpath.write_text(json.dumps(_CHAT_COMPLETIONS_TOOL_ROW) + "\n" + json.dumps(_GOOD_ROW) + "\n")
+
+        with raises(ValueError) as error:
+            TrainDataProcessor().validate_samples_and_aggregate_metrics(
+                [_agent_config_for(first_fpath), _agent_config_for(second_fpath)],
+                overwrite_metrics_conflicts=False,
+                task_data_validation="error",
+            )
+
+        assert f"{first_fpath}: 1/2 rows failed request validation" in str(error.value)
+        assert f"{second_fpath}: 1/2 rows failed request validation" in str(error.value)
+        # A sidecar that left out the rejected rows would conflict with the fixed file's metrics on the next run.
+        assert not (first_fpath.parent / "train_metrics.json").exists()
+        assert not (second_fpath.parent / "train_metrics.json").exists()
+
     def test_warn_mode_prints_and_keeps_going(self, tmp_path: Path, capsys) -> None:
         data_fpath = self._write(tmp_path, [_CHAT_COMPLETIONS_TOOL_ROW, _GOOD_ROW])
 
@@ -1231,6 +1251,15 @@ class TestRequestValidationReport:
         assert state.rejection_summary("train.jsonl").endswith("  ... and 4 more rows")
         # Every repeated copy is still left out of the metrics.
         assert len(state.offending_example_idxs) == 27
+
+    def test_row_that_is_not_an_object_names_the_row(self, tmp_path: Path) -> None:
+        data_fpath = self._write(tmp_path, [[1]])
+
+        state = TrainDataProcessor()._validate_samples_and_aggregate_metrics_single_dataset(
+            _agent_config_for(data_fpath).datasets[0]
+        )
+
+        assert state.rejected_source_row_reasons[0].startswith("0: row: Input should be")
 
     def test_not_json_is_described(self, tmp_path: Path) -> None:
         data_fpath = tmp_path / "train.jsonl"

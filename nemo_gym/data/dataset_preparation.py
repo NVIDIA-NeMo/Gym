@@ -441,13 +441,14 @@ def _describe_validation_error(error: ValidationError) -> str:
     hundreds of errors; the first one names the field that needs fixing.
     """
     first = error.errors()[0]
-    location = ".".join(str(part) for part in first["loc"])
+    # A row that is not a JSON object fails at the top level, with no location.
+    location = ".".join(str(part) for part in first["loc"]) or "row"
     return f"{location}: {first['msg']} ({error.error_count()} validation errors)"
 
 
 def _compute_sample_metrics(
     sample_dict_str: str, *, require_responses: bool = True
-) -> Tuple[DatasetMetrics, Optional[str]]:
+) -> tuple[DatasetMetrics, str | None]:
     """A row's metrics, and why the row is rejected (None when it is not)."""
     try:
         sample_dict = json.loads(sample_dict_str)
@@ -562,7 +563,7 @@ class DatasetValidatorState(BaseModel):
     # why the first few were rejected. The reasons stay capped so a large broken dataset reports in bounded memory.
     number_of_source_rows: int = 0
     number_of_rejected_source_rows: int = 0
-    rejected_source_row_reasons: List[str] = Field(default_factory=list)
+    rejected_source_row_reasons: list[str] = Field(default_factory=list)
     other_metrics: Dict[str, Any] = Field(default_factory=dict)
 
     MAX_RECORDED_REJECTIONS: ClassVar[int] = TaskDataValidationReport.MAX_RECORDED_ERRORS
@@ -1048,7 +1049,7 @@ class TrainDataProcessor(BaseModel):
         ``error`` mode, and not reported in ``off`` mode. They are left out of the metrics either way.
         """
         conflicting_fpaths: List[str] = []
-        rejection_summaries: List[str] = []
+        rejection_summaries: list[str] = []
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics] = defaultdict(DatasetMetrics)
         for c in server_instance_configs:
             for d in c.datasets:
@@ -1060,9 +1061,11 @@ class TrainDataProcessor(BaseModel):
                 if state.number_of_rejected_source_rows and task_data_validation != "off":
                     summary = state.rejection_summary(str(d.jsonl_fpath))
                     if task_data_validation == "error":
+                        # Collation fails below, so write no sidecar: one that leaves out the rejected rows would
+                        # conflict with the metrics of the fixed file on the next run.
                         rejection_summaries.append(summary)
-                    else:
-                        print(f"[request validation]\n{summary}")
+                        continue
+                    print(f"[request validation]\n{summary}")
 
                 dataset_type_to_aggregate_metrics[d.type].add(state.metrics)
 
