@@ -1,0 +1,51 @@
+name: vision_arena_v1
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: rlhf
+description: VisionArena-Bench image-and-text prompts, each answer compared with a
+  saved baseline answer in both orders by an LLM judge.
+modality: text, image
+licensing: MIT
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- jveronvialard
+intended_use:
+- evaluation
+capabilities:
+- multimodal_input_understanding
+- multimodal_input_understanding/scene_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- multimodal_input_understanding/cross_modal_understanding
+- writing_and_editing
+- writing_and_editing/general_qa
+domains:
+- general
+primary_metric: win_rate
+requirements:
+  gpu: false
+  network: allowlist
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: arena
+agent_server: simple_agent
+datasets:
+- name: vision_arena_v1
+  type: benchmark
+  jsonl_fpath: benchmarks/vision_arena_v1/data/vision_arena_v1_validation.jsonl
+  prepare_script: benchmarks/vision_arena_v1/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: train
+prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/lmarena-ai/vision-arena-bench-v0.1
+  ref: 3abe18efa30d674a8903386b463ce278e7f41f2d  # pragma: allowlist secret
+  reconciled: '2026-10-23'
+lifecycle: active

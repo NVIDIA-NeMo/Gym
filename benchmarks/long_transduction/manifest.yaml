@@ -1,0 +1,53 @@
+name: long_transduction
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: long_context
+description: Synthetic long-input transduction tasks (arithmetic chains, line sorting,
+  variable expansion, CSV permutation, key-value lookup) from about 2K to 64K input
+  tokens, scored by the fraction of correct output items.
+modality: text
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- jeffwillette
+intended_use:
+- evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- data_analysis
+- data_analysis/data_transformation
+- reasoning
+- reasoning/quantitative_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+domains:
+- general
+primary_metric: unknown
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: long_transduction
+agent_server: simple_agent
+datasets:
+- name: long_transduction
+  type: benchmark
+  jsonl_fpath: benchmarks/long_transduction/data/long_transduction.jsonl
+  prepare_script: benchmarks/long_transduction/prepare.py
+  prompt_config: benchmarks/prompts/generic/default.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: full
+standard_prompt_config: benchmarks/prompts/generic/default.yaml
+lifecycle: active
