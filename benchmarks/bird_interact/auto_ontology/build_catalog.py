@@ -69,8 +69,8 @@ class _FailedModelCalls(logging.Handler):
             self.messages.append(record.getMessage()[:300])
 
 
-# Auto Ontology opens a connection pool to every source database each time it looks up connectors, and keeps them, so
-# PostgreSQL's default of 100 connections runs out while the semantic layer compiles.
+# Compiling the semantic layer of the release's 18 databases holds more than PostgreSQL's default of 100 connections
+# with the Auto Ontology version Gym pins ("too many clients"); its connectors are cached, so the cause is elsewhere.
 SERVER_OPTIONS = "-c listen_addresses=localhost -c max_connections=500"
 
 
