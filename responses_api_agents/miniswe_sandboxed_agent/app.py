@@ -78,6 +78,7 @@ DEPRECATION_WARNING = (
     "must stay on this adapter until their environment-server migration. "
     "See responses_api_agents/mini_swe_agent/README.md#agent-sessions."
 )
+from nemo_gym.utils import monotonic_timeout
 
 
 @cache
@@ -465,7 +466,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     if seed.termination is None:
                         timings["agent_setup"] = {"started_at": state.setup_started_at or now()}
                         deadline = state.setup_deadline or monotonic() + self.config.setup_timeout_sec
-                        async with asyncio.timeout_at(deadline):
+                        async with monotonic_timeout(deadline):
                             workdir = state.workdir
                             if workdir is None:
                                 cwd = await sandbox.exec("pwd", timeout_s=30, user=seed.user)
@@ -672,7 +673,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 setup_started_at = now()
                 setup_deadline = monotonic() + self.config.setup_timeout_sec
                 result.agent_timings["agent_setup"] = {"started_at": setup_started_at}
-                async with asyncio.timeout_at(setup_deadline):
+                async with monotonic_timeout(setup_deadline):
                     provider = create_provider(resolve_provider_config(seed.sandbox_provider))
                     sandbox = await AsyncSandbox.connect(seed.sandbox_descriptor, provider=provider)
                 if key in self._sessions:

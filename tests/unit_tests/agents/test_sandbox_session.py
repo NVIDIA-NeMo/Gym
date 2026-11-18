@@ -1241,3 +1241,24 @@ async def test_borrowed_close_survives_a_task_that_moved_its_workdir(tmp_path, f
         activation.cancel()
         await asyncio.gather(activation, return_exceptions=True)
         await sandbox.stop()
+
+
+def test_monotonic_deadline_holds_on_an_event_loop_clock_ahead_of_monotonic(session):
+    class AheadClockLoop(asyncio.SelectorEventLoop):
+        def time(self) -> float:
+            return super().time() + 1_000_000
+
+    async def main():
+        return await session.execute(
+            stage_activation=AsyncMock(return_value=SandboxCommand(argv=["worker"])),
+            collect=AsyncMock(return_value="transcript"),
+            timeout=10,
+            close_timeout=1,
+            deadline=monotonic() + 120,
+        )
+
+    loop = AheadClockLoop()
+    try:
+        assert loop.run_until_complete(main()) == "transcript"
+    finally:
+        loop.close()

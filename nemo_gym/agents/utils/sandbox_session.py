@@ -31,6 +31,7 @@ from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.utils.deadlines import monotonic_timeout
 
 
 LOG = logging.getLogger(__name__)
@@ -228,7 +229,7 @@ class SandboxSession[Artifacts]:
         self._collect = collect
         self._stage_task = asyncio.create_task(self._stage(stage_activation))
         try:
-            async with asyncio.timeout_at(deadline):
+            async with monotonic_timeout(deadline):
                 command = await asyncio.shield(self._stage_task)
             if self._expire_requested:
                 await self._request_expiry(timeout=close_timeout)
