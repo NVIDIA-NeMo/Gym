@@ -19,21 +19,22 @@ import json
 
 import pytest
 
-from nemo_gym.orchestration.executors.slurm import RETRY_EXTENSION_JOURNAL_NAME
-from nemo_gym.orchestration.recovery import decide_from_collected, select_managed_evidence
+from nemo_gym.eval.recovery.evidence import select_managed_evidence
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.orchestration.executors.slurm.chain import RETRY_EXTENSION_JOURNAL_NAME
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _provider_failures, _resumable_run
+from tests.helpers.recovery_store_runs import collect_isolated, provider_failures_jsonl, save_store_run
+from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
-from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
 
 
 EXTENSION = "rollouts_attempt_extension"
 
 
 def _decide(job, **options):
-    selected = select_managed_evidence(collect(job), job)
+    selected = select_managed_evidence(collect_isolated(job), job)
     assert selected.managed_reader_error is None
     return decide_from_collected(selected, max_infra_retries=3, max_walltime_s=None, live_job=False, **options)
 
@@ -51,7 +52,7 @@ def _reopen(job, n=2):
 
 
 def test_an_exhausted_run_stops_and_names_the_attempt_extension(tmp_path):
-    prepare_managed(tmp_path, "exhausted")
+    save_store_run(tmp_path, "exhausted")
 
     result = _decide(tmp_path)
 
@@ -61,7 +62,7 @@ def test_an_exhausted_run_stops_and_names_the_attempt_extension(tmp_path):
 
 
 def test_a_requested_extension_resumes_each_exhausted_rollout(tmp_path):
-    prepare_managed(tmp_path, "exhausted")
+    save_store_run(tmp_path, "exhausted")
 
     result = _decide(tmp_path, extend_attempts=1)
 
@@ -72,7 +73,7 @@ def test_a_requested_extension_resumes_each_exhausted_rollout(tmp_path):
 
 @pytest.mark.parametrize("case,state", [("final_zero", "model_final"), ("healthy", "scored")])
 def test_an_extension_never_reopens_a_model_final_or_scored_rollout(tmp_path, case, state):
-    prepare_managed(tmp_path, case)
+    save_store_run(tmp_path, case)
 
     result = _decide(tmp_path, extend_attempts=2)
 
@@ -80,7 +81,7 @@ def test_an_extension_never_reopens_a_model_final_or_scored_rollout(tmp_path, ca
 
 
 def test_the_store_runs_exactly_the_extended_attempts(tmp_path):
-    prepare_managed(tmp_path, "exhausted", n=2)
+    save_store_run(tmp_path, "exhausted", n=2)
     output = tmp_path / "artifacts" / "rollouts.jsonl"
     assert RolloutStore.read(output, import_legacy=False).pending() == []
 
@@ -96,12 +97,12 @@ def test_the_store_runs_exactly_the_extended_attempts(tmp_path):
     with writer as store:
         attempt = dict(rows[0])
         store.allocate_attempt(attempt)
-        store.record_outcome(attempt | json.loads(_provider_failures(0, 4, 4).splitlines()[-1]))
+        store.record_outcome(attempt | json.loads(provider_failures_jsonl(0, 4, 4).splitlines()[-1]))
     assert RolloutStore.read(output, import_legacy=False).pending() == []
 
 
 def test_the_two_extensions_are_independent(tmp_path):
-    prepare_managed(tmp_path, "exhausted")
+    save_store_run(tmp_path, "exhausted")
 
     # More infra retries do not reopen a rollout that spent its attempts.
     assert _decide(tmp_path, extend_retries=2).action.value == "stop"
@@ -111,8 +112,8 @@ def test_the_two_extensions_are_independent(tmp_path):
 
 
 def test_an_extension_is_refused_when_the_runs_store_reader_predates_it(tmp_path):
-    prepare_managed(tmp_path, "exhausted")
-    selected = select_managed_evidence(collect(tmp_path), tmp_path)
+    save_store_run(tmp_path, "exhausted")
+    selected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
     # What a Store reader at an earlier pinned Gym returns: no applied extension, no replay facts.
     old = selected.model_copy(
         update={
@@ -131,7 +132,7 @@ def test_recover_records_the_extension_journals_it_and_a_later_recovery_counts_i
     from nemo_gym.orchestration.submit import inspect_recovery, recover
 
     job, _, _ = _resumable_run(tmp_path)
-    prepare_managed(job, "exhausted", n=2)
+    save_store_run(job, "exhausted", n=2)
     assert inspect_recovery(*_handle(job)).decision.action.value == "stop"
 
     out = recover(*_handle(job), extend_attempts=1)
@@ -157,9 +158,9 @@ def test_recover_records_the_extension_journals_it_and_a_later_recovery_counts_i
 
 @pytest.mark.parametrize("extension,continues", [(None, False), ("1", True)])
 def test_the_in_job_admission_reads_the_recorded_extension(tmp_path, monkeypatch, capsys, extension, continues):
-    from nemo_gym.orchestration.recovery import continuation_admission
+    from nemo_gym.eval.recovery.continuation import continuation_admission
 
-    prepare_managed(tmp_path, "exhausted")
+    save_store_run(tmp_path, "exhausted")
     # Segment 200 continues segment 100, which timed out after 60 s.
     monkeypatch.setenv("SLURM_JOB_ID", "200")
     (tmp_path / ".gym_job_chain").write_text("100\n200\n")
@@ -185,12 +186,12 @@ def test_an_extension_needs_a_whole_number_in_range():
 
 
 def test_the_remote_reader_reports_the_applied_extension_and_an_older_reader_is_refused(tmp_path):
-    from nemo_gym.orchestration.executors.slurm import _remote_managed_evidence
+    from nemo_gym.orchestration.executors.slurm.reader import _remote_managed_evidence
     from tests.unit_tests.orchestration.test_remote_managed_recovery import ProjectionConnection, config
 
-    prepare_managed(tmp_path, "exhausted")
+    save_store_run(tmp_path, "exhausted")
     (tmp_path / "artifacts" / EXTENSION).write_text("1\n")
-    raw = collect(tmp_path)
+    raw = collect_isolated(tmp_path)
     selected = select_managed_evidence(raw, tmp_path)
 
     reply = "installer output\n__GYM_MANAGED:" + selected.model_dump_json()
@@ -275,7 +276,7 @@ def test_an_extension_whose_job_is_not_queued_restores_the_record_and_journals_n
     from nemo_gym.orchestration.submit import recover
 
     job, _, _ = _resumable_run(tmp_path)
-    prepare_managed(job, "exhausted", n=2)
+    save_store_run(job, "exhausted", n=2)
     record = job / "artifacts" / EXTENSION
     record.write_text("1\n")  # an earlier recovery's extension
     (slurm_bin / "sbatch").write_text("#!/bin/bash\necho 'sbatch: error: Batch job submission failed'; exit 1\n")
@@ -290,12 +291,12 @@ def test_an_extension_whose_job_is_not_queued_restores_the_record_and_journals_n
 
 
 def test_the_journal_names_the_user_who_extended_the_attempts(tmp_path, slurm_bin, monkeypatch):
-    from nemo_gym.orchestration.executors import slurm as slurm_module
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
     from nemo_gym.orchestration.submit import recover
 
-    monkeypatch.setattr(slurm_module.getpass, "getuser", lambda: "operator-a")
+    monkeypatch.setattr(slurm_chain.getpass, "getuser", lambda: "operator-a")
     job, _, _ = _resumable_run(tmp_path)
-    prepare_managed(job, "exhausted", n=2)
+    save_store_run(job, "exhausted", n=2)
 
     out = recover(*_handle(job), extend_attempts=1)
 
@@ -324,3 +325,49 @@ def test_a_fresh_run_at_the_same_path_does_not_inherit_an_earlier_runs_extension
 
     with RolloutStore.start_or_resume(output, prepare, resume=True) as resumed:
         assert resumed.attempt_cap == 3
+
+
+def _verdict(decision):
+    from nemo_gym.eval.recovery.gate import operator_verdict
+
+    return operator_verdict({"status": "FAILED", "expected_samples": decision.expected, "errors": []}, decision)
+
+
+def test_an_extension_refused_for_an_old_reader_keeps_it_and_names_the_repin_in_one_call(tmp_path):
+    save_store_run(tmp_path, "exhausted", n=2)
+    (tmp_path / ".gym_infra_retries").write_text("3\n")
+    selected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
+    old = selected.model_copy(
+        update={
+            "attempt_extension_applied": None,
+            "managed_selection": [fact.model_copy(update={"replayable": None}) for fact in selected.managed_selection],
+        }
+    )
+
+    decision = decide_from_collected(old, max_infra_retries=3, max_walltime_s=None, live_job=False, extend_attempts=1)
+
+    assert decision.action.value == "stop" and decision.reason.startswith("--extend-attempts 1 is refused")
+    action = _verdict(decision)["action"]
+    assert (
+        "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover --extend-attempts N --extend-retries N --repin COMMIT "
+        "--repin-reason TEXT`" in (action)
+    ), action
+    assert "`gym eval submit`" not in action
+
+
+def test_an_extension_refused_for_an_unreadable_record_is_not_offered_again(tmp_path):
+    save_store_run(tmp_path, "exhausted", n=2)
+    selected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
+    unreadable = selected.model_copy(update={"attempt_extension_state": "malformed"})
+
+    decision = decide_from_collected(
+        unreadable, max_infra_retries=3, max_walltime_s=None, live_job=False, extend_attempts=1
+    )
+
+    assert decision.action.value == "stop" and "is unreadable" in decision.reason
+    verdict = _verdict(decision)
+    # The same extension would be refused again: read the record first, never a loop or a fresh submit.
+    assert verdict["state"] == "unknown"
+    assert (
+        verdict["action"] == "make the file the reason names readable again and inspect again (completed work is kept)"
+    )

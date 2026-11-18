@@ -11,6 +11,14 @@ All third-party software is used without modification unless otherwise noted
 
 ---
 
+## WildClawBench instruction prefix
+
+`responses_api_agents/wildclawbench_agent/worker.py` retains the actor instruction
+prefix from `eval/run_batch.py` in [internlm/WildClawBench](https://github.com/internlm/WildClawBench),
+revision `0c6551f798f8028bdfdd065f10d8d6b048a7fd06`, under MIT.
+The benchmark license and notice are in `benchmarks/wildclawbench/third-party-notices.md`.
+Native task execution is an external dependency, not vendored here.
+
 ## MiMo music scorer
 
 `resources_servers/mimo_music/scorer/` vendors the music scorer and
@@ -253,6 +261,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | LongFact prompt data | CC-BY-4.0 | `resources_servers/longfact/data/example.jsonl`, `benchmarks/longfact/data/hard200.jsonl` (selected source prompts with NeMo Gym fields, stable task IDs, source provenance and the original canary) | https://github.com/google-deepmind/long-form-factuality/tree/9d27158d198ced0a9d8271a80147cae580614601/longfact |
 | GPT-5 System Card prompts | CC-BY-4.0 (prompt text); Apache-2.0 (NVIDIA implementation) | `resources_servers/longfact/claim_prompts.py`, `resources_servers/longfact/card_fact_check.py` (Appendix 2 prompt adaptations) | https://arxiv.org/html/2601.03267v1 |
 | OpenCode max-steps prompt | MIT (vendored unmodified) | `nemo_gym/models/token_capture/harness_notes/opencode.py` (`OPENCODE_MAX_STEPS_PROMPT`, upstream `packages/core/src/session/runner/max-steps.ts`, verbatim) | https://github.com/anomalyco/opencode |
+| HLE with-tools blocklist | MIT (vendored unmodified) | `resources_servers/hle_web_tools/blocklist.json` (upstream `docs/blocklist.json` at revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`, byte-for-byte; its SHA-256 is pinned in `app.py` and verified at server start) | https://github.com/centerforaisafety/hle |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
@@ -266,6 +275,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 - LongFact prompt data: Copyright 2024 DeepMind Technologies Limited, licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). The [upstream license statement](https://github.com/google-deepmind/long-form-factuality/blob/9d27158d198ced0a9d8271a80147cae580614601/README.md#license-and-disclaimer) applies to the prompt materials at revision `9d27158d198ced0a9d8271a80147cae580614601`. The subsets select and reorder prompts, normalize surrounding whitespace, and add NeMo Gym metadata; each row preserves its source file checksum, row index and canary. Full-suite preparation uses the same source and attribution.
 - GPT-5 System Card prompts: OpenAI, [GPT-5 System Card, section 3.7 and Appendix 2, arXiv:2601.03267v1](https://arxiv.org/html/2601.03267v1), licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). Adaptations change output formatting, add validated claim IDs and optional browsing-off instructions, and replace iterative browsing with a single search-planning pass. Per-file source and license notices are retained; equivalence with the paper's reported scores has not been validated.
 - OpenCode max-steps prompt: copied verbatim from upstream revision `67aec2212010d67775c35e696d8b8b54902eb338` (OpenCode 1.17.11, https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts), because token capture must recognize the exact text OpenCode sends at its step limit. Upstream is MIT; its license is reproduced in full in the OpenCode MIT License section below. The file header records the same source, revision and license.
+- HLE with-tools blocklist: vendored, unmodified, from upstream revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`. Upstream is MIT, Copyright (c) 2025 centerforaisafety. The JSON must stay byte-exact for its digest check, so it carries no notice itself; the upstream `LICENSE` at that revision is reproduced unchanged in `resources_servers/hle_web_tools/LICENSE-HLE`. The server that applies it (`resources_servers/hle_web_tools/app.py`) is NVIDIA code under Apache-2.0.
 
 ---
 
@@ -22627,3 +22637,7 @@ VLMEvalKit source file with that name records helper-code provenance only.
 revision `7b9a3c154ef9fb40215bb67934afc43e6799de16`, under Apache-2.0.
 The scorer header retains the Databricks copyright, applicable upstream notice,
 and modification record. The scoring behavior is unchanged.
+
+## SaaS-Bench
+
+Source: https://github.com/UniPat-AI/SaaS-Bench at `48c22deb18b98c0ed78f81e7f3be82bc162de2c8`. Runtime: Apache-2.0; task data and verifiers: CC-BY-4.0. Original copyright: SaaS-Bench Authors. NVIDIA modifications are identified in each changed file; NVIDIA extensions are Apache-2.0. See [vendoring details](responses_api_agents/saas_bench_agent/benchmark/VENDORING.md).

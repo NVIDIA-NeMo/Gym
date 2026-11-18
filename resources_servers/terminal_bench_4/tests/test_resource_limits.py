@@ -6,6 +6,23 @@ import pytest
 from resources_servers.terminal_bench_4.resource_limits import sandbox_resource_limit
 
 
+# The cleanup failures of a real run, verbatim: OpenSandbox's lifecycle report cuts the pod detail at 256 characters.
+STORAGE_EVICTION_CLEANUP = (
+    "Process cleanup failed: Sandbox is unavailable; lifecycle status: state='Failed', reason='FAILED', "
+    "message='1/1 observed pods failed; primary reason=PodFailed; sample pod=1ab9122e-73b8-449d-bda7-98f6eebd28b4-0; "
+    "sample detail=Pod 1ab9122e-73b8-449d-bda7-98f6eebd28b4-0 entered Failed phase (Evicted): "
+    "Pod ephemeral local storage usage exceeds the total limit of con'"
+)
+CONTAINER_EXIT_CLEANUP = (
+    "Process cleanup failed: Sandbox is unavailable; lifecycle status: state='Failed', reason='FAILED', "
+    "message='1/1 observed pods failed; primary reason=ContainerFailed; sample pod=aa162baf-e2bb-477e-84c8-ea31d6b0216d-0; "
+    "sample detail=Pod aa162baf-e2bb-477e-84c8-ea31d6b0216d-0 container sandbox exited with code 143 (Error)'"
+)
+_UNAVAILABLE = (
+    "Sandbox is unavailable; lifecycle status: state='Failed', reason='FAILED', message='1/1 observed pods failed; "
+)
+
+
 @pytest.mark.parametrize(
     "detail, resource",
     [
@@ -35,6 +52,12 @@ from resources_servers.terminal_bench_4.resource_limits import sandbox_resource_
             "message='Pod ephemeral local storage usage exceeds the total limit of containers 4Gi.'",
             "storage",
         ),
+        (STORAGE_EVICTION_CLEANUP, "storage"),
+        (
+            _UNAVAILABLE + "primary reason=PodFailed; sample pod=p-0; sample detail=Pod p-0 entered Failed phase "
+            "(Evicted): Pod ephemeral local storage usage exceeds the total limit of containers 10Gi.'",
+            "storage",
+        ),
     ],
 )
 def test_explicit_provider_limit_deaths(detail, resource):
@@ -61,6 +84,18 @@ def test_explicit_provider_limit_deaths(detail, resource):
         "[KUBERNETES::POD_READY_TIMEOUT] sandbox remained Pending/CREATING",
         "[KUBERNETES::SANDBOX_NOT_FOUND] sandbox disappeared",
         "Process cleanup failed: Timed out during OpenSandbox command run after 70s",
+        CONTAINER_EXIT_CLEANUP,
+        "Sandbox is unavailable; lifecycle status: state='Failed', reason='FAILED'",
+        _UNAVAILABLE + "primary reason=PodFailed; sample pod=p-0; sample detail=Pod p-0 entered Failed phase "
+        "(Evicted): The node was low on resource: ephemeral-storage. Container sandbox was using 9Gi.'",
+        _UNAVAILABLE
+        + "primary reason=PodFailed; sample pod=p-0; sample detail=Pod p-0 entered Failed phase (Evicted)'",
+        # The lifecycle report names no container, so an OOMKilled reason there may be a sidecar's.
+        "Sandbox is unavailable; lifecycle status: state='Failed', reason='OOMKilled'",
+        "Process cleanup failed: No space left on device",
+        "Sandbox is unavailable; lifecycle status: state='Failed', reason='FAILED', message='No space left on device'",
+        "Command exited with code 143",
+        "container sandbox exited with code 143 (Error)",
     ],
 )
 def test_ambiguous_or_unrelated_errors_are_not_resource_limit_grades(detail):

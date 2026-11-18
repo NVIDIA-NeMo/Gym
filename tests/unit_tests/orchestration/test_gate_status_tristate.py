@@ -20,9 +20,10 @@ from types import SimpleNamespace
 import pytest
 
 from nemo_gym.cli.main import _eval_resubmit
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.gate import gate_task_summary
 from nemo_gym.orchestration import submit
-from nemo_gym.orchestration.recovery import CollectedEvidence, gate_task_summary
-from tests.unit_tests.orchestration.test_evaluation_health import _gate, _run
+from tests.helpers.recovery_health import _gate, _run
 
 
 def _accountable(collected: CollectedEvidence) -> CollectedEvidence:
@@ -50,6 +51,7 @@ def test_unverified_coverage_is_unverified_with_the_reason_in_warnings():
     assert task["status"] == "UNVERIFIED"
     assert task["errors"] == []
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert health.startswith("response/trial health unknown") and "trial: UNOBSERVED 10 of 100" in health
     assert task["health_verdict"].startswith("evaluation health: UNVERIFIED")
 
@@ -74,7 +76,11 @@ def test_a_real_error_beside_unverified_health_is_failed():
 
 
 def test_an_unread_score_of_an_incomplete_run_names_the_run_not_the_score_options():
-    from nemo_gym.orchestration.recovery import IdentityState, RecoveryAction, RecoveryDecision
+    from nemo_gym.eval.recovery.decision import (
+        IdentityState,
+        RecoveryAction,
+        RecoveryDecision,
+    )
 
     # Both score options were passed; the run is half done, so there is no aggregate to read yet.
     decision = RecoveryDecision(
@@ -137,7 +143,7 @@ def test_status_precedence_of_a_complete_noop(summary_valid, health_passed, scor
 
 
 def _exit_code(monkeypatch, gate_task: dict, **flags) -> int:
-    outcome = SimpleNamespace(ok=True, gate_task=gate_task, model_dump_json=lambda **kw: "{}")
+    outcome = SimpleNamespace(ok=True, gate_task=gate_task, operator_verdict=None, model_dump_json=lambda **kw: "{}")
     monkeypatch.setattr(submit, "recover", lambda *a, **kw: outcome)
     monkeypatch.setattr(submit, "inspect_recovery", lambda *a, **kw: outcome)
     try:
