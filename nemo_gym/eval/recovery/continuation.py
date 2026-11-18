@@ -99,10 +99,11 @@ def continuation_admission(
             print(f"{CONTINUATION_REASON_PREFIX}the chain's accumulated walltime is {collected.walltime_state}")
             return "stop"
         collected.accounted_walltime_s = collected.walltime_used_s
-        # A completed outcome plus untouched pending inputs establishes planned segment work. Actual failed
-        # attempts still consume infra retries, even if the driver happened to exit 75. A missing output,
-        # reservation, judge answer or unowned selected cause is rejected by the ordinary decision below.
-        # A scheduler allocation timeout continues untouched work, but never a failed agent attempt.
+        # A completed outcome plus untouched pending inputs establishes planned segment work. The decision below
+        # makes it a free segment only while never-started rows remain: retryable rows ride along and each spends its
+        # own attempt cap, whatever exit code the driver used. With no untouched row left, failed attempts still
+        # consume infra retries. A missing output, reservation, judge answer or unowned selected cause is rejected by
+        # the ordinary decision below.
         segment = previous_state == "TIMEOUT"
         if previous_state == "FAILED" and exit_code == "75:0" and collected.managed_selection is not None:
             from nemo_gym.rollouts import RolloutStore
