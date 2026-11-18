@@ -477,7 +477,16 @@ class GooseAgent(SimpleResponsesAPIAgent):
         if status == "failed":
             LOG.warning("Goose run failed (%s, exit %s); stderr tail: %s", stop, return_code, artifacts.stderr[-2048:])
             outcome = {"failure_kind": failure_kind, "status_code": status_code}
-            return self.report_outcome(response, outcome, model_answered=bool(output))
+            # Goose persists every model message, an empty one too, which converts to no output; its own notices are
+            # hidden or persisted as error blocks. The adapter imports no assistant history.
+            answered = bool(output) or any(
+                message["role"] == "assistant"
+                and message.get("user_visible", True)
+                and not any(block.get("type") == "error" for block in message["content"])
+                for session in sessions
+                for message in session["messages"]
+            )
+            return self.report_outcome(response, outcome, model_answered=answered)
         return self.report_rollout_stop(response, state.session)
 
     async def responses(

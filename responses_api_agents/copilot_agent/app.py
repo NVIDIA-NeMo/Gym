@@ -1077,8 +1077,9 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         if execution_error:
             raise RuntimeError(f"Copilot agent failed: {execution_error}")
         if reported_error:
-            # Copilot names each answered model call, a sub-agent's too, by its apiCallId.
-            answered = bool(transcript.response_ids or transcript.output)
+            # Copilot names each answered model call, a sub-agent's too, by its apiCallId; a background call that
+            # returned without an assistant event still has its successful chat span.
+            answered = bool(transcript.response_ids or transcript.output or (usage is not None and usage.response_ids))
             return self.report_outcome(response, transcript.error, model_answered=answered)
         return response
 

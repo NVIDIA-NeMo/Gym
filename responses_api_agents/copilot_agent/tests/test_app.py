@@ -674,21 +674,32 @@ def test_reported_provider_error_is_a_classified_failed_response(setup):
     assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
 
 
-def test_provider_error_before_any_answer_is_a_rejected_request(setup):
+@pytest.mark.parametrize(
+    "background_answer,outcome,action",
+    [
+        # No model call answered, so the endpoint refused the run's own request: not graded, not retried.
+        (False, {"failure_kind": "model_request_rejected"}, "fail"),
+        # A background call answered with no assistant event; its successful span is the evidence.
+        (True, {"failure_kind": "model_request_error", "status_code": 400}, "verify"),
+    ],
+)
+def test_provider_error_before_any_answer_is_a_rejected_request(setup, background_answer, outcome, action):
     agent, sandbox = setup
     sandbox.events = [
         {"type": "session.error", "data": {"errorType": "query", "message": "400 rejected", "statusCode": 400}},
         {"type": "result", "sessionId": "copilot-run-1", "exitCode": 1},
     ]
-    sandbox.otel = otel(chat_span("rejected", usage=None, status=2))
+    spans = [chat_span("chatcmpl-bg", usage=(4, 1))] if background_answer else []
+    sandbox.otel = otel(*spans, chat_span("rejected", usage=None, status=2))
     sandbox.result["return_code"] = 1
-    result, _ = run_session(agent)
+    result, closed = run_session(agent)
     assert result.status_code == 200, result.text
     body = result.json()
     assert body["status"] == "failed" and body["output"] == []
-    # No model call answered, so the endpoint refused the run's own request: not graded, not retried.
-    assert json.loads(body["metadata"][AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_request_rejected"}
-    assert agent_outcome_policy(NeMoGymResponse.model_validate(body)) == "fail"
+    assert json.loads(body["metadata"][AGENT_OUTCOME_METADATA_KEY]) == outcome
+    assert agent_outcome_policy(NeMoGymResponse.model_validate(body)) == action
+    model_calls = [call["response_id"] for call in closed.json()["agent_observations"]["records"][0]["model_calls"]]
+    assert model_calls == (["chatcmpl-bg"] if background_answer else [])
 
 
 def test_unexplained_nonzero_exit_is_an_execution_error(setup):
