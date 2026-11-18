@@ -22,7 +22,7 @@ driver:
 ```
 
 The rest is section 2. A policy that reasons by default and is served with `--reasoning-parser` (Qwen3,
-for example) needs no section 3 keys, because the shipped `vllm_model` client already expects the parser;
+for example) needs no section 3 keys, because the shipped `vllm_model` client already expects the parser,
 a model that needs them adds them to the same `run` mapping. In the `--dry-run` script the job runs
 `gym eval prepare '+config_paths=[benchmarks/ifeval/config.yaml]'`, then `gym eval run --model-type
 vllm_model` with the same `+config_paths`, `+split=benchmark` and the three policy keys submit filled in.

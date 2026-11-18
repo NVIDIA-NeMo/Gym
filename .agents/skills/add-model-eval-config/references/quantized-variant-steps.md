@@ -8,7 +8,7 @@ Moved from section 9 of [SKILL.md](../SKILL.md), unchanged. Section 9 there keep
    to the BF16 checkpoint's. Also compare `generation_config.json`, including whether it exists: with
    `--generation-config auto` its values are the defaults for every sampling setting a request leaves unset,
    so a different file changes the sampling too. If the two differ, stop and ask the export's owner to
-   align them; do not override the benchmark's sampling to compensate. Record what you compared.
+   align them. Do not override the benchmark's sampling to compensate. Record what you compared.
 2. Copy the BF16 config and change only these fields, each with a comment naming its source:
    - `model` (and its mount): the export.
    - `served_model_name`: the model's name without its precision suffix plus the export's actual
@@ -41,5 +41,5 @@ Moved from section 9 of [SKILL.md](../SKILL.md), unchanged. Section 9 there keep
    the requester gives its name, id or URL, add them as the tags `quantization_run_name`,
    `quantization_run_id` and `quantization_run_url`, in the same place as step 5, and use the experiment
    the requester names as `mlflow_experiment_name`. The evaluation run stays on your own tracking server and
-   keeps its own run name; the tags only link it to the quantization run. Do not copy that run's tracking URI
+   keeps its own run name. The tags only link it to the quantization run. Do not copy that run's tracking URI
    or experiment id. With no such run, there is nothing to carry.
