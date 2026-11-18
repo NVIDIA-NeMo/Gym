@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""``phase_network_policy``: a Harbor phase's ``network_mode`` as the OpenSandbox egress policy, failing closed."""
+"""``phase_network_policy``: a Harbor phase's ``network_mode`` as the OpenSandbox egress policy, failing closed;
+``with_harness_hosts``: the agent's policy opened to the hosts its harness needs."""
 
 import pytest
 
-from environment_servers.harbor.network_policy import phase_network_policy
+from environment_servers.harbor.network_policy import phase_network_policy, with_harness_hosts
 
 
 class TestPhaseNetworkPolicy:
@@ -70,3 +71,41 @@ class TestPhaseNetworkPolicy:
     def test_unknown_mode_is_refused(self):
         with pytest.raises(ValueError, match="Unknown network_mode"):
             phase_network_policy("opensandbox", "firewalled")
+
+
+class TestWithHarnessHosts:
+    """`with_harness_hosts`: the hosts a harness reaches from the agent's sandbox, after the task's own rules."""
+
+    def test_harness_hosts_follow_the_tasks_rules_without_repeats(self):
+        policy = phase_network_policy("opensandbox", "allowlist", ["example.com"])
+        opened = with_harness_hosts(policy, ["10.1.2.3", "Registry.npmjs.org.", "example.com", "10.1.2.3"])
+        assert opened == {
+            "defaultAction": "deny",
+            "egress": [
+                {"action": "allow", "target": "example.com"},
+                {"action": "allow", "target": "10.1.2.3"},
+                {"action": "allow", "target": "registry.npmjs.org"},
+            ],
+        }
+        # The task's policy is not changed in place.
+        assert policy["egress"] == [{"action": "allow", "target": "example.com"}]
+
+    def test_no_hosts_leave_the_tasks_policy(self):
+        policy = phase_network_policy("opensandbox", "no-network")
+        assert with_harness_hosts(policy, []) == {"defaultAction": "deny", "egress": []}
+
+    @pytest.mark.parametrize(
+        ("host", "reason"),
+        [
+            ("127.0.0.1", "loopback or unspecified address"),
+            ("::1", "loopback or unspecified address"),
+            ("0.0.0.0", "loopback or unspecified address"),
+            ("LocalHost.", "loopback or unspecified address"),
+            ("", "must not be empty"),
+            ("[::1]", "written without brackets"),
+            ("http://model:8000", "is not a host name"),
+        ],
+    )
+    def test_hosts_the_sandbox_cannot_reach_are_refused(self, host, reason):
+        with pytest.raises(ValueError, match=f"host the harness needs.*{reason}|{reason}"):
+            with_harness_hosts(phase_network_policy("opensandbox", "no-network"), ["10.1.2.3", host])

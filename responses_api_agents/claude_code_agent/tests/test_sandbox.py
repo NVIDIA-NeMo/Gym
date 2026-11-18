@@ -158,6 +158,30 @@ async def test_model_only_allows_the_host_however_the_url_writes_it(monkeypatch,
     assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": allowed}]}
 
 
+@pytest.mark.parametrize(
+    ("settings", "model_host"),
+    [
+        ({"anthropic_api_key": "sk-test"}, "api.anthropic.com"),  # pragma: allowlist secret
+        ({"anthropic_base_url": "https://Direct.Example/anthropic"}, "direct.example"),
+        (
+            {
+                "model_server": {"type": "responses_api_models", "name": "policy_model"},
+                "anthropic_base_url": "https://direct.example/anthropic",
+            },
+            "gym-model.example",
+        ),
+    ],
+)
+def test_sandbox_egress_declares_the_endpoint_the_cli_calls_and_no_install_host(settings, model_host):
+    """A server that restricts the borrowed sandbox opens the model endpoint the CLI calls from there; the binary is
+    uploaded from the Agent Server host, so the sandbox downloads nothing."""
+    instance = agent(**settings)
+    instance.server_client.global_config_dict["policy_model"] = {"responses_api_models": {"vllm_model": {}}}
+    instance.server_client._build_server_base_url = MagicMock(return_value="http://gym-model.example:8000")
+    reply = TestClient(instance.setup_webserver()).get("/v1/agent_sessions/capabilities")
+    assert reply.json()["sandbox_egress"] == {"model_hosts": [model_host], "install_hosts": []}
+
+
 @pytest.mark.asyncio
 async def test_inherit_keeps_a_loopback_model_endpoint_working(monkeypatch):
     # A local Gym model server must keep working by default: inherit adds no policy and refuses nothing.

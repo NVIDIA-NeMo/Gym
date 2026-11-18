@@ -100,9 +100,11 @@ folder it was given, as with any non-Claude harness in the official runner.
 
 ### Differences from the official runner
 
-- One task (`bike-rebalance` at the pinned revision) requests `no-network`. The environment server does not
-  restrict an agent sandbox's network yet, so its loader refuses that task instead of running it with open
-  egress; `--skip-unloadable` leaves it out of a run and names it in `skipped.json`.
+- One task (`bike-rebalance` at the pinned revision) requests `no-network`. On OpenSandbox, with a harness that
+  declares the hosts it needs in the sandbox (such as `codex_agent` or `claude_code_agent`), the environment server
+  creates its agent sandbox without network except for those hosts (the model endpoint and the harness's install
+  sources); see "Network restrictions" in `fern/versions/latest/pages/agent-interactions/harbor.mdx`. On another
+  provider, or with another harness, the episode fails at seed instead of running with open egress.
 - Three tasks ship Compose files written for Docker whose services are built from the task's own Dockerfiles
   (`drone-planning-control`, `fix-visual-stability`, `react-performance-debugging`); the published images cover only
   each task's main image. Preparation keeps the files as they are. Without an image builder (see "Dockerfile builds"

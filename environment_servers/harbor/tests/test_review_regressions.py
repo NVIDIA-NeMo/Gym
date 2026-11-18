@@ -110,7 +110,7 @@ async def test_dockerfile_env_literal_is_not_a_host_template(tmp_path, monkeypat
     )
     specs = []
 
-    async def create(task, workdir, *, episode_key=None):
+    async def create(task, workdir, *, episode_key=None, network_policy=None):
         # The sandbox starts with the spec's environment, as the provider's container would.
         specs.append(server._sandbox_spec(task, workdir))
         sandbox.spec_env = dict(specs[-1].env)
@@ -193,7 +193,7 @@ async def test_cancelled_episode_stops_owned_sandbox(tmp_path, monkeypatch, stag
         monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", lambda config: sandbox)
         monkeypatch.setattr("environment_servers.harbor.sandboxes.resolve_provider_config", lambda *args: {})
         monkeypatch.setattr("environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {})
-        monkeypatch.setattr(server, "_sandbox_spec", lambda *args: None)
+        monkeypatch.setattr(server, "_sandbox_spec", lambda *args, **kwargs: None)
         monkeypatch.setattr(sandbox, "start", block, raising=False)
         monkeypatch.setattr(server, "_create_sandbox", HarborEnvironmentServer._create_sandbox.__get__(server))
     elif stage == "prepare":

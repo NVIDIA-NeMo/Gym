@@ -51,6 +51,14 @@ servers not granted through `task_mcp_grants: required`, also needs a harness th
 declares multi-turn continuation. `harbor_agent` and `harbor_agent_general` are separate Agent Servers that run
 Harbor's own runtime; they are not this path.
 
+A task that restricts the agent's network (`network_mode` in `[environment]`, `[agent]` or `[steps.agent]`) gets an
+agent sandbox created under that egress policy, on OpenSandbox only, for the sandbox's whole life (`_seed` and
+`_agent_network_policy` in `app.py`). The policy also allows the hosts the harness declares in its session
+capabilities (`sandbox_egress`: its model endpoint and where its setup downloads its runtime) and the hosts of the
+MCP servers `task_mcp_grants` grants, so the agent can reach those hosts beyond what the task asked for. The extra
+hosts and the refusals are listed under "Network restrictions" in
+[`fern/versions/latest/pages/agent-interactions/harbor.mdx`](../../fern/versions/latest/pages/agent-interactions/harbor.mdx).
+
 ## Run it
 
 The committed entry `environments/harbor/terminal_bench_2_1/` pins Terminal-Bench 2.1 in Harbor's package store.
@@ -121,7 +129,7 @@ Unit tests are not enough for a behavior change: also run
 | `users.py` | Which user an exec runs as: the image's `USER`, `[agent].user`, root on every provider |
 | `steps.py` | Prepare a `[[steps]]` turn: its `workdir/`, `setup.sh` and health check |
 | `verifier.py` | The `test.sh` wrapper, the reward files and the verifier sandbox |
-| `network_policy.py` | A `[verifier]` `network_mode` and `allowed_hosts` as an OpenSandbox egress policy |
+| `network_policy.py` | A phase's `network_mode` and `allowed_hosts` as an OpenSandbox egress policy, and the agent's opened to the hosts its harness needs |
 | `task_data.py` | The row's task-data schema: the reserved `_ng_digest` and `_ng_dataset_digest` keys |
 | `configs/harbor.yaml` | The shipped server block |
 | `data/` | The example tasks and their recorded rows, rollouts and metrics |

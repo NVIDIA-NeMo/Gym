@@ -1581,9 +1581,9 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
     await server._resolve_task(request.task.task_id, request.task.task_input.task_data)
     create = server._create_sandbox
 
-    async def slow_create(task, workdir, *, episode_key=None):
+    async def slow_create(task, workdir, *, episode_key=None, network_policy=None):
         await asyncio.sleep(5.5)
-        return await create(task, workdir, episode_key=episode_key)
+        return await create(task, workdir, episode_key=episode_key, network_policy=network_policy)
 
     monkeypatch.setattr(server, "_create_sandbox", slow_create)
     server.server_client.slow_path = "/ng-rollout/r1/v1/responses"

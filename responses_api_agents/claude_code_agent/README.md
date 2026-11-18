@@ -273,6 +273,8 @@ other provider rejects a restricted value, including ones with network controls 
 their own. `network_access` cannot be combined with
 `sandbox_config.provider_options.network_policy`. Claude uses no tool grants, so
 `model_and_tools` is rejected. Each of these refusals fails the seed with HTTP 422.
+A borrowed sandbox that its owner restricted (a Harbor task's `network_mode`) is created with the model endpoint's
+host, which Claude declares in its session capabilities (`sandbox_egress`), and no download host.
 Under `model_only` the image must already include `bash`: the step that installs a
 missing one on a root image runs after the sandbox starts, when the package mirrors
 are out of reach. A borrowed sandbox relies on its owner's network policy. The policy

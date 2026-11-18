@@ -242,18 +242,36 @@ class AgentSeedSessionResponse(BaseModel):
         return result
 
 
+class AgentSandboxEgress(BaseModel):
+    """The hosts a harness reaches from inside a task sandbox it borrows, beyond what the task itself reaches.
+
+    An environment server that creates the sandbox with a restricted network opens these hosts as well, so the
+    harness can still work there. Each entry is a host name or an IP literal, opened on every port.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Where the harness calls its model from inside the sandbox, such as the Gym Model Server's host.
+    model_hosts: list[str] = Field(default_factory=list)
+    # Where the session seed downloads the harness runtime from inside the sandbox; empty when it downloads nothing.
+    install_hosts: list[str] = Field(default_factory=list)
+
+
 class AgentSessionCapabilitiesResponse(BaseModel):
     """What this adapter's sessions can do, asked before any session is seeded.
 
     An environment server reads it to refuse a run before provisioning anything: a multi-step task whose turns
     must continue one harness session needs ``continuation``, as Harbor's multi-step trial refuses
-    ``resume_trajectory`` for an agent without ``SUPPORTS_RESUME`` before any environment spend.
+    ``resume_trajectory`` for an agent without ``SUPPORTS_RESUME`` before any environment spend. A task that
+    restricts the agent's network needs ``sandbox_egress``, the hosts the harness reaches from inside the sandbox;
+    ``None`` declares none, and such a task is refused for the harness rather than run without them.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     supports_task_tool_context: bool = False
     continuation: AgentContinuationCapabilities | None = None
+    sandbox_egress: AgentSandboxEgress | None = None
 
 
 class AgentCloseSessionRequest(BaseModel):
@@ -1002,11 +1020,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def agent_session_capabilities(self) -> AgentSessionCapabilitiesResponse:
         """Declare the session capabilities a seed would confirm, without seeding: the task-tool context and the
         multi-turn continuation this adapter supports (``None`` for one-activation adapters and for agents that
-        implement no sessions at all)."""
+        implement no sessions at all), and the hosts it reaches from inside a borrowed sandbox."""
         return AgentSessionCapabilitiesResponse(
             supports_task_tool_context=self.supports_task_tool_context(),
             continuation=self._agent_continuation_capabilities(),
+            sandbox_egress=self.sandbox_egress(),
         )
+
+    def sandbox_egress(self) -> AgentSandboxEgress | None:
+        """The hosts this harness reaches from inside a task sandbox it borrows: its model endpoint and where its
+        session seed downloads its runtime. An environment server that restricts the sandbox's network opens them.
+
+        ``None``, the default, declares nothing; such a server then refuses a restricted task for this harness
+        instead of guessing. Override it in an adapter that runs in a borrowed sandbox, with every host the seed and
+        the harness reach there, and nothing else.
+        """
+        return None
 
     async def seed_agent_session(
         self,

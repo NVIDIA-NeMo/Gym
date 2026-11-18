@@ -428,6 +428,12 @@ Task-image Python is not required. Setup checks that the directory reports `code
 instead of installing, and refuses the seed with a 422 when it does not. `sandbox_runtime_dir` applies to a borrowed
 sandbox too: it is checked there in the same way, and a borrowed sandbox is never stopped.
 
+A borrowed sandbox that its owner restricted (a Harbor task's `network_mode`) is created with the hosts Codex declares
+in its session capabilities (`sandbox_egress`): the Gym model server's host, and the installer's download hosts
+`nodejs.org`, `unofficial-builds.nodejs.org`, `registry.npmjs.org` and `dl-cdn.alpinelinux.org` (none with
+`sandbox_runtime_dir`). The installer's `apt-get`/`apk` fallback for a missing `curl`, `tar`, `gzip`, `sha256sum`,
+`awk` or CA bundle reaches the image's package mirrors, which are not declared, so such an image needs those tools.
+
 Under `model_only`, a required MCP grant is refused at seed with a 422, since the policy would block its host; under
 `model_and_tools`, a grant at an address the sandbox cannot reach, such as loopback, refuses the seed. A borrowed
 sandbox relies on its owner's network policy. The policy is only as strong as the OpenSandbox server's egress mode:

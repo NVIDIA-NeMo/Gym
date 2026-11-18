@@ -465,6 +465,29 @@ sandbox = AsyncSandbox(provider)
 - The policy is only as strong as the OpenSandbox server's egress mode: `dns` filters only name resolution, so a hard-coded IP bypasses it, while `dns+nft` also enforces it at the IP layer. See [Network Policy](/main/infrastructure/sandbox/opensandbox#network-policy).
 - A profile that composes the adapter onto a benchmark graded on the model's own knowledge should set `network_access: model_only`, as the deprecated agents' profiles do.
 
+### Declare what a borrowed sandbox must reach
+
+An Environment Server can create the sandbox it lends with a restricted network, such as the `harbor` server for a task that sets `network_mode` (see [Network restrictions](/main/agent-interactions/harbor#network-restrictions)). It creates the sandbox before your session is seeded, so it asks first, through `GET /v1/agent_sessions/capabilities`, which hosts the harness reaches from inside it. Override `sandbox_egress()` to answer:
+
+```python
+from urllib.parse import urlsplit
+
+from nemo_gym.agents import AgentSandboxEgress
+
+
+def sandbox_egress(self) -> AgentSandboxEgress | None:
+    model_url = self.resolve_model_base_url(self.config.model_server.name, trace_context=False)
+    return AgentSandboxEgress(
+        model_hosts=[urlsplit(model_url).hostname or ""],
+        install_hosts=[] if self.config.sandbox_runtime_dir else ["registry.npmjs.org"],
+    )
+```
+
+- `model_hosts` names the host of every model endpoint the harness calls from the sandbox. `install_hosts` names every host the session seed downloads from inside the sandbox; leave it empty when the runtime is uploaded or baked into the image.
+- List exactly what the seed and the harness reach, and nothing else: the server opens each host on every port, and a missing one fails the install or the model calls under the restriction.
+- The default, `None`, declares nothing, and the server refuses a restricted task for the harness rather than guess. Return `None` too for a configuration that cannot run in a borrowed sandbox.
+- Hosts of the tool servers the Environment Server grants are its own to open; list a tool server here only if the adapter's own configuration grants it.
+
 ## Build the adapter with `nemo_gym.agents.utils`
 
 The [`nemo_gym/agents/utils`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/agents/utils) package implements the sandbox execution lifecycle that Hermes, Pi, Codex, OpenCode, and OpenClaw share. The adapter provides the harness-specific parts: runtime installation, input staging, the harness command, and output parsing. `nemo_gym.agents.utils` launches, supervises, stops, and cleans up the harness process.

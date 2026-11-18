@@ -28,6 +28,7 @@ from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
 from typing import Any, Callable, ClassVar, Optional
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -38,6 +39,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentSandboxEgress,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
@@ -186,6 +188,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+
+    def sandbox_egress(self) -> AgentSandboxEgress:
+        """In a borrowed sandbox Claude Code calls its model endpoint: the Gym Model Server, else
+        ``anthropic_base_url``, else Anthropic's API. Its binary is downloaded on the Agent Server host and uploaded,
+        so the sandbox downloads nothing (an image without ``bash`` still needs its package mirror, which is not
+        listed)."""
+        return AgentSandboxEgress(
+            model_hosts=[urlsplit(self._resolve_base_url() or "https://api.anthropic.com").hostname or ""]
+        )
 
     async def _ensure_local_runtime(self) -> None:
         if self._local_setup_task is None:

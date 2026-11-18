@@ -61,6 +61,7 @@ Like Harbor, Gym ignores unknown keys (logging each one) and reads the legacy sp
 | `healthcheck` | none | A `command` polled at seed. After `start_period_sec` (`0`), `retries` (`3`) consecutive failures `interval_sec` (`5`) apart fail the seed (retryable). `timeout_sec` (`30`) bounds each attempt; `start_interval_sec` (`5`) paces the start period. |
 | `mcp_servers` | `[]` | Tool servers for the task. See [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool). |
 | `skills_dir` | none | A skills folder for harnesses that read one; a relative path resolves in the working directory. When the sandbox's folder is missing or empty and the task ships `environment/skills/`, the server uploads it there at seed. |
+| `network_mode`, `allowed_hosts` | `public`, none | The baseline network: `no-network`, or `allowlist` with `allowed_hosts`. The agent, a shared verifier and a separate verifier without `[verifier.environment]` run under it unless `[agent]` or `[verifier]` sets its own. Needs OpenSandbox. See [Network restrictions](/main/agent-interactions/harbor#network-restrictions). |
 
 A task whose `environment/` holds `docker-compose.yaml` runs as a group of sandboxes, one per service, on
 OpenSandbox only; see [Multi-Container Tasks](/main/data/task-folders/compose-tasks).
@@ -68,7 +69,10 @@ OpenSandbox only; see [Multi-Container Tasks](/main/data/task-folders/compose-ta
 ### [agent]
 
 `timeout_sec` (default `28800`) is the agent's budget. `user` is the user the agent runs as; unset, the
-Dockerfile's final `USER`, else the image's.
+Dockerfile's final `USER`, else the image's. `network_mode` and `allowed_hosts` restrict the agent's network in
+place of `[environment]`'s, and `[steps.agent]` in place of both for its step; every step must come out with the same
+network. The agent's sandbox is created with it, plus the hosts the harness needs, on OpenSandbox only. See
+[Network restrictions](/main/agent-interactions/harbor#network-restrictions).
 
 A numeric user is looked up by name in the image first. A bare numeric `USER` with no passwd entry runs as that
 integer user ID on Docker and on OpenSandbox's plain exec; other providers, and OpenSandbox's PTY and bash sessions,
@@ -84,7 +88,7 @@ need a named user. A `uid:gid` pair runs only on Docker.
 | `environment_mode` | `shared` | `shared` runs `test.sh` in the agent's sandbox, `separate` in a fresh one. |
 | `environment` | none | A `[verifier.environment]` table with the keys of `[environment]`. Selects separate mode. |
 | `collect` | `[]` | `[[verifier.collect]]` hooks, run before `test.sh` and any artifact collection: `command`, `service` (`main`), `timeout_sec` (`60`) and `user` (unset: the service's default, in `main` the task's agent user). A hook that fails, times out or names a missing service only logs a warning; one the sandbox cannot run masks the sample. |
-| `network_mode`, `allowed_hosts` | `public`, none | `no-network`, or `allowlist` with `allowed_hosts`. Needs OpenSandbox and separate mode, on every step of a multi-step task. An allowlist fails at seed if the deployment's `network_policy` denies by default. |
+| `network_mode`, `allowed_hosts` | none | `no-network`, or `allowlist` with `allowed_hosts`. Unset, a separate verifier runs under its `[verifier.environment]`'s network, else `[environment]`'s, and a shared one under `[environment]`'s. A shared verifier runs in the agent's sandbox, so its network must be the agent's; a separate one gets a sandbox with its own. Needs OpenSandbox. An allowlist fails at seed if the deployment's `network_policy` denies by default. |
 
 ### [solution]
 
@@ -214,7 +218,7 @@ When no task loads at all, it prints the error instead of a table and exits 2.
 | --- | --- |
 | Missing files | No `instruction.md` (single-step), no `tests/` folder (single-step, without a dataset `verifier.py`), or a step with no `steps/<name>/` folder, `instruction.md` there, or `test.sh` in its own or the task's `tests/`. A folder without `task.toml` is never refused: Gym searches it for task folders. |
 | Missing images | A build-mode Dockerfile, base image or `tests/Dockerfile` with no record from prepare, or a separate verifier with no image. |
-| Unsupported settings | Windows, TPU, network restrictions outside separate-mode `[verifier]`, or a shared verifier with its own environment. |
+| Unsupported settings | Windows, TPU, a network restriction on `[verifier.environment]`, `[steps.verifier]` or its environment, `allowed_hosts` without `network_mode = "allowlist"`, steps whose agents ask for different networks, a shared verifier whose network is not the agent's, or a shared verifier with its own environment. |
 | Invalid values | A malformed `task.toml` or override, a bad `inputs` entry, an MCP server without an endpoint, or an artifact whose source is `/` or under `/tests` or `/logs/verifier`, whose path has a `..` part, or whose `destination` is absolute. |
 | Dataset settings | `type = "example"`, a harness outside `allowed_agents` (without `--allow-unsupported-pairing`), or a `[gym.tasks]` table naming no task. These stop the whole command. |
 

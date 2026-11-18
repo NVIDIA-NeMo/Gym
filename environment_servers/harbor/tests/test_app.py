@@ -440,7 +440,7 @@ class TestEpisode:
     async def test_sandbox_failure_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
 
-        async def boom(task, workdir, *, episode_key):
+        async def boom(task, workdir, *, episode_key, network_policy=None):
             raise RuntimeError("pull failed")
 
         monkeypatch.setattr(server, "_create_sandbox", boom)
@@ -458,7 +458,7 @@ class TestEpisode:
             status_code = status
             request_payload = {"secret": "must not be serialized"}
 
-        async def refused(task, workdir, *, episode_key):
+        async def refused(task, workdir, *, episode_key, network_policy=None):
             raise SandboxApiException("Create sandbox failed: Authentication credentials are invalid.")
 
         monkeypatch.setattr(server, "_create_sandbox", refused)
@@ -1054,7 +1054,7 @@ class TestSeedWorkdirAndResources:
 
         pwd_sandbox = PwdSandbox()
 
-        async def create(task, workdir, *, episode_key=None):
+        async def create(task, workdir, *, episode_key=None, network_policy=None):
             created.append((task.task_id, workdir))
             return pwd_sandbox
 
@@ -4435,7 +4435,7 @@ class TestSeedGuards:
             async def stop(self):
                 stopped.append(True)
 
-        async def hang(task, workdir, *, episode_key):
+        async def hang(task, workdir, *, episode_key, network_policy=None):
             server._sandboxes[episode_key] = Hanging()
             await asyncio.get_running_loop().create_future()
 
@@ -4489,7 +4489,7 @@ class TestSeedGuards:
     async def test_a_providers_own_timeout_inside_the_deadline_is_reported_as_is(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox_ready_timeout_s=100)
 
-        async def provider_timeout(task, workdir, *, episode_key):
+        async def provider_timeout(task, workdir, *, episode_key, network_policy=None):
             raise TimeoutError("Timed out creating OpenSandbox sandbox after 100s")
 
         monkeypatch.setattr(server, "_create_sandbox", provider_timeout)
@@ -5641,13 +5641,184 @@ class TestVerifierNetwork:
         monkeypatch.setattr(server, "_separate_verifier", lambda task: False)
         response = await run_episode(server, task)
         assert response.failure.stage == "seed" and response.failure.terminal and created == []
-        assert "network policy cannot be changed after it started" in response.failure.failure_reason
+        assert "network policy cannot be changed after it started (public)" in response.failure.failure_reason
+        assert "its verifier asks for no-network" in response.failure.failure_reason
 
     def test_public_verifier_phase_adds_no_policy(self, tmp_path, monkeypatch):
         server, task, _, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=SEPARATE_TOML)
         assert server._verifier_network_policy(task) is None
         spec = server._sandbox_spec(task, None, image="org/verifier:1", role="verifier", network_policy=None)
         assert "network_policy" not in spec.provider_options
+
+    def test_a_separate_verifier_without_an_environment_inherits_the_environments_network(self, tmp_path, monkeypatch):
+        """Harbor's separate verifier without a ``[verifier.environment]`` runs a copy of ``[environment]``, network
+        included; one with its own environment runs under that environment's (public) network."""
+        inherited = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n').replace(
+            "[environment]\n", '[environment]\ndocker_image = "ubuntu:24.04"\nnetwork_mode = "no-network"\n'
+        )
+        server, task, _, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=inherited)
+        assert server._verifier_network_policy(task) == {"defaultAction": "deny", "egress": []}
+        own = inherited + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+        server, task, _, _, _, _ = self.prepared(tmp_path / "own", monkeypatch, toml=own)
+        assert server._verifier_network_policy(task) is None
+
+
+class TestAgentNetwork:
+    """The agent's network (``[agent]``, ``[steps.agent]`` or ``[environment]``) is the agent sandbox's egress policy,
+    fixed when the server creates it: the task's policy opened to the hosts the harness declares it reaches from
+    inside the sandbox (``sandbox_egress``) and the hosts of the MCP servers the server grants it."""
+
+    EGRESS = {"model_hosts": ["10.1.2.3"], "install_hosts": ["registry.npmjs.org", "nodejs.org"]}
+    # The agent's allowlist, with a shared verifier that names the same policy (required: it runs in that sandbox).
+    ALLOWLIST_TOML = TASK_TOML.replace(
+        "[agent]\n", '[agent]\nnetwork_mode = "allowlist"\nallowed_hosts = ["Example.com"]\n'
+    ).replace("[verifier]\n", '[verifier]\nnetwork_mode = "allowlist"\nallowed_hosts = ["example.com"]\n')
+    NO_NETWORK_TOML = TASK_TOML.replace("[environment]\n", '[environment]\nnetwork_mode = "no-network"\n')
+    MCP_TOML = NO_NETWORK_TOML + (
+        '\n[[environment.mcp_servers]]\nname = "search"\ntransport = "streamable-http"\n'
+        'url = "http://tools.internal:9000/mcp"\n'
+    )
+
+    def prepared(self, tmp_path, monkeypatch, *, toml, provider="opensandbox", egress=EGRESS, **config):
+        server, task, sandbox, created = make_server(tmp_path, monkeypatch, toml=toml, **config)
+        server.server_client.sandbox_egress = egress
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {provider: {}}}
+        )
+        return server, task, sandbox, created
+
+    async def test_the_sandbox_gets_the_task_policy_and_the_hosts_the_harness_needs(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        server, task, sandbox, created = self.prepared(tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML)
+        with caplog.at_level("INFO", logger="environment_servers.harbor.app"):
+            response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert (response.result.reward, response.result.verifier_network) == (1.0, "allowlist")
+        expected = {
+            "defaultAction": "deny",
+            "egress": [
+                {"action": "allow", "target": target}
+                for target in ("example.com", "10.1.2.3", "registry.npmjs.org", "nodejs.org")
+            ],
+        }
+        assert created == [("hello", "/app")] and sandbox.network_policy == expected
+        # The real `_create_sandbox` passes it on: the spec carries it as the provider's create-time option.
+        assert server._sandbox_spec(task, "/app", network_policy=expected).provider_options == {
+            "network_policy": expected
+        }
+        assert json.dumps(expected) in caplog.text and "install hosts ['registry.npmjs.org', 'nodejs.org']" in (
+            caplog.text
+        )
+        assert server.server_client.paths().count("/v1/agent_sessions/capabilities") == 1
+
+    async def test_an_environment_restriction_with_a_harness_that_needs_nothing_is_exactly_the_tasks(
+        self, tmp_path, monkeypatch
+    ):
+        """The oracle declares no host: its sandbox carries the task's own policy, nothing more."""
+        server, task, sandbox, _ = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, egress={})
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "no-network"
+        assert sandbox.network_policy == {"defaultAction": "deny", "egress": []}
+
+    async def test_a_public_agent_asks_nothing_and_adds_no_policy(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = self.prepared(tmp_path, monkeypatch, toml=TASK_TOML)
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert sandbox.network_policy is None
+        assert "/v1/agent_sessions/capabilities" not in server.server_client.paths()
+
+    @pytest.mark.parametrize("provider", ["docker", "daytona"])
+    async def test_providers_without_an_egress_policy_are_refused_at_seed(self, tmp_path, monkeypatch, provider):
+        server, task, _, created = self.prepared(tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML, provider=provider)
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal and created == []
+        assert "Task 'hello' agent network (allowlist ['example.com'])" in failure.failure_reason
+        assert "requires the OpenSandbox network-policy provider" in failure.failure_reason
+        assert f"(the task runs on '{provider}')" in failure.failure_reason
+
+    @pytest.mark.parametrize("status", [200, 404])
+    async def test_a_harness_that_declares_no_hosts_is_refused_at_seed(self, tmp_path, monkeypatch, status):
+        """No declaration (or an agent server older than the field or the route) is refused, not guessed at."""
+        server, task, _, created = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, egress=None)
+        server.server_client.capabilities_status = status
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal and created == []
+        assert "the agent 'agent' does not declare the hosts it reaches from inside the task's sandbox" in (
+            failure.failure_reason
+        )
+
+    async def test_an_agent_server_that_cannot_be_asked_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        server, task, _, created = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)
+        server.server_client.capabilities_status = 500
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and not failure.terminal and created == []
+        assert "could not ask the agent server which hosts it reaches" in failure.failure_reason
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "0.0.0.0", "::1", "", "[::1]"])
+    async def test_a_host_the_sandbox_cannot_reach_is_refused_at_seed(self, tmp_path, monkeypatch, host):
+        egress = {"model_hosts": [host]}
+        server, task, _, created = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, egress=egress)
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal and created == []
+        assert "host the harness needs" in failure.failure_reason
+
+    @pytest.mark.parametrize(("grants", "opened"), [("off", False), ("optional", True), ("required", True)])
+    async def test_granted_tool_servers_are_opened(self, tmp_path, monkeypatch, grants, opened):
+        server, task, sandbox, _ = self.prepared(
+            tmp_path, monkeypatch, toml=self.MCP_TOML, egress={}, task_mcp_grants=grants
+        )
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        expected = [{"action": "allow", "target": "tools.internal"}] if opened else []
+        assert sandbox.network_policy == {"defaultAction": "deny", "egress": expected}
+
+    async def test_a_deny_by_default_deployment_is_not_widened(self, tmp_path, monkeypatch):
+        deny = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.1.2.3"}]}
+        server, task, _, created = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, sandbox_provider_options={"network_policy": deny}
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal and created == []
+        assert "would widen this deployment's deny-by-default" in failure.failure_reason
+        assert "for the agent" in failure.failure_reason
+        # A harness that needs no host only narrows such a deployment, as `no-network` does for a verifier.
+        server, task, sandbox, _ = self.prepared(
+            tmp_path / "oracle",
+            monkeypatch,
+            toml=self.NO_NETWORK_TOML,
+            egress={},
+            sandbox_provider_options={"network_policy": deny},
+        )
+        assert (await run_episode(server, task)).result is not None
+        assert sandbox.network_policy == {"defaultAction": "deny", "egress": []}
+
+    async def test_a_compose_group_is_refused_at_seed(self, tmp_path, monkeypatch):
+        server, task, _, created = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)
+        monkeypatch.setattr(server, "_uses_compose", lambda task: True)
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal and created == []
+        assert "not supported for a Compose group yet" in failure.failure_reason
+
+    async def test_a_shared_verifier_under_another_policy_is_refused_at_seed(self, tmp_path, monkeypatch):
+        """The loader refuses this shape; the seed keeps the invariant for a task object that did not come from it."""
+        server, task, _, created = self.prepared(tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML)
+        verifier = task.config.verifier.model_copy(update={"network_mode": None, "allowed_hosts": None})
+        task = replace(task, config=task.config.model_copy(update={"verifier": verifier}))
+        monkeypatch.setattr(server, "_resolve_task", lambda *args: asyncio.sleep(0, task))
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal and created == []
+        assert "cannot be changed after it started (allowlist ['example.com']), but its verifier asks for public" in (
+            failure.failure_reason
+        )
 
 
 @pytest.mark.parametrize(

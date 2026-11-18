@@ -231,6 +231,38 @@ def setup():
         yield agent, sandbox
 
 
+def test_sandbox_egress_declares_the_model_server_and_the_installers_hosts(setup):
+    """A server that restricts the borrowed sandbox opens what Codex reaches there: the Gym Model Server it calls
+    and the hosts its installer downloads Node and the CLI from, through the capabilities route."""
+    agent, _ = setup
+    reply = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities")
+    assert reply.json()["sandbox_egress"] == {
+        "model_hosts": ["model.example"],
+        "install_hosts": [
+            "nodejs.org",
+            "unofficial-builds.nodejs.org",
+            "registry.npmjs.org",
+            "dl-cdn.alpinelinux.org",
+        ],
+    }
+    # A runtime baked into the image downloads nothing.
+    agent.config.sandbox_runtime_dir = "/opt/codex-runtime"
+    assert agent.sandbox_egress().install_hosts == []
+    # Without a Gym Model Server Codex cannot run in a borrowed sandbox, so it declares nothing.
+    agent.config.model_server = None
+    assert agent.sandbox_egress() is None
+
+
+def test_the_declared_install_hosts_cover_every_host_the_installer_downloads_from():
+    """`CODEX_INSTALL_HOSTS` must name every host `install_codex_runtime.sh` fetches from (npm's registry serves the
+    `npm install` it runs), or a restricted sandbox would fail the install."""
+    from responses_api_agents.codex_agent.app import CODEX_INSTALL_HOSTS
+
+    script = (Path(__file__).parents[1] / "install_codex_runtime.sh").read_text()
+    fetched = set(re.findall(r"https://([A-Za-z0-9.-]+)/", script))
+    assert fetched and fetched | {"registry.npmjs.org"} == set(CODEX_INSTALL_HOSTS)
+
+
 def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
 

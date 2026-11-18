@@ -236,6 +236,15 @@ def test_oracle_declares_task_tool_context_support(monkeypatch):
     assert seed.json() == {"agent_session_id": "ag-1", "supports_task_tool_context": True}
 
 
+def test_oracle_declares_that_it_reaches_no_host_from_the_sandbox(monkeypatch):
+    """A task that restricts the agent's network runs its reference solution under exactly the task's policy: the
+    oracle calls no model and installs nothing, so `gym dataset validate` checks the task as Harbor's oracle would."""
+    agent, _, _ = make_agent(monkeypatch)
+    reply = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities")
+    assert reply.status_code == 200
+    assert reply.json()["sandbox_egress"] == {"model_hosts": [], "install_hosts": []}
+
+
 def test_task_without_solution_is_unvalidated_not_failed(monkeypatch):
     """The server uploaded nothing for a task without `solution/`, so the script is absent from the sandbox."""
     sandbox = FakeSandbox(solution=False)

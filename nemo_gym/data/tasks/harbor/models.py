@@ -10,6 +10,7 @@ them; :meth:`HarborSettings.unknown_keys` lists them so the loader can say so.
 """
 
 import re
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, ClassVar, Literal, get_args
 
@@ -91,8 +92,40 @@ class HarborMCPServer(HarborSettings):
         return self
 
 
+NetworkMode = Literal["public", "no-network", "allowlist"]
+
+
+@dataclass(frozen=True, eq=False)
+class PhaseNetwork:
+    """The network one phase runs under once Harbor's settings are resolved: a ``network_mode`` and, for an
+    ``allowlist``, the ``allowed_hosts`` it opens, in the order written, lower-cased, without a trailing dot and
+    without repeats. Two networks are equal when they open the same hosts, in whatever order or spelling."""
+
+    mode: NetworkMode
+    allowed_hosts: tuple[str, ...] = ()
+
+    @classmethod
+    def of(cls, mode: NetworkMode, allowed_hosts: list[str] | None) -> "PhaseNetwork":
+        return cls(mode, tuple(dict.fromkeys(str(host).strip().rstrip(".").lower() for host in allowed_hosts or ())))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PhaseNetwork):
+            return NotImplemented
+        return (self.mode, frozenset(self.allowed_hosts)) == (other.mode, frozenset(other.allowed_hosts))
+
+    def __hash__(self) -> int:
+        return hash((self.mode, frozenset(self.allowed_hosts)))
+
+    @property
+    def restricted(self) -> bool:
+        return self.mode != "public"
+
+    def __str__(self) -> str:
+        return f"allowlist {list(self.allowed_hosts)}" if self.mode == "allowlist" else self.mode
+
+
 class HarborPhaseSettings(HarborSettings):
-    network_mode: Literal["public", "no-network", "allowlist"] | None = None
+    network_mode: NetworkMode | None = None
     allowed_hosts: list[str] | None = None
 
 
@@ -127,7 +160,7 @@ class HarborEnvironment(HarborPhaseSettings):
     skills_dir: str | None = None
     healthcheck: HarborHealthcheck | None = None
     workdir: str | None = None
-    network_mode: Literal["public", "no-network", "allowlist"] = "public"
+    network_mode: NetworkMode = "public"
 
     @model_validator(mode="before")
     @classmethod
@@ -410,3 +443,27 @@ class HarborTaskConfig(HarborSettings):
         ``[verifier.environment]`` block is declared.
         """
         return self.verifier.environment_mode != "separate" and self.verifier.environment is None
+
+    def agent_network(self, step: HarborTaskStep | None = None) -> PhaseNetwork:
+        """The network the agent works under, as Harbor resolves its agent phase (``_explicit_phase_policy`` over
+        ``resolve_baseline``): the step's ``[steps.agent]`` policy, else the task's ``[agent]``, else the
+        ``[environment]`` baseline."""
+        for phase in (step.agent if step is not None else None, self.agent):
+            if phase is not None and phase.network_mode is not None:
+                return PhaseNetwork.of(phase.network_mode, phase.allowed_hosts)
+        return PhaseNetwork.of(self.environment.network_mode, self.environment.allowed_hosts)
+
+    def verifier_network(self, step: HarborTaskStep | None = None, *, separate: bool) -> PhaseNetwork:
+        """The network a verification runs under, as Harbor resolves its verifier phase: the step's
+        ``[steps.verifier]`` policy, else the task's ``[verifier]``, else the baseline of the environment the
+        verifier runs in. That is ``[environment]`` for a shared verifier; a separate one runs in the step's
+        ``[steps.verifier.environment]``, else the task's ``[verifier.environment]``, else a copy of ``[environment]``
+        (Harbor's ``resolve_effective_verifier_env_config``), network included."""
+        for phase in (step.verifier if step is not None else None, self.verifier):
+            if phase is not None and phase.network_mode is not None:
+                return PhaseNetwork.of(phase.network_mode, phase.allowed_hosts)
+        environment = self.environment
+        if separate:
+            own = (step.verifier.environment if step is not None else None) or self.verifier.environment
+            environment = own or environment
+        return PhaseNetwork.of(environment.network_mode, environment.allowed_hosts)
