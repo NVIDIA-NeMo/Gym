@@ -115,6 +115,11 @@ def _iter_dataset_rows(dataset_name: str, audio_dir: Path) -> Iterator[Dict[str,
     audio_dir.mkdir(parents=True, exist_ok=True)
 
     for entry in tqdm(ds, desc=dataset_name):
+        audio = entry.get("audio")
+        if audio is not None:
+            # datasets>=4 yields an audio decoder: indexing "array" decodes the clip, and `"array" in audio`
+            # raises TypeError. Decode once into the dict that _format_row and the FLAC write below read.
+            entry = {**entry, "audio": {"array": audio["array"], "sampling_rate": audio["sampling_rate"]}}
         row = _format_row(entry, dataset_name, text_field=text_field, id_field=id_field)
         if row is None:
             continue

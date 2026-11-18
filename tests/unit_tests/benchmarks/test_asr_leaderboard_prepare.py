@@ -27,14 +27,27 @@ UPSTREAM_SUBSETS = {
 }
 
 
+class _FakeAudioDecoder:
+    """What datasets>=4 yields for an Audio column: "array" and "sampling_rate" can be indexed (each "array" read
+    decodes the clip again), but it is no mapping, so `"array" in decoder` raises like datasets' wrapper does."""
+
+    def __init__(self, num_samples: int, sampling_rate: int = 16000) -> None:
+        self.num_samples = num_samples
+        self.sampling_rate = sampling_rate
+        self.decodes = 0
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "array":
+            self.decodes += 1
+            return [0.0] * self.num_samples
+        if key == "sampling_rate":
+            return self.sampling_rate
+        raise TypeError("'torchcodec.decoders.AudioDecoder' object is not subscriptable")
+
+
 def _entries(config: str, split: str, n: int = 2) -> list[dict[str, Any]]:
     return [
-        {
-            "id": f"{config}-{split}-{i}",
-            "text": f"utterance {i}",
-            "audio": {"array": [0.0] * 1600, "sampling_rate": 16000},
-        }
-        for i in range(n)
+        {"id": f"{config}-{split}-{i}", "text": f"utterance {i}", "audio": _FakeAudioDecoder(1600)} for i in range(n)
     ]
 
 
@@ -112,3 +125,39 @@ def test_a_failed_subset_leaves_no_partial_benchmark_jsonl(
     else:
         assert out_path.read_text(encoding="utf-8") == previous
     assert sorted(p.name for p in out_path.parent.iterdir()) == ([] if previous is None else [out_path.name])
+
+
+@pytest.mark.parametrize("shape", ["decoder", "dict"])
+def test_prepare_decodes_each_clip_once_and_skips_too_short_audio(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str
+) -> None:
+    """datasets>=4 rows carry an audio decoder, datasets<4 rows a decoded dict; both must produce the same rows."""
+    clips = {"spk/long": _FakeAudioDecoder(1600), "spk/short": _FakeAudioDecoder(800)}  # 0.1 s and 0.05 s
+    entries = [
+        {
+            "id": raw_id,
+            "text": "hello",
+            "audio": clip if shape == "decoder" else {"array": clip["array"], "sampling_rate": clip["sampling_rate"]},
+        }
+        for raw_id, clip in clips.items()
+    ]
+    for clip in clips.values():
+        clip.decodes = 0
+    monkeypatch.setattr("datasets.load_dataset", lambda *args, **kwargs: entries)
+    written: dict[str, tuple[int, int]] = {}
+    soundfile = types.ModuleType("soundfile")
+    soundfile.write = lambda path, array, sampling_rate: written.update({Path(path).name: (len(array), sampling_rate)})
+    monkeypatch.setitem(sys.modules, "soundfile", soundfile)
+    monkeypatch.setattr(prepare_module, "DATA_DIR", tmp_path / "data")
+
+    out_path = prepare_module.prepare(work_dir=tmp_path / "audio", datasets=("ami",))
+
+    rows = [json.loads(line) for line in out_path.read_text(encoding="utf-8").split("\n") if line]
+    assert [row["sample_id"] for row in rows] == ["spk/long"]
+    assert (
+        rows[0]["responses_create_params"]["metadata"]["audio_path"]
+        == "/dataset/asr-leaderboard/data/ami/spk_long.flac"
+    )
+    assert written == {"spk_long.flac": (1600, 16000)}
+    if shape == "decoder":
+        assert [clip.decodes for clip in clips.values()] == [1, 1]
