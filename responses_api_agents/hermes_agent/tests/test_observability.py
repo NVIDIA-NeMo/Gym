@@ -210,9 +210,11 @@ def test_concurrent_tool_intervals_end_at_each_worker_not_completion_callback():
     agent._invoke_tool = invoke
     observer = HermesAgentObserver().instrument(agent)
 
+    arguments = {name: {} for name in release}
+
     def execute(name):
-        agent.tool_start_callback(f"{name}-call", name, {})
-        agent._invoke_tool(name, {}, "task")
+        agent.tool_start_callback(f"{name}-call", name, arguments[name])
+        agent._invoke_tool(name, arguments[name], "task")
 
     workers = {name: threading.Thread(target=execute, args=(name,)) for name in release}
     for worker in workers.values():
@@ -226,7 +228,7 @@ def test_concurrent_tool_intervals_end_at_each_worker_not_completion_callback():
     workers["slow"].join(timeout=2)
     assert not workers["slow"].is_alive()
     for name in workers:
-        agent.tool_complete_callback(f"{name}-call", name, {}, name)
+        agent.tool_complete_callback(f"{name}-call", name, arguments[name], name)
     bundle = observer.finish({"completed": True, "messages": []})
 
     fast = _tool(bundle, "fast-call")

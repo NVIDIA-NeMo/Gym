@@ -81,6 +81,7 @@ class SandboxHermesObserver:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._executing_tool: ContextVar[tuple[str, str] | None] = ContextVar("executing_tool", default=None)
         self._child_index = 0
         self._started_ticks: dict[tuple[str, str], float] = {}
         self._tools: dict[tuple[str, str], dict[str, Any]] = {}
@@ -138,6 +139,7 @@ class SandboxHermesObserver:
         agent._gym_on_iteration_limit_reached = self.on_iteration_limit_reached
         self._chain_callback(agent, "tool_start_callback", self._tool_started, invocation_id)
         self._chain_callback(agent, "tool_complete_callback", self._tool_completed, invocation_id)
+        self._wrap_tool_execution(agent, invocation_id)
         self._wrap_model_calls(agent, invocation_id)
         self._wrap_compaction(agent, invocation_id)
 
@@ -302,13 +304,40 @@ class SandboxHermesObserver:
 
         setattr(agent, _COMPACTION_METHOD, compact)
 
+    def _wrap_tool_execution(self, agent: Any, invocation_id: str) -> None:
+        original = getattr(agent, "_invoke_tool", None)
+        if not callable(original):
+            return
+
+        def invoke(*args: Any, **kwargs: Any) -> Any:
+            # v0.23.2 supplies a call ID even when middleware rewrites the argument dictionary.
+            call_id = args[3] if len(args) > 3 else kwargs.get("tool_call_id")
+            key = (invocation_id, str(call_id or ""))
+            with self._lock:
+                tool = self._tools.get(key)
+                if tool is not None:
+                    tool.update(started_at=time(), timing_source="executor")
+            started = monotonic()
+            token = self._executing_tool.set(key)
+            try:
+                return original(*args, **kwargs)
+            finally:
+                self._executing_tool.reset(token)
+                if tool is not None:
+                    with self._lock:
+                        tool.update(completed_at=time(), duration_ms=(monotonic() - started) * 1000)
+
+        agent._invoke_tool = invoke
+
     def _child_added(self, child: Any, parent_id: str) -> None:
         with self._lock:
             self._child_index += 1
             invocation_id = f"{parent_id}.child-{self._child_index}"
+            executing = self._executing_tool.get()
             self._invocations[invocation_id] = {
                 "invocation_id": invocation_id,
                 "parent_invocation_id": parent_id,
+                "spawned_by_tool_call_id": executing[1] if executing and executing[0] == parent_id else None,
                 "model_response_ids": [],
                 "messages": [],
                 "status": "unknown",
@@ -340,9 +369,10 @@ class SandboxHermesObserver:
                 self._tool_started(invocation_id, call_id, name, args)
             tool = self._tools[key]
             failed = self._failed_result(name, result)
-            tool["completed_at"] = time()
             started = self._started_ticks.pop(key, None)
-            tool["duration_ms"] = max(0.0, (monotonic() - started) * 1000) if started is not None else None
+            if tool["completed_at"] is None:
+                tool["completed_at"] = time()
+                tool["duration_ms"] = max(0.0, (monotonic() - started) * 1000) if started is not None else None
             tool["status"] = "failed" if failed else "completed"
             tool["error_type"] = "tool_result" if failed else None
 

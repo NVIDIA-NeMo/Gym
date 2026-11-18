@@ -192,3 +192,19 @@ def test_summary_calls_keep_invocation_identity_and_usage(monkeypatch, usage):
     assert observations["invocations"][0]["model_response_ids"] == ["summary-response"]
     assert observations["compactions"][0]["model_calls"] == [{"response_id": "summary-response"}]
     assert observations["compactions"][0]["summary"] == "Preserve progress."
+
+
+def test_worker_attributes_child_and_executor_interval_to_native_call_id():
+    agent = _Agent()
+    agent._invoke_tool = lambda *_: agent._active_children.append(_Agent())
+    observer = SandboxHermesObserver().instrument(agent)
+    agent.tool_start_callback("d1", "delegate_task", {"goal": "inspect"})
+    agent._invoke_tool("delegate_task", {"goal": "inspect"}, "task-id", "d1")
+    before_callback = observer.finish({"completed": True}, None)["tools"][0].copy()
+    agent.tool_complete_callback("d1", "delegate_task", {}, "done")
+    observation = observer.finish({"completed": True}, None)
+    assert observation["invocations"][1]["spawned_by_tool_call_id"] == "d1"
+    tool = observation["tools"][0]
+    assert tool["timing_source"] == "executor"
+    assert tool["completed_at"] == before_callback["completed_at"] and tool["duration_ms"] >= 0
+    assert tool["status"] == "completed"

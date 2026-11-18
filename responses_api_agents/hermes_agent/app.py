@@ -634,6 +634,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                         AgentInvocation(
                             invocation_id=invocation_id,
                             parent_invocation_id=raw_invocation.get("parent_invocation_id"),
+                            spawned_by_tool_call_id=raw_invocation.get("spawned_by_tool_call_id"),
                             status="incomplete" if root_context_limit else raw_invocation.get("status", "unknown"),
                             stop_reason="context_limit" if root_context_limit else raw_invocation.get("stop_reason"),
                             # Every call goes to the configured Model Server, so a response ID identifies the call.
@@ -1036,7 +1037,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 observations = AgentObservationBundle(
                     source="hermes", gaps=[ObservationGap(code="observation_capture_failed")]
                 )
-            observation_collector(observations)
+            try:
+                observation_collector(observations)
+            except Exception:
+                LOG.exception("Unable to return Hermes observations")
         return self._response_from_result(
             body=body,
             result=result,
