@@ -20,7 +20,9 @@ from nemo_gym.config.global_config import CACHE_DIR_KEY_NAME, maybe_get_global_c
 
 # Wheel metadata reports 0.0.0 and wheels omit runtime assets.
 with Path(__file__).with_name("pyproject.toml").open("rb") as metadata:
-    HERMES_SOURCE = tomllib.load(metadata)["tool"]["nemo-gym"]["hermes"]["source"]
+    _RUNTIME = tomllib.load(metadata)["tool"]["nemo-gym"]["hermes"]
+HERMES_SOURCE = _RUNTIME["source"]
+HERMES_PYTHON_VERSION = _RUNTIME["python-version"]
 HERMES_COMMIT = HERMES_SOURCE.rsplit("@", 1)[1]
 
 
@@ -66,14 +68,15 @@ def host_python() -> Path:
         return bundled / "bin/python3"
     source = source_checkout()
     env = os.environ.copy()
-    env["UV_PROJECT_ENVIRONMENT"] = str(source / ".venv")
+    environment = source.parent / f"venv-{HERMES_PYTHON_VERSION}"
+    env["UV_PROJECT_ENVIRONMENT"] = str(environment)
     subprocess.run(
-        ["uv", "sync", "--frozen", "--no-dev", "--extra", "mcp", "--python", "3.14"],
+        ["uv", "sync", "--frozen", "--no-dev", "--extra", "mcp", "--python", HERMES_PYTHON_VERSION],
         check=True,
         cwd=source,
         env=env,
     )
-    return source / ".venv/bin/python"
+    return environment / "bin/python"
 
 
 @functools.cache

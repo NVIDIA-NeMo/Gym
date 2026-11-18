@@ -1016,8 +1016,9 @@ class TestResultClassification:
 
 
 def test_host_and_sandbox_share_an_immutable_runtime_source():
-    from responses_api_agents.hermes_agent.runtime import HERMES_COMMIT, HERMES_SOURCE
+    from responses_api_agents.hermes_agent.runtime import HERMES_COMMIT, HERMES_PYTHON_VERSION, HERMES_SOURCE
 
+    assert _HERMES_RUNTIME.python_version == HERMES_PYTHON_VERSION
     assert re.fullmatch("[0-9a-f]{40}", HERMES_COMMIT)
     assert _HERMES_RUNTIME.requirements == (HERMES_SOURCE,)
     assert HERMES_SOURCE.endswith("@" + HERMES_COMMIT)

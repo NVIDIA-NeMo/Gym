@@ -1917,3 +1917,14 @@ async def test_invalid_images_fail_before_execution(agent, state, role, image, m
     )
     assert recovered.status == "completed"
     (agent._run_sandbox_episode if sandbox else agent._create_response).assert_awaited_once()
+
+
+@pytest.mark.parametrize("minor", [17, 27, None])
+async def test_hermes_explains_unsupported_glibc_before_downloading_wheels(tmp_path, minor):
+    from nemo_gym.agents.utils.sandbox_python import SandboxPlatform
+
+    with pytest.raises(RuntimeError, match=r"Hermes requires glibc 2\.28 or newer"):
+        await hermes_sandbox._HERMES_RUNTIME._build_site_packages(
+            SandboxPlatform("x86_64", "gnu", minor), tmp_path / "bundle"
+        )
+    assert not (tmp_path / "bundle").exists()

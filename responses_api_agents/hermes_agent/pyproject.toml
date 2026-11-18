@@ -66,3 +66,4 @@ members = []
 [tool.nemo-gym.hermes]
 # Hermes 0.23.2 runs from this checkout in its own Python 3.14 environment.
 source = "git+https://github.com/NousResearch/hermes-agent.git@ae2a81ccc00e9b7c06301523e5bb09608397149c"
+python-version = "3.14.7"
