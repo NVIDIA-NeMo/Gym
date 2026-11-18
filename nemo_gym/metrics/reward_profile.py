@@ -14,7 +14,6 @@
 # limitations under the License.
 from __future__ import annotations
 
-import logging
 import math
 import re
 import statistics
@@ -204,17 +203,6 @@ class RewardProfiler:
                 "wandb is not installed, so the histogram/* stats are being skipped. "
                 "Install with: pip install nemo-gym[wandb]",
                 stacklevel=2,
-            )
-            return None
-
-        minimum, maximum = float(data.min()), float(data.max())
-        if not math.isfinite(minimum) or not math.isfinite(maximum) or not math.isfinite(maximum - minimum):
-            logging.getLogger(__name__).warning(
-                "Skipping histogram for column %r: degenerate float64 range (n=%d, min=%r, max=%r)",
-                data.name,
-                len(data),
-                minimum,
-                maximum,
             )
             return None
 

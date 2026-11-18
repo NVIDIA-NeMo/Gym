@@ -154,46 +154,82 @@ def _never_accepting_listener() -> tuple[socket.socket, list[socket.socket], int
 async def test_only_a_timeout_after_the_request_was_sent_is_a_response_timeout(
     monkeypatch, phase: str, connect_timeout: float | None, waited_for_response: bool
 ):
-    async def never_answer(reader, writer):
-        await reader.read()
-        writer.close()
+    upload_received = asyncio.Event()
+    release_response = asyncio.Event()
+    total_timer = None
 
-    server = await asyncio.start_server(never_answer, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
+    class PhaseTimeout(aiohttp.client.TimeoutHandle):
+        def start(self):
+            nonlocal total_timer
+            total_timer = self
+            # The real aiohttp timeout still cancels the request, but only after the
+            # intended upload phase. Wall-clock deadlines can expire during setup in CI.
+            return None
+
+    class RequestWithTimeoutAfterUpload(aiohttp.ClientRequest):
+        async def write_bytes(self, writer, conn, content_length=None):
+            await super().write_bytes(writer, conn, content_length)
+            if waited_for_response:
+                asyncio.get_running_loop().call_soon(total_timer)
+
+    async def never_answer(request):
+        await request.read()
+        upload_received.set()
+        await release_response.wait()
+        return web.json_response({})
+
+    if phase in {"sent", "uploading"}:
+        monkeypatch.setattr(aiohttp.client, "TimeoutHandle", PhaseTimeout)
+    app = web.Application()
+    app.router.add_post("/v1/responses", never_answer)
+    server = TestServer(app)
+    await server.start_server()
     listener = None
+    queued = []
+    url = str(server.make_url("/v1/responses"))
     if phase == "never-connected":
-        listener, _queued, port = _never_accepting_listener()
-    url = f"http://127.0.0.1:{port}/v1/responses"
-    session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit_per_host=1))
-    held = asyncio.create_task(session.post(url, data=b"x")) if phase == "pool" else None
-    await asyncio.sleep(0.1)
+        listener, queued, port = _never_accepting_listener()
+        url = f"http://127.0.0.1:{port}/v1/responses"
+    session = aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit_per_host=1), request_class=RequestWithTimeoutAfterUpload
+    )
+    held = None
     monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
     monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
     model = NeMoGymAsyncOpenAI(
         api_key="test",
-        base_url=f"http://127.0.0.1:{port}/v1",
+        base_url=str(server.make_url("/v1")),
         max_num_tries=1,
         request_timeout_seconds=0.5,
         connect_timeout_seconds=connect_timeout,
     )
     try:
-        with RequestFailureLog.capture() as log:
-            with pytest.raises(TimeoutError) as caught:
+        async with asyncio.timeout(30):  # Bound stuck I/O, not the phase under test.
+            if phase == "pool":
+                held = asyncio.create_task(session.post(url, data=b"x"))
+                await upload_received.wait()  # Occupy the sole connection before the model call.
+            with RequestFailureLog.capture() as log:
+                with pytest.raises(TimeoutError) as caught:
 
-                async def unfinished_body():
-                    yield b"started"
-                    await asyncio.Event().wait()
+                    async def unfinished_body():
+                        yield b"started"
+                        asyncio.get_running_loop().call_soon(total_timer)
+                        await asyncio.Event().wait()
 
-                payload = {"data": unfinished_body()} if phase == "uploading" else {"json": {"model": "m"}}
-                await model._request(method="POST", url=url, **payload)
-            report = log.reply_report(caught.value)
+                    payload = {"data": unfinished_body()} if phase == "uploading" else {"json": {"model": "m"}}
+                    await model._request(method="POST", url=url, **payload)
+                report = log.reply_report(caught.value)
     finally:
         if held is not None:
             held.cancel()
+            await asyncio.gather(held, return_exceptions=True)
+        release_response.set()
         await session.close()
-        server.close()
+        await server.close()
         if listener is not None:
             listener.close()
+        for pending in queued:
+            pending.close()
 
     [attempt] = report.events.values()
     assert report.failure_id == attempt.event_id
