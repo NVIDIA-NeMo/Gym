@@ -17,8 +17,9 @@
 A task that declares ``skills_dir`` has its skills in the task sandbox: the ``harbor`` Environment Server uploads
 ``environment/skills/`` there at seed, unless the image already holds them, and writes the folder's absolute path to
 ``/tmp/.nemo-gym/task.json``. A harness that runs its CLI with a private configuration folder (Claude Code's
-``CLAUDE_CONFIG_DIR``, Codex's ``CODEX_HOME``) does not see that folder, so at seed it copies the skills into the
-CLI's own discovery folder with :func:`stage_task_skills`, and the model finds them through the CLI's skill mechanism.
+``CLAUDE_CONFIG_DIR``, Codex's ``CODEX_HOME``, OpenCode's ``XDG_CONFIG_HOME/opencode``, Hermes's ``HERMES_HOME``,
+Pi's ``PI_CODING_AGENT_DIR``) does not see that folder, so at seed it copies the skills into the ``skills`` folder of
+that configuration folder with :func:`stage_task_skills`, and the model finds them through the CLI's skill mechanism.
 """
 
 import json

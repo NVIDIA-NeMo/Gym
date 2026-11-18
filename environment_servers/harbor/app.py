@@ -1667,8 +1667,8 @@ class HarborEnvironmentServer(
         await self._prepare_step_workdir(session, turn)
         await self._run_step_healthcheck(session, turn)
         await self._place_turn_solution(session, turn)
-        # Claude Code and Codex are admitted to a skills_dir task because they copy what task.json names at seed;
-        # with the file gone they would copy nothing and run the step without its skills.
+        # A harness that declares supports_task_skills is admitted to a skills_dir task because it copies what
+        # task.json names at seed; with the file gone it would copy nothing and run the step without its skills.
         await self._write_task_context(session.sandbox, task, session.workdir)
         return access
 

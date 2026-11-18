@@ -180,10 +180,10 @@ async def test_each_step_is_a_turn_in_a_fresh_session_on_one_sandbox(tmp_path, m
 
 
 async def test_each_steps_harness_is_seeded_after_task_json_is_written_again(tmp_path, monkeypatch):
-    """Claude Code and Codex copy the skills that task.json names at their seed, and a fresh session seeds every step:
-    the previous step's agent or verifier, or the step's setup.sh, may have removed the file the episode's seed wrote,
-    and the harness would then copy nothing and run the step without its skills. Each step's preparation writes it
-    again, after the step's setup."""
+    """A harness that declares supports_task_skills copies the skills that task.json names at its seed, and a fresh
+    session seeds every step: the previous step's agent or verifier, or the step's setup.sh, may have removed the file
+    the episode's seed wrote, and the harness would then copy nothing and run the step without its skills. Each
+    step's preparation writes it again, after the step's setup."""
     steps = '\n[[steps]]\nname = "one"\n\n[[steps]]\nname = "two"\n'
     server, task, sandbox, _ = multi_turn_server(
         tmp_path, monkeypatch, steps, {"one": "a", "two": "b"}, base=TASK_TOML + 'skills_dir = "/app/.skills"\n'

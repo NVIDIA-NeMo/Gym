@@ -1308,8 +1308,8 @@ class TestAgentStage:
         assert not any("test.sh" in call["command"] for call in sandbox.execs)
 
     async def test_a_task_with_only_skills_runs_on_a_harness_that_stages_task_skills(self, tmp_path, monkeypatch):
-        """Claude Code and Codex copy the task's ``skills_dir`` into their CLI's own skills folder at seed, but read
-        no MCP servers: a skills-only task is admitted, with no grants needed."""
+        """A harness that declares ``supports_task_skills`` copies the task's ``skills_dir`` into its CLI's own skills
+        folder at seed, but reads no MCP servers: a skills-only task is admitted, with no grants needed."""
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=task_tool_context_toml("skills_dir"))
         server.server_client.supports_task_tool_context = False
         server.server_client.supports_task_skills = True
