@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from aiohttp import ClientTimeout
 
-from nemo_gym.server_utils import request
+from nemo_gym.client import request
 
 
 CACHE_DIR = Path(gettempdir()) / "nemo-gym-miniswe-assets"
@@ -33,7 +33,7 @@ PYTHON_SHA256 = {
 }
 
 
-async def cached_download(url: str, *, sha256: str | None = None) -> Path:
+async def cached_download(url: str, *, sha256: str | None = None, timeout: float = 120) -> Path:
     """Download once per cache, serializing concurrent first-task requests."""
     async with _DOWNLOAD_LOCK:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -42,7 +42,7 @@ async def cached_download(url: str, *, sha256: str | None = None) -> Path:
             return path
         temporary = path.with_name(path.name + "." + uuid4().hex)
         try:
-            async with await request("GET", url, timeout=ClientTimeout(total=120)) as response:
+            async with await request("GET", url, timeout=ClientTimeout(total=timeout)) as response:
                 response.raise_for_status()
                 data = await response.read()
             if sha256 and hashlib.sha256(data).hexdigest() != sha256:

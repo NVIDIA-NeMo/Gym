@@ -88,8 +88,9 @@ The public API is part of `nemo-gym`. Runtime backends can have optional depende
 | `SandboxResources` | Typed resource request with CPU, memory, disk, and GPU fields. |
 | `SandboxExecResult` | Command result with `stdout`, `stderr`, `return_code`, and optional `error_type`. |
 | `SandboxStatus` | Provider-neutral lifecycle status: `starting`, `running`, `stopped`, `error`, or `unknown`. |
-| `SandboxCreateError` | Base create-time failure for provider allocation and readiness errors. |
-| `SandboxCreateVerificationError` | Create-time failure raised when a new sandbox cannot pass provider readiness checks. |
+| `SandboxCreateError` | Creation exception retained for [providers awaiting migration](#required-provider-migrations). |
+| `SandboxCreateVerificationError` | Readiness-check exception retained for providers awaiting migration. |
+| `SandboxPtyError` | PTY-session exception retained for providers awaiting migration. |
 
 ## First-Run Example
 
@@ -234,6 +235,10 @@ with Sandbox(provider_config, SandboxSpec(image="ghcr.io/example/eval-image:py31
 Do not call `Sandbox` from FastAPI handlers, async resources servers, or async agents. It blocks the caller by design. Use `AsyncSandbox` in async code.
 </Warning>
 
+## Interactive Terminals
+
+`AsyncSandbox.pty` opens interactive terminal sessions on providers that implement `SupportsSandboxPty`: OpenSandbox (execd PTY sessions, which also re-attach by id from another process) and Docker (`docker exec -i -t` under a host pseudo-terminal; sessions live in the calling process). `await sandbox.pty.create(rows=..., cols=...)` returns a session with `read`, `write`, `resize`, `send_signal`, `wait_exit` and `close`; `await sandbox.pty.exec(command)` runs one command in a terminal and collects its output; `pty=False` gives a pipe session with stdout and stderr split. Providers without the capability raise `NotImplementedError`, so use `exec()` there. The sync `Sandbox` facade does not mirror the PTY namespace.
+
 ## SandboxSpec Fields
 
 `SandboxSpec` is intentionally provider-neutral. Providers map these fields onto their own runtime primitives.
@@ -245,7 +250,7 @@ Do not call `Sandbox` from FastAPI handlers, async resources servers, or async a
 | `ready_timeout_s` | Time to wait for sandbox readiness. |
 | `workdir` | Default working directory for `exec()` calls. |
 | `env` | Environment variables injected into the sandbox. Forward only values required by the task. |
-| `files` | Text files to upload at startup, keyed by remote target path. |
+| `files` | Files to upload at startup, keyed by remote target path. A `str` value is written as UTF-8 text and a `bytes` value is written unchanged. |
 | `metadata` | String metadata for tracing, debugging, and backend labels. Providers may normalize values for their runtime. |
 | `resources` | `SandboxResources` or a mapping with `cpu`, `memory_mib`, `disk_gib`, `gpu`, and `gpu_type`. |
 | `entrypoint` | Optional container entrypoint override. |
@@ -268,14 +273,18 @@ Unknown resource keys raise a `ValueError`, which catches config drift early.
 
 ## Startup Files and File Transfer
 
-Use `files` for small text files that should exist before the first command runs:
+Use `files` for small files that should exist before the first command runs.
+A `str` value is written as UTF-8 text, and a `bytes` value, such as an image, is written unchanged:
 
 ```python
+from pathlib import Path
+
 spec = SandboxSpec(
     image="ghcr.io/example/eval-image:py312",
     workdir="/workspace",
     files={
         "/workspace/input.txt": "hello\n",
+        "/workspace/figure.png": Path("figure.png").read_bytes(),
     },
 )
 ```
@@ -288,6 +297,32 @@ await sandbox.download("/workspace/log.txt", output_path)
 ```
 
 `upload()` and `download()` operate on files. If you need structured values, serialize them locally before uploading and parse the downloaded file locally after the sandbox command completes.
+
+To move in-memory content into or out of a sandbox that is already running, use `upload_bytes()` and `download_bytes()`, or `upload_text()` and `read_text()` for UTF-8 text, from `nemo_gym.sandbox`.
+They go through `upload()` and `download()`, so the content never passes through a shell:
+
+```python
+from nemo_gym.sandbox import download_bytes, upload_bytes, upload_text
+
+await upload_bytes(sandbox, path="/workspace/figure.png", data=image_bytes)
+await upload_text(sandbox, path="/workspace/notes.md", text="# Notes\n")
+plot = await download_bytes(sandbox, path="/workspace/plot.png")
+```
+
+For media in a prompt, `nemo_gym.core.split_text_and_media` decodes a message's content into its text and its media files.
+`stage_media()` writes each file to `/tmp/nemo-gym-media/<sha256>.<extension>`, named by its content, and returns the sandbox paths to pass to a harness, in order.
+Every rollout of a task then gets the same paths, and so the same prompt.
+The sandbox's default user creates the directory, and each file is uploaded under a unique name, readable by every user, then renamed onto its path. Sessions that share a sandbox can stage the same image at once and never read a partly written file.
+Sessions do not delete staged files, because another session may be reading them. A sandbox with its own `/tmp` drops them when it is destroyed. The local provider, and Apptainer without `--contain`, use the host's `/tmp`, where the files stay until the host clears it.
+`stage_media()` raises `SandboxUnavailableError` when the provider cannot run a staging command, such as on a timeout, and `SandboxTransferError` when a command fails inside the sandbox.
+
+```python
+from nemo_gym.core import split_text_and_media
+from nemo_gym.sandbox import stage_media
+
+text, media = split_text_and_media(message.content)
+paths = await stage_media(sandbox, media)
+```
 
 ## Status and Cleanup
 
@@ -328,20 +363,58 @@ Rewrites are ordered. The first matching `from` prefix wins.
 
 ## Error Handling
 
-Sandbox create failures use provider-neutral exception classes:
+Command process exits, including nonzero exits, return `SandboxExecResult`. For allocation, readiness,
+lifecycle and runtime failures, new and migrated providers must raise `NgFailureEvent` with `boundary="sandbox"`.
+Its registered `failure_kind`, `operation`, observed HTTP status, typed `details` and explicit cause
+carry the evidence; callers apply their own outcome policy. A failure kind alone does not decide
+attribution, retries, health or a zero score.
 
-- `SandboxCreateError` for sandbox allocation or readiness failures.
-- `SandboxCreateVerificationError` when a created sandbox fails Gym readiness verification.
+The registered kinds and their meanings live in
+[failure_kinds.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/core/failure_kinds.py).
+The `provider_*` namespace covers sandboxes, browsers and containers; `boundary="sandbox"` identifies
+the API boundary for sandbox events.
 
-In resources servers and agents, catch these errors close to the sandbox operation and return a meaningful verifier or rollout error. Do not let one bad sandbox allocation crash a long-running server.
+A command exit code of 137, a signal kill near a deadline, an error message, or a sidecar's OOM does not
+establish the command's cause. Forward `NgFailureEvent` unchanged when only forwarding; when reporting
+a distinct failure at a caller's boundary, create its event and use `raise ... from error`.
 
-```python
-from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError
+Local argument/configuration validation and task cancellation are separate from operational failure events.
+Do not translate cancellation into a sandbox failure.
+PTY `read(timeout_s=...)` and `wait_exit(timeout_s=...)` raise `TimeoutError` when the caller's bounded wait expires:
+that timeout alone does not mean the PTY or command failed.
 
+Resources servers and agents forward failure events to the owning task boundary for its outcome policy,
+preserving their causes. An infrastructure failure alone does not justify a zero reward.
+See [Failure observations](/observability/rollout-failures) for recording, transport and saved reports,
+and [policy by execution stage](/observability/rollout-failures#policy-by-execution-stage) for shared OOM defaults.
 
-sandbox = AsyncSandbox(provider_config, spec)
-try:
-    await sandbox.start()
-except SandboxCreateError as error:
-    return {"reward": 0.0, "error": f"sandbox_create_failed: {error}"}
-```
+### Required provider migrations
+
+OpenSandbox implements the failure-event contract above. The following built-in providers **must migrate**
+in follow-up changes:
+
+| Provider | Config key |
+| --- | --- |
+| Apptainer | `apptainer` |
+| Daytona | `daytona` |
+| Docker | `docker` |
+| E2B | `e2b` |
+| ECS Fargate | `ecs_fargate` |
+| Enroot | `enroot` |
+| Local | `local` |
+| OpenShell | `openshell` |
+
+For each migration:
+
+- Cover allocation, readiness, lifecycle, command and file failures, plus PTY failures where supported.
+  Include operational failures currently returned as error-valued results; keep ordinary command exits as `SandboxExecResult`.
+- Classify provider evidence into registered kinds and preserve explicit causes.
+- Record recovered attempts and use configurable outcome policies within existing retry budgets and replay constraints.
+- Update callers and tests together, retaining their retry and grading behavior.
+
+A provider's migration is complete when all its supported operational failure paths and their callers use the shared contract.
+
+Until a provider migrates, callers must retain its existing exception handling. `SandboxCreateError`,
+`SandboxCreateVerificationError` and `SandboxPtyError` remain compatibility classes for those paths;
+they are not an alternative contract for new providers. Remove them only after their remaining providers
+and callers have migrated. The [provider guide](./adding-a-provider#provider-contract) describes the required implementation.

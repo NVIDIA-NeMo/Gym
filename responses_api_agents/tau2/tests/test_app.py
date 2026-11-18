@@ -22,9 +22,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_agent import AggregateMetricsRequest
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.core import ModelCallSampling, encode_model_sampling
+from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
 
 # Import the adapter before Tau2 so it can set TAU2_DATA_DIR before Tau2
@@ -188,7 +191,7 @@ class TestApp:
         client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(return_value=malformed),
         ) as create_chat_completion:
             with pytest.raises(Tau2MalformedToolCallError, match="1 consecutive attempts"):
@@ -203,7 +206,7 @@ class TestApp:
         client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(return_value=malformed),
         ) as create_chat_completion:
             with pytest.raises(Tau2MalformedToolCallError, match="1 consecutive attempts"):
@@ -221,7 +224,7 @@ class TestApp:
         )
 
         with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(side_effect=[malformed, valid]),
         ) as create_chat_completion:
             response = await client.create_chat_completion(model="model", messages=[])
@@ -235,7 +238,7 @@ class TestApp:
         client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(return_value=response),
         ) as create_chat_completion:
             with pytest.raises(Tau2MalformedToolCallError, match="must decode to an object"):
@@ -251,7 +254,7 @@ class TestApp:
         client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(return_value=expected),
         ) as create_chat_completion:
             response = await client.create_chat_completion(model="model", messages=[])
@@ -297,11 +300,23 @@ class TestApp:
         validated = Tau2FailureResponse.model_validate(result)
         assert validated.reward == 0.0
         assert result[NG_FAILURE_CLASS_KEY] == expected_failure_class
+        # No model call failed: no caller is named and no kind is stamped.
+        assert "failure_caller" not in result and result.get("failure_kind") is None
+        assert result["response"]["output"] == []
         assert result["error"] != "stale"
         assert result["response"]["object"] == "response"
-        assert result["response"]["output"][0]["content"][0]["text"] == ""
         assert NG_NO_PERSIST_KEY not in result
         assert NG_TERMINAL_KEY not in result
+
+    def test_failure_placeholder_is_marked_as_no_generation(self) -> None:
+        """The empty assistant message the failure path returns is a placeholder, never a saved answer."""
+        _, server = self._dummy_server()
+        body = self._example_run_request()
+        failure = server._failure_response(body, server._sanitized_record(body), "infrastructure_error", "boom")
+        result = failure.model_dump(mode="json")
+        assert result["response"]["metadata"] == NG_NO_GENERATION_METADATA
+        assert not has_saved_generation(result)
+        assert not has_saved_generation({"_ng_failure_response": result["response"]})
 
     def test_sanity_query_input(self) -> None:
         example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
@@ -405,6 +420,32 @@ class TestApp:
         assert response.result.agent_steps == 3
         assert response.result.max_agent_steps == 3
         assert response.result.termination_reason == TerminationReason.MAX_AGENT_STEPS
+
+    @pytest.mark.parametrize("sampling", [None, ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)])
+    async def test_the_simulated_user_keeps_its_own_sampling(self, sampling: Optional[ModelCallSampling]) -> None:
+        _, server = self._dummy_server()
+        body = self._example_run_request().model_copy(update={"model_sampling": sampling})
+        captured_kwargs = {}
+
+        async def fake_run_single_task(**kwargs):
+            captured_kwargs.update(kwargs)
+            return self._fake_simulation_run()
+
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model-host:8000"),
+            patch("responses_api_agents.tau2.app.run_single_task", side_effect=fake_run_single_task),
+        ):
+            await server.run(body)
+
+        config = captured_kwargs["config"]
+        if sampling is None:
+            # Gym-only evaluation: neither URL changes.
+            assert config.llm_args_agent["api_base"] == "http://model-host:8000/v1"
+            assert config.llm_args_user["api_base"] == "http://model-host:8000/v1"
+        else:
+            values = encode_model_sampling(sampling)
+            assert config.llm_args_agent["api_base"] == f"http://model-host:8000/ng-sampling/{values}/v1"
+            assert config.llm_args_user["api_base"] == "http://model-host:8000/ng-sampling/null/v1"
 
     async def test_run_uses_agent_visible_messages_for_responses_conversion(self) -> None:
         _, server = self._dummy_server(max_agent_steps=3)
@@ -557,7 +598,7 @@ class TestApp:
         token = _POLICY_CALL_USAGES.set(usages)
         try:
             with patch(
-                "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+                "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
                 AsyncMock(side_effect=[malformed, valid, user_turn]),
             ):
                 await client.create_chat_completion(model=TAU2_AGENT_MODEL, messages=[])
@@ -595,7 +636,7 @@ class TestApp:
 
         with (
             patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
-            patch("nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion", create_chat_completion),
+            patch("nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion", create_chat_completion),
         ):
             response = TestClient(app).post("/run", json=self._example_run_request().model_dump(mode="json"))
         assert response.status_code == 200
@@ -620,7 +661,7 @@ class TestApp:
         assert result["num_agent_calls"] == 3  # the canned greeting plus two kept agent messages
         assert result["response"]["usage"] == {
             "input_tokens": 3200,
-            "input_tokens_details": {"cached_tokens": 2048},
+            "input_tokens_details": {"cached_tokens": 2048, "cache_write_tokens": None},
             "output_tokens": 390,
             "output_tokens_details": {"reasoning_tokens": 335},
             "total_tokens": 3590,
@@ -643,7 +684,8 @@ class TestApp:
         token = _POLICY_CALL_USAGES.set(usages)
         try:
             with patch(
-                "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion", AsyncMock(return_value=partial)
+                "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
+                AsyncMock(return_value=partial),
             ):
                 response = await client.create_chat_completion(model=TAU2_AGENT_MODEL, messages=[])
         finally:
@@ -689,6 +731,10 @@ class TestApp:
         assert result[NG_FAILURE_CLASS_KEY] == TAU2_AGENT_FAILURE_CLASS
         # An empty record does not prove that no policy call finished, so usage is not reported as zero.
         assert result["response"]["usage"] is None
+        # The user simulator's call failed: an evaluation-side episode failure, named with its caller.
+        assert (result["failure_caller"], result["failure_kind"]) == ("user_simulator", "environment_episode_failed")
+        # No stand-in answer: the failure reply's response has no output.
+        assert result["response"]["output"] == []
 
     async def test_concurrent_runs_keep_their_own_policy_usage(self) -> None:
         config = Tau2Config(
@@ -717,7 +763,7 @@ class TestApp:
         test_case = self
         with (
             patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
-            patch("nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion", create_chat_completion),
+            patch("nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion", create_chat_completion),
         ):
             results = await asyncio.gather(
                 server.run(self._example_run_request()), server.run(self._example_run_request())

@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fixed output checks: exact, deterministic contracts that need no judge.
 
-None takes parameters, so a dataset row cannot loosen one. Markdown is parsed as CommonMark:
-headings, code and comments inside code blocks, code spans or quotes are not the answer's own
-structure. Meaning, tone and accuracy stay with the LLM judge.
+Most take no parameters. The file-block check takes only the expected paths; its parsing
+rules are code-owned. Markdown is parsed as CommonMark: headings, code and comments inside
+code blocks, code spans or quotes are not the answer's own structure. Meaning, tone and
+accuracy stay with the LLM judge.
 """
 
 import json
@@ -18,7 +19,7 @@ from resources_servers.partner_if.evidence import EvidenceUnavailable
 
 
 if TYPE_CHECKING:
-    from resources_servers.partner_if.checks import CheckContext
+    from resources_servers.partner_if.checks import CheckContext, FileBlocksParams
 
 # The H2 sections a change review requires, in this order.
 REVIEW_SECTIONS = (
@@ -30,6 +31,46 @@ REVIEW_SECTIONS = (
 PLAN_TOOL = "plan--draft"
 # The artifact in which an environment records the agent's successful project edits.
 EDITS_ARTIFACT = "project_edits"
+FILE_START = re.compile(r"<!-- file_start: (.+?) -->")
+FILE_END = "<!-- file_end -->"
+
+
+def file_blocks(params: "FileBlocksParams", context: "CheckContext") -> tuple[bool, str]:
+    """Check exact per-file wrappers in the answer, excluding fenced and indented code."""
+    answer = context.evidence.answer
+    code_lines = {
+        line
+        for token in MarkdownIt("commonmark").parse(answer)
+        if token.type in {"fence", "code_block"} and token.map
+        for line in range(*token.map)
+    }
+    expected = set(params.expected_paths)
+    seen: set[str] = set()
+    opened: str | None = None
+    for number, line in enumerate(answer.splitlines()):
+        if number in code_lines:
+            continue
+        marker = line.strip()
+        start = FILE_START.fullmatch(marker)
+        if start:
+            path = start.group(1)
+            if opened is not None:
+                return False, f"File block {opened!r} has no end marker before another start marker"
+            if path not in expected:
+                return False, f"Unexpected file path in start marker: {path!r}"
+            if path in seen:
+                return False, f"Duplicate file block for {path!r}"
+            seen.add(path)
+            opened = path
+        elif marker == FILE_END:
+            if opened is None:
+                return False, "File end marker has no matching start marker"
+            opened = None
+    if opened is not None:
+        return False, f"File block {opened!r} has no end marker"
+    if missing := sorted(expected - seen):
+        return False, f"Missing file blocks for {missing!r}"
+    return True, f"All {len(expected)} file blocks have exact paths and paired, non-nested markers"
 
 
 def scratchpad_comments(context: "CheckContext") -> tuple[bool, str]:

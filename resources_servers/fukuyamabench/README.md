@@ -275,9 +275,11 @@ and Pillow. It reproduced every control recorded above.
 SMILES on Python 3.13, but it is **GPL-2.0**, which CONTRIBUTING forbids
 introducing into the main tree. That rules it out independently of its merits.
 
-Version: see the note in `requirements.txt` for why `2025.9.6` is pinned rather
-than the newer `2026.3.6`, and what would justify moving it. Assessed
-2026-09-14 against
+Version: `pyproject.toml` and `uv.lock` retain RDKit `2025.9.6` rather than
+`2026.3.6`. The gold-as-prediction, negative, and organometallic controls recorded
+above were measured on this version; canonical SMILES can change across releases.
+This also matches the sibling moldetox server. Re-run those controls before moving
+the pin. Assessed 2026-09-14 against
 [RDKit releases](https://github.com/rdkit/rdkit/releases),
 [RDKit license](https://github.com/rdkit/rdkit/blob/master/license.txt), and
 [Open Babel license](https://github.com/openbabel/openbabel/blob/master/COPYING).

@@ -71,7 +71,9 @@ a specific prior run's directory.)
 
 ## Prepare benchmark data
 
-`CritPt-Benchmark/CritPt` is a public HuggingFace dataset (no auth required).
+`CritPt-Benchmark/CritPt` is a public HuggingFace dataset (no auth required). `prepare.py` pins
+it to `HF_REVISION`: the problem text was revised upstream on 2026-10-22, and an unpinned download
+silently changes the task set and the score. Bump the revision deliberately and re-baseline.
 
 ```bash
 gym eval prepare --benchmark critpt

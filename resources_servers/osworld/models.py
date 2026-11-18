@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,

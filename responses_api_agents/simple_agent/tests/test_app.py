@@ -16,38 +16,37 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, fields
+from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call
+from uuid import uuid4
 
 import httpx
 import orjson
 import pytest
+from aiohttp import ClientResponseError, RequestInfo
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
+from pydantic import BaseModel, ConfigDict
 from pytest import MonkeyPatch
+from yarl import URL
 
-from nemo_gym._checkpoint.agent import AgentSessionParticipant, AgentSessionRecord
-from nemo_gym._checkpoint.control import CheckpointRequest, CommitRequest, ParticipantControlPlane, RestoreRequest
-from nemo_gym._checkpoint.environment import EnvironmentParticipant
-from nemo_gym._checkpoint.errors import RolloutIdRequiredError, StaleAttemptError
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
+    AGENT_OUTCOME_METADATA_KEY,
     AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionRequest,
+    AgentOutcome,
     AgentSeedSessionRequest,
+    check_agent_seed_rejected,
+    raises_agent_failure,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.global_config import (
+from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON, SESSION_ID_KEY, ServerClient
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -55,27 +54,66 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    MODEL_REQUEST_ERROR,
+    MODEL_SERVER_QUEUE_TIMEOUT,
+    EpisodeId,
+    FailureBoundary,
+    FailureEvent,
+    FailureHeader,
+    FailureReport,
+    ModelFailureDetails,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NgFailureEvent,
+    SdkErrorDetails,
+    TaskId,
+    failure_report_for,
 )
-from nemo_gym.rollout_collection import _attach_trajectory_record
-from nemo_gym.rollout_observability import TrajectoryRecord
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
+from nemo_gym.server_runtime import (
+    TOOL_CALL_ID_HEADER,
+    TOOL_ERROR_HEADER,
+    AgentContext,
+    AgentContextArtifact,
+    AgentSessionParticipant,
+    AgentSessionRecord,
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    CheckpointRequest,
+    CommitRequest,
+    DirectHTTPToolAccess,
+    EnvironmentParticipant,
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
+    ParticipantControlPlane,
+    RestoredAgentSession,
+    RestoreRequest,
+    RolloutIdRequiredError,
+    SimpleResourcesServer,
+    StaleAttemptError,
+)
+from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.simple_agent.app import (
+    POLICY_TIMEOUT_OPERATION,
     ModelServerRef,
     ResourcesServerRef,
     SimpleAgent,
     SimpleAgentConfig,
     SimpleAgentLoopState,
     SimpleAgentRunRequest,
+    SimpleAgentSessionState,
     SimpleAgentVerifyRequest,
+    _policy_request_timed_out,
 )
 
 
@@ -109,8 +147,8 @@ def _make_agent(
     return agent_type(config=config, server_client=server_client), server_client
 
 
-def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
-    response = MagicMock(status=status, cookies={}, ok=status < 400)
+def _mock_response(payload=None, *, status=200, content="", headers=None) -> MagicMock:
+    response = MagicMock(status=status, cookies={}, ok=status < 400, headers=headers or {})
     response.read = AsyncMock(return_value=json.dumps(payload or {}))
     response.content.read = AsyncMock(return_value=content.encode())
     return response
@@ -263,9 +301,10 @@ class TestApp:
         assert prefixed_response.status_code == 200
         assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
 
+    @pytest.mark.parametrize("error_result", [False, True], ids=["result", "error-result"])
     @pytest.mark.parametrize("observability_enabled", [False, True])
     async def test_agent_session_uses_seeded_direct_http_tool_access(
-        self, monkeypatch: MonkeyPatch, observability_enabled: bool
+        self, monkeypatch: MonkeyPatch, observability_enabled: bool, error_result: bool
     ) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
@@ -321,7 +360,11 @@ class TestApp:
                 ),
             ]
         )
-        tool_response = _mock_response(content='{"city":"San Francisco","weather_description":"cold"}')
+        # A tool's error result is a 200 over direct HTTP, so only the header marks it.
+        tool_response = _mock_response(
+            content='{"city":"San Francisco","weather_description":"cold"}',
+            headers={TOOL_ERROR_HEADER: "true"} if error_result else {},
+        )
         tool_response.cookies = {"session_id": MagicMock(value="updated-resource-cookie")}
         direct_request = AsyncMock(return_value=tool_response)
         monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", direct_request)
@@ -376,7 +419,7 @@ class TestApp:
             url="http://resources:8000/get_weather",
             json={"city": "San Francisco"},
             cookies={"session_id": "seeded-resource-cookie"},
-            headers={"X-Scoped-Access": "token"},
+            headers={"X-Scoped-Access": "token", TOOL_CALL_ID_HEADER: "call-1"},
             _internal=True,
         )
         assert [item.kwargs["server_name"] for item in server_client.post.await_args_list] == ["model", "model"]
@@ -393,7 +436,13 @@ class TestApp:
         # A session returns its agent evidence at close, which becomes the episode's ng_agent_observations.
         observations = close.json()["agent_observations"]
         if observability_enabled:
-            assert [record["kind"] for record in observations["records"]] == ["agent_invocation"]
+            assert [record["kind"] for record in observations["records"]] == ["agent_invocation", "tool_call"]
+            tool = observations["records"][1]
+            assert tool["tool_name"] == "get_weather"
+            assert (tool["status"], tool["error_type"]) == (
+                ("failed", "tool_error") if error_result else ("completed", None)
+            )
+            assert tool["invocation_id"] == observations["records"][0]["invocation_id"]
             assert observations["source"] == "simple_agent"
         else:
             assert observations is None
@@ -456,6 +505,95 @@ class TestApp:
         records = close.json()["agent_observations"]["records"]
         assert [record["invocation_id"] for record in records] == ["root", "activation-2"]
         assert [record["model_calls"][0]["response_id"] for record in records] == ["resp-1", "resp-2"]
+
+    async def test_a_session_activation_creates_its_episode_with_the_session_state(self) -> None:
+        """Subclasses that keep task context in the session state read it here; the sessionless path skips it."""
+        seen_states = []
+
+        class _StatefulAgent(SimpleAgent):
+            async def _create_session_episode(self, state, body, **kwargs):
+                seen_states.append(state)
+                return await super()._create_session_episode(state, body, **kwargs)
+
+        server, server_client = _make_agent(False, _StatefulAgent)
+        reply = {
+            "id": "resp-1",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "id": "msg-1",
+                    "content": [{"annotations": [], "text": "Done.", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+        }
+        server_client.post = AsyncMock(side_effect=lambda **kwargs: _mock_response(reply))
+        client = TestClient(server.setup_webserver())
+
+        assert client.post("/v1/responses", json={"input": "no session"}).status_code == 200
+        assert seen_states == []
+
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session", episode_id=episode_id, task_id=TaskId(taskset="example", task_id="0")
+        )
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        assert client.post("/ng-rollout/rollout/v1/responses", json={"input": "question?"}).status_code == 200
+
+        [state] = seen_states
+        assert state is server._session_state("agent-session")
+        assert server_client.post.await_count == 2
+
+    async def test_checkpoint_restore_rebuilds_typed_agent_context(self) -> None:
+        class FigureContext(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            media: AgentContextArtifact
+            tag: str
+
+        @dataclass
+        class FigureState(SimpleAgentSessionState):
+            context: FigureContext | None = None
+
+        class FigureAgent(SimpleAgent):
+            agent_context_model = FigureContext
+
+            def _new_session_state(self, body: AgentSeedSessionRequest) -> FigureState:
+                state = super()._new_session_state(body)
+                inherited = {field.name: getattr(state, field.name) for field in fields(state)}
+                return FigureState(**inherited, context=self.parse_agent_context(body))
+
+        server, _ = _make_agent(False, FigureAgent)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="example", task_id="0"),
+            agent_context=AgentContext(values={"tag": "figqa2"}, artifacts={"media": {"path": "figs/1"}}),
+        )
+        client = TestClient(server.setup_webserver())
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        exported = (await server.export_agent_sessions(["agent-session"], checkpoint_id="c"))["agent-session"]
+        restored, _ = _make_agent(False, FigureAgent)
+        replacement = EpisodeId(rollout_id="rollout", attempt=1)
+
+        await restored.restore_agent_sessions(
+            [RestoredAgentSession(session_key="agent-session", episode_id=replacement, session=exported)]
+        )
+
+        state = restored._session_state("agent-session")
+        assert isinstance(state, FigureState)
+        assert state.request.agent_context == seed.agent_context
+        assert state.context == FigureContext(media=AgentContextArtifact(path="figs/1"), tag="figqa2")
+        assert state.request.episode_id == replacement
+        assert exported["request"]["agent_context"] == seed.agent_context.model_dump(mode="json")
+        assert exported["request"]["episode_id"] == seed.episode_id.model_dump(mode="json")
 
     async def test_agent_session_can_return_unresolved_tool_calls(self) -> None:
         config = SimpleAgentConfig(
@@ -594,7 +732,7 @@ class TestApp:
             ),
         ],
     )
-    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+    def test_unsupported_seed_is_refused_with_a_terminal_422(self, unsupported: dict, reason: str) -> None:
         server, _ = _make_agent(False)
         body = AgentSeedSessionRequest(
             agent_session_id="agent-session",
@@ -674,7 +812,7 @@ class TestApp:
         )
         assert seed.status_code == 200
 
-        with pytest.raises(RuntimeError, match="no direct HTTP tool access"):
+        with raises_agent_failure(RuntimeError, match="no direct HTTP tool access"):
             client.post("/v1/responses", json={"input": [{"role": "user", "content": "weather?"}]})
         assert [call.kwargs["server_name"] for call in server_client.post.await_args_list] == ["model"]
         direct_request.assert_not_awaited()
@@ -1441,7 +1579,7 @@ class TestApp:
         actual_usage_dict = actual_responses_dict["usage"]
         expected_usage_dict = {
             "input_tokens": 101,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": None},
             "output_tokens": 202,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 303,
@@ -1880,7 +2018,9 @@ class TestCheckpointContinuation:
                 return _mock_response(_FINAL_RESPONSE)
             # Its verification would hold up a checkpoint, but nothing of a restart is in one.
             report = participant.readiness()
-            during_verify.append((report.ready, report.restarts, len(await participant.export(None))))
+            during_verify.append(
+                (report.ready, report.restarts, len(await participant.export(None, checkpoint_id="c")))
+            )
             return _mock_response(kwargs["json"] | {"reward": 1.0})
 
         server_client.post = AsyncMock(side_effect=post)
@@ -1943,7 +2083,7 @@ async def _session_after_two_activations() -> tuple[str, dict]:
     for question in ("first?", "second?"):
         assert client.post("/ng-rollout/rollout/v1/responses", json={"input": question}).status_code == 200
     session_id = seed.json()["agent_session_id"]
-    return session_id, (await server.export_agent_sessions([session_id]))[session_id]
+    return session_id, (await server.export_agent_sessions([session_id], checkpoint_id="c"))[session_id]
 
 
 async def _restore_and_activate(session_id: str, session: dict, boundary: dict | None) -> list[str]:
@@ -2101,7 +2241,7 @@ class TestCheckpointAcrossModelCalls:
         await _until(lambda: calls)
         # A second checkpoint while the restored activation waits on its model call.
         prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c2")))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c2")))
         reply.set()
         await asyncio.wait_for(activation, 5)
@@ -2136,7 +2276,7 @@ class TestCheckpointAcrossModelCalls:
         await asyncio.wait_for(held.wait(), 5)
         ready_with_the_reply = participant.ready()
         committed = await controller.commit(CommitRequest(**_checkpoint("c1", checkpoint_dir=str(tmp_path))))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c1")))
         result = await asyncio.wait_for(activation, 5)
 
@@ -2173,7 +2313,7 @@ class TestCheckpointAcrossModelCalls:
         await asyncio.wait_for(reading_body.wait(), 5)
         # The agent server prepares after the headers arrived, while the body is still held.
         prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c1") | {"deadline_ts": time.time() + 1}))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c1")))
         model_server_resumed.set()
         result = await asyncio.wait_for(activation, 5)
@@ -2554,7 +2694,7 @@ async def test_an_activation_without_an_index_keeps_no_reply() -> None:
 async def test_a_restored_session_answered_with_its_reply_survives_a_commit_that_leaves_its_episode_out(
     tmp_path,
 ) -> None:
-    """The replayed reply claims the restored session for the live episode, so a commit no longer frees it."""
+    """The replayed reply claims the restored session for the live episode, so a commit no longer releases it."""
     server, server_client = _make_agent(False)
     request = await _restored_session(server, activations=1, boundary=None)
     participant = server.checkpoint_participant
@@ -2692,7 +2832,7 @@ async def test_a_close_cancelled_while_it_stops_the_activation_runs_the_cleanup_
     assert server.events.count("cleanup") == 1
 
 
-async def test_a_retire_that_frees_a_session_while_its_close_waits_leaves_no_receipt_behind(
+async def test_a_retire_that_releases_a_session_while_its_close_waits_leaves_no_fence_behind(
     monkeypatch: MonkeyPatch,
 ) -> None:
     server, server_client = _make_agent(False)
@@ -2715,7 +2855,7 @@ async def test_a_retire_that_frees_a_session_while_its_close_waits_leaves_no_rec
 
     # Long after the receipt would have expired, an unrelated seed sweeps the expired receipts.
     later = time.monotonic() + 3600
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: later)
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: later)
     other = AgentSeedSessionRequest(
         agent_session_id="other-session",
         episode_id=EpisodeId(rollout_id="other"),
@@ -2725,7 +2865,7 @@ async def test_a_retire_that_frees_a_session_while_its_close_waits_leaves_no_rec
 
     assert retiring.done() and retiring.exception() is None
     assert isinstance(closing.exception(), StaleAttemptError)
-    assert _SESSION_ID not in server._session_records and _SESSION_ID not in server._closed_session_records
+    assert _SESSION_ID not in server._session_records and _SESSION_ID not in server._fenced_session_records
     assert seeded.agent_session_id == "other-session"
 
 
@@ -2839,7 +2979,7 @@ async def test_an_indexed_session_reply_and_its_replay_carry_no_trajectory_and_n
         replayed = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
         # A caller that sends no index, such as the UserSim environment server, still reads the trajectory.
         unindexed = await http.post(path, json={"input": "q"})
-    exported = await server.export_agent_sessions([_SESSION_ID])
+    exported = await server.export_agent_sessions([_SESSION_ID], checkpoint_id="c")
 
     assert original.status_code == 200 and "_ng_trajectory" not in original.json()
     assert replayed.content == original.content
@@ -2860,7 +3000,7 @@ async def test_an_indexed_reply_is_kept_unserialized_until_a_replay_or_an_export
         original = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
         kept = server._session_state(_SESSION_ID).completed_reply["response"]
         replayed = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
-    exported = (await server.export_agent_sessions([_SESSION_ID]))[_SESSION_ID]["completed_reply"]
+    exported = (await server.export_agent_sessions([_SESSION_ID], checkpoint_id="c"))[_SESSION_ID]["completed_reply"]
 
     # The normal path keeps the response object; nothing is dumped until a replay or an export.
     assert isinstance(kept, NeMoGymResponse)
@@ -2949,7 +3089,7 @@ class _WeatherResources(SimpleResourcesServer):
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict:
         return {session_id: self.calls[session_id] for session_id in session_ids if session_id in self.calls}
 
     async def restore_session_states(self, states: dict) -> None:
@@ -3149,3 +3289,614 @@ async def test_a_skip_verification_run_parks_at_its_return_boundary_until_resume
     # Restored at its return step: no seed, model call, tool call, or verification runs again.
     assert calls == []
     assert result.reward == 0.25 and result.response.output == first.response.output
+
+
+_ATTEMPTS = {
+    # (failure_reason, exception type, HTTP status) as the policy model server's client records each outcome.
+    "response_timeout": (MODEL_RESPONSE_TIMEOUT_REASON, "TimeoutError", None),
+    "connect_timeout": ("Model request transport failed", "TimeoutError", None),
+    "connection_timeout_error": (
+        "Model request transport failed",
+        "aiohttp.client_exceptions.ConnectionTimeoutError",
+        None,
+    ),
+    "refused": ("Model request transport failed", "aiohttp.client_exceptions.ClientConnectorError", None),
+    "http_500": ("HTTP 500 from the model server", None, 500),
+}
+
+
+def _model_attempt(
+    outcome: str, *, operation_id: str = "final-call", queue: tuple[int, int] | None = None
+) -> FailureEvent:
+    """One failed attempt of the model call ``operation_id`` as the policy model server's client reports it."""
+    reason, exception_type, http_status = _ATTEMPTS[outcome]
+    return FailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind=MODEL_REQUEST_ERROR,
+        failure_reason=reason,
+        operation="model_request",
+        operation_id=operation_id,
+        http_status=http_status,
+        attempt_id=uuid4().hex,
+        details=ModelFailureDetails(
+            request_upload_complete=True if outcome == "response_timeout" else None,
+            server_requests_waiting=queue[0] if queue is not None else None,
+            server_requests_running=queue[1] if queue is not None else None,
+        ),
+        foreign_error=SdkErrorDetails(exception_type=exception_type, message="") if exception_type else None,
+    )
+
+
+def _policy_report(attempts: list[FailureEvent], *, ended_on: FailureEvent | None = None) -> FailureReport:
+    """The policy model server's reply report: every observed attempt, and the attempt its failure ended on."""
+    return FailureReport(
+        failure_id=ended_on.event_id if ended_on is not None else None,
+        events={event.event_id: event for event in attempts},
+    )
+
+
+def _timed_out_report(*queues: tuple[int, int] | None) -> FailureReport:
+    """Three timed-out attempts of the final call; ``queues`` gives each attempt's server queue reading."""
+    attempts = [_model_attempt("response_timeout", queue=queue) for queue in (queues or (None, None, None))]
+    return _policy_report(attempts, ended_on=attempts[-1])
+
+
+def _failed_reply(report: FailureReport) -> MagicMock:
+    """A 500 reply from another Gym server whose failure report travels in its header, as on the wire."""
+    request_info = SimpleNamespace(url="http://server", method="POST", headers={}, real_url="http://server")
+    error = ClientResponseError(
+        request_info, (), status=500, message="Internal Server Error", headers=FailureHeader.encode(report)
+    )
+    response = MagicMock(status=500, ok=False, cookies={})
+    response.content.read = AsyncMock(return_value=b"Internal Server Error")
+    response.raise_for_status = MagicMock(side_effect=error)
+    return response
+
+
+def _timeout_agent(**config) -> tuple[SimpleAgent, MagicMock]:
+    server, server_client = _make_agent(False)
+    return type(server)(
+        config=SimpleAgentConfig.model_validate(
+            server.config.model_dump(exclude={"outcome_policy"}, exclude_none=True) | config
+        ),
+        server_client=server_client,
+    ), server_client
+
+
+class TestFinalOnModelTimeout:
+    @pytest.mark.parametrize(
+        ("earlier", "final", "timed_out"),
+        [
+            pytest.param([], ["response_timeout"] * 3, True, id="every-attempt-waited-for-the-response"),
+            pytest.param(["http_500", "refused"], ["response_timeout"] * 2, True, id="an-earlier-call-does-not-count"),
+            pytest.param([], ["connect_timeout"] * 3, False, id="never-connected"),
+            pytest.param([], ["connection_timeout_error"] * 3, False, id="connect-timeout"),
+            pytest.param([], ["response_timeout", "connect_timeout"], False, id="one-attempt-never-connected"),
+            pytest.param([], ["response_timeout", "http_500"], False, id="one-attempt-answered-an-http-error"),
+            pytest.param([], ["response_timeout", "refused"], False, id="refused"),
+        ],
+    )
+    def test_a_policy_request_timed_out_only_when_every_attempt_of_its_final_call_did(
+        self, earlier: list[str], final: list[str], timed_out: bool
+    ) -> None:
+        earlier_attempts = [_model_attempt(outcome, operation_id="earlier-call") for outcome in earlier]
+        final_attempts = [_model_attempt(outcome) for outcome in final]
+        report = _policy_report(earlier_attempts + final_attempts, ended_on=final_attempts[-1])
+        error = _failed_reply(report).raise_for_status.side_effect
+
+        assert _policy_request_timed_out(error) is timed_out
+
+    @pytest.mark.parametrize(
+        "case", ["ended-on-no-model-attempt", "ended-on-another-failure", "omitted", "no-report", "no-attempt"]
+    )
+    def test_a_policy_reply_that_does_not_show_its_final_attempt_is_not_a_timeout(self, case: str) -> None:
+        # A recovered attempt timed out; the reply's failure is something the model client did not raise from one,
+        # such as a 400 it returned at once or a response body the model server rejected.
+        attempts = [_model_attempt("response_timeout") for _ in range(2)]
+        other = FailureEvent(
+            boundary=FailureBoundary.AGENT, failure_kind=AGENT_ROUTE_FAILED, failure_reason="x", operation="o"
+        )
+        report = {
+            "ended-on-no-model-attempt": _policy_report(attempts),
+            "ended-on-another-failure": FailureReport(
+                failure_id=other.event_id, events={e.event_id: e for e in [other, *attempts]}
+            ),
+            "omitted": _policy_report(attempts, ended_on=attempts[-1]).model_copy(update={"omitted": True}),
+            "no-attempt": FailureReport(),
+        }.get(case)
+        error = _failed_reply(report or FailureReport()).raise_for_status.side_effect
+        if case == "no-report":
+            error.headers = {}
+
+        assert _policy_request_timed_out(error) is False
+
+    @pytest.mark.parametrize(
+        "missing", ["upload", "attempt", "operation", "unknown-peer-operation", "duplicate-attempt"]
+    )
+    def test_missing_or_ambiguous_attempt_evidence_cannot_qualify(self, missing):
+        report = _timed_out_report()
+        events = list(report.events.values())
+        target = events[0]
+        update = {
+            "upload": {"details": ModelFailureDetails()},
+            "attempt": {"attempt_id": None},
+            "operation": {"operation_id": None},
+            "unknown-peer-operation": {"operation_id": None},
+            "duplicate-attempt": {"attempt_id": events[-1].attempt_id},
+        }[missing]
+        # A missing operation identifier on a peer cannot silently remove that attempt from the final operation.
+        if missing == "operation":
+            target = events[-1]
+        changed = target.model_copy(update=update)
+        altered = report.model_copy(update={"events": report.events | {changed.event_id: changed}})
+        assert not _policy_request_timed_out(_failed_reply(altered).raise_for_status.side_effect)
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    async def test_a_policy_timeout_is_classified_independently_of_the_compatibility_policy(
+        self, enabled: bool
+    ) -> None:
+        server, server_client = _timeout_agent(final_on_model_timeout=enabled)
+        server_client.post = AsyncMock(return_value=_failed_reply(_timed_out_report()))
+        request = MagicMock(session={}, path_params={}, cookies={})
+
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="question"))
+
+        assert (raised.value.boundary, raised.value.failure_kind, raised.value.operation) == (
+            FailureBoundary.AGENT,
+            MODEL_POLICY_RESPONSE_TIMEOUT,
+            POLICY_TIMEOUT_OPERATION,
+        )
+        # One policy call: the model server's attempts are its own, and nothing here adds one.
+        assert server_client.post.await_count == 1
+
+    async def test_a_policy_http_error_stays_a_retryable_failure_when_enabled(self) -> None:
+        server, server_client = _timeout_agent(final_on_model_timeout=True)
+        attempt = _model_attempt("http_500")
+        server_client.post = AsyncMock(return_value=_failed_reply(_policy_report([attempt], ended_on=attempt)))
+        request = MagicMock(session={}, path_params={}, cookies={})
+
+        with pytest.raises(ClientResponseError):
+            await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="question"))
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    async def test_run_ends_a_policy_timeout_as_a_final_row_only_when_enabled(self, enabled: bool) -> None:
+        server, server_client = _timeout_agent(final_on_model_timeout=enabled)
+        policy_timeout = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
+            failure_reason="Policy model request timed out on every attempt",
+            operation=POLICY_TIMEOUT_OPERATION,
+        )
+        route_failure = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind=AGENT_ROUTE_FAILED,
+            failure_reason="Agent route failed",
+            operation="agent.responses",
+        )
+        route_failure.__cause__ = policy_timeout
+        report = failure_report_for(route_failure)
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            assert url_path.endswith("/v1/responses"), "the rollout must not be verified"
+            return _failed_reply(report)
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate({"responses_create_params": {"input": "question"}})
+
+        response = await server.run(MagicMock(cookies={}), body)
+        assert isinstance(response, JSONResponse)
+        row = json.loads(response.body)
+        assert row["_ng_failure_terminal"] is enabled
+        assert row["_ng_failure_counts_as_zero"] is enabled
+        assert "reward" not in row
+        assert row["failure_kind"] == MODEL_POLICY_RESPONSE_TIMEOUT
+        assert row["_ng_failure_id"] == policy_timeout.event_id
+        assert row["_ng_failure_events"][policy_timeout.event_id] == report.events[policy_timeout.event_id].model_dump(
+            mode="json"
+        )
+        assert server_client.post.await_count == 2
+
+    async def test_run_keeps_other_policy_failures_retryable(self) -> None:
+        server, server_client = _timeout_agent(final_on_model_timeout=True)
+        attempt = _model_attempt("http_500")
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            return _failed_reply(_policy_report([attempt], ended_on=attempt))
+
+        server_client.post = AsyncMock(side_effect=post)
+
+        with pytest.raises(ClientResponseError):
+            await server.run(
+                MagicMock(cookies={}),
+                SimpleAgentRunRequest.model_validate({"responses_create_params": {"input": "q"}}),
+            )
+
+
+class TestServerQueueTimeout:
+    """A policy timeout on a model server that was queueing requests is the server's capacity, not the model."""
+
+    @pytest.mark.parametrize(
+        ("queues", "kind"),
+        [
+            pytest.param(
+                ((62, 1), (61, 1), (60, 1)), MODEL_SERVER_QUEUE_TIMEOUT, id="every-attempt-waited-in-the-queue"
+            ),
+            pytest.param(((0, 4), (0, 4), (0, 4)), MODEL_POLICY_RESPONSE_TIMEOUT, id="idle-server-slow-model"),
+            pytest.param(((62, 1), (0, 1), (60, 1)), MODEL_POLICY_RESPONSE_TIMEOUT, id="one-attempt-was-not-queued"),
+            pytest.param(((62, 1), None, (60, 1)), MODEL_POLICY_RESPONSE_TIMEOUT, id="one-attempt-has-no-reading"),
+            pytest.param((None, None, None), MODEL_POLICY_RESPONSE_TIMEOUT, id="no-readings"),
+        ],
+    )
+    async def test_only_a_timeout_queued_on_every_attempt_is_the_servers(self, queues, kind) -> None:
+        server, server_client = _timeout_agent()
+        server_client.post = AsyncMock(return_value=_failed_reply(_timed_out_report(*queues)))
+        request = MagicMock(session={}, path_params={}, cookies={})
+
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="question"))
+
+        assert (raised.value.boundary, raised.value.failure_kind, raised.value.operation) == (
+            FailureBoundary.AGENT,
+            kind,
+            POLICY_TIMEOUT_OPERATION,
+        )
+
+    async def test_run_retries_a_queued_timeout_even_when_timeouts_count_as_zero(self) -> None:
+        server, server_client = _timeout_agent(final_on_model_timeout=True)
+        assert server.config.outcome_policy.by_failure_kind[MODEL_POLICY_RESPONSE_TIMEOUT] == "count_as_zero"
+        queued = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind=MODEL_SERVER_QUEUE_TIMEOUT,
+            failure_reason="Policy model request timed out on every attempt while the model server queued requests",
+            operation=POLICY_TIMEOUT_OPERATION,
+        )
+        route_failure = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind=AGENT_ROUTE_FAILED,
+            failure_reason="Agent route failed",
+            operation="agent.responses",
+        )
+        route_failure.__cause__ = queued
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            assert url_path.endswith("/v1/responses"), "the rollout must not be verified"
+            return _failed_reply(failure_report_for(route_failure))
+
+        server_client.post = AsyncMock(side_effect=post)
+
+        # Not a final row: the failure travels on as a retryable error, so it is retried and never scored zero.
+        with pytest.raises(ClientResponseError) as raised:
+            await server.run(
+                MagicMock(cookies={}),
+                SimpleAgentRunRequest.model_validate({"responses_create_params": {"input": "q"}}),
+            )
+        assert (
+            FailureHeader.decode(raised.value.headers).events[queued.event_id].failure_kind
+            == MODEL_SERVER_QUEUE_TIMEOUT
+        )
+
+
+def _model_http_error(status: int) -> MagicMock:
+    response = _mock_response(status=status, content='{"error":{"message":"controlled model failure"}}')
+    url = URL("http://model/v1/responses")
+    response.raise_for_status.side_effect = ClientResponseError(
+        RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url), (), status=status, message="model failure"
+    )
+    return response
+
+
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 503])
+async def test_model_http_retries_keep_one_decision(status: int, monkeypatch: MonkeyPatch) -> None:
+    server, client = _make_agent(True)
+    client.post = AsyncMock(
+        side_effect=[_model_http_error(status), _model_http_error(status), _message_response("ok")]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", sleep)
+
+    response, trajectory, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        collect_trajectory=True,
+    )
+
+    assert response.output[-1].content[0].text == "Done."
+    assert client.post.await_count == 3
+    requests = [call.kwargs for call in client.post.await_args_list]
+    assert requests[0] == requests[1] == requests[2]
+    assert requests[0]["headers"] == {"x-session-id": "root"}
+    assert len(trajectory.turns) == 1
+    assert trajectory.invocations[0].status == "completed"
+    assert [ref.response_id for ref in trajectory.invocations[0].model_calls] == ["ok"]
+    assert sleep.await_args_list == [call(0.5), call(1.0)]
+
+
+@pytest.mark.parametrize(
+    ("status", "retries", "attempts"), [(400, 2, 1), (401, 2, 1), (422, 2, 1), (429, 0, 1), (500, 2, 3)]
+)
+async def test_terminal_model_http_error_returns_cause_and_zero_usage(
+    status: int, retries: int, attempts: int, monkeypatch: MonkeyPatch
+) -> None:
+    server, client = _make_agent(True)
+    server.config.max_model_retries = retries
+    client.post = AsyncMock(side_effect=[_model_http_error(status) for _ in range(attempts)])
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    response, trajectory, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        collect_trajectory=True,
+    )
+
+    assert client.post.await_count == attempts
+    assert response.status == "failed"
+    assert "controlled model failure" in response.error.message
+    assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+        failure_kind="model_request_error", status_code=status
+    )
+    assert response.output == [] and response.usage.total_tokens == 0
+    assert trajectory.turns == [] and trajectory.tool_calls == []
+    invocation = trajectory.invocations[0]
+    assert invocation.status == "failed" and invocation.error_type == "model_request_error"
+    assert invocation.model_calls == []  # The rejected attempts have no provider response IDs.
+
+
+@pytest.mark.parametrize("has_usage", [False, True])
+async def test_exhausted_model_retries_preserve_partial_work_without_repeating_tools(
+    has_usage: bool, monkeypatch: MonkeyPatch
+) -> None:
+    server, client = _make_agent(True)
+    tool_response = {
+        "id": "tool-response",
+        "created_at": 1,
+        "model": "model",
+        "object": "response",
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [],
+        "output": [
+            {
+                "type": "function_call",
+                "id": "tool-1",
+                "call_id": "tool-1",
+                "name": "bash",
+                "arguments": '{"command":"printf done"}',
+            }
+        ],
+    }
+    if has_usage:
+        tool_response["usage"] = {
+            "input_tokens": 20,
+            "output_tokens": 8,
+            "total_tokens": 28,
+            "input_tokens_details": {"cached_tokens": 3},
+            "output_tokens_details": {"reasoning_tokens": 2},
+        }
+    client.post = AsyncMock(side_effect=[_mock_response(tool_response), *[_model_http_error(500) for _ in range(3)]])
+    tool = AsyncMock(return_value=_mock_response(content="done"))
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", tool)
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    response, trajectory, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        tool_access=DirectHTTPToolAccess(name="resources", base_url="http://resources", required=True),
+        collect_trajectory=True,
+    )
+
+    assert response.status == "failed"
+    assert client.post.await_count == 4
+    assert tool.await_count == 1
+    requests = [entry.kwargs["json"].model_dump() for entry in client.post.await_args_list]
+    assert requests[1] == requests[2] == requests[3]
+    assert requests[1]["input"][-1]["output"] == "done"
+    assert response.output[-1].output == "done"
+    assert len(trajectory.turns) == len(trajectory.tool_calls) == 1
+    assert trajectory.tool_calls[0].status == "completed"
+    assert [ref.response_id for ref in trajectory.invocations[0].model_calls] == ["tool-response"]
+    if has_usage:
+        assert response.usage.total_tokens == 28
+    else:
+        assert response.usage is None
+
+
+def _body_failure_report(http_status: int) -> FailureReport:
+    attempt = FailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="Model response body read failed",
+        operation="model_request",
+        operation_id="op",
+        attempt_id="op-1",
+        http_status=http_status,
+    )
+    return _policy_report([attempt], ended_on=attempt)
+
+
+@pytest.mark.parametrize("in_session", [True, False])
+async def test_a_selected_model_body_failure_gets_no_resend_and_no_session_reply(
+    in_session: bool, monkeypatch: MonkeyPatch
+) -> None:
+    server, client = _make_agent(True)
+    report = _body_failure_report(200)
+    client.post = AsyncMock(side_effect=[_failed_reply(report), _message_response("ok")])
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    with pytest.raises(ClientResponseError) as caught:
+        await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+            model_url_path="/ng-rollout/rollout/v1/responses",
+            in_session=in_session,
+            collect_trajectory=True,
+        )
+    assert client.post.await_count == 1, "the provider may have generated an answer; it is not asked again"
+    assert FailureHeader.decode(caught.value.headers).failure_id == report.failure_id
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param(FailureHeader.encode(_body_failure_report(503)), id="pre-answer-503"),
+        pytest.param(
+            FailureHeader.encode(
+                _body_failure_report(503).merged(FailureReport(events=_body_failure_report(200).events))
+            ),
+            id="unselected-recovered-200-body-event-beside-a-selected-503",
+        ),
+        pytest.param(
+            FailureHeader.encode(FailureReport(events=_body_failure_report(200).events)),
+            id="only-recovered-observations",
+        ),
+        pytest.param({}, id="no-report"),
+    ],
+)
+async def test_other_model_failures_keep_their_retry_and_session_handling(
+    header: dict, monkeypatch: MonkeyPatch
+) -> None:
+    server, client = _make_agent(True)
+    failed = _failed_reply(FailureReport())
+    failed.raise_for_status.side_effect.headers = header
+    client.post = AsyncMock(side_effect=[failed, _message_response("ok")])
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    response, _, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        collect_trajectory=True,
+    )
+    assert client.post.await_count == 2
+    assert response.output[-1].content[0].text == "Done."
+
+
+@pytest.mark.parametrize("in_session", [True, False])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param('{"failure_id": "a", "events": {"a": {"cause_id": "a"}}}', id="invalid"),
+        pytest.param('{"omitted": true}', id="omitted"),
+        pytest.param("not json", id="malformed"),
+    ],
+)
+async def test_an_unreadable_selected_failure_gets_no_resend_and_no_session_reply(
+    value: str, in_session: bool, monkeypatch: MonkeyPatch
+) -> None:
+    server, client = _make_agent(True)
+    failed = _failed_reply(FailureReport())
+    failed.raise_for_status.side_effect.headers = {FailureHeader.NAME: value}
+    client.post = AsyncMock(side_effect=[failed, _message_response("ok")])
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    with pytest.raises(ClientResponseError) as caught:
+        await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+            model_url_path="/ng-rollout/rollout/v1/responses",
+            in_session=in_session,
+            collect_trajectory=True,
+        )
+    assert client.post.await_count == 1
+    assert caught.value.headers[FailureHeader.NAME] == value, "the original report travels on unchanged"
+
+
+def test_tool_output_images_reach_the_model_in_user_messages_after_the_turn_s_tool_outputs() -> None:
+    """A tool reply's images leave its function_call_output and follow all of the turn's outputs, as user messages."""
+    server, server_client = _make_agent(False)
+    image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+    def model_reply(response_id: str, output: list[dict]) -> MagicMock:
+        return _mock_response(
+            {
+                "id": response_id,
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "output": output,
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+
+    def function_call(call_id: str, name: str) -> dict:
+        return {
+            "type": "function_call",
+            "id": f"fc_{call_id}",
+            "call_id": call_id,
+            "name": name,
+            "arguments": json.dumps({"image_index": 0}),
+            "status": "completed",
+        }
+
+    replies = {
+        # Some backends emit several calls in one turn even with parallel_tool_calls off.
+        "/v1/responses": [
+            model_reply("first", [function_call("call_1", "grayscale"), function_call("call_2", "invert")]),
+            _message_response("second"),
+        ],
+        "/grayscale": [
+            _mock_response(
+                content=json.dumps(
+                    {
+                        "ok": True,
+                        "new_image_index": 1,
+                        "tool_output_images": [{"image_url": image_url, "label": "Image 1"}],
+                    }
+                )
+            )
+        ],
+        "/invert": [_mock_response(content=json.dumps({"ok": False, "error": "no such image"}))],
+    }
+    server_client.post.side_effect = lambda *, url_path, **_: replies[url_path].pop(0)
+
+    response = TestClient(server.setup_webserver()).post(
+        "/v1/responses", json={"input": [{"role": "user", "content": "Look closer."}]}
+    )
+
+    assert response.status_code == 200, response.text
+    model_calls = [c.kwargs for c in server_client.post.call_args_list if c.kwargs["url_path"] == "/v1/responses"]
+    turn = [item.model_dump(exclude_none=True) for item in model_calls[1]["json"].input[1:]]
+    assert [(item["type"], item.get("call_id") or item.get("role")) for item in turn] == [
+        ("function_call", "call_1"),
+        ("function_call", "call_2"),
+        ("function_call_output", "call_1"),
+        ("function_call_output", "call_2"),
+        ("message", "user"),
+    ]
+    assert json.loads(turn[2]["output"]) == {"ok": True, "new_image_index": 1}
+    assert json.loads(turn[3]["output"]) == {"ok": False, "error": "no such image"}
+    assert turn[4]["content"] == [
+        {"type": "input_text", "text": "Image 1"},
+        {"type": "input_image", "image_url": image_url, "detail": "auto"},
+    ]
+    # The reply keeps the images too, so a trainer sees what the model saw.
+    assert response.json()["output"][-2]["content"][1]["image_url"] == image_url
+
+
+@pytest.mark.parametrize(
+    "tool_output",
+    ["grep: tool_output_images: No such file or directory", '{\n  "stdout": "tool_output_images"\n}'],
+)
+def test_a_tool_output_that_only_names_the_image_key_stays_unchanged(tool_output: str) -> None:
+    from responses_api_agents.simple_agent.app import _split_tool_output_images
+
+    assert _split_tool_output_images(tool_output) == (tool_output, [])
+
+
+def test_a_tool_output_with_images_keeps_the_json_format_of_a_reply_without_images() -> None:
+    from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY
+    from responses_api_agents.simple_agent.app import _split_tool_output_images
+
+    rest, images = _split_tool_output_images(
+        json.dumps({"ok": False, "error": "图像 index 7", TOOL_OUTPUT_IMAGES_KEY: None})
+    )
+    assert (rest, images) == ('{"ok":false,"error":"图像 index 7"}', [])

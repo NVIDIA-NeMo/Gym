@@ -16,11 +16,16 @@ from fastapi.exceptions import RequestValidationError
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym import failure_kinds, server_utils
-from nemo_gym.config_types import DatasetConfig, ResourcesServerTypeConfig, ResponsesAPIAgentServerTypeConfig
-from nemo_gym.server_metadata import visit_resources_server
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.task_data import normalize_task_fields
+from nemo_gym.client import ServerClient
+from nemo_gym.config import (
+    DatasetConfig,
+    ResourcesServerTypeConfig,
+    ResponsesAPIAgentServerTypeConfig,
+    visit_resources_server,
+)
+from nemo_gym.core import failure_kinds
+from nemo_gym.data import normalize_task_fields
+from nemo_gym.server_runtime import base_server
 from resources_servers.critpt_custom_grader import app as adapter
 from resources_servers.critpt_custom_grader import task_data as task_schema
 from resources_servers.critpt_custom_grader.execution import (
@@ -264,7 +269,7 @@ def probing_server(provider, *, startup_probe=True, **spec_fields):
 
 @pytest.mark.asyncio
 async def test_stock_agent_defaults_tool_choice_auto_with_empty_tools_are_accepted(make_server):
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
     server, app, fake = make_server()
     request = payload()
@@ -324,6 +329,23 @@ async def test_every_unscorable_category_masks_the_sample_and_keeps_its_name(mak
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("category", NONTERMINAL_CATEGORIES + TERMINAL_CATEGORIES)
+async def test_explicit_uncertainty_policy_scores_only_comparator_uncertainty(make_server, category):
+    _, app, _ = make_server(
+        grade=unscorable_verdict(category, cases_attempted=1, candidate_uncertainty_reasons=("symbolic_undecided",)),
+        score_comparator_uncertain_as_incorrect=True,
+    )
+    status, result = await post(app, "/verify", payload())
+    assert status == 200 and result["category"] == category
+    if category == "comparator_uncertain":
+        assert result["reward"] == 0.0 and result["scored"] is True and result["mask_sample"] is False
+        assert "_ng_failure_class" not in result
+        assert result["response"] == saved_response()
+    else:
+        assert_unscorable(result, terminal=UNSCORABLE_CATEGORIES[category][1])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("category", sorted(FAILED_CATEGORIES))
 async def test_scored_zero_rows_are_not_masked_and_carry_no_failure_keys(make_server, category):
     extra = (
@@ -349,12 +371,10 @@ async def test_sandbox_observations_and_cleanup_status_are_reported(make_server)
 
 
 @pytest.mark.asyncio
-async def test_malformed_and_oversized_bodies_answer_category_only(make_server, caplog):
+async def test_malformed_body_answers_category_only(make_server, caplog):
     server, app, fake = make_server()
     status, result = await post(app, "/verify", raw=b'{"not json')
     assert (status, result) == (422, {"error": {"category": "request_invalid"}})
-    status, result = await post(app, "/verify", raw=b"x" * (adapter.MAX_REQUEST_BYTES + 1))
-    assert (status, result) == (413, {"error": {"category": "request_limit"}})
     status, result = await post(app, "/verify", payload(entrypoint=""))
     assert status == 200 and result["category"] == "task_invalid"
     assert REFERENCE_MARKER not in caplog.text
@@ -752,13 +772,11 @@ async def test_pre_endpoint_privacy_survives_late_handler_registration(
 
 
 @pytest.mark.asyncio
-async def test_malformed_saved_response_and_ingress_limit(make_server, monkeypatch):
+async def test_malformed_saved_response_answers_category_only(make_server):
     _, app, fake = make_server()
     row = payload()
     row["response"] = {"private": REFERENCE_MARKER}
     assert await post(app, "/verify", row) == (422, {"error": {"category": "request_invalid"}})
-    monkeypatch.setattr(adapter, "MAX_REQUEST_BYTES", 64)
-    assert await post(app, "/verify", raw=b" " * 65) == (413, {"error": {"category": "request_limit"}})
     fake.grade.assert_not_awaited()
 
 
@@ -1322,7 +1340,26 @@ async def test_raw_text_fallback_still_honors_source_bounds(make_server):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["incomplete", "incomplete_details", "error"])
+@pytest.mark.parametrize("has_source", [True, False])
+async def test_token_limit_is_scored_zero_without_regeneration(make_server, has_source):
+    _, app, fake = make_server()
+    row = payload()
+    row["response"]["status"] = "incomplete"
+    row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
+    if not has_source:
+        row["response"]["output"] = []
+    result = (await post(app, "/verify", row))[1]
+    assert result["reward"] == 0.0
+    assert result["scored"] is True
+    assert result["mask_sample"] is False
+    assert result["category"] == "response_truncated"
+    assert result["response"] == row["response"]
+    assert "_ng_failure_class" not in result
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["incomplete", "incomplete_details", "error", "token_limit_with_error"])
 async def test_uncompleted_response_needs_regeneration(make_server, mode):
     # An uncompleted, incomplete, or error response has no usable source. It carries needs_regeneration, not
     # verifier_unavailable, because reverify would reach the same verdict. The class is not terminal.
@@ -1334,6 +1371,9 @@ async def test_uncompleted_response_needs_regeneration(make_server, mode):
         row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
     else:
         row["response"]["error"] = {"code": "server_error", "message": "synthetic"}
+        if mode == "token_limit_with_error":
+            row["response"]["status"] = "incomplete"
+            row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
     result = (await post(app, "/verify", row))[1]
     assert result["reward"] == 0.0 and result["scored"] is False
     assert result["mask_sample"] is True
@@ -1525,16 +1565,16 @@ def test_contributed_yaml_loads_actual_server_schemas(operator_yaml, monkeypatch
     ResourcesServerTypeConfig.model_validate(operator_yaml[GRADER_NAME])
     ResponsesAPIAgentServerTypeConfig.model_validate(operator_yaml[AGENT_NAME])
     reader = MagicMock(return_value=OmegaConf.create(operator_yaml))
-    monkeypatch.setattr(server_utils, "get_global_config_dict", reader)
+    monkeypatch.setattr(base_server, "get_global_config_dict", reader)
     loaded = {}
     for name, server_class, config_class in (
         (GRADER_NAME, adapter.CritPtCustomGraderServer, adapter.CritPtCustomGraderConfig),
         (AGENT_NAME, SimpleAgent, SimpleAgentConfig),
     ):
         selector = MagicMock(return_value=name)
-        monkeypatch.setattr(server_utils, "getenv", selector)
+        monkeypatch.setattr(base_server, "getenv", selector)
         loaded[name] = server_class.load_config_from_global_config()
-        selector.assert_called_once_with(server_utils.NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
+        selector.assert_called_once_with(base_server.NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
         assert isinstance(loaded[name], config_class)
         assert loaded[name].name == name and loaded[name].entrypoint == "app.py"
     assert reader.call_count == 2
@@ -1682,3 +1722,144 @@ def test_comparison_defaults_validate_at_load_and_default_to_delivered_verdict_v
     for bad in ({"default_rtol": "abc"}, {"default_atol": "-1e-8"}, {"default_rtol": None}, {"default_rtol": "nan"}):
         with pytest.raises(ValidationError):
             adapter.CritPtCustomGraderConfig(**base, comparison=bad)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    ("stage", "status", "reason", "eligible"),
+    [
+        ("reference", "uncertain", "symbolic_undecided", False),
+        ("reference", "timeout", None, False),
+        ("reference", "runner_error", "limits", False),
+        ("candidate", "runner_error", "limits", False),
+        ("candidate", "invalid_expected", "nonfinite_expected", False),
+        ("candidate", "uncertain", "comparator_failure", False),
+        ("candidate", "uncertain", "native_type_not_supported", False),
+        ("candidate", "uncertain", "future_reason", False),
+        ("candidate", "uncertain", "symbolic_undecided", True),
+        ("candidate", "uncertain", "symbolic_growth_limit", True),
+        ("candidate", "uncertain", "unordered_undecided", True),
+        ("candidate", "uncertain", "unordered_budget", True),
+        ("candidate", "uncertain", "comparator_timeout", True),
+    ],
+)
+async def test_uncertainty_policy_requires_completed_candidate_proof(
+    make_server, enabled, stage, status, reason, eligible
+):
+    from resources_servers.critpt_custom_grader import runner
+    from resources_servers.critpt_custom_grader.tests.support import (
+        compare_result,
+        exited,
+        happy_script,
+        make_grader,
+        make_task,
+    )
+
+    script = happy_script()
+    report = compare_result(["equal", status], side=stage)
+    if status in {"timeout", "runner_error"}:
+        report = {**compare_result([]), "status": status, "code": reason}
+        exit_code = runner.EXIT_TIMEOUT if status == "timeout" else runner.EXIT_RUNNER_ERROR
+        script[("exec", "comparator")] = (
+            exited(exit_code) if stage == "reference" else [exited(runner.EXIT_COMPLETED), exited(exit_code)]
+        )
+    else:
+        report["results"][1]["code"] = reason
+        if status == "uncertain":
+            report["results"][1]["side"] = "comparator"
+    script[("result", "comparator")][0 if stage == "reference" else 1] = report
+    grader, provider = make_grader(script)
+    server, app, _ = make_server(score_comparator_uncertain_as_incorrect=enabled)
+    server._grader = grader
+    request = payload(**make_task().model_dump())
+    http_status, result = await post(app, "/verify", request)
+    assert http_status == 200 and result["category"] == "comparator_uncertain"
+    assert result["response"] == request["response"]
+    assert result["scored"] is (enabled and eligible)
+    assert result["candidate_uncertainty_reasons"] == ([reason] if eligible else [])
+    if enabled and eligible:
+        assert result["reward"] == 0.0 and result["mask_sample"] is False
+        assert not any(key.startswith("_ng_failure_") for key in result)
+    else:
+        assert_unscorable(result)
+    domains = {spec.metadata["ng-grader-domain"] for spec in provider.created}
+    assert ("candidate" in domains) is (stage == "candidate")
+
+
+@pytest.mark.asyncio
+async def test_uncertainty_without_execution_provenance_stays_unscored(make_server):
+    _, app, _ = make_server(grade=unscorable_verdict(), score_comparator_uncertain_as_incorrect=True)
+    _, result = await post(app, "/verify", payload())
+    assert_unscorable(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["passed", "truncated", "source_limit"])
+async def test_long_reasoning_preserves_response_and_executable_limits(make_server, outcome):
+    server, app, fake = make_server()
+    row = payload()
+    reasoning = {
+        "id": "reasoning-1",
+        "type": "reasoning",
+        "summary": [],
+        "content": [{"type": "reasoning_text", "text": "long reasoning " * 100_000}],
+    }
+    row["response"]["output"].insert(0, reasoning)
+    # Multi-turn prompt history can contain an earlier long reasoning item too.
+    row["responses_create_params"]["input"] = [reasoning, {"role": "user", "content": "Return the code."}]
+    if outcome == "truncated":
+        row["response"]["status"] = "incomplete"
+        row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
+    if outcome == "source_limit":
+        row["response"]["output"][-1]["content"][0]["text"] = "x" * (
+            server.config.execution.max_candidate_source_bytes + 1
+        )
+    status, result = await post(app, "/verify", row)
+    assert status == 200
+    assert result["response"] == row["response"]
+    assert result["responses_create_params"] == row["responses_create_params"]
+    assert (
+        result["category"]
+        == {"passed": "passed", "truncated": "response_truncated", "source_limit": "candidate_source_limit"}[outcome]
+    )
+    assert result["reward"] == (1.0 if outcome == "passed" else 0.0)
+    if outcome == "passed":
+        assert fake.grade.await_args.args[1] == SOURCE.strip()
+        # Judge-only replay preserves the same saved response and verdict.
+        replay_status, replay = await post(app, "/verify", {**row, "response": result["response"]})
+        assert replay_status == 200 and replay["category"] == "passed"
+        assert replay["response"] == result["response"]
+        assert fake.grade.await_count == 2
+    else:
+        fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/verify", "/seed_session"])
+async def test_large_request_uses_standard_transport_without_a_grader_byte_cap(make_server, caplog, path):
+    _, app, fake = make_server()
+    row = payload()
+    row["responses_create_params"]["input"] = "private_prompt_marker" * 600_000
+    assert len(json.dumps(row).encode()) > 10 * 1024 * 1024
+    if path == "/seed_session":
+        row.pop("response")
+    status, result = await post(app, path, row)
+    assert status == 200
+    if path == "/verify":
+        assert result["category"] == "passed"
+        fake.grade.assert_awaited_once()
+    else:
+        fake.grade.assert_not_awaited()
+    assert "private_prompt_marker" not in caplog.text
+
+
+def test_unbounded_envelope_bytes_still_enforce_json_structure_and_types():
+    for value in [float("nan"), 2**64, {"x": [None] * (task_schema.MAX_JSON_NODES + 1)}]:
+        with pytest.raises(ValueError):
+            task_schema.bounded_json(value, max_bytes=None)
+    nested = None
+    for _ in range(3 * task_schema.MAX_DEPTH + 10):
+        nested = [nested]
+    with pytest.raises(ValueError, match="structure"):
+        task_schema.bounded_json(nested, max_bytes=None)

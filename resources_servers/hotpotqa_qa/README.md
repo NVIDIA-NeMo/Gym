@@ -20,10 +20,35 @@ port of the scoring used by NeMo Skills' `hotpotqa_closedbook` benchmark:
   capitalized, mostly non-stopword) so the benchmark can report both
   `unfiltered` and `filtered_*` metrics side by side.
 
-The reward emitted on `/verify` is `is_correct_strict`. The full set of
-scores (`answer_em`, `answer_f1`, `is_correct`, `is_correct_strict`) is
+The reward emitted on `/verify` is set by `reward_metric` (below). The full
+set of scores (`answer_em`, `answer_f1`, `is_correct`, `is_correct_strict`) is
 returned in the verify response so downstream metric aggregation can compute
 pass@k for each channel.
+
+## Reward metric
+
+| `reward_metric` | Reward | Use |
+|---|---|---|
+| `is_correct_strict` (default) | Alternative-aware substring match, as in NeMo Skills | Evaluation; results stay comparable with Skills |
+| `answer_em` | SQuAD-normalized exact match | Recommended for training |
+
+`is_correct_strict` accepts the ground truth inside a longer answer, so for
+ground truth `blue` the answers `"blue or red"` and
+`"blue is wrong; red is correct"` get reward 1.0, as does `"yes or no"` for
+`yes`. Used as a training reward, that pays for hedged answers. `answer_em`
+scores them 0.0. It also scores 0.0 for a correct answer wrapped in a sentence
+(`"The capital is Paris"`) or written as a surface-form variant (`5` for
+`five`), so it relies on the prompt asking for the bare answer.
+
+To train with exact match, set `reward_metric: answer_em` in the resources
+server config or override it on the command line:
+
+```bash
+gym env start \
+    --model-type openai_model \
+    --resources-server hotpotqa_qa \
+    ++hotpotqa_qa.resources_servers.hotpotqa_qa.reward_metric=answer_em
+```
 
 # Example usage
 

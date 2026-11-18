@@ -12,14 +12,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import SESSION_LOST
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.client import ServerClient
+from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.session_routing import install_session_routing
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+    install_session_routing,
+)
 from resources_servers.gdpval import persisted_layout, task_sandbox
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest
 
@@ -191,6 +192,8 @@ def test_unjudged_deliverables_are_persisted_and_masked(server, root, tmp_path, 
     verified = _verify(client, rubric_json=[{"criterion": "clarity", "score": 1}])
 
     assert (verified["reward"], verified["mask_sample"]) == (0.0, True)
+    assert verified["failure_kind"] == "gdpval:judging_disabled"
+    assert verified["failure_reason"] == "judge_deliverables is false, so the deliverables were saved without judging"
     assert verified["judge_response"] is None
     assert (Path(verified["deliverables_dir"]) / "report.md").read_text() == "the report"
 
@@ -239,7 +242,7 @@ def test_tasks_without_submitted_files_record_how_they_ended(server, root, tmp_p
     assert sorted(p.name for p in task_dir.iterdir()) == ["finish_params.json", "reference_files"]
 
 
-def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_nothing(
+def test_an_agent_that_ran_out_of_wall_time_is_a_scored_zero_and_persists_nothing(
     server, root, tmp_path, stopped, references
 ):
     client = TestClient(server.setup_webserver())
@@ -250,8 +253,11 @@ def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_not
 
     verified = _verify(client, response_metadata={"stop_reason": "wall_time"})
 
-    assert verified["_ng_failure_class"] == "agent_timeout"
-    assert (verified["failure_kind"], verified["mask_sample"], verified["reward"]) == ("agent_timeout", True, 0.0)
+    # The model's own result: a zero that stays in the denominator, typed with model attribution. No outcome action,
+    # so a timeout whose window held a server-side fault is still run again by recovery.
+    assert "_ng_failure_class" not in verified
+    assert (verified["failure_kind"], verified["mask_sample"], verified["reward"]) == ("agent_timeout", False, 0.0)
+    assert verified["failure_outcome_attribution"] == "model"
     assert "_ng_failure_terminal" not in verified
     assert not (tmp_path / "persist").exists(), "the partial work is not collected or judged"
     assert _close(client, seed).status_code == 200
@@ -406,11 +412,11 @@ def test_task_data_that_is_not_a_task_is_refused_as_final(server, root, tmp_path
 def _app(server: GDPValResourcesServer, *, routed: bool):
     app = server.setup_webserver()
     if routed:
-        # As run_webserver does, even for one worker: the router names a typed seed's session by its
+        # As run_webserver does, even for one worker: the router names an episode seed's session by its
         # resources_session_id before the handler runs.
         key = server.get_session_middleware_key()
         install_session_routing(
-            app, socket_dir=None, session_cookie=key, secret_key=key, **server.claimed_session_routing()
+            app, socket_dir=None, session_cookie=key, secret_key=key, **server.owned_session_routing()
         )
     return app
 
@@ -431,16 +437,27 @@ def test_a_refused_seed_does_not_hand_out_the_cookie_of_the_live_session(server,
     assert _verify(intruder)["failure_kind"] == SESSION_LOST
 
 
-def test_a_seed_whose_rollout_id_names_no_rollout_index_is_rejected(server, root, tmp_path):
-    seed = _seed(tmp_path).model_copy(update={"episode_id": EpisodeId(rollout_id="explicit")})
+def test_sessions_with_rollout_ids_another_orchestrator_assigned_keep_their_files_apart(server, root, tmp_path):
+    """Rollouts named per trial attempt: concurrent samples of one task must not share a directory."""
+    app = server.setup_webserver()
+    first, second = TestClient(app), TestClient(app)
+    first_id, second_id = "trial-trial_01aaa-attempt-0", "trial-trial_01bbb-attempt-0"
+    for client, session_id, rollout_id in ((first, "first", first_id), (second, "second", second_id)):
+        seed = _seed(tmp_path, session_id=session_id).model_copy(
+            update={"episode_id": EpisodeId(rollout_id=rollout_id)}
+        )
+        assert _post_seed(client, seed).status_code == 200
+    (root / "a.md").write_text("a")
+    (root / "b.md").write_text("b")
+    first.post("/finish", json={"reason": "first", "paths": ["a.md"]})
+    second.post("/finish", json={"reason": "second", "paths": ["b.md"]})
 
-    refused = _post_seed(TestClient(server.setup_webserver()), seed)
+    first_dir, second_dir = (Path(_verify(client)["deliverables_dir"]) for client in (first, second))
 
-    # 422, not a retried 500: a retry sends the same rollout_id.
-    assert refused.status_code == 422
-    assert "is not '<task_index>-<rollout_index>' with two integers" in refused.json()["detail"]
-
-    assert not root.exists()
+    assert (first_dir.name, second_dir.name) == (f"repeat_id_{first_id}", f"repeat_id_{second_id}")
+    assert first_dir.parent == second_dir.parent == tmp_path / "persist" / "task_task-1"
+    assert "a.md" in _files(first_dir) and "b.md" not in _files(first_dir)
+    assert "b.md" in _files(second_dir) and "a.md" not in _files(second_dir)
 
 
 def test_a_second_live_session_for_the_same_task_and_repeat_is_refused_until_the_first_closes(

@@ -8,7 +8,7 @@ import shutil
 
 import pytest
 
-from nemo_gym.sandbox.providers import SandboxSpec
+from nemo_gym.sandbox import SandboxSpec
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from responses_api_agents.anyswe_agent.app import _resolve_sandbox_provider
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 
-from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox import AsyncSandbox
 
 
 log = logging.getLogger(__name__)

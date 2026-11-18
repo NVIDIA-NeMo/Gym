@@ -23,13 +23,12 @@ from fastapi import HTTPException
 from pytest import MonkeyPatch, approx
 
 import resources_servers.genrm_compare.app
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    ModelServerRef,
 )
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -38,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.verification import JudgeError
 from resources_servers.genrm_compare.app import (
     GROUP_ATTEMPT_KEY_NAME,
     GenRMCompareConfig,
@@ -48,6 +48,7 @@ from resources_servers.genrm_compare.app import (
     _input_to_conversation_history,
     _output_budget_exhausted,
 )
+from resources_servers.genrm_compare.tests.support import request_with_session
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons
 from resources_servers.genrm_compare.utils import get_prompt_key_from_input
 
@@ -356,12 +357,13 @@ class TestGenRMCompareResourcesServer:
         for rollout_index in range(16):
             tasks.append(
                 server.verify(
+                    request_with_session(),
                     request.model_copy(
                         update={
                             "task_index": 7,
                             "rollout_index": rollout_index,
                         }
-                    )
+                    ),
                 )
             )
 
@@ -474,7 +476,15 @@ class TestGenRMCompareResourcesServer:
                     tools=[],
                     parallel_tool_calls=True,
                     tool_choice="auto",
-                    output=[],
+                    output=[
+                        {
+                            "id": f"message_{rollout_index}",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": f"answer_{rollout_index}", "annotations": []}],
+                        }
+                    ],
                     object="response",
                 ),
                 task_index=11,
@@ -484,12 +494,15 @@ class TestGenRMCompareResourcesServer:
         run_compare = AsyncMock(return_value=collected_comparisons([10.0, 20.0, 30.0]))
         monkeypatch.setattr(server, "_collect_comparisons", run_compare)
 
-        results = await asyncio.gather(*(server.verify(request(index)) for index in (2, 0, 1)))
+        results = await asyncio.gather(*(server.verify(request_with_session(), request(index)) for index in (2, 0, 1)))
 
         assert [result.reward for result in results] == [30.0, 10.0, 20.0]
         run_compare.assert_awaited_once()
-        response_ids = [response_obj["id"] for response_obj in run_compare.await_args.kwargs["response_objs"]]
-        assert response_ids == ["resp_0", "resp_1", "resp_2"]
+        answer_texts = [
+            response_obj["output"][1]["content"][0]["text"]
+            for response_obj in run_compare.await_args.kwargs["response_objs"]
+        ]
+        assert answer_texts == ["answer_0", "answer_1", "answer_2"]
 
     async def test_identical_duplicate_attaches_to_existing_rollout_slot(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -518,7 +531,11 @@ class TestGenRMCompareResourcesServer:
         monkeypatch.setattr(server, "_collect_comparisons", run_compare)
         first = request(0)
 
-        results = await asyncio.gather(server.verify(first), server.verify(first), server.verify(request(1)))
+        results = await asyncio.gather(
+            server.verify(request_with_session(), first),
+            server.verify(request_with_session(), first),
+            server.verify(request_with_session(), request(1)),
+        )
 
         assert [result.reward for result in results] == [1.0, 1.0, 2.0]
         run_compare.assert_awaited_once()
@@ -549,15 +566,15 @@ class TestGenRMCompareResourcesServer:
 
         run_compare = AsyncMock(return_value=collected_comparisons([1.0, 2.0]))
         monkeypatch.setattr(server, "_collect_comparisons", run_compare)
-        original = asyncio.create_task(server.verify(request(0, "original")))
+        original = asyncio.create_task(server.verify(request_with_session(), request(0, "original")))
         await asyncio.sleep(0)
 
         with pytest.raises(HTTPException) as error:
-            await server.verify(request(0, "replacement"))
+            await server.verify(request_with_session(), request(0, "replacement"))
 
         assert error.value.status_code == 409
         assert len(next(iter(server._verify_cohorts.values())).members) == 1
-        second = asyncio.create_task(server.verify(request(1, "sibling")))
+        second = asyncio.create_task(server.verify(request_with_session(), request(1, "sibling")))
         results = await asyncio.gather(original, second)
         assert [result.reward for result in results] == [1.0, 2.0]
         assert server._verify_cohorts == {}
@@ -569,8 +586,8 @@ class TestGenRMCompareResourcesServer:
         monkeypatch.setattr(server, "_collect_comparisons", run_compare)
 
         results = await asyncio.gather(
-            server.verify(self._verify_request(0, task_index=None)),
-            server.verify(self._verify_request(1, task_index=None)),
+            server.verify(request_with_session(), self._verify_request(0, task_index=None)),
+            server.verify(request_with_session(), self._verify_request(1, task_index=None)),
         )
 
         assert [result.reward for result in results] == [1.0, 2.0]
@@ -593,12 +610,12 @@ class TestGenRMCompareResourcesServer:
         monkeypatch.setattr(server, "_collect_comparisons", run_compare)
 
         first = await asyncio.gather(
-            server.verify(self._verify_request(0, response_id="first-0")),
-            server.verify(self._verify_request(1, response_id="first-1")),
+            server.verify(request_with_session(), self._verify_request(0, response_id="first-0")),
+            server.verify(request_with_session(), self._verify_request(1, response_id="first-1")),
         )
         second = await asyncio.gather(
-            server.verify(self._verify_request(0, response_id="second-0")),
-            server.verify(self._verify_request(1, response_id="second-1")),
+            server.verify(request_with_session(), self._verify_request(0, response_id="second-0")),
+            server.verify(request_with_session(), self._verify_request(1, response_id="second-1")),
         )
 
         assert [result.reward for result in first] == [1.0, 2.0]
@@ -611,9 +628,9 @@ class TestGenRMCompareResourcesServer:
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
 
         with pytest.raises(HTTPException) as missing_rollout_index:
-            await server.verify(self._verify_request(None))
+            await server.verify(request_with_session(), self._verify_request(None))
         with pytest.raises(HTTPException) as invalid_rollout_index:
-            await server.verify(self._verify_request(2))
+            await server.verify(request_with_session(), self._verify_request(2))
 
         assert missing_rollout_index.value.status_code == 422
         assert invalid_rollout_index.value.status_code == 422
@@ -627,15 +644,15 @@ class TestGenRMCompareResourcesServer:
         first = self._verify_request(0, task_index=None, group_id="legacy-21")
 
         await asyncio.gather(
-            server.verify(first),
-            server.verify(self._verify_request(1, task_index=None, group_id="legacy-21")),
+            server.verify(request_with_session(), first),
+            server.verify(request_with_session(), self._verify_request(1, task_index=None, group_id="legacy-21")),
         )
-        duplicate = await server.verify(first)
+        duplicate = await server.verify(request_with_session(), first)
 
         assert duplicate.reward == 1.0
         run_compare.assert_awaited_once()
         cohort = next(iter(server._verify_cohorts.values()))
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
     async def test_new_group_attempt_is_isolated_from_completed_cohort(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -649,34 +666,42 @@ class TestGenRMCompareResourcesServer:
         monkeypatch.setattr(server, "_collect_comparisons", run_compare)
 
         first_attempt = await asyncio.gather(
-            server.verify(self._verify_request(0, task_index=None, group_id="completed-group", response_id="old-0")),
-            server.verify(self._verify_request(1, task_index=None, group_id="completed-group", response_id="old-1")),
+            server.verify(
+                request_with_session(),
+                self._verify_request(0, task_index=None, group_id="completed-group", response_id="old-0"),
+            ),
+            server.verify(
+                request_with_session(),
+                self._verify_request(1, task_index=None, group_id="completed-group", response_id="old-1"),
+            ),
         )
         replacement_attempt = await asyncio.gather(
             server.verify(
+                request_with_session(),
                 self._verify_request(
                     0,
                     task_index=None,
                     group_id="completed-group",
                     group_attempt=1,
                     response_id="replacement-0",
-                )
+                ),
             ),
             server.verify(
+                request_with_session(),
                 self._verify_request(
                     1,
                     task_index=None,
                     group_id="completed-group",
                     group_attempt=1,
                     response_id="replacement-1",
-                )
+                ),
             ),
         )
 
         assert [result.reward for result in first_attempt] == [1.0, 2.0]
         assert [result.reward for result in replacement_attempt] == [3.0, 4.0]
         assert run_compare.await_count == 2
-        assert len(server._verify_cohorts) == 2
+        assert list(server._verify_cohorts) == ["group_id::completed-group::group_attempt::1"]
 
     async def test_partial_old_attempt_does_not_mix_with_completed_replacement(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -689,34 +714,38 @@ class TestGenRMCompareResourcesServer:
 
         old_waiter = asyncio.create_task(
             server.verify(
+                request_with_session(),
                 self._verify_request(
                     0,
                     task_index=None,
                     group_id="replacement-group",
                     group_attempt=0,
                     response_id="old-0",
-                )
+                ),
             )
         )
         await asyncio.sleep(0)
+        old_cohort = next(iter(server._verify_cohorts.values()))
         replacement = await asyncio.gather(
             server.verify(
+                request_with_session(),
                 self._verify_request(
                     0,
                     task_index=None,
                     group_id="replacement-group",
                     group_attempt=1,
                     response_id="new-0",
-                )
+                ),
             ),
             server.verify(
+                request_with_session(),
                 self._verify_request(
                     1,
                     task_index=None,
                     group_id="replacement-group",
                     group_attempt=1,
                     response_id="new-1",
-                )
+                ),
             ),
         )
 
@@ -724,14 +753,13 @@ class TestGenRMCompareResourcesServer:
 
         assert [result.reward for result in replacement] == [3.0, 4.0]
         assert [result.group_attempt for result in replacement] == [1, 1]
-        assert len(server._verify_cohorts) == 2
+        assert len(server._verify_cohorts) == 1
         assert len(old_result) == 1
         assert isinstance(old_result[0], HTTPException)
         assert old_result[0].status_code == 503
         assert "superseded by attempt 1" in str(old_result[0].detail)
-        old_cohort = next(cohort for cohort in server._verify_cohorts.values() if cohort.group_attempt == 0)
         assert old_cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in old_cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in old_cohort.members.values())
 
     async def test_late_older_group_attempt_is_rejected(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -744,34 +772,37 @@ class TestGenRMCompareResourcesServer:
 
         replacement = await asyncio.gather(
             server.verify(
+                request_with_session(),
                 self._verify_request(
                     0,
                     task_index=None,
                     group_id="stale-group",
                     group_attempt=1,
                     response_id="new-0",
-                )
+                ),
             ),
             server.verify(
+                request_with_session(),
                 self._verify_request(
                     1,
                     task_index=None,
                     group_id="stale-group",
                     group_attempt=1,
                     response_id="new-1",
-                )
+                ),
             ),
         )
 
         with pytest.raises(HTTPException) as error:
             await server.verify(
+                request_with_session(),
                 self._verify_request(
                     0,
                     task_index=None,
                     group_id="stale-group",
                     group_attempt=0,
                     response_id="old-0",
-                )
+                ),
             )
 
         assert [result.reward for result in replacement] == [3.0, 4.0]
@@ -784,12 +815,13 @@ class TestGenRMCompareResourcesServer:
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         first_waiter = asyncio.create_task(
             server.verify(
+                request_with_session(),
                 self._verify_request(
                     0,
                     task_index=None,
                     group_id="stable-group",
                     group_attempt=0,
-                )
+                ),
             )
         )
         await asyncio.sleep(0)
@@ -813,7 +845,7 @@ class TestGenRMCompareResourcesServer:
         )
 
         with pytest.raises(HTTPException) as error:
-            await server.verify(mismatched)
+            await server.verify(request_with_session(), mismatched)
 
         assert error.value.status_code == 409
         assert "inconsistent prompt" in str(error.value.detail)
@@ -827,7 +859,7 @@ class TestGenRMCompareResourcesServer:
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         first = self._verify_request(0, task_index=None, group_id="prompt-mismatch", group_attempt=0)
-        first_waiter = asyncio.create_task(server.verify(first))
+        first_waiter = asyncio.create_task(server.verify(request_with_session(), first))
         await asyncio.sleep(0)
         mismatched = self._verify_request(1, task_index=None, group_id="prompt-mismatch", group_attempt=0).model_copy(
             update={
@@ -838,7 +870,7 @@ class TestGenRMCompareResourcesServer:
         )
 
         with pytest.raises(HTTPException) as error:
-            await server.verify(mismatched)
+            await server.verify(request_with_session(), mismatched)
 
         assert error.value.status_code == 409
         assert "inconsistent prompt" in error.value.detail
@@ -854,7 +886,7 @@ class TestGenRMCompareResourcesServer:
         )
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
 
-        waiter = asyncio.create_task(server.verify(self._verify_request(0, task_index=22)))
+        waiter = asyncio.create_task(server.verify(request_with_session(), self._verify_request(0, task_index=22)))
         await asyncio.sleep(0)
         cohort = next(iter(server._verify_cohorts.values()))
         with pytest.raises(HTTPException, match="did not collect 2 unique rollout indices") as error:
@@ -864,7 +896,7 @@ class TestGenRMCompareResourcesServer:
         assert server._verify_cohorts[cohort.key] is cohort
         assert cohort.phase == "failed"
         assert cohort.collection_timeout_task is None
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
     async def test_disconnected_waiter_does_not_retire_logical_cohort(self, config):
         config = config.model_copy(
@@ -874,7 +906,7 @@ class TestGenRMCompareResourcesServer:
             }
         )
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
-        waiter = asyncio.create_task(server.verify(self._verify_request(0, task_index=27)))
+        waiter = asyncio.create_task(server.verify(request_with_session(), self._verify_request(0, task_index=27)))
         await asyncio.sleep(0)
         cohort = next(iter(server._verify_cohorts.values()))
 
@@ -884,7 +916,7 @@ class TestGenRMCompareResourcesServer:
 
         assert cohort.phase == "collecting"
         assert len(cohort.members) == 1
-        assert all(member.body is not None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is not None and not member.waiters for member in cohort.members.values())
 
     async def test_evaluation_failure_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -892,8 +924,8 @@ class TestGenRMCompareResourcesServer:
         monkeypatch.setattr(server, "_collect_comparisons", AsyncMock(side_effect=ValueError("judge failed")))
 
         results = await asyncio.gather(
-            server.verify(self._verify_request(0, task_index=23)),
-            server.verify(self._verify_request(1, task_index=23)),
+            server.verify(request_with_session(), self._verify_request(0, task_index=23)),
+            server.verify(request_with_session(), self._verify_request(1, task_index=23)),
             return_exceptions=True,
         )
 
@@ -904,35 +936,51 @@ class TestGenRMCompareResourcesServer:
         )
         cohort = next(iter(server._verify_cohorts.values()))
         assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
-    async def test_input_materialization_failure_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
+    async def test_input_materialization_failure_releases_legacy_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
-        run_compare = AsyncMock()
+        run_compare = AsyncMock(return_value=collected_comparisons([1.0, 2.0]))
         monkeypatch.setattr(server, "_collect_comparisons", run_compare)
         monkeypatch.setattr(server, "_response_digest", lambda response: response.id)
+
+        first = asyncio.create_task(server.verify(request_with_session(), self._verify_request(0, task_index=26)))
+        await asyncio.sleep(0)
+        cohort = next(iter(server._verify_cohorts.values()))
+        assert list(cohort.members) == [0]
+        assert len(cohort.members[0].waiters) == 1 and not first.done()
+        convert = server._comparison_response
 
         def fail_model_dump(*args, **kwargs):
             raise ValueError("response conversion failed")
 
-        monkeypatch.setattr(NeMoGymResponse, "model_dump", fail_model_dump)
-        results = await asyncio.gather(
-            server.verify(self._verify_request(0, task_index=26)),
-            server.verify(self._verify_request(1, task_index=26)),
-            return_exceptions=True,
-        )
-
-        assert all(
-            isinstance(result, HTTPException)
-            and result.status_code == 503
-            and "response conversion failed" in str(result.detail)
-            for result in results
-        )
+        monkeypatch.setattr(server, "_comparison_response", fail_model_dump)
+        with pytest.raises(HTTPException) as error:
+            await server.verify(request_with_session(), self._verify_request(1, task_index=26))
+        assert error.value.status_code == 503 and "response conversion failed" in error.value.detail
+        with pytest.raises(HTTPException) as error:
+            await asyncio.wait_for(first, 0.5)
+        assert error.value.status_code == 503 and "fresh _ng_group_id" in error.value.detail
         run_compare.assert_not_awaited()
-        cohort = next(iter(server._verify_cohorts.values()))
-        assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert cohort.phase == "failed" and list(cohort.members) == [0]
+        assert cohort.collection_timeout_task is None
+        assert all(not member.waiters and member.response_obj is None for member in cohort.members.values())
+
+        monkeypatch.setattr(server, "_comparison_response", convert)
+        with pytest.raises(HTTPException) as error:
+            await server.verify(request_with_session(), self._verify_request(1, task_index=26))
+        assert error.value.status_code == 503
+        recovered = await asyncio.gather(
+            *(
+                server.verify(
+                    request_with_session(), self._verify_request(i, task_index=26, group_id="fresh-conversion")
+                )
+                for i in range(2)
+            )
+        )
+        assert [result.reward for result in recovered] == [1.0, 2.0]
+        run_compare.assert_awaited_once()
 
     async def test_evaluation_cancellation_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -946,8 +994,8 @@ class TestGenRMCompareResourcesServer:
 
         monkeypatch.setattr(server, "_collect_comparisons", blocked_compare)
         waiters = [
-            asyncio.create_task(server.verify(self._verify_request(0, task_index=24))),
-            asyncio.create_task(server.verify(self._verify_request(1, task_index=24))),
+            asyncio.create_task(server.verify(request_with_session(), self._verify_request(0, task_index=24))),
+            asyncio.create_task(server.verify(request_with_session(), self._verify_request(1, task_index=24))),
         ]
         await asyncio.wait_for(comparison_started.wait(), timeout=1.0)
         cohort = next(iter(server._verify_cohorts.values()))
@@ -963,14 +1011,16 @@ class TestGenRMCompareResourcesServer:
             for result in results
         )
         assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
     async def test_server_instances_do_not_share_cohorts(self, config):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         first = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         second = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
 
-        first_waiter = asyncio.create_task(first.verify(self._verify_request(0, task_index=25)))
+        first_waiter = asyncio.create_task(
+            first.verify(request_with_session(), self._verify_request(0, task_index=25))
+        )
         await asyncio.sleep(0)
 
         assert len(first._verify_cohorts) == 1
@@ -994,8 +1044,12 @@ class TestGenRMCompareResourcesServer:
 
         for task_index in (30, 31, 32):
             await asyncio.gather(
-                server.verify(self._verify_request(0, task_index=None, group_id=f"group-{task_index}")),
-                server.verify(self._verify_request(1, task_index=None, group_id=f"group-{task_index}")),
+                server.verify(
+                    request_with_session(), self._verify_request(0, task_index=None, group_id=f"group-{task_index}")
+                ),
+                server.verify(
+                    request_with_session(), self._verify_request(1, task_index=None, group_id=f"group-{task_index}")
+                ),
             )
 
         server._prune_terminal_cohorts()
@@ -1051,7 +1105,7 @@ class TestFixedBaseline:
             rollout_index=0,
         )
 
-        result = await server.verify(request)
+        result = await server.verify(request_with_session(), request)
 
         assert result.reward == 5.0
         server._run_single_comparison.assert_awaited_once()

@@ -17,7 +17,6 @@ VLLM_COMMON_ARGS=(
     --enable-chunked-prefill
     --enable-prefix-caching
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
-    --enable-expert-parallel
     --kv-cache-dtype fp8
     --data-parallel-size 1
     --data-parallel-size-local 1

@@ -24,9 +24,11 @@ import pytest
 
 from nemo_gym.sandbox import api as sandbox_api
 from nemo_gym.sandbox.api import AsyncSandbox, SandboxSpec
+from nemo_gym.telemetry import _fallbacks as telemetry_fallbacks
 from nemo_gym.telemetry import gym_metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
-from tests.unit_tests.test_sandbox import FakeSandboxProvider
+from tests.unit_tests.sandbox.test_sandbox import FakeSandboxProvider
+from tests.unit_tests.telemetry.in_memory_meter import collected_metrics  # noqa: F401 - fixture, re-exported
 
 
 pytest.importorskip("opentelemetry.sdk.metrics")
@@ -35,42 +37,20 @@ PROVIDER_ATTR = telemetry_metrics.SANDBOX_PROVIDER_ATTRIBUTE
 ACTIVE = telemetry_metrics.SANDBOX_ACTIVE_INSTRUMENT
 
 
-@pytest.fixture
-def collected_metrics(monkeypatch):
-    """A live meter on an in-memory reader, installed as the process handle."""
-    from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-
-    reader = InMemoryMetricReader()
-    provider = MeterProvider(metric_readers=[reader])
-
-    class _Handle:
-        is_exporting = True
-        meter = provider.get_meter("test")
-
-    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
-    telemetry_metrics._reset_for_testing()
-
-    def collect():
-        data = reader.get_metrics_data()
-        out = {}
-        # The reader hands back None when no instrument has recorded yet.
-        for resource_metric in data.resource_metrics if data is not None else ():
-            for scope_metric in resource_metric.scope_metrics:
-                for metric in scope_metric.metrics:
-                    out[metric.name] = list(metric.data.data_points)
-        return out
-
-    return collect
-
-
 def _active_by_provider(points) -> dict[str, int]:
     return {p.attributes[PROVIDER_ATTR]: p.value for p in points}
 
 
+def set_sandbox_gates(monkeypatch, *, group: bool, exporter: bool) -> None:
+    """Set the `sandbox` span group and the metrics exporter where the sandbox sites read them."""
+    monkeypatch.setattr(telemetry_fallbacks, "is_span_group_enabled", lambda _: group)
+    monkeypatch.setattr(sandbox_api, "is_span_group_enabled", lambda _: group)
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", exporter)
+
+
 @pytest.fixture
 def sandbox_group_on(monkeypatch):
-    monkeypatch.setattr(sandbox_api, "is_span_group_enabled", lambda group: True)
+    set_sandbox_gates(monkeypatch, group=True, exporter=False)
 
 
 def test_recording_without_telemetry_is_a_no_op(monkeypatch):
@@ -180,8 +160,8 @@ async def test_failed_close_keeps_the_sandbox_counted_until_a_retry_releases_it(
 
 
 @pytest.mark.asyncio
-async def test_sandbox_group_off_records_nothing(collected_metrics, monkeypatch):
-    monkeypatch.setattr(sandbox_api, "is_span_group_enabled", lambda group: False)
+async def test_sandbox_records_nothing_without_the_group_or_a_metrics_exporter(collected_metrics, monkeypatch):
+    set_sandbox_gates(monkeypatch, group=False, exporter=False)
     sandbox = AsyncSandbox(FakeSandboxProvider(), SandboxSpec(image="img"))
     await sandbox.start()
     await sandbox.stop()

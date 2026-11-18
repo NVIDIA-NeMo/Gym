@@ -32,6 +32,41 @@ You need the two artifact files that `gym eval run` writes alongside the main ro
 
 Both files are required. `rollouts.jsonl` alone is not sufficient because many resources servers drop verifier-specific fields from the verify response; those fields are preserved in `*_materialized_inputs.jsonl`.
 
+<Note>
+Ordinary re-scoring reads the currently selected completed answers from a manifest-backed run, including after
+retries or judge-only recovery. Older successes superseded by a later failure or interrupted attempt are excluded.
+Write the new scores to a separate output; the source run and its recovery state remain unchanged. Separate outputs
+record `_ng_reverification_source_run_id` as source provenance, without claiming ownership of the source history,
+and support `--resume` after partial re-scoring. No policy inference is repeated.
+
+Resume checks that every cached score and failure still belongs to the same source run, selected attempt, and
+saved answer. If an answer was replaced or is no longer selected, choose a fresh output; the existing output is
+preserved. Outputs from older versions without these answer bindings also require a fresh output for managed-source
+re-scoring. A source grade changing on the same attempt and answer does not invalidate its cached re-score.
+`--limit` reads selected answers on demand instead of loading all selected trajectories.
+
+For managed-source re-scoring, a completed verifier reply must include a response object and a finite numeric
+reward. A malformed completed reply stops the pass before that reply is saved; scores already written remain
+saved. Correct the verifier and use `--resume` to retry unfinished rows. Resuming without correcting it can fail
+again on the same row. HTTP and connection errors also stop the pass. Replies explicitly marked as failures
+continue through the existing failure-output handling.
+
+Managed judge-only recovery uses `--judge-failed-only --settle-into-source`, as described in
+[evaluation resume](/main/evaluation/resume). It keeps the original attempt identity and admits each re-judgment
+against the saved failure budget before dispatch. Ordinary re-scoring does not settle results into the source run.
+
+For manifest- or journal-backed sources, the output and its supporting files cannot overwrite the source run's
+manifest, saved inputs, results, failures or other recovery files, including when `--rollouts` names the run's
+`_failures` file. These checks include output aliases and the `unsafe_` prefix used by `--force`. Outputs also cannot
+overwrite another manifest-backed run's results, failures or saved inputs.
+
+For legacy outputs with no manifest or journal, `--resume` and `--append` preserve an existing symlink and an unambiguous
+set of sidecars beside that link. If both the link and its target have companion files, Gym refuses to choose between
+them without changing saved files. This also applies to a fresh `--overwrite` and an output named after the alias's
+`_failures` or `_materialized_inputs` file, even when neither side has a manifest or journal. Back up and reconcile
+the files first, or choose an unambiguous output path. New outputs put companions beside the resolved target.
+</Note>
+
 ### Relay ATIF trajectories
 
 The initial external-trajectory path accepts the completed, text-only ATIF v1.7 profile emitted by NeMo Relay. It does not load the Relay runtime. You need:
@@ -186,7 +221,14 @@ gym eval reverify \
 # Output written to: results/unsafe_rollouts_reverified.jsonl
 ```
 
-## Recover judge failures
+## Recover judge failures from legacy runs
+
+<Note>
+The `--append` examples in this section apply only to runs without a recovery manifest. For a manifest-backed
+run, use `--judge-failed-only --settle-into-source` to settle selected saved judge failures into their original run.
+The command uses a separate output for its working results and retains the original attempt identity.
+Ordinary re-scoring reads selected completed answers into a separate output without changing the original run.
+</Note>
 
 When a run uses an LLM-as-judge verifier, the judge is a second model call made *after* the expensive policy inference. If that judge call fails (bad key, unreachable or rate-limited endpoint), the sample fails even though the policy `response` is already computed and stored in `<rollouts>_failures.jsonl`. `--judge-failed-only` re-runs the judge on **only** those rollouts, reusing the stored responses — no inference — and merges the recovered rows back with the ones that already scored, so the metrics match a clean run.
 
@@ -217,6 +259,14 @@ gym eval reverify --judge-failed-only --append \
   --rollouts results/rollouts.jsonl \
   --output results/rollouts.jsonl
 ```
+
+## Reusing output after an identity-stamp upgrade
+
+Older reverification output may lack the Environment Server and result-type stamps. On resume, Gym fills missing stamps from the original producing rollouts **in memory** for export and aggregation; it does not rewrite cached rows. The saved output can therefore still mix unstamped cached rows with newly stamped rows.
+
+Before using that mixed file as `--rollouts` for another `--judge-failed-only` recovery, or passing it to standalone `gym eval aggregate`, create a fresh output from the **original producing rollouts**. Use a new `--output` path without `--resume` or `--append`, and keep the same verifier configuration. This writes the identities carried by those source records into the fresh results. Passing the mixed file itself as the source can still split one benchmark into separate metric groups; the missing-source guard does not detect this when matching but unstamped source rows exist.
+
+If the original producing rollouts also have no stamps, their existing agent-based grouping remains; Gym does not infer an Environment Server identity.
 
 ## Sharding
 

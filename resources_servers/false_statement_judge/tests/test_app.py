@@ -26,15 +26,20 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
+from httpx import ASGITransport, AsyncClient
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    FailureReportRow,
+    NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import judge_failsafe
 from resources_servers.false_statement_judge.app import (
     FalseStatementJudgeConfig,
     FalseStatementJudgeServer,
@@ -225,11 +230,14 @@ async def test_verify_clamps_out_of_range_points() -> None:
 @pytest.mark.asyncio
 async def test_verify_unparsable_judge_is_flagged() -> None:
     server = _make_server("I could not decide.")
-    result = await server.verify(_request())
-    assert result.reward == 0.0
-    assert result.judge_points is None
-    # Surfaced rather than silently scored as a 0 the judge never gave.
-    assert FalseStatementJudgeServer._score_fn(result.model_dump())["no_judge_score"] == 1.0
+    body = _request()
+    result = await judge_failsafe(server.verify)(body)
+    row = json.loads(result.body)
+    assert row["mask_sample"] is True
+    assert row["_ng_failure_class"] == "judge_failed"
+    assert row["response"] == body.response.model_dump(mode="json")
+    report = FailureReportRow.report(row)
+    assert report.events[report.failure_id].failure_kind == "judge_failed"
 
 
 @pytest.mark.asyncio
@@ -307,6 +315,7 @@ def test_score_fn_breaks_out_all_three_bands() -> None:
 def _server_with_post(payload: dict, use_chat: bool) -> FalseStatementJudgeServer:
     client = MagicMock(spec=ServerClient)
     response_mock = AsyncMock()
+    response_mock.ok = True
     # `get_response_json` decodes `await response.read()` with orjson.
     response_mock.read = AsyncMock(return_value=json.dumps(payload).encode())
     client.post = AsyncMock(return_value=response_mock)
@@ -378,3 +387,144 @@ def test_get_key_metrics_selects_headline_only() -> None:
     assert key["mean/input_tokens"] == 10.0
     assert key["mean/output_tokens"] == 20.0
     assert "some/other" not in key
+
+
+# Exercise the registered route: the common failsafe and observation wrappers must
+# preserve an already-generated answer even when the judge cannot produce a grade.
+async def _verify_route(server: FalseStatementJudgeServer, body: FalseStatementVerifyRequest) -> dict:
+    server.server_client.global_config_dict = {"observability_enabled": True}
+    transport = ASGITransport(app=server.setup_webserver())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/ng-rollout/brokenarxiv-fixture/verify", json=body.model_dump(mode="json"))
+    assert response.status_code == 200
+    return response.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_chat", [False, True])
+@pytest.mark.parametrize("points", [0, 1, 2])
+async def test_valid_judge_grade_is_observed_without_changing_score(use_chat: bool, points: int) -> None:
+    text = f"<points>{points}</points>"
+    payload = _chat_payload(text) if use_chat else _responses_payload(text)
+    server = _server_with_post(payload, use_chat=use_chat)
+    body = _request()
+    row = await _verify_route(server, body)
+    assert row["reward"] == points / 2
+    assert row["judge_points"] == points
+    assert row["response"] == body.response.model_dump(mode="json")
+    assert not row.get("mask_sample", False)
+    assert not row.get("_ng_failure_class")
+    [invocation] = row["ng_verifier_invocations"]
+    assert invocation["status"] == "completed"
+    [operation] = invocation["grading_operations"]
+    assert operation["kind"] == "llm_judge"
+    assert operation["outcome"] == "completed"
+    assert operation["result_binding_sha256"]
+    [dependency] = operation["dependencies"]
+    assert dependency["response_id"] == payload["id"]
+    assert (
+        server.server_client.post.await_args.kwargs["headers"]["x-ng-verifier-invocation-id"]
+        == invocation["invocation_id"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_chat", [False, True])
+@pytest.mark.parametrize("failure", ["missing_points", "invalid_reply", "timeout", "model_failure"])
+async def test_unusable_judge_grade_is_masked_with_answer_and_failure_events(use_chat: bool, failure: str) -> None:
+    payload = _chat_payload("No verdict.") if use_chat else _responses_payload("No verdict.")
+    if failure == "invalid_reply":
+        payload = {"invalid": "reply"}
+    server = _server_with_post(payload, use_chat=use_chat)
+    cause = None
+    if failure == "timeout":
+        server.server_client.post.side_effect = TimeoutError("scripted judge timeout")
+    elif failure == "model_failure":
+        cause = NgFailureEvent(
+            boundary="model",
+            failure_kind="model_request_error",
+            failure_reason="scripted judge server failure",
+            operation="responses.create",
+            stage="verification",
+        )
+        server.server_client.post.side_effect = cause
+    body = _request()
+    row = await _verify_route(server, body)
+    assert row["response"] == body.response.model_dump(mode="json")
+    assert row["mask_sample"] is True
+    assert row["instance_config"]["mask_sample"] is True
+    assert row["_ng_failure_class"] == "judge_failed"
+    assert not row.get("_ng_failure_counts_as_zero", False)
+    report = FailureReportRow.report(row)
+    selected = report.events[report.failure_id]
+    assert selected.failure_kind == "judge_failed"
+    if cause is not None:
+        assert selected.cause_id in report.events
+        assert report.events[selected.cause_id].failure_kind == "model_request_error"
+    [invocation] = row["ng_verifier_invocations"]
+    assert invocation["status"] == "failed"
+    [operation] = invocation["grading_operations"]
+    assert operation["outcome"] == "failed"
+    assert operation["result_binding_sha256"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_chat", [False, True])
+async def test_truncated_judge_with_points_retains_score_but_grade_is_unconfirmed(use_chat: bool) -> None:
+    text = "<points>2</points>"
+    payload = _chat_payload(text) if use_chat else _responses_payload(text)
+    if use_chat:
+        payload["choices"][0]["finish_reason"] = "length"
+    else:
+        payload["status"] = "incomplete"
+        payload["incomplete_details"] = {"reason": "max_output_tokens"}
+    server = _server_with_post(payload, use_chat=use_chat)
+    row = await _verify_route(server, _request())
+    # This change observes completeness; it does not retune the benchmark's parser or reward.
+    assert row["reward"] == 1.0
+    assert row["judge_points"] == 2
+    [invocation] = row["ng_verifier_invocations"]
+    [operation] = invocation["grading_operations"]
+    assert operation["outcome"] == "unknown"
+    assert operation["result_binding_sha256"]
+    [dependency] = operation["dependencies"]
+    assert dependency["response_id"] == payload["id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "extra_fields", "expected_outcome"),
+    [
+        ("repetition", {}, "unknown"),
+        ("stop", {"native_finish_reason": "repetition"}, "unknown"),
+        ("stop", {"stop_reason": "repetition_detected"}, "unknown"),
+        ("stop", {"stop_reason": 0}, "completed"),
+        ("stop", {"stop_reason": 11}, "completed"),
+        ("stop", {"stop_reason": "stop_sequence"}, "completed"),
+        ("stop", {"native_finish_reason": "provider_stop"}, "completed"),
+    ],
+)
+async def test_chat_judge_completion_observes_only_known_repetition_causes(
+    finish_reason: str, extra_fields: dict[str, str | int], expected_outcome: str
+) -> None:
+    payload = _chat_payload("<points>2</points>")
+    payload["choices"][0].update(finish_reason=finish_reason, **extra_fields)
+    [choice] = NeMoGymChatCompletion.model_validate(payload).choices
+    assert choice.finish_reason == "stop"
+    if finish_reason == "repetition":
+        assert choice.native_finish_reason == "repetition"
+    for key, value in extra_fields.items():
+        assert getattr(choice, key) == value
+        assert type(getattr(choice, key)) is type(value)
+    server = _server_with_post(payload, use_chat=True)
+    body = _request()
+    row = await _verify_route(server, body)
+    assert row["reward"] == 1.0
+    assert row["judge_points"] == 2
+    assert row["response"] == body.response.model_dump(mode="json")
+    [invocation] = row["ng_verifier_invocations"]
+    [operation] = invocation["grading_operations"]
+    assert operation["outcome"] == expected_outcome
+    assert operation["result_binding_sha256"]
+    [dependency] = operation["dependencies"]
+    assert dependency["response_id"] == payload["id"]

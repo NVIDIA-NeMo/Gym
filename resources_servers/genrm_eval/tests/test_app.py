@@ -9,12 +9,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 import tiktoken
 
-from nemo_gym.base_resources_server import AggregateMetricsRequest
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest
 from resources_servers.genrm_eval.app import GenRMEvalConfig, GenRMEvalResourcesServer, GenRMEvalVerifyRequest
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("incomplete_reason", [None, "max_output_tokens", "content_filter"])
 @pytest.mark.parametrize(
     ("text", "expected", "ranking"),
     [
@@ -28,7 +29,7 @@ from resources_servers.genrm_eval.app import GenRMEvalConfig, GenRMEvalResources
         ('{"ranking":3.5}', 0, None),
     ],
 )
-async def test_verify(text: str, expected: float, ranking: float | None) -> None:
+async def test_verify(text: str, expected: float, ranking: float | None, incomplete_reason: str | None) -> None:
     server = GenRMEvalResourcesServer(
         config=GenRMEvalConfig(
             host="localhost",
@@ -53,6 +54,7 @@ async def test_verify(text: str, expected: float, ranking: float | None) -> None
                 "created_at": 0,
                 "model": "test",
                 "object": "response",
+                "incomplete_details": {"reason": incomplete_reason} if incomplete_reason else None,
                 "output": [
                     {
                         "type": "reasoning",
@@ -82,9 +84,11 @@ async def test_verify(text: str, expected: float, ranking: float | None) -> None
     assert result.reasoning_tokens == len(encoding.encode('```json\n{"ranking":6}\n```', disallowed_special=()))
     # Gym drops response.output before aggregation; per-row counts survive that.
     stripped = result.model_dump(exclude={"response", "responses_create_params"})
+    stripped["response"] = {"incomplete_details": result.response.model_dump()["incomplete_details"]}
     aggregate = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[stripped]))
     assert aggregate.key_metrics == {
         "overall/accuracy": expected,
+        "max_token_reached_rate": float(incomplete_reason == "max_output_tokens"),
         "median/response_tokens": result.response_tokens,
         "median/reasoning_tokens": result.reasoning_tokens,
     }
@@ -130,8 +134,8 @@ def test_configured_coverage_is_in_headline_metrics() -> None:
 @pytest.mark.parametrize("is_worker", [False, True])
 def test_worker_entrypoint(is_worker: bool) -> None:
     with (
-        patch("nemo_gym.server_utils.is_nemo_gym_fastapi_entrypoint", return_value=is_worker),
-        patch("nemo_gym.base_resources_server.SimpleResourcesServer.run_webserver") as start,
+        patch("nemo_gym.utils.server_process.is_nemo_gym_fastapi_entrypoint", return_value=is_worker),
+        patch("nemo_gym.server_runtime.base_resources_server.SimpleResourcesServer.run_webserver") as start,
     ):
         module = runpy.run_path(str(Path(__file__).parents[1] / "app.py"), run_name="worker_import")
     assert ("app" in module) == is_worker

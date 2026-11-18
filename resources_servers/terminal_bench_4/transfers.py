@@ -3,6 +3,7 @@
 
 """File and directory transfer through Gym sandbox operations."""
 
+import asyncio
 import hashlib
 import shlex
 import tarfile
@@ -44,7 +45,46 @@ async def download_file(sandbox, source, target):
     await sandbox.download(source, target)
 
 
-async def download_dir(sandbox, source, target, *, exclude=None, exec_command=None, shared_archive=None):
+def extract_safe_members(tar: tarfile.TarFile, target: Path) -> list[str]:
+    """Extract with the ``data`` filter and skip each member it refuses, as Harbor sanitizes artifacts.
+
+    Links that leave the target, FIFOs, sockets and device files are skipped one by one, and
+    setuid/setgid bits are cleared, so one unsafe entry does not drop the rest of the directory.
+    Returns why each skipped member was refused.
+    """
+    refused = []
+
+    def safe(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
+        try:
+            return tarfile.data_filter(member, destination)
+        except tarfile.FilterError as exc:
+            refused.append(str(exc))
+            return None
+
+    # extractall, not a loop over extract: only extractall filters the member a hard link falls back to.
+    tar.extractall(target, filter=safe)
+    return refused
+
+
+async def download_dir(
+    sandbox,
+    source,
+    target,
+    *,
+    exclude=None,
+    exec_command=None,
+    shared_archive=None,
+    deadline=None,
+    refused: list[str] | None = None,
+):
+    def remaining(limit):
+        if deadline is None:
+            return limit
+        value = deadline - asyncio.get_running_loop().time()
+        if value <= 0:
+            raise TimeoutError("The directory transfer deadline has expired")
+        return min(limit, value)
+
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
     remote = shared_archive or f"/tmp/.nemo-gym-download-{uuid4().hex}.tar.gz"
@@ -54,14 +94,14 @@ async def download_dir(sandbox, source, target, *, exclude=None, exec_command=No
     # The reference uses role shell/root for exclusions; plain directory
     # transfers use the provider's default execution user and shell.
     if exclude and exec_command:
-        result = await exec_command(command, timeout_sec=600, user="root")
+        result = await exec_command(command, timeout_sec=remaining(600), user="root")
     else:
-        result = await sandbox.exec(command, timeout_s=600)
+        result = await sandbox.exec(command, timeout_s=remaining(600))
     try:
         if result.return_code:
             if exclude:
                 raise RuntimeError(f"Failed to archive {source}: {result.stderr}")
-            listing = await sandbox.exec(f"find {shlex.quote(source)} -type f", timeout_s=120)
+            listing = await sandbox.exec(f"find {shlex.quote(source)} -type f", timeout_s=remaining(120))
             if listing.return_code:
                 raise RuntimeError(f"Failed to list {source}: {listing.stderr}")
             for line in (listing.stdout or "").splitlines():
@@ -73,15 +113,17 @@ async def download_dir(sandbox, source, target, *, exclude=None, exec_command=No
             archive = Path(tmp) / "download.tar.gz"
             await sandbox.download(remote, archive)
             with tarfile.open(archive, "r:gz") as tar:
-                tar.extractall(target, filter="data")
+                skipped = extract_safe_members(tar, target)
+            if refused is not None:
+                refused.extend(skipped)
             if shared_archive:
                 with archive.open("rb") as stream:
                     digest = hashlib.file_digest(stream, "sha256").hexdigest()
                 retained = True
                 return digest
     finally:
-        if not retained:
-            await sandbox.exec(f"rm -f {remote}", timeout_s=60)
+        if not retained and (deadline is None or asyncio.get_running_loop().time() < deadline):
+            await sandbox.exec(f"rm -f {remote}", timeout_s=remaining(60))
 
 
 async def prepare_directory(environment, path, *, empty=False):

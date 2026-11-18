@@ -23,21 +23,21 @@ import orjson
 import pytest
 import yaml
 from fastapi import Request
+from fastapi.testclient import TestClient
 
-from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import SKILLS_REF_KEY_NAME
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    skip_token_capture_context,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.records import TokenEntry
-from nemo_gym.token_id_capture.terminal import resolve_terminal
+from nemo_gym.models import AnthropicConverter
+from nemo_gym.models.token_capture import TokenEntry, resolve_terminal, stamp_continuation
+from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
     ClaudeCodeAgentConfig,
@@ -426,6 +426,7 @@ class TestRunClaudeCode:
             # the staged dir + settings must exist while the subprocess runs
             captured["dir_exists_during_run"] = (Path(config_dir) / "settings.json").is_file()
             captured["sandbox"] = env.get("IS_SANDBOX")
+            captured["background_tasks_disabled"] = env.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
             return FakeProc()
 
         with (
@@ -438,6 +439,7 @@ class TestRunClaudeCode:
         assert "--mcp-config" in captured["cmd"]
         assert "be terse" in captured["cmd"]
         assert captured["sandbox"] == "1"
+        assert captured["background_tasks_disabled"] == "1"
         assert captured["dir_exists_during_run"] is True
         # config dir is removed after the run (no leakage between rollouts)
         assert not Path(captured["config_dir"]).exists()
@@ -872,6 +874,44 @@ class TestRolloutCorrelation:
 
         assert base_url == "http://model-server:9000/ng-rollout/task3-roll1/training-token-capture"
 
+    @pytest.mark.parametrize(
+        ("skip_token_capture", "base_url"),
+        [
+            (False, "http://model-server:9000/ng-rollout/val-0/training-token-capture"),
+            # The rollout keeps its prefix and drops only the training tag.
+            (True, "http://model-server:9000/ng-rollout/val-0"),
+        ],
+    )
+    def test_a_run_follows_its_rollout_setting(self, tmp_path: Path, skip_token_capture: bool, base_url: str) -> None:
+        # Through the /run route, which reads the row's setting; the agent builds the URL from its own config.
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            token_id_capture=True,
+        )
+        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+        agent.server_client.post = AsyncMock(return_value=FakeAioHTTPResponse({}))
+        captured: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["base_url"] = kwargs["env"].get("ANTHROPIC_BASE_URL")
+            raise RuntimeError("stop before the CLI runs")
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            TestClient(agent.setup_webserver(), raise_server_exceptions=False).post(
+                "/run",
+                json={
+                    "responses_create_params": {"input": "hi"},
+                    "_ng_rollout_id": "val-0",
+                    "_ng_skip_token_capture": skip_token_capture,
+                },
+            )
+
+        assert captured["base_url"] == base_url
+
 
 class TestExtractInstruction:
     def test_user_only(self) -> None:
@@ -903,6 +943,8 @@ class TestParseStreamJson:
             ({"subtype": "success"}, 7, ("failed", "process_exit_7")),
             ({"subtype": "error_max_turns", "is_error": True}, 0, ("incomplete", "error_max_turns")),
             ({"subtype": "error_during_execution", "is_error": True}, 0, ("failed", "error_during_execution")),
+            ({"subtype": "success", "is_error": True}, 0, ("failed", "agent_error")),
+            ({"is_error": True}, 0, ("failed", "agent_error")),
             ({"subtype": "error_max_turns", "is_error": True}, 7, ("incomplete", "error_max_turns")),
             ({}, 7, ("failed", "process_exit_7")),
             ({}, 0, ("incomplete", "result_missing")),
@@ -998,6 +1040,32 @@ class TestParseStreamJson:
         assert usage["input_tokens"] == 100
         assert usage["output_tokens"] == 50
 
+    def test_result_usage_is_the_total(self) -> None:
+        # The result event's usage is cumulative: the assistant messages are not added to it.
+        assistant = _event("assistant", message={"id": "m1", "content": [], "usage": {"input_tokens": 60}})
+        result = _event("result", usage={"input_tokens": 60, "output_tokens": 9})
+        _, usage = parse_stream_json(f"{assistant}\n{result}")
+        assert (usage["input_tokens"], usage["output_tokens"]) == (60, 9)
+
+    def test_message_usage_counted_once_per_message(self) -> None:
+        # Without a result event (the CLI was killed), stream-json's one event per content block
+        # repeats the message's usage; count each message once, with its latest usage.
+        thinking = _event(
+            "assistant",
+            message={"id": "m1", "content": [{"type": "thinking", "thinking": "hmm"}], "usage": {"input_tokens": 40}},
+        )
+        text = _event(
+            "assistant",
+            message={
+                "id": "m1",
+                "content": [{"type": "text", "text": "done"}],
+                "usage": {"input_tokens": 40, "output_tokens": 3},
+            },
+        )
+        second = _event("assistant", message={"id": "m2", "content": [], "usage": {"input_tokens": 50}})
+        _, usage = parse_stream_json(f"{thinking}\n{text}\n{second}")
+        assert (usage["input_tokens"], usage["output_tokens"]) == (90, 3)
+
     def test_result_event_exposes_num_turns(self) -> None:
         result = _event(
             "result",
@@ -1016,6 +1084,24 @@ class TestParseStreamJson:
             "is_error": False,
             "duration_ms": 1234,
         }
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage "
+                "Policy (https://www.anthropic.com/legal/aup). Try rephrasing the request.",
+                ("failed", "refusal"),
+            ),
+            ("API Error: 500 upstream unavailable", ("failed", "agent_error")),
+        ],
+    )
+    def test_error_result_with_success_subtype_is_classified(self, text: str, expected: tuple[str, str]) -> None:
+        # Claude Code 2.1.108 reports a model refusal or API error with subtype "success" and is_error true.
+        result = _event("result", subtype="success", is_error=True, result=text, stop_reason="stop_sequence")
+        _, metadata = parse_stream_json(result)
+        assert metadata["error_message"] == text
+        assert _invocation_outcome(metadata, 0) == expected
 
     def test_num_turns_absent_when_no_result_event(self) -> None:
         assistant = self._assistant([{"type": "text", "text": "hi"}])
@@ -1057,6 +1143,8 @@ class TestConfigYaml:
         assert inner.get("token_id_capture", False) is False
         assert inner["concurrency"] == 32
         assert inner["max_turns"] == 30
+        # Restricting egress is opt-in: the shipped default leaves the provider's network alone.
+        assert inner["network_access"] == "inherit"
 
 
 class TestCaptureFriendlyTranscript:
@@ -1095,6 +1183,21 @@ class TestCaptureFriendlyTranscript:
         assert items[0].summary[0].text == "let me look"
         assert items[1].content[0].text == "Reading the file."
         assert meta["terminal_response_id"] == "resp_served123"
+
+    @pytest.mark.parametrize(
+        ("fold_thinking", "capture", "expected"),
+        [(None, False, True), (None, True, False), (False, False, False), (False, True, False), (True, False, True)],
+    )
+    def test_fold_thinking_config(self, fold_thinking, capture, expected) -> None:
+        agent = _make_agent(fold_thinking=fold_thinking)
+        with patch.object(agent, "_token_id_capture_enabled", return_value=capture):
+            assert agent._fold_thinking() is expected
+
+    def test_fold_thinking_true_rejected_under_capture(self) -> None:
+        agent = _make_agent(fold_thinking=True)
+        with patch.object(agent, "_token_id_capture_enabled", return_value=True):
+            with pytest.raises(ValueError, match="incompatible"):
+                agent._fold_thinking()
 
     @pytest.mark.parametrize("capture", [False, True])
     def test_response_id_is_the_served_id_only_under_capture(self, capture: bool) -> None:
@@ -1145,6 +1248,15 @@ class TestCaptureFriendlyTranscript:
         assert metadata["status"] == ("incomplete" if timeout else "completed")
         if timeout:
             assert metadata["error_type"] == "timeout"
+
+    def test_a_rollout_that_skips_capture_returns_the_evaluation_output(self, tmp_path: Path) -> None:
+        # The run captures, but this rollout skips capture: the output is the uncaptured, evaluation one.
+        with skip_token_capture_context(True):
+            response, _ = self._run_stream(self._events(), tmp_path, capture=True, timeout=False)
+
+        assert [item.type for item in response.output] == ["message"]
+        assert response.output[-1].content[0].text == "<think>\nlet me look\n</think>\n\nReading the file."
+        assert response.id != "resp_served123"
 
     def test_thinking_only_event_is_preserved(self) -> None:
         items, metadata = parse_stream_json(
@@ -1223,7 +1335,7 @@ class TestCaptureFriendlyTranscript:
             )
             served.id = f"resp_{call_id}"
             entry = TokenEntry(
-                rollout_id="rollout",
+                capture_key="rollout",
                 model_call_id=call_id,
                 response_id=served.id,
                 prompt_token_ids=[1],

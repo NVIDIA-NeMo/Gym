@@ -28,7 +28,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,

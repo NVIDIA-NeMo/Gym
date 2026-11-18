@@ -10,8 +10,8 @@ One row = one decision point. The trajectory prefix is replayed verbatim
 and there is no final answer, so this is not outcome-reward RL — the reward is
 "did you choose the action the demonstration chose".
 
-Pair it with `tool_simulation_agent` (`max_steps: 1`): one model call, straight to
-`/verify`.
+Pair it with `simple_agent` with `execute_tools: false` under `single_agent_turn_legacy`:
+one model call, its tool call left unexecuted, straight to `/verify`.
 
 ## Verification flow
 

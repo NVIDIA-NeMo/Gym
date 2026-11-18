@@ -1,8 +1,7 @@
 # Claude Code harness in a sandbox per rollout, calling the rna_design tools over MCP. The tools and the scoring stay on
 # the Gym node, so the sandbox calls back to it: Gym listens on the node's address rather than localhost.
+# Pass a sandbox provider's config next to this one: nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml.
 use_absolute_ip: true
-config_paths:
-- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 rna_design:
   resources_servers:
