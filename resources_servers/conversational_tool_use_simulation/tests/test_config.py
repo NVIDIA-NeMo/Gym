@@ -53,21 +53,22 @@ def test_simulation_roles_use_the_canonical_shared_model_and_sampling() -> None:
         assert OmegaConf.to_container(server_config[field]) == expected_params
 
     assert server_config["enforce_transfer_ground_truth"] is True
+    assert server_config["fallback_first_user_message"] is True
 
 
 def test_generation_role_models_copy_the_standard_policy_model() -> None:
     config_paths = {
         "domain_generation_model": (
-            "responses_api_agents/conversational_tool_use/domain_generation/configs/conversational_tool_use_domain_generation.yaml"
+            "responses_api_agents/conversational_tool_use_domain_generation/configs/conversational_tool_use_domain_generation.yaml"
         ),
         "policy_generation_model": (
-            "responses_api_agents/conversational_tool_use/policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml"
+            "responses_api_agents/conversational_tool_use_policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml"
         ),
         "policy_tool_judge_model": (
-            "responses_api_agents/conversational_tool_use/policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml"
+            "responses_api_agents/conversational_tool_use_policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml"
         ),
         "scenario_generation_model": (
-            "responses_api_agents/conversational_tool_use/scenario_generation/configs/conversational_tool_use_scenario_generation.yaml"
+            "responses_api_agents/conversational_tool_use_scenario_generation/configs/conversational_tool_use_scenario_generation.yaml"
         ),
     }
 

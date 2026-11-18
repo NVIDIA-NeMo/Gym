@@ -25,3 +25,13 @@ mmlu_prox_mcqa_simple_agent:
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/mmlu_prox/prepare.py
         num_repeats: 1
+
+mmlu_prox_mcqa_environment_server:
+  _inherit_from: mcqa_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: mmlu_prox_mcqa_resources_server
+      agent_server:
+        name: mmlu_prox_mcqa_simple_agent

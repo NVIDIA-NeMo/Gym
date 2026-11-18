@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run real single-runner smoke checks in CPU, Compose, GPU order.
+"""Run real agent/resources smoke checks in CPU, Compose, GPU order.
 
 Uses loopback HTTP between Gym services. mini-SWE routes model calls through
 the local Gym model server.
@@ -22,11 +22,10 @@ import uvicorn
 from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
-from nemo_gym import global_config, server_utils
-from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
-from nemo_gym.rollout_collection import _attach_trajectory_record
-from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.server_utils import BaseServerConfig, GlobalAIOHTTPAsyncClientConfig, ServerClient
+from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient, http_client
+from nemo_gym.config import BaseServerConfig, global_config
+from nemo_gym.rollouts import merge_model_call_capture_into_record, run_health_checks
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
@@ -48,6 +47,7 @@ def load_baseline(paths):
 
 
 async def main(args):
+    host = getattr(args, "host", "127.0.0.1")
     baseline = load_baseline(args.baseline_health)
     if args.env_file:
         for key, value in dotenv_values(args.env_file).items():
@@ -77,6 +77,7 @@ async def main(args):
             "resources_servers/terminal_bench_4/verifier.py",
             "responses_api_agents/miniswe_sandboxed_agent/app.py",
             "responses_api_agents/miniswe_sandboxed_agent/harness.py",
+            "responses_api_agents/miniswe_sandboxed_agent/bootstrap.py",
             "responses_api_agents/miniswe_sandboxed_agent/mcp_client.py",
         ]
     ]
@@ -107,9 +108,11 @@ async def main(args):
     config.tb4_split_sandbox_endpoints = True
     config.tb4_agent_max_timeout_sec = args.agent_timeout
     config.tb4_jobs_dir = str(args.output / "resources")
+    config.tb4_agent_artifacts_dir = str(args.output / "agent")
     config.tb4_max_steps = args.steps
     agent_name = "terminal_bench_4_" + args.harness
-    profile = OmegaConf.load(root / f"{args.harness}.yaml")
+    # The legacy /run preset: this runner exercises the TB4 resources server's own sessions.
+    profile = OmegaConf.load(root / f"{args.harness}_legacy_agent.yaml")
     del profile["config_paths"]
     config = OmegaConf.merge(config, profile)
     ports = {name: free_port() for name in ["terminal_bench_4", agent_name, "policy_model"]}
@@ -118,7 +121,7 @@ async def main(args):
     resource_config.environment.sandbox_metadata["nemo-gym.nvidia.com/run"] = args.output.name
     agent_config = next(iter(config[agent_name].responses_api_agents.values()))
     model_config = {
-        "host": "127.0.0.1",
+        "host": host,
         "port": ports["policy_model"],
         "name": "policy_model",
         "entrypoint": "app.py",
@@ -128,11 +131,11 @@ async def main(args):
     }
     config.policy_model = {"responses_api_models": {"openai_model": model_config}}
     for name, values in [("terminal_bench_4", resource_config), (agent_name, agent_config)]:
-        values.update({"name": name, "host": "127.0.0.1", "port": ports[name]})
+        values.update({"name": name, "host": host, "port": ports[name]})
     config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
     global_config._GLOBAL_CONFIG_DICT = config
     client = ServerClient(head_server_config=BaseServerConfig(host="127.0.0.1", port=1), global_config_dict=config)
-    http = server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+    http = http_client.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
     resource = TerminalBench4ResourcesServer(
         config=TerminalBench4Config.model_validate(OmegaConf.to_container(resource_config, resolve=True)),
         server_client=client,
@@ -143,9 +146,7 @@ async def main(args):
     )
     model = SimpleModelServer(config=SimpleModelServerConfig.model_validate(model_config), server_client=client)
     servers = [
-        uvicorn.Server(
-            uvicorn.Config(instance.setup_webserver(), host="127.0.0.1", port=ports[name], log_level="warning")
-        )
+        uvicorn.Server(uvicorn.Config(instance.setup_webserver(), host=host, port=ports[name], log_level="warning"))
         for name, instance in [("terminal_bench_4", resource), (agent_name, agent), ("policy_model", model)]
     ]
     workers = [asyncio.create_task(s.serve()) for s in servers]
@@ -172,7 +173,7 @@ async def main(args):
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
                     async with session.post(
-                        f"http://127.0.0.1:{ports[agent_name]}/run",
+                        f"http://{host}:{ports[agent_name]}/run",
                         json={
                             "task_id": f"terminal-bench/{task['name']}",
                             "task_name": "terminal-bench/" + task["name"],
@@ -242,7 +243,7 @@ async def main(args):
             server.should_exit = True
         await asyncio.gather(*workers, return_exceptions=True)
         await http.close()
-        server_utils._GLOBAL_AIOHTTP_CLIENT = None
+        http_client._GLOBAL_AIOHTTP_CLIENT = None
     if rollout_records:
         rollout_path = args.output / "evaluator_rollouts.jsonl"
         with rollout_path.open("w") as handle:
@@ -254,6 +255,7 @@ async def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="127.0.0.1", help="Service bind address reachable from the sandboxes")
     parser.add_argument("--harness", choices=["miniswe"], default="miniswe")
     parser.add_argument("--tasks", nargs="*")
     parser.add_argument("--exclude-tasks", nargs="*", default=[])

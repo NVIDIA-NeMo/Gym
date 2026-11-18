@@ -8,9 +8,9 @@ from typing import Any
 
 from harbor.llms.base import LLMResponse
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.trajectory import (
     ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,

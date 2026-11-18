@@ -2,6 +2,8 @@ ether0:
   resources_servers:
     ether0:
       entrypoint: app.py
+      # Per worker; oracle grades run in background threads so HTTP handling stays responsive.
+      oracle_max_concurrency: 8
       domain: knowledge
       verified: false
       description: ether0 chemistry benchmark verifiers
@@ -24,3 +26,16 @@ ether0_simple_agent:
         type: validation
         jsonl_fpath: resources_servers/ether0/data/val.jsonl
         license: Creative Commons Attribution 4.0 International
+
+ether0_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ether0
+      agent_server:
+        type: responses_api_agents
+        name: ether0_simple_agent
+      resources_tool_transports:
+      - direct_http

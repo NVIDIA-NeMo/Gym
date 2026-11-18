@@ -15,8 +15,8 @@
 import json
 from asyncio import run
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 server_client = ServerClient.load_from_global_config()
@@ -60,6 +60,7 @@ task = server_client.post(
                 },
             ],
         ).model_dump(exclude_unset=True),
+        "initial_count": 0,
         "expected_count": 7,
     },
 )

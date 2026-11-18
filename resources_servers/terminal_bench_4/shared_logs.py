@@ -36,6 +36,7 @@ class SharedLogs:
         self.cleanup_errors = []
         self._cleanup_task = None
         self.initialized = False
+        self.helper_stopped = False
         provider = deepcopy(environment.provider_config)
         self.pool = environment.pool
         # The helper needs no GPU, but must use the workload's deployment so
@@ -167,8 +168,11 @@ class SharedLogs:
             "def headers(info):\n"
             " info.uid, info.gid, info.uname, info.gname = uid, gid, uname, gname\n"
             " return info\n"
+            "def safe(member, path):\n"
+            " try: return tarfile.data_filter(member, path)\n"
+            " except tarfile.FilterError: return None\n"
             "with tempfile.TemporaryDirectory(dir=root) as tmp:\n"
-            " with tarfile.open(source, 'r:gz') as tar: tar.extractall(tmp, filter='data')\n"
+            " with tarfile.open(source, 'r:gz') as tar: tar.extractall(tmp, filter=safe)\n"
             " with tarfile.open(root / 'verifier' / name, 'w:gz') as tar:\n"
             "  tar.add(tmp, arcname='.', filter=headers)\n"
             "print('ready')\n",
@@ -188,14 +192,16 @@ class SharedLogs:
         return result
 
     async def stop(self, *, remove_data=True):
-        if self._cleanup_task is None:
+        # Callers share a pending or successful teardown; a failed one is retried.
+        if self._cleanup_task is None or (self._cleanup_task.done() and not self.closed):
             self._cleanup_task = asyncio.create_task(self._stop(remove_data))
         await asyncio.shield(self._cleanup_task)
 
     async def _stop(self, remove_data):
         self.resources = self.resource_identities()
         errors = []
-        if self.initialized and remove_data:
+        # Removal runs through the helper, so a retry after the helper stopped cannot repeat it.
+        if self.initialized and remove_data and not self.helper_stopped:
             try:
                 await self.python(
                     "import pathlib, shutil, sys\n"
@@ -209,10 +215,12 @@ class SharedLogs:
                 )
             except Exception as exc:
                 errors.append(exc)
-        try:
-            await self.main.stop()
-        except Exception as exc:
-            errors.append(exc)
+        if not self.helper_stopped:
+            try:
+                await self.main.stop()
+                self.helper_stopped = True
+            except Exception as exc:
+                errors.append(exc)
         if errors:
             self.cleanup_errors.extend({"error": str(exc), "resources": self.resources} for exc in errors)
             raise ExceptionGroup("EFS logs cleanup failed", errors)

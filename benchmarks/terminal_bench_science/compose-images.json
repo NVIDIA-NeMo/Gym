@@ -1,0 +1,13 @@
+{
+  "inverse-lithography/fabricator": {"architecture": "amd64", "config": {"Cmd": ["python3", "/opt/fabricator/server.py"], "WorkingDir": "/opt/fabricator"}, "dockerfile": "environment/fabricator/Dockerfile", "os": "linux"},
+  "inverse-lithography/main": {"architecture": "amd64", "config": {"Cmd": ["python3"], "WorkingDir": "/root"}, "dockerfile": "environment/Dockerfile", "os": "linux"},
+  "longitudinal-clinical-agent/broker": {"architecture": "amd64", "config": {"Cmd": ["python3", "/usr/local/bin/clinenv-broker"], "ExposedPorts": {"8000/tcp": {}}, "WorkingDir": "/srv/clinenv"}, "dockerfile": "environment/broker/Dockerfile", "os": "linux"},
+  "longitudinal-clinical-agent/main": {"architecture": "amd64", "config": {"Cmd": ["python3"], "WorkingDir": "/root"}, "dockerfile": "environment/Dockerfile", "os": "linux"},
+  "noisy-blackbox-optimization/main": {"architecture": "amd64", "config": {"Cmd": ["python3"], "WorkingDir": "/app"}, "dockerfile": "environment/Dockerfile", "os": "linux"},
+  "noisy-blackbox-optimization/public-evaluator": {"architecture": "amd64", "config": {"Cmd": ["python3"], "ExposedPorts": {"8080/tcp": {}}, "WorkingDir": "/srv"}, "dockerfile": "environment/public_evaluator/Dockerfile", "os": "linux"},
+  "protein-active-learning/assay": {"architecture": "amd64", "config": {"Cmd": ["python3", "/service/assay_server.py"], "User": "root", "WorkingDir": "/service"}, "dockerfile": "environment/assay/Dockerfile", "os": "linux"},
+  "protein-active-learning/main": {"architecture": "amd64", "config": {"Cmd": ["python3"], "WorkingDir": "/app"}, "dockerfile": "environment/Dockerfile", "os": "linux"},
+  "protein-active-learning/submission": {"architecture": "amd64", "config": {"Cmd": ["python3", "/service/submission_server.py"], "User": "submission", "WorkingDir": "/service"}, "dockerfile": "environment/submission/Dockerfile", "os": "linux"},
+  "tamp-skill-planning/main": {"architecture": "amd64", "config": {"Cmd": ["python3"], "WorkingDir": "/app"}, "dockerfile": "environment/Dockerfile", "os": "linux"},
+  "tamp-skill-planning/sim": {"architecture": "amd64", "config": {"Cmd": ["python3", "/app/sim_local/server.py"], "ExposedPorts": {"8788/tcp": {}}, "WorkingDir": "/app"}, "dockerfile": "environment/sim/Dockerfile", "os": "linux"}
+}

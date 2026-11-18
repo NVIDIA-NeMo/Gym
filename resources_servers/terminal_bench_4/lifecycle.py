@@ -12,13 +12,13 @@ from typing import Any, Callable
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.environment import Environment
 from resources_servers.terminal_bench_4.models import AgentTermination
+from resources_servers.terminal_bench_4.resource_limits import sandbox_resource_limit
 from resources_servers.terminal_bench_4.shared_logs import SharedLogs
 from resources_servers.terminal_bench_4.transfers import download_dir
 from resources_servers.terminal_bench_4.verifier import restore, run_verifier
 
 
 NATIVE_VERSION = "1"
-SETUP_TIMEOUT_SEC = 360
 
 
 def now():
@@ -37,6 +37,8 @@ class Session:
     started: asyncio.Event = field(default_factory=asyncio.Event)
     execution: asyncio.Task | None = None
     finalization: asyncio.Task | None = None
+    expiry_task: asyncio.Task | None = None
+    agent_deadline: float | None = None
     task: Any = None
     environment: Any = None
     verifier_environment: Any = None
@@ -44,6 +46,7 @@ class Session:
     termination: AgentTermination | None = None
     verify_body: Any = None
     verified_response: Any = None
+    seed_response: Any = None
     result: dict = field(default_factory=dict)
     deadlines: dict = field(default_factory=dict)
     diagnostics: list = field(default_factory=list)
@@ -52,6 +55,12 @@ class Session:
     slots: Any = None
     config: Any = None
     persist: Callable = field(default=lambda: None, repr=False)
+    # Episode sessions: the seed request, the SandboxAccess response or the HTTP
+    # error the seed replays, and the first verify body (retries must repeat it exactly).
+    resources_request: Any = None
+    resources_response: Any = None
+    resources_error: tuple[int, str] | None = None
+    resources_verify_body: Any = None
 
 
 def exception(session, error, error_type=None):
@@ -60,7 +69,25 @@ def exception(session, error, error_type=None):
     session.diagnostics.append({"phase": session.phase, "subphase": session.subphase, **record})
 
 
+def interrupted(session, reason):
+    """Mark the attempt's result as cut short, in result.json and the state record, so that no later reader (an
+    audit, a resumed run) takes what it recorded for a graded outcome. The first reason stands."""
+    session.result.setdefault(
+        "interrupted", {"reason": reason, "phase": session.phase, "subphase": session.subphase, "at": now()}
+    )
+
+
+def released(session):
+    """Whether every sandbox this session allocated (task, verifier, EFS helper) has stopped."""
+    return all(
+        resource is None or resource.closed
+        for resource in (session.environment, session.verifier_environment, session.shared_logs)
+    )
+
+
 async def cleanup(session):
+    if session.expiry_task is not None:
+        session.expiry_task.cancel()
     session.subphase = "cleanup"
     session.persist()
     for env in (session.environment, session.verifier_environment):
@@ -103,6 +130,10 @@ async def prepare_session(session, loader):
     await session.slots.acquire()
     session.owns_slot = True
     session.task = await loader.load(session.request.task_name, session.request.task_ref)
+    # Before any sandbox starts or the agent runs: this task's settings could not produce a valid verification.
+    session.config.environment.require_exec_limit_covers(
+        session.task.name, session.config.environment.verifier_timeout_sec(session.task)
+    )
     session.environment = Environment(session.task, session.config.environment, session.session_id, session.directory)
     # Construct and validate the verifier configuration before allocating
     # either environment, but allocate its resources only after collection.
@@ -112,6 +143,7 @@ async def prepare_session(session, loader):
         session.session_id + "__verifier__trial",
         session.directory,
         verifier=True,
+        placement_group=session.environment.placement_group,
     )
     if session.config.environment.efs_logs_host_path:
         session.shared_logs = SharedLogs(session.environment)
@@ -153,11 +185,32 @@ async def prepare_session(session, loader):
     await session.environment.healthcheck()
 
 
+def _grade_resource_limit(session: Session, detail: str | None) -> bool:
+    limit = sandbox_resource_limit(detail)
+    if limit is None:
+        return False
+    session.result["sandbox_resource_limit"] = limit.model_dump()
+    session.result["verifier_result"] = {"rewards": {"reward": 0.0}, "source": "sandbox_resource_limit"}
+    session.diagnostics.append({"operation": "sandbox_resource_limit", **limit.model_dump()})
+    return True
+
+
 async def finalize_session(session, *, grade):
     try:
         if not grade:
             if session.environment and session.environment.main and not session.environment.closed:
                 await session.environment.quiesce_agent(session.session_id)
+            return
+        if session.termination.reason == "infrastructure_error" and _grade_resource_limit(
+            session, session.termination.detail
+        ):
+            return
+        if session.termination.reason == "killed":
+            # A self-kill and a per-process OOM kill look the same afterwards, and either ends the attempt.
+            exception(session, session.termination.detail or "Agent was killed", "NonZeroAgentExitCodeError")
+            session.result["verifier_result"] = {"rewards": {"reward": 0.0}, "source": "agent_killed"}
+            # The zero stands for this attempt, but the agent did not finish: it is never a result to reuse.
+            interrupted(session, "agent_killed")
             return
         session.subphase = "quiesce"
         session.persist()
@@ -173,11 +226,20 @@ async def finalize_session(session, *, grade):
             await download_dir(session.environment.main, "/logs/agent", session.directory / "agent")
         except Exception as exc:
             session.diagnostics.append({"operation": "agent_logs", "error": str(exc)})
+            if _grade_resource_limit(session, str(exc)):
+                return
+        collection_start = len(session.diagnostics)
         await collect(session.environment, session.directory / "artifacts", session.diagnostics)
+        # Collection retains provider failures as diagnostics rather than raising.
+        for diagnostic in session.diagnostics[collection_start:]:
+            if _grade_resource_limit(session, diagnostic.get("error")):
+                return
         try:
             await session.environment.stop()
         except Exception as exc:
             exception(session, exc)
+            if _grade_resource_limit(session, str(exc)):
+                return
         if session.shared_logs and session.environment.closed:
             try:
                 await session.shared_logs.prepare_verifier()
@@ -210,33 +272,60 @@ async def finalize_session(session, *, grade):
             await restore(session.verifier_environment, session.directory / "artifacts")
             session.subphase = "verifier_execution"
             session.persist()
+            timeout_sec = session.config.environment.verifier_timeout_sec(session.task)
+            if timeout_sec != session.task.config.verifier.timeout_sec:
+                session.diagnostics.append(
+                    {
+                        "operation": "verifier_timeout_override",
+                        "package_timeout_sec": session.task.config.verifier.timeout_sec,
+                        "timeout_sec": timeout_sec,
+                    }
+                )
             session.result["verifier_result"] = await run_verifier(
                 session.verifier_environment,
                 session.directory,
                 session.diagnostics,
+                timeout_sec=timeout_sec,
             )
         finally:
             session.result["verifier"]["finished_at"] = now()
     except asyncio.CancelledError:
         exception(session, "Resources shutdown interrupted evaluation", "CancelledError")
+        interrupted(session, "resources_shutdown")
     except Exception as exc:
         exception(session, exc)
+        if grade and session.subphase in ("quiesce", "collect"):
+            _grade_resource_limit(session, str(exc))
     finally:
         await cleanup(session)
 
 
-async def shutdown(sessions, timeout):
-    executions = []
+async def shutdown(sessions: list[Session], timeout: float) -> None:
+    preparations = []
+    finalizers = []
+    expiries = []
     for session in sessions:
+        if session.expiry_task is not None:
+            session.expiry_task.cancel()
+            expiries.append(session.expiry_task)
         if session.execution and not session.execution.done():
-            # Once grading starts, allow it the grace period before interrupting.
             await session.started.wait()
-            if session.finalization is None and not session.execution.cancelling():
-                session.execution.cancel()
-            executions.append(session.execution)
-    if executions:
-        _, pending = await asyncio.wait(executions, timeout=timeout)
+            session.execution.cancel()
+            preparations.append(session.execution)
+        if session.finalization and not session.finalization.done():
+            finalizers.append(session.finalization)
+    if expiries:
+        await asyncio.gather(*expiries, return_exceptions=True)
+    if preparations:
+        await asyncio.gather(*preparations, return_exceptions=True)
+    if finalizers:
+        _, pending = await asyncio.wait(finalizers, timeout=timeout)
         for session in sessions:
-            if session.execution in pending and session.finalization is not None and session.subphase != "cleanup":
+            if session.finalization in pending and session.subphase != "cleanup":
                 session.finalization.cancel()
-        await asyncio.gather(*executions, return_exceptions=True)
+        await asyncio.gather(*finalizers, return_exceptions=True)
+    # Includes provisioned sessions whose agent disconnected or died before verification. Their attempt was in flight.
+    for session in sessions:
+        if session.phase != "closed":
+            interrupted(session, "resources_shutdown")
+            await cleanup(session)

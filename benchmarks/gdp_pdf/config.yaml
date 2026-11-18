@@ -23,5 +23,13 @@ gdp_pdf_benchmark_simple_agent:
         jsonl_fpath: benchmarks/gdp_pdf/data/gdp_pdf_benchmark.jsonl
         prompt_config: null
         prepare_script: benchmarks/gdp_pdf/prepare.py
+        prepare_project: resources_servers/gdp_pdf
         num_repeats: 5
         license: MIT
+
+gdp_pdf_benchmark_simple_environment_server:
+  _inherit_from: gdp_pdf_simple_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: gdp_pdf_benchmark_simple_agent

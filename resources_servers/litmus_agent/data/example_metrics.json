@@ -9,7 +9,7 @@
     "license": null,
     "Number of examples": 5,
     "Number of tools": {
-        "Total # non-null values": 5,
+        "Total # non-null values": 0,
         "Average": 0.0,
         "Min": 0.0,
         "Max": 0.0,
@@ -17,10 +17,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 23.4,
-        "Min": 19.0,
-        "Max": 29.0,
-        "Standard deviation": 4.04
+        "Average": 137.6,
+        "Min": 33.0,
+        "Max": 261.0,
+        "Standard deviation": 106.15
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -36,43 +36,39 @@
         "Max": 0.0,
         "Standard deviation": 0.0
     },
-    "expected_answer": {
-        "unique_count": 5,
+    "answer_type": {
+        "unique_count": 2,
         "total_count": 5
     },
-    "answer_type": {
-        "unique_count": 3,
-        "total_count": 4
+    "dataset": {
+        "unique_count": 1,
+        "total_count": 5
     },
-    "answer_format": {
-        "unique_count": 4,
-        "total_count": 4
+    "expected_answer": {
+        "Total # non-null values": 5,
+        "Average": 3.39,
+        "Min": 1.0,
+        "Max": 11.0,
+        "Standard deviation": 4.28
     },
     "method": {
         "unique_count": 1,
         "total_count": 5
     },
+    "output_regex": {
+        "unique_count": 4,
+        "total_count": 5
+    },
     "property": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "question_family": {
         "unique_count": 5,
         "total_count": 5
     },
-    "chembl_id": {
-        "unique_count": 4,
+    "question_license": {
+        "unique_count": 2,
         "total_count": 5
-    },
-    "smiles": {
-        "unique_count": 4,
-        "total_count": 5
-    },
-    "property_type": {
-        "unique_count": 1,
-        "total_count": 1
-    },
-    "use_box_format": {
-        "Total # non-null values": 1,
-        "Average": 0.0,
-        "Min": 0.0,
-        "Max": 0.0,
-        "Standard deviation": 0.0
     }
 }

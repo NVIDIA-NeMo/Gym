@@ -25,17 +25,29 @@ if [[ ! -r "${runtime_checker}" ]]; then
     exit 2
 fi
 
+# uv interprets a relative UV_PROJECT_ENVIRONMENT from the selected project.
+# Normalize first so a caller running from benchmarks/osworld targets its venv.
+venv_path="$(cd "${venv_path}" && pwd)"
+venv_python="${venv_path}/bin/python"
+runtime_project="${script_dir}/runtime"
+for filename in pyproject.toml uv.lock; do
+    if [[ ! -r "${runtime_project}/${filename}" ]]; then
+        echo "Missing locked OSWorld runtime project: ${runtime_project}/${filename}" >&2
+        exit 2
+    fi
+done
+
 if "${venv_python}" "${runtime_checker}" check --quiet; then
     echo "[osworld-runtime-deps] Required versions are already installed and importable; skipping."
     exit 0
 fi
 
 echo "[osworld-runtime-deps] Installing opt-in runtime dependencies..."
-uv pip install --no-config --python "${venv_python}" \
-    "numpy<2" \
-    "cryptography~=46.0" \
-    "opencv-python-headless~=4.8.1.78" \
-    "torchvision==0.26.0"
+# This explicitly opted-in layer is independently locked. Preserve the base
+# agent packages while installing the exact runtime lock; never re-resolve them.
+# The runtime project binds both torch and torchvision to the CPU index.
+UV_PROJECT_ENVIRONMENT="${venv_path}" uv sync --locked --inexact \
+    --project "${runtime_project}" --python "${venv_python}" --no-dev
 
 "${venv_python}" "${runtime_checker}" check
 echo "[osworld-runtime-deps] Done."

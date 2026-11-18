@@ -13,12 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
+from pydantic import ValidationError
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
+    FailureBoundary,
+    FailureHeader,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    RequestFailureLog,
+    failure_report_for,
+)
 from responses_api_agents.critpt_agent.app import (
     CritPtAgent,
     CritPtAgentConfig,
@@ -61,6 +72,13 @@ _VERIFY_RESPONSE = {
     "timeout_rate": 0.0,
 }
 
+# Row fields the request does not declare; a resources server that grades from the row needs them.
+_EXTRA_TASK_FIELDS = {
+    "reference_code": "def solve():\n    return 1.23",
+    "entry": "solve",
+    "testcases": [{"args": [], "expected": 1.23}],
+}
+
 
 def _make_config() -> CritPtAgentConfig:
     return CritPtAgentConfig(
@@ -86,7 +104,7 @@ def _mock_post_response(data: dict) -> AsyncMock:
 
 
 def _make_run_body(
-    problem_id: str = "5", code_template: str = "def solve():\n    return ???"
+    problem_id: str = "5", code_template: str = "def solve():\n    return ???", **extra_fields
 ) -> CritPtAgentRunRequest:
     return CritPtAgentRunRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -97,6 +115,7 @@ def _make_run_body(
         ),
         problem_id=problem_id,
         code_template=code_template,
+        **extra_fields,
     )
 
 
@@ -155,9 +174,79 @@ class TestHelpers:
         assert "No additional reasoning" in rendered
 
 
+class TestRunRequest:
+    @pytest.mark.parametrize("missing_field", ["problem_id", "code_template"])
+    def test_declared_fields_still_required(self, missing_field):
+        row = {
+            "responses_create_params": {"input": [{"role": "user", "content": "Solve this."}]},
+            "problem_id": "5",
+            "code_template": "def solve():\n    return ???",
+            **_EXTRA_TASK_FIELDS,
+        }
+        del row[missing_field]
+
+        with pytest.raises(ValidationError) as exc_info:
+            CritPtAgentRunRequest.model_validate(row)
+
+        assert [(error["type"], error["loc"]) for error in exc_info.value.errors()] == [("missing", (missing_field,))]
+
+
 class TestApp:
     def test_sanity(self):
         _make_server()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing_turns", [(), (1,), (2,), (1, 2)])
+    @pytest.mark.parametrize("detail_tokens", [None, 0, 5])
+    async def test_run_reports_both_turns_usage(self, missing_turns, detail_tokens):
+        server = _make_server()
+        turn1 = deepcopy(_MODEL_RESPONSE)
+        turn2 = deepcopy(_MODEL_RESPONSE)
+        turn1["output"][0]["content"][0]["text"] = "<think>Solving...</think>The answer is 1.23"
+        turn2["output"][0]["content"][0]["text"] = "def solve():\n    return 1.23"
+        for turn, response, input_tokens, output_tokens in [(1, turn1, 100, 200), (2, turn2, 350, 20)]:
+            response["usage"] = (
+                None
+                if turn in missing_turns
+                else {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                    "input_tokens_details": {"cached_tokens": detail_tokens},
+                    "output_tokens_details": {"reasoning_tokens": detail_tokens},
+                }
+            )
+
+        async def post(*, url_path, json, **kwargs):
+            if url_path == "/verify":
+                return _mock_post_response(json | {"reward": 1.0})
+            return _mock_post_response(next(responses))
+
+        responses = iter([{}, turn1, turn2])
+        server.server_client.post.side_effect = post
+        request_mock = MagicMock(cookies={})
+        result = await server.run(request_mock, _make_run_body())
+
+        verify_data = server.server_client.post.call_args_list[3].kwargs["json"]
+        assert verify_data["response"]["output"] == turn2["output"]
+        assert _extract_output_text(result.response.model_dump()) == "def solve():\n    return 1.23"
+        assert result.reward == 1.0
+        if missing_turns:
+            assert verify_data["response"]["usage"] is None
+            assert result.response.usage is None
+        else:
+            expected_usage = {
+                "input_tokens": 450,
+                "output_tokens": 220,
+                "total_tokens": 670,
+                "input_tokens_details": {
+                    "cached_tokens": None if detail_tokens is None else 2 * detail_tokens,
+                    "cache_write_tokens": None,
+                },
+                "output_tokens_details": {"reasoning_tokens": None if detail_tokens is None else 2 * detail_tokens},
+            }
+            assert verify_data["response"]["usage"] == expected_usage
+            assert result.response.usage.model_dump() == expected_usage
 
     @pytest.mark.asyncio
     async def test_run_correct(self):
@@ -258,3 +347,66 @@ class TestApp:
         assert verify_call.kwargs["url_path"] == "/verify"
         verify_data = verify_call.kwargs["json"]
         assert verify_data["problem_id"] == "42"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("url_path", ["/seed_session", "/verify"])
+    async def test_run_forwards_extra_task_fields_to_resources_server(self, url_path):
+        server = _make_server()
+        server.server_client.post.side_effect = [
+            _mock_post_response({}),  # seed_session
+            _mock_post_response(_MODEL_RESPONSE),  # Turn 1
+            _mock_post_response(_MODEL_RESPONSE),  # Turn 2
+            _mock_post_response(_VERIFY_RESPONSE),  # verify
+        ]
+
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        await server.run(request_mock, _make_run_body(**_EXTRA_TASK_FIELDS))
+
+        payloads = {call.kwargs["url_path"]: call.kwargs["json"] for call in server.server_client.post.call_args_list}
+        payload = payloads[url_path]
+        assert {field: payload.get(field) for field in _EXTRA_TASK_FIELDS} == _EXTRA_TASK_FIELDS
+        assert payload["problem_id"] == "5"
+        assert payload["code_template"] == "def solve():\n    return ???"
+
+
+def _failed_verify_reply() -> MagicMock:
+    """A 500 /verify reply whose failure report names the resources server's verifier error, as on the wire."""
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="verifier_error",
+        failure_reason="Verification failed: CritPtRateLimitExceeded",
+        operation="verify",
+        stage="verification",
+        http_status=500,
+    )
+    request_info = SimpleNamespace(url="http://server", method="POST", headers={}, real_url="http://server")
+    error = ClientResponseError(
+        request_info,
+        (),
+        status=500,
+        message="Internal Server Error",
+        headers=FailureHeader.encode(failure_report_for(failure)),
+    )
+    reply = MagicMock(status=500, ok=False, cookies={})
+    reply.content.read = AsyncMock(return_value=b"Internal Server Error")
+    reply.raise_for_status = MagicMock(side_effect=error)
+    return reply
+
+
+@pytest.mark.asyncio
+async def test_run_masks_the_row_when_verify_fails_and_keeps_the_answer():
+    server = _make_server()
+    server.server_client.post.side_effect = [
+        _mock_post_response({}),
+        _mock_post_response(_MODEL_RESPONSE),
+        _mock_post_response(_MODEL_RESPONSE),
+        _failed_verify_reply(),
+    ]
+
+    with RequestFailureLog.capture() as log:
+        result = await server.run(MagicMock(cookies={}), _make_run_body())
+
+    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "agent_route_failed")
+    assert result.response.output  # the generated answer survives for a later grade
+    assert {"agent_route_failed", "verifier_error"} <= {event.failure_kind for event in log.report.events.values()}

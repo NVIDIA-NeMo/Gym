@@ -15,12 +15,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from resources_servers.critpt.app import _ALL_PROBLEM_IDS, CritPtRateLimitExceeded
+from resources_servers.critpt.app import CritPtAccessDenied, CritPtRateLimitExceeded
 from resources_servers.critpt.replay import (
     _call_api_with_rotation,
     _load_api_keys,
     _pack_into_batches,
-    _pad_to_batch_size,
     _parse_api_keys_env,
     main_async,
 )
@@ -43,12 +42,12 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
-def _make_replay_args(cache_dir: Path, batch_size: int = 2, fire_after: int | None = None) -> argparse.Namespace:
+def _make_replay_args(cache_dir: Path, batch_size: int = 2, max_judge_errors: int = 0) -> argparse.Namespace:
     return argparse.Namespace(
         cache_dir=cache_dir,
         api_url="https://example/api",
         batch_size=batch_size,
-        fire_after=fire_after,
+        max_judge_errors=max_judge_errors,
         max_retries=1,
         backoff_seconds=0.0,
     )
@@ -91,32 +90,6 @@ class TestParseApiKeysEnv:
     def test_list_of_empties_rejected(self):
         with pytest.raises(ValueError):
             _parse_api_keys_env("[,, ,]")
-
-
-class TestPadToBatchSize:
-    def _real(self, pid: str) -> dict:
-        return {"problem_id": pid, "generated_code": "```python\nx=1\n```", "model": "m"}
-
-    def test_pads_short_batch_up_to_batch_size(self):
-        payload = [self._real("Challenge_1_main"), self._real("Challenge_2_main")]
-        padded = _pad_to_batch_size(payload, batch_size=70)
-        assert len(padded) == 70
-        # Real submissions are preserved unchanged at the front.
-        assert padded[:2] == payload
-
-    def test_padding_uses_missing_problem_ids_with_empty_code(self):
-        payload = [self._real("Challenge_1_main")]
-        padded = _pad_to_batch_size(payload, batch_size=70)
-        padding_entries = padded[1:]
-        assert all(d["generated_code"] == "```python\n```" for d in padding_entries)
-        # No padding entry reuses a real problem_id, and together they cover the canonical set.
-        assert "Challenge_1_main" not in {d["problem_id"] for d in padding_entries}
-        assert {p["problem_id"] for p in padded} == set(_ALL_PROBLEM_IDS)
-
-    def test_already_full_batch_unchanged(self):
-        payload = [self._real(pid) for pid in _ALL_PROBLEM_IDS]
-        padded = _pad_to_batch_size(payload, batch_size=70)
-        assert padded == payload
 
 
 class TestPackIntoBatches:
@@ -283,6 +256,56 @@ class TestReplayMainAsync:
         assert partial["mean_accuracy_over_scored"] == 0.25
 
     @pytest.mark.asyncio
+    async def test_batch_within_max_judge_errors_is_accepted_by_replay(self, tmp_path):
+        _write_jsonl(tmp_path / "submissions.jsonl", [_submission_row(0, "p1"), _submission_row(1, "p2")])
+        tolerated = {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 1}
+        with patch("resources_servers.critpt.replay._call_api_with_rotation", new_callable=AsyncMock) as call_api:
+            call_api.return_value = (tolerated, 0)
+            assert await main_async(_make_replay_args(tmp_path, max_judge_errors=1), api_keys=["k0"]) == 0
+            # Accepted, so a second replay has nothing pending.
+            assert await main_async(_make_replay_args(tmp_path, max_judge_errors=1), api_keys=["k0"]) == 0
+            assert call_api.await_count == 1
+        partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+        assert partial["scored_submissions"] == 2
+        assert partial["mean_accuracy_over_scored"] == 1.0  # 0.5 * 2 / (2 - 1), clamped
+
+    @pytest.mark.asyncio
+    async def test_grader_error_batches_stay_pending_until_a_clean_replay(self, tmp_path):
+        _write_jsonl(tmp_path / "submissions.jsonl", [_submission_row(0, "p1"), _submission_row(1, "p2")])
+        _write_jsonl(
+            tmp_path / "aa_responses.jsonl",
+            [
+                {
+                    "batch_id": 0,
+                    "submission_ids": [0, 1],
+                    "response": {"accuracy": 0.5, "judge_error_count": 1},
+                    "ts": 1.0,
+                }
+            ],
+        )
+        clean = {"accuracy": 0.75, "timeout_rate": 0.0, "judge_error_count": 0}
+        bad = {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 2}
+
+        with patch("resources_servers.critpt.replay._call_api_with_rotation", new_callable=AsyncMock) as call_api:
+            call_api.return_value = (bad, 0)
+            assert await main_async(_make_replay_args(tmp_path), api_keys=["k0"]) == 5
+            assert call_api.await_count == 1
+            partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+            assert partial["scored_submissions"] == 0 and partial["pending_submissions"] == 2
+            assert partial["mean_accuracy_over_scored"] is None
+
+            call_api.return_value = (clean, 0)
+            assert await main_async(_make_replay_args(tmp_path), api_keys=["k0"]) == 0
+            assert call_api.await_count == 2
+            assert [s["problem_id"] for s in call_api.await_args.kwargs["submissions"]] == ["p1", "p2"]
+            partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+            assert partial["scored_submissions"] == 2 and partial["pending_submissions"] == 0
+            assert partial["mean_accuracy_over_scored"] == 0.75
+
+            assert await main_async(_make_replay_args(tmp_path), api_keys=["k0"]) == 0
+            assert call_api.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_nothing_pending_returns_zero(self, tmp_path):
         _write_jsonl(
             tmp_path / "submissions.jsonl",
@@ -361,3 +384,35 @@ class TestReplayMainAsync:
         assert partial["pending_submissions"] == 2
         assert partial["scored_batches"] == 1
         assert partial["mean_accuracy_over_scored"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_access_denied_exits_4_and_keeps_scored_batches(self, tmp_path):
+        """A 403 exits 4, not 3: rerunning after the quota resets cannot fix it.
+
+        The recovery tool for a run killed by an unapproved key must not tell the
+        operator to wait. Batches scored before the denial still count.
+        """
+        _write_jsonl(
+            tmp_path / "submissions.jsonl",
+            [
+                _submission_row(0, "p1", "a=1"),
+                _submission_row(1, "p2", "b=2"),
+                _submission_row(2, "p1", "c=3"),
+                _submission_row(3, "p2", "d=4"),
+            ],
+        )
+        first_batch = {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 0}
+
+        with patch("resources_servers.critpt.replay._call_api_with_rotation", new_callable=AsyncMock) as call_api:
+            call_api.side_effect = [
+                (first_batch, 0),
+                CritPtAccessDenied(body='{"error":"CritPt grading requires approved access."}'),
+            ]
+            exit_code = await main_async(_make_replay_args(tmp_path, batch_size=2), api_keys=["k0"])
+
+        assert exit_code == 4
+        assert call_api.await_count == 2
+
+        partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+        assert partial["scored_submissions"] == 2
+        assert partial["scored_batches"] == 1

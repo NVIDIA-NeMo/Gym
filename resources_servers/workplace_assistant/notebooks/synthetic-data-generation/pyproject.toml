@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "gym-workplace-assistant-sdg"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "data-designer==0.5.2",
+    "duckdb==1.4.4",
+    "pydantic==2.12.5",
+    "pandas==2.3.3",
+    "notebook==7.6.2",
+    "wcwidth==0.8.2"
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = []

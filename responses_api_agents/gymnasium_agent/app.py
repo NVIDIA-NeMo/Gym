@@ -15,27 +15,32 @@
 
 """Agent for GymnasiumServer resources servers (resources_servers.gymnasium) which implements the Gymnasium API."""
 
+import asyncio
 import logging
 import uuid
+from typing import Any
 
+import anyio
 from fastapi import Body, Request, Response
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     accumulate_response_usage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
-from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ModelCallRef
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse, extract_text
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,6 +50,26 @@ class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = Field(10, ge=1)
+    # Some multi-turn benchmarks reconstruct history from visible text rather
+    # than replaying provider-specific reasoning/output items.
+    text_only_history: bool = False
+    model_server_transport_max_attempts: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Total attempts for each agent-to-model-server HTTP call. When set, it "
+            "replaces the transport's default generic-error and connection-error retry limits."
+        ),
+    )
+    # Optional process-wide cap around target-model calls. This is distinct
+    # from rollout concurrency: simulated-user/resource-server calls do not
+    # acquire it, matching generators with target-only rate limiting.
+    model_response_max_concurrency: int | None = Field(default=None, ge=1)
+    environment_cleanup_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="Maximum time to close the environment after a failed or cancelled rollout.",
+    )
 
 
 class GymnasiumAgentRunRequest(BaseRunRequest):
@@ -56,10 +81,28 @@ class GymnasiumRunResponse(BaseVerifyResponse):
     terminated: bool = False
     truncated: bool = False
     info: dict = {}
+    # Saved when the environment ended the episode and reported no failure (``result.reward_info.reward``). Its value
+    # is the agent's sum of the step rewards, the same value as the row ``reward``; it records that the episode ended
+    # cleanly, not a separate grade. Absent when the step limit cut the episode or the environment reported a failure.
+    result: dict | None = Field(default=None, exclude_if=lambda value: value is None)
+    # The agent's one invocation and the model responses it asked for, so a cut-off answer is the model's observed own.
+    ng_agent_observations: AgentObservationBundle | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class GymnasiumAgent(SimpleResponsesAPIAgent):
     config: GymnasiumAgentConfig
+    _model_response_semaphore: asyncio.Semaphore | None = PrivateAttr(default=None)
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        if self.config.model_response_max_concurrency is not None:
+            self._model_response_semaphore = asyncio.Semaphore(self.config.model_response_max_concurrency)
+
+    def _model_server_request_kwargs(self) -> dict:
+        kwargs = {}
+        if self.config.model_server_transport_max_attempts is not None:
+            kwargs["_max_num_tries"] = self.config.model_server_transport_max_attempts
+        return kwargs
 
     async def responses(
         self,
@@ -67,17 +110,36 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        model_resp = await self.server_client.post(
-            server_name=self.config.model_server.name,
-            url_path="/v1/responses",
-            json=body,
-            cookies=request.cookies,
-        )
-        await raise_for_status(model_resp)
-        result = NeMoGymResponse.model_validate(await get_response_json(model_resp))
-        for k, v in model_resp.cookies.items():
+        result, model_cookies = await self._request_model_response(body, request.cookies)
+        for k, v in model_cookies.items():
             response.set_cookie(k, v)
         return result
+
+    async def _request_model_response(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        cookies,
+        *,
+        url_path: str = "/v1/responses",
+    ) -> tuple[NeMoGymResponse, Any]:
+        semaphore = self._model_response_semaphore
+
+        async def request_once() -> tuple[NeMoGymResponse, Any]:
+            model_resp = await self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path=url_path,
+                json=body,
+                cookies=cookies,
+                **self._model_server_request_kwargs(),
+            )
+            await raise_for_status(model_resp)
+            parsed = NeMoGymResponse.model_validate(await get_response_json(model_resp))
+            return parsed, model_resp.cookies
+
+        if semaphore is None:
+            return await request_once()
+        async with semaphore:
+            return await request_once()
 
     async def run(self, request: Request, body: GymnasiumAgentRunRequest) -> GymnasiumRunResponse:
         # Preserve auth/routing cookies and then merge in any session cookies
@@ -109,7 +171,11 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             if supports_explicit_close:
                 # Preserve the original model/transport/cancellation failure.
                 try:
-                    await self._close_environment(env_cookies)
+                    # Disconnect middleware level-cancels the request's AnyIO
+                    # scope. Shield cleanup across its HTTP awaits, but bound
+                    # it so an unavailable resource server cannot stall exit.
+                    with anyio.fail_after(self.config.environment_cleanup_timeout_seconds, shield=True):
+                        await self._close_environment(env_cookies)
                 except Exception:
                     _LOGGER.exception("Failed to close Gymnasium environment after rollout error")
             raise
@@ -163,38 +229,58 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             ]
 
         new_outputs = []
+        returned_outputs = []
         total_reward = 0.0
         usage = None
         model_server_cookies = None
         step_data = EnvStepResponse(terminated=False, truncated=True, reward=0.0)
         last_model_response = None
+        response_ids: list[str] = []
         finished = False
 
         for _ in range(self.config.max_steps):
             new_body = base_body.model_copy(update={"input": base_body.input + new_outputs})
 
-            model_resp = await self.server_client.post(
-                server_name=self.config.model_server.name,
+            model_response, model_server_cookies = await self._request_model_response(
+                new_body,
+                model_server_cookies,
                 url_path=model_url_path,
-                json=new_body,
-                cookies=model_server_cookies,
             )
-            await raise_for_status(model_resp)
-            model_response = NeMoGymResponse.model_validate(await get_response_json(model_resp))
-            model_server_cookies = model_resp.cookies
             last_model_response = model_response
+            if isinstance(model_response.id, str) and model_response.id:
+                response_ids.append(model_response.id)
 
-            new_outputs.extend(model_response.output)
+            returned_outputs.extend(model_response.output)
+            if self.config.text_only_history:
+                visible_message = NeMoGymEasyInputMessage(
+                    role="assistant",
+                    content=extract_text(model_response),
+                )
+                new_outputs.append(visible_message)
+                if not any(
+                    item.type == "message" and getattr(item, "role", None) == "assistant"
+                    for item in model_response.output
+                ):
+                    # Reasoning-only responses still occupy an assistant turn.
+                    # Preserve that empty boundary in the returned transcript,
+                    # alongside the original provider output and status.
+                    returned_outputs.append(visible_message)
+            else:
+                new_outputs.extend(model_response.output)
 
             usage = accumulate_response_usage(usage, model_response.usage)
 
-            step_body = body.model_dump() | {"response": model_response.model_dump()}
+            step_payload = body.model_dump() | {
+                "response": model_response.model_dump(),
+            }
+            if self.config.text_only_history:
+                step_payload["agent_history_mode"] = "text_only"
             if (reset_data.info or {}).get("supports_step_idempotency") is True:
-                step_body["_ng_step_request_id"] = uuid.uuid4().hex
+                step_payload["_ng_step_request_id"] = uuid.uuid4().hex
             step_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/step",
-                json=step_body,
+                json=step_payload,
                 cookies=env_cookies,
             )
             await raise_for_status(step_resp)
@@ -208,23 +294,55 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 break
 
             for tool_output in (step_data.info or {}).get("tool_outputs", []):
-                new_outputs.append(
-                    NeMoGymFunctionCallOutput(
-                        type="function_call_output",
-                        call_id=tool_output["call_id"],
-                        output=tool_output["output"],
-                    )
+                output = NeMoGymFunctionCallOutput(
+                    type="function_call_output",
+                    call_id=tool_output["call_id"],
+                    output=tool_output["output"],
                 )
+                # A function-call output must be replayed with its originating
+                # function call (and, for reasoning models, associated reasoning
+                # items). Text-only history intentionally omits those items, so
+                # do not send an orphaned call_id in the next model request.
+                if not self.config.text_only_history:
+                    new_outputs.append(output)
+                returned_outputs.append(output)
 
             if step_data.observation:
-                new_outputs.append(NeMoGymEasyInputMessage(role="user", content=step_data.observation))
+                observation = NeMoGymEasyInputMessage(role="user", content=step_data.observation)
+                new_outputs.append(observation)
+                returned_outputs.append(observation)
 
         if not finished:
             step_data = step_data.model_copy(update={"truncated": True})
 
-        last_model_response.output = new_outputs
+        last_model_response.output = returned_outputs if self.config.text_only_history else new_outputs
         last_model_response.usage = usage
 
+        environment_failed = step_data.mask_sample or step_data.failure_kind is not None
+        observations = None
+        # Tools that run inside the environment's /step are not recorded as tool calls, so ng_perf.num_tool_calls
+        # counts 0 for them (verifiers_agent has the same gap).
+        if response_ids and self.rollout_id_from_run(body) is not None:
+            observations = AgentObservationBundle(
+                source="gymnasium_agent",
+                records=[
+                    AgentInvocation(
+                        invocation_id=f"gymnasium_{uuid.uuid4().hex}",
+                        in_session=False,
+                        conversation=[*base_body.input, *last_model_response.output],
+                        # A cut-off last answer or an episode the step limit ended is incomplete, as other
+                        # agents mark it.
+                        status="completed"
+                        if finished
+                        and getattr(last_model_response, "status", None) != "incomplete"
+                        and getattr(last_model_response, "incomplete_details", None) is None
+                        else "incomplete",
+                        model_calls=[
+                            ModelCallRef(model_ref=self.config.model_server, response_id=rid) for rid in response_ids
+                        ],
+                    )
+                ],
+            )
         return GymnasiumRunResponse(
             responses_create_params=base_body,
             response=last_model_response,
@@ -232,6 +350,14 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             terminated=step_data.terminated,
             truncated=step_data.truncated,
             info=step_data.info,
+            result={"reward_info": {"reward": total_reward}} if finished and not environment_failed else None,
+            ng_agent_observations=observations,
+            # An environment that ended the episode because of its own failure (a user simulator or judge
+            # that never answered) reports it on the final step; carry it onto the rollout so the reward
+            # is masked out of quality metrics and training data instead of counted as a policy outcome.
+            mask_sample=step_data.mask_sample,
+            failure_kind=step_data.failure_kind,
+            failure_reason=step_data.failure_reason,
         )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
@@ -246,3 +372,6 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     GymnasiumAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GymnasiumAgent.run_webserver()  # noqa: F401

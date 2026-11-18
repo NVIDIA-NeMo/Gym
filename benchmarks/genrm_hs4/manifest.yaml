@@ -1,0 +1,28 @@
+name: genrm_hs4
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: rlhf
+description: GenRM judge evaluation on hs4 validation response pairs
+modality: text
+licensing: internal
+authors:
+- Julien Veron Vialard
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: stochastic
+resources_server: genrm_eval
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: genrm_hs4
+    type: benchmark
+    jsonl_fpath: benchmarks/genrm_hs4/data/hs4_validation.jsonl
+    prepare_script: benchmarks/genrm_hs4/prepare.py
+    prompt_config: null
+    num_repeats: 1
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

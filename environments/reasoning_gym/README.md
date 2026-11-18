@@ -26,7 +26,7 @@ python environments/reasoning_gym/scripts/create_dataset.py \
 **Multiple tasks (composite):**
 ```bash
 python environments/reasoning_gym/scripts/create_dataset.py \
-    --tasks knights_knaves,syllogisms,leg_counting \
+    --tasks knights_knaves,syllogism,leg_counting \
     --size 1000 \
     --output environments/reasoning_gym/data/train_composite.jsonl
 ```

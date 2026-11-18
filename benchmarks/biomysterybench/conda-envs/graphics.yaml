@@ -1,0 +1,7 @@
+channels:
+  - conda-forge
+dependencies:
+  - cairo
+  - libgl-devel
+  - libegl-devel
+  - libopengl-devel

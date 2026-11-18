@@ -28,7 +28,7 @@ import random
 import uuid
 from pathlib import Path
 
-from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+from nemo_gym.config import HF_TOKEN_KEY_NAME, get_global_config_dict
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -80,6 +80,7 @@ def prepare() -> Path:
             "options": options,
             "expected_answer": correct_letter,
             "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, example["Question"])),
+            "task_id": example["Record ID"],
         }
         rows.append(json.dumps(row) + "\n")
 

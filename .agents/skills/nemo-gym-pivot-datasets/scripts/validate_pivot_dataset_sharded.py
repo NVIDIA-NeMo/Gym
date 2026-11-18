@@ -179,7 +179,7 @@ def init_worker(options: dict) -> None:
     if config:
         if not gym_repo:
             raise ValidationError("--config needs --gym-repo so the comparator can be imported")
-        from nemo_gym.openai_utils import NeMoGymResponse
+        from nemo_gym.core import NeMoGymResponse
         from resources_servers.single_step_tool_use_with_argument_comparison.common.response_utils import (
             extract_action,
         )

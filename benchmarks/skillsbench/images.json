@@ -1,0 +1,532 @@
+{
+  "source": "benchflow-ai/skillsbench",
+  "source_revision": "12ebd8653093e0734c7902835cb20c054196026c",
+  "image_repository": "ghcr.io/benchflow-ai/skillsbench-task-env",
+  "total": 87,
+  "successful": 87,
+  "failed": 0,
+  "tasks": [
+    {
+      "task_name": "3d-scan-calc",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:e878cf6529e1c1192a76c65195e464ffc3e83551e8c0792a7881aa3535870e6d",
+      "success": true,
+      "tag": "skillsbench-v1.1-3d-scan-calc-12ebd8653093"
+    },
+    {
+      "task_name": "ada-bathroom-plan-repair",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:8971717fa60035954fcee3af211d620999ad25a08bb55fc00d01b3d0eb93f9a0",
+      "success": true,
+      "tag": "skillsbench-v1.1-ada-bathroom-plan-repair-12ebd8653093"
+    },
+    {
+      "task_name": "adaptive-cruise-control",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:9f6d67570f2607f9d3b668afc8f7bec7b4459cc96d6587fd267491c0eb7a7d02",
+      "success": true,
+      "tag": "skillsbench-v1.1-adaptive-cruise-control-12ebd8653093"
+    },
+    {
+      "task_name": "azure-bgp-oscillation-route-leak",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:213b25502518fe3708d8accba4276d56b0a9d3b522666cfc6e55a5ea22e97c3d",
+      "success": true,
+      "tag": "skillsbench-v1.1-azure-bgp-oscillation-route-leak-12ebd8653093"
+    },
+    {
+      "task_name": "bike-rebalance",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:8a644c64db6d6f9661a6fd4c4c23d3835720da209fdd18de25106b81ec7b77b4",
+      "success": true,
+      "tag": "skillsbench-v1.1-bike-rebalance-12ebd8653093"
+    },
+    {
+      "task_name": "citation-check",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:06a0058ceeec96b8c1d1736233057e674f62960d5f5784a5d2fef8164bcda947",
+      "success": true,
+      "tag": "skillsbench-v1.1-citation-check-12ebd8653093"
+    },
+    {
+      "task_name": "civ6-adjacency-optimizer",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:9dd88d308d927f8326f7c76075d9ec48eb8c1afd02cb028b3d75a26c3301d858",
+      "success": true,
+      "tag": "skillsbench-v1.1-civ6-adjacency-optimizer-12ebd8653093"
+    },
+    {
+      "task_name": "court-form-filling",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:6ba12a5ae7cd5c7477425c648892c1c0a6b5fbdeedcd5d7759af9c9b41509da6",
+      "success": true,
+      "tag": "skillsbench-v1.1-court-form-filling-12ebd8653093"
+    },
+    {
+      "task_name": "crystallographic-wyckoff-position-analysis",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:d5c97dae8559f6e2a1f72bf7a8231062fed0c6956c4fc78e3710cc37d0209572",
+      "success": true,
+      "tag": "skillsbench-v1.1-crystallographic-wyckoff-position-analysis-12ebd8653093"
+    },
+    {
+      "task_name": "dapt-intrusion-detection",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:6808ee046ef1954b7f12d81ba21b2d9052ab4fdc8f3765dbf368b63db5664adb",
+      "success": true,
+      "tag": "skillsbench-v1.1-dapt-intrusion-detection-12ebd8653093"
+    },
+    {
+      "task_name": "data-to-d3",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:4cebcdf0d152a1f3bee6548fd4d55d167f62ca9cc035bab17b75ca5fbc56897c",
+      "success": true,
+      "tag": "skillsbench-v1.1-data-to-d3-12ebd8653093"
+    },
+    {
+      "task_name": "debug-trl-grpo",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:fef4ddfc17501fb4dd57ba589293f860b8fe4f8df1b551fda1b0d13dc681bf4e",
+      "success": true,
+      "tag": "skillsbench-v1.1-debug-trl-grpo-12ebd8653093"
+    },
+    {
+      "task_name": "dialogue-parser",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:5dc7c5099dfb970528db11d54808787e7622cc6c8224cba08d295470733243f1",
+      "success": true,
+      "tag": "skillsbench-v1.1-dialogue-parser-12ebd8653093"
+    },
+    {
+      "task_name": "drone-planning-control",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:c5542ddac29904e8786ac16387ccfa51cba029493da609adad2f0fe76ba5b2bb",
+      "success": true,
+      "tag": "skillsbench-v1.1-drone-planning-control-12ebd8653093"
+    },
+    {
+      "task_name": "dynamic-object-aware-egomotion",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:79f461f2a51f410b1e14428c6c000b767ff7c6d67a36f9dc4ea3606fea41e986",
+      "success": true,
+      "tag": "skillsbench-v1.1-dynamic-object-aware-egomotion-12ebd8653093"
+    },
+    {
+      "task_name": "earthquake-phase-association",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:b4324ceac8508323250e6ef40a821df1c479473d08c3c56420b2d38e0d391dd4",
+      "success": true,
+      "tag": "skillsbench-v1.1-earthquake-phase-association-12ebd8653093"
+    },
+    {
+      "task_name": "earthquake-plate-calculation",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:d02cdf2b61582bde0f55f8b9fb021aba04a41bbb8194e5d0180eb81d4928fa0c",
+      "success": true,
+      "tag": "skillsbench-v1.1-earthquake-plate-calculation-12ebd8653093"
+    },
+    {
+      "task_name": "econ-detrending-correlation",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:66d90e73e3e63b2483a55d50d7f9aa3311feb7e2d4fe194f03c293b4fa70be60",
+      "success": true,
+      "tag": "skillsbench-v1.1-econ-detrending-correlation-12ebd8653093"
+    },
+    {
+      "task_name": "edit-pdf",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:6df91a5c9cf358c692c3c7045a852443f02087b31e57cf120bab99697246093e",
+      "success": true,
+      "tag": "skillsbench-v1.1-edit-pdf-12ebd8653093"
+    },
+    {
+      "task_name": "energy-ac-optimal-power-flow",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:bab32fdd91c5069b7b7c8151560b3d0bc61dc28a099a094e8d30f877709524ea",
+      "success": true,
+      "tag": "skillsbench-v1.1-energy-ac-optimal-power-flow-12ebd8653093"
+    },
+    {
+      "task_name": "energy-market-pricing",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:aaad1dcba9d6fa1349e2f3e299f0eceb249d066dc8a24bbac418cf8b3b13163d",
+      "success": true,
+      "tag": "skillsbench-v1.1-energy-market-pricing-12ebd8653093"
+    },
+    {
+      "task_name": "energy-unit-commitment",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:a9e8ecfda5a00307261ee2db5a6eb253d27d4d097200151e71bb16ae72554398",
+      "success": true,
+      "tag": "skillsbench-v1.1-energy-unit-commitment-12ebd8653093"
+    },
+    {
+      "task_name": "enterprise-information-search",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:ddafba74d09818214f7cf5f2f02f4f065b398d532f5ebf9b9c2c327952a2c421",
+      "success": true,
+      "tag": "skillsbench-v1.1-enterprise-information-search-12ebd8653093"
+    },
+    {
+      "task_name": "exam-block-sequencing",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:a8c9caa435df06eefd1e4ea5cce5c5daad0a3ffdd8f5263ef7135e9cff74fc36",
+      "success": true,
+      "tag": "skillsbench-v1.1-exam-block-sequencing-12ebd8653093"
+    },
+    {
+      "task_name": "exceltable-in-ppt",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:969d7cb00da5e79d7cf7e070cd2071a3f79fc4b1bcb801af686fbcf0b57f4144",
+      "success": true,
+      "tag": "skillsbench-v1.1-exceltable-in-ppt-12ebd8653093"
+    },
+    {
+      "task_name": "exoplanet-detection-period",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:2c3a5ef788b8a9444826b83d46817208fcc0506f548242b45b5685340b83a93d",
+      "success": true,
+      "tag": "skillsbench-v1.1-exoplanet-detection-period-12ebd8653093"
+    },
+    {
+      "task_name": "financial-modeling-qa",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:ddee455a268f2d91d2784fddaddba4707b57e6270ac714bb2b1b1279e11f6e96",
+      "success": true,
+      "tag": "skillsbench-v1.1-financial-modeling-qa-12ebd8653093"
+    },
+    {
+      "task_name": "fix-build-agentops",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:81273354f625b4c6a8518a21be38f9b42cfe358ab291f6e7544f531ad1ee7e55",
+      "success": true,
+      "tag": "skillsbench-v1.1-fix-build-agentops-12ebd8653093"
+    },
+    {
+      "task_name": "fix-build-google-auto",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:47c606f7b5cfcd776918883f569e9747e24803cd847daa67de9a19c599262bd2",
+      "success": true,
+      "tag": "skillsbench-v1.1-fix-build-google-auto-12ebd8653093"
+    },
+    {
+      "task_name": "fix-druid-loophole-cve",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:9b652d41a3c018c566f858245fd80a3660df154abf31184830d24b30d2f5b3b4",
+      "success": true,
+      "tag": "skillsbench-v1.1-fix-druid-loophole-cve-12ebd8653093"
+    },
+    {
+      "task_name": "fix-erlang-ssh-cve",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:f216e3b28418b169b212de63a629a3c8b1188823f931833723414372e00e7a57",
+      "success": true,
+      "tag": "skillsbench-v1.1-fix-erlang-ssh-cve-12ebd8653093"
+    },
+    {
+      "task_name": "fix-visual-stability",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:8c97a1e889a100b32c17ccb71e79206464fd275073464b97ce4309fd8722d16d",
+      "success": true,
+      "tag": "skillsbench-v1.1-fix-visual-stability-12ebd8653093"
+    },
+    {
+      "task_name": "flink-query",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:662716f05e21888d9c4173384cd011e22f00fb4d00ff16dccf17f2ca62c739c7",
+      "success": true,
+      "tag": "skillsbench-v1.1-flink-query-12ebd8653093"
+    },
+    {
+      "task_name": "flood-risk-analysis",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:d38a394bad8909c392e5f13091c2fa537601830be68d932cf87d6161a7dc0d54",
+      "success": true,
+      "tag": "skillsbench-v1.1-flood-risk-analysis-12ebd8653093"
+    },
+    {
+      "task_name": "glm-lake-mendota",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:922bfdd9494e2537b9e1278e4c55c31b93a389497c028a8bb9b054fc857aaf08",
+      "success": true,
+      "tag": "skillsbench-v1.1-glm-lake-mendota-12ebd8653093"
+    },
+    {
+      "task_name": "gravitational-wave-detection",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:be280586da378abf8bc298b32641021c3de13bcfc6b2f799e4900ccfff3064e2",
+      "success": true,
+      "tag": "skillsbench-v1.1-gravitational-wave-detection-12ebd8653093"
+    },
+    {
+      "task_name": "grid-dispatch-operator",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:9a05d40ee8001cc5befaf61ed7b7810548c12ce0c82752e29f424a8a3f152141",
+      "success": true,
+      "tag": "skillsbench-v1.1-grid-dispatch-operator-12ebd8653093"
+    },
+    {
+      "task_name": "hvac-control",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:e4d0d25c7e0674873e32910559cab96318f286a28e1427dbaabf61c32a03c7e4",
+      "success": true,
+      "tag": "skillsbench-v1.1-hvac-control-12ebd8653093"
+    },
+    {
+      "task_name": "invoice-fraud-detection",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:e4df3947b1823ca6fae0b1b14121c27698c2fb784e65210d2ee80faefe210f2f",
+      "success": true,
+      "tag": "skillsbench-v1.1-invoice-fraud-detection-12ebd8653093"
+    },
+    {
+      "task_name": "jax-computing-basics",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:5194a2a25c5679ea5c1cb38b1629199601f44b305fe0766f8b59ffbe5a479a38",
+      "success": true,
+      "tag": "skillsbench-v1.1-jax-computing-basics-12ebd8653093"
+    },
+    {
+      "task_name": "jpg-ocr-stat",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:955e6187246bc603546c8b0ec72760ac8c55d411ecfd0dcd30a120474527062f",
+      "success": true,
+      "tag": "skillsbench-v1.1-jpg-ocr-stat-12ebd8653093"
+    },
+    {
+      "task_name": "lab-unit-harmonization",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:df462f6163b49825e637b7fa7a2510e3fb3b7eaf7d006b64540ec00ac54d33a1",
+      "success": true,
+      "tag": "skillsbench-v1.1-lab-unit-harmonization-12ebd8653093"
+    },
+    {
+      "task_name": "lake-warming-attribution",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:a3826f1c36bdc9b33908e4f937f487edaf702b6bd8e32ff5c067b5d8a215583c",
+      "success": true,
+      "tag": "skillsbench-v1.1-lake-warming-attribution-12ebd8653093"
+    },
+    {
+      "task_name": "latex-formula-extraction",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:405964385cf1a483cb4c5b4647fcd345c03631c0f577582ff04cac4b55c19c28",
+      "success": true,
+      "tag": "skillsbench-v1.1-latex-formula-extraction-12ebd8653093"
+    },
+    {
+      "task_name": "lean4-proof",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:1e5f6670d5ae13caa59510583721073ffc61c821900872648ad7aede3a9c9ab9",
+      "success": true,
+      "tag": "skillsbench-v1.1-lean4-proof-12ebd8653093"
+    },
+    {
+      "task_name": "llm-prefix-cache-replay",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:25cf8944e331bbd23c440abfa92ce087bc4db6ceda465686a9a415da6389050a",
+      "success": true,
+      "tag": "skillsbench-v1.1-llm-prefix-cache-replay-12ebd8653093"
+    },
+    {
+      "task_name": "manufacturing-codebook-normalization",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:5f2409171119c29e174ad81c1712e709454b20618bc3747c35de764c0fc2e53f",
+      "success": true,
+      "tag": "skillsbench-v1.1-manufacturing-codebook-normalization-12ebd8653093"
+    },
+    {
+      "task_name": "manufacturing-equipment-maintenance",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:dd384b21997cb7dbfa38b1e12bfdeab0d799c43e5e0c41b93f7fd94d58c27acc",
+      "success": true,
+      "tag": "skillsbench-v1.1-manufacturing-equipment-maintenance-12ebd8653093"
+    },
+    {
+      "task_name": "manufacturing-fjsp-optimization",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:b6a1c86cf0c4d49cad3a608b531f9791cfdc7c6bf1faf620db0b2eaee47665ef",
+      "success": true,
+      "tag": "skillsbench-v1.1-manufacturing-fjsp-optimization-12ebd8653093"
+    },
+    {
+      "task_name": "mario-coin-counting",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:64510d468246cd38be0725d82217a4b73ca986e1cb2bda783c8ecfca13936d5e",
+      "success": true,
+      "tag": "skillsbench-v1.1-mario-coin-counting-12ebd8653093"
+    },
+    {
+      "task_name": "mars-clouds-clustering",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:9bdfa5fa4f213bf0ad4680d42f97251156c2c3fd043c6ddd1d1968a238a108d7",
+      "success": true,
+      "tag": "skillsbench-v1.1-mars-clouds-clustering-12ebd8653093"
+    },
+    {
+      "task_name": "multilingual-video-dubbing",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:d0e4a3fbbcee9cee283c4bedcaf0236a411952e6a354c9bf4c08c050c6ae9285",
+      "success": true,
+      "tag": "skillsbench-v1.1-multilingual-video-dubbing-12ebd8653093"
+    },
+    {
+      "task_name": "offer-letter-generator",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:8938bb19803e23612f88757855bb675774a6b59f65ebdf4872a3b09d60a0b280",
+      "success": true,
+      "tag": "skillsbench-v1.1-offer-letter-generator-12ebd8653093"
+    },
+    {
+      "task_name": "organize-messy-files",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:f6c4d10a526f7927f15e0a9a93231a78b2612fde43474cd737c825652de865e1",
+      "success": true,
+      "tag": "skillsbench-v1.1-organize-messy-files-12ebd8653093"
+    },
+    {
+      "task_name": "paper-anonymizer",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:7147520e5aa764e3c387ff77085ecb8105f621de220245cb80772590eea4d47e",
+      "success": true,
+      "tag": "skillsbench-v1.1-paper-anonymizer-12ebd8653093"
+    },
+    {
+      "task_name": "parallel-tfidf-search",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:646d0e0beb114924f9b979da82f9c7bfda893a24af13ca6df6c833ddc735d9af",
+      "success": true,
+      "tag": "skillsbench-v1.1-parallel-tfidf-search-12ebd8653093"
+    },
+    {
+      "task_name": "paratransit-routing",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:299fe2fbf9b09ab3164b98512aa75624da0d586ca4ef4ef9ebe8655043bd13da",
+      "success": true,
+      "tag": "skillsbench-v1.1-paratransit-routing-12ebd8653093"
+    },
+    {
+      "task_name": "pddl-airport-planning",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:c5609b7b02e785dac25c21a23c6d4ee5c80c283195ab2b353fda43a9f54de1ad",
+      "success": true,
+      "tag": "skillsbench-v1.1-pddl-airport-planning-12ebd8653093"
+    },
+    {
+      "task_name": "pddl-tpp-planning",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:3b150f63b1697c8a3cc9ba2a48c8d5ab603c77262520ca2734e2b5a9d2bbd9b1",
+      "success": true,
+      "tag": "skillsbench-v1.1-pddl-tpp-planning-12ebd8653093"
+    },
+    {
+      "task_name": "pdf-excel-diff",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:36d38cd356c2f79b06de679223343447a0e788f714dd2760c09811b38007af57",
+      "success": true,
+      "tag": "skillsbench-v1.1-pdf-excel-diff-12ebd8653093"
+    },
+    {
+      "task_name": "powerlifting-coef-calc",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:6cb2fdab955effe17aa72061b9d60391744ea83020f435c65c0bdbbf26b6d643",
+      "success": true,
+      "tag": "skillsbench-v1.1-powerlifting-coef-calc-12ebd8653093"
+    },
+    {
+      "task_name": "pptx-reference-formatting",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:43c42b33e1a9ebe3f0ba95e6c761a700d56e155873500a048e64e5bd849021fd",
+      "success": true,
+      "tag": "skillsbench-v1.1-pptx-reference-formatting-12ebd8653093"
+    },
+    {
+      "task_name": "protein-expression-analysis",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:54f782b5eb23fc2a59a27944eda1f95935728ca43a4502b8a8a4369d580c7767",
+      "success": true,
+      "tag": "skillsbench-v1.1-protein-expression-analysis-12ebd8653093"
+    },
+    {
+      "task_name": "python-scala-translation",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:003145e864aa523f5716e3dd1af1fc5843fb0280948d409b8a55d3285e4db16a",
+      "success": true,
+      "tag": "skillsbench-v1.1-python-scala-translation-12ebd8653093"
+    },
+    {
+      "task_name": "quantum-numerical-simulation",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:80192badfdcc880995d55c4b4b8daed7199dc9f207a008a98d5e0b662976f053",
+      "success": true,
+      "tag": "skillsbench-v1.1-quantum-numerical-simulation-12ebd8653093"
+    },
+    {
+      "task_name": "r2r-mpc-control",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:577ba10b0e42bce169c097dd39c6aa80275e8913dea5e98ffa49821a86496081",
+      "success": true,
+      "tag": "skillsbench-v1.1-r2r-mpc-control-12ebd8653093"
+    },
+    {
+      "task_name": "radar-vital-signs",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:fb96cd9d3fc4e110bc21f202f7abd13928b9677edb2e1f98c240783b1fe82ed1",
+      "success": true,
+      "tag": "skillsbench-v1.1-radar-vital-signs-12ebd8653093"
+    },
+    {
+      "task_name": "react-performance-debugging",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:2055e7090f88977ead4696ad24240c407b7229e6bdb70e88ddf14ccdb49257bd",
+      "success": true,
+      "tag": "skillsbench-v1.1-react-performance-debugging-12ebd8653093"
+    },
+    {
+      "task_name": "reserves-at-risk-calc",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:65ac3dd16de8c8162d216bf63b7f57862db2066c8993fbd52d2c235ff4e41068",
+      "success": true,
+      "tag": "skillsbench-v1.1-reserves-at-risk-calc-12ebd8653093"
+    },
+    {
+      "task_name": "sales-pivot-analysis",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:572e57c4c28b337a5c08f48991854eb0c2521e8b970f1c0a0c60ddba86e10ec6",
+      "success": true,
+      "tag": "skillsbench-v1.1-sales-pivot-analysis-12ebd8653093"
+    },
+    {
+      "task_name": "sec-financial-report",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:d95c8c7f54fcecae3a5579fb36a5b72c60a673019f0a1cd4d4e86a08b0b05463",
+      "success": true,
+      "tag": "skillsbench-v1.1-sec-financial-report-12ebd8653093"
+    },
+    {
+      "task_name": "seismic-phase-picking",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:1935fb5499cca24f4410203a0317d2ff0b6ca0b3625b1d3f5a577ba770937537",
+      "success": true,
+      "tag": "skillsbench-v1.1-seismic-phase-picking-12ebd8653093"
+    },
+    {
+      "task_name": "setup-fuzzing-py",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:bf3c6a75567676cfaa86a3122f58aaec1e1da1f5d88fe422cae4aedd2cd26e78",
+      "success": true,
+      "tag": "skillsbench-v1.1-setup-fuzzing-py-12ebd8653093"
+    },
+    {
+      "task_name": "shock-analysis-demand",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:948ae1e4044c413eecb042a3939ff8179ea54ce310dac7e6660c1447019103da",
+      "success": true,
+      "tag": "skillsbench-v1.1-shock-analysis-demand-12ebd8653093"
+    },
+    {
+      "task_name": "shock-analysis-supply",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:d7a3d7a4ec8894331784bb5429651f91ba30943183a77732f29692f69dec881e",
+      "success": true,
+      "tag": "skillsbench-v1.1-shock-analysis-supply-12ebd8653093"
+    },
+    {
+      "task_name": "simpo-code-reproduction",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:99527e351bb4b2c8bfafffc30653ad6331ebed4b700a55679b130630c1fd03ea",
+      "success": true,
+      "tag": "skillsbench-v1.1-simpo-code-reproduction-12ebd8653093"
+    },
+    {
+      "task_name": "software-dependency-audit",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:6e01b9ef7778303521b2fd0a60d2c8250f80cc79030dc75cd5a483ab4f639cbd",
+      "success": true,
+      "tag": "skillsbench-v1.1-software-dependency-audit-12ebd8653093"
+    },
+    {
+      "task_name": "spring-boot-jakarta-migration",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:a870eb526f3a79e9c6806ebabd0fb2d5110ae74fcef52b6b764c277a95db5fb1",
+      "success": true,
+      "tag": "skillsbench-v1.1-spring-boot-jakarta-migration-12ebd8653093"
+    },
+    {
+      "task_name": "suricata-custom-exfil",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:638322cadcb8af370f1ce55e2dc294354643edb6363ab8d75f643092e2996d2c",
+      "success": true,
+      "tag": "skillsbench-v1.1-suricata-custom-exfil-12ebd8653093"
+    },
+    {
+      "task_name": "syzkaller-ppdev-syzlang",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:d1bb2baf6fb0fc44f71f0b836496e04c2e576edacd48043389e5f3045185789e",
+      "success": true,
+      "tag": "skillsbench-v1.1-syzkaller-ppdev-syzlang-12ebd8653093"
+    },
+    {
+      "task_name": "threejs-structure-parser",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:2f9b5752c060da630101cae642c12285f483a6843fad566caffbcc12ca500783",
+      "success": true,
+      "tag": "skillsbench-v1.1-threejs-structure-parser-12ebd8653093"
+    },
+    {
+      "task_name": "threejs-to-obj",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:cb8495e8147bc4ae0751bd36f7dfb83552eb1f74aad7e255f97c3b3f43fdf22d",
+      "success": true,
+      "tag": "skillsbench-v1.1-threejs-to-obj-12ebd8653093"
+    },
+    {
+      "task_name": "tictoc-unnecessary-abort-detection",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:52a5235b2153c6664059d0dfefdacebd53f688ab120e62715572fc9f58f32488",
+      "success": true,
+      "tag": "skillsbench-v1.1-tictoc-unnecessary-abort-detection-12ebd8653093"
+    },
+    {
+      "task_name": "travel-planning",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:b19e70fdb836f16ed551cc57e9e8496cfa66174152f306145a5f10ff99198750",
+      "success": true,
+      "tag": "skillsbench-v1.1-travel-planning-12ebd8653093"
+    },
+    {
+      "task_name": "video-silence-remover",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:4d6719efd0f0b0ff2e20caa539b6bdf243a88910e8f8b277d66d9d039aa48660",
+      "success": true,
+      "tag": "skillsbench-v1.1-video-silence-remover-12ebd8653093"
+    },
+    {
+      "task_name": "weighted-gdp-calc",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:59cfd42c4c1e3b8524c8c834ae16903c2749bf3b772aab0e6f26edd16463a712",
+      "success": true,
+      "tag": "skillsbench-v1.1-weighted-gdp-calc-12ebd8653093"
+    },
+    {
+      "task_name": "xlsx-recover-data",
+      "docker_image": "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:1bee334f1c49bde6e243ba71224cfb702ef6391ea59e8203faa1ac22ac8b4b94",
+      "success": true,
+      "tag": "skillsbench-v1.1-xlsx-recover-data-12ebd8653093"
+    }
+  ]
+}

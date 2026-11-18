@@ -47,3 +47,11 @@ cvdp_agent_generic_opencode:
             extra_start_args: [--writable-tmpfs]
       container_workdir: /code
       deps_provision: archive
+
+cvdp_agent_generic_opencode_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: cvdp_agent_generic_opencode

@@ -1,0 +1,46 @@
+chartography:
+  resources_servers:
+    chartography:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: 'Professional chart reading: one chart image and one question, graded against a golden answer
+        (numeric parts carry an acceptable range) by the Chartography benchmark''s own LLM judge'
+      value: Train and measure careful, precise reading of specialized charts
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_chat_create_params:
+        messages: []
+      judge_prompt_template_fpath: prompt_templates/judge.txt
+      judge_max_attempts: 5
+      judge_endpoint_max_concurrency: 64
+chartography_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: chartography
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/chartography/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+
+chartography_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: chartography
+      agent_server:
+        type: responses_api_agents
+        name: chartography_simple_agent
+      resources_tool_transports:
+      - direct_http

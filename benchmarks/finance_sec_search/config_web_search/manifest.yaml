@@ -1,0 +1,31 @@
+name: finance_sec_search/config_web_search
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: Financial research over SEC filings with grounded answer verification,
+  including web search.
+modality: text
+licensing: unknown
+authors:
+- ushnish-de
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../config_web_search.yaml
+resources_server: finance_sec_search
+agent_server: finance_agent
+datasets:
+- name: finance_sec_search_web_search
+  type: benchmark
+  jsonl_fpath: benchmarks/finance_sec_search/data/finance_sec_search_benchmark_web_search.jsonl
+  prepare_script: benchmarks/finance_sec_search/prepare_web_search.py
+  num_repeats: 3
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

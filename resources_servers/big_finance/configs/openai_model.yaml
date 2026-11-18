@@ -1,0 +1,12 @@
+# Combine with --model-type openai_model for BigFinance-specific request settings.
+big_finance_policy_model:
+  responses_api_models:
+    openai_model:
+      upstream_max_num_tries: 1
+      upstream_request_timeout_seconds: 1800
+      upstream_retry_policy:
+        max_attempts: 13
+        backoff_initial_seconds: 0.5
+        backoff_multiplier: 1.0
+        backoff_jitter_fraction: 0.0
+        terminal_http_status_codes: [400, 401, 402, 403, 405, 409, 410, 413, 415, 422]
