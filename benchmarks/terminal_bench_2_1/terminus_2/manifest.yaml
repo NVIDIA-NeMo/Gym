@@ -69,3 +69,7 @@ model_server: policy_model
 canonical_split: full
 prompt_source: prepared
 lifecycle: active
+setups:
+- name: terminal_bench_2_1/opencode
+  config_path: ../opencode.yaml
+  agent_server: opencode_sandboxed_agent

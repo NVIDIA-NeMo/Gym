@@ -71,3 +71,7 @@ adopted_from:
   ref: 12ebd8653093e0734c7902835cb20c054196026c  # pragma: allowlist secret
   reconciled: '2026-10-27'
 lifecycle: active
+setups:
+- name: skillsbench/harbor_opensandbox
+  config_path: ../harbor_opensandbox.yaml
+  description: Official benchflow-ai/skillsbench tasks through Harbor and OpenSandbox.
