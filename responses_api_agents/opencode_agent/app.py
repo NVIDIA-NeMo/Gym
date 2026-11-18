@@ -102,7 +102,7 @@ from nemo_gym.trajectory import (
     SandboxObservation,
     TrajectoryRecord,
 )
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, monotonic_timeout
 from responses_api_agents.opencode_agent.artifacts import (
     _assistant_part_items,
     _empty_answer_part,
@@ -1714,7 +1714,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         deadline = started + timeout
         failure: BaseException | None = None
         try:
-            async with asyncio.timeout_at(deadline):
+            async with monotonic_timeout(deadline):
                 await state.prepare_activation(
                     activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
                 )
@@ -2043,7 +2043,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         export = {}
         failure = None
         try:
-            async with asyncio.timeout_at(deadline):
+            async with monotonic_timeout(deadline):
                 await self.sem.acquire()
             try:
                 if deadline is None:
