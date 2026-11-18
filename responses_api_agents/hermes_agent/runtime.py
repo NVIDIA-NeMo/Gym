@@ -15,7 +15,7 @@ import tomllib
 from pathlib import Path
 
 from nemo_gym import CACHE_DIR
-from nemo_gym.config.global_config import CACHE_DIR_KEY_NAME, maybe_get_global_config_dict
+from nemo_gym.config import CACHE_DIR_KEY_NAME, maybe_get_global_config_dict
 
 
 # Wheel metadata reports 0.0.0 and wheels omit runtime assets.
