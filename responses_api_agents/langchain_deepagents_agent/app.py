@@ -42,6 +42,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     SandboxSession,
@@ -591,7 +592,9 @@ class DeepAgentsAgent(SimpleAgent):
         agent_session_id = self._agent_session_id_from_request(request)
         if agent_session_id is None:
             if self.config.tool_profile == "builtin":
-                raise HTTPException(409, "Sandboxed DeepAgents runs only in agent sessions; use an environment server")
+                raise AgentSessionConflictError(
+                    "Sandboxed DeepAgents runs only in agent sessions; use an environment server"
+                )
             # Legacy self-dispatch from run(). Different servers have different session-middleware keys
             # (get_session_middleware_key() is f"{class_name}___{server_name}"), so a cookie from the resources
             # server's /seed_session does not automatically ride through to /verify unless re-set here.
@@ -605,7 +608,7 @@ class DeepAgentsAgent(SimpleAgent):
         if not isinstance(state, (DeepAgentsSessionState, DeepAgentsSandboxSession)):
             raise TypeError("Expected a DeepAgents session state")
         if rollout_id != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Activation rollout does not match the seeded agent session")
+            raise AgentSessionConflictError("Activation rollout does not match the seeded agent session")
         if state.activation is None:
             if isinstance(state, DeepAgentsSandboxSession) and body.tools:
                 raise HTTPException(
@@ -624,7 +627,7 @@ class DeepAgentsAgent(SimpleAgent):
 
             state.activation = asyncio.create_task(activate())
         elif body != state.activation_request:
-            raise HTTPException(409, "DeepAgents sessions run one activation; retry the same request")
+            raise AgentSessionConflictError("DeepAgents sessions run one activation; retry the same request")
         # A disconnected HTTP client must not cancel the shared run; only close cancels it.
         return (await asyncio.shield(state.activation)).model_copy(deep=True)
 
@@ -732,7 +735,9 @@ class DeepAgentsAgent(SimpleAgent):
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         """Keep legacy /run for the search profile; sandbox episodes require an Environment Server."""
         if self.config.tool_profile == "builtin":
-            raise HTTPException(409, "Sandboxed DeepAgents runs only in agent sessions; use an environment server")
+            raise AgentSessionConflictError(
+                "Sandboxed DeepAgents runs only in agent sessions; use an environment server"
+            )
         _reject_response_budget(body.responses_create_params)
         return await super().run(request, body)
 

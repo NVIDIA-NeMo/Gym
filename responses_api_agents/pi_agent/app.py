@@ -39,6 +39,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -1572,9 +1573,9 @@ class PiAgent(SimpleResponsesAPIAgent):
             assert isinstance(state, PiSandboxSession)
             rollout_id = request.path_params.get("rollout_id")
             if state.request.episode_id.capture_key != rollout_id:
-                raise HTTPException(409, "Pi activation does not match the seeded session and rollout route")
+                raise AgentSessionConflictError("Pi activation does not match the seeded session and rollout route")
             if state.session.closing:
-                raise HTTPException(409, "Pi session is closing")
+                raise AgentSessionConflictError("Pi session is closing")
             if state.task is None:
                 # Validate and decode only for a new activation: a retry is compared with the stored request, so
                 # its media are never decoded again. Bind the request before the first await so retries join one
@@ -1586,7 +1587,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     self._sandbox_response(state, validated, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "Pi sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError("Pi sandbox sessions support one activation; retry the same request")
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         # AnySWE, AnyTerminal and HarnessAgent pass generic Responses fields here.
@@ -1607,7 +1608,7 @@ class PiAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: PiAgentRunRequest) -> PiAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Pi sessions require EnvironmentServer /run")
+            raise AgentSessionConflictError("Pi sessions require EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Pi /run requires resources_server; use EnvironmentServer /run for sandbox sessions"

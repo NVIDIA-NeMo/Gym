@@ -24,6 +24,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -579,9 +580,9 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
         state = self._require_agent_session(session_id)
         assert isinstance(state, OpenHandsSandboxSession)
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "OpenHands activation does not match the seeded session and rollout")
+            raise AgentSessionConflictError("OpenHands activation does not match the seeded session and rollout")
         if state.session.closing:
-            raise HTTPException(409, "OpenHands session is closing")
+            raise AgentSessionConflictError("OpenHands session is closing")
         prompt, system, sampling = self._validate_request(body)
         if state.task is None:
             state.activation_request = body.model_copy(deep=True)
@@ -589,7 +590,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                 self._activate(state, state.activation_request, prompt=prompt, system=system, sampling=sampling)
             )
         elif body != state.activation_request:
-            raise HTTPException(409, "OpenHands sessions support one activation; retry the same request")
+            raise AgentSessionConflictError("OpenHands sessions support one activation; retry the same request")
         # A disconnected client must not cancel the shared activation; only close does.
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 

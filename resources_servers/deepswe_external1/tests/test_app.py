@@ -459,7 +459,7 @@ async def test_agent_mode_names_the_stage_that_failed_and_keeps_recovery_aligned
 ) -> None:
     """A collection failure is an environment failure; a verifier failure after a collected patch stays a verifier
     error, so recovery grades the saved patch again only in the second case."""
-    from nemo_gym.orchestration.recovery import REVERIFY_VERIFIER, reverification_cause
+    from nemo_gym.eval.recovery.grading import REVERIFY_VERIFIER, reverification_cause
 
     server = make_server(task, mode="agent")
     server.config.include_model_patch_in_response = True

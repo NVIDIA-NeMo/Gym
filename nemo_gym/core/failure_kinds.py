@@ -90,6 +90,7 @@ AGENT_TIMEOUT = "agent_timeout"
 AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
 AGENT_LIMIT = "agent_limit"
 AGENT_INVALID_OUTPUT = "agent_invalid_output"
+GIT_WORKTREE_COMMIT_REJECTED = "git_worktree_commit_rejected"
 
 # --- model: requests made to a model endpoint ---------------------------------------- #
 # Preserve the upstream HTTP status separately; it is not a retry policy.
@@ -240,6 +241,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         ENVIRONMENT_PROTOCOL_VIOLATION,
         AGENT_LIMIT,
         AGENT_INVALID_OUTPUT,
+        GIT_WORKTREE_COMMIT_REJECTED,
         MODEL_REQUEST_ERROR,
         MODEL_TRANSPORT_ERROR,
         MODEL_POLICY_RESPONSE_TIMEOUT,

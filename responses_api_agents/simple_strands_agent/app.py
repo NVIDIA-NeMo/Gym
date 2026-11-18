@@ -25,6 +25,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -627,12 +628,14 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         if not isinstance(state, SimpleStrandsSession):
             raise TypeError("Expected SimpleStrandsSession")
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Simple Strands activation must use its seeded rollout route")
+            raise AgentSessionConflictError("Simple Strands activation must use its seeded rollout route")
         if state.task is None:
             state.activation_request = body.model_copy(deep=True)
             state.task = asyncio.create_task(self._activate_session(state, state.activation_request))
         elif body != state.activation_request:
-            raise HTTPException(409, "Simple Strands sessions support one activation; retries must repeat the request")
+            raise AgentSessionConflictError(
+                "Simple Strands sessions support one activation; retries must repeat the request"
+            )
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 
     async def run(self, request: Request, body: SimpleStrandsAgentRunRequest) -> SimpleStrandsAgentVerifyResponse:
