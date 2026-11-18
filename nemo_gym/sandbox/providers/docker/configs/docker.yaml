@@ -20,6 +20,7 @@ sandbox:
   default_metadata:
     sandbox-api: docker-cli
   docker:
+    # allow_privileged: true  # let a Compose service that declares `privileged: true` run --privileged (host root; see README)
     create:
       # Keep the container alive across exec calls, independent of the image's CMD/ENTRYPOINT.
       keepalive_shell: /bin/sh

@@ -56,7 +56,8 @@ to keep **before** the sandbox stops — stopping force-removes the container.
 ## Selecting and configuring the provider
 
 The provider config is a single-key mapping `{"docker": {<kwargs>}}`, grouped into three
-optional sections (each accepts a plain mapping from Hydra YAML or the dataclass):
+optional sections (each accepts a plain mapping from Hydra YAML or the dataclass), plus the
+`allow_privileged` switch (default `false`; see [Isolation & security](#isolation--security)):
 
 ```yaml
 docker:
@@ -79,6 +80,13 @@ docker:
     expected_stdout: docker-sandbox-ready
     deadline_s: 60
 ```
+
+### `allow_privileged`
+
+`false` by default. `true` lets the provider start a sandbox privileged (`docker run --privileged`) when that
+sandbox asks for it: a Compose service that declares `privileged: true`. No other sandbox becomes privileged, and a
+task that declares it on a provider without this switch is left out at prepare, naming the setting. Read the
+security note below before you turn it on.
 
 ### `create` — `DockerCreateConfig`
 
@@ -199,8 +207,16 @@ It is not a hard boundary for hostile code.** For adversarial or untrusted workl
 Docker on a disposable VM or use a stronger runtime (gVisor `runsc`, Kata Containers, or a
 microVM). For that reason:
 
-- **Never** run with `--privileged` and don't mount the Docker socket into the sandbox
-  (either would grant host root).
+- **Never** add `--privileged` through `extra_run_args` or a deployment's `run_args` (that makes
+  every sandbox of the run privileged), and never mount the Docker socket into the sandbox. Either
+  grants host root.
+- **Privileged Compose services** (`privileged: true`, for a task that runs its own Docker
+  daemon, such as one that installs a tool through a container) start only when the operator
+  sets `allow_privileged: true` in the provider config. Only that service's container gets
+  `--privileged`; its other services, the volume helper and the copy-up seed do not. A
+  privileged container has every capability and the host's devices, so code in it can take
+  over the host: turn the switch on only on a disposable VM or a host you would rebuild,
+  and only for task folders you trust.
 - **Networking** is on by default (the bridge network) because most tasks need egress
   (pip/git). For untrusted code set `network: none` to cut it entirely (or attach a locked
   internal network via `network: <name>`).

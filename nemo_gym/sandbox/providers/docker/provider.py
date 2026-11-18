@@ -303,7 +303,12 @@ class DockerProvider:
         exec: DockerExecConfig | Mapping[str, Any] | None = None,
         create: DockerCreateConfig | Mapping[str, Any] | None = None,
         probe: DockerProbeConfig | Mapping[str, Any] | None = None,
+        allow_privileged: bool = False,
     ) -> None:
+        if not isinstance(allow_privileged, bool):
+            raise TypeError(f"allow_privileged must be true or false, got {allow_privileged!r}")
+        # Off unless the operator opts in: a privileged container's root is root on the host.
+        self._allow_privileged = allow_privileged
         self._exec_config = _coerce_config(exec, DockerExecConfig)
         self._create_config = _coerce_config(create, DockerCreateConfig)
         self._probe = _coerce_config(probe, DockerProbeConfig)
@@ -336,6 +341,15 @@ class DockerProvider:
         for option in security_opt:
             args += ["--security-opt", str(option)]
         return {"run_args": args} if args else {}
+
+    def privileged_options(self) -> dict[str, Any]:
+        """``docker run --privileged`` for one sandbox, when the operator set ``allow_privileged: true``."""
+        if not self._allow_privileged:
+            raise ValueError(
+                "privileged: true needs `allow_privileged: true` in the docker sandbox provider config, which the "
+                "operator sets to accept that a privileged container's root is root on the host"
+            )
+        return {"run_args": ["--privileged"]}
 
     def pull_policy_options(self, policy: str) -> dict[str, Any]:
         """Compose's ``pull_policy`` as ``docker run --pull``; only ``always``, ``missing`` and ``never`` exist."""
