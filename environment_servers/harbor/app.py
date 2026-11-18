@@ -1439,7 +1439,7 @@ class HarborEnvironmentServer(
                 policy, [*egress.model_hosts, *egress.install_hosts, *egress.tool_hosts, *task_tool_hosts]
             )
             self._refuse_widening_the_deployment(policy, sandbox="the agent")
-            self._refuse_dropping_the_deployments_denials(policy)
+            self._refuse_dropping_the_deployments_denials(policy, sandbox="the agent")
         except ValueError as exc:
             raise HTTPException(422, f"{where}: {exc}") from exc
         LOGGER.info(

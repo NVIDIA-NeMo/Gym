@@ -187,8 +187,11 @@ prebuilt verifier image, only a `pull_policy` other than `build`.
 sandbox. Unset, the separate verifier runs under its `[verifier.environment]`'s network, else `[environment]`'s, as
 Harbor's copy of `[environment]` does. A restriction on `[verifier.environment]` itself is refused at load. The
 episode fails at seed without OpenSandbox, or for an allowlist under a deny-by-default
-`sandbox_provider_options.network_policy`. A shared verifier runs in the agent's sandbox, whose network is the
-agent's for its whole life (see [Network restrictions](/main/agent-interactions/harbor#network-restrictions)): its
+`sandbox_provider_options.network_policy`. It also fails there for an allowlist the separate verifier takes from
+`[environment]` when the deployment's `network_policy` has deny rules: the verifier's policy replaces the
+deployment's, so an allowed host could be one the deployment denies. A shared verifier runs in the agent's sandbox,
+whose network is the agent's for its whole life (see
+[Network restrictions](/main/agent-interactions/harbor#network-restrictions)): its
 network, `[verifier]`'s else `[environment]`'s, must be the agent's, or the task is refused at load. The server option
 `separate_verifier_for_artifacts: true` verifies every task that declares `artifacts` separately; see
 [Configure the server](/main/agent-interactions/harbor#configure-the-server).

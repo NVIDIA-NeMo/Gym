@@ -5712,6 +5712,78 @@ class TestVerifierNetwork:
         # The agent's own sandbox runs under the agent's (public) network.
         assert agent.network_policy is None
 
+    # An allow-by-default deployment that denies one host.
+    BLOCKING = {"defaultAction": "allow", "egress": [{"action": "deny", "target": "blocked.example"}]}
+    ENVIRONMENT_ALLOWLIST = 'network_mode = "allowlist"\nallowed_hosts = ["blocked.example"]'
+
+    @staticmethod
+    def inheriting_toml(agent_network, *, environment=ENVIRONMENT_ALLOWLIST, verifier=""):
+        """A separate verifier with no ``[verifier.environment]``, so it runs under ``[environment]``'s network
+        unless ``verifier`` gives it one of its own."""
+        return (
+            TASK_TOML.replace("[verifier]\n", f'[verifier]\nenvironment_mode = "separate"\n{verifier}\n')
+            .replace("[agent]\n", f'[agent]\nnetwork_mode = "{agent_network}"\n')
+            .replace("[environment]\n", f'[environment]\ndocker_image = "ubuntu:24.04"\n{environment}\n')
+        )
+
+    @pytest.mark.parametrize("agent_network", ["public", "no-network"])
+    async def test_an_inherited_allowlist_does_not_drop_the_deployments_deny_rules(
+        self, tmp_path, monkeypatch, agent_network
+    ):
+        """The separate verifier inherits ``[environment]``'s allowlist whatever the agent's own network, and its
+        policy replaces the deployment's, deny rules included: an allow rule for a host the operator denied would open
+        it, so the episode is refused at seed, before any sandbox, as the agent's is
+        (``TestAgentNetwork.test_the_deployments_deny_rules_are_not_dropped``)."""
+        server, task, _, _, specs, created = self.prepared(
+            tmp_path,
+            monkeypatch,
+            toml=self.inheriting_toml(agent_network),
+            sandbox_provider_options={"network_policy": self.BLOCKING},
+        )
+        # A harness that needs no host: a `no-network` agent's own policy is deny-all, which keeps every denial.
+        server.server_client.sandbox_egress = {}
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert created == [] and specs == []
+        assert "[verifier] network policy" in failure.failure_reason
+        assert "the separate verifier's allow rules (blocked.example) would replace this deployment's" in (
+            failure.failure_reason
+        )
+        assert "drop its deny rules ['blocked.example']" in failure.failure_reason
+        assert server.config.sandbox_provider_options["network_policy"] == self.BLOCKING
+
+    async def test_an_explicit_verifier_allowlist_or_an_inherited_deny_all_runs_under_deny_rules(
+        self, tmp_path, monkeypatch
+    ):
+        """The verifier's own ``[verifier]`` allowlist is not checked against the deployment's deny rules (its
+        behavior is unchanged): it replaces the deployment's policy for the verifier sandbox, here over an inherited
+        allowlist the check would refuse. An inherited deny-all policy keeps every denial and runs."""
+        explicit = 'network_mode = "allowlist"\nallowed_hosts = ["blocked.example"]'
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path,
+            monkeypatch,
+            toml=self.inheriting_toml("public", verifier=explicit),
+            sandbox_provider_options={"network_policy": self.BLOCKING},
+        )
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "allowlist"
+        assert specs[0].provider_options["network_policy"] == {
+            "defaultAction": "deny",
+            "egress": [{"action": "allow", "target": "blocked.example"}],
+        }
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path / "no-network",
+            monkeypatch,
+            toml=self.inheriting_toml("public", environment='network_mode = "no-network"'),
+            sandbox_provider_options={"network_policy": self.BLOCKING},
+        )
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "no-network"
+        assert specs[0].provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+
 
 class TestAgentNetwork:
     """The agent's network (``[agent]``, ``[steps.agent]`` or ``[environment]``) is the agent sandbox's egress policy,

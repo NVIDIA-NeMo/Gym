@@ -212,8 +212,8 @@ class HarborSandboxMixin:
         ``network_policy`` is the provider's egress policy for this sandbox (the agent's network, see
         ``_agent_network_policy``, or the separate verifier's, see :meth:`_verifier_network_policy`); it replaces the
         deployment's ``sandbox_provider_options.network_policy`` for that sandbox (never widening a deny-by-default
-        one, which both refuse, nor, for the agent, opening hosts past its deny rules), as Harbor's explicit phase
-        policy replaces the environment baseline.
+        one, which both refuse, nor, for the agent and a separate verifier whose network is ``[environment]``'s,
+        opening hosts past its deny rules), as Harbor's explicit phase policy replaces the environment baseline.
         """
         global_config_dict = get_global_config_dict()
         if environment is None:
@@ -282,13 +282,18 @@ class HarborSandboxMixin:
         ``defaultAction`` (its egress API only patches rules under the policy the sandbox was created with), so the
         restricted policy is applied to the separate verifier's sandbox at creation, for the whole of its life. Here
         the provider is checked (:func:`phase_network_policy` fails closed for every provider but OpenSandbox) and
-        the entries are turned into egress rules. Raises ``ValueError``.
+        the entries are turned into egress rules. A network the verifier takes from its environment, not its own
+        ``[verifier]`` (or, in a step's view, ``[steps.verifier]``) one, also keeps the deployment's deny rules
+        (:meth:`_refuse_dropping_the_deployments_denials`), as the agent's does. Raises ``ValueError``.
         """
         network = task.config.verifier_network(separate=True)
         if not network.restricted:
             return None  # the common case: no provider lookup for a public verifier
         policy = phase_network_policy(self._task_provider_name(task), network.mode, network.allowed_hosts)
         self._refuse_widening_the_deployment(policy, sandbox="the verifier")
+        if task.config.verifier.network_mode is None:
+            # Inherited: the loader refuses a restriction on a verifier environment, so this is `[environment]`'s.
+            self._refuse_dropping_the_deployments_denials(policy, sandbox="the separate verifier")
         return policy
 
     def _refuse_widening_the_deployment(self, policy: Mapping[str, Any], *, sandbox: str) -> None:
@@ -316,14 +321,16 @@ class HarborSandboxMixin:
                 "deployment"
             )
 
-    def _refuse_dropping_the_deployments_denials(self, policy: Mapping[str, Any]) -> None:
-        """Refuse an agent ``policy`` that allows any host when the deployment's network policy has deny rules.
+    def _refuse_dropping_the_deployments_denials(self, policy: Mapping[str, Any], *, sandbox: str) -> None:
+        """Refuse ``sandbox``'s ``policy`` when it allows any host and the deployment's network policy has deny rules.
 
-        The agent's policy replaces the deployment's ``sandbox_provider_options.network_policy`` for its sandbox, deny
-        rules included, so an allow rule (the task's ``allowed_hosts`` or a host the harness needs) for a destination
-        the operator denied would open it. Refused rather than matched rule by rule (wildcards, an address against a
-        host name) or merged (the egress sidecar's precedence between conflicting rules is not verified); a deny-all
-        policy keeps every denial and passes. A rule that is not a plain ``allow`` counts as a denial. Call it after
+        The task's policy replaces the deployment's ``sandbox_provider_options.network_policy`` for ``sandbox``, deny
+        rules included, so an allow rule (the task's ``allowed_hosts`` or, for the agent, a host the harness needs)
+        for a destination the operator denied would open it. Applied to the agent's sandbox, and to a separate
+        verifier's when the verifier inherits its network from ``[environment]`` (its own ``[verifier]`` policy is
+        not checked here). Refused rather than matched rule by rule (wildcards, an address against a host name) or
+        merged (the egress sidecar's precedence between conflicting rules is not verified); a deny-all policy keeps
+        every denial and passes. A rule that is not a plain ``allow`` counts as a denial. Call it after
         :meth:`_refuse_widening_the_deployment`, which refuses a deny-by-default deployment. Raises ``ValueError``.
         """
         deployment = self.config.sandbox_provider_options.get("network_policy")
@@ -336,7 +343,7 @@ class HarborSandboxMixin:
         if denied and policy["egress"]:
             hosts = ", ".join(rule["target"] for rule in policy["egress"])
             raise ValueError(
-                f"the agent's allow rules ({hosts}) would replace this deployment's "
+                f"{sandbox}'s allow rules ({hosts}) would replace this deployment's "
                 f"sandbox_provider_options.network_policy and drop its deny rules {denied}; refused rather than "
                 "matched against them: run the task on a deployment whose network_policy has no deny rules"
             )
