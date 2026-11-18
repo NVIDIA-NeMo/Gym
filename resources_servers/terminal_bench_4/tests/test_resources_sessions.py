@@ -509,19 +509,24 @@ async def test_relative_workdir_fails_provisioning(harness, monkeypatch) -> None
 
 
 @pytest.mark.parametrize(
-    "status,details,reason",
+    "status,details,metadata,reason",
     [
-        ("completed", None, "completed"),
-        ("incomplete", None, "timeout"),
-        ("incomplete", {"reason": "max_output_tokens"}, "nonzero_exit"),
-        # An agent that died while its sandbox lives (codex_agent verify_after_agent_error).
-        ("failed", None, "nonzero_exit"),
+        ("completed", None, None, "completed"),
+        ("incomplete", None, None, "timeout"),
+        ("incomplete", {"reason": "max_output_tokens"}, None, "nonzero_exit"),
+        ("failed", None, None, "nonzero_exit"),
+        # An agent that died while its sandbox lives (codex_agent verify_after_agent_error): the outcome ladder grades
+        # it as completed, or incomplete at its time limit, and the response names the error.
+        ("completed", None, {"graded_agent_error": "Codex exited with code 1"}, "nonzero_exit"),
+        ("incomplete", None, {"graded_agent_error": "Codex exited with code 1"}, "nonzero_exit"),
     ],
 )
-async def test_termination_follows_the_agent_response_and_grading_still_runs(harness, status, details, reason) -> None:
+async def test_termination_follows_the_agent_response_and_grading_still_runs(
+    harness, status, details, metadata, reason
+) -> None:
     request = SimpleNamespace(session={})
     await harness.server.seed_session(request, harness.seed())
-    body = harness.verify_body(status, incomplete_details=details)
+    body = harness.verify_body(status, incomplete_details=details, metadata=metadata)
     verified = await harness.server.verify(request, harness.verify_request(body))
     assert verified.termination.reason == reason
     assert verified.evaluation_completed

@@ -429,7 +429,9 @@ as for mini-SWE. Defaults:
   as Harbor grades it (`++tbsci_verify_after_agent_error=false` retries it instead); a lost
   sandbox or a model-endpoint outage is still retried. A provider failure Codex reports itself
   goes to the environment's outcome policy (#4834), which by default grades a rejected request
-  (400, 413, 422) and retries a transient one. See `codex_agent`'s `verify_after_agent_error`.
+  (400, 413, 422) after a model reply, fails one on the first request without grading it
+  (`model_request_rejected`), and retries a transient one. See `codex_agent`'s
+  `verify_after_agent_error`.
 - Codex and its tools get `oom_score_adj` 1000 (0 when the sandbox starts below zero), so an
   OOM kill inside the sandbox picks agent work, not the exec daemon
   (`++tbsci_raise_oom_score_adj=false` turns it off).
