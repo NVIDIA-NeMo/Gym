@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import shlex
 import sys
 import tempfile
 import uuid
@@ -21,6 +23,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
+from random import uniform
 from shutil import rmtree
 from time import monotonic
 from traceback import format_exc
@@ -33,10 +36,12 @@ from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
+    PROVIDER_IO_TIMEOUT,
     PROVIDER_OOM_KILLED,
     SESSION_LOST,
     VERIFIER_ERROR,
     FailureBoundary,
+    FailureClass,
     FailureReport,
     FailureReportRow,
     NgFailureEvent,
@@ -44,11 +49,13 @@ from nemo_gym.core import (
     RequestFailureLog,
     SandboxFailureDetails,
     StageOutcomePolicyConfig,
+    StagePolicyConfig,
     choose_stage_outcome,
     current_verifier_invocation_id,
     failure_kinds,
     observe_failure,
 )
+from nemo_gym.core.outcome_policy import declare_action_kind
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -89,6 +96,11 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 # The task repository in every DeepSWE image; the agent works and commits here.
 AGENT_WORKDIR = "/app"
+# Where agent_ripgrep_path lands in the agent sandbox, readable and executable by every user.
+AGENT_RUNTIME_DIR = "/tmp/nemo-gym-deepswe"
+AGENT_RIPGREP = f"{AGENT_RUNTIME_DIR}/rg"
+_RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
+LOGGER = logging.getLogger(__name__)
 
 
 def _resolve_repo_path(path: Path) -> Path:
@@ -104,6 +116,58 @@ _MAX_FAILURE_REASON_CHARS = 2000
 _NO_VERDICT_FILE = "Verifier did not produce /logs/verifier/reward.json"
 
 
+# The failure kind of a model patch whose tests the in-sandbox timeout stopped at the task's limit (see
+# ``_verifier_command``).
+TEST_DEADLINE = "deepswe:test_deadline"
+
+
+declare_action_kind(TEST_DEADLINE)
+
+
+def _default_outcome_policy() -> StageOutcomePolicyConfig:
+    """The shared defaults, plus a confirmed test deadline classified as the model's."""
+    return StageOutcomePolicyConfig(
+        classification={"by_stage": {"verification": {"by_failure_kind": {TEST_DEADLINE: FailureClass.MODEL}}}}
+    )
+
+
+def _with_deadline_default(override: object) -> object:
+    """Add this server's boundary default for a confirmed test deadline: it counts as a zero.
+
+    The default is only a default. A rule the deployment wrote for the deadline itself wins, and so does an explicit
+    ``fail`` as the verification stage's default action or for the model's class, which leaves the deadline ungraded.
+    A ``retry`` there is the shared default for inconclusive attempts; a confirmed deadline is never run again, so it
+    does not apply to it.
+    """
+    if isinstance(override, StageOutcomePolicyConfig):
+        override = override.model_dump(exclude_unset=True)
+    if not isinstance(override, dict):
+        return override
+    stages = override.get("by_stage", {})
+    rules = stages.get("verification", {}) if isinstance(stages, dict) else {}
+    if isinstance(rules, StagePolicyConfig):
+        rules = rules.model_dump(exclude_unset=True)
+    if not isinstance(rules, dict):
+        return override
+    kinds = rules.get("by_failure_kind", {})
+    classes = rules.get("by_failure_class", {})
+    if (
+        TEST_DEADLINE in kinds
+        or rules.get("default_action") == OutcomeAction.FAIL
+        or classes.get(FailureClass.MODEL) == OutcomeAction.FAIL
+    ):
+        return override
+    default_rule = {
+        "verification": {**rules, "by_failure_kind": {**kinds, TEST_DEADLINE: OutcomeAction.COUNT_AS_ZERO}}
+    }
+    return {**override, "by_stage": {**stages, **default_rule}}
+
+
+def _overlay_on_defaults(override: object) -> object:
+    """An override on this server's own defaults: the shared ones, the deadline's classification and its zero."""
+    return StageOutcomePolicyConfig.overlay(_default_outcome_policy(), _with_deadline_default(override))
+
+
 class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE = ReverifyMode.UNSUPPORTED
 
@@ -112,12 +176,18 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     task_cpu_multiplier: float = Field(default=2.0, gt=0)
     task_memory_multiplier: float = Field(default=2.0, gt=0)
-    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=StageOutcomePolicyConfig)
+    outcome_policy: StageOutcomePolicyConfig = Field(
+        default_factory=lambda: StageOutcomePolicyConfig.model_validate(_overlay_on_defaults({}))
+    )
 
     sandbox_provider: str
     sandbox_config: dict[str, Any]
     enforce_agent_no_network: bool = True
     sandbox_model_server: ModelServerRef | None = None
+    # A host ripgrep copied into every agent sandbox as AGENT_RIPGREP; a relative path is under the Gym root.
+    # benchmarks/deepswe/opencode.yaml stages OpenCode's ripgrep this way, since the agent sandbox has no network, and
+    # opencode_agent checks the copy against its pinned digest.
+    agent_ripgrep_path: Path | None = None
 
     logs_dir: Path = Path("resources_servers/deepswe/logs")
     clear_verifier_logs: bool = False
@@ -127,6 +197,12 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     # a reported command deadline and a conclusive result are not run again; a patch that breaks the
     # test script leaves no verdict every time, so after the bound the outcome stays masked as before.
     inconclusive_verification_retries: int = Field(default=2, ge=0)
+
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def keep_untouched_default_rules(cls, value: object) -> object:
+        """A partial override changes only the rules it names; the others keep this server's defaults."""
+        return _overlay_on_defaults(value)
 
     @field_validator("outcome_policy")
     @classmethod
@@ -139,9 +215,19 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
         }
         for stage, allowed in supported.items():
             rules = policy.by_stage.get(stage, policy.default_policy)
+            kind_rules = dict(rules.by_failure_kind)
+            if stage == "verification":
+                # The deadline's rule: its zero is counted, never retried. The other rules also decide
+                # inconclusive attempts, so they cannot count a zero.
+                deadline = kind_rules.pop(TEST_DEADLINE, None)
+                if deadline not in (None, OutcomeAction.COUNT_AS_ZERO, OutcomeAction.FAIL):
+                    raise ValueError(
+                        f"DeepSWE verification by_failure_kind.{TEST_DEADLINE} supports only count_as_zero, fail: "
+                        "a confirmed test deadline is never run again"
+                    )
             actions = {
                 rules.default_action,
-                *rules.by_failure_kind.values(),
+                *kind_rules.values(),
                 *rules.by_status_code.values(),
                 *rules.by_failure_class.values(),
             }
@@ -188,6 +274,8 @@ class DeepSWEVerifyResponse(BaseVerifyResponse):
     apply_failed: bool = False
     verifier_exit_code: int | None = None
     verifier_error: str | None = None
+    # Set when the tests did not finish within this limit (seconds) on the model's patch, which scores 0.
+    verifier_timeout_s: float | None = None
 
     f2p_total: int = 0
     f2p_passed: int = 0
@@ -218,6 +306,8 @@ class VerifierResult(BaseModel):
     apply_failed: bool = False
     verifier_exit_code: int | None = None
     verifier_error: str | None = None
+    # The test command's limit in seconds when the tests did not finish within it on the model's patch (scored 0).
+    verifier_timeout_s: float | None = None
     test_output: str | None = None
     f2p_total: int = 0
     f2p_passed: int = 0
@@ -247,6 +337,27 @@ def _resolve_task_id(body: DeepSWEInstanceRequest) -> str:
     if not isinstance(task_id, str) or not task_id:
         raise ValueError("DeepSWE requests must provide verifier_metadata.task_id or task_id")
     return task_id
+
+
+# The test limit is enforced inside the verifier sandbox, so that a deadline is confirmed by the process that enforced
+# it and not inferred from a provider's error type: a provider may report "timeout" for a request whose command never
+# ran. GNU timeout's --verbose notice plus its exit status (124, or 137 when it had to send KILL) is the confirmation.
+# An image without timeout runs the tests under the provider's deadline only, and such a deadline stays inconclusive.
+_VERIFIER_KILL_GRACE_S = 30.0
+_VERIFIER_PROVIDER_HEADROOM_S = 60.0
+_TEST_DEADLINE_EXIT_CODES = (124, 137)
+_TEST_DEADLINE_NOTICE = "timeout: sending signal TERM to command"
+
+
+def _verifier_command(limit_s: float) -> str:
+    """The verifier command: the task's test.sh, stopped by GNU timeout at the task's limit where the image has it."""
+    bounded = f"timeout --verbose --kill-after={_VERIFIER_KILL_GRACE_S:g} {limit_s:g} bash /tests/test.sh"
+    return f"if command -v timeout >/dev/null 2>&1; then exec {bounded}; else exec bash /tests/test.sh; fi"
+
+
+def _tests_hit_their_limit(return_code: int | None, output: str) -> bool:
+    """Whether the in-sandbox timeout stopped the tests at the task's limit (see ``_verifier_command``)."""
+    return return_code in _TEST_DEADLINE_EXIT_CODES and _TEST_DEADLINE_NOTICE in output
 
 
 def _inconclusive_reason(result: VerifierResult, error: Exception | None) -> str | None:
@@ -290,6 +401,15 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         )
         self._agent_sessions: dict[str, AgentSandboxSession] = {}
         self._episode_agent_sandboxes: dict[str, AgentSandboxSession] = {}
+        self._ripgrep_upload_sem = asyncio.Semaphore(2)
+        self._agent_ripgrep = (
+            _resolve_repo_path(self.config.agent_ripgrep_path) if self.config.agent_ripgrep_path else None
+        )
+        if self._agent_ripgrep is not None and not self._agent_ripgrep.is_file():
+            raise ValueError(
+                f"agent_ripgrep_path is missing: {self._agent_ripgrep}; for the benchmark, run "
+                "`gym eval prepare --benchmark deepswe/opencode`"
+            )
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = deepcopy(self.config.sandbox_config.get("provider_options", {}))
@@ -387,9 +507,61 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
                     f"DeepSWE agent git setup failed with code {setup_result.return_code}, "
                     f"error_type={setup_result.error_type!r}: {setup_result.stderr or ''}"
                 )
+            if self._agent_ripgrep is not None:
+                await self._stage_agent_ripgrep(started, self._agent_ripgrep)
 
         await sandbox.start_with_setup(spec, _run_setup)
         return sandbox
+
+    async def _stage_agent_ripgrep(self, sandbox: AsyncSandbox, ripgrep: Path) -> None:
+        """Publish executable ripgrep after a bounded upload; ambiguous timeouts never reuse a remote path."""
+        mkdir_result = await sandbox.exec(shlex.join(["mkdir", "-p", AGENT_RUNTIME_DIR]), timeout_s=60)
+        if mkdir_result.return_code != 0 or mkdir_result.error_type is not None:
+            raise RuntimeError(
+                f"DeepSWE could not create {AGENT_RUNTIME_DIR}: return_code={mkdir_result.return_code}, "
+                f"error_type={mkdir_result.error_type!r}: {mkdir_result.stderr or ''}"
+            )
+        for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
+            remote_path = f"{AGENT_RUNTIME_DIR}/.rg-{uuid.uuid4().hex}"
+            started = monotonic()
+            try:
+                async with self._ripgrep_upload_sem:
+                    await sandbox.upload(ripgrep, remote_path)
+            except (TimeoutError, NgFailureEvent) as error:
+                if isinstance(error, NgFailureEvent):
+                    if error.boundary != FailureBoundary.SANDBOX or error.failure_kind != PROVIDER_IO_TIMEOUT:
+                        raise
+                    observe_failure(error)
+                LOGGER.warning(
+                    "DeepSWE ripgrep upload timed out; remote_path=%s attempt=%d/%d duration_s=%.1f",
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    monotonic() - started,
+                )
+                if attempt == _RIPGREP_UPLOAD_MAX_ATTEMPTS:
+                    raise
+                await asyncio.sleep(uniform(15.0, 30.0))
+            else:
+                LOGGER.info(
+                    "DeepSWE ripgrep upload completed; remote_path=%s attempt=%d/%d duration_s=%.1f",
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    monotonic() - started,
+                )
+                promote_result = await sandbox.exec(
+                    shlex.join(["chmod", "0755", AGENT_RUNTIME_DIR, remote_path])
+                    + " && "
+                    + shlex.join(["mv", "-f", "--", remote_path, AGENT_RIPGREP]),
+                    timeout_s=60,
+                )
+                if promote_result.return_code != 0 or promote_result.error_type is not None:
+                    raise RuntimeError(
+                        f"DeepSWE could not stage ripgrep: return_code={promote_result.return_code}, "
+                        f"error_type={promote_result.error_type!r}: {promote_result.stderr or ''}"
+                    )
+                return
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
         try:
@@ -458,10 +630,11 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         log_dir: Path,
     ) -> VerifierResult:
         await self._stage_verifier(sandbox, task, model_patch)
+        limit_s = task.config.verifier.timeout_sec
         command_result = await sandbox.exec(
-            "bash /tests/test.sh",
+            _verifier_command(limit_s),
             cwd=self._verifier_workdir(task),
-            timeout_s=task.config.verifier.timeout_sec,
+            timeout_s=limit_s + _VERIFIER_KILL_GRACE_S + _VERIFIER_PROVIDER_HEADROOM_S,
         )
 
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -487,6 +660,25 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
             name: await self._download_if_present(sandbox, f"/logs/verifier/{name}", path)
             for name, path in artifact_paths.items()
         }
+        if not present["reward.json"] and _tests_hit_their_limit(command_result.return_code, combined_output):
+            if self.config.is_verifying_golden_patch:
+                # The reference patch must finish: a golden patch past the limit means the task itself is broken.
+                return VerifierResult(
+                    evaluation_completed=False,
+                    reward=0.0,
+                    verifier_exit_code=command_result.return_code,
+                    verifier_error=f"Tests did not finish within {limit_s:g}s on the golden patch",
+                    test_output=combined_output,
+                )
+            # The tests did not finish on the model's patch within the task's limit, so the task is not resolved: a
+            # patch that hangs the tests scores 0 like one that fails them.
+            return VerifierResult(
+                evaluation_completed=True,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_timeout_s=limit_s,
+                test_output=combined_output,
+            )
         if not present["reward.json"]:
             return VerifierResult(
                 evaluation_completed=False,
@@ -951,11 +1143,31 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
                     file=sys.stderr,
                 )
 
+        test_deadline = result.verifier_timeout_s is not None
+        if test_deadline:
+            # The tests were stopped at the task's limit on the model's patch (``_run_verifier``). The verification
+            # policy decides, and its default for this kind counts the zero; ``fail`` leaves the result ungraded and
+            # masked. A confirmed deadline is never run again (the validator refuses ``retry`` for it).
+            decision = choose_stage_outcome(
+                failure_kind=TEST_DEADLINE, http_status=None, stage="verification", config=self.config.outcome_policy
+            )
+            counts_as_zero = decision.action == OutcomeAction.COUNT_AS_ZERO
+            verification_failure_action = decision.action
+            failure_outcome_attribution = decision.attribution
+            failure_kind = TEST_DEADLINE
+            result = result.model_copy(
+                update={
+                    "evaluation_completed": counts_as_zero,
+                    "verifier_error": f"Tests did not finish within {result.verifier_timeout_s:g}s on the model's patch",
+                }
+            )
+
         if self.config.clear_verifier_logs:
             rmtree(str(log_dir), ignore_errors=True)
             log_dir = ""
 
-        if not result.evaluation_completed and agent_oom_observation is None:
+        reports_failure = test_deadline or not result.evaluation_completed
+        if reports_failure and agent_oom_observation is None:
             # A lost session or failed patch collection happens before verification. Keep that
             # boundary and its cause distinct from an inconclusive verifier result.
             failure = NgFailureEvent(
@@ -1010,8 +1222,8 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
                 "failure_outcome_attribution": failure_outcome_attribution,
                 "failure_kind": PROVIDER_OOM_KILLED
                 if agent_oom_observation is not None
-                else (None if result.evaluation_completed else failure_kind),
-                "failure_reason": None if result.evaluation_completed else result.verifier_error,
+                else (failure_kind if reports_failure else None),
+                "failure_reason": result.verifier_error if reports_failure else None,
             }
             | agent_failure_fields
             | (lost_session_verification(patch_error) if failure_kind == SESSION_LOST else {})

@@ -1,0 +1,69 @@
+{
+  "harness_version": "4.0.0",
+  "namespace_backend": "bubblewrap-namespaces-v1",
+  "scope": "One public AgentVista task per harness, at most three turns/steps; not a full benchmark or accuracy estimate.",
+  "policy_model": "nvidia/moonshotai/kimi-k3",
+  "context_tokens": 65536,
+  "output_tokens": 32768,
+  "harnesses": [
+    {
+      "harness": "default",
+      "task_id": "agentvista-000",
+      "returncode": 0,
+      "mask_sample": false,
+      "reward": 0.0,
+      "failure_kind": null,
+      "error": null,
+      "execution_health": null,
+      "verify_status": "FAIL",
+      "source_provenance": {
+        "repository": "https://github.com/hkust-nlp/AgentVista.git",
+        "revision": "a3385d51d0c3dd0c8501350a08d52065e3e94ab4",
+        "files_verified": 26
+      }
+    },
+    {
+      "harness": "opencode",
+      "task_id": "agentvista-000",
+      "returncode": 0,
+      "mask_sample": false,
+      "reward": 0.0,
+      "failure_kind": null,
+      "error": null,
+      "execution_health": {
+        "termination": "completed",
+        "finish_reason": "stop",
+        "output_tokens_limit": 32768,
+        "last_step_output_tokens": 496,
+        "returncode": 0,
+        "timed_out": false,
+        "native_errors": 0,
+        "tool_calls": 2,
+        "tool_errors": 0,
+        "execution_healthy": true,
+        "task_success": false
+      },
+      "verify_status": "FAIL",
+      "source_provenance": {
+        "repository": "https://github.com/hkust-nlp/AgentVista.git",
+        "revision": "a3385d51d0c3dd0c8501350a08d52065e3e94ab4",
+        "files_verified": 26
+      }
+    }
+  ],
+  "namespace_regressions": [
+    "host reference-file and symlink reads denied",
+    "host process environment excluded",
+    "judge credential absent from child environment",
+    "separate network and PID namespaces",
+    "detached descendant removed on cancellation",
+    "untrusted host image references and labels sanitized",
+    "sandbox startup/transport failures mask the episode"
+  ],
+  "limitations": [
+    "Evaluation only; resources-server/session migration and training remain separate.",
+    "Linux namespaces share the host kernel.",
+    "Live smoke exercises the sandbox implementation working tree; final label/prefix hardening and kernel-readiness updates are additionally covered by namespace and real CLI fixtures.",
+    "No new Docker/Enroot image build; builders updated to provision Bubblewrap."
+  ]
+}

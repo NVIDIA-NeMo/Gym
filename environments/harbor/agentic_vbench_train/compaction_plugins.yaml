@@ -1,0 +1,24 @@
+# Opt-in overlay: OpenCode compaction continuity for long Agentic-VBench episodes. Pass it after `harbor_train.yaml`.
+#
+# The prepare script stages three OpenCode plugins into every task's step workdir (they reach the sandbox at
+# `/workspace/.opencode-plugins/`, see benchmarks/agentic_vbench/opencode_plugins/README.md); this overlay loads them
+# and turns on the model server's compaction-summary recovery, which the third plugin's request header drives:
+# - compaction_order.mjs: a compaction summary goes before the retained recent messages, so the model reads the
+#   conversation in order after a compaction;
+# - compaction_anchor.mjs: the original task prompt is kept verbatim across compactions;
+# - compaction_summary_header.mjs: names OpenCode's `compaction` agent on its model calls, so `vllm_model` can bound
+#   the summary's output and retry an unusable summary (empty, reasoning-only, truncated or without the sections
+#   OpenCode's compaction prompt asks for) instead of handing it to the session.
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      plugins:
+        - /workspace/.opencode-plugins/compaction_order.mjs
+        - /workspace/.opencode-plugins/compaction_anchor.mjs
+        - /workspace/.opencode-plugins/compaction_summary_header.mjs
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      compaction_summary_max_tokens: ${oc.select:agentic_vbench_summary_tokens,8192}
+      compaction_summary_max_attempts: 3
