@@ -614,12 +614,20 @@ def _next_steps(gym_job_id: str) -> list[str]:
     ]
 
 
+def _queue_again(args: argparse.Namespace) -> None:
+    """Queue one benchmark of a submitted run again and print the new job id: the plain resubmit that
+    `gym job resubmit` and `gym eval resubmit` share."""
+    from nemo_gym.orchestration.submit import resubmit
+
+    print(resubmit(args.gym_job_id, args.benchmark).job_id)
+
+
 def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides:
         args._parser.error("resubmit does not accept Hydra overrides")
     from nemo_gym.eval.recovery.gate import operator_verdict_line
     from nemo_gym.orchestration.executors.slurm.reader import RemoteReaderInterrupted
-    from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover, resubmit
+    from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover
 
     _raise_keyboard_interrupt_on_sigterm()
 
@@ -802,7 +810,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
             if not outcome.ok or gate_not_accepted:
                 sys.exit(1)
             return
-        print(resubmit(args.gym_job_id, args.benchmark).job_id)
+        _queue_again(args)
     except RemoteReaderInterrupted as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(128 + (signal.SIGTERM if "SIGTERM" in str(error) else signal.SIGINT))
@@ -915,6 +923,12 @@ def _job_logs(args: argparse.Namespace, overrides: list[str]) -> None:
     job_commands.logs_command(
         args.gym_job_id, args.benchmark, source=args.source, instance=args.instance, tail=args.tail
     )
+
+
+@exit_cleanly_on_job_error
+def _job_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "job resubmit")
+    _queue_again(args)
 
 
 @exit_cleanly_on_job_error
@@ -2479,6 +2493,18 @@ COMMANDS = {
                     "--tail", type=int, metavar="N", help="Print only the last N lines (a log can be large)."
                 ),
             ),
+        ),
+    ),
+    "job resubmit": Command(
+        target=_job_resubmit,
+        summary="Queue one benchmark of a submitted run again, in place; prints the new job id.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
