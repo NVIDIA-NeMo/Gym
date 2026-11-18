@@ -236,3 +236,18 @@ def test_a_health_check_that_reads_the_store_selection_gets_the_settled_history_
     assert call["rollout_paths"] == output and call["output_dir"] == output.parent
     assert call["run_coverage"][0]["masked"] == 0
     assert not (Path(config.settle_receipt_fpath).parent / "selected_rollouts.jsonl").exists()
+
+
+def test_the_quality_summary_alone_can_be_rewritten_from_the_saved_rows(tmp_path, aggregation) -> None:  # noqa: F811
+    output = _run(tmp_path, [verify_transport_masked(0), ungraded(1, judge_response="A")])
+
+    refreshed = eval_cli._refresh_settled_source(
+        {"config_paths": ["fixture.yaml"], "health_check_workers": 1}, output, workdir=output.parent, metrics=False
+    )
+
+    assert refreshed == {"metrics_recomputed": False, "health_summary_recomputed": True}
+    assert aggregation == []
+    summary = json.loads((output.parent / "quality_summary.json").read_text())
+    digests = summary["run"]["provenance"]["rollout_artifact_digests"][0]
+    assert digests["rollouts_jsonl_fpath"] == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert summary["run"]["artifacts"]["expected"] == 2

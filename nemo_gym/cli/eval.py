@@ -985,6 +985,10 @@ def _rejudge_saved_judge_failures(
     if collection_config.disable_aggregation or not aggregate:
         return complete
     if complete_only and not complete:
+        # A strict run that stays incomplete publishes no score, but its quality summary must describe the rows the
+        # pass settled: the aggregation that rewrites it is skipped with the metrics.
+        if scored:
+            _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
         return complete
     try:
         aggregation = RolloutAggregationConfig.model_validate(
@@ -1009,10 +1013,11 @@ class _SettledHealthSettings(RunHealthConfig):
 
 
 def _refresh_settled_source(
-    run_config: DictConfig | Mapping[str, Any], output: Path, *, workdir: Path
+    run_config: DictConfig | Mapping[str, Any], output: Path, *, workdir: Path, metrics: bool = True
 ) -> dict[str, bool]:
     """Recompute the settled run's aggregate metrics in place and rewrite its quality summary from the settled rows,
-    as the run's own completion does after its saved-answer pass.
+    as the run's own completion does after its saved-answer pass. ``metrics=False`` rewrites only the quality summary,
+    for a strict run that stays incomplete and publishes no score.
 
     A settled run's rollouts file holds superseded outcomes (a masked row and the grade that settled it). A health
     check that selects the Store's attempts itself reads it as it is; an earlier one reads it only through a
@@ -1032,11 +1037,12 @@ def _refresh_settled_source(
         run_config = dict(run_config)
     refreshed = {"metrics_recomputed": False, "health_summary_recomputed": False}
     try:
-        aggregation = RolloutAggregationConfig.model_validate(
-            run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
-        )
-        asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
-        refreshed["metrics_recomputed"] = True
+        if metrics:
+            aggregation = RolloutAggregationConfig.model_validate(
+                run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
+            )
+            asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
+            refreshed["metrics_recomputed"] = True
     except Exception as error:
         print(
             f"Metrics were not recomputed after the re-judgment ({type(error).__name__}: {error}); "

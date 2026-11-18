@@ -97,3 +97,33 @@ def test_disabled_aggregation_is_still_respected_when_the_pass_raised(
     )
 
     assert pass_settles_one_row == []
+
+
+@pytest.mark.parametrize(
+    "complete_only, run_is_complete, rows_settled, refreshed",
+    [
+        pytest.param(True, False, 3, 1, id="incomplete-strict-run-describes-the-settled-rows"),
+        pytest.param(True, False, 0, 0, id="nothing-settled-leaves-the-summary-as-written"),
+        pytest.param(True, True, 3, 0, id="completed-run-gets-it-from-the-aggregation"),
+        pytest.param(False, False, 3, 0, id="not-a-rejection-gets-it-from-the-aggregation"),
+    ],
+)
+def test_an_incomplete_strict_run_refreshes_its_quality_summary_without_publishing_metrics(
+    tmp_path, monkeypatch, pass_settles_one_row, complete_only, run_is_complete, rows_settled, refreshed
+) -> None:
+    async def rejudge(run_config, output):
+        return rows_settled
+
+    calls = []
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.rejudge_saved_judge_failures", rejudge)
+    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda output: run_is_complete)
+    monkeypatch.setattr(eval_cli, "_refresh_settled_source", lambda *args, **kwargs: calls.append(kwargs) or {})
+
+    eval_cli._rejudge_saved_judge_failures(
+        {}, tmp_path / "rollouts.jsonl", SimpleNamespace(disable_aggregation=False), complete_only=complete_only
+    )
+
+    assert len(calls) == refreshed
+    assert all(call["metrics"] is False and call["workdir"] == tmp_path for call in calls)
+    # An incomplete strict run still publishes no score.
+    assert len(pass_settles_one_row) == (1 if run_is_complete or not complete_only else 0)
