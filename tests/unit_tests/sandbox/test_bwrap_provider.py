@@ -374,6 +374,89 @@ async def test_exec_runs_and_classifies_failures(system) -> None:
     assert stopped.error_type == "sandbox" and "stopped" in stopped.stderr
 
 
+async def test_own_directories_must_be_disjoint(system) -> None:
+    # Nested, a later bind hides an earlier one from commands while transfers still resolve to it.
+    provider = make_provider(system)
+    for workdir in ("/home", "/home/sandbox", "/home/sandbox/w", "/tmp/w"):
+        with pytest.raises(BwrapCreateError, match="overlap"):
+            await start(provider, workdir=workdir)
+    with pytest.raises(ValueError, match="overlap"):
+        make_provider(system, workdir="/task", home_path="/task/home")
+    with pytest.raises(BwrapCreateError, match="overlap"):
+        await start(make_provider(system, home_path="/task/home"), workdir="/task")
+    sandbox = await start(provider, workdir="/task")  # disjoint custom workdir
+    await sandbox.stop()
+
+
+async def test_a_pending_exec_of_another_instance_blocks_the_proof_and_the_stop(system, tmp_path) -> None:
+    # Provider A queues an exec for a shared sandbox; borrower B must neither prove it empty nor stop past it.
+    owner = make_provider(system, exec_concurrency=1, kill_timeout_s=1)
+    shared = await start(owner)
+    other = await start(owner)
+    borrower = make_provider(system, kill_timeout_s=1)
+    borrowed = await borrower.connect(await shared.serialize())
+    ran = tmp_path / "queued-exec-ran"
+    holder = asyncio.create_task(owner.exec(other._handle, "sleep 30"))
+    while not owner._processes.get(other._handle.sandbox_id):
+        await asyncio.sleep(0.01)
+    queued = asyncio.create_task(owner.exec(shared._handle, f"touch {ran}"))
+    while not [e for e in shared._handle.raw.run_dir.iterdir() if e.name.startswith("pending-")]:
+        await asyncio.sleep(0.01)
+    assert await borrower.exec_processes_terminated(borrowed) is False
+    await borrower.close(borrowed)  # waits (bounded) for the pending exec, then stops
+    await owner.close(other._handle)
+    result = await asyncio.wait_for(queued, 10)
+    assert result.error_type == "sandbox" and "stopped" in result.stderr
+    assert not ran.exists()
+    await holder
+
+
+async def test_a_dead_owners_pending_record_does_not_block_the_proof(system) -> None:
+    provider = make_provider(system)
+    sandbox = await start(provider)
+    record = sandbox._handle.raw.run_dir / "pending-stale"
+    record.write_text("2147483647 1")  # an owner pid that cannot exist
+    assert await provider.exec_processes_terminated(sandbox._handle) is True
+    assert not record.exists()
+    await sandbox.stop()
+
+
+async def test_transfers_resolve_to_the_bind_a_command_sees(system, tmp_path) -> None:
+    hidden, visible = tmp_path / "hidden", tmp_path / "visible"
+    for root, text in ((hidden, "hidden"), (visible, "visible")):
+        (root / "sub").mkdir(parents=True)
+        (root / "f.txt").write_text(text)
+        (root / "sub" / "g.txt").write_text(text)
+    # A later read-only mount at the same destination hides the earlier writable one.
+    provider = make_provider(system, mounts=[{"src": str(hidden), "dst": "/tools", "ro": False}])
+    sandbox = await start(provider, provider_options={"mounts": [{"src": str(visible), "dst": "/tools", "ro": True}]})
+    await sandbox.download("/tools/f.txt", tmp_path / "got.txt")
+    assert (tmp_path / "got.txt").read_text() == "visible"
+    with pytest.raises(BwrapPathError, match="read-only"):
+        await sandbox.upload(_text(tmp_path / "src", "x"), "/tools/new.txt")
+    await sandbox.stop()
+    # A later parent mount hides an earlier child mount.
+    provider = make_provider(system, mounts=[{"src": str(hidden / "sub"), "dst": "/tools/sub"}])
+    sandbox = await start(provider, provider_options={"mounts": [{"src": str(visible), "dst": "/tools", "ro": True}]})
+    await sandbox.download("/tools/sub/g.txt", tmp_path / "got2.txt")
+    assert (tmp_path / "got2.txt").read_text() == "visible"
+    await sandbox.stop()
+
+
+async def test_a_regular_file_mount_is_transferable_at_its_destination(system, tmp_path) -> None:
+    tool = _text(tmp_path / "tool", "#!/bin/sh\necho tool\n")
+    provider = make_provider(system, mounts=[{"src": str(tool), "dst": "/tool", "ro": True}])
+    sandbox = await start(provider)
+    await sandbox.download("/tool", tmp_path / "got")
+    assert (tmp_path / "got").read_text() == tool.read_text()
+    assert await provider.exists(sandbox._handle, "/tool")
+    with pytest.raises(BwrapPathError, match="read-only"):
+        await sandbox.upload(tool, "/tool")
+    with pytest.raises(BwrapPathError, match="below a file mount"):
+        await sandbox.download("/tool/child", tmp_path / "got2")
+    await sandbox.stop()
+
+
 async def test_an_exec_queued_for_a_slot_never_starts_after_stop(system, tmp_path) -> None:
     provider = make_provider(system, exec_concurrency=1)
     sandbox = await start(provider)
@@ -391,7 +474,6 @@ async def test_an_exec_queued_for_a_slot_never_starts_after_stop(system, tmp_pat
     assert result.error_type == "sandbox" and "stopped" in result.stderr
     assert not ran.exists()
     assert (await holder).return_code != 0
-    assert not provider._pending_execs
 
 
 async def test_exec_concurrency_is_bounded(system) -> None:
@@ -489,7 +571,8 @@ async def test_connect_refusals(system, tmp_path, monkeypatch) -> None:
     await refused("invalid bwrap sandbox id", sandbox_id="../../etc")
     await refused("invalid bwrap sandbox id", sandbox_id="bwrap-" + "0" * 31)
     await refused("does not exist", sandbox_id="bwrap-" + "0" * 32)
-    await refused("workdir", workdir="/elsewhere")
+    # The descriptor's workdir is the facade's default cwd, not the workspace bind: a moved one connects.
+    assert (await provider.connect({**good, "workdir": "/workspace/project"})).raw.workdir == "/workspace"
     await refused("network", network="host")
     other = make_provider(system, base_dir=str(tmp_path / "other-base"))
     with pytest.raises(ValueError, match="base_dir"):
