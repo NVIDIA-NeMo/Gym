@@ -377,6 +377,11 @@ def _command_scripts(command: str, request: dict[str, Any]) -> int:
     return 2 + 2 * len(request.get("solution_sql") or []) + applied
 
 
+def _shown(entry: dict[str, Any]) -> dict[str, Any]:
+    """A knowledge-base entry as the ADK shows it to an agent: without its type and its children's ids."""
+    return {key: entry[key] for key in KNOWLEDGE_VISIBLE_FIELDS if key in entry}
+
+
 def _submission_reply(submission: _Submission, *, budget: float | None) -> str:
     """What the agent reads after a submission, as the ADK's ``submit_sql`` writes it."""
     lines = [submission.message.replace(f"{EXECUTION_ERROR_FLAG} ", "")]
@@ -555,7 +560,9 @@ class AInteractTools:
         async def act(episode: BirdInteractEpisode) -> str:
             wanted = arguments.knowledge_name.casefold()
             entry = next((e for e in episode.visible_knowledge() if e["knowledge"].casefold() == wanted), None)
-            return json.dumps(entry) if entry else f"No knowledge named {arguments.knowledge_name!r}."
+            return (
+                json.dumps(_shown(entry), indent=2) if entry else f"No knowledge named {arguments.knowledge_name!r}."
+            )
 
         return await self._charge("get_knowledge_definition", act)
 
@@ -564,7 +571,7 @@ class AInteractTools:
         """Read every knowledge-base entry."""
 
         async def act(episode: BirdInteractEpisode) -> str:
-            return "\n".join(json.dumps(entry) for entry in episode.visible_knowledge())
+            return json.dumps([_shown(entry) for entry in episode.visible_knowledge()], indent=2)
 
         return await self._charge("get_all_knowledge_definitions", act)
 
@@ -756,10 +763,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
         task = episode.task
         if self.config.mode == "c_interact":
             # The ADK's instruction and first message. Its instruction shows the schema and the visible knowledge.
-            knowledge = [
-                {key: entry[key] for key in KNOWLEDGE_VISIBLE_FIELDS if key in entry}
-                for entry in episode.visible_knowledge()
-            ]
+            knowledge = [_shown(entry) for entry in episode.visible_knowledge()]
             # The dialect changes the ADK's texts only, never the task, schema or knowledge they hold.
             instructions = self.in_dialect(C_INTERACT_INSTRUCTION).format(
                 db_name=task.selected_database,

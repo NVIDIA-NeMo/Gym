@@ -1116,6 +1116,27 @@ class TestAInteract:
         (grant,) = client.seeds[0]["tool_accesses"]
         assert grant["kind"] == "direct_http" and "continuation" not in client.seeds[0]
 
+    async def test_the_knowledge_tools_show_the_fields_the_adk_shows_and_not_the_hidden_entry(self) -> None:
+        seen: dict[str, Any] = {}
+
+        async def agent(tools: _Tools) -> str:
+            seen["all"] = await tools.observe("get_all_knowledge_definitions")
+            seen["one"] = await tools.observe("get_knowledge_definition", knowledge_name="discount rate")
+            return "Done."
+
+        server, _ = _server("a_interact", turns=[agent])
+
+        await _run(server)
+
+        # The ADK's db_environment /knowledge: a JSON array of the visible entries, each with these four fields only.
+        entries = json.loads(seen["all"]["observation"])
+        assert {entry["knowledge"] for entry in entries} >= {"Discount Rate"}
+        assert "Bestseller" not in {entry["knowledge"] for entry in entries}
+        assert all(set(entry) <= {"id", "knowledge", "description", "definition"} for entry in entries)
+        assert seen["all"]["observation"] == json.dumps(entries, indent=2)
+        one = json.loads(seen["one"]["observation"])
+        assert one["knowledge"] == "Discount Rate" and "type" not in one
+
     async def test_the_first_request_declares_the_nine_tools_and_leaves_out_what_they_charge_for(self) -> None:
         server, client = _server("a_interact", turns=["Done."])
 
