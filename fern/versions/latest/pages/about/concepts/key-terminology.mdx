@@ -62,7 +62,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
 | **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
 | **Sandbox owner** | The one server that starts a sandbox and stops it, through its `OwnedSandboxes` (`self.sandboxes`): the server that holds the episode's environment state for a task sandbox, or the agent server for a harness sandbox it starts because nothing was lent. |
-| **Lend** / **borrow** | The owner lends a sandbox by handing out operate-scope `SandboxAccess`; an agent that borrows it runs commands and transfers files in it, and never stops it. |
+| **Lend** / **borrow** | The owner lends a sandbox by handing out operate-scope `SandboxAccess`; an agent borrows it with `borrow()` from `nemo_gym.agents.utils`, runs commands and transfers files in it, and never stops, pauses or snapshots it. |
 
 ### Sessions
 
