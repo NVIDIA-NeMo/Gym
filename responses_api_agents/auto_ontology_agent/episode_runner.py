@@ -16,12 +16,17 @@ query, or none, and Auto Ontology's record of the episode.
 An Environment Server's tools can take part, for a benchmark such as BIRD-Interact whose user the agent asks.
 ``tools`` are offered to the model beside Auto Ontology's own, each called over HTTP at its ``url``; ``submit`` is where
 the query Auto Ontology accepts goes, as ``{"sql": ...}``. ``custom_prompts`` extends the system prompt. RESULT_JSON
-then also gets each call of those tools and the reply to the submission.
+then also gets each call of those tools and the reply to the submission. A tool call the server fails or refuses
+replies with the error, which the model reads as the tool's result.
+
+An episode that raises writes RESULT_JSON with ``error`` and exits 1, so the agent reports the cause.
 """
 
 import json
 import os
 import sys
+import traceback
+import urllib.error
 import urllib.request
 from pathlib import Path
 from string import Template
@@ -68,8 +73,14 @@ def call_tool(endpoint: dict[str, Any], arguments: dict[str, Any]) -> str:
     request = urllib.request.Request(
         endpoint["url"], data=json.dumps(arguments).encode(), headers=headers, method="POST"
     )
-    with urllib.request.urlopen(request, timeout=TOOL_TIMEOUT_SECONDS) as response:
-        reply = response.read().decode(errors="replace")
+    try:
+        with urllib.request.urlopen(request, timeout=TOOL_TIMEOUT_SECONDS) as response:
+            reply = response.read().decode(errors="replace")
+    except urllib.error.HTTPError as error:
+        body = error.read().decode(errors="replace")
+        return f"The tool call failed with HTTP {error.code}: {body[:2000]}"
+    except (urllib.error.URLError, TimeoutError) as error:
+        return f"The tool call failed: {error}"
     try:
         output = json.loads(reply)
     except json.JSONDecodeError:
@@ -151,7 +162,12 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     task_path, result_path = (Path(arg) for arg in argv)
-    result = run(json.loads(task_path.read_text()))
+    try:
+        result = run(json.loads(task_path.read_text()))
+    except Exception as error:
+        traceback.print_exc()
+        result_path.write_text(json.dumps({"error": f"{type(error).__name__}: {error}"[:4000]}))
+        return 1
     result_path.write_text(json.dumps(result, default=str))
     return 0
 

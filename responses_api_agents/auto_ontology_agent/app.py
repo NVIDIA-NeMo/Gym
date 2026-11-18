@@ -84,6 +84,10 @@ SANDBOX_DIR = "/tmp/nemo-gym-auto-ontology"
 SANDBOX_RUNNER = f"{SANDBOX_DIR}/episode_runner.py"
 
 
+class AutoOntologyEpisodeError(RuntimeError):
+    """Auto Ontology's episode raised in the sandbox; the message is the runner's error."""
+
+
 class AutoOntologyTask(BaseModel):
     """The task, from the seed's agent context."""
 
@@ -346,7 +350,10 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             return SandboxCommand(argv=[self.config.catalog_python, SANDBOX_RUNNER, task_path, result_path])
 
         async def collect() -> dict[str, Any]:
-            return json.loads(await read_text(session.sandbox, path=result_path))
+            result = json.loads(await read_text(session.sandbox, path=result_path))
+            if error := result.get("error"):
+                raise AutoOntologyEpisodeError(f"Auto Ontology's episode failed: {error}")
+            return result
 
         async with self._episodes:
             try:
