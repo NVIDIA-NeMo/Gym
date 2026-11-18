@@ -247,17 +247,17 @@ A harness can get tools from two sources:
 | Transport | Grant type | What the adapter receives |
 | --- | --- | --- |
 | `direct_http` | `DirectHTTPToolAccess` | The Resources Server base URL and session cookies, for trusted Python agents that call typed tool routes. The cookies identify the episode's Resources Server session, so they also reach its routes other than tools. |
-| `mcp` | `MCPToolAccess` | A streamable-HTTP MCP endpoint, usually the Resources Server's `/mcp`, with the headers returned by the Resources Server's seed. |
+| `mcp` | `MCPToolAccess` | An MCP server over one of three transports: a streamable-HTTP endpoint, usually the Resources Server's `/mcp`, with the headers returned by the Resources Server's seed; an HTTP+SSE endpoint (`sse`); or a command that speaks MCP over stdio (`stdio`), which the harness's MCP client starts where the harness runs. The `harbor` Environment Server grants a task's own servers over their own transport. |
 
 Grants in the agent configuration's `tool_accesses` are merged with the episode's grants by name. Call `effective_tool_accesses(body)` to get the merged list. The grant types are defined in [`nemo_gym/server_runtime/tool_access.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/server_runtime/tool_access.py).
 
 An adapter must handle grants as follows:
 
-- At seed, reject any **required** grant that the harness cannot use, with HTTP 422. An optional grant can be skipped. Never silently ignore a required grant.
+- At seed, reject any **required** grant that the harness cannot use, with HTTP 422 (`AgentSeedRejectedError`), including an MCP grant over a transport the harness's MCP client lacks. An optional grant can be skipped. Never silently ignore a required grant. `unusable_required_grants(accesses, transports)` names the required grants a harness that speaks `transports` cannot use, `mcp_grants_over(accesses, transports)` gives the MCP grants it can, and `mcp_server_urls(grants)` gives their hosts for a restricted sandbox network (a `stdio` server needs none).
 - Reject grant names that collide with the names of built-in tools or toolsets.
-- Fail before the first model call if a required MCP server does not connect. The sandbox must be able to reach the granted URL.
+- Fail before the first model call if a required MCP server does not connect or start. The sandbox must be able to reach the granted URL.
 - Return grant tool results to the model as tool output. Tool routes return JSON values, often objects: serialize any value the harness cannot take directly instead of validating it as tool arguments, so that a call that succeeded is not reported to the model as a failure.
-- On close, disconnect tool clients without stopping the remote server.
+- On close, disconnect tool clients without stopping the remote server. A `stdio` server is a process the harness's MCP client starts for the session and that ends with the harness; nothing remote is stopped.
 - Assume that grant headers and tokens are readable inside the sandbox. A grant must only give access to that episode's tools. When the harness runs inside the sandbox, keep `direct_http` session cookies out of files the model can read, for example by deleting the staged input once the runner has loaded it.
 
 The current adapters support the following tool sources:
@@ -266,19 +266,19 @@ The current adapters support the following tool sources:
 | --- | --- | --- | --- |
 | BrowseComp | `update_progress` when configured. | At most one `direct_http` grant; required MCP grants are rejected. The research tools remain on the Resources Server, which isolates `bash_command` in its own sandbox. | Responses |
 | LangGraph | Reflection, orchestration, parallel thinking and ReWOO run in the Agent Server and call only the Model Server. | No environment tools or sandbox access; required tool grants and sandbox grants are rejected. Keep `resources_tool_transports: []`. Evaluation sessions report missing native invocation and turn evidence. | Responses |
-| Hermes | Hermes toolsets, selected with `enabled_toolsets` and `disabled_toolsets`, for example `[terminal]`. | `mcp` only. Each granted MCP server becomes a Hermes toolset with the same name. Required `direct_http` grants are rejected. | Chat Completions |
-| Pi | Pi's built-in sandbox tools. `sandbox_bash_timeout_seconds` limits each bash call. | None in agent sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
+| Hermes | Hermes toolsets, selected with `enabled_toolsets` and `disabled_toolsets`, for example `[terminal]`. | `mcp` over `stdio` and streamable HTTP. Each granted MCP server becomes a Hermes toolset with the same name. Required `direct_http` and `sse` grants are rejected (the pinned Hermes MCP client has no SSE transport). | Chat Completions |
+| Pi | Pi's built-in sandbox tools. `sandbox_bash_timeout_seconds` limits each bash call. | `mcp` over `stdio` and streamable HTTP, through Gym's `gym_mcp.mjs` extension, which names each tool `<grant>_<tool>` and starts a `stdio` grant's command itself; a required server that does not connect ends the run before the first model call. Required `direct_http` and `sse` grants are rejected. | Chat Completions |
 | Copilot | Copilot CLI built-in shell, file, and task tools inside the task sandbox. | None. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions (BYOK) |
-| Codex | Codex's shell and file tools. Agent sessions require `sandbox_mode: danger-full-access`, because the task sandbox supplies isolation. | `mcp` only. Each granted MCP server becomes a Codex `mcp_servers` entry with the same name. Required `direct_http` grants are rejected. | Responses (streaming) |
-| Claude Code | Claude Code's built-in tools, such as `Bash`, `Read` and `Edit`; `allowed_tools` and `disallowed_tools` select them. | `mcp` only. Each granted MCP server becomes an `http` server with the same name in the session's `--mcp-config`, next to the servers of the static `mcp_config`; a required one that Claude Code's `init` event does not report as connected fails the activation. Required `direct_http` grants are rejected. | Anthropic Messages |
-| OpenCode | OpenCode's built-in tools. Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto` and `agent.build.steps`. | `mcp` only. Each granted MCP server becomes an OpenCode `remote` MCP server with the same name; a required one that does not connect fails the activation. Required `direct_http` grants are rejected. | Chat Completions |
-| OpenClaw | `read`, `write`, `edit`, `exec`, and `process`. | `mcp` only. Each granted MCP server becomes an OpenClaw `mcp.servers` entry with the same name, probed before the run; a required one that does not connect fails the activation. Required `direct_http` grants are rejected. | Chat Completions |
+| Codex | Codex's shell and file tools. Agent sessions require `sandbox_mode: danger-full-access`, because the task sandbox supplies isolation. | `mcp` over `stdio` and streamable HTTP. Each granted MCP server becomes a Codex `mcp_servers` entry with the same name: a `command` entry for `stdio`, a `url` entry otherwise. Required `direct_http` and `sse` grants are rejected (Codex has no SSE MCP client). | Responses (streaming) |
+| Claude Code | Claude Code's built-in tools, such as `Bash`, `Read` and `Edit`; `allowed_tools` and `disallowed_tools` select them. | `mcp` over every transport. Each granted MCP server becomes an `http`, `sse` or `stdio` server with the same name in the session's `--mcp-config`, next to the servers of the static `mcp_config`; a required one that Claude Code's `init` event does not report as connected fails the activation. Required `direct_http` grants are rejected. | Anthropic Messages |
+| OpenCode | OpenCode's built-in tools. Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto` and `agent.build.steps`. | `mcp` only. With OpenCode 1, each granted MCP server becomes an OpenCode `remote` MCP server (streamable HTTP, then SSE) or, for `stdio`, a `local` one with the same name; OpenCode 2 sessions take streamable HTTP grants only. A required one that does not connect fails the activation. Required `direct_http` grants are rejected. | Chat Completions |
+| OpenClaw | `read`, `write`, `edit`, `exec`, and `process`. | `mcp` over streamable HTTP. Each granted MCP server becomes an OpenClaw `mcp.servers` entry with the same name, probed before the run; a required one that does not connect fails the activation. Required `direct_http`, `sse` and `stdio` grants are rejected. | Chat Completions |
 | WildClawBench (`wildclawbench_agent`) | Pinned original OpenClaw tools, image handling, search and task skills. | None; required grants and borrowed sandbox access are rejected. Native Resources owns the task container. WildClawBench pairing only; no token IDs or continuation. | Chat Completions |
-| CrewAI | `shell`, which runs each command in the task's working directory. The crew runs in the task sandbox: the borrowed one, or an agent-owned one when none is lent. | `mcp` only. Each tool of a granted MCP server becomes a CrewAI tool under its own name; a required server that does not list its tools fails the activation. Required `direct_http` grants are rejected. | Chat Completions |
+| CrewAI | `shell`, which runs each command in the task's working directory. The crew runs in the task sandbox: the borrowed one, or an agent-owned one when none is lent. | `mcp` over streamable HTTP. Each tool of a granted MCP server becomes a CrewAI tool under its own name; a required server that does not list its tools fails the activation. Required `direct_http`, `sse` and `stdio` grants are rejected. | Chat Completions |
 | DeepAgents (`app.py`, `tool_profile: builtin`) | deepagents' own tools: `write_todos`, `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `execute`, and `task` subagents. `shell_timeout_seconds` sets the default limit of each `execute` call. | None in agent sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Responses |
 | Cline | Cline's built-in tools (shell commands, file reads and edits); `command_permissions` restricts its shell commands. | None in agent sessions. Required grants are rejected and optional ones skipped; keep `resources_tool_transports: []`. | Chat Completions |
-| OpenHands | OpenHands' terminal (subprocess backend), file editor, task tracker, `finish` and `think`, with its default condenser. | None. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
-| mini-SWE | mini-SWE's bash tool. | `mcp` only. Each granted MCP server, and each MCP server a Harbor task declares, is reached through a task-local CLI that the bash tool calls; a required one that does not connect fails the activation before the first model call. The response carries each call after the bash call that made it, as `mcp__<server>__<tool>`. Required `direct_http` grants are rejected. | Responses |
+| OpenHands | OpenHands' terminal (subprocess backend), file editor, task tracker, `finish` and `think`, with its default condenser. | `mcp` over streamable HTTP; a required server that does not connect fails the activation before the first model call. Required `direct_http`, `sse` and `stdio` grants are rejected. | Chat Completions |
+| mini-SWE | mini-SWE's bash tool. | `mcp` over every transport. Each granted MCP server, and each MCP server a Harbor task declares, is reached through a task-local CLI that the bash tool calls; a required one that does not connect fails the activation before the first model call. The response carries each call after the bash call that made it, as `mcp__<server>__<tool>`. Required `direct_http` grants are rejected. | Responses |
 | Droid | Droid's built-in tools (`Read`, `Execute`, `Edit`, `Create`, `Grep`, `Glob`, `LS`, its Task subagents and others), run with `--skip-permissions-unsafe` because the task sandbox supplies isolation. | None. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions (streaming) |
 | Goose | Goose's default extensions, plus `summon` (`delegate` and `load`) unless `delegate: false`. | None in agent sessions. Required grants are rejected, so keep `resources_tool_transports: []`. | Chat Completions |
 | Qwen Code | Qwen Code's built-in tools, including the `agent` tool unless `subagents: false`. `exclude_tools` turns off the web tools by default. | None in agent sessions. Required grants are rejected, so keep `resources_tool_transports: []`. | Chat Completions |
@@ -305,6 +305,19 @@ With `resources_tool_transports: [mcp]`, an episode's `tool_accesses` can contai
   }
 }
 ```
+
+The `harbor` Environment Server grants a task's own `[[environment.mcp_servers]]` too, over the entry's transport. A
+`stdio` grant names a command instead of an endpoint, and an `sse` grant an HTTP+SSE endpoint:
+
+```json
+{"kind": "mcp", "name": "magic", "required": true,
+ "connection": {"transport": "stdio", "command": "python3", "args": ["/opt/magic/server.py"], "env": {}}}
+```
+
+Write a `stdio` grant as the harness's own local MCP server entry (command, arguments, environment), so that the
+harness's MCP client starts the command where the harness runs (inside the task sandbox for a sandboxed harness, as
+the user the harness runs as) and stops it with the harness. A harness whose client lacks a transport refuses a
+required grant over it at seed and leaves an optional one out.
 
 Map the grant from `effective_tool_accesses(body)` into the pinned harness's remote MCP client configuration. Preserve the supplied URL and headers: they carry the episode's tool access, so a static URL or interactive login is not a substitute. Keep credentials out of diagnostics. Check server and tool names for collisions after any renaming the harness applies, including names from its static MCP configuration.
 

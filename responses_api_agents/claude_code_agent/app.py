@@ -72,7 +72,15 @@ from nemo_gym.rollouts import (
     read_available_model_call_records,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
-from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.server_runtime import (
+    NEMO_GYM_MCP_METADATA_KEY,
+    BaseRunRequest,
+    BaseVerifyResponse,
+    MCPSSEConnection,
+    MCPStdioConnection,
+    MCPToolAccess,
+    mcp_server_urls,
+)
 from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
@@ -657,9 +665,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     # With neither a Gym model server nor anthropic_base_url, the CLI calls Anthropic's own API.
                     # Only the allowlist needs that host; activation still leaves ANTHROPIC_BASE_URL unset.
                     model_base_url=self._resolve_base_url() or "https://api.anthropic.com",
-                    tool_urls=[str(access.connection.url) for access in mcp_grants],
+                    # A stdio server runs in the sandbox beside the CLI, so it needs no host.
+                    tool_urls=mcp_server_urls(mcp_grants),
                     # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
-                    required_tool_urls=[str(access.connection.url) for access in mcp_grants if access.required],
+                    required_tool_urls=mcp_server_urls(access for access in mcp_grants if access.required),
                 )
             except BaseException:
                 await provider.aclose()
@@ -917,16 +926,26 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     def _session_mcp_config(self, mcp_grants: list[MCPToolAccess]) -> Optional[dict[str, Any]]:
         """The ``--mcp-config`` of a sandbox session: the static ``mcp_config`` plus a server per MCP grant.
 
-        Each grant becomes a streamable HTTP (``http``) server under the grant's name, with the grant's URL and
-        headers, which carry the session's tool token. Seeding refused grants whose names the static config uses.
+        Each grant becomes a server under the grant's name, over the grant's transport: a streamable HTTP (``http``)
+        or ``sse`` server with the grant's URL and headers, which carry the session's tool token, or a ``stdio``
+        server with the grant's command, arguments and environment, which Claude Code starts in the sandbox as the
+        user it runs as and stops when it exits. Seeding refused grants whose names the static config uses.
         """
         if not mcp_grants and not self.config.mcp_config:
             return None
         config = copy.deepcopy(self._get_static_mcp_config())
         for access in mcp_grants:
-            server: dict[str, Any] = {"type": "http", "url": str(access.connection.url)}
-            if access.connection.headers:
-                server["headers"] = dict(access.connection.headers)
+            connection = access.connection
+            server: dict[str, Any]
+            if isinstance(connection, MCPStdioConnection):
+                server = {"type": "stdio", "command": connection.command, "args": list(connection.args)}
+                if connection.env:
+                    server["env"] = dict(connection.env)
+            else:
+                server = {"type": "sse" if isinstance(connection, MCPSSEConnection) else "http"}
+                server["url"] = str(connection.url)
+                if connection.headers:
+                    server["headers"] = dict(connection.headers)
             config["mcpServers"][access.name] = server
         return config
 

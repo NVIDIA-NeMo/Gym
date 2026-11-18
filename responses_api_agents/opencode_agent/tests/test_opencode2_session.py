@@ -19,7 +19,7 @@ from responses_api_agents.opencode_agent.opencode2 import PLUGIN_SOURCE
 from responses_api_agents.opencode_agent.opencode2 import config as opencode2_config
 from responses_api_agents.opencode_agent.opencode2.config import UNRESTRICTED_MEDIA
 from responses_api_agents.opencode_agent.runtime import OPENCODE_RELEASE_SHA256, OPENCODE_V2_VERSION
-from responses_api_agents.opencode_agent.tests.test_mcp_grants import grant
+from responses_api_agents.opencode_agent.tests.test_mcp_grants import grant, sse_grant, stdio_grant
 from responses_api_agents.opencode_agent.tests.test_sandbox_extensions import (
     episode,
     index,
@@ -176,6 +176,42 @@ async def test_sampling_steps_and_a_replaced_prompt_reach_opencode_2(opencode2):
     # The prompt's braces never reach OpenCode's {env:} and {file:} substitution.
     assert "{careful}" not in params["env"]["OPENCODE_CONFIG_CONTENT"]
     assert "instructions" not in config
+
+
+@pytest.mark.parametrize(
+    ("grant_body", "unusable"),
+    [
+        (stdio_grant("magic", required=True), "magic (stdio)"),
+        (sse_grant("memory", required=True), "memory (sse)"),
+    ],
+)
+def test_a_required_stdio_or_sse_grant_is_refused_at_seed(opencode2, grant_body, unusable):
+    """The adapter configures OpenCode 2 with remote streamable HTTP servers only."""
+    agent, sandbox = opencode2
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant_body]
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=body)
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        f"OpenCode {OPENCODE_V2_VERSION} in the task sandbox supports only streamable HTTP MCP tool grants; required "
+        f"grants it cannot use: {unusable}"
+    )
+    sandbox.exec.assert_not_awaited()
+
+
+def test_an_optional_stdio_grant_is_left_out(opencode2):
+    agent, sandbox = opencode2
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant("task_tools", required=True), stdio_grant("magic", required=False)]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=body)
+        assert created.status_code == 200, created.text
+        client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        _, config = launch_config(sandbox)
+        assert list(config["mcp"]["servers"]) == ["task_tools"]
+        assert config["plugins"][0]["options"]["mcpGrants"] == {"required": ["task_tools"], "optional": []}
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
 
 
 def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):

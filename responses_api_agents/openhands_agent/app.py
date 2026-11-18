@@ -53,7 +53,13 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+    mcp_grants_over,
+    mcp_server_urls,
+    unusable_required_grants,
+)
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
 from responses_api_agents.openhands_agent.conversion import (
     RunOutcome,
@@ -79,6 +85,8 @@ from responses_api_agents.openhands_agent.sandbox import (
 
 
 LOG = logging.getLogger(__name__)
+# The MCP transport the sandbox runner's client speaks.
+OPENHANDS_MCP_TRANSPORTS = frozenset({"streamable_http"})
 # OpenHands SDK 1.59.0 LLM settings that change only how the harness calls the model. The adapter owns the
 # connection (model, base_url, api_key, usage_id, extra_headers) and turns OpenHands' own model retries off, so its
 # retry settings are not offered. Settings that write files (completion logs, tokenizer downloads), call other models
@@ -193,14 +201,13 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenHandsSandboxSession:
         accesses = self.effective_tool_accesses(body)
-        required = sorted(
-            access.name for access in accesses if access.required and not isinstance(access, MCPToolAccess)
-        )
+        required = unusable_required_grants(accesses, OPENHANDS_MCP_TRANSPORTS)
         if required:
             raise AgentSeedRejectedError(
-                "OpenHands takes tool grants only over MCP and cannot use required tool grants: " + ", ".join(required)
+                "OpenHands takes tool grants only over streamable HTTP MCP and cannot use required tool grants: "
+                + ", ".join(required)
             )
-        mcp_grants = [access for access in accesses if isinstance(access, MCPToolAccess)]
+        mcp_grants = mcp_grants_over(accesses, OPENHANDS_MCP_TRANSPORTS)
         global_config = self.server_client.global_config_dict
         access = body.sandbox_access
         owns_sandbox = access is None
@@ -258,8 +265,8 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                     network_access=self.config.network_access,
                     provider=provider,
                     model_base_url=model_base_url,
-                    tool_urls=[str(access.connection.url) for access in mcp_grants],
-                    required_tool_urls=[str(access.connection.url) for access in mcp_grants if access.required],
+                    tool_urls=mcp_server_urls(mcp_grants),
+                    required_tool_urls=mcp_server_urls(access for access in mcp_grants if access.required),
                 )
                 sandbox = AsyncSandbox(provider)
             else:
@@ -405,6 +412,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             "condenser": self.config.condenser,
             "max_iterations": self.config.max_iterations,
             # The episode's MCP grants, by grant name; the runner connects to each required one before the first call.
+            # Seeding refused a required grant over another transport; an optional one is left out.
             "mcp_servers": {
                 access.name: {
                     "url": str(access.connection.url),
@@ -412,8 +420,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                     "required": access.required,
                     "timeout": self.config.mcp_tool_timeout_seconds,
                 }
-                for access in self.effective_tool_accesses(state.request)
-                if isinstance(access, MCPToolAccess)
+                for access in mcp_grants_over(self.effective_tool_accesses(state.request), OPENHANDS_MCP_TRANSPORTS)
             },
             "finish_tool_names": self.config.finish_tool_names,
             "state_dir": state.path("state"),

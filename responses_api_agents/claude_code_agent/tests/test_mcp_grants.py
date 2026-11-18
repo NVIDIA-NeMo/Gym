@@ -35,6 +35,29 @@ def mcp_grant(name="magic", *, required=True, url="http://mcp-sidecar:8000/mcp",
     }
 
 
+def sse_grant(name="memory", *, required=True, url="http://memory:9000/sse", headers=None):
+    return {
+        "kind": "mcp",
+        "name": name,
+        "required": required,
+        "connection": {"transport": "sse", "url": url, "headers": headers or {}},
+    }
+
+
+def stdio_grant(name="magic", *, required=True, env=None):
+    return {
+        "kind": "mcp",
+        "name": name,
+        "required": required,
+        "connection": {
+            "transport": "stdio",
+            "command": "python3",
+            "args": ["/opt/magic/server.py"],
+            "env": env or {},
+        },
+    }
+
+
 def direct_http_grant(name="resources", *, required=True):
     return {"kind": "direct_http", "name": name, "required": required, "base_url": "http://resources:8080"}
 
@@ -151,6 +174,35 @@ async def test_model_and_tools_opens_the_host_of_each_mcp_grant(monkeypatch):
     }
 
 
+@pytest.mark.asyncio
+async def test_model_only_takes_a_required_stdio_grant_and_opens_the_host_of_an_sse_grant(monkeypatch):
+    """A stdio server runs in the sandbox beside the CLI, so it needs no host and passes model_only; an SSE server
+    is reached over the network like a streamable HTTP one."""
+    remote, _, _ = owned_seed_mocks(monkeypatch)
+    instance = agent(
+        sandbox_provider="sandbox",
+        sandbox_config={"workdir": "/app"},
+        anthropic_base_url="http://model.example:9000",
+        network_access="model_only",
+    )
+    await instance._seed_agent_session_state(seed(borrowed=False, tool_accesses=[stdio_grant()]))
+    assert remote.start.await_args.args[0].provider_options["network_policy"] == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "model.example"}],
+    }
+    instance.config.network_access = "model_and_tools"
+    await instance._seed_agent_session_state(
+        seed(borrowed=False, tool_accesses=[stdio_grant(), sse_grant(url="http://memory.example:9000/sse")])
+    )
+    assert remote.start.await_args.args[0].provider_options["network_policy"] == {
+        "defaultAction": "deny",
+        "egress": [
+            {"action": "allow", "target": "memory.example"},
+            {"action": "allow", "target": "model.example"},
+        ],
+    }
+
+
 def test_model_only_refuses_a_required_mcp_grant_before_the_sandbox_exists(monkeypatch):
     _, constructor, provider = owned_seed_mocks(monkeypatch)
     instance = agent(
@@ -244,6 +296,50 @@ async def test_grants_and_the_static_config_form_the_session_mcp_config(monkeypa
     assert response.output[-1].content[0].text == "pineapple"
     # The cached static config is not changed by a session's grants.
     assert set(instance._get_static_mcp_config()["mcpServers"]) == {"static"}
+
+
+@pytest.mark.asyncio
+async def test_stdio_and_sse_grants_become_servers_of_their_own_transport(monkeypatch):
+    """Claude Code starts a stdio grant's command itself, in the sandbox, and reaches an SSE grant over its event
+    stream; both are required servers the init event must confirm, as a streamable HTTP grant is."""
+    state = activation_state(
+        [
+            stdio_grant(env={"MAGIC_LOG": "/tmp/magic.log"}),
+            sse_grant(headers=TOKEN_HEADER),
+            stdio_grant("plain", required=False),
+        ]
+    )
+    execute = mock_execute(
+        monkeypatch, events(init_event(magic="connected", memory="connected", plain="connected"), ANSWER, SUCCESS)
+    )
+    response = await respond(agent(), state)
+    payload = execute.await_args.args[0]
+    assert payload["mcp_config"] == {
+        "mcpServers": {
+            "magic": {
+                "type": "stdio",
+                "command": "python3",
+                "args": ["/opt/magic/server.py"],
+                "env": {"MAGIC_LOG": "/tmp/magic.log"},
+            },
+            "memory": {"type": "sse", "url": "http://memory:9000/sse", "headers": TOKEN_HEADER},
+            "plain": {"type": "stdio", "command": "python3", "args": ["/opt/magic/server.py"]},
+        }
+    }
+    assert payload["required_mcp_servers"] == ["magic", "memory"]
+    assert response.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_required_stdio_server_that_fails_to_start_fails_the_turn(monkeypatch):
+    state = activation_state([stdio_grant()])
+    mock_execute(monkeypatch, events(init_event(magic="failed"), ANSWER, SUCCESS))
+    with pytest.raises(HTTPException) as error:
+        await respond(agent(), state)
+    assert error.value.status_code == 502
+    assert "Required MCP servers did not connect before Claude Code's first model request: magic (failed)" in str(
+        error.value.detail
+    )
 
 
 @pytest.mark.asyncio

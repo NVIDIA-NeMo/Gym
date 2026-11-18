@@ -92,7 +92,14 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+    MCPStdioConnection,
+    mcp_grants_over,
+    mcp_server_urls,
+    unusable_required_grants,
+)
 from nemo_gym.trajectory import (
     NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentEpisode,
@@ -1097,16 +1104,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox workdir must be absolute and separate from adapter runtime/session storage"
             )
-        unsupported = [
-            access.name
-            for access in self.effective_tool_accesses(body)
-            if access.required and not isinstance(access, MCPToolAccess)
-        ]
+        unsupported = unusable_required_grants(self.effective_tool_accesses(body), self._mcp_transports)
         if unsupported:
-            raise HTTPException(
-                422,
-                "OpenCode in the task sandbox supports only MCP tool grants; required grants it cannot use: "
-                + ", ".join(sorted(unsupported)),
+            raise AgentSeedRejectedError(
+                f"OpenCode {self.config.opencode_version} in the task sandbox supports only "
+                f"{self._mcp_transports_text} MCP tool grants; required grants it cannot use: "
+                + ", ".join(unsupported)
             )
         if not isinstance(self.config.opencode_version, str) or not re.fullmatch(
             r"\d+\.\d+\.\d+", self.config.opencode_version
@@ -1174,17 +1177,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     network_access=self.config.network_access,
                     provider=provider,
                     model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
-                    tool_urls=[
-                        str(access.connection.url)
-                        for access in self.effective_tool_accesses(body)
-                        if isinstance(access, MCPToolAccess)
-                    ],
+                    # A stdio server runs in the sandbox beside OpenCode, so it needs no host.
+                    tool_urls=mcp_server_urls(
+                        mcp_grants_over(self.effective_tool_accesses(body), self._mcp_transports)
+                    ),
                     # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
-                    required_tool_urls=[
-                        str(access.connection.url)
-                        for access in self.effective_tool_accesses(body)
-                        if isinstance(access, MCPToolAccess) and access.required
-                    ],
+                    required_tool_urls=mcp_server_urls(
+                        access
+                        for access in mcp_grants_over(self.effective_tool_accesses(body), self._mcp_transports)
+                        if access.required
+                    ),
                 )
             except BaseException:
                 await provider.aclose()
@@ -1435,27 +1437,49 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             state.harness_session_id = roots[0]
             state.message_ids = await asyncio.to_thread(stored_message_ids, database)
 
-    def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> tuple[dict[str, Any], dict[str, list[str]]]:
-        """OpenCode ``mcp`` entries for a session's MCP tool grants, and the grant names by requirement.
+    @property
+    def _mcp_transports(self) -> frozenset[str]:
+        """The MCP transports the configured OpenCode's client speaks, as the adapter configures it.
 
-        The model sees each grant's tools as ``<grant>_<tool>``. OpenCode connects when the run starts and leaves a
-        server that fails to connect out of the tool list, so ``required_mcp.mjs`` checks the grants before the first
-        model call and ``_check_mcp_grants`` reads the result.
+        OpenCode 1 starts a ``local`` server's command itself and tries a ``remote`` server over streamable HTTP,
+        then SSE (``packages/opencode/src/mcp/index.ts``); the adapter configures OpenCode 2 with remote servers
+        only.
+        """
+        return frozenset({"streamable_http"}) if self._opencode2 else frozenset({"streamable_http", "sse", "stdio"})
+
+    @property
+    def _mcp_transports_text(self) -> str:
+        return "streamable HTTP" if self._opencode2 else "streamable HTTP, SSE and stdio"
+
+    def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> tuple[dict[str, Any], dict[str, list[str]]]:
+        """OpenCode 1 ``mcp`` entries for a session's MCP tool grants, and the grant names by requirement.
+
+        The model sees each grant's tools as ``<grant>_<tool>``. A streamable HTTP or SSE grant is a ``remote``
+        server, which OpenCode tries over streamable HTTP and then SSE; a stdio grant is a ``local`` server, whose
+        command OpenCode starts in the sandbox as the user it runs as, in the session's working directory. OpenCode
+        connects when the run starts and leaves a server that fails to connect out of the tool list, so
+        ``required_mcp.mjs`` checks the grants before the first model call and ``_check_mcp_grants`` reads the
+        result.
         """
         servers = {}
         grants: dict[str, list[str]] = {"required": [], "optional": []}
-        for access in self.effective_tool_accesses(request):
-            if not isinstance(access, MCPToolAccess):
-                continue
-            entry: dict[str, Any] = {
-                "type": "remote",
-                "url": str(access.connection.url),
-                "enabled": True,
-                # The grant's headers authenticate the session; a headless run must not start an OAuth flow.
-                "oauth": False,
-            }
-            if access.connection.headers:
-                entry["headers"] = dict(access.connection.headers)
+        for access in mcp_grants_over(self.effective_tool_accesses(request), self._mcp_transports):
+            connection = access.connection
+            entry: dict[str, Any]
+            if isinstance(connection, MCPStdioConnection):
+                entry = {"type": "local", "command": [connection.command, *connection.args], "enabled": True}
+                if connection.env:
+                    entry["environment"] = dict(connection.env)
+            else:
+                entry = {
+                    "type": "remote",
+                    "url": str(connection.url),
+                    "enabled": True,
+                    # The grant's headers authenticate the session; a headless run must not start an OAuth flow.
+                    "oauth": False,
+                }
+                if connection.headers:
+                    entry["headers"] = dict(connection.headers)
             if self.config.mcp_tool_timeout_seconds is not None:
                 entry["timeout"] = round(self.config.mcp_tool_timeout_seconds * 1000)
             servers[access.name] = entry
@@ -1960,9 +1984,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         timeout_ms = (
             round(self.config.mcp_tool_timeout_seconds * 1000) if self.config.mcp_tool_timeout_seconds else None
         )
-        for access in self.effective_tool_accesses(state.request):
-            if not isinstance(access, MCPToolAccess):
-                continue
+        # Seeding refused a required grant over another transport; an optional one is left out.
+        for access in mcp_grants_over(self.effective_tool_accesses(state.request), self._mcp_transports):
             mcp_servers[access.name] = opencode2_config.mcp_server(
                 str(access.connection.url), access.connection.headers, timeout_ms
             )

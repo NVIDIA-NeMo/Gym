@@ -267,7 +267,8 @@ sandbox**. These two options are mutually exclusive and require
 `network_access: model_only` limits an agent-owned sandbox's egress to the model
 endpoint's host. The CLI is uploaded from the Agent Server, so setup needs no other
 host. `model_and_tools` also allows the host of each MCP tool grant; `model_only`
-blocks those hosts, so it refuses a seed with a required MCP grant. The OpenSandbox
+blocks those hosts, so it refuses a seed with a required `http` or `sse` MCP grant (a `stdio` server runs in the
+sandbox and needs no host). The OpenSandbox
 policy is set when the sandbox is created, so a session that borrows a task sandbox
 rejects any value other than `inherit` (the default, the provider's network). Only
 the OpenSandbox provider enforces the policy, so every other provider rejects a
@@ -319,13 +320,20 @@ run-level skills option remains unsupported for materialized task rows.
 
 ### MCP tool grants
 
-A session takes the `mcp` (streamable HTTP) tool grants in its seed request's `tool_accesses`,
-required and optional, such as the Resources Server's `/mcp` endpoint with `resources_tool_transports: [mcp]`
-or the MCP servers of a Harbor task that the `harbor` Environment Server grants. Each grant becomes an `http` server under the
-grant's name in the session's `mcp.json`, with the grant's URL and headers, which carry the session's tool token,
-next to the servers of the static `mcp_config`. The CLI gets that file with `--mcp-config`, which applies with
-`--bare` too, and the model sees each grant's tools as `mcp__<grant>__<tool>`. The file lives in the session
-directory, where the model can read it; a grant gives access to its own episode's tools only.
+A session takes the `mcp` tool grants in its seed request's `tool_accesses`, required and optional, over every
+transport: such as the Resources Server's `/mcp` endpoint with `resources_tool_transports: [mcp]`, or the MCP servers
+of a Harbor task that the `harbor` Environment Server grants. Each grant becomes a server under the grant's name in
+the session's `mcp.json`, next to the servers of the static `mcp_config`:
+
+| Grant transport | `mcp.json` entry |
+| --- | --- |
+| `streamable_http` | `{"type": "http", "url": ..., "headers": ...}`, the headers carrying the session's tool token. |
+| `sse` | `{"type": "sse", "url": ..., "headers": ...}`. |
+| `stdio` | `{"type": "stdio", "command": ..., "args": [...], "env": {...}}`. Claude Code starts the command inside the sandbox, as the user it runs as, and stops it when it exits. |
+
+The CLI gets that file with `--mcp-config`, which applies with `--bare` too, and the model sees each grant's tools as
+`mcp__<grant>__<tool>`. The file lives in the session directory, where the model can read it; a grant gives access
+to its own episode's tools only.
 
 The seed refuses with HTTP 422:
 

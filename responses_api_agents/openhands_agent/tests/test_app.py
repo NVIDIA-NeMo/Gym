@@ -102,7 +102,32 @@ def mcp_grant(*, required):
                     )
                 ]
             ),
-            "only over MCP",
+            "only over streamable HTTP MCP",
+        ),
+        # The sandbox runner's MCP client speaks streamable HTTP only.
+        (
+            agent(),
+            seed(
+                tool_accesses=[
+                    MCPToolAccess(
+                        name="magic",
+                        required=True,
+                        connection={"transport": "stdio", "command": "python3", "args": ["/opt/magic/server.py"]},
+                    )
+                ]
+            ),
+            "cannot use required tool grants: magic (stdio)",
+        ),
+        (
+            agent(),
+            seed(
+                tool_accesses=[
+                    MCPToolAccess(
+                        name="memory", required=True, connection={"transport": "sse", "url": "http://memory:9000/sse"}
+                    )
+                ]
+            ),
+            "cannot use required tool grants: memory (sse)",
         ),
         (agent(), seed(borrowed=False), "sandbox_access or a configured sandbox_provider"),
         (agent(), seed(workdir="relative"), "workdir"),
@@ -615,6 +640,17 @@ def test_runner_input_carries_the_mcp_grants_and_finish_tools():
     }
     assert runner_input["finish_tool_names"] == ["finish", "abandon_task_finish"]
     assert instance._runner_input(session_state(), prompt="p", system="")["mcp_servers"] == {}
+    # An optional grant over a transport the runner cannot use is left out.
+    state.request = seed(
+        tool_accesses=[
+            MCPToolAccess(
+                name="magic",
+                required=False,
+                connection={"transport": "stdio", "command": "python3", "args": ["/opt/magic/server.py"]},
+            )
+        ]
+    )
+    assert instance._runner_input(state, prompt="p", system="")["mcp_servers"] == {}
 
 
 def test_runner_input_carries_the_configured_limits_and_lets_llm_settings_choose_the_api_mode():

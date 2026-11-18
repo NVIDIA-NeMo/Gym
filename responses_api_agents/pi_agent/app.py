@@ -79,7 +79,14 @@ from nemo_gym.sandbox import (
     media_path,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess, ToolAccess
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+    MCPStdioConnection,
+    MCPToolAccess,
+    ToolAccess,
+    mcp_server_urls,
+)
 from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
@@ -199,9 +206,14 @@ def _mcp_grant_problems(accesses: list[ToolAccess]) -> dict[str, str]:
     """
     grants = [access for access in accesses if isinstance(access, MCPToolAccess)]
     problems = {
+        grant.name: "gym_mcp.mjs speaks stdio and streamable HTTP, not SSE"
+        for grant in grants
+        if grant.connection.transport == "sse"
+    }
+    problems |= {
         grant.name: "its name is not 1 to 62 letters, digits, '-' and '_'"
         for grant in grants
-        if not _MCP_SERVER_NAME.fullmatch(grant.name)
+        if grant.name not in problems and not _MCP_SERVER_NAME.fullmatch(grant.name)
     }
     named = [grant for grant in grants if grant.name not in problems]
     for grant in named:
@@ -808,18 +820,17 @@ class PiAgent(SimpleResponsesAPIAgent):
                     network_access=self.config.network_access,
                     provider=provider,
                     model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
-                    # Only the grants Pi keeps; activation leaves out the optional ones listed in `problems`.
-                    tool_urls=[
-                        str(access.connection.url)
+                    # Only the grants Pi keeps; activation leaves out the optional ones listed in `problems`. A
+                    # stdio server runs in the sandbox beside Pi, so it needs no host.
+                    tool_urls=mcp_server_urls(
+                        access
                         for access in tool_accesses
                         if isinstance(access, MCPToolAccess) and access.name not in problems
-                    ],
+                    ),
                     # A required grant Pi cannot use was refused above, so every one left here is kept.
-                    required_tool_urls=[
-                        str(access.connection.url)
-                        for access in tool_accesses
-                        if isinstance(access, MCPToolAccess) and access.required
-                    ],
+                    required_tool_urls=mcp_server_urls(
+                        access for access in tool_accesses if isinstance(access, MCPToolAccess) and access.required
+                    ),
                 )
             except BaseException:
                 await provider.aclose()
@@ -973,21 +984,27 @@ class PiAgent(SimpleResponsesAPIAgent):
     ) -> tuple[dict[str, dict[str, Any]], list[ObservationGap]]:
         """gym_mcp.mjs configuration for the episode's MCP tool grants, and gaps for the grants Pi cannot use.
 
-        Seeding refused the required grants Pi cannot use, so the gaps are for optional ones left out.
+        A stdio grant is a ``command`` server, which gym_mcp.mjs starts in the sandbox as the user Pi runs as; a
+        streamable HTTP grant is a ``url`` server. Seeding refused the required grants Pi cannot use, so the gaps are
+        for optional ones left out.
         """
         accesses = self.effective_tool_accesses(request)
         problems = _mcp_grant_problems(accesses)
-        servers = {
-            access.name: {
-                "url": str(access.connection.url),
-                "headers": access.connection.headers,
+        servers = {}
+        for access in accesses:
+            if not isinstance(access, MCPToolAccess) or access.name in problems:
+                continue
+            connection = access.connection
+            if isinstance(connection, MCPStdioConnection):
+                server = {"command": connection.command, "args": list(connection.args), "env": dict(connection.env)}
+            else:
+                server = {"url": str(connection.url), "headers": connection.headers}
+            servers[access.name] = {
+                **server,
                 "timeout": round(self.config.sandbox_mcp_timeout_seconds * 1000),
                 "required": access.required,
                 "terminal_tools": list(self.config.finish_tool_names),
             }
-            for access in accesses
-            if isinstance(access, MCPToolAccess) and access.name not in problems
-        }
         gaps = [
             ObservationGap(code="mcp_server_skipped", detail=f"{name}: {problem}")
             for name, problem in problems.items()

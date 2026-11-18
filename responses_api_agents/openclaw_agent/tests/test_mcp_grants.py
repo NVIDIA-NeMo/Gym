@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.openclaw_agent.app import _mcp_probe_problem
 from responses_api_agents.openclaw_agent.tests.test_sandbox import close_body, seed, setup  # noqa: F401
@@ -204,6 +205,44 @@ def test_required_non_mcp_grant_is_still_rejected(setup):  # noqa: F811
     assert response.status_code == 422
     assert response.json()["detail"].endswith("required grants it cannot use: tools")
     sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("connection", "unusable"),
+    [
+        ({"transport": "stdio", "command": "python3", "args": ["/opt/magic/server.py"]}, "magic (stdio)"),
+        ({"transport": "sse", "url": "http://memory:9000/sse"}, "magic (sse)"),
+    ],
+)
+def test_a_required_stdio_or_sse_grant_is_refused(setup, connection, unusable):  # noqa: F811
+    """The adapter configures OpenClaw with streamable HTTP servers only."""
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [{"kind": "mcp", "name": "magic", "required": True, "connection": connection}]
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=body)
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "OpenClaw in the task sandbox supports only streamable HTTP MCP tool grants; required grants it cannot use: "
+        + unusable
+    )
+    sandbox.exec.assert_not_awaited()
+
+
+def test_an_optional_stdio_grant_is_left_out(setup):  # noqa: F811
+    agent, _ = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [
+        grant("task_tools", required=True),
+        {
+            "kind": "mcp",
+            "name": "magic",
+            "required": False,
+            "connection": {"transport": "stdio", "command": "python3", "args": ["/opt/magic/server.py"]},
+        },
+    ]
+    servers, required = agent._granted_mcp_servers(AgentSeedSessionRequest.model_validate(body))
+    assert list(servers) == ["task_tools"] and required == {"task_tools"}
 
 
 @pytest.mark.parametrize("lost", ["task_tools", "extra", "both"])

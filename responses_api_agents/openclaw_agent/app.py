@@ -91,7 +91,13 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     upload_text,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+    mcp_grants_over,
+    mcp_server_urls,
+    unusable_required_grants,
+)
 from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
@@ -110,6 +116,8 @@ from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
 
 
 LOG = logging.getLogger(__name__)
+# The MCP transport the adapter configures OpenClaw with (`mcp.servers` entries of transport streamable-http).
+OPENCLAW_MCP_TRANSPORTS = frozenset({"streamable_http"})
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _SANDBOX_SESSION_KEY = "nemo_gym_openclaw_sandbox_session"
 
@@ -654,16 +662,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/") or workdir in ("/", "/tmp"):
             raise HTTPException(422, "OpenClaw workdir must be absolute and separate from /tmp runtime storage")
-        unsupported = [
-            access.name
-            for access in self.effective_tool_accesses(body)
-            if access.required and not isinstance(access, MCPToolAccess)
-        ]
+        unsupported = unusable_required_grants(self.effective_tool_accesses(body), OPENCLAW_MCP_TRANSPORTS)
         if unsupported:
-            raise HTTPException(
-                422,
-                "OpenClaw in the task sandbox supports only MCP tool grants; required grants it cannot use: "
-                + ", ".join(sorted(unsupported)),
+            raise AgentSeedRejectedError(
+                "OpenClaw in the task sandbox supports only streamable HTTP MCP tool grants; required grants it "
+                "cannot use: " + ", ".join(unsupported)
             )
         if self.config.model_server is None:
             raise HTTPException(422, "OpenClaw sandbox execution requires a sandbox-reachable Gym model_server")
@@ -699,17 +702,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     network_access=self.config.network_access,
                     provider=provider,
                     model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
-                    tool_urls=[
-                        str(access.connection.url)
-                        for access in self.effective_tool_accesses(body)
-                        if isinstance(access, MCPToolAccess)
-                    ],
+                    tool_urls=mcp_server_urls(
+                        mcp_grants_over(self.effective_tool_accesses(body), OPENCLAW_MCP_TRANSPORTS)
+                    ),
                     # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
-                    required_tool_urls=[
-                        str(access.connection.url)
-                        for access in self.effective_tool_accesses(body)
-                        if isinstance(access, MCPToolAccess) and access.required
-                    ],
+                    required_tool_urls=mcp_server_urls(
+                        access
+                        for access in mcp_grants_over(self.effective_tool_accesses(body), OPENCLAW_MCP_TRANSPORTS)
+                        if access.required
+                    ),
                 )
             except BaseException:
                 await provider.aclose()
@@ -1028,12 +1029,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         return response
 
     def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> tuple[dict[str, Any], set[str]]:
-        """OpenClaw ``mcp.servers`` entries for a session's MCP tool grants, and the required grant names."""
+        """OpenClaw ``mcp.servers`` entries for a session's streamable HTTP MCP tool grants, and the required grant
+        names. Seeding refused a required grant over another transport; an optional one is left out."""
         servers = {}
         required = set()
-        for access in self.effective_tool_accesses(request):
-            if not isinstance(access, MCPToolAccess):
-                continue
+        for access in mcp_grants_over(self.effective_tool_accesses(request), OPENCLAW_MCP_TRANSPORTS):
             entry: dict[str, Any] = {"url": str(access.connection.url), "transport": "streamable-http"}
             if access.connection.headers:
                 entry["headers"] = dict(access.connection.headers)

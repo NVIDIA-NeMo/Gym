@@ -84,7 +84,8 @@ other request field, including `tools`, is refused with HTTP 422.
 
 ## Session lifecycle
 
-**Seed** refuses, with a final 422, a required tool grant that is not MCP, a non-direct
+**Seed** refuses, with a final 422, a required tool grant that is not MCP over streamable HTTP (the runner's MCP
+client has no `sse` or `stdio` transport; an optional such grant is left out), a non-direct
 sandbox connection, a seed with neither `sandbox_access` nor `sandbox_provider`, an invalid
 `sandbox_provider` or `sandbox_config`, a workdir that is relative or overlaps the adapter's own directories,
 and a loopback Model Server URL for a remote sandbox (start the servers with `++use_absolute_ip=true`).
@@ -177,7 +178,7 @@ invocation. Gaps name what the events do not show, such as token counts around a
 
 ## Limits
 
-- Only MCP tool grants are supported; a required direct HTTP grant is refused.
+- Only streamable HTTP MCP tool grants are supported; a required direct HTTP, `sse` or `stdio` grant is refused.
 - `network_access` restricts only an agent-owned OpenSandbox sandbox. With the default `inherit`, an owned
   sandbox's egress is open unless its provider limits it. A borrowed sandbox keeps the network its Resources
   Server gave it.
