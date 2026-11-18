@@ -3,15 +3,16 @@
 """Readers of a sandbox's measured CPU and memory for providers that implement ``SupportsSandboxUsage``.
 
 ``cgroup_v2_sample`` reads a cgroup the sandbox owns or shares.
-``in_sandbox_cgroup_command`` and ``parse_in_sandbox_cgroup`` read the container's cgroup from inside it, for
-runtimes whose host is not this one. Every reader returns None rather than a guess when it cannot measure.
+``IN_SANDBOX_CGROUP_COMMAND`` and ``parse_in_sandbox_cgroup`` read the container's cgroup from inside it, for
+runtimes whose host is not this one. A reader that cannot measure returns None, or raises
+``SandboxUsageUnavailable`` naming why, rather than a guess.
 """
 
 import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from nemo_gym.sandbox.providers.base import SandboxUsageSample, SandboxUsageScope
+from nemo_gym.sandbox.providers.base import SandboxUsageSample, SandboxUsageScope, SandboxUsageUnavailable
 
 
 CGROUP_FILES = ("cpu.stat", "memory.current", "memory.peak", "memory.stat")
@@ -95,7 +96,8 @@ def parse_in_sandbox_cgroup(stdout: str, *, sampled_at: float) -> SandboxUsageSa
     """A container-scope sample from ``IN_SANDBOX_CGROUP_COMMAND`` output.
 
     Only a reader at its cgroup namespace's root (``0::/``) sees the container's own cgroup. Without that
-    namespace it sees the host hierarchy root, whose totals are not the sandbox's, so it returns None.
+    namespace it sees the host hierarchy root, whose totals are not the sandbox's, so it raises
+    ``SandboxUsageUnavailable("not_cgroup_root")``. Output without the cgroup section is no sample (None).
     """
     sections: dict[str, list[str]] = {}
     current: list[str] | None = None
@@ -104,7 +106,9 @@ def parse_in_sandbox_cgroup(stdout: str, *, sampled_at: float) -> SandboxUsageSa
             current = sections.setdefault(line[2:], [])
         elif current is not None:
             current.append(line)
-    if "0::/" not in sections.get("cgroup", []):
+    if not sections.get("cgroup"):
         return None
+    if "0::/" not in sections["cgroup"]:
+        raise SandboxUsageUnavailable("not_cgroup_root")
     texts = {name: "\n".join(sections[name]) if sections.get(name) else None for name in CGROUP_FILES}
     return parse_cgroup_v2(texts, scope="container", sampled_at=sampled_at)

@@ -9,14 +9,14 @@ import pytest
 
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import usage as usage_readers
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxUsageSample
+from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxUsageSample, SandboxUsageUnavailable
 from nemo_gym.sandbox.providers.usage import (
     IN_SANDBOX_CGROUP_COMMAND,
     cgroup_v2_sample,
     parse_cgroup_v2,
     parse_in_sandbox_cgroup,
 )
-from nemo_gym.sandbox.usage import SandboxUsageTracker, sample_interval, summarize
+from nemo_gym.sandbox.usage import SandboxUsageTracker, summarize, usage_sample_interval
 
 
 CPU_STAT = "usage_usec 2500000\nuser_usec 2000000\nsystem_usec 500000\n"
@@ -76,7 +76,8 @@ def test_an_in_sandbox_read_counts_only_at_the_cgroup_namespace_root() -> None:
     assert sample.sampled_at == 5.0
 
     # Without a private cgroup namespace the files are the host hierarchy's root, not the sandbox's.
-    assert parse_in_sandbox_cgroup(_in_sandbox_output("0::/system.slice/job.scope"), sampled_at=5.0) is None
+    with pytest.raises(SandboxUsageUnavailable, match="not_cgroup_root"):
+        parse_in_sandbox_cgroup(_in_sandbox_output("0::/system.slice/job.scope"), sampled_at=5.0)
     assert parse_in_sandbox_cgroup("", sampled_at=5.0) is None
     assert "/sys/fs/cgroup/$f" in IN_SANDBOX_CGROUP_COMMAND and "/proc/self/cgroup" in IN_SANDBOX_CGROUP_COMMAND
 
@@ -136,7 +137,7 @@ def test_a_process_without_a_unified_cgroup_has_no_cgroup_path(proc: FakeProc) -
 @pytest.mark.parametrize(("value", "expected"), [("2.5", 2.5), ("0", 0.0), ("inf", 0.0), ("soon", 5.0)])
 def test_the_sample_interval_setting(monkeypatch: pytest.MonkeyPatch, value: str, expected: float) -> None:
     monkeypatch.setenv("NEMO_GYM_SANDBOX_USAGE_SAMPLE_INTERVAL_SECONDS", value)
-    assert sample_interval() == expected
+    assert usage_sample_interval() == expected
 
 
 def _sample(scope: str, at: float, cpu: int, peak: int, kind: str = "counter") -> SandboxUsageSample:
@@ -210,6 +211,64 @@ async def test_the_owner_samples_after_create_periodically_for_lower_bounds_and_
     assert summaries["container"].sample_count == provider.reads
     assert summaries["container"].cpu_usage_usec_total == 1000 * provider.reads
     assert summaries["process_tree"].memory_peak_bytes == 6  # the first sample's, the largest seen
+    assert all(summary.final_read and summary.unavailable_reason is None for summary in summaries.values())
+
+
+async def test_without_a_read_at_close_the_totals_are_unknown_not_the_baseline() -> None:
+    class GoneAtClose(UsageProvider):
+        async def usage(self, handle: SandboxHandle) -> tuple[SandboxUsageSample, ...]:
+            if self.reads >= 1:
+                self.reads += 1
+                raise SandboxUsageUnavailable("sandbox_gone")
+            return await super().usage(handle)
+
+    tracker = SandboxUsageTracker(GoneAtClose(), SandboxHandle("box-1", "fake", None), interval=0)
+    tracker.start()
+    await asyncio.sleep(0)
+    assert all(not summary.final_read and summary.unavailable_reason is None for summary in tracker.summaries())
+    await tracker.stop()
+
+    container = next(summary for summary in tracker.summaries() if summary.scope == "container")
+    assert (container.final_read, container.unavailable_reason) == (False, "sandbox_gone")
+    assert container.cpu_usage_usec_total is None and container.cpu_usage_usec_delta is None
+    assert container.memory_peak_bytes is None and container.first_sampled_at == 1.0
+
+
+async def test_a_partial_read_at_close_marks_only_the_missing_measurement() -> None:
+    class ContainerOnlyAtClose(UsageProvider):
+        async def usage(self, handle: SandboxHandle) -> tuple[SandboxUsageSample, ...]:
+            taken = await super().usage(handle)
+            return taken if self.reads == 1 else taken[:1]
+
+    tracker = SandboxUsageTracker(ContainerOnlyAtClose(), SandboxHandle("box-1", "fake", None), interval=0)
+    tracker.start()
+    await tracker.stop()
+
+    summaries = {summary.scope: summary for summary in tracker.summaries()}
+    assert summaries["container"].final_read and summaries["container"].cpu_usage_usec_total == 2000
+    assert (summaries["process_tree"].final_read, summaries["process_tree"].unavailable_reason) == (
+        False,
+        "final_read_failed",
+    )
+
+
+async def test_a_hung_create_read_is_not_followed_by_a_second_read_at_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nemo_gym.sandbox import usage as usage_module
+
+    monkeypatch.setattr(usage_module, "SAMPLE_TIMEOUT_S", 0.05)
+
+    class Hung(UsageProvider):
+        async def usage(self, handle: SandboxHandle) -> tuple[SandboxUsageSample, ...]:
+            self.reads += 1
+            await asyncio.sleep(10)
+            return ()
+
+    provider = Hung()
+    tracker = SandboxUsageTracker(provider, SandboxHandle("box-1", "fake", None), interval=0)
+    tracker.start()
+    await tracker.stop()
+
+    assert provider.reads == 1 and tracker.final_failure == "final_read_timeout"
 
 
 async def test_an_unavailable_first_read_is_retried_before_deciding_to_poll() -> None:
@@ -324,14 +383,14 @@ async def test_docker_reads_the_container_cgroup_on_this_host_or_from_inside(
 
     # A remote daemon's PID is not this host's process, so the read falls back to the container itself.
     monkeypatch.setattr(docker_provider, "cgroup_path", lambda pid: "/user.slice/something-else")
+    handle.raw.cgroup_dir = None
     (inside,) = await provider.usage(handle)
     assert inside.scope == "container" and runs[-1][1] == "exec" and runs[-1][-1] == IN_SANDBOX_CGROUP_COMMAND
+    assert runs[-1][runs[-1].index("-w") + 1] == "/" and "--user" in runs[-1]
 
 
 @pytest.mark.sandbox
-@pytest.mark.parametrize(
-    ("exec_reply", "cgroup"), [((0, _in_sandbox_output("0::/docker/abc"), ""), "/x"), ((1, "", "no sh"), None)]
-)
+@pytest.mark.parametrize(("exec_reply", "cgroup"), [((0, "", ""), "/x"), ((1, "", "no sh"), None)])
 async def test_docker_reports_nothing_without_a_readable_container_cgroup(
     monkeypatch: pytest.MonkeyPatch, exec_reply, cgroup
 ) -> None:
@@ -357,11 +416,67 @@ async def test_docker_reports_nothing_when_the_container_cannot_be_inspected(mon
     provider = docker_provider.DockerProvider()
 
     async def run(argv, *, timeout_s, stdin=None):
-        return 1, "", "No such object"
+        return 1, "", "permission denied"
 
     monkeypatch.setattr(provider, "_run", run)
     handle = SandboxHandle("box", "docker", docker_provider._DockerContainer(name="box", image="img"))
     assert await provider.usage(handle) == ()
+
+
+@pytest.mark.sandbox
+async def test_docker_names_why_a_container_cannot_be_measured(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nemo_gym.sandbox.providers.docker import provider as docker_provider
+
+    monkeypatch.setattr(docker_provider, "_require_docker", lambda: "/usr/bin/docker")
+    provider = docker_provider.DockerProvider()
+    replies = {"inspect": (1, "", "Error: No such object: box")}
+
+    async def run(argv, *, timeout_s, stdin=None):
+        return replies[argv[1]]
+
+    monkeypatch.setattr(provider, "_run", run)
+    handle = SandboxHandle("box", "docker", docker_provider._DockerContainer(name="box", image="img"))
+    with pytest.raises(SandboxUsageUnavailable, match="sandbox_gone"):
+        await provider.usage(handle)
+
+    # Without a private cgroup namespace the in-container read sees the host root, never the container's cgroup.
+    replies.update(inspect=(0, "abc 0\n", ""), exec=(0, _in_sandbox_output("0::/docker/abc"), ""))
+    with pytest.raises(SandboxUsageUnavailable, match="not_cgroup_root"):
+        await provider.usage(handle)
+
+
+@pytest.mark.sandbox
+async def test_docker_keeps_reading_a_local_container_on_this_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from nemo_gym.sandbox.providers.docker import provider as docker_provider
+
+    monkeypatch.setattr(docker_provider, "_require_docker", lambda: "/usr/bin/docker")
+    provider = docker_provider.DockerProvider()
+    container_id = "c0ffee" * 10
+    runs = []
+
+    async def run(argv, *, timeout_s, stdin=None):
+        runs.append(argv)
+        return 0, f"{container_id} 4242\n", ""
+
+    monkeypatch.setattr(provider, "_run", run)
+    directory = _write_cgroup(tmp_path / f"docker-{container_id}.scope")
+    monkeypatch.setattr(docker_provider, "cgroup_path", lambda pid: f"/docker-{container_id}.scope")
+    monkeypatch.setattr(
+        docker_provider,
+        "cgroup_v2_sample",
+        lambda d, scope: cgroup_v2_sample(tmp_path / d.relative_to("/sys/fs/cgroup"), scope=scope),
+    )
+    handle = SandboxHandle("box", "docker", docker_provider._DockerContainer(name="box", image="img"))
+    assert len(await provider.usage(handle)) == 1
+
+    # The container exited (say OOM-killed) before teardown: its cgroup is gone, and no `docker exec` is tried.
+    for path in directory.iterdir():
+        path.unlink()
+    with pytest.raises(SandboxUsageUnavailable, match="sandbox_gone"):
+        await provider.usage(handle)
+    assert [argv[1] for argv in runs] == ["inspect"]
 
 
 async def test_stop_puts_the_usage_on_its_span_and_tells_listeners(monkeypatch: pytest.MonkeyPatch) -> None:

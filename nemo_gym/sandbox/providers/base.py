@@ -762,6 +762,18 @@ class SandboxUsageSample:
     process_count: int | None = None
 
 
+class SandboxUsageUnavailable(Exception):
+    """Raised by ``SupportsSandboxUsage.usage()`` when the runtime cannot measure the sandbox, naming why.
+
+    ``reason`` becomes the summary's ``unavailable_reason`` when the read before close fails this way, for example
+    ``not_cgroup_root`` (the reader does not see the sandbox's own cgroup) or ``sandbox_gone``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @runtime_checkable
 class SupportsSandboxUsage(Protocol):
     """Optional provider capability: read a sandbox's measured CPU and memory from the runtime's accounting.
