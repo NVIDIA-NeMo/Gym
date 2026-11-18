@@ -1,0 +1,41 @@
+perceptionbench_resources_server:
+  resources_servers:
+    perceptionbench:
+      entrypoint: app.py
+      domain: other
+      verified: true
+      description: PerceptionBench short-answer visual perception VQA across ten atomic capabilities, graded 0/1 by an LLM judge
+      value: Measure atomic visual perception accuracy across ten perception error categories without conflating reasoning or domain knowledge
+      judge_model_server:
+        type: responses_api_models
+        name: perceptionbench_judge_model
+      judge_chat_create_params:
+        messages: []
+        temperature: 0.3
+        max_tokens: 4096
+      judge_prompt_template_fpath: prompt_templates/judge_prompt.txt
+      judge_max_attempts: 3
+      judge_max_concurrency: 64
+
+perceptionbench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: perceptionbench_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+perceptionbench_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: perceptionbench_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: perceptionbench_simple_agent
