@@ -225,3 +225,37 @@ python -m pytest -o addopts= --import-mode=importlib -q \
     tests/unit_tests/rollouts/harness_capabilities
 python -m pytest -o addopts= --import-mode=importlib -q responses_api_agents/<key>_agent/tests
 ```
+
+## Native model-call timeout
+
+`native_model_call_timeout` is a P1 scenario. A scripted model request stays pending
+for 120 seconds while the harness applies a shorter native model-call deadline.
+Run it with an episode budget above the native deadline, for example:
+
+```bash
+python scripts/run_harness_conformance.py --harness opencode \
+  --scenario native_model_call_timeout --timeout 90 --gate-tier P1
+```
+
+The shared probe retains native runtime downloads before cleanup, observes the
+agent's actual failure report and the report received by the EnvironmentServer,
+and compares every original event ID and fact with Collection's canonical saved
+events. Missing turns or model-call capture cannot replace these failure checks.
+The selected terminal cause must still reach both consumers. The scenario does
+not prescribe grading, zero reward, masking, or a new retry policy.
+
+`HarnessDefinition.scenario_settings` supplies the native deadline and native error
+pattern. OpenCode currently uses `model_call_timeout_ms: 1000`; its default remains
+`None`, preserving each path's existing behavior: disabled in sandbox sessions,
+with the runtime's own default retained in local execution. Other harnesses explicitly
+report that their native-deadline fixture is unsupported until configured and
+qualified. Configure other adapters here instead of adding harness branches to the
+shared timeout checks.
+
+The native scenario verdict uses only initialization, model reach/protocol, and
+the native-timeout failure requirements. Capture, token, verifier, and other
+ancillary checks remain in `scenario_result.json` under `diagnostic_checks` and
+in the report's ancillary diagnostics section; they do not require a failed
+native request to produce a scored answer. A no-score exit is treated as expected
+only after the fixture independently witnesses its native deadline. Default P0
+gating is unchanged; the new requirement is evaluated with `--gate-tier P1`.

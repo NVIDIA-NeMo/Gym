@@ -66,6 +66,15 @@ class HarnessDefinition:
             },
             self.base_settings(directory, timeout),
         )
+        if getattr(scenario, "native_model_timeout", False):
+            settings = OmegaConf.merge(
+                settings,
+                {
+                    "unsupported_reason": "No native model-call deadline fixture is configured for this harness.",
+                    "probe": ".native_timeouts:NativeTimeoutProbe",
+                    "probe_overrides": {"responses": [{"kind": "stall", "delay_seconds": 120}]},
+                },
+            )
         overrides = self.scenario_settings.get(getattr(scenario, "name", None))
         return OmegaConf.merge(settings, overrides(scenario)) if overrides else settings
 
@@ -125,6 +134,12 @@ HARNESSES = {
             },
         },
         scenario_settings={
+            "native_model_call_timeout": lambda scenario: {
+                "unsupported_reason": None,
+                "harness_overrides": {"model_call_timeout_ms": 1000},
+                "session": {"sandbox_backend": "native_timeout_local"},
+                "probe_overrides": {"native_error_pattern": "operation timed out", "native_timeout_seconds": 1},
+            },
             "context_compaction": lambda scenario: {
                 "harness_overrides": {"context_window": 32768, "max_output_tokens": 8192},
                 "probe_overrides": {
@@ -139,7 +154,7 @@ HARNESSES = {
                         {"kind": "final", "input_tokens": 500, "output_tokens": 8},
                     ]
                 },
-            }
+            },
         },
     ),
     "pi": HarnessDefinition(
