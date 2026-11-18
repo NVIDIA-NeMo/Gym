@@ -3,19 +3,11 @@
 
 # Reuse the SOTA build stages and Slurm settings in NeMo-RL's worker environment.
 config_paths:
-  - benchmarks/nemotron_3.5_super/build_container_configs/current_sota.yaml
+  - benchmarks/nemotron_3.5_super/build_container_configs/nemo_rl_vllm.yaml
 
-# Need to override these
-input_container_fpath: null
-output_container_fpath: null
-
-python_executable: /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker/bin/python
-
-# Use the output as CONTAINER in the RL launcher. Warm up and serve through RL:
-# Gym's serving stages would launch outside the vLLM actor environment.
-
-vllm_router: null
+# vllm: null
 mooncake: null
 flashinfer: null
+vllm_router: null
 warmup: null
 run: null
