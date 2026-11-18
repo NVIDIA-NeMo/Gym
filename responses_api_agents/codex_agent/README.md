@@ -83,17 +83,9 @@ It sets `network_access: model_only`, so the sandbox reaches only the model serv
 overrides it with `model_and_tools`. A restricted sandbox cannot download Codex, so supply
 `sandbox_runtime_dir`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
 ## Runtime and model requirements
 
@@ -135,10 +127,21 @@ context-management controls, not generation budgets.
 
 ## Requests, results, and lifecycle
 
-Input is a string or one text user message, optionally preceded by a system/developer message.
+Input is a string or one user message with text and base64 data-URI `input_image` parts, optionally preceded by a text system/developer message.
 Configured `system_prompt`, request `instructions`, and that preceding message become Codex
-developer instructions in that order. Unsupported conversation/multimodal input, required
+developer instructions in that order. Unsupported conversation input, other media, required
 direct HTTP tools, provider overrides, and extra host config are rejected before activation.
+
+The adapter stages prompt images at `/tmp/nemo-gym-media/<sha256>.<ext>` and passes each occurrence with
+`codex exec --image`. Codex shows these paths beside the images; content-based names keep them stable across
+rollouts of a task. Staged files remain in borrowed sandboxes after close. Codex 0.144.4 puts images in their
+supplied order before all prompt text, uses `detail: high` regardless of the requested detail, and resizes images
+over 2048 px on a side or 2,500 tiles of 32 px. For example, a 2400x2400 PNG becomes 1600x1600. GIF is re-encoded
+as PNG. These native processing limits cannot be disabled. Image-only prompts are supported in sessions;
+local execution rejects images with HTTP 422. Exported conversations retain images as data URIs. When the native
+transcript shows fewer images than supplied, completed and output-limit runs fail with HTTP 502 instead of
+scoring an answer made without all prompt images. Wall-time limits and reported model failures keep their
+existing outcomes.
 
 Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and unsupported tool
 policies are rejected rather than ignored. Codex cannot enforce these request-level controls
@@ -229,7 +232,7 @@ when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent 
 than the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
 container's memory cgroup. The runner records the change in the supervisor's `output.log`.
 
-Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; the cumulative totals in Codex's session files supplement CLI totals when a failed turn omits them. A turn stopped at its output or wall-time limit reports unknown usage, because neither total covers every call: Codex records no usage for an output-limited response and writes a call's token count only after the call's tools finish. A run stopped before any model call reports zero. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 
@@ -398,7 +401,8 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 
 ## Legacy direct-agent limitations
 
-- Eval only for now. Token IDs and logprobs are not wired up yet.
+- Training token-ID capture works as in agent sessions when `model_server` is set. A direct
+  `openai_base_url` endpoint bypasses Gym capture.
 - Token counts come from Codex's own usage reporting (`turn.completed`).
 - `turns_used` counts assistant messages right now, not tool calls.
 - Codex has no `--max-turns` equivalent; runaway rollouts are bounded by `timeout`.

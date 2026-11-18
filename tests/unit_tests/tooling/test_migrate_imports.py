@@ -343,6 +343,41 @@ class TestRewritePython:
                 "from nemo_gym.models.chat_streaming import stream\n"
             )
 
+    def test_names_renamed_after_their_module_moved_are_found_at_its_old_path_in_one_pass(self) -> None:
+        migrator = migrate_imports.Migrator(
+            {"nemo_gym.responses_converter": "nemo_gym.models.chat_completions_converter"},
+            {
+                "nemo_gym.models.chat_completions_converter": {
+                    "VLLMConverter": ("nemo_gym.models.chat_completions_converter", "ChatCompletionsConverter")
+                }
+            },
+        )
+        once = _python(migrator, "from nemo_gym.responses_converter import VLLMConverter, split\n")
+        assert once == (
+            "from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter as VLLMConverter, split\n"
+        )
+        assert _python(migrator, once) == once
+
+    def test_wrapped_import_from_a_server_module_that_lists_moved_names_is_split(self) -> None:
+        migrator = migrate_imports.Migrator(
+            {},
+            {
+                "responses_api_models.vllm_model.app": {
+                    "VLLMConverter": ("nemo_gym.models.chat_completions_converter", "ChatCompletionsConverter")
+                }
+            },
+        )
+        source = "from responses_api_models.vllm_model.app import (\n    VLLMConverter,\n    VLLMModel,\n)\n"
+        once = _python(migrator, source)
+        assert once == (
+            "from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter as VLLMConverter\n"
+            "from responses_api_models.vllm_model.app import VLLMModel\n"
+        )
+        assert _python(migrator, once) == once
+        # Server modules that list no moved names stay out of the rewrite.
+        other = "from responses_api_models.openai_model.app import (\n    SimpleModelServer,\n)\n"
+        assert _python(migrator, other) == other
+
 
 class TestRewriteText:
     def test_library_reference_urls_are_left_for_the_docs_redirects(self, migrator) -> None:

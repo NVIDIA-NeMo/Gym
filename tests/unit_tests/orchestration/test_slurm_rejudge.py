@@ -7,17 +7,41 @@ from types import SimpleNamespace
 
 import pytest
 
+from nemo_gym.eval.recovery.decision import (
+    RecoveryAction,
+    RecoveryDecision,
+)
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.recovery import CollectedEvidence, RecoveryAction, RecoveryDecision
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
 from tests.unit_tests.orchestration.test_slurm_judge_only_job import _rendered_gym_commands, _unrecognized_flags
 
 
-@pytest.mark.parametrize("case", ["ok", "large", "exhausted", "unknown", "stale", "live"])
-def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
+@pytest.fixture
+def login_umask():
+    """The usual login umask: what the run's other artifacts are created under, and what sbatch hands to the job."""
+    import os
+
+    previous = os.umask(0o022)
+    yield 0o022
+    os.umask(previous)
+
+
+@pytest.mark.parametrize(
+    "case", ["ok", "large", "first_allocation", "exhausted", "unknown", "incomplete", "stale", "live"]
+)
+def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umask):
+    from nemo_gym.eval.recovery.markers import NO_ELIGIBLE_RETRY_REASON
+
     large = case == "large"
-    if large:
+    # A judge failure in the chain's first allocation: no infra retry ran, so .gym_infra_retries was never written,
+    # and the job ended its own chain with nothing eligible for another attempt.
+    first_allocation = case == "first_allocation"
+    if large or first_allocation:
         case = "ok"
     job = tmp_path / "run" / "judge"
     (job / "artifacts").mkdir(parents=True)
@@ -50,24 +74,37 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
     (job.parent / "resolved_config.yaml").write_text("fixture: true\n")
     # Real source/accounting files; the only process-level fakes are the scheduler executables.
     (job / "artifacts/rollouts.jsonl").write_text("fixture\n")
-    for n, v in {".gym_job_chain": "10\n", ".gym_infra_retries": "0\n", ".gym_accumulated_walltime": "60\n"}.items():
+    files = {".gym_job_chain": "10\n", ".gym_infra_retries": "0\n", ".gym_accumulated_walltime": "60\n"}
+    if first_allocation:
+        del files[".gym_infra_retries"]
+        files[".gym_chain_incomplete"] = NO_ELIGIBLE_RETRY_REASON + "\n"
+    elif case == "incomplete":
+        # Any other marker line, here a continuation that ended before its guard, still refuses.
+        files[".gym_chain_incomplete"] = "Continuation 10 started; follow-up not yet queued\n"
+    for n, v in files.items():
         (job / n).write_text(v)
     if large:
         with (job / "artifacts/rollouts.jsonl").open("wb") as artifact:
             artifact.truncate(64 * 1024 * 1024)
 
     def digest(path):
+        if not path.exists():
+            return None
         with path.open("rb") as artifact:
             return hashlib.file_digest(artifact, "sha256").hexdigest()
 
-    snapshot = {n: digest(job / n) for n in (".gym_job_chain", ".gym_infra_retries", ".gym_accumulated_walltime")}
+    accounting = (".gym_job_chain", ".gym_infra_retries", ".gym_accumulated_walltime", ".gym_chain_incomplete")
+    snapshot = {n: digest(job / n) for n in accounting}
     snapshot["resume_config"] = cfg.driver.benchmarks["judge"].resume_config.model_dump_json()
     evidence = CollectedEvidence(
         materialized=[],
         results=[],
         failures=[],
-        infra_retries_used=0,
+        infra_retries_used=None if first_allocation else 0,
+        infra_retries_state="absent" if first_allocation else "ok",
         job_chain=["10"],
+        chain_incomplete=".gym_chain_incomplete" in files,
+        chain_ended_itself=first_allocation,
         accounted_walltime_s=600 if case == "exhausted" else None if case == "unknown" else 60,
         accounting_snapshot=snapshot,
         source_digests={"rollouts.jsonl": digest(job / "artifacts/rollouts.jsonl")},
@@ -78,7 +115,7 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
     bins.mkdir()
     for name, body in {
         "squeue": ("echo 10" if case == "live" else "true"),
-        "sbatch": f"echo call >> {tmp_path}/calls; echo 11",
+        "sbatch": f"echo call >> {tmp_path}/calls; umask > {tmp_path}/sbatch_umask; echo 11",
     }.items():
         f = bins / name
         f.write_text("#!/bin/bash\n" + body + "\n")
@@ -118,9 +155,13 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
         ),
         with_benchmark=lambda _: None,
     )
-    (job.parent / sm.RESOLVED_CONFIG_NAME).write_text("fixture: true\n")
-    monkeypatch.setattr(sm, "get_connection", lambda _: Conn())
-    monkeypatch.setattr(sm, "installed_gym_commit", lambda: "a" * 40)
+    (job.parent / slurm_chain.RESOLVED_CONFIG_NAME).write_text("fixture: true\n")
+    monkeypatch.setattr(slurm_chain, "get_connection", lambda _: Conn())
+    monkeypatch.setattr(slurm_judge_job, "get_connection", lambda _: Conn())
+    monkeypatch.setattr(slurm_executor, "get_connection", lambda _: Conn())
+    monkeypatch.setattr(slurm_chain, "installed_gym_commit", lambda: "a" * 40)
+    monkeypatch.setattr(slurm_judge_job, "installed_gym_commit", lambda: "a" * 40)
+    monkeypatch.setattr(slurm_executor, "installed_gym_commit", lambda: "a" * 40)
     monkeypatch.setattr(sm.SlurmExecutor, "_saved_config", staticmethod(lambda *a: cfg))
     decision = RecoveryDecision(
         action=RecoveryAction.REVERIFY,
@@ -149,8 +190,14 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
             [capture] = [word for word in words if word.startswith("+model_call_capture_dir=")]
             assert "/reverification/" in capture and capture.endswith("/model-calls"), capture
             assert not [word for word in words if word.lstrip("+").startswith("limit=")], words
+            # A receipt beside the re-judge's output: the job recomputes the run's metrics and quality summary.
+            output = words[words.index("--output") + 1]
+            receipt = words[words.index("--settle-receipt") + 1]
+            assert receipt == output.rsplit("/", 1)[0] + "/receipt.json", (output, receipt)
     assert (tmp_path / "calls").exists() is (case == "ok")
-    assert (job / ".gym_infra_retries").read_text() == "0\n"
+    assert (job / ".gym_infra_retries").exists() is not first_allocation
+    if not first_allocation:
+        assert (job / ".gym_infra_retries").read_text() == "0\n"
     if case == "ok":
         assert (job / ".gym_job_chain").read_text() == "10\n11\n"
         assert float((job / ".gym_accumulated_walltime").read_text()) == 60
@@ -159,3 +206,8 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
         assert "--withdraw-unresolved-admissions" in script  # dispatched only with no allocation of the run live
         assert "gym eval run" not in script and "afternotok" not in script
         assert "#SBATCH --time=00:05:00" in script
+        # Only the staged driver script is owner-only; the job inherits the caller's umask, so what it creates (the
+        # reverification folder and its files) stays readable to the run's other readers.
+        (script_path,) = job.glob("reverify-*.sh")
+        assert script_path.stat().st_mode & 0o777 == 0o600
+        assert (tmp_path / "sbatch_umask").read_text().strip() == "0022"

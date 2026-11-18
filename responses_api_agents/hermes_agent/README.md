@@ -83,17 +83,9 @@ harness on the Gym host. Hermes derives the sandbox's lifetime from its own time
 It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
 overrides it with `model_and_tools`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
 ## Configuration example
 
@@ -145,8 +137,19 @@ Host and sandbox execution use the same request rules. User tasks remain user me
 Request `model` must match the configured model. Unsupported non-default controls return
 HTTP 422, including `top_p` (even `1.0`), `store`, `service_tier`, and request metadata.
 `max_output_tokens` also returns 422: Hermes does not enforce a total response token budget.
-Config `max_tokens` limits each model call. `context_length` sets Hermes' `model.context_length`, the window context compression reads (at `compression_threshold` of it); unset, Hermes probes the endpoint, which the Gym model server does not answer, and assumes 128,000 tokens. Only text input is supported; `developer` messages
+Config `max_tokens` limits each model call. `context_length` sets Hermes' `model.context_length`, the window context compression reads (at `compression_threshold` of it); unset, Hermes probes the endpoint, which the Gym model server does not answer, and assumes 128,000 tokens. `developer` messages
 are rejected.
+
+Images: user messages, earlier user turns included, may hold base64 data-URI `input_image` parts (PNG, JPEG, GIF
+or WebP). Each is checked with `nemo_gym.core.MediaFile`, and its media type is corrected to match its bytes. Hermes
+gets them as Chat Completions `image_url` parts in their original order and sends them to the model unresized.
+It preserves `auto`, `low`, and `high` detail; Responses-only `original` maps to `high`, the closest Chat level.
+No files are staged in the sandbox. Image URLs, file IDs, malformed or unsupported images, and
+images outside user messages return HTTP 422. Use a vision model: Hermes passes the images on as given, and a
+text-only deployment rejects the request. The response output keeps only each message's text, while the session
+conversation in the agent observations keeps the images, so base64 data makes those records large. Hermes estimates
+context use from message length, base64 included, so images weigh heavily in its preflight compression check on a
+long history. Hermes' vision tools, images returned by MCP tools, and token capture with images are not qualified.
 
 Compatibility: the host path previously let config `system_prompt` replace the dataset's
 system message and ignored request `temperature`. It now combines the prompts and honors

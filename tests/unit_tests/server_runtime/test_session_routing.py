@@ -834,8 +834,11 @@ class TestOwnershipLifetime:
             _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
     def test_a_session_started_by_another_request_keeps_its_owner_a_window_after_each_request(
-        self, socket_dir: str
+        self, socket_dir: str, monkeypatch
     ) -> None:
+        # Exercise real forwarding and sweeping without spending the lease window on runner scheduling.
+        clock = [0.0]
+        monkeypatch.setattr(session_routing, "monotonic", lambda: clock[0])
         a = Worker("a", socket_dir, close_retry_window_seconds=0.3)
         b = Worker("b", socket_dir, close_retry_window_seconds=0.3)
         with a.client, b.client:
@@ -843,9 +846,10 @@ class TestOwnershipLifetime:
             session_id = b.session(stored)[SESSION_ID_KEY]
             cookie = stored.cookies[b.cookie_name]
             for _ in range(4):
-                time.sleep(0.15)
+                clock[0] += 0.15
                 assert a.post("/store", json={"value": 2}, cookie=cookie).json() == {"worker": "b"}
             still_owned = _owner(socket_dir, session_id)
+            clock[0] += 0.31
             _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
         assert still_owned == b.routing_id
@@ -890,6 +894,26 @@ class TestOwnershipLifetime:
         assert lifetimes.sweep() == [] and lifetimes.holds("s")
         clock[0] = 20.0
         assert lifetimes.sweep() == ["s"] and not lifetimes._expiries and len(lifetimes) == 0
+
+    def test_successful_verify_keeps_its_worker_until_pending_release_succeeds(self, monkeypatch) -> None:
+        clock = [0.0]
+        pending = {"s"}
+        monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: clock[0])
+        lifetimes = ResourcesSessionLifetimes(
+            10,
+            starts=("/seed_session",),
+            ends=("/close_session", "/verify"),
+            session_release_pending=pending.__contains__,
+        )
+        # This also covers a lazy tool-created session which has never passed through seed.
+        lifetimes.served("s", {"path": "/verify", "headers": []}, 200)
+        clock[0] = 1000
+        assert lifetimes.sweep() == [] and lifetimes.holds("s")
+        pending.clear()
+        lifetimes.served("s", {"path": "/close_session", "headers": []}, 200)
+        assert lifetimes.holds("s")
+        clock[0] += 10
+        assert lifetimes.sweep() == ["s"] and not lifetimes.holds("s")
 
     def test_an_agent_session_owner_is_released_once_it_drops_the_closed_record(self, socket_dir: str) -> None:
         a = AgentWorker("a", socket_dir, close_retry_window_seconds=0.1)

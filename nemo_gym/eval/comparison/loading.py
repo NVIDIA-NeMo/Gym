@@ -38,7 +38,8 @@ from nemo_gym.config.global_config import (
 from nemo_gym.eval.comparison.schema import RunFile, RunSource
 from nemo_gym.metrics.metrics_config import COMPLETION_TOKEN_METRIC_NAMES, Stat
 from nemo_gym.rollouts.rollout_records import resolve_rollout_path
-from nemo_gym.utils.path_utils import aggregate_metrics_path_for
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for, task_selection_path_for
+from nemo_gym.utils.task_ids import read_task_selection_record
 from nemo_gym.utils.text import did_you_mean
 
 
@@ -167,13 +168,23 @@ def load_agg_metrics_file(
             name: entry if "repeat_level_metrics" in entry else _compute_repeat_metrics(entry)
             for name, entry in entries_by_agent.items()
         }
+    rollouts = _resolve_under_cwd_or_install(rollouts_jsonl_fpath)
     return RunFile(
         role=role,
         index=index,
-        rollouts_jsonl_fpath=_resolve_under_cwd_or_install(rollouts_jsonl_fpath),
+        rollouts_jsonl_fpath=rollouts,
         aggregate_metrics_fpath=metrics_path,
         entries_by_agent=entries_by_agent,
+        task_selection=_task_selection_summary(rollouts),
     )
+
+
+def _task_selection_summary(rollouts: Path) -> Optional[Dict[str, Any]]:
+    """A subset run's selection without its ids (source, counts, digest), from the record beside its rollouts."""
+    record = read_task_selection_record(task_selection_path_for(rollouts))
+    if record is None:
+        return None
+    return {key: record.get(key) for key in ("source", "tasks", "rows", "task_ids_sha256")}
 
 
 def _sole_agent(run_file: RunFile) -> str:

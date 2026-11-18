@@ -21,12 +21,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
-from nemo_gym.orchestration.executors.resume_script import (
+from nemo_gym.orchestration.executors.slurm.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     CHAIN_END_JOURNAL_NAME,
     DRIVER_FAILURE_NAME,
@@ -36,6 +37,9 @@ from nemo_gym.orchestration.executors.resume_script import (
     FRESH_RESTART_MARKER_NAME,
     GUARDED_DRIVER_FAILURE_KINDS,
     INCOMPLETE_MARKER_NAME,
+    JOB_ALLOCATIONS_FORMAT,
+    JOB_ALLOCATIONS_LOCK_NAME,
+    JOB_ALLOCATIONS_NAME,
     NO_ELIGIBLE_RETRY,
     NO_ELIGIBLE_RETRY_EXIT,
     NO_ELIGIBLE_RETRY_REASON,
@@ -124,6 +128,14 @@ def test_rendered_prologue_is_valid_bash(resume, tmp_path):
 # ---------------------------------------------------------------------------
 
 _FAKE_SACCT = """#!/bin/bash
+# The allocation query reads the scheduler's allocation records from the allocations file, or fails.
+if [[ "$*" == *AllocTRES* ]]; then
+    echo "${SLURM_TIME_FORMAT:-} $*" >> "$FAKE_LOG_DIR/allocation_calls"
+    [[ -z "${FAKE_ALLOCATIONS_FAIL:-}" ]] || exit 1
+    [[ -z "${FAKE_ALLOCATIONS_STALL:-}" ]] || exec /bin/sleep 60
+    cat "$FAKE_LOG_DIR/allocations" 2>/dev/null
+    exit 0
+fi
 echo call >> "$FAKE_LOG_DIR/sacct_calls"
 # The node dies under the job: kill the job's shell, found by its script path (never the test runner).
 if [[ -n "${FAKE_SACCT_KILLS_JOB:-}" ]]; then pkill -KILL -f "$FAKE_LOG_DIR/job.sh"; exit 1; fi
@@ -238,7 +250,7 @@ def _run_prologue(
         # Explicit installed-runtime boundary: host PATH below intentionally has no Gym installation.
         code = (
             f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[3])!r}); "
-            "from nemo_gym.orchestration.recovery import continuation_admission; "
+            "from nemo_gym.eval.recovery.continuation import continuation_admission; "
             f"print('__GYM_CONTINUATION:' + continuation_admission({str(tmp_path)!r}, "
             f"{resume.max_retries}, {_walltime_to_seconds(resume.max_walltime) if resume.max_walltime else None!r}, sys.argv[1], sys.argv[2], sys.argv[3]))"
         )
@@ -311,11 +323,11 @@ def test_successor_is_killed_if_its_dependency_can_never_be_met(tmp_path):
 @pytest.mark.parametrize("exit_code,continues", [("75:0", True), ("76:0", False)])
 @pytest.mark.parametrize("max_retries", [0, 3])
 def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, monkeypatch, exit_code, continues, max_retries):
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+    from tests.helpers.recovery_store_runs import save_store_run
 
     monkeypatch.setenv("SLURM_JOB_ID", "100")
     # Real saved outcomes and untouched pending inputs, not an exit-code-only permission token.
-    prepare_managed(tmp_path, "missing" if continues else "healthy", n=2)
+    save_store_run(tmp_path, "missing" if continues else "healthy", n=2)
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=max_retries), "FAILED", exit_code=exit_code)
     assert result.returncode == (0 if continues else 1), result.stdout
     assert ("REACHED_WORK" in result.stdout) is continues
@@ -512,8 +524,9 @@ def test_only_a_definite_refusal_of_the_follow_up_is_a_typed_stop(tmp_path, repl
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_recovery_resubmits_a_run_whose_follow_up_the_scheduler_refused(tmp_path):
-    from nemo_gym.orchestration.recovery import RecoveryAction, decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.decision import RecoveryAction
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     # The segment's prologue took its follow-up claim, and the scheduler refused the submission.
     job = write_job_dir(tmp_path, n=2, results=[ident(0, reward=1.0)], failures=[])
@@ -538,8 +551,8 @@ def test_a_follow_up_submission_without_a_definite_reply_stays_unknown_and_logs_
 
 
 def test_inspection_names_a_chain_stopped_on_a_refused_follow_up(tmp_path):
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"{FOLLOW_UP_SUBMISSION_REFUSED}: sbatch exited 1: sbatch: error: QOSMaxSubmitJobPerUserLimit"
@@ -991,7 +1004,7 @@ def test_a_failure_without_scheduler_infrastructure_cause_stops_and_keeps_its_el
 
 
 def test_the_prologue_carries_the_scheduler_cause_capability():
-    from nemo_gym.orchestration.executors.resume_script import SCHEDULER_CAUSE_MARKER
+    from nemo_gym.orchestration.executors.slurm.resume_script import SCHEDULER_CAUSE_MARKER
 
     assert SCHEDULER_CAUSE_MARKER in render_resume_prologue(ResumeConfig(max_retries=1)).splitlines()
 
@@ -1041,7 +1054,11 @@ def test_manual_follower_without_predecessor_cannot_claim_a_fresh_chain(tmp_path
 def test_collector_preserves_unknown_budget_even_with_apparently_complete_counters(tmp_path):
     import json
 
-    from nemo_gym.orchestration.recovery import COLLECT_SCRIPT, CollectedEvidence, decide_from_collected
+    from nemo_gym.eval.recovery.evidence import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+    )
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -1073,7 +1090,10 @@ def test_manual_reset_cannot_erase_malformed_spent_counters(tmp_path, name):
 def test_collector_binds_dynamic_followup_claim_set_and_contents(tmp_path, mutation):
     import json
 
-    from nemo_gym.orchestration.recovery import COLLECT_SCRIPT, CollectedEvidence
+    from nemo_gym.eval.recovery.evidence import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+    )
 
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -1286,8 +1306,8 @@ def test_a_finished_run_clears_the_provisional_line(tmp_path):
 
 
 def test_inspection_names_a_continuation_that_died_before_its_guard(tmp_path):
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     (job / INCOMPLETE_MARKER_NAME).write_text(_provisional_line("777") + "\n")
@@ -1455,8 +1475,8 @@ def test_a_cancelled_follow_up_keeps_a_deliberate_stop_and_replaces_a_provisiona
 
 
 def test_inspection_names_a_follow_up_cancelled_before_it_started(tmp_path):
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = "Follow-up 777 was cancelled before it started (job 100 ended TIMEOUT); the chain stopped."
@@ -1469,9 +1489,9 @@ def test_inspection_names_a_follow_up_cancelled_before_it_started(tmp_path):
 
 
 def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_path):
-    from nemo_gym.orchestration.executors.resume_script import CREDENTIALS_REJECTED_REASON
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.orchestration.executors.slurm.resume_script import CREDENTIALS_REJECTED_REASON
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"Previous job 100 ended FAILED: {CREDENTIALS_REJECTED_REASON}"
@@ -1484,9 +1504,9 @@ def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_pa
 
 
 def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_path):
-    from nemo_gym.orchestration.executors.resume_script import PROTOCOL_VIOLATION_REASON
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.orchestration.executors.slurm.resume_script import PROTOCOL_VIOLATION_REASON
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"Previous job 100 ended FAILED: {PROTOCOL_VIOLATION_REASON}"
@@ -1499,9 +1519,9 @@ def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_p
 
 
 def test_inspection_names_a_chain_stopped_on_an_exhausted_grading_quota(tmp_path):
-    from nemo_gym.orchestration.executors.resume_script import QUOTA_EXHAUSTED_REASON
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.orchestration.executors.slurm.resume_script import QUOTA_EXHAUSTED_REASON
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"Previous job 100 ended FAILED: {QUOTA_EXHAUSTED_REASON}"
@@ -1523,10 +1543,10 @@ _MLFLOW_CONFIG = "mlflow_tracking_uri: http://tracking.example\nmlflow_experimen
 
 def _finished_run(tmp_path, monkeypatch, case="healthy", config=_MLFLOW_CONFIG, receipt="current") -> None:
     """A managed run of two rollouts as its last segment left it: Store, saved config, aggregate and export receipt."""
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+    from tests.helpers.recovery_store_runs import save_store_run
 
     monkeypatch.setenv("SLURM_JOB_ID", "100")
-    prepare_managed(tmp_path, case, n=2)
+    save_store_run(tmp_path, case, n=2)
     artifacts = tmp_path / "artifacts"
     (artifacts / "rollouts_resolved_config.yaml").write_text(config)
     (artifacts / "rollouts_aggregate_metrics.json").write_text("[]\n")
@@ -1998,3 +2018,297 @@ def test_a_server_start_failure_with_saved_rollouts_keeps_the_saved_evidence_pat
     assert "restarting the run fresh" not in result.stdout
     assert not (tmp_path / f"{FRESH_RESTART_MARKER_NAME}.200").exists()
     assert result.returncode == 1 and "no eligible retries" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Every job records the allocations of the run's jobs that have ended
+# ---------------------------------------------------------------------------
+
+_GPU_TRES = "billing=128,cpu=128,gres/gpu=16,gres/gpu:h100=16,mem=2T,node=2"
+
+
+def _allocations(tmp_path) -> list[dict]:
+    path = tmp_path / JOB_ALLOCATIONS_NAME
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_segment_records_each_ended_allocation_incarnation_once(tmp_path):
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    (tmp_path / ".gym_followup_queued.100").write_text("150\n")
+    (tmp_path / ".gym_followup_sentinel.100").write_text("175\n")
+    (tmp_path / "allocations").write_text(
+        # 100 was requeued once, 150 (its follow-up) was cancelled before it started, and sentinel 175 runs.
+        f"100|NODE_FAIL|1000|1300|300|2|node[01-02]|{_GPU_TRES}|0\n"
+        f"100|PREEMPTED|1400|1600|200|2|node[03-04]|{_GPU_TRES}|1\n"
+        "150|CANCELLED by 42|None|1650|0|1|None assigned||0\n"
+        f"175|RUNNING|1700|Unknown|5|2|node[05-06]|{_GPU_TRES}|0\n"
+        "garbage\n"
+    )
+
+    result = _run_prologue(tmp_path, ResumeConfig(), "PREEMPTED")
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    # One query, once this job has queued its follow-up and sentinel (999): every job the job dir names.
+    [call] = (tmp_path / "allocation_calls").read_text().splitlines()
+    assert call == f"%s -D -X -P -n -j 100,150,175,200,999 --format={JOB_ALLOCATIONS_FORMAT}"
+    assert _sbatch_calls(tmp_path)
+    rows = _allocations(tmp_path)
+    assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", row.pop("recorded_at")) for row in rows)
+    assert rows == [
+        {
+            "alloc_tres": _GPU_TRES,
+            "elapsed_s": 300,
+            "end_epoch_s": 1300,
+            "ended": True,
+            "gpus": 16,
+            "job_id": "100",
+            "node_list": "node[01-02]",
+            "nodes": 2,
+            "restarts": 0,
+            "source": "sacct",
+            "start_epoch_s": 1000,
+            "state": "NODE_FAIL",
+        },
+        {
+            "alloc_tres": _GPU_TRES,
+            "elapsed_s": 200,
+            "end_epoch_s": 1600,
+            "ended": True,
+            "gpus": 16,
+            "job_id": "100",
+            "node_list": "node[03-04]",
+            "nodes": 2,
+            "restarts": 1,
+            "source": "sacct",
+            "start_epoch_s": 1400,
+            "state": "PREEMPTED",
+        },
+        {
+            "alloc_tres": "",
+            "elapsed_s": 0,
+            "end_epoch_s": 1650,
+            "ended": True,
+            "gpus": None,
+            "job_id": "150",
+            "node_list": "None assigned",
+            "nodes": 1,
+            "restarts": 0,
+            "source": "sacct",
+            "start_epoch_s": None,
+            "state": "CANCELLED",
+        },
+    ]
+
+    # The same job again (a requeue, or a sentinel in its place) adds no row for an incarnation already recorded.
+    (tmp_path / "pending").unlink()
+    (tmp_path / ".gym_followup_queued.200").unlink()
+    again = _run_prologue(tmp_path, ResumeConfig(), "PREEMPTED")
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert len(_allocations(tmp_path)) == 3
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_unavailable_allocation_accounting_records_nothing_and_the_chain_continues(tmp_path):
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+
+    result = _run_prologue(tmp_path, ResumeConfig(), "PREEMPTED", extra_env={"FAKE_ALLOCATIONS_FAIL": "1"})
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    # The same bounded retries as the previous job's accounting query, then a gap, never a made-up row.
+    assert len((tmp_path / "allocation_calls").read_text().splitlines()) == 6
+    assert "scheduler accounting of jobs 100,200,999 is unavailable" in result.stdout
+    assert not (tmp_path / JOB_ALLOCATIONS_NAME).exists()
+    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "60"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_the_segment_that_ends_the_chain_records_its_own_allocation(tmp_path, monkeypatch):
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    (tmp_path / "allocations").write_text(
+        f"100|TIMEOUT|1000|1300|300|2|node[01-02]|{_GPU_TRES}|0\n"
+        f"200|RUNNING|1400|Unknown|90|2|node[03-04]|{_GPU_TRES}|0\n"
+    )
+
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", driver=_FINISHES_THE_RUN, sentinel_id="998")
+
+    assert result.returncode == 0 and "Run complete" in result.stdout, result.stdout + result.stderr
+    # The prologue recorded the previous job; the epilogue, with nothing queued after it, its own running allocation.
+    assert [(row["job_id"], row["ended"], row["elapsed_s"], row["end_epoch_s"]) for row in _allocations(tmp_path)] == [
+        ("100", True, 300, 1300),
+        ("200", False, 90, None),
+    ]
+    # The cancelled follow-up and sentinel are jobs of the run too: the epilogue asked about them.
+    last_call = (tmp_path / "allocation_calls").read_text().splitlines()[-1]
+    assert " -j 100,200,998,999 " in last_call
+
+    # A reader that later finds the ended incarnation (here a recovery's prologue) adds it beside the running one.
+    (tmp_path / "allocations").write_text(f"200|COMPLETED|1400|1500|100|2|node[03-04]|{_GPU_TRES}|0\n")
+    (tmp_path / "pending").unlink()
+    _run_prologue(tmp_path, ResumeConfig(), "COMPLETED", job_id="300", prev_job_id="200")
+    assert [(row["job_id"], row["ended"]) for row in _allocations(tmp_path)] == [
+        ("100", True),
+        ("200", False),
+        ("200", True),
+    ]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_an_idle_sentinel_records_its_own_allocation_and_nothing_else_changes(tmp_path):
+    (tmp_path / ".gym_job_chain").write_text("100\n777\n")
+    stop = "Infra retry limit (3) reached. Stopping.\n"
+    (tmp_path / INCOMPLETE_MARKER_NAME).write_text(stop)
+    (tmp_path / "allocations").write_text(
+        f"100|TIMEOUT|1000|1300|300|2|node[01-02]|{_GPU_TRES}|0\n"
+        f"777|FAILED|1400|1500|100|2|node[03-04]|{_GPU_TRES}|0\n"
+        f"200|RUNNING|1600|Unknown|4|2|node[05-06]|{_GPU_TRES}|0\n"
+    )
+
+    # Sentinel 200 is in no file of the job dir: it names itself in the query.
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of("13"))
+
+    assert result.returncode == 0 and "REACHED_WORK" not in result.stdout, result.stdout + result.stderr
+    assert "Follow-up 777 recorded itself in the chain" in result.stdout
+    assert " -j 100,200,777 " in (tmp_path / "allocation_calls").read_text()
+    assert [(row["job_id"], row["ended"], row["end_epoch_s"]) for row in _allocations(tmp_path)] == [
+        ("100", True, 1300),
+        ("777", True, 1500),
+        ("200", False, None),
+    ]
+    # The sentinel stays out of the chain and changes no budget, marker or queue.
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n777\n"
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == stop
+    assert _sbatch_calls(tmp_path) == []
+    assert not (tmp_path / ".gym_accumulated_walltime").exists()
+    assert not (tmp_path / ".gym_infra_retries").exists()
+
+    # A later job that sees the sentinel's terminal record adds one ended row beside the running one.
+    (tmp_path / ".gym_followup_sentinel.100").write_text("200\n")
+    (tmp_path / "allocations").write_text(f"200|COMPLETED|1600|1605|5|2|node[05-06]|{_GPU_TRES}|0\n")
+    _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", job_id="300", prev_job_id="777")
+    assert [(row["job_id"], row["ended"]) for row in _allocations(tmp_path) if row["job_id"] == "200"] == [
+        ("200", False),
+        ("200", True),
+    ]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_job_that_stops_the_chain_records_its_own_allocation(tmp_path):
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    (tmp_path / ".gym_infra_retries").write_text("3\n")
+    (tmp_path / "allocations").write_text(
+        f"100|PREEMPTED|1000|1300|300|2|node[01-02]|{_GPU_TRES}|0\n"
+        f"200|RUNNING|1400|Unknown|3|2|node[03-04]|{_GPU_TRES}|0\n"
+    )
+
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "PREEMPTED")
+
+    assert result.returncode == 1 and "Infra retry limit" in result.stdout, result.stdout + result.stderr
+    assert _sbatch_calls(tmp_path) == []
+    assert [(row["job_id"], row["ended"]) for row in _allocations(tmp_path)] == [("100", True), ("200", False)]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_sentinel_that_ends_a_complete_run_records_its_own_allocation(tmp_path, monkeypatch):
+    _finished_run(tmp_path, monkeypatch)
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    (tmp_path / "allocations").write_text(f"200|RUNNING|1400|Unknown|3|2|node[03-04]|{_GPU_TRES}|0\n")
+
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of("14"))
+
+    assert result.returncode == 0 and "Run complete" in result.stdout, result.stdout + result.stderr
+    assert _sbatch_calls(tmp_path) == []
+    assert [(row["job_id"], row["ended"]) for row in _allocations(tmp_path)] == [("200", False)]
+
+
+def _timeout_on_job_path() -> bool:
+    return any(Path(directory, "timeout").exists() for directory in ("/usr/bin", "/bin"))
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.skipif(not _timeout_on_job_path(), reason="coreutils timeout not installed")
+def test_stalled_allocation_accounting_is_cut_off_and_the_chain_continues(tmp_path, monkeypatch):
+    monkeypatch.setattr("nemo_gym.orchestration.executors.slurm.resume_script.JOB_ALLOCATIONS_BUDGET_S", 2)
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+
+    started = time.monotonic()
+    result = _run_prologue(tmp_path, ResumeConfig(), "PREEMPTED", extra_env={"FAKE_ALLOCATIONS_STALL": "1"})
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    # The stalled query (60 s per attempt) is cut off at the 2 s budget.
+    assert time.monotonic() - started < 30
+    assert "unavailable" in result.stdout
+    assert not (tmp_path / JOB_ALLOCATIONS_NAME).exists()
+    # The allocation and its continuation were recorded before the optional query.
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n200\n"
+    assert [call.split()[0] for call in _sbatch_calls(tmp_path)] == [
+        "--dependency=afternotok:200",
+        "--dependency=afterany:999",
+    ]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.skipif(not _timeout_on_job_path(), reason="coreutils timeout not installed")
+def test_stalled_allocation_accounting_does_not_hold_up_the_end_of_the_chain(tmp_path, monkeypatch):
+    monkeypatch.setattr("nemo_gym.orchestration.executors.slurm.resume_script.JOB_ALLOCATIONS_BUDGET_S", 2)
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    driver = f"{_FINISHES_THE_RUN}; ( exit 0 )"
+
+    result = _run_prologue(
+        tmp_path, ResumeConfig(), "TIMEOUT", driver=driver, extra_env={"FAKE_ALLOCATIONS_STALL": "1"}
+    )
+
+    assert result.returncode == 0 and "Run complete" in result.stdout, result.stdout + result.stderr
+    [entry] = _chain_end_entries(tmp_path)
+    assert entry["ended"] == "run_complete"
+    assert not (tmp_path / JOB_ALLOCATIONS_NAME).exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("stale", [False, True], ids=["held", "stale"])
+def test_a_held_allocation_lock_skips_recording_and_a_stale_one_is_broken(tmp_path, stale):
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    (tmp_path / "allocations").write_text(f"100|PREEMPTED|1000|1300|300|2|node[01-02]|{_GPU_TRES}|0\n")
+    lock = tmp_path / JOB_ALLOCATIONS_LOCK_NAME
+    lock.write_text("")
+    if stale:
+        os.utime(lock, (1_000_000, 1_000_000))
+
+    result = _run_prologue(tmp_path, ResumeConfig(), "PREEMPTED")
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert [row["job_id"] for row in _allocations(tmp_path)] == (["100"] if stale else [])
+    # A lock another writer holds is never taken from it; the one this job took is released.
+    assert lock.exists() is not stale
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_jobs_that_record_at_once_write_each_row_once(tmp_path):
+    prologue = render_resume_prologue(ResumeConfig())
+    start = prologue.index("# Every job of the run the job dir names")
+    functions = prologue[start : prologue.index("# The previous job queues a sentinel")]
+    (tmp_path / "functions.sh").write_text(functions)
+    (tmp_path / ".gym_job_chain").write_text("100\n150\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    sacct = bin_dir / "sacct"
+    sacct.write_text(
+        "#!/bin/bash\n"
+        f"echo '100|PREEMPTED|1000|1300|300|2|node[01-02]|{_GPU_TRES}|0'\n"
+        f"echo '100|NODE_FAIL|1400|1500|100|2|node[01-02]|{_GPU_TRES}|1'\n"
+        f"echo '150|TIMEOUT|1600|1700|100|2|node[01-02]|{_GPU_TRES}|0'\n"
+    )
+    sacct.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "OUTPUT_DIR": str(tmp_path)}
+    script = 'source functions.sh; _gym_record_allocations "$1"'
+    writers = [
+        subprocess.Popen(["bash", "-c", script, "writer", str(job)], cwd=tmp_path, env=env) for job in range(300, 316)
+    ]
+    assert [writer.wait() for writer in writers] == [0] * len(writers)
+
+    assert sorted((row["job_id"], row["restarts"]) for row in _allocations(tmp_path)) == [
+        ("100", 0),
+        ("100", 1),
+        ("150", 0),
+    ]
+    assert not (tmp_path / JOB_ALLOCATIONS_LOCK_NAME).exists()

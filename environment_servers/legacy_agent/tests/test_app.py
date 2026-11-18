@@ -45,7 +45,7 @@ class _Client(ServerClient):
         return self.responses.pop(0)
 
 
-def _config(**limits: float) -> LegacyAgentEnvironmentServerConfig:
+def _config(**limits: float | None) -> LegacyAgentEnvironmentServerConfig:
     return LegacyAgentEnvironmentServerConfig(
         name="environment",
         host="environment",
@@ -138,7 +138,7 @@ class _SlowClient(_Client):
         return _Upstream(b'{"reward": 1.0}')
 
 
-def _slow_server(delay: float, **limits: float) -> tuple[LegacyAgentEnvironmentServer, _SlowClient]:
+def _slow_server(delay: float, **limits: float | None) -> tuple[LegacyAgentEnvironmentServer, _SlowClient]:
     client = _SlowClient(
         head_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create({}),
@@ -186,8 +186,13 @@ def test_an_episode_within_its_deadline_is_relayed_unchanged() -> None:
     assert client.cancelled == []
 
 
-def test_without_a_deadline_a_slow_episode_is_relayed() -> None:
-    server, client = _slow_server(delay=0.3)
+def test_the_deadline_is_six_hours_unless_configured() -> None:
+    assert _config().default_episode_timeout_seconds == 21600
+    assert _config(default_episode_timeout_seconds=120).default_episode_timeout_seconds == 120
+
+
+def test_a_relay_with_a_null_deadline_relays_a_slow_episode() -> None:
+    server, client = _slow_server(delay=0.3, default_episode_timeout_seconds=None)
 
     response = TestClient(server.setup_webserver()).post("/run", json={})
 

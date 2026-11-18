@@ -70,6 +70,7 @@ from nemo_gym.core import (
     PROVIDER_UNAVAILABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_model_sampling_segment,
     current_rollout_id,
 )
 from nemo_gym.models import ChatCompletionsConverter
@@ -78,6 +79,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
 )
 from nemo_gym.telemetry import Profiler
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
     merge_replay_subagent_trajectories,
@@ -146,6 +148,16 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     container_formatter: str | list[str] = Field(
         default="docker://swebench/sweb.eval.x86_64.{instance_id}", description="Container path template"
     )
+    preserve_episode_artifacts: bool = Field(
+        default=True,
+        description=(
+            "Keep each successful episode's results directory after its /run completes. "
+            "Episode scratch is very large; long training runs may set this to False so completed "
+            "directories are reaped instead of accumulating until the filesystem fills mid-run "
+            "(failed episodes always keep their directory, including traceback.err)."
+        ),
+    )
+
     swebench_tests_timeout: int = Field(default=30 * 60, description="Timeout for running tests (seconds)")
 
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
@@ -254,6 +266,7 @@ class ExecuteContainerCommandArgs(BaseModel):
     expected_file_pattern: str
     mode: Union[Literal["agent"], Literal["eval"]]
     timeout: int
+    overlay_dirname: Optional[str] = None
 
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
@@ -2624,12 +2637,20 @@ def _kill_container_tree(root_pid: int) -> None:
             pass
 
 
+def _reap_overlay_dir(overlay_dirname: Optional[str]) -> None:
+    """Remove a container's overlay upperdir after a SIGKILL teardown."""
+    if not overlay_dirname:
+        return
+    rmtree(Path(os.environ.get("TMPDIR") or "/tmp") / overlay_dirname, ignore_errors=True)
+
+
 class ActiveContainerCommand(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     process: Process
     log_file: Any
     log_file_path: Path
+    overlay_dirname: Optional[str] = None
     watchdog_task: Optional[Any] = None
     watchdog_stats: Dict[str, Any] = Field(default_factory=dict)
 
@@ -2772,7 +2793,12 @@ class RunOpenHandsAgent(BaseModel):
             apptainer_cmd, stdout=log_file, stderr=log_file, start_new_session=True
         )
 
-        active_command = ActiveContainerCommand(process=process, log_file=log_file, log_file_path=log_file_path)
+        active_command = ActiveContainerCommand(
+            process=process,
+            log_file=log_file,
+            log_file_path=log_file_path,
+            overlay_dirname=command.overlay_dirname,
+        )
         if self.config.memory_watchdog_enabled:
             active_command.watchdog_task = asyncio.create_task(
                 self._memory_watchdog(process.pid, active_command.watchdog_stats, command.mode)
@@ -2800,6 +2826,8 @@ class RunOpenHandsAgent(BaseModel):
             active_command.log_file.close()
             if active_command.watchdog_task is not None:
                 active_command.watchdog_task.cancel()
+            if active_command.process.returncode is not None:
+                _reap_overlay_dir(active_command.overlay_dirname)
 
         if active_command.watchdog_stats.get("oom_killed"):
             raise RuntimeError(
@@ -2843,6 +2871,7 @@ class RunOpenHandsAgent(BaseModel):
         active_command.log_file.close()
         if active_command.watchdog_task is not None:
             active_command.watchdog_task.cancel()
+        _reap_overlay_dir(active_command.overlay_dirname)
 
     async def process_single_datapoint(self) -> Optional[Path]:
         if self.config.verify_golden_patch:
@@ -3375,9 +3404,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
         data_point = params.problem_info
 
-        # Fix localhost URLs not working sometimes
+        # Fix localhost URLs not working sometimes.
+        # Append non-fatally; a write to /etc/hosts can fail and abort the entire episode.
         container_commands = []
-        container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
+        container_commands.append("(echo '127.0.0.1 localhost' >>/etc/hosts 2>/dev/null || true)")
+
+        # Under the overlay the repository .git can appear owned by a different uid.
+        container_commands.append("(git config --global --add safe.directory '*' 2>/dev/null || true)")
 
         # Apptainer uid namespacing makes the eval-image's `chmod` against
         # /var/run/postgresql fail with "Value too large for defined data
@@ -3709,9 +3742,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         env_args += "--env CHROME_BIN=/tmp/chrome-wrapper.sh "
         env_args += "--env CHROMIUM_BIN=/tmp/chrome-wrapper.sh "
 
+        # Back the container's writable layer with a directory overlay.
+        # The tmpfs layer is capped, but SWE working trees routinely exceed it.
+        # A `git reset --hard` call is often sufficient to kill the episode otherwise.
+        # The dir name is generated here rather than by shell mktemp so the kill paths
+        # can reap the dir after a SIGKILL, which never runs the shell's cleanup trap.
+        command.overlay_dirname = f"apptainer_overlay_{command.mode}_{uuid.uuid4().hex}"
+
         # Launch Apptainer container and execute the script file
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f'OVERLAY_DIR="${{TMPDIR:-/tmp}}/{command.overlay_dirname}" && '
+            f'rm -rf "$OVERLAY_DIR" && mkdir "$OVERLAY_DIR" && '
+            f"trap 'rm -rf \"$OVERLAY_DIR\"' EXIT TERM INT && "
+            f'apptainer exec --overlay "$OVERLAY_DIR" --cleanenv --pid --no-mount home,tmp,bind-paths '
             f"{env_args}"
             f"{mount_str} "
             f" {params.container} bash {container_script_path}"
@@ -3865,7 +3908,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,
-            install_openhands_capture_overlay=token_capture_enabled,
+            # The overlay points OpenHands at the per-run URL, which it otherwise ignores: needed whenever that URL
+            # carries what the model server requires, the capture prefix or the rollout's sampling segment.
+            install_openhands_capture_overlay=token_capture_enabled or current_model_sampling_segment() is not None,
             profiling_dir=persistent_dir / "profiling",
             profiling_mounted_dir=base_mounted_dir / "profiling",
             ray_queue_timestamp=time.time(),
@@ -3944,7 +3989,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f.write(params.model_dump_json(indent=4))
 
         try:
-            return await self._inner_responses(params, dataset_processor)
+            response = await self._inner_responses(params, dataset_processor)
+            if not self.config.preserve_episode_artifacts:
+                rmtree(params.persistent_dir, ignore_errors=True)
+            return response
         except Exception as e:
             traceback_file = params.persistent_dir / "traceback.err"
             with traceback_file.open("w") as f:
@@ -4132,3 +4180,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     SWEBenchWrapper.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEBenchWrapper.run_webserver()  # noqa: F401
