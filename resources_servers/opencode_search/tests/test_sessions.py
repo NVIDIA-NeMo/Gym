@@ -683,9 +683,10 @@ def test_with_the_mask_policy_a_judge_without_a_verdict_masks_the_row_for_traini
 
 @pytest.mark.parametrize("policy", ["zero", "mask"])
 def test_a_budget_ending_keeps_its_kind_when_the_judge_gives_no_verdict(workdir, policy) -> None:
-    """Recovery re-judges a judge_unparseable row from a payload that carries no ending, which would grade a capped
-    run unmasked; agent_limit keeps it masked, as when the judge gave a verdict, under either policy. The judge decided
-    its reward, so the mask policy also keeps it out of the training loss, as for any rollout without a verdict."""
+    """Recovery re-judges a masked judge_unparseable row from a payload that carries no ending, which would grade a
+    capped run unmasked; agent_limit keeps it masked, as when the judge gave a verdict, under either policy. The judge
+    decided its reward, so the mask policy also keeps it out of the training loss, as for any rollout without a
+    verdict."""
     server = _server(workdir, unparseable_verdict_policy=policy)
     client = TestClient(server.setup_webserver())
     _mock_judge(server, NO_VERDICT)

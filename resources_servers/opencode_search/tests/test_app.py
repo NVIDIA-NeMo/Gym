@@ -110,7 +110,7 @@ class TestParseJudgeVerdict:
 
     def test_an_answer_that_is_the_template_line_is_graded_on_the_verdict(self):
         """When the response holds the template's line itself, a judge that extracts it has graded it: the verdict
-        counts, rather than the row leaving the score as a judge failure."""
+        counts, rather than the row scoring 0, or being masked, as one the judge gave no verdict."""
         text = f"extracted_final_answer: {_JUDGE_TEMPLATE_ECHO}\nreasoning: not an answer\ncorrect: no"
         assert parse_judge_verdict(text, response=f"Exact Answer: {_JUDGE_TEMPLATE_ECHO}") == (
             False,

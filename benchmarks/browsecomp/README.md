@@ -290,10 +290,10 @@ gym eval run --no-serve <the same --config and ++ arguments> \
 - Pin the session preset to the OpenCode binary the relay agent installs, so both run one build.
 - Compare question by question: each row's `reward`, `mask_sample` and `failure_kind`, and the failure rows.
 - A row graded again from its saved answer carries no budget mask on either preset (see
-  `resources_servers/opencode_search/README.md`): one from `gym eval reverify`, or one whose judge failed or gave no
-  verdict and that Gym judged again at the end of the collection or when the run resumed, which names that re-judge in
-  `_ng_rejudge_operation_id`. Leave such rows out of the `mask_sample` and `failure_kind` comparison and report them on
-  their own.
+  `resources_servers/opencode_search/README.md`): one from `gym eval reverify`, or one whose judge failed, or gave no
+  verdict under `unparseable_verdict_policy: mask`, and that Gym judged again at the end of the collection or when the
+  run resumed, which names that re-judge in `_ng_rejudge_operation_id`. Leave such rows out of the `mask_sample` and
+  `failure_kind` comparison and report them on their own.
 - Compare token counts by `response.usage.input_tokens` and `output_tokens`, which both presets count the same way;
   for a total, add the two on both, since the relay's `total_tokens` is OpenCode's stored total. Leave out the cached
   and reasoning details (see Token usage above).

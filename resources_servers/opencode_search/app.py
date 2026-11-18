@@ -1032,19 +1032,20 @@ class SearchResourcesServer(SimpleResourcesServer):
         )
 
     def _maybe_abort_on_judge_failures(self) -> None:
-        """Make verify answer 500 once the judge looks dead, rather than mask every remaining row.
+        """Make verify answer 500 once the judge looks dead, rather than score 0 or mask every remaining row.
 
         Ported from the legacy stack (the legacy stack's swe_agents/app.py).
-        Without it a dead grader is indistinguishable from a model that answers nothing: every row
-        is masked or routes to the failures sidecar, the headline metric is computed over whatever survived,
-        and the run burns its whole wall clock producing a number from a handful of samples.
+        Without it a dead grader is indistinguishable from a model that answers nothing: every row is scored 0 or
+        masked (unparseable_verdict_policy) or routes to the failures sidecar, the headline metric counts those zeros
+        or is computed over whatever survived, and the run burns its whole wall clock producing a number that
+        measures nothing.
         """
         limit = self.config.judge_max_consecutive_failures
         if limit and self._judge_consecutive_failures >= limit:
             raise RuntimeError(
                 f"judge appears dead: {self._judge_consecutive_failures} consecutive rollouts "
                 f"failed to grade (judge_max_consecutive_failures={limit}). Aborting rather than "
-                f"masking the rest of the run."
+                f"grading the rest of the run without a verdict."
             )
 
     # ---- Exa cache proxy ----------------------------------------------------------------------
