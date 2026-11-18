@@ -63,10 +63,13 @@ genrm_compare_resources_server:
       # Principle-based comparison
       use_principle: false
       # default_principle: "..." (see code for full default text)
+      # With use_principle disabled, these IDs apply to every prompt routed here,
+      # including prompts from all agents that share this verifier.
+      # default_rubric_ids: [1]
       
       # Aggregator method (only "simple_tiebreaker" is currently supported)
       aggregator_method: simple_tiebreaker
-      # rubric_mean requires expected_rubric_ids on each dataset record.
+      # rubric_mean requires expected_rubric_ids on each record or configured default_rubric_ids.
       score_source: overall  # "overall" or "rubric_mean"
       
       # Bonus for shortest reasoning trace if in top percentile
