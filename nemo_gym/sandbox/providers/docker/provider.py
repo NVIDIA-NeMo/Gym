@@ -314,6 +314,24 @@ def _normalize_image(image: str) -> str:
     return image[len(prefix) :] if image.startswith(prefix) else image
 
 
+async def _finish_despite_cancellation[T](task: asyncio.Future[T]) -> T:
+    """``task``'s result, waited for however often the caller is cancelled meanwhile.
+
+    Once ``task`` is done, a cancellation the caller received while waiting is raised in place of the result.
+    """
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait((task,))
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    if cancellation is not None:
+        if not task.cancelled():
+            task.exception()  # The cancellation takes the place of the task's outcome, an error included.
+        raise cancellation
+    return task.result()
+
+
 def _resource_limit_flags(resources: SandboxResources) -> list[str]:
     flags: list[str] = []
     if resources.cpu is not None:
@@ -476,8 +494,9 @@ class DockerProvider:
         ``spec.ttl_s`` bounds the lifetime (the keep-alive sleeps for it and ``--rm`` self-removes on
         exit). ``spec.provider_options`` may carry ``volumes`` (strings -> ``-v``, shared-storage mounts
         -> ``--mount``) and ``run_args`` (extra run flags). ``spec.metadata`` entries become container labels
-        beside ``nemo-gym.sandbox=1``. A half-created container is force-removed on any failure, and a created one
-        whose readiness probe or shell detection is cancelled is removed before the cancellation propagates.
+        beside ``nemo-gym.sandbox=1``. A half-created container is force-removed on any failure. A cancelled create
+        leaves no container either: the ``docker run`` under way answers first, and the container is then removed,
+        once inspect shows it is this provider's, before the cancellation propagates, however often it repeats.
         """
         if spec.image is None:
             raise DockerCreateError("spec.image is required for the docker provider")
@@ -529,7 +548,15 @@ class DockerProvider:
             keepalive_cmd = f"sleep {max(1, math.ceil(spec.ttl_s))}" if enforce_ttl else cfg.keepalive_cmd
             argv += ["--entrypoint", cfg.keepalive_shell, image, "-c", keepalive_cmd]
 
-        await self._run_create_with_reconciliation(argv, name=name, image=image)
+        try:
+            await self._run_create_with_reconciliation(argv, name=name, image=image)
+        except asyncio.CancelledError:
+            # A caller's deadline (a Compose collection's startup timeout) expired while the container was being
+            # created. No caller will hold its handle, and a Compose service's keep-alive has no TTL to end it.
+            await _finish_despite_cancellation(
+                asyncio.ensure_future(self._remove_cancelled_create(name=name, image=image))
+            )
+            raise
 
         handle = SandboxHandle(
             sandbox_id=name,
@@ -546,16 +573,24 @@ class DockerProvider:
             handle.raw.shell = await self._resolve_shell(name)  # resolve real shell once exec is confirmed live
         except BaseException:
             # Also on cancellation (a caller's deadline expiring during the probe): the container is running and no
-            # caller holds its handle yet, so nothing else would remove it. A second cancellation waits for the
-            # removal before it propagates.
-            cleanup = asyncio.ensure_future(self._cleanup_failed_create_handle(handle))
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                await cleanup
-                raise
+            # caller holds its handle yet, so nothing else would remove it. Further cancellations wait for the
+            # removal before they propagate.
+            await _finish_despite_cancellation(asyncio.ensure_future(self._cleanup_failed_create_handle(handle)))
             raise
         return handle
+
+    async def _remove_cancelled_create(self, *, name: str, image: str) -> None:
+        """Remove the container a cancelled create left under ``name``, if inspect shows it is this provider's.
+
+        The ownership and image check is reconciliation's: a same-name container without them is left alone.
+        """
+        try:
+            state = await self._inspect_owned_container(name=name, image=image)
+        except DockerCreateError as exc:
+            LOGGER.warning("Leaving Docker container %s after a cancelled create: %s", name, exc)
+            return
+        if state is not None:
+            await self._force_remove(name)
 
     async def _run_create_with_reconciliation(self, argv: list[str], *, name: str, image: str) -> None:
         """Run ``docker run`` without leaking a container when its response is lost.
@@ -564,13 +599,19 @@ class DockerProvider:
         error, or same-name conflict, inspect that exact name before retrying.
         Reuse it only when both the Sandbox ownership label and requested image
         match; never remove an unrelated collision.
+
+        A cancellation that arrives during an attempt's ``docker run`` (its wait for a command slot included)
+        propagates only once the client has answered or timed out: until then it could still create the container,
+        after any removal the caller issued.
         """
         cfg = self._create_config
         last_detail = "docker run did not complete"
         last_cause: BaseException | None = None
         for attempt in range(cfg.transport_retries + 1):
             try:
-                code, _out, err = await self._run(argv, timeout_s=cfg.start_timeout_s)
+                code, _out, err = await _finish_despite_cancellation(
+                    asyncio.ensure_future(self._run(argv, timeout_s=cfg.start_timeout_s))
+                )
             except TimeoutError as exc:
                 last_cause = exc
                 last_detail = f"docker run timed out for image={image!r}: {exc}"

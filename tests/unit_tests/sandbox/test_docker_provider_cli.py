@@ -105,9 +105,23 @@ def run(args):
                     "env": dict(value.split("=", 1) for value in values("--env")),
                     "workdir": (values("-w") or ["/"])[-1],
                     "address": f"172.17.0.{number}",
+                    "label": "0" if "unowned" in image else "1",
                 }
             )
         )
+    if "held-run" in image:
+        # The container exists, but the client has not answered yet: it answers once the test releases it.
+        (CONTAINERS / name / "run-waiting").touch()
+        while not (ROOT / "release-run").exists() and not (ROOT / "shutdown").exists():
+            time.sleep(0.02)
+    if "unowned" in image:
+        # The name belongs to a container another owner made: Docker refuses it.
+        print(
+            f'docker: Error response from daemon: Conflict. The container name "/{name}" is already in use by '
+            'container "0123". You have to remove (or rename) that container to be able to reuse that name.',
+            file=sys.stderr,
+        )
+        return 125
     print(name)
     return 0
 
@@ -187,6 +201,9 @@ def inspect(args):
         return 1
     if "NetworkSettings.Networks" in form:
         print(json.dumps({"bridge": {"IPAddress": container["address"], "GlobalIPv6Address": ""}}))
+    elif "Config.Labels" in form:
+        # Reconciliation's ownership check: the sandbox label, the image and the state.
+        print(f"{container['label']}\t{container['image']}\trunning")
     else:
         print("running")
     return 0
@@ -287,6 +304,19 @@ class FakeDocker:
                 await asyncio.sleep(0.01)
         return self.file(name, path).read_text()
 
+    async def held_run(self) -> str:
+        """The container whose ``docker run`` the fake holds (a ``held-run`` image), once it holds it."""
+        async with asyncio.timeout(10):
+            while not self.created():
+                await asyncio.sleep(0.01)
+        (name,) = self.created()
+        await self.wait_for(name, "run-waiting")
+        return name
+
+    def release_run(self) -> None:
+        """Let a held ``docker run`` answer."""
+        (self.root / "release-run").touch()
+
     async def wait_for(self, name: str, marker: str) -> None:
         """Wait until the fake writes ``marker`` in container ``name``'s folder."""
         async with asyncio.timeout(10):
@@ -386,6 +416,67 @@ async def test_a_cancelled_create_removes_its_container_even_when_cancelled_agai
         await create
     assert fake_docker.removed() == {created}
     assert fake_docker.containers() == set()
+
+
+# --------------------------------------------------------------------------- #
+# A create cancelled while ``docker run`` has not answered
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_a_startup_deadline_during_docker_run_removes_the_container_once_run_answers(fake_docker):
+    """The collection's deadline expired while ``docker run`` had created the container but not answered. The create
+    waits for the answer, removes nothing before it (the client could still create the container after a removal),
+    then removes the container before the timeout propagates."""
+    provider = DockerProvider(exec={"exec_shell": "sh"})
+    group = collection(
+        provider, {"services": {"main": {"image": "held-run", "command": ["sleep", "60"]}}}, timeout_s=0.5
+    )
+    start = asyncio.create_task(group.start())
+    created = await fake_docker.held_run()
+    await asyncio.sleep(1)
+    assert not start.done()
+    assert [call[0] for call in fake_docker.calls()] == ["run"]
+    fake_docker.release_run()
+    with pytest.raises(TimeoutError):
+        await start
+    assert ["rm", "-f", created] in fake_docker.calls()
+    assert fake_docker.removed() == {created}
+    assert fake_docker.containers() == set()
+
+
+@pytest.mark.asyncio
+async def test_a_create_cancelled_during_docker_run_removes_the_container_even_when_cancelled_again(fake_docker):
+    """Cancelling ``create()`` while ``docker run`` has not answered waits for the answer, then removes the container
+    it made; a second cancellation that arrives while the removal runs waits for it too."""
+    provider = DockerProvider(exec={"exec_shell": "sh"})
+    create = asyncio.create_task(provider.create(SandboxSpec(image="held-run-slow-rm")))
+    created = await fake_docker.held_run()
+    create.cancel()
+    await asyncio.sleep(0.2)
+    assert not create.done()
+    assert [call[0] for call in fake_docker.calls()] == ["run"]
+    fake_docker.release_run()
+    await fake_docker.wait_for(created, "rm-started")
+    create.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await create
+    assert [call[0] for call in fake_docker.calls()] == ["run", "inspect", "rm"]
+    assert fake_docker.removed() == {created}
+    assert fake_docker.containers() == set()
+
+
+@pytest.mark.asyncio
+async def test_a_create_cancelled_during_docker_run_leaves_a_same_name_container_it_does_not_own(fake_docker):
+    """When the answer is a name conflict with a container that lacks the sandbox label, the cancelled create removes
+    nothing: ownership is checked as reconciliation checks it."""
+    provider = DockerProvider(exec={"exec_shell": "sh"})
+    create = asyncio.create_task(provider.create(SandboxSpec(image="held-run-unowned")))
+    created = await fake_docker.held_run()
+    create.cancel()
+    fake_docker.release_run()
+    with pytest.raises(asyncio.CancelledError):
+        await create
+    assert [call[0] for call in fake_docker.calls()] == ["run", "inspect"]
+    assert fake_docker.containers() == {created}
 
 
 # --------------------------------------------------------------------------- #
