@@ -15,6 +15,10 @@ description: >
 
 # Run a Gym Evaluation to Its Result
 
+For failure-handling changes, consult [failure-contracts](../failure-contracts/SKILL.md). It describes
+the strongly recommended shared path and its consumer benefits; alternatives can still merge, and
+deviation alone is not a blocker.
+
 The Gym pages are the reference; when they and this skill disagree, the pages win:
 [Configuration](../../../fern/versions/latest/pages/orchestration/configuration.mdx),
 [Resumable Runs](../../../fern/versions/latest/pages/orchestration/how-to/resumable-runs.mdx),

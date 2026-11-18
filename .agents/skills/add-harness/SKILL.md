@@ -13,6 +13,10 @@ description: >
 
 # Add or Update a Harness in NeMo-Gym
 
+For failure-handling changes, consult [failure-contracts](../failure-contracts/SKILL.md). It describes
+the strongly recommended shared path and its consumer benefits; alternatives can still merge, and
+deviation alone is not a blocker.
+
 The Gym page [Add or Update a Harness](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx) is the contract and command reference. When it and this skill disagree, the page wins. This skill adds the order of work, the decisions to make before writing code, and the checks a harness must pass before it merges (Step 7). Read the linked sections; do not work from this summary alone.
 
 Words used below follow the page's [Terminology](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminology): the *harness* is the agent runtime, the *adapter* is the Agent Server that wraps it. A *pairing* is one harness run on one benchmark: the adapter is the agent, the benchmark's Resources Server prepares and verifies the tasks, and a `single_agent_turn` Environment Server connects the two for each episode.

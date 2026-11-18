@@ -12,6 +12,10 @@ description: >
 
 # Add Benchmark to NeMo-Gym
 
+For failure-handling changes, consult [failure-contracts](../failure-contracts/SKILL.md). It describes
+the strongly recommended shared path and its consumer benefits; alternatives can still merge, and
+deviation alone is not a blocker.
+
 The Gym page [Add a benchmark](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx) is the current command reference. When it and this skill disagree, the page wins. This skill adds the order of work and the checks a benchmark must pass before it merges (Step 7).
 
 ## Determine Integration Type
