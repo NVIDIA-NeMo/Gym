@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Install the upstream Hermes source layout and its own frozen Python environment."""
+"""Host-side helpers for running Hermes locally and building the runtime uploaded to task sandboxes."""
 
 import functools
 import hashlib
@@ -28,7 +28,7 @@ HERMES_COMMIT = HERMES_SOURCE.rsplit("@", 1)[1]
 
 @functools.cache
 def source_checkout(source_spec: str = HERMES_SOURCE) -> Path:
-    """Publish the verified checkout atomically, shared by host and sandbox builders."""
+    """Publish the verified checkout atomically in the host cache for local workers and sandbox bundle builds."""
     import fcntl
 
     cache = Path((maybe_get_global_config_dict() or {}).get(CACHE_DIR_KEY_NAME) or CACHE_DIR)
@@ -58,7 +58,10 @@ def source_checkout(source_spec: str = HERMES_SOURCE) -> Path:
 
 @functools.cache
 def host_python() -> Path:
-    """Sync the release lock, including its MCP client, outside Gym's interpreter."""
+    """Return the host interpreter used by the local worker and the MCP toolset probe.
+
+    Reuse a prebuilt Hermes environment or run ``uv sync`` on the host with the upstream lock and MCP extra.
+    """
     bundled = Path(sys.prefix) / "hermes-runtime"
     if (bundled / "hermes-source").is_file():
         recorded = json.loads((bundled / "hermes-source").read_text())
@@ -81,7 +84,7 @@ def host_python() -> Path:
 
 @functools.cache
 def builtin_toolsets() -> frozenset[str]:
-    """Read the toolset names from the exact runtime that will receive the grants."""
+    """Read toolset names in a host subprocess so the agent server can detect conflicting sandbox MCP grants."""
     output = subprocess.check_output(
         [
             str(host_python()),
@@ -95,7 +98,7 @@ def builtin_toolsets() -> frozenset[str]:
 
 
 def stage_source(source: Path, site_packages: Path) -> None:
-    """Stage the release with the data files Hermes resolves relative to its source."""
+    """Copy the host checkout and its runtime assets into the bundle's local site-packages staging directory."""
     tree = site_packages / "hermes-source"
     shutil.copytree(source, tree, symlinks=True, ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__"))
     (site_packages / "hermes-source.pth").write_text("hermes-source\n")

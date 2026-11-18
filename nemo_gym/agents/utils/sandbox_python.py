@@ -187,7 +187,7 @@ def _sha256(path: Path) -> str:
 
 
 async def _python_archive(platform: SandboxPlatform, *, version: str = PYTHON_VERSION) -> Path:
-    """The pinned python-build-standalone archive for ``platform``, checked against its published SHA-256."""
+    """Return the host-cache path to the target platform's Python archive after checking its published SHA-256."""
     checksums = {PYTHON_VERSION: _PYTHON_SHA256, "3.14.7": _PYTHON_314_SHA256}[version]
     expected = checksums.get(f"{platform.arch}/{platform.libc}")
     if expected is None:
@@ -298,7 +298,7 @@ class SandboxPythonRuntime:
 
     @property
     def python(self) -> str:
-        """The runtime's interpreter in the sandbox, once ``is_installed()`` passes or ``install()`` returns.
+        """Absolute path to the interpreter inside the task sandbox after runtime installation.
 
         Run an absolute harness script with ``-E -s``: ignore the task's Python environment settings and user
         site-packages without changing the environment inherited by tool subprocesses. The script directory
@@ -370,6 +370,7 @@ class SandboxPythonRuntime:
             )
 
     async def _site_packages_archive(self, platform: SandboxPlatform) -> Path:
+        """Return the host-cache path to the package archive built for this sandbox platform."""
         path = _cache_dir() / f"{Path(self.directory).name}-{platform.wheel_platform}.tar.gz"
         return await _cached(path, lambda: self._build_site_packages(platform, path))
 

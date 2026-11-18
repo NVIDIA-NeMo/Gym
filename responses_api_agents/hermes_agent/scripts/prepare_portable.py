@@ -18,8 +18,8 @@ from responses_api_agents.hermes_agent.sandbox import _HERMES_RUNTIME, HERMES_MI
 
 
 async def prepare(prefix: Path, *, target: str, source: str) -> None:
+    """Build the target platform's Hermes runtime under the local CLI caller's prefix for mounting in task images."""
     arch, libc = target.split("-unknown-linux-")
-    # The portable prefix is built before the task image is started.
     platform = SandboxPlatform(arch, libc, glibc_minor=HERMES_MIN_GLIBC_MINOR)
     runtime = replace(_HERMES_RUNTIME, requirements=(source,))
     interpreter = await _python_archive(platform, version=runtime.python_version)

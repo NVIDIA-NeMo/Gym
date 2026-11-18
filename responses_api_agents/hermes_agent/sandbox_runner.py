@@ -196,7 +196,7 @@ def _run_worker(input_path: Path, output_path: Path) -> int:
 
 
 def main() -> int:
-    """Run the Hermes worker; the uploaded process supervisor owns its lifetime."""
+    """Run the worker CLI with ``--host DIR`` and pipes on the host, or with input and output paths in the sandbox."""
     if len(sys.argv) != 3:
         print("usage: sandbox_runner.py INPUT_JSON OUTPUT_JSON", file=sys.stderr)
         return 2

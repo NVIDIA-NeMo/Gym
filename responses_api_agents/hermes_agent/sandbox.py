@@ -103,6 +103,7 @@ _HERMES_RUNTIME = HermesPythonRuntime(
         "from run_agent import AIAgent; from tools.mcp_tool_discovery import discover_mcp_tools; import mcp"
     ),
 )
+# These paths are inside the task sandbox. The runner uses the absolute interpreter path regardless of the task's PATH.
 _SANDBOX_RUNTIME_DIR = _HERMES_RUNTIME.directory
 _SANDBOX_PYTHON = _HERMES_RUNTIME.python
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
