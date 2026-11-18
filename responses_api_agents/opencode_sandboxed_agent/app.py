@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -575,6 +576,9 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
     artifacts_dir: Optional[str] = None
     opencode_model_call_timeout: Optional[int] = None
+    # Install local-trajectory-recorder.js: every OpenCode session, subagents and compaction calls included, records
+    # its exact provider requests/responses; the files are copied next to export.json for SFT data collection.
+    record_trajectories: bool = False
 
     # Environment variables exported in front of `opencode run` inside the sandbox.
     #
@@ -752,6 +756,12 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_failed: bool = False
     # Images of the user turn uploaded into the sandbox and attached with `opencode run -f`.
     opencode_attachment_count: int = 0
+    # Set only with record_trajectories, and only once the export is captured: the local recorder output
+    # directory, or "" if the copy failed.
+    opencode_trajectories_dir: Optional[str] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -923,6 +933,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             policy_plugins.append("remaining-context.js")
         if self.config.tool_servers:
             policy_plugins.append("required-mcp.js")
+        if self.config.record_trajectories:
+            # local-trajectory-recorder.js (exact provider requests per OpenCode session, compaction and subagent
+            # sessions included). It is a policy plugin, not a config-named one, so the plugin-ready gate does not
+            # require it: a recording missing after the run never fails or rescores a rollout.
+            policy_plugins.append("local-trajectory-recorder.js")
         uploads.extend((Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}") for name in policy_plugins)
         return uploads
 
@@ -939,6 +954,34 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             command="opencode_run",
             **facts,
         )
+
+    async def _download_trajectories(
+        self, sandbox: AsyncSandbox, remote_dir: str, results_dir: Path
+    ) -> Optional[Path]:
+        """Copy the recorder's per-session directories out of the sandbox, or return None when unavailable.
+
+        A missing or unreadable recording never fails the rollout, so the consumer decides whether to drop it.
+        """
+        local_dir = results_dir / "opencode-trajectories"
+        local_archive = results_dir / "opencode-trajectories.tar.gz"
+        remote_archive = f"{remote_dir}.tar.gz"
+        shutil.rmtree(local_dir, ignore_errors=True)
+        try:
+            archive_result = await sandbox.exec(
+                command=f"tar -czf {quote(remote_archive)} -C {quote(remote_dir)} .",
+                timeout_s=self.config.sandbox_timeout,
+            )
+            if archive_result.return_code != 0 or archive_result.error_type:
+                raise RuntimeError(f"Archiving OpenCode trajectories failed: {archive_result.stderr}")
+            await sandbox.download(remote_archive, local_archive)
+            await asyncio.to_thread(shutil.unpack_archive, local_archive, local_dir, "gztar", filter="data")
+        except Exception:
+            print("Failed to collect OpenCode trajectories", format_exc(), file=sys.stderr)
+            shutil.rmtree(local_dir, ignore_errors=True)
+            return None
+        finally:
+            local_archive.unlink(missing_ok=True)
+        return local_dir
 
     def _agent_sandbox_observation(
         self,
@@ -1335,6 +1378,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if collect_observations:
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
             xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
+        recorder_env_str = ""
+        remote_trajectory_dir = None
+        if self.config.record_trajectories:
+            # Outside the task repo for the same reason as the export below; the recorder defaults to the cwd.
+            remote_trajectory_dir = f"/tmp/nemo-gym-opencode-trajectories-{uuid4().hex}"
+            recorder_env_str = f"OPENCODE_TRAJECTORY_DIR={quote(remote_trajectory_dir)}"
 
         # OpenCode's glob/grep tools otherwise download rg inside the sandbox.
         ripgrep_remote_path = None
@@ -1393,7 +1442,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && rm -f /tmp/nemo-gym-mcp-setup-error
         """
         agent_command = f"""
-        {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
+        {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} {recorder_env_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
         && echo "OpenCode run finished"
         """
@@ -1687,6 +1736,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 failure_reason=f"OpenCode export at {results_local_fpath} had no assistant messages or was invalid",
             )
 
+        trajectories_local_dir = None
+        if remote_trajectory_dir is not None:
+            trajectories_local_dir = await self._download_trajectories(sandbox, remote_trajectory_dir, results_dir)
+
         observations = None
         trajectory = (
             TrajectoryRecord(task_id="", rollout_id=observation_invocation_id) if collect_observations else None
@@ -1873,6 +1926,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_terminal_reason": _terminal_reason(run_output),
             "opencode_attachment_count": len(attachments),
         }
+        if remote_trajectory_dir is not None:
+            run_result["opencode_trajectories_dir"] = str(trajectories_local_dir) if trajectories_local_dir else ""
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
             run_result["_ng_trajectory"] = trajectory

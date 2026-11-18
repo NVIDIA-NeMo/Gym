@@ -61,6 +61,61 @@ checksum before use. Gym uploads it through the sandbox file API and installs it
 alongside OpenCode before execution; no sandbox internet access or root package
 installation is needed. The default is `null`, preserving existing behavior.
 
+## Recording trajectories for compaction and subagent data
+
+`export.json` and the rollout `response` hold only the root session's native
+transcript. They omit the exact provider requests, which matter for SFT data:
+OpenCode's compaction (summarization) calls, and the child sessions that run
+subagents spawned by the `task` tool. Set `record_trajectories: true` to install
+the `local-trajectory-recorder.js` plugin. It writes one directory per
+OpenCode session (root and subagents) under `/tmp` in the sandbox, outside the task
+repository. Once the run's export is captured, the adapter copies those
+directories to `<artifacts_dir>/<session>/opencode-trajectories/` (replacing any
+earlier copy) and reports that path as `opencode_trajectories_dir`, or `""` if
+the copy fails. A rollout that fails before its export is captured reports no
+recordings. Each session directory contains:
+
+- `openai-trajectory.jsonl`: every provider request and response, tagged with the
+  OpenCode agent (`build`, `compaction`, or the subagent name), plus capture and
+  attempt ids that group retries;
+- `native-trajectory.jsonl`: OpenCode-native events, including
+  `session.created` (with the parent session id for subagents) and
+  `session.compacted`.
+
+A recording missing after the run never fails or rescores a rollout. Like every
+plugin, though, the recorder's upload is read back, and a recorder file that does
+not land fails the rollout before OpenCode starts. The sandbox image needs `tar`
+to collect the files.
+
+Only this relay agent records, so collect on a relay preset such as
+`benchmarks/browsecomp/configs/browsecomp_opencode_legacy_agent.yaml`. The session
+presets, such as `benchmarks/browsecomp/configs/browsecomp_opencode.yaml`, run
+`opencode_agent`, which has no `record_trajectories` setting: it ignores the key,
+as it ignores any key it does not declare, and records nothing.
+
+To collect compaction data, enable automatic compaction and give the model an
+input limit. OpenCode 1.17.11 compacts once a turn's prompt plus completion tokens
+reach `limit.input - compaction.reserved`. For example:
+
+```yaml
+record_trajectories: true
+opencode_max_context_window: <context window>
+opencode_config:
+  compaction:
+    auto: true
+    prune: false
+    reserved: <tokens kept free for compaction>
+  provider:
+    nemo_gym:
+      models:
+        dummy_model:
+          limit:
+            input: <input token limit>
+            output: <output token limit>
+  permission:
+    task: allow  # subagents; some benchmark presets deny it
+```
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The plain-named HLE and APEX Shortlist presets (`hle/opencode`, `hle/opencode_search`, `hle/pi`, `hle/pi_search`,

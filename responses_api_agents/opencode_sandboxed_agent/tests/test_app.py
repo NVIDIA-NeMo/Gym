@@ -2511,6 +2511,179 @@ async def test_export_failure_prevents_verification_and_stops_sandbox(tmp_path):
     assert server._sandbox_id_to_sandbox == {}
 
 
+@mark.parametrize("failure", [None, "archive", "download"])
+async def test_recorded_sessions_are_collected_next_to_export(tmp_path, monkeypatch, failure):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path / "artifacts")
+    config.record_trajectories = True
+    # Compaction data collection: auto-compact before the model's input limit, keep the per-run model route.
+    config.opencode_config = {
+        "compaction": {"auto": True, "reserved": 20000},
+        "provider": {"nemo_gym": {"models": {"dummy_model": {"limit": {"input": 98304, "output": 32768}}}}},
+    }
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(app_module, "sandbox_server_url", lambda _, **kwargs: "http://model.example:8000")
+    monkeypatch.setattr(
+        OpenCodeSandboxedAgent, "base_url_for_run", MagicMock(return_value="http://model.example:8000")
+    )
+    monkeypatch.setattr(app_module, "uuid4", MagicMock(return_value=MagicMock(hex="rollout")))
+    monkeypatch.setattr(app_module, "_read_opencode_child_messages", lambda *args: [])
+    sandbox_root = tmp_path / "sandbox"
+
+    def in_sandbox(path: str) -> Path:
+        return sandbox_root / path.lstrip("/")
+
+    # The recorder writes one directory per OpenCode session; a subagent runs in a child session.
+    recorded = in_sandbox("/tmp/nemo-gym-opencode-trajectories-rollout")
+    for session in ("ses_root", "ses_child"):
+        (recorded / session).mkdir(parents=True)
+        (recorded / session / "openai-trajectory.jsonl").write_text(json.dumps({"sessionID": session}) + "\n")
+
+    async def execute(command, **kwargs):
+        if command.startswith("tar "):
+            if failure == "archive":
+                return SimpleNamespace(stdout="", stderr="tar: not found", return_code=127, error_type=None)
+            completed = subprocess.run(
+                ["sh", "-c", command.replace("/tmp/", f"{sandbox_root}/tmp/")],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            return SimpleNamespace(
+                stdout=completed.stdout, stderr=completed.stderr, return_code=completed.returncode, error_type=None
+            )
+        stdout = '[{"id":"ses_root"}]' if "session list" in command else "Shell: bash\nOpenCode run finished"
+        return SimpleNamespace(stdout=stdout, stderr="", return_code=0, error_type=None)
+
+    async def upload(local, remote):
+        # Plugins are uploaded and then read back by the verified upload, so keep them in the fake sandbox.
+        in_sandbox(remote).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(local, in_sandbox(remote))
+
+    async def download(remote, local):
+        if remote.endswith(".tar.gz"):
+            if failure == "download":
+                raise OSError("download failed")
+            shutil.copyfile(in_sandbox(remote), local)
+        elif in_sandbox(remote).is_file():
+            shutil.copyfile(in_sandbox(remote), local)
+        else:
+            # The OpenCode export: the agent requires at least one assistant message.
+            local.write_text(json.dumps({"messages": [{"info": {"role": "assistant"}, "parts": []}]}))
+
+    sandbox = MagicMock(
+        upload=AsyncMock(side_effect=upload),
+        exec=AsyncMock(side_effect=execute),
+        download=AsyncMock(side_effect=download),
+    )
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    collected = tmp_path / "artifacts" / "session" / "opencode-trajectories"
+    # A prior attempt's recording must never be mistaken for the current one.
+    (collected / "ses_stale").mkdir(parents=True)
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"},
+        session={SESSION_ID_KEY: "session"},
+        state=SimpleNamespace(),
+        json=AsyncMock(return_value={}),
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    await server.responses(request, body)
+
+    sandbox.upload.assert_any_await(
+        Path(app_module.__file__).with_name("local-trajectory-recorder.js"),
+        "/tmp/nemo-gym-local-trajectory-recorder.js",
+    )
+    # The agent runs a setup command first; the recorder env rides on the `opencode run` command.
+    run_command = next(
+        c.kwargs["command"] for c in sandbox.exec.await_args_list if "opencode run" in c.kwargs["command"]
+    )
+    run_args = shlex.split(run_command)
+    assert "OPENCODE_TRAJECTORY_DIR=/tmp/nemo-gym-opencode-trajectories-rollout" in run_args
+    opencode_config = json.loads(
+        next(arg.split("=", 1)[1] for arg in run_args if arg.startswith("OPENCODE_CONFIG_CONTENT="))
+    )
+    assert opencode_config["plugin"] == ["file:///tmp/nemo-gym-local-trajectory-recorder.js"]
+    assert opencode_config["compaction"] == {"auto": True, "reserved": 20000}
+    provider = opencode_config["provider"]["nemo_gym"]
+    assert provider["options"]["baseURL"] == "http://model.example:8000/v1"
+    assert provider["models"]["dummy_model"]["limit"] == {"context": 0, "input": 98304, "output": 32768}
+
+    run_result = server._sandbox_id_to_run_result["session"]
+    if failure is None:
+        assert run_result["opencode_trajectories_dir"] == str(collected)
+        assert sorted(path.name for path in collected.iterdir()) == ["ses_child", "ses_root"]
+        for session in ("ses_root", "ses_child"):
+            assert (collected / session / "openai-trajectory.jsonl").read_text() == json.dumps(
+                {"sessionID": session}
+            ) + "\n"
+    else:
+        assert run_result["opencode_trajectories_dir"] == ""
+        assert not collected.exists()
+    assert not (tmp_path / "artifacts" / "session" / "opencode-trajectories.tar.gz").exists()
+
+
+async def test_trajectories_dir_is_omitted_unless_recording(tmp_path, monkeypatch):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    assert "local-trajectory-recorder.js" not in [local.name for local, _ in server._plugin_uploads()]
+    uploaded = {}
+
+    async def upload(local, remote):
+        uploaded[remote] = Path(local).read_bytes()
+
+    async def download(remote, local):
+        if remote in uploaded:
+            Path(local).write_bytes(uploaded[remote])
+        else:
+            Path(local).write_text(json.dumps({"messages": [{"info": {"role": "assistant"}, "parts": []}]}))
+
+    sandbox = MagicMock(
+        upload=AsyncMock(side_effect=upload),
+        download=AsyncMock(side_effect=download),
+        exec=AsyncMock(
+            side_effect=lambda command, **kwargs: SimpleNamespace(
+                stdout='[{"id":"session"}]' if "session list" in command else "Shell: bash\nOpenCode run finished",
+                stderr="",
+                return_code=0,
+                error_type=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+    await server.responses(
+        request=MagicMock(session={SESSION_ID_KEY: "trial"}, cookies={"sandbox_id": ""}, state=SimpleNamespace()),
+        body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+    )
+    assert all("OPENCODE_TRAJECTORY_DIR" not in c.kwargs["command"] for c in sandbox.exec.await_args_list)
+    assert "opencode_trajectories_dir" not in server._sandbox_id_to_run_result[""]
+    assert (
+        "opencode_trajectories_dir"
+        not in app_module.OpenCodeSandboxedAgentVerifyResponse.model_validate(
+            {
+                "responses_create_params": {"input": []},
+                "response": {
+                    "id": "r",
+                    "created_at": 0,
+                    "model": "m",
+                    "object": "response",
+                    "output": [],
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                },
+                "reward": 0.0,
+                "opencode_results_fpath": "",
+                "opencode_run_stdout": "",
+                "opencode_run_stderr": "",
+                "opencode_finished": False,
+                "opencode_export_found": False,
+            }
+        ).model_dump()
+    )
+
+
 async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]
