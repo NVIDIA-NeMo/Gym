@@ -5,7 +5,7 @@
 | Name | `nemo-gym-analyzing-results` |
 | Version | 0.1 (draft, not yet reviewed or published) |
 | License | Apache-2.0 (same as NVIDIA-NeMo/Gym) |
-| Owner / PIC | TBD: Adam |
+| Owner / PIC | TBD (NeMo Gym maintainers) |
 | Repository | NVIDIA-NeMo/Gym, `skills/nemo-gym-analyzing-results` |
 | Agents it is written for | Claude Code and Codex (plain SKILL.md, no agent-specific syntax) |
 
