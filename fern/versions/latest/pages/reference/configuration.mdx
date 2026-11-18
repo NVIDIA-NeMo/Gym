@@ -251,7 +251,7 @@ short ends good work and changes what a run measures.
 
 | Setting | Where | What it bounds |
 |---|---|---|
-| `request_timeout_seconds`, `max_connection_retries`, `connection_retry_timeout_s` | `base_model`, `inference_provider` and `switchyard_model` configs (`vllm_model` and `openai_model` have their own) | Each HTTP attempt to the endpoint, the number of connection-error retries, and the time spent on them. A timed-out attempt is retried like any transport error. |
+| `request_timeout_seconds`, `max_connection_retries`, `connection_retry_timeout_s` | `base_model`, `inference_provider` and `switchyard_model` configs (`vllm_model` and `openai_model` have their own) | Each HTTP attempt to the endpoint (not the whole call), the number of connection-error attempts (`N` allows N, so `1` means no retry; HTTP-status retries are counted separately), and the time spent retrying connection errors. A timed-out attempt is retried like any transport error; a timeout while reading the response body is not resent. None of these is a deadline for the whole call. |
 | `verify_timeout_seconds` | `gym eval reverify` config | Each `/verify` and `/aggregate_metrics` call, including its retries. A call that runs out fails the pass, as a lost outcome does, and is not resent. |
 | `runner_timeout_seconds` | `harness_exa_search` config | The harness command in its sandbox. |
 | `external_judge_wait_timeout_seconds`, `external_judge_request_timeout_seconds` | `proof_judge` and `proof_verification` configs | The wait for an external judge server (`JUDGE_SERVER_ARGS`), and each request to it (4 hours by default, as before). |

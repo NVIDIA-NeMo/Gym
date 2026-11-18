@@ -34,9 +34,9 @@ against a path that does not exist, which scores as a quiet 0.
 | `tool_definitions_json` | none | the tool schema as a JSON string, rendered verbatim into the prompt |
 | `max_tool_calls_per_turn` | 3 | calls beyond this in one turn are dropped |
 | `max_tokens`, `temperature`, `top_p` | 1024, 0.6, none | sampling |
-| `request_timeout_seconds` | none | time limit for each HTTP attempt to the endpoint; a timed-out attempt is retried like any other transport error. None means no limit |
-| `max_connection_retries` | none | how often one call retries a connection error before raising it. None retries without limit |
-| `connection_retry_timeout_s` | none | wall-clock seconds one call may spend retrying connection errors. None means no limit |
+| `request_timeout_seconds` | none | Time limit for each HTTP attempt, not for the whole call. A timed-out attempt is retried like any other transport error; a timeout while reading the response body is raised without resending the request. None means no limit |
+| `max_connection_retries` | none | Connection-error attempts one call makes before raising: `N` allows N attempts, so `1` means no retry. Also caps the timeout and error retry path. It does not cap the attempts of the separate HTTP-status retry loop. None means no limit |
+| `connection_retry_timeout_s` | none | Wall-clock seconds one call may spend retrying connection errors. Not a deadline for the whole call. None means no limit |
 
 `configs/base_model.yaml` defines `policy_model`, which reads `policy_base_url` and `policy_model_name` from
 `env.yaml`. The prefix pass@K benchmark (`benchmarks/prefix_pass_k/`) serves checkpoints through this server on both

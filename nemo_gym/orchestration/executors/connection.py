@@ -16,6 +16,7 @@
 import os
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -290,32 +291,61 @@ def _checked_holding_input(cmd: list[str], *, input: str, context: str = "", tim
         label = f" ({context})" if context else ""
         return RuntimeError(f"Command timed out after {timeout_s} s{label}:\n  {' '.join(cmd)}")
 
-    with subprocess.Popen(
-        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-    ) as process:
-        output: dict[str, str] = {}
-        readers = [
-            threading.Thread(target=lambda: output.__setitem__("stdout", process.stdout.read()), daemon=True),
-            threading.Thread(target=_read_stderr_forwarding_progress, args=(process.stderr, output), daemon=True),
-        ]
-        for reader in readers:
-            reader.start()
+    # With a limit, the command leads its own process group, so that expiry also stops what it started (an SSH
+    # ProxyCommand keeps the output pipes open after ssh itself is gone).
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=timeout_s is not None,
+    )
+
+    def stop() -> None:
+        try:
+            if timeout_s is None:
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+
+    output: dict[str, str] = {}
+
+    def write_input() -> None:
+        # A command that does not read its stdin blocks this write; the caller's deadline still applies.
         try:
             process.stdin.write(input)
             process.stdin.flush()
-            for reader in readers:
-                reader.join(remaining_s())
-            if any(reader.is_alive() for reader in readers):
-                raise timed_out()
-            returncode = process.wait(timeout=remaining_s())
-        except subprocess.TimeoutExpired as exc:
-            process.kill()
-            raise timed_out() from exc
-        except BaseException:
-            process.kill()
-            raise
-        finally:
-            process.stdin.close()
+        except (BrokenPipeError, ValueError, OSError):
+            pass  # The command ended or was stopped; its exit status and stderr report it.
+
+    threads = [
+        threading.Thread(target=write_input, daemon=True),
+        threading.Thread(target=lambda: output.__setitem__("stdout", process.stdout.read()), daemon=True),
+        threading.Thread(target=_read_stderr_forwarding_progress, args=(process.stderr, output), daemon=True),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        # The writer ends once the input is delivered; the readers end when the command and its descendants close
+        # their output.
+        for thread in threads:
+            thread.join(remaining_s())
+        if any(thread.is_alive() for thread in threads):
+            raise timed_out()
+        returncode = process.wait(timeout=remaining_s())
+    except subprocess.TimeoutExpired as exc:
+        stop()
+        raise timed_out() from exc
+    except BaseException:
+        stop()
+        raise
+    # Only a finished command's pipes are closed here. After stop() they are left to the daemon threads, since closing
+    # a pipe that a thread is still reading or writing would block past the deadline.
+    for stream in (process.stdin, process.stdout, process.stderr):
+        stream.close()
     if returncode != 0:
         label = f" ({context})" if context else ""
         raise RuntimeError(

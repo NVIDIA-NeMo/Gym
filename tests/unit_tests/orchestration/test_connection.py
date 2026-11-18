@@ -286,3 +286,25 @@ def test_a_failed_held_command_still_reports_its_exit_code_and_stderr(no_ssh_bou
         connection_module._checked_holding_input(
             ["bash", "-s"], input="echo boom >&2\nexit 3\n", context="failing", timeout_s=30
         )
+
+
+def test_a_held_command_that_never_reads_its_input_ends_at_its_time_limit(no_ssh_bounds):
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=r"timed out after 0.5 s \(stalled\)"):
+        # The input is larger than a pipe buffer, so delivering it blocks until the command reads or is stopped.
+        connection_module._checked_holding_input(
+            ["bash", "-c", "exec sleep 30"], input="x" * 1_000_000, context="stalled", timeout_s=0.5
+        )
+
+    assert time.monotonic() - started < 10
+
+
+def test_a_held_command_whose_descendant_keeps_its_output_open_ends_at_its_time_limit(no_ssh_bounds):
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=r"timed out after 0.5 s \(proxy\)"):
+        # The shell exits at once; the background process keeps stdout and stderr open, as an SSH ProxyCommand does.
+        connection_module._checked_holding_input(
+            ["bash", "-s"], input="sleep 30 &\nexit\n", context="proxy", timeout_s=0.5
+        )
+
+    assert time.monotonic() - started < 10

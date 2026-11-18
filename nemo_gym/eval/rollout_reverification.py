@@ -994,30 +994,38 @@ def _run_verification_payloads(
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
             # settle_into_source the outcomes already answered are settled and its admission is withdrawn, so a
             # later pass grades it again (see _settle_what_a_failed_pass_judged).
-            async with asyncio.timeout(timeout_s):
-                res = await server_client.post(
-                    server_name=rs_name, url_path="/verify", json=request_row, _resend_after_disconnect=False
-                )
-                try:
-                    await raise_for_status(
-                        res
-                    )  # this code works similarly to the rollout collection code, so *_failures.jsonl is empty now
-                # IMO we need another task to unify dealing with failed cases (and writing to the *_failures.jsonl file if needed)
-                except Exception:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_reverification] /verify failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
-                            flush=True,
-                        )
-                    raise
-                result = await get_response_json(res)
-                # As collection saves a dispatch reply's report: failures this /verify observed, such as a judge attempt
-                # a retry recovered from, are kept beside the result; a failed result keeps its own failure_id.
-                report = FailureHeader.decode(getattr(res, "headers", None))
-                if report is not None:
-                    result = FailureReportRow.merged_into(result, report)
+            try:
+                async with (deadline := asyncio.timeout(timeout_s)):
+                    res = await server_client.post(
+                        server_name=rs_name, url_path="/verify", json=request_row, _resend_after_disconnect=False
+                    )
+                    try:
+                        await raise_for_status(
+                            res
+                        )  # this code works similarly to the rollout collection code, so *_failures.jsonl is empty now
+                    # IMO we need another task to unify dealing with failed cases (and writing to the *_failures.jsonl file if needed)
+                    except Exception:
+                        if is_global_aiohttp_client_request_debug_enabled():
+                            print(
+                                "[rollout_reverification] /verify failed "
+                                f"status={getattr(res, 'status', None)} "
+                                f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
+                                flush=True,
+                            )
+                        raise
+                    result = await get_response_json(res)
+                    # As collection saves a dispatch reply's report: failures this /verify observed, such as a judge attempt
+                    # a retry recovered from, are kept beside the result; a failed result keeps its own failure_id.
+                    report = FailureHeader.decode(getattr(res, "headers", None))
+                    if report is not None:
+                        result = FailureReportRow.merged_into(result, report)
+            except TimeoutError as error:
+                if not deadline.expired():
+                    raise  # Not this limit: a transport error keeps its own type and message.
+                raise TimeoutError(
+                    f"The /verify call to resources server {rs_name!r} did not finish within {timeout_s} s "
+                    f"(task {row.get(TASK_INDEX_KEY_NAME)}, rollout {row.get(ROLLOUT_INDEX_KEY_NAME)})"
+                ) from error
             return row, result
 
     return tqdm.as_completed(
@@ -1169,15 +1177,23 @@ async def _call_aggregate_metrics(
             stripped.append(entry)
 
         agg_request = AggregateMetricsRequest(verify_responses=stripped)
-        async with asyncio.timeout(timeout_s):
-            agg_response = await server_client.post(
-                server_name=rs_name,
-                url_path="/aggregate_metrics",
-                json=agg_request,
-            )
+        try:
+            async with (deadline := asyncio.timeout(timeout_s)):
+                agg_response = await server_client.post(
+                    server_name=rs_name,
+                    url_path="/aggregate_metrics",
+                    json=agg_request,
+                )
 
-            await raise_for_status(agg_response)
-            agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+                await raise_for_status(agg_response)
+                agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+        except TimeoutError as error:
+            if not deadline.expired():
+                raise  # Not this limit: a transport error keeps its own type and message.
+            raise TimeoutError(
+                f"The /aggregate_metrics call to resources server {rs_name!r} for agent {agent_name!r} did not finish "
+                f"within {timeout_s} s"
+            ) from error
 
         agent_entry = {
             AGENT_REF_KEY_NAME: {"name": agent_name},

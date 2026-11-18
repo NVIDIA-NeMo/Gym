@@ -271,8 +271,14 @@ Total Ray cluster resources: {cluster_resources()}""")
                     if remaining <= 0:
                         raise not_ready()
                     # Each poll gets a time limit too, so a server that accepts the connection and never answers
-                    # cannot outlast the deadline.
-                    requests.get(url=f"{self.config.base_url[0]}/models", timeout=min(10.0, remaining))
+                    # cannot outlast the deadline. The body is not read (stream=True): readiness is the answer.
+                    with requests.get(
+                        url=f"{self.config.base_url[0]}/models", timeout=min(10.0, remaining), stream=True
+                    ):
+                        pass
+                    # A poll that succeeded after the deadline is not accepted.
+                    if remaining_s() <= 0:
+                        raise not_ready()
                 return
             except (ConnectionError, Timeout):
                 remaining = remaining_s()

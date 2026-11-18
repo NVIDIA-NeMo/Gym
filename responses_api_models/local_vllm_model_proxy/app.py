@@ -55,7 +55,14 @@ class LocalVLLMModelProxyServer(VLLMModel):
             remaining = None if deadline is None else deadline - monotonic()
             if remaining is not None and remaining <= 0:
                 raise TimeoutError(f"LocalVLLMModelServer `{model_server_name}` was not up within {timeout_s} s")
-            if self.server_client.poll_for_status(model_server_name) == "success":
+            status = self.server_client.poll_for_status(
+                model_server_name, timeout_seconds=5 if remaining is None else min(5, remaining)
+            )
+            remaining = None if deadline is None else deadline - monotonic()
+            if remaining is not None and remaining <= 0:
+                # Also a poll that succeeded late: readiness after the deadline is not accepted.
+                raise TimeoutError(f"LocalVLLMModelServer `{model_server_name}` was not up within {timeout_s} s")
+            if status == "success":
                 break
             # Sleep for 10s by default, or less when that would pass the deadline
             sleep(10 if remaining is None else min(10, remaining))

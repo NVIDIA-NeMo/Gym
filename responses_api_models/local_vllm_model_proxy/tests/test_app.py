@@ -114,6 +114,27 @@ class TestApp:
 
         assert server.server_client.poll_for_status.call_count == 1
 
+    def test_a_poll_that_succeeds_after_the_deadline_is_not_accepted_and_each_poll_fits_the_budget(
+        self, monkeypatch
+    ) -> None:
+        server = self._setup_server(model_server_wait_timeout_seconds=1)
+        now = [0.0]
+        monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "monotonic", lambda: now[0])
+        monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "sleep", lambda seconds: None)
+        timeouts = []
+
+        def slow_success(server_name, *, timeout_seconds):
+            timeouts.append(timeout_seconds)
+            now[0] += 5  # the answer comes after the 1 s limit
+            return "success"
+
+        server.server_client.poll_for_status.side_effect = slow_success
+
+        with pytest.raises(TimeoutError, match="was not up within 1"):
+            server.setup_webserver()
+
+        assert timeouts == [1]  # the poll was limited to the budget that remained, not its usual 5 s
+
     def test_the_config_request_carries_the_limit_and_no_limit_means_none(self, monkeypatch) -> None:
         for limit in (None, 30):
             server = self._setup_server(**({} if limit is None else {"model_server_wait_timeout_seconds": limit}))

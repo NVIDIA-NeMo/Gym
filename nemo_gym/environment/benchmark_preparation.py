@@ -13,6 +13,7 @@ import importlib.util
 import json
 import logging
 import os
+import signal
 import site
 import subprocess
 import sys
@@ -142,6 +143,31 @@ def _multiprocess_benchmark_prepare_fn(args):
     print(f"Dataset prepared at: {output_fpath}")
 
 
+def _run_checked(command: list[str], *, timeout_s: float | None, env: dict[str, str] | None = None) -> None:
+    """Run `command` like ``subprocess.run(check=True, timeout=timeout_s)``, but on expiry stop its whole process group.
+
+    ``subprocess.run`` kills only the direct child, so a preparer's own download or build subprocess would go on
+    writing after the failure is reported. With a limit the command leads its own process group, and an expiry or an
+    interrupt kills the group and reaps the child. None sets no limit and keeps the caller's process group."""
+    with subprocess.Popen(command, env=env, start_new_session=timeout_s is not None) as process:
+        try:
+            returncode = process.wait(timeout=timeout_s)
+        except BaseException as exc:
+            try:
+                if timeout_s is None:
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                process.kill()
+            process.wait()
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise subprocess.TimeoutExpired(command, timeout_s) from None
+            raise
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+
+
 def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig", timeout_s: float | None = None) -> None:
     """Install what a benchmark's prepare script imports, before importing it.
 
@@ -241,7 +267,7 @@ def _run_isolated_prepare(
         serialized_args = OmegaConf.to_container(args, resolve=True) if OmegaConf.is_config(args) else args
         options.write_text(json.dumps(serialized_args, default=_prepare_json_default))
         try:
-            subprocess.run(
+            _run_checked(
                 [
                     str(python),
                     str(worker),
@@ -258,8 +284,7 @@ def _run_isolated_prepare(
                     "--result",
                     str(result),
                 ],
-                check=True,
-                timeout=timeout_s,
+                timeout_s=timeout_s,
                 env=os.environ
                 | {
                     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: json.dumps(serialized_config, default=_prepare_json_default),

@@ -49,9 +49,9 @@ gym env start --resources-server my_benchmark --model-type inference_provider
 | `uses_reasoning_parser` | Parse `<think>` tags and `reasoning_content` fields | `false` |
 | `num_concurrent_requests` | Max concurrent requests to provider | `1000` |
 | `extra_body` | Additional parameters merged into every request body | `{}` |
-| `request_timeout_seconds` | Time limit for each HTTP attempt to the provider. A timed-out attempt is retried like any other transport error. | none (no limit) |
-| `max_connection_retries` | How often one call retries a connection error before raising it | none (no limit) |
-| `connection_retry_timeout_s` | Wall-clock seconds one call may spend retrying connection errors | none (no limit) |
+| `request_timeout_seconds` | Time limit for each HTTP attempt, not for the whole call. A timed-out attempt is retried like any other transport error; a timeout while reading the response body is raised without resending the request. | none (no limit) |
+| `max_connection_retries` | Connection-error attempts one call makes before raising: `N` allows N attempts, so `1` means no retry. Also caps the timeout and error retry path. It does not cap the attempts of the separate HTTP-status retry loop. | none (no limit) |
+| `connection_retry_timeout_s` | Wall-clock seconds one call may spend retrying connection errors. Not a deadline for the whole call. | none (no limit) |
 
 ## When to Use This vs Other Model Servers
 

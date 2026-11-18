@@ -368,6 +368,27 @@ class TestAwaitServerReady:
 
         assert all(0 < call["timeout"] <= 10 for call in calls)
 
+    def test_a_probe_that_answers_after_the_deadline_is_not_accepted(self, monkeypatch) -> None:
+        import requests
+
+        clocks = []
+
+        def healthy(reference, timeout, clock):
+            clocks.append(clock)
+            return True
+
+        server, calls, _ = self._server(monkeypatch, timeout_s=1, answers=[MagicMock()], ray_get=healthy)
+        answer = requests.get
+
+        def slow_get(url, **kwargs):
+            clocks[0][0] += 5  # the answer arrives after the 1 s limit
+            return answer(url, **kwargs)
+
+        monkeypatch.setattr(responses_api_models.local_vllm_model.app.requests, "get", slow_get)
+
+        with pytest.raises(TimeoutError, match="was not ready within 1"):
+            LocalVLLMModel.await_server_ready(server)
+
     def test_a_health_check_that_returns_after_the_deadline_does_not_start_another_probe(self, monkeypatch) -> None:
         def late_reply(reference, timeout, clock):
             clock[0] += 5  # the check comes back after the 1 s limit

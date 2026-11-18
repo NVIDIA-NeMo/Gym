@@ -80,6 +80,8 @@ def test_a_connection_attempt_is_capped_at_the_time_left(monkeypatch: pytest.Mon
 
     def create_connection(address, timeout=None):
         seen.append(timeout)
+        # Fails at once if the deadline stops working, instead of refusing forever and holding the test run.
+        assert len(seen) < 100, "the wait kept retrying past its deadline"
         raise ConnectionRefusedError("refused")
 
     monkeypatch.setattr(app_module.socket, "create_connection", create_connection)

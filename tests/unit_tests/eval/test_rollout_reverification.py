@@ -1381,8 +1381,9 @@ class TestPreparePayloads:
         build_calls: list = []
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._build_verify_payload",
-            lambda p, *, forward_agent_evidence: build_calls.append((p, forward_agent_evidence))
-            or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            lambda p, *, forward_agent_evidence: (
+                build_calls.append((p, forward_agent_evidence)) or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+            ),
         )
 
         _prepare_payloads(tmp_path / "in.jsonl", tmp_path / "r.jsonl", self._paths(tmp_path), resume_from_cache=False)
@@ -1619,7 +1620,9 @@ class TestRunVerificationPayloads:
         self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
 
         started = time.monotonic()
-        with pytest.raises(TimeoutError):
+        with pytest.raises(
+            TimeoutError, match=r"/verify call to resources server 'rs_a' did not finish within 0\.2 s"
+        ):
             await self._collect(_run_verification_payloads([self._make_row("agent_a")], timeout_s=0.2))
 
         assert time.monotonic() - started < 2
@@ -2225,7 +2228,7 @@ class TestCallAggregateMetrics:
         self._patch(monkeypatch, {"agent_a": "rs_a"}, post_side_effect=slow_post)
 
         started = time.monotonic()
-        with pytest.raises(TimeoutError):
+        with pytest.raises(TimeoutError, match=r"/aggregate_metrics call to resources server .* within 0\.2 s"):
             await _call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl", timeout_s=0.2)
 
         assert time.monotonic() - started < 2

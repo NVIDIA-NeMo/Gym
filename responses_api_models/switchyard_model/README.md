@@ -124,10 +124,13 @@ such as OpenAI's o-series models.
 
 A call to the proxy has no time limit by default. Three optional settings bound it; each is off (`null`) until set:
 
-- `request_timeout_seconds`: time limit for each HTTP attempt. A timed-out attempt is retried like any other transport
-  error, so a call can take about the limit times the number of attempts.
-- `max_connection_retries`: how often one call retries a connection error before raising it.
-- `connection_retry_timeout_s`: wall-clock seconds one call may spend retrying connection errors.
+- `request_timeout_seconds`: time limit for each HTTP attempt, not for the whole call. A timed-out attempt is retried
+  like any other transport error, so a call can take about the limit times the number of attempts. A timeout while
+  reading the response body is raised without resending the request.
+- `max_connection_retries`: connection-error attempts one call makes before raising: `N` allows N attempts, so `1`
+  means no retry. It also caps the timeout and error retry path, and does not cap the separate HTTP-status retry loop.
+- `connection_retry_timeout_s`: wall-clock seconds one call may spend retrying connection errors. It is not a deadline
+  for the whole call.
 
 Set `request_timeout_seconds` above the longest generation a route can legitimately take; a shorter limit ends good
 calls as `model_policy_response_timeout` failures.

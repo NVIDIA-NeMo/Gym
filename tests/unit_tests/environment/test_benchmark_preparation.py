@@ -350,6 +350,81 @@ class TestPrepareDependencies:
         assert isinstance(stopped.value.__cause__, subprocess.TimeoutExpired)
         assert time.monotonic() - started < 20
 
+    def test_a_worker_that_outlasts_the_time_limit_takes_its_own_subprocesses_with_it(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        late_output = tmp_path / "late.txt"
+        # The preparer starts a subprocess that would write after the failure is reported, and then hangs itself.
+        (tmp_path / "forking_preparer.py").write_text(
+            "import subprocess, time\n"
+            "def prepare():\n"
+            f"    subprocess.Popen(['bash', '-c', 'sleep 3; echo late > {late_output}'])\n"
+            "    time.sleep(30)\n"
+        )
+
+        with pytest.raises(benchmark_preparation.PreparationFailedError, match="did not finish within 1 s"):
+            benchmark_preparation._run_isolated_prepare(
+                Path(sys.executable), "forking_preparer", "prepare", tmp_path / "expected", {}, timeout_s=1
+            )
+        time.sleep(4)
+
+        assert not late_output.exists()
+
+    def test_the_configured_limit_reaches_every_preparation_stage(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "limited_preparer.py").write_text("def prepare():\n    pass\n")
+        seen = {"environment": [], "worker": []}
+        monkeypatch.setattr(
+            benchmark_preparation,
+            "_prepare_environment",
+            lambda config, venv_root=None, timeout_s=None: seen["environment"].append(timeout_s) or Path("python"),
+        )
+
+        def worker(python, module, action, expected, args, *, config=None, timeout_s=None):
+            seen["worker"].append((action, timeout_s))
+            return {"has_prepare": True, "cache_current": False}
+
+        monkeypatch.setattr(benchmark_preparation, "_run_isolated_prepare", worker)
+        benchmark = SimpleNamespace(
+            name="b",
+            dataset=SimpleNamespace(prepare_script="limited_preparer.py", jsonl_fpath=tmp_path / "out.jsonl"),
+        )
+
+        benchmark_preparation.prepare_datasets(
+            [benchmark],
+            benchmark_preparation.PrepareBenchmarkConfig(prepare_timeout_seconds=7, num_prepare_benchmark_processes=1),
+        )
+
+        assert seen == {"environment": [7], "worker": [("inspect", 7), ("prepare", 7)]}
+
+    def test_the_configured_limit_reaches_the_dependency_install(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "limited_preparer.py").write_text("def prepare():\n    pass\n")
+        limits = []
+        monkeypatch.setattr(
+            benchmark_preparation.subprocess, "run", lambda cmd, **kwargs: limits.append(kwargs["timeout"])
+        )
+        monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: None)
+        monkeypatch.setattr(
+            "nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer",
+            lambda module: SimpleNamespace(prepare=lambda **kwargs: tmp_path / "out.jsonl"),
+        )
+        benchmark = SimpleNamespace(
+            name="b",
+            dataset=SimpleNamespace(
+                prepare_script="limited_preparer.py",
+                jsonl_fpath=tmp_path / "out.jsonl",
+                prepare_dependencies=["tqdm"],
+                prepare_project=None,
+            ),
+        )
+
+        benchmark_preparation.prepare_datasets(
+            [benchmark],
+            benchmark_preparation.PrepareBenchmarkConfig(prepare_timeout_seconds=7, num_prepare_benchmark_processes=1),
+        )
+
+        assert limits == [7]
+
     def test_the_time_limit_reaches_the_isolated_worker_of_each_benchmark(self, monkeypatch):
         seen = []
         monkeypatch.setattr(
@@ -440,7 +515,7 @@ def test_a_failed_isolated_preparer_is_a_typed_terminal_stop(tmp_path, monkeypat
     def failing_worker(*args, **kwargs):
         raise subprocess.CalledProcessError(1, args[0])
 
-    monkeypatch.setattr(preparation.subprocess, "run", failing_worker)
+    monkeypatch.setattr(preparation, "_run_checked", failing_worker)
 
     with pytest.raises(preparation.PreparationFailedError) as stopped:
         preparation._run_isolated_prepare(

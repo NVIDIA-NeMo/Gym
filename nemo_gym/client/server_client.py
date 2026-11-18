@@ -323,8 +323,10 @@ class ServerClient(BaseModel):
             server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
 
         try:
-            requests.get(self._build_server_base_url(server_config_dict), timeout=timeout_seconds)
+            # The body is not read (stream=True), so a peer that keeps sending one cannot hold this poll past its answer.
             # We don't check the status code since there may not be a route at /
+            with requests.get(self._build_server_base_url(server_config_dict), timeout=timeout_seconds, stream=True):
+                pass
             return "success"
         except requests.exceptions.ConnectionError:
             return "connection_error"
