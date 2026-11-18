@@ -767,7 +767,7 @@ class TestCacheUsage:
         start = next(event for event in events if event["type"] == "message_start")
         delta = next(event for event in events if event["type"] == "message_delta")
         # The split arrives with message_start; message_delta adds only the output, as Anthropic streams it.
-        assert start["message"]["usage"] == out["usage"]
+        assert start["message"]["usage"] == {**out["usage"], "output_tokens": 0}
         assert delta["usage"] == {"output_tokens": 50}
 
     def test_responses_usage_without_a_cache_count_has_no_cache_reads(self) -> None:
