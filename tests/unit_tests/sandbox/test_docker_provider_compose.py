@@ -479,7 +479,7 @@ async def test_a_read_only_named_volume_is_seeded_from_the_image_and_removed_wit
         # Copy-up: a sandbox of main's own image mounts the collection's directory and copies the image's files in.
         assert seed[seed.index("--entrypoint") + 2] == FIXTURE_IMAGE
         assert seed[seed.index("--mount") + 1] == (
-            f"type=volume,source={VOLUME},target=/tmp/compose-volumes,"
+            f"type=volume,source={VOLUME},target=/.nemo-gym-copy-up,"
             f"volume-subpath={group.project}/gym_fixture,volume-nocopy"
         )
         assert (project_dir / "bundled-output-hashes.json").read_text() == '{"sample": "abc"}\n'

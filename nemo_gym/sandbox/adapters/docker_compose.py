@@ -607,6 +607,12 @@ class AsyncSandboxCompose:
                     if result.return_code:
                         raise RuntimeError(f"Shared volume initialization failed: {result.stderr}")
                     if not (volume.get("volume") or {}).get("nocopy"):
+                        # The seed stages the volume at a path of its own, neither the target nor inside it: at the
+                        # helper's root, a target of `/tmp` would copy the volume into itself, and a target of that
+                        # root would hide the image's files behind the empty volume.
+                        staging = "/.nemo-gym-copy-up"
+                        if (lexical_target(volume["target"]) + "/").startswith(staging + "/"):
+                            staging += "-1"
                         # The seed reads the service's image, so it keeps the service's provider options, its
                         # pull policy first (``pull_policy_options``, which OpenSandbox reads per spec: a deployment
                         # default of Never would otherwise fail the seed of an uncached ``always`` image before the
@@ -620,7 +626,7 @@ class AsyncSandboxCompose:
                             metadata=metadata,
                             provider_options=_merge_provider_options(
                                 {key: value for key, value in service_options.items() if key != "volumes"},
-                                provider.shared_volume_options(relative, root),
+                                provider.shared_volume_options(relative, staging),
                             ),
                         )
                         seed = AsyncSandbox(provider, seed_spec, owns_provider=False)
@@ -629,8 +635,8 @@ class AsyncSandboxCompose:
                         try:
                             target = shlex.quote(volume["target"])
                             result = await seed.exec(
-                                f'if test -n "$(ls -A {root})"; then :; '
-                                f"elif test -d {target}; then cp -a {target}/. {root}/; "
+                                f'if test -n "$(ls -A {staging})"; then :; '
+                                f"elif test -d {target}; then cp -a {target}/. {staging}/; "
                                 f"elif test -e {target}; then exit 1; fi",
                                 user="root",
                                 cwd="/",  # The service's working directory may not exist in the seed image.
