@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import shlex
@@ -21,7 +22,13 @@ from typing import Any, ClassVar, Literal
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.core.failure_kinds import SESSION_LOST, VERIFIER_ERROR
+from nemo_gym.core.typed_exceptions import NgFailureEvent
+from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -29,11 +36,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
 from resources_servers.nl2repobench.guard_v2 import derive_identifiers, install_guard_v2, network_policy_for_v2
 from resources_servers.nl2repobench.task_store import (
@@ -542,6 +546,10 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # reward 0, graded=false, evaluation_completed=false; grade later from the saved workspace (for nl2repo-tasks: its
     # own grade.py). Mirrors the ProgramBench resources server's trace-only mode. Added 2026-11-03.
     trace_only: bool = False
+    # Starting the verifier sandbox is retried this many times in all before the row is masked as inconclusive: a sandbox
+    # the provider could not start says nothing about the agent's code, so it must not score as a 0.
+    verifier_sandbox_start_attempts: int = Field(default=3, ge=1)
+    verifier_sandbox_retry_delay_s: float = Field(default=5.0, ge=0)
 
 
 class NL2RepoBenchInstanceRequest(BaseModel):
@@ -675,6 +683,13 @@ def _compute_reward(tests_passed: int, test_case_count: int) -> float:
     return max(reward, 0.0)
 
 
+def _raise_on_sandbox_error(result: Any, what: str) -> None:
+    """A command the provider could not run to an outcome is not a test result. A timeout is: the agent's code hung."""
+    error_type = getattr(result, "error_type", None)
+    if error_type not in (None, "timeout"):
+        raise RuntimeError(f"{what}: the sandbox provider reported {error_type!r}")
+
+
 class NL2RepoBenchResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     config: NL2RepoBenchResourcesServerConfig
@@ -717,11 +732,17 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         # enforce_agent_no_network=True: deny-all except the policy_model host below.
 
         model_egress_target = self._model_egress_target()
-        options.setdefault("network_policy", {"defaultAction": "deny", "egress": []})
+        network_policy = options.setdefault("network_policy", {"defaultAction": "deny", "egress": []})
+        if not isinstance(network_policy, dict):
+            raise TypeError("NL2RepoBench sandbox network_policy must be a mapping")
+        # An inherited provider_options policy must not widen the contract: this mode is deny-all except the model host.
+        if network_policy.setdefault("defaultAction", "deny") != "deny":
+            raise ValueError(
+                "NL2RepoBench sandbox network_policy.defaultAction must be 'deny' when the agent has no internet "
+                f"(agent_network_mode={mode!r}, enforce_agent_no_network={self.config.enforce_agent_no_network}), "
+                f"got {network_policy['defaultAction']!r}"
+            )
         if model_egress_target is not None:
-            network_policy = options["network_policy"]
-            if not isinstance(network_policy, dict):
-                raise TypeError("NL2RepoBench sandbox network_policy must be a mapping")
             egress = network_policy.setdefault("egress", [])
             if not isinstance(egress, list):
                 raise TypeError("NL2RepoBench sandbox network_policy.egress must be a list")
@@ -823,124 +844,134 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         )
         sandbox = AsyncSandbox(provider)
         await sandbox.start(spec)
-        if phase == "agent":
-            # Upstream NL2RepoBench copies start.md into the task workspace at launch
-            # (shutil.copy2 onto a host bind-mount); this is our equivalent for the
-            # sandbox-provider path. mkdir first (see the comment on `files=` above for
-            # why SandboxSpec.files alone silently drops this on images that don't
-            # already have /workspace), then upload via the dedicated file-transfer API
-            # rather than inlining content into a sandbox.exec() shell command: some
-            # start.md specs run up to ~375KB, and the opencode_sandboxed_agent install
-            # path hit a real `fork/exec ... argument list too long` failure the last
-            # time large NL2RepoBench content was inlined into an exec command string
-            # (see benchmarks/nl2repobench/opencode.yaml) - upload() avoids that
-            # class of failure entirely rather than relying on staying under some
-            # untested ARG_MAX threshold.
-            # cwd="/" is required here, not just defensive: exec()'s default cwd is
-            # SandboxSpec.workdir ("/workspace" above), and at least one provider
-            # (OpenSandbox) validates the cwd exists before running the command at
-            # all - so letting this call default to /workspace, the very directory
-            # it's trying to create, fails with "working directory does not exist"
-            # before mkdir ever runs. "/" is guaranteed to exist in any image.
-            mkdir_result = await sandbox.exec(command=f"mkdir -p {shlex.quote(task.workdir)}", cwd="/", timeout_s=60)
-            if mkdir_result.return_code != 0:
-                raise RuntimeError(
-                    f"Failed to create {task.workdir} in agent sandbox for {task_id(task)!r}: "
-                    f"{mkdir_result.stderr or mkdir_result.stdout or '(no output)'}"
+        try:
+            if phase == "agent":
+                # Upstream NL2RepoBench copies start.md into the task workspace at launch
+                # (shutil.copy2 onto a host bind-mount); this is our equivalent for the
+                # sandbox-provider path. mkdir first (see the comment on `files=` above for
+                # why SandboxSpec.files alone silently drops this on images that don't
+                # already have /workspace), then upload via the dedicated file-transfer API
+                # rather than inlining content into a sandbox.exec() shell command: some
+                # start.md specs run up to ~375KB, and the opencode_sandboxed_agent install
+                # path hit a real `fork/exec ... argument list too long` failure the last
+                # time large NL2RepoBench content was inlined into an exec command string
+                # (see benchmarks/nl2repobench/opencode.yaml) - upload() avoids that
+                # class of failure entirely rather than relying on staying under some
+                # untested ARG_MAX threshold.
+                # cwd="/" is required here, not just defensive: exec()'s default cwd is
+                # SandboxSpec.workdir ("/workspace" above), and at least one provider
+                # (OpenSandbox) validates the cwd exists before running the command at
+                # all - so letting this call default to /workspace, the very directory
+                # it's trying to create, fails with "working directory does not exist"
+                # before mkdir ever runs. "/" is guaranteed to exist in any image.
+                mkdir_result = await sandbox.exec(
+                    command=f"mkdir -p {shlex.quote(task.workdir)}", cwd="/", timeout_s=60
                 )
-            if mode == "no_internet_preinstalled":
-                # agent_image above is task_image(task), which also ships this task's real
-                # held-out tests AND the real repo's own root-level packaging/scaffolding files
-                # (setup.py, pyproject.toml, requirements*.txt, .pytest_cache/, ...) - confirmed
-                # live: deleting only task.test_files.files left setup.py/pyproject.toml/
-                # requirements.txt sitting in /workspace across most tasks (e.g. icecream's real
-                # setup.py), leaking real dependency versions/package metadata the agent was
-                # never supposed to see. Wipe /workspace entirely instead of targeting the known
-                # test-file list. Must happen before the agent's session is usable (seed_session
-                # can't return until this function returns, so there's no window where the agent
-                # could read any of it first).
-                #
-                # /tmp/_reference_repo ALSO wiped, not just /workspace: our own per-task images
-                # (sft_runs/lightning_vahid1016/testset/task_images/) install the reference repo
-                # with `pip install -e .` (an EDITABLE install - deliberately matching what
-                # test_commands.json itself does at verify time), which leaves the real
-                # implementation AND the real held-out tests/ sitting in /tmp/_reference_repo,
-                # readable in full by the agent, and importable as the real package via Python's
-                # normal import machinery - a complete answer leak, strictly worse than the
-                # /workspace case above. Deleting it does NOT break any genuinely-needed
-                # pre-installed dependency: only this ONE package's own (editable) install
-                # resolves through /tmp/_reference_repo; every other third-party dependency the
-                # task needs was installed normally into system site-packages (e.g.
-                # /usr/local/lib/python3.*/site-packages), unaffected by this deletion. The agent
-                # losing the ability to `import <the task's own package>` is the point, not a
-                # side effect to work around - it is never supposed to have the real
-                # implementation available at all.
-                wipe_result = await sandbox.exec(
-                    command=f"find {shlex.quote(task.workdir)} -mindepth 1 -delete && rm -rf /tmp/_reference_repo",
-                    cwd="/",
-                    timeout_s=60,
-                )
-                if wipe_result.return_code != 0:
+                if mkdir_result.return_code != 0:
                     raise RuntimeError(
-                        f"Failed to wipe pre-existing /workspace/_reference_repo contents in agent sandbox for "
-                        f"{task_id(task)!r}: {wipe_result.stderr or wipe_result.stdout or '(no output)'}"
+                        f"Failed to create {task.workdir} in agent sandbox for {task_id(task)!r}: "
+                        f"{mkdir_result.stderr or mkdir_result.stdout or '(no output)'}"
                     )
-                # Metadata scrub (added 2026-10-21 after a leak scan of the real per-task images, see
-                # sft_runs/lightning_vahid1016/testset/LEAK_AUDIT.md): the editable install of the reference repo
-                # leaves, outside /tmp/_reference_repo, the package's dist-info (METADATA embeds the README with code
-                # examples + version + Home-page URL + dependency list; `pip show` prints them), its console-script
-                # stubs in bin/ (reveal the module layout) and the .pth/__editable__ pointer. Remove every dist-info
-                # whose direct_url.json points at /tmp/_reference_repo together with the files its RECORD lists, and
-                # any leftover .pth/__editable__ file naming it. The verifier uses its own fresh sandbox, unaffected.
-                scrub_result = await sandbox.exec(
-                    command=_METADATA_SCRUB_COMMAND.replace(
-                        "__IDENTS__", " ".join(derive_identifiers(task_id(task), task.test_commands.commands)[0])
-                    ),
-                    cwd="/",
-                    timeout_s=120,
-                )
-                if scrub_result.return_code != 0:
-                    raise RuntimeError(
-                        f"Failed to scrub editable-install metadata in agent sandbox for {task_id(task)!r}: "
-                        f"{scrub_result.stderr or scrub_result.stdout or '(no output)'}"
+                if mode == "no_internet_preinstalled":
+                    # agent_image above is task_image(task), which also ships this task's real
+                    # held-out tests AND the real repo's own root-level packaging/scaffolding files
+                    # (setup.py, pyproject.toml, requirements*.txt, .pytest_cache/, ...) - confirmed
+                    # live: deleting only task.test_files.files left setup.py/pyproject.toml/
+                    # requirements.txt sitting in /workspace across most tasks (e.g. icecream's real
+                    # setup.py), leaking real dependency versions/package metadata the agent was
+                    # never supposed to see. Wipe /workspace entirely instead of targeting the known
+                    # test-file list. Must happen before the agent's session is usable (seed_session
+                    # can't return until this function returns, so there's no window where the agent
+                    # could read any of it first).
+                    #
+                    # /tmp/_reference_repo ALSO wiped, not just /workspace: our own per-task images
+                    # (sft_runs/lightning_vahid1016/testset/task_images/) install the reference repo
+                    # with `pip install -e .` (an EDITABLE install - deliberately matching what
+                    # test_commands.json itself does at verify time), which leaves the real
+                    # implementation AND the real held-out tests/ sitting in /tmp/_reference_repo,
+                    # readable in full by the agent, and importable as the real package via Python's
+                    # normal import machinery - a complete answer leak, strictly worse than the
+                    # /workspace case above. Deleting it does NOT break any genuinely-needed
+                    # pre-installed dependency: only this ONE package's own (editable) install
+                    # resolves through /tmp/_reference_repo; every other third-party dependency the
+                    # task needs was installed normally into system site-packages (e.g.
+                    # /usr/local/lib/python3.*/site-packages), unaffected by this deletion. The agent
+                    # losing the ability to `import <the task's own package>` is the point, not a
+                    # side effect to work around - it is never supposed to have the real
+                    # implementation available at all.
+                    wipe_result = await sandbox.exec(
+                        command=f"find {shlex.quote(task.workdir)} -mindepth 1 -delete && rm -rf /tmp/_reference_repo",
+                        cwd="/",
+                        timeout_s=60,
                     )
-                if self.config.scrub_workspace_installs:
-                    ws_scrub = await sandbox.exec(
-                        command=_WORKSPACE_INSTALL_SCRUB_COMMAND.replace(
+                    if wipe_result.return_code != 0:
+                        raise RuntimeError(
+                            f"Failed to wipe pre-existing /workspace/_reference_repo contents in agent sandbox for "
+                            f"{task_id(task)!r}: {wipe_result.stderr or wipe_result.stdout or '(no output)'}"
+                        )
+                    # Metadata scrub (added 2026-10-21 after a leak scan of the real per-task images, see
+                    # sft_runs/lightning_vahid1016/testset/LEAK_AUDIT.md): the editable install of the reference repo
+                    # leaves, outside /tmp/_reference_repo, the package's dist-info (METADATA embeds the README with code
+                    # examples + version + Home-page URL + dependency list; `pip show` prints them), its console-script
+                    # stubs in bin/ (reveal the module layout) and the .pth/__editable__ pointer. Remove every dist-info
+                    # whose direct_url.json points at /tmp/_reference_repo together with the files its RECORD lists, and
+                    # any leftover .pth/__editable__ file naming it. The verifier uses its own fresh sandbox, unaffected.
+                    scrub_result = await sandbox.exec(
+                        command=_METADATA_SCRUB_COMMAND.replace(
                             "__IDENTS__", " ".join(derive_identifiers(task_id(task), task.test_commands.commands)[0])
                         ),
                         cwd="/",
                         timeout_s=120,
                     )
-                    if ws_scrub.return_code != 0:
+                    if scrub_result.return_code != 0:
                         raise RuntimeError(
-                            f"Failed to scrub /workspace installs in agent sandbox for {task_id(task)!r}: "
-                            f"{ws_scrub.stderr or ws_scrub.stdout or '(no output)'}"
+                            f"Failed to scrub editable-install metadata in agent sandbox for {task_id(task)!r}: "
+                            f"{scrub_result.stderr or scrub_result.stdout or '(no output)'}"
                         )
-                if self.config.scrub_target_installs:
-                    target_scrub = await sandbox.exec(
-                        command=_TARGET_INSTALL_SCRUB_COMMAND.replace(
-                            "__IDENTS__", " ".join(derive_identifiers(task_id(task), task.test_commands.commands)[0])
-                        ),
-                        cwd="/",
-                        timeout_s=120,
-                    )
-                    if target_scrub.return_code != 0:
-                        raise RuntimeError(
-                            f"Failed to scrub the reference project's installs in agent sandbox for {task_id(task)!r}: "
-                            f"{target_scrub.stderr or target_scrub.stdout or '(no output)'}"
+                    if self.config.scrub_workspace_installs:
+                        ws_scrub = await sandbox.exec(
+                            command=_WORKSPACE_INSTALL_SCRUB_COMMAND.replace(
+                                "__IDENTS__",
+                                " ".join(derive_identifiers(task_id(task), task.test_commands.commands)[0]),
+                            ),
+                            cwd="/",
+                            timeout_s=120,
                         )
-            elif mode == "block_target":
-                await self._install_pip_git_guard(sandbox, task)
-            elif mode == "block_target_v2":
-                await install_guard_v2(sandbox, task_id(task), task.test_commands.commands)
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-                f.write(task.start_md)
-                local_start_md_path = Path(f.name)
-            try:
-                await sandbox.upload(local_start_md_path, f"{task.workdir}/start.md")
-            finally:
-                local_start_md_path.unlink(missing_ok=True)
+                        if ws_scrub.return_code != 0:
+                            raise RuntimeError(
+                                f"Failed to scrub /workspace installs in agent sandbox for {task_id(task)!r}: "
+                                f"{ws_scrub.stderr or ws_scrub.stdout or '(no output)'}"
+                            )
+                    if self.config.scrub_target_installs:
+                        target_scrub = await sandbox.exec(
+                            command=_TARGET_INSTALL_SCRUB_COMMAND.replace(
+                                "__IDENTS__",
+                                " ".join(derive_identifiers(task_id(task), task.test_commands.commands)[0]),
+                            ),
+                            cwd="/",
+                            timeout_s=120,
+                        )
+                        if target_scrub.return_code != 0:
+                            raise RuntimeError(
+                                f"Failed to scrub the reference project's installs in agent sandbox for {task_id(task)!r}: "
+                                f"{target_scrub.stderr or target_scrub.stdout or '(no output)'}"
+                            )
+                elif mode == "block_target":
+                    await self._install_pip_git_guard(sandbox, task)
+                elif mode == "block_target_v2":
+                    await install_guard_v2(sandbox, task_id(task), task.test_commands.commands)
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+                    f.write(task.start_md)
+                    local_start_md_path = Path(f.name)
+                try:
+                    await sandbox.upload(local_start_md_path, f"{task.workdir}/start.md")
+                finally:
+                    local_start_md_path.unlink(missing_ok=True)
+        except BaseException:
+            # The sandbox is not returned yet, so no caller can stop it: a failed mkdir, wipe, guard or upload would
+            # otherwise leave it running until its TTL. Shielded so a cancelled request still stops it.
+            await asyncio.shield(self._stop_sandbox(sandbox, task_id=current_task_id, phase=f"failed-{phase}-init"))
+            raise
         return sandbox
 
     # Blanket-match tools: never legitimately invoked in a way that would coincidentally mention
@@ -1022,6 +1053,40 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                         f"Failed to chmod guard wrapper for {name!r} on {current_task_id!r}: "
                         f"{chmod_result.stderr or chmod_result.stdout or '(no output)'}"
                     )
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._agent_sessions
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        # Unused: seed_session below is overridden and keeps the cookie-based seed this server's agents send.
+        raise NotImplementedError("NL2RepoBench seeds through its own seed_session")
+
+    async def release_session_state(self, session_id: str) -> None:
+        """Stop the session's live agent sandbox, so /close_session and a retire do not leave it to its TTL.
+
+        The session is dropped only once the stop succeeded; a failure raises and keeps it for the retry.
+        """
+        session = self._agent_sessions.get(session_id)
+        if session is None:
+            return
+        await session.sandbox.stop()
+        self._agent_sessions.pop(session_id, None)
+
+    async def _create_verifier_sandbox(self, task: Task) -> AsyncSandbox:
+        attempts = self.config.verifier_sandbox_start_attempts
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._create_sandbox(task, phase="verifier")
+            except Exception:
+                if attempt == attempts:
+                    raise
+                print(
+                    f"NL2RepoBench verifier sandbox start failed for {task_id(task)} (attempt {attempt}/{attempts}): "
+                    f"{format_exc()}",
+                    file=sys.stderr,
+                )
+                await asyncio.sleep(self.config.verifier_sandbox_retry_delay_s)
+        raise AssertionError("unreachable")
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
         try:
@@ -1110,6 +1175,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         # there) - surfaced by verify_image_override pointing at a generic image instead
         # (confirmed via a real failed run, 100% of verifies failing on this exact error).
         mkdir_result = await sandbox.exec("mkdir -p /workspace", cwd="/", timeout_s=60)
+        _raise_on_sandbox_error(mkdir_result, "creating /workspace in the verifier sandbox")
         if mkdir_result.return_code != 0:
             return VerifierResult(
                 evaluation_completed=False,
@@ -1130,6 +1196,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             )
         else:
             extract_result = await sandbox.exec("tar xzf /tmp/workspace.tar.gz -C /workspace", timeout_s=300)
+        _raise_on_sandbox_error(extract_result, "restoring the workspace in the verifier sandbox")
         if extract_result.return_code != 0:
             return VerifierResult(
                 evaluation_completed=False,
@@ -1152,6 +1219,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             command_result = await sandbox.exec(
                 _bounded_output(run_command), cwd="/workspace", timeout_s=TEST_COMMAND_TIMEOUT_S
             )
+            _raise_on_sandbox_error(command_result, f"running {command!r} in the verifier sandbox")
             last_exit_code = command_result.return_code
             command_output = f"{command_result.stdout or ''}{command_result.stderr or ''}"
             output_parts.append(f"$ {command}\n{command_output}\n[exit code: {command_result.return_code}]\n")
@@ -1207,12 +1275,15 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         sandbox_handle = body.sandbox_handle
 
         workspace_error: str | None = None
+        # Set when the verdict is inconclusive for reasons that are not the agent's: the row is masked, not scored 0.
+        masked: dict[str, Any] | None = None
         workspace_tar = b""
         workspace_collection_time_s = 0.0
 
         agent_session = self._agent_sessions.pop(session_id, None)
         if agent_session is None:
             workspace_error = f"no agent session found for session {session_id!r}"
+            masked = lost_session_verification(workspace_error, failure_kind=SESSION_LOST)
         else:
             sandbox_handle = agent_session.sandbox_handle
             started = monotonic()
@@ -1269,17 +1340,24 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         elif workspace_error is None:
             try:
                 started = monotonic()
-                sandbox = await self._create_sandbox(task, phase="verifier")
+                sandbox = await self._create_verifier_sandbox(task)
                 sandbox_start_time_s = monotonic() - started
                 started = monotonic()
                 result = await self._run_verifier(sandbox, task, workspace_tar)
                 verification_time_s = monotonic() - started
             except Exception as error:
                 print(f"NL2RepoBench verifier failed for {current_task_id}: {format_exc()}", file=sys.stderr)
+                reason = f"{type(error).__name__}: {error}"
+                masked = {
+                    "reward": 0.0,
+                    "mask_sample": True,
+                    "failure_kind": error.failure_kind if isinstance(error, NgFailureEvent) else VERIFIER_ERROR,
+                    "failure_reason": f"NL2RepoBench verification was inconclusive: {reason}",
+                }
                 result = VerifierResult(
                     evaluation_completed=False,
                     reward=0.0,
-                    verifier_error=f"{type(error).__name__}: {error}",
+                    verifier_error=reason,
                     test_case_count=task.test_case_count,
                 )
             finally:
@@ -1300,6 +1378,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         return NL2RepoBenchVerifyResponse.model_validate(
             body.model_dump()
             | result.model_dump()
+            | (masked or {})
             | {
                 "clean_reward": clean_reward,
                 "task_id": current_task_id,

@@ -3,6 +3,7 @@
 
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -174,8 +175,30 @@ def test_network_policy_is_scoped_to_agent_sandbox(task_assets: Path) -> None:
     config.sandbox_config = {"provider_options": {"network_policy": {"defaultAction": "allow", "egress": []}}}
     server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    assert server._provider_options(phase="agent")["network_policy"] == {"defaultAction": "allow", "egress": []}
     assert server._provider_options(phase="verifier") == {}
+    # The agent phase of a no-internet mode is deny-all except the model host: an inherited allow-all policy is refused
+    # rather than kept (config here has enforce_agent_no_network=True).
+    with pytest.raises(ValueError, match="defaultAction must be 'deny'"):
+        server._provider_options(phase="agent")
+
+
+def test_no_internet_mode_forces_deny_by_default(task_assets: Path) -> None:
+    for inherited, expected in (
+        (None, {"defaultAction": "deny", "egress": []}),
+        ({"egress": []}, {"defaultAction": "deny", "egress": []}),
+        ({"defaultAction": "deny", "egress": []}, {"defaultAction": "deny", "egress": []}),
+    ):
+        config = _config(task_assets)
+        config.agent_network_mode = "no_internet_preinstalled"
+        config.sandbox_config = {"provider_options": {"network_policy": inherited} if inherited is not None else {}}
+        server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert server._provider_options(phase="agent")["network_policy"] == expected
+    config = _config(task_assets)
+    config.agent_network_mode = "no_internet_preinstalled"
+    config.sandbox_config = {"provider_options": {"network_policy": {"defaultAction": "allow"}}}
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    with pytest.raises(ValueError, match="defaultAction must be 'deny'"):
+        server._provider_options(phase="agent")
 
 
 # --- seed_session / verify flow ------------------------------------------------------------------
@@ -216,6 +239,9 @@ async def test_verify_without_seed_returns_incomplete_result(task_assets: Path) 
     assert response.reward == 0.0
     assert response.evaluation_completed is False
     assert "no agent session found" in (response.verifier_error or "")
+    # a lost session says nothing about the agent: masked, not a scored 0
+    assert response.mask_sample is True
+    assert response.failure_kind == "session_lost"
 
 
 async def test_verify_collects_workspace_and_runs_tests_in_fresh_sandbox(
@@ -322,7 +348,7 @@ def _resolved_task(task_assets: Path):
 
 
 def _exec_result(return_code: int, stdout: str = "") -> MagicMock:
-    return MagicMock(return_code=return_code, stdout=stdout, stderr="")
+    return MagicMock(return_code=return_code, stdout=stdout, stderr="", error_type=None)
 
 
 def test_parse_pytest_upstream_sums_every_line_of_every_pytest_command() -> None:
@@ -563,3 +589,131 @@ def test_bounded_output_runs_multi_statement_commands_with_a_trailing_comment() 
     )
 
     assert result.returncode == 0 and result.stdout == "1\n"
+
+
+# --- inconclusive verification is masked, not scored ---------------------------------------------
+
+
+async def _seeded_server(task_assets: Path, monkeypatch: MonkeyPatch, **config_updates: Any) -> tuple:
+    config = _config(task_assets).model_copy(update={"verifier_sandbox_retry_delay_s": 0.0, **config_updates})
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    create_sandbox = AsyncMock(side_effect=[agent_sandbox])
+    monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+    monkeypatch.setattr(server, "_collect_workspace", AsyncMock(return_value=(b"tar-bytes", None)))
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+    await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
+    return server, request, create_sandbox
+
+
+async def test_verifier_sandbox_start_is_retried_then_succeeds(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    verifier_sandbox = AsyncMock()
+    create_sandbox.side_effect = [RuntimeError("provider busy"), RuntimeError("provider busy"), verifier_sandbox]
+    monkeypatch.setattr(
+        server,
+        "_run_verifier",
+        AsyncMock(return_value=VerifierResult(evaluation_completed=True, reward=1.0, test_case_count=5)),
+    )
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.reward == 1.0 and not getattr(response, "mask_sample", False)
+    assert create_sandbox.await_count == 1 + 3  # the agent sandbox, then three verifier starts
+    verifier_sandbox.stop.assert_awaited_once()
+
+
+async def test_verifier_sandbox_that_never_starts_masks_the_row(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    create_sandbox.side_effect = RuntimeError("provider busy")
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.reward == 0.0
+    assert response.mask_sample is True
+    assert response.failure_kind == "verifier_error"
+    assert "provider busy" in response.failure_reason
+    assert create_sandbox.await_count == 1 + server.config.verifier_sandbox_start_attempts
+
+
+async def test_provider_error_while_running_tests_masks_the_row(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    verifier_sandbox = AsyncMock()
+    verifier_sandbox.exec.return_value = MagicMock(return_code=125, stdout="", stderr="", error_type="sandbox")
+    create_sandbox.side_effect = [verifier_sandbox]
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.mask_sample is True and response.reward == 0.0
+    assert "sandbox" in response.failure_reason
+    verifier_sandbox.stop.assert_awaited_once()
+
+
+async def test_a_test_command_timeout_is_still_a_scored_result(task_assets: Path) -> None:
+    server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    task = server._task_store.get("example-task")
+    calls = []
+
+    async def exec_(command: str, **kwargs: Any) -> MagicMock:
+        calls.append(command)
+        if len(calls) <= 2:  # mkdir and the workspace restore
+            return _exec_result(0)
+        return MagicMock(return_code=124, stdout="", stderr="", error_type="timeout")  # the agent's code hung
+
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = exec_
+
+    result = await server._run_verifier(sandbox, task, b"tar")
+
+    assert result.evaluation_completed is True  # scored, not masked: a timeout is a test outcome
+
+
+# --- sandbox lifecycle ---------------------------------------------------------------------------
+
+
+async def test_failed_agent_init_stops_the_sandbox(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = _exec_result(1)  # mkdir -p /workspace fails after the sandbox started
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    with pytest.raises(RuntimeError, match="Failed to create"):
+        await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
+
+    sandbox.stop.assert_awaited()
+    assert server._agent_sessions == {}
+
+
+async def test_release_session_state_stops_the_live_sandbox(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, _ = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    assert server.has_session_state("test-session")
+
+    await server.release_session_state("test-session")
+
+    agent_sandbox.stop.assert_awaited_once()
+    assert not server.has_session_state("test-session")
+    await server.release_session_state("test-session")  # idempotent
+    await server.release_session_state("never-seeded")
+
+
+async def test_release_session_state_keeps_the_session_when_stop_fails(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, _ = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    agent_sandbox.stop.side_effect = [RuntimeError("provider down"), None]
+
+    with pytest.raises(RuntimeError, match="provider down"):
+        await server.release_session_state("test-session")
+    assert server.has_session_state("test-session")  # kept for the retry
+
+    await server.release_session_state("test-session")
+    assert not server.has_session_state("test-session")
