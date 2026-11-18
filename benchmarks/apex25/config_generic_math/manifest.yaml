@@ -1,0 +1,32 @@
+name: apex25/config_generic_math
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: APEX 2025 math problems with the generic NeMo Skills math prompt and symbolic-only
+  math-verify grading.
+modality: text
+licensing: unknown
+authors:
+- wedu-nvidia
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../config_generic_math.yaml
+resources_server: math_with_judge
+agent_server: simple_agent
+datasets:
+- name: apex25
+  type: benchmark
+  jsonl_fpath: benchmarks/apex25/data/apex25_benchmark.jsonl
+  prepare_script: benchmarks/apex25/prepare.py
+  prompt_config: benchmarks/prompts/generic/math.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/generic/math.yaml
+lifecycle: active

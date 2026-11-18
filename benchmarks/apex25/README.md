@@ -26,6 +26,22 @@ Put your final answer within \boxed{}.
 <question>
 ```
 
+### Generic math prompt (opt-in)
+
+`apex25/config_generic_math` runs the same data and grading with the shared
+`benchmarks/prompts/generic/math.yaml` prompt (NeMo Skills `generic/math`), for
+comparison with NeMo Skills' default math eval (`eval_type=math` with no judge):
+
+```
+Solve the following math problem. Make sure to put the answer (and only answer) inside \boxed{}.
+
+<question>
+```
+
+Select it with `--benchmark apex25/config_generic_math`, and pass
+`--prompt-config benchmarks/prompts/generic/math.yaml` when collecting
+rollouts.
+
 ## Data preparation
 
 ```bash
@@ -51,8 +67,12 @@ gym eval run --no-serve \
     --agent apex25_math_with_judge_simple_agent \
     --input benchmarks/apex25/data/apex25_benchmark.jsonl \
     --output results/apex25_rollouts.jsonl \
+    --prompt-config benchmarks/apex25/prompts/default.yaml \
     --num-repeats 32
 ```
+
+The prepared rows carry no `responses_create_params`, so `--prompt-config` is
+required.
 
 The example supplies all repeats at collection time; do not also repeat the
 prepared dataset.
