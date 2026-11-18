@@ -310,8 +310,10 @@ def fake_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         (root / folder).mkdir(parents=True)
     (root / "fake_docker.py").write_text(FAKE_DOCKER)
     cli = root / "bin" / "docker"
+    # `-S` skips site-packages hooks, such as pytest-cov's subprocess coverage, which made every call slow enough
+    # under `--cov` that a collection missed its startup deadline. The fake needs only the standard library.
     cli.write_text(
-        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I {shlex.quote(str(root / "fake_docker.py"))} "$@"\n'
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -S {shlex.quote(str(root / "fake_docker.py"))} "$@"\n'
     )
     cli.chmod(0o755)
     monkeypatch.setenv("PATH", f"{root / 'bin'}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}")
