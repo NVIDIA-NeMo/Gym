@@ -28,6 +28,7 @@ from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, Aggrega
 from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
+    RequestFailureLog,
 )
 
 
@@ -989,7 +990,8 @@ class TestApp:
 
         run_request = create_run_request(instance_id="test_instance_456", temperature=0.3, top_p=0.95)
 
-        response = await server.run(run_request)
+        with RequestFailureLog.capture() as log:
+            response = await server.run(run_request)
 
         assert_run_response(
             response,
@@ -998,6 +1000,15 @@ class TestApp:
             expected_top_p=0.95,
             expected_input_length=0,
         )
+
+        (recorded,) = [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+        assert (recorded.boundary.value, recorded.failure_kind, recorded.stage) == (
+            "agent",
+            "agent_run_error",
+            "agent",
+        )
+        assert "run_mini_swe failed" in recorded.failure_reason
+        assert log.report.failure_id is None
 
         assert_run_mini_swe_called(mock_runner_ray_remote, instance_id="test_instance_456")
 

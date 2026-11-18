@@ -65,7 +65,7 @@ class TestGitlabUtils:
 
         def fake_get(url: str, headers: dict) -> SimpleNamespace:
             requested.append(url)
-            return SimpleNamespace(content=b'{"question": "q"}\n')
+            return SimpleNamespace(content=b'{"question": "q"}\n', raise_for_status=lambda: None)
 
         monkeypatch.setattr("nemo_gym.data.gitlab_utils.requests.get", fake_get)
         output = tmp_path / "data" / "nested" / "rows.jsonl"
@@ -78,3 +78,43 @@ class TestGitlabUtils:
 
         assert requested == ["https://gitlab.invalid/artifacts/rows.jsonl"]
         assert output.read_text() == '{"question": "q"}\n'
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 500])
+    def test_an_error_response_fails_the_download_and_writes_no_output(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, status: int
+    ) -> None:
+        import requests
+
+        client = SimpleNamespace(
+            tracking_uri="https://gitlab.invalid/api/v4/projects/1/ml/mlflow",
+            get_model_version=lambda name, version: SimpleNamespace(run_id="run"),
+        )
+        repository = SimpleNamespace(repo=SimpleNamespace(artifact_uri="https://gitlab.invalid/artifacts/"))
+        monkeypatch.setattr("nemo_gym.data.gitlab_utils.create_mlflow_client", lambda: client)
+        monkeypatch.setitem(sys.modules, "mlflow", ModuleType("mlflow"))
+        monkeypatch.setitem(
+            sys.modules, "mlflow.artifacts", SimpleNamespace(get_artifact_repository=lambda **_: repository)
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "mlflow.environment_variables",
+            SimpleNamespace(MLFLOW_TRACKING_TOKEN=SimpleNamespace(get=lambda: "token")),
+        )
+
+        def rejected() -> None:
+            raise requests.HTTPError(f"{status} Client Error")
+
+        monkeypatch.setattr(
+            "nemo_gym.data.gitlab_utils.requests.get",
+            lambda url, headers: SimpleNamespace(content=b"<html>error page</html>", raise_for_status=rejected),
+        )
+        output = tmp_path / "rows.jsonl"
+
+        with pytest.raises(requests.HTTPError, match=str(status)):
+            download_jsonl_dataset(
+                DownloadJsonlDatasetGitlabConfig(
+                    dataset_name="dataset", version="0.0.1", artifact_fpath="rows.jsonl", output_fpath=str(output)
+                )
+            )
+
+        assert not output.exists()  # the error page is not saved as the dataset

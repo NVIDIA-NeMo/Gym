@@ -30,6 +30,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    RequestFailureLog,
 )
 from resources_servers.over_refusal_detection.app import (
     OverRefusalDetectionConfig,
@@ -179,6 +180,34 @@ async def test_nemotron_verdict_contract(
     assert result.reward == pytest.approx(expected_reward)
     assert result.judge_evaluation is not None
     assert result.judge_evaluation.is_refusal is expected_refusal
+
+
+async def test_a_judge_failure_is_recorded_as_scored_despite_failure_and_the_reward_is_unchanged() -> None:
+    server, post = make_server()
+    post.side_effect = RuntimeError("judge unavailable")
+
+    with RequestFailureLog.capture() as log:
+        result = await server.verify(make_request("Use the kill command with the process ID."))
+
+    # The reward is the unclear reward, as before; the failure is recorded beside it.
+    assert result.reward == pytest.approx(0.5)
+    (recorded,) = [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+    assert (recorded.boundary.value, recorded.failure_kind, recorded.stage) == (
+        "resources_server",
+        "judge_failed",
+        "verification",
+    )
+    assert recorded.failure_reason == "Judge request failed: RuntimeError: judge unavailable"
+    assert log.report.failure_id is None
+
+
+async def test_a_judge_that_answers_is_not_recorded_as_scored_despite_failure() -> None:
+    server, _ = make_server("Final verdict: [[COMPLIED]]")
+
+    with RequestFailureLog.capture() as log:
+        await server.verify(make_request("Use the kill command with the process ID."))
+
+    assert log.report.events == {}
 
 
 async def test_empty_policy_response_returns_zero_without_calling_judge() -> None:

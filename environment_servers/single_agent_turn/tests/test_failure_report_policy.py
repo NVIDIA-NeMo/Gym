@@ -253,6 +253,61 @@ async def test_report_without_selected_failure_follows_outcome_policy():
     assert verify["response"]["failure_report"] == {"failure_id": None, "events": {}}
 
 
+async def test_a_failed_reply_without_an_outcome_is_verified_as_before_and_recorded_as_scored_despite_failure():
+    from nemo_gym.core import RequestFailureLog
+
+    environment, client = _environment_server()
+    response = _agent_response().model_dump(mode="json")
+    response.update(status="failed", error={"code": "server_error", "message": "harness exited with status 3"})
+    client.responses[2] = _Response(response)
+
+    with RequestFailureLog.capture() as log:
+        result = await environment.run_request(_request())
+
+    # The reply is verified and scored exactly as it was before the event was recorded.
+    assert result.failure is None and result.result is not None
+    assert any(path == "/verify" for _, path, _ in client.calls)
+    recorded = [event for event in log.report.events.values() if event.operation == "scored_despite_failure"]
+    assert [(event.boundary.value, event.failure_kind, event.failure_reason, event.stage) for event in recorded] == [
+        ("agent", "agent_run_error", "harness exited with status 3", "agent")
+    ]
+    assert log.report.failure_id is None  # it is not the rollout's own failure
+
+
+async def test_a_failed_reply_with_a_classified_outcome_is_not_recorded_as_scored_despite_failure():
+    from nemo_gym.core import RequestFailureLog
+
+    environment, client = _environment_server()
+    response = _agent_response().model_dump(mode="json")
+    response.update(
+        status="failed",
+        error={"code": "server_error", "message": "scripted bad request"},
+        metadata={
+            AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
+                failure_kind="model_request_error", status_code=400
+            ).model_dump_json()
+        },
+        failure_report={"failure_id": None, "events": {}},
+    )
+    client.responses[2] = _Response(response)
+
+    with RequestFailureLog.capture() as log:
+        await environment.run_request(_request())
+
+    assert all(event.operation != "scored_despite_failure" for event in log.report.events.values())
+
+
+async def test_a_completed_reply_is_not_recorded_as_scored_despite_failure():
+    from nemo_gym.core import RequestFailureLog
+
+    environment, _ = _environment_server()
+
+    with RequestFailureLog.capture() as log:
+        await environment.run_request(_request())
+
+    assert all(event.operation != "scored_despite_failure" for event in log.report.events.values())
+
+
 @pytest.mark.parametrize("final_on_model_timeout", [False, True])
 async def test_queued_timeout_stays_retryable_under_the_default_policy(final_on_model_timeout):
     environment, client = _environment_server()

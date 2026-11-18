@@ -44,6 +44,8 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    AGENT_LIMIT,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -52,6 +54,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseUsage,
     accumulate_response_usage,
+    observe_scored_despite_failure,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.sandbox import (
@@ -422,6 +425,14 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 stop_reason = "max_iterations"
+                # The reward and the response sent to verification are unchanged; the cap is recorded as a limit that
+                # ended the run, so the rollout is not mistaken for one that finished.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_LIMIT,
+                    failure_reason=f"The run reached max_steps ({self.config.max_steps}) with tool calls still pending",
+                    stage="agent",
+                )
                 break
 
         # Propogate any extra cookies necessary for downstream verification

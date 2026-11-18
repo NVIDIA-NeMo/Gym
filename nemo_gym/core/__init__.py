@@ -92,6 +92,7 @@ if TYPE_CHECKING:
         RequestFailureLog,
         StreamFailureReportReader,
         observe_failure,
+        observe_scored_despite_failure,
         reply_failure_report,
         report_for_current_request,
     )
@@ -316,6 +317,7 @@ _PUBLIC_API = {
     "model_sampling_from_run_body": "model_call_sampling",
     "model_sampling_path_segment": "model_call_sampling",
     "observe_failure": "failure_transport",
+    "observe_scored_despite_failure": "failure_transport",
     "rebuild_failure": "typed_exceptions",
     "reply_failure_report": "failure_transport",
     "report_for_current_request": "failure_transport",

@@ -41,6 +41,7 @@ from nemo_gym.config import (
     get_first_server_config_dict,
 )
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     FailureBoundary,
@@ -52,6 +53,7 @@ from nemo_gym.core import (
     NgFailureEvent,
     RequestFailureLog,
     model_sampling_path_segment,
+    observe_scored_despite_failure,
     rebuild_failure,
 )
 from nemo_gym.metrics import add_perf_metrics
@@ -349,6 +351,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         if stage == "verify":
             action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
             cause = self._agent_failure(agent_response)
+            if agent_response.status == "failed" and AGENT_OUTCOME_METADATA_KEY not in (agent_response.metadata or {}):
+                # An agent that reports failure without a classified outcome is verified like any other reply. The
+                # rollout is recorded as scored despite that failure, so it is not mistaken for a normal run.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_RUN_ERROR,
+                    failure_reason=(agent_response.error.message if agent_response.error else None)
+                    or "The agent reported failure without a classified outcome",
+                    stage="agent",
+                )
             if agent_response.status == "failed" and AGENT_OUTCOME_METADATA_KEY in (agent_response.metadata or {}):
                 extra = agent_response.model_extra or {}
                 report = extra.get("failure_report")

@@ -48,6 +48,8 @@ from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -56,6 +58,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NgFailureEvent,
     accumulate_response_usage,
+    observe_scored_despite_failure,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -640,6 +643,13 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             return await self._run_inner(request, body)
         except Exception as e:
             logger.error("run() failed — returning reward=0: %s: %s", type(e).__name__, e)
+            # The reward stays 0; the rollout is recorded as scored despite the crash.
+            observe_scored_despite_failure(
+                boundary=FailureBoundary.AGENT,
+                failure_kind=AGENT_RUN_ERROR,
+                failure_reason=f"run() failed and was scored 0: {type(e).__name__}: {e}",
+                stage="agent",
+            )
             empty_response = NeMoGymResponse(
                 id="error",
                 created_at=0.0,

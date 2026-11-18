@@ -26,6 +26,7 @@ from nemo_gym.core import (
     ModelCallSampling,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
+    RequestFailureLog,
     encode_model_sampling,
 )
 from responses_api_agents.mini_swe_agent.app import (
@@ -343,7 +344,8 @@ class TestApp:
 
         run_request = create_run_request(instance_id="test_instance_456", temperature=0.3, top_p=0.95)
 
-        response = await server.run(run_request)
+        with RequestFailureLog.capture() as log:
+            response = await server.run(run_request)
 
         assert_run_response(
             response,
@@ -352,6 +354,15 @@ class TestApp:
             expected_top_p=0.95,
             expected_input_length=0,
         )
+
+        (recorded,) = [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+        assert (recorded.boundary.value, recorded.failure_kind, recorded.stage) == (
+            "agent",
+            "agent_run_error",
+            "agent",
+        )
+        assert "run_swegym failed" in recorded.failure_reason
+        assert log.report.failure_id is None
 
         assert_run_swegym_called(mock_to_thread, instance_id="test_instance_456")
 

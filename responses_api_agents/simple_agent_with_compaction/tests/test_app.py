@@ -1110,6 +1110,91 @@ class TestApp:
         assert "bug in the inference engine" in caplog.text
         assert mock_response_reasoning_data["id"] in caplog.text
 
+    async def test_a_run_ended_by_max_steps_is_recorded_as_scored_despite_failure(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        import responses_api_agents.simple_agent_with_compaction.app as agent_module
+
+        recorded = []
+        monkeypatch.setattr(agent_module, "observe_scored_despite_failure", lambda **kwargs: recorded.append(kwargs))
+        config = SimpleAgentWithCompactionConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="my server name"),
+            resources_server=ResourcesServerRef(type="resources_servers", name=""),
+            max_steps=2,
+        )
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+        tool_call_reply = {
+            "id": "resp_1",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "my_tool", "arguments": "{bad"}
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        reply = AsyncMock()
+        reply.read.side_effect = [json.dumps(tool_call_reply)] * 3
+        reply.cookies = MagicMock()
+        server.server_client.post.return_value = reply
+
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+
+        assert res.status_code == 200  # the response is returned as before
+        assert [(call["failure_kind"], call["stage"]) for call in recorded] == [("agent_limit", "agent")]
+        assert "max_steps (2)" in recorded[0]["failure_reason"]
+
+    async def test_a_run_that_finishes_before_max_steps_is_not_recorded(self, monkeypatch: MonkeyPatch) -> None:
+        import responses_api_agents.simple_agent_with_compaction.app as agent_module
+
+        recorded = []
+        monkeypatch.setattr(agent_module, "observe_scored_despite_failure", lambda **kwargs: recorded.append(kwargs))
+        config = SimpleAgentWithCompactionConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="my server name"),
+            resources_server=ResourcesServerRef(type="resources_servers", name=""),
+            max_steps=2,
+        )
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+        answer_reply = {
+            "id": "resp_1",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"annotations": [], "text": "42", "type": "output_text"}],
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        reply = AsyncMock()
+        reply.read.side_effect = [json.dumps(answer_reply)]
+        reply.cookies = MagicMock()
+        server.server_client.post.return_value = reply
+
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+
+        assert res.status_code == 200
+        assert recorded == []
+
     async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentWithCompactionConfig(
             host="0.0.0.0",

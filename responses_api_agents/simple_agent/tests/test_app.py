@@ -1586,6 +1586,75 @@ class TestApp:
         }
         assert expected_usage_dict == actual_usage_dict
 
+    def _step_cap_client(self, outputs: list, max_steps: int = 2) -> TestClient:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="my server name"),
+            resources_server=ResourcesServerRef(type="resources_servers", name=""),
+            max_steps=max_steps,
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        base = {
+            "id": "resp_1",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        model_replies = iter(json.dumps(base | {"output": output}) for output in outputs)
+
+        async def post(*, server_name: str, url_path: str, json=None, cookies=None, **kwargs) -> MagicMock:
+            if server_name == "my server name":
+                reply = _mock_response()
+                reply.read = AsyncMock(return_value=next(model_replies))
+                return reply
+            return _mock_response(content="tool output")  # the resources server answers the tool call
+
+        server.server_client.post = AsyncMock(side_effect=post)
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)  # `run_webserver` installs it; it opens the failure log of a request
+        return TestClient(app)
+
+    def test_a_run_ended_by_max_steps_is_recorded_as_scored_despite_failure(self) -> None:
+        tool_call = {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "my_tool",
+            "arguments": "{bad",
+        }
+        client = self._step_cap_client([[tool_call], [tool_call]])
+
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+
+        # The response is returned as before; the cap is recorded beside it.
+        assert res.status_code == 200
+        report = FailureHeader.decode(res.headers)
+        (recorded,) = [event for event in report.events.values() if event.operation == "scored_despite_failure"]
+        assert (recorded.boundary.value, recorded.failure_kind, recorded.stage) == ("agent", "agent_limit", "agent")
+        assert "max_steps (2)" in recorded.failure_reason
+
+    def test_a_run_that_finishes_before_max_steps_is_not_recorded(self) -> None:
+        answer = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"annotations": [], "text": "42", "type": "output_text"}],
+        }
+        client = self._step_cap_client([[answer]])
+
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+
+        assert res.status_code == 200
+        report = FailureHeader.decode(res.headers)
+        assert report is None or all(event.operation != "scored_despite_failure" for event in report.events.values())
+
     async def test_incomplete_details(self, monkeypatch: MonkeyPatch, caplog) -> None:
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "max_output_tokens"})
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "content_filter"})

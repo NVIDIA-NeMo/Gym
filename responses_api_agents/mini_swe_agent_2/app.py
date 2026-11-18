@@ -38,8 +38,11 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    observe_scored_despite_failure,
 )
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
@@ -907,6 +910,13 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             except Exception as e:
                 error_info = {"error": str(e), "traceback": traceback.format_exc()}
                 print(f"Error running mini-swe-agent: {e}\n{error_info['traceback']}", flush=True)
+                # The reward stays 0; the rollout is recorded as scored despite the failed run.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_RUN_ERROR,
+                    failure_reason=f"The mini-swe-agent run failed and the rollout was scored 0: {type(e).__name__}: {e}",
+                    stage="agent",
+                )
                 result = {"eval_report": error_info}
                 input_messages = []
                 response_output = []

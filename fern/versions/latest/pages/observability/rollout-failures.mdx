@@ -111,6 +111,26 @@ failed. Outside a request capture scope it does nothing.
 Reports deduplicate events by `event_id`; count each ID once across saved reports. A recovered failure
 remains diagnostic evidence and does not by itself change a successful result, score or health assessment.
 
+## Scored despite a failure
+
+A server sometimes swallows a failure and goes on to return a normal result: an agent whose harness crashed and is
+scored zero, a judge that did not answer and fell back to a default reward, a step limit that ended the run, a
+verifier whose sandbox could not run. The rollout is then scored from a degraded path, and without a record it cannot be
+told from one that was graded normally.
+
+Where the code carries on, call `observe_scored_despite_failure(boundary=..., failure_kind=..., failure_reason=...,
+stage=...)` from `nemo_gym.core`. It records an event with the operation `scored_despite_failure` in the same request
+failure log as `observe_failure`, so it travels with the reply and is saved beside the row. It changes nothing else: the
+reward, the response, the retry decision and the exit code are as they were, and no `failure_id` is set, because it is not
+the rollout's own failure. Use it only where the result is a consequence of the failure. A failure that a retry
+recovered from is a recovered failure, and `observe_failure` is the call for it.
+
+The `rollout_scored_despite_failure` [health check](/main/evaluation/rollout-health) counts these events, so the run's health
+summary says how many rollouts were scored this way and from which failure kinds. The shipped agents and verifiers
+record the cases they swallow: a crashed harness (`agent_run_error`), a step limit (`agent_limit`), a judge that did not
+answer (`judge_failed`), a verifier that could not run its sandbox (`verifier_error`), an agent that reported failure
+without a classified outcome, and a `/run` that was resent after it may have been delivered.
+
 ## Causes and transport
 
 An environment uses `handled_episode_failure(...)` with event fields, its local

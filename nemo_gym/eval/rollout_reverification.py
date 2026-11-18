@@ -2041,7 +2041,12 @@ class RolloutReverificationHelper(BaseModel):
                 if no_persist and config.input_format != "atif":
                     # kill_shaped: don't write anywhere. Set-difference on resume
                     # naturally re-dispatches; per-task timeout bounds wallclock.
-                    pass
+                    # Say so as it happens, so the rollout is not an unexplained absence from the output. It is not
+                    # counted as dropped, because a resume grades it again.
+                    tqdm.write(
+                        "[rollout_reverification] rollout not recorded (kill-shaped); a resume verifies it again: "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}"
+                    )
                 elif no_persist or failure_class is not None:
                     # Ordinary failures go to the sidecar. ATIF also persists
                     # kill-shaped diagnostics because that mode cannot resume.

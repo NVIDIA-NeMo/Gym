@@ -25,9 +25,9 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.core.failure_kinds import is_namespaced, is_registered
-from nemo_gym.core.failure_records import FailureReport
-from nemo_gym.core.typed_exceptions import failure_report_for
+from nemo_gym.core.failure_kinds import FailureStage, is_namespaced, is_registered
+from nemo_gym.core.failure_records import FailureBoundary, FailureReport
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 
 
 LOGGER = logging.getLogger(__name__)
@@ -257,6 +257,36 @@ def observe_failure(error: BaseException) -> None:
     log = RequestFailureLog.current()
     if log is not None:
         log.add(failure_report_for(error))
+
+
+SCORED_DESPITE_FAILURE_OPERATION = "scored_despite_failure"
+"""The ``operation`` of an event that ``observe_scored_despite_failure`` records, so a reader can pick these out."""
+
+
+def observe_scored_despite_failure(
+    *,
+    boundary: FailureBoundary | str,
+    failure_kind: str,
+    failure_reason: str,
+    stage: FailureStage | None = None,
+) -> None:
+    """Record a failure the code carried on past, for the request being served.
+
+    A server calls this where it swallows a failure and goes on to return a normal result: a harness that crashed and
+    is scored zero, a judge that was unreachable and fell back to a default reward, a step limit that ended the run.
+    The outcome is unchanged. The event travels with the reply and is saved beside the row (``_ng_failure_events``),
+    where the ``rollout_scored_despite_failure`` health check counts it, so such a rollout is no longer
+    indistinguishable from one that was graded normally. It is not the rollout's own failure: no ``failure_id`` is set.
+    """
+    observe_failure(
+        NgFailureEvent(
+            boundary=boundary,
+            failure_kind=failure_kind,
+            failure_reason=failure_reason[:2000],
+            operation=SCORED_DESPITE_FAILURE_OPERATION,
+            stage=stage,
+        )
+    )
 
 
 class StreamFailureReportReader:

@@ -869,6 +869,25 @@ class TestSimpleRunAttemptEvidence:
         assert result["response"] == verified[0]["response"]
         assert result["reward"] == 0.0
 
+    @pytest.mark.parametrize(("outcome", "limit_recorded"), [("iteration_limit", True), ("completed", False)])
+    def test_the_iteration_limit_is_recorded_as_scored_despite_failure(
+        self, monkeypatch: pytest.MonkeyPatch, outcome: str, limit_recorded: bool
+    ) -> None:
+        import responses_api_agents.cvdp_agent.app as agent_module
+
+        recorded = []
+        monkeypatch.setattr(agent_module, "observe_scored_despite_failure", lambda **kwargs: recorded.append(kwargs))
+        reply = self._reply("resp_a", "module a; endmodule", (10, 5))
+        if outcome == "iteration_limit":
+            reply["output"] = [{"id": "reason_a", "type": "reasoning", "summary": []}]
+
+        result, _, verified, _ = self._run([reply], [False], max_steps=1)
+
+        assert len(verified) == 1  # verification and the result are as before
+        assert [(call["failure_kind"], call["stage"]) for call in recorded] == (
+            [("agent_limit", "agent")] if limit_recorded else []
+        )
+
     def test_recovered_iteration_limit_uses_final_attempt_outcome_and_keeps_both_calls(self) -> None:
         first = self._reply("resp_a", None, None)
         first["output"] = [{"id": "reason_a", "type": "reasoning", "summary": []}]

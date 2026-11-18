@@ -41,6 +41,7 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
+    RequestFailureLog,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
 from responses_api_agents.finance_agent import app as finance_agent_app
@@ -1554,9 +1555,19 @@ class TestRun:
         )
         req = MagicMock()
         req.cookies = {}
-        result = await agent.run(req, body)
+        with RequestFailureLog.capture() as log:
+            result = await agent.run(req, body)
         assert result.reward == 0.0
         assert result.response.id == "error"
+        # The reward is unchanged, and the crash is recorded on the request.
+        (recorded,) = [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+        assert (recorded.boundary.value, recorded.failure_kind, recorded.stage) == (
+            "agent",
+            "agent_run_error",
+            "agent",
+        )
+        assert "catastrophic failure" in recorded.failure_reason
+        assert log.report.failure_id is None
 
 
 def _status_mock(status: int) -> MagicMock:

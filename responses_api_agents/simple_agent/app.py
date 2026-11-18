@@ -65,6 +65,7 @@ from nemo_gym.config import (
     ResourcesServerRef,
 )
 from nemo_gym.core import (
+    AGENT_LIMIT,
     AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
@@ -86,6 +87,7 @@ from nemo_gym.core import (
     RequestFailureLog,
     ToolOutputImage,
     accumulate_response_usage,
+    observe_scored_despite_failure,
     report_for_current_request,
     split_tool_output_images,
 )
@@ -818,6 +820,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 invocation_status = "incomplete"
+                # The reward and the response sent to verification are unchanged; the cap is recorded as a limit that
+                # ended the run, so the rollout is not mistaken for one that finished.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_LIMIT,
+                    failure_reason=f"The run reached max_steps ({self.config.max_steps}) with tool calls still pending",
+                    stage="agent",
+                )
                 break
             await commit_boundary()
 

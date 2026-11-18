@@ -401,6 +401,73 @@ def driver_metric_reader(monkeypatch: pytest.MonkeyPatch):
     provider.shutdown()
 
 
+class TestResentRunIsRecorded:
+    """A /run that dropped after it may have been delivered, was resent, and answered is recorded on the saved row."""
+
+    async def _collect(self, tmp_path, monkeypatch, empty_global_config, errors: list) -> list[dict]:
+        source = tmp_path / "input.jsonl"
+        source.write_text(json.dumps(failing_row(0)) + "\n")
+        output = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(source),
+            output_jsonl_fpath=str(output),
+            route_failures_to_sidecar=True,
+            upload_rollouts=False,
+            disable_aggregation=True,
+            disable_health_check=True,
+            num_samples_in_parallel=1,
+        )
+
+        async def post(*, _on_transport_failure=None, **kwargs):
+            for error in errors:
+                _on_transport_failure(error, True)  # the client reports each dropped attempt, then resends
+            return FakeResponse(200, {"response": {"output": []}, "reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "_record_rollout_health", lambda *args: None)
+        await RolloutCollectionHelper().run_from_config(config)
+        return [json.loads(line) for line in output.read_text().splitlines()]
+
+    @staticmethod
+    def _recorded(row: dict) -> list[dict]:
+        return [
+            event
+            for event in (row.get("_ng_failure_events") or {}).values()
+            if event.get("operation") == "scored_despite_failure"
+        ]
+
+    async def test_a_dropped_connection_that_was_resent_leaves_an_event_on_the_row(
+        self, tmp_path, monkeypatch, empty_global_config
+    ):
+        from aiohttp import ServerDisconnectedError
+
+        [row] = await self._collect(tmp_path, monkeypatch, empty_global_config, [ServerDisconnectedError()])
+
+        # The result is as before, and the row says it may have run twice.
+        assert row["reward"] == 1.0 and row.get("_ng_failure_id") is None
+        (event,) = self._recorded(row)
+        assert (event["boundary"], event["failure_kind"]) == ("collection", "transport_peer_drop")
+        assert (
+            "may have run more than once" in event["failure_reason"]
+            and "ServerDisconnectedError" in event["failure_reason"]
+        )
+
+    async def test_a_refused_connection_that_was_retried_is_routine_and_not_recorded(
+        self, tmp_path, monkeypatch, empty_global_config
+    ):
+        from tests.unit_tests.rollouts.test_rollout_recovery import _refused_connection
+
+        [row] = await self._collect(tmp_path, monkeypatch, empty_global_config, [_refused_connection()])
+
+        assert row["reward"] == 1.0
+        assert self._recorded(row) == []
+
+    async def test_a_run_that_was_not_resent_is_not_recorded(self, tmp_path, monkeypatch, empty_global_config):
+        [row] = await self._collect(tmp_path, monkeypatch, empty_global_config, [])
+
+        assert self._recorded(row) == []
+
+
 class TestRecoveryDriverMetrics:
     @pytest.mark.parametrize("max_resident_tasks", [None, 2])
     async def test_only_new_persisted_outcomes_are_measured_on_resume(

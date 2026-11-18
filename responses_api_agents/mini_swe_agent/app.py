@@ -67,13 +67,16 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
+    AGENT_RUN_ERROR,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     observe_failure,
+    observe_scored_despite_failure,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -879,6 +882,13 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
             except Exception as e:
                 print(f"Error running swegym: {e}")
+                # The reward stays 0; the rollout is recorded as scored despite the failed run.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_RUN_ERROR,
+                    failure_reason=f"The swegym run failed and the rollout was scored 0: {type(e).__name__}: {e}",
+                    stage="agent",
+                )
                 result = None
                 messages = []
                 responses = []

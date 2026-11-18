@@ -29,6 +29,8 @@ from nemo_gym.agents import (
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    AGENT_LIMIT,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -36,6 +38,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
+    observe_scored_despite_failure,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.trajectory import (
@@ -409,6 +412,14 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 invocation_status = "incomplete"
+                # The reward and the response sent to verification are unchanged; the cap is recorded as a limit that
+                # ended the run, so the rollout is not mistaken for one that finished.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_LIMIT,
+                    failure_reason=f"The run reached max_steps ({self.config.max_steps}) with tool calls still pending",
+                    stage="agent",
+                )
                 break
 
         if context_session is not None:
