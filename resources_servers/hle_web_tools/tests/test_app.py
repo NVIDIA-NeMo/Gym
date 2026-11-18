@@ -111,13 +111,20 @@ async def test_domains_rule_drops_results_from_blocked_hosts_and_their_subdomain
             result("https://example.com/ok", snippet="kept"),
         ],
     )
-    with caplog.at_level(logging.INFO, logger=module.__name__):
+    # Dropped results are audit log lines like refusals (the protocol: "log blocked calls and the matching rule"),
+    # so they go out at WARNING, which Python's last-resort handler emits even where Gym configures no root logger.
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
         response = await search(server, "riemann surfaces")
     assert response.result_count == 1
     assert "example.com/ok" in response.text
     assert "hf.co" not in response.text and "huggingface" not in response.text
-    assert "family=domains rule='hf.co'" in caplog.text
+    assert (
+        "dropped a web_search result (session session-a): family=domains rule='hf.co' where=result URL" in caplog.text
+    )
     assert "family=domains rule='huggingface.co'" in caplog.text
+    assert all(
+        record.levelno == logging.WARNING for record in caplog.records if "dropped a web_search" in record.message
+    )
 
 
 async def test_url_prefix_rule_ignores_case_scheme_and_leading_www(server, caplog):
@@ -559,8 +566,9 @@ async def warm_page_checks(server) -> None:
 
 
 async def test_page_checks_do_not_stall_the_event_loop(server):
-    """Python's re keeps the GIL for a whole search, so a slow scan of an adversarial page (about 1.2 s here) in a
-    thread would hold up every other request; the page work must leave the event loop free."""
+    """Python's re keeps the GIL for a whole search, so the scan of an adversarial page (about 0.25 s for the 60,000
+    characters the cap leaves of this one) in a thread would hold up every other request; the page work must leave
+    the event loop free. The gap bound sits well under that scan time, so an inline check fails this test."""
     await warm_page_checks(server)
     stub_backend(server, page="抱抱脸" * 100_000)
     gaps = []
@@ -577,7 +585,7 @@ async def test_page_checks_do_not_stall_the_event_loop(server):
     response = await fetch(server, "https://example.com/slow")
     beat.cancel()
     assert not response.refused and gaps
-    assert max(gaps) < 0.5
+    assert max(gaps) < 0.1
 
 
 async def test_fetched_markdown_is_capped_at_60000_characters_with_a_marker(server):
@@ -614,21 +622,40 @@ async def test_fetch_renders_title_and_final_url_and_strips_data_uris(server):
     )
 
 
-async def test_fetched_content_is_checked_whole_before_it_is_cut():
-    """The content families see the provider's whole page: a blocked span past every cut still refuses it.
-    A page above max_page_chars is refused unread, and one above max_cached_page_chars is served whole."""
-    server = make_server(max_page_chars=600_000, max_cached_page_chars=100)
-    stub_backend(server, page="x" * 500_001 + " HLE answers")
-    refused = await fetch(server, "https://example.com/tail")
-    assert refused.refused and "blocked pattern" in refused.text and not server._page_cache
-    stub_backend(server, page="x" * 600_001)
-    oversized = await fetch(server, "https://example.com/huge")
-    assert oversized.refused and "larger than the policy can check" in oversized.text
-    backend = stub_backend(server, page="y" * 200)
-    for _ in range(2):
-        served = await fetch(server, "https://example.com/clean")
-        assert not served.truncated and "y" * 200 in served.text
-    assert backend.extract.await_count == 2 and not server._page_cache  # served whole, not cached
+async def test_pages_longer_than_the_cap_are_served_cut_and_checked_as_served(server):
+    """The protocol caps web_fetch at 60,000 characters with a truncation indicator and checks "the title and
+    Markdown" of the response: a page of any length is served cut, never refused for its size, and the content
+    families run on the Markdown the model receives (title included), which also bounds the scan."""
+    backend = stub_backend(server, page="x" * 1_500_000 + " HLE answers")
+    served = await fetch(server, "https://example.com/huge")
+    assert not served.refused and served.truncated
+    assert served.text.endswith("[Content truncated at 60,000 characters; 1,440,012 characters omitted]")
+    assert "HLE answers" not in served.text and len(served.text) < 60_200
+    # A blocked span inside the served Markdown refuses the page (fresh and from the cache); one past the cut is
+    # never served, so it is not what the policy checks.
+    stub_backend(server, page="y" * 59_900 + " HLE answers " + "y" * 100)
+    refused = await fetch(server, "https://example.com/inside")
+    assert (
+        refused.refused
+        and "blocked pattern" in refused.text
+        and "https://example.com/inside" not in server._page_cache
+    )
+    stub_backend(server, page="# HLE answers\n\n" + "z" * 70_000)
+    assert (await fetch(server, "https://example.com/title")).refused  # the title is checked whatever the length
+    # The cut page is what the cache holds and what the cache-hit recheck sees.
+    backend = stub_backend(server, page="w" * 70_000)
+    first = await fetch(server, "https://example.com/cached")
+    second = await fetch(server, "https://example.com/cached")
+    assert backend.extract.await_count == 1 and first.text == second.text and second.truncated
+    server._blocklist.patterns_case_sensitive.append(re.compile(r"w{60000}"))
+    assert (await fetch(server, "https://example.com/cached")).refused
+
+
+def test_the_fetch_cap_cannot_exceed_the_protocols():
+    """max_fetch_chars is a deployment knob below the protocol's 60,000, never above it (as max_results is)."""
+    assert make_server(max_fetch_chars=1_000).config.max_fetch_chars == 1_000
+    with pytest.raises(ValidationError):
+        make_server(max_fetch_chars=module.PROTOCOL_MAX_FETCH_CHARS + 1)
 
 
 async def test_redirect_to_a_blocked_host_is_refused_after_the_fetch(server, caplog):
