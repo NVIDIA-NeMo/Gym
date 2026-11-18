@@ -21,7 +21,7 @@ from unittest.mock import Mock
 import pytest
 
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-from nemo_gym.sandbox.providers.base import SandboxSpec
+from nemo_gym.sandbox.providers.base import SandboxSpec, SupportsSandboxDetachedExec
 from nemo_gym.sandbox.providers.docker.provider import DockerProvider
 
 
@@ -115,7 +115,7 @@ def run(args):
 def exec_(args):
     flags, env, index = {}, {}, 0
     while args[index].startswith("-"):
-        if args[index] == "-i":
+        if args[index] in ("-i", "-d"):
             flags[args[index]] = True
             index += 1
             continue
@@ -136,23 +136,30 @@ def exec_(args):
         while state(name) is not None and not (ROOT / "shutdown").exists():
             time.sleep(0.02)
         return no_such_container(name)
+    if flags.get("--user") == "no-such-user":
+        print("unable to find user no-such-user: no matching entries in passwd file", file=sys.stderr)
+        return 126
     with locked():
         if state(name) is None:
             return no_such_container(name)
         cwd = Path(in_container(name, flags.get("-w", container["workdir"])))
         cwd.mkdir(parents=True, exist_ok=True)
+        output = subprocess.DEVNULL if "-d" in flags else subprocess.PIPE
         process = subprocess.Popen(
             [shell, "-c", in_container(name, command)],
             cwd=cwd,
             env={"PATH": os.environ["PATH"], **container["env"], **env},
             stdin=None if "-i" in flags else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=output,
+            stderr=output,
             # What the command starts belongs to the container, not to this client: removing the container ends
             # it, and killing the client (a timed-out exec) does not.
             start_new_session=True,
         )
         record_session(name, process.pid, add=True)
+    if "-d" in flags:
+        # Detached: Docker answers once the command started.
+        return 0
     out, err = process.communicate()
     if not group_alive(process.pid):
         with locked():
@@ -273,6 +280,13 @@ class FakeDocker:
             folder = self.root / "removed" / name
         return folder / "fs" / path.lstrip("/")
 
+    async def read(self, name: str, path: str) -> str:
+        """``path`` of container ``name`` once something wrote it."""
+        async with asyncio.timeout(10):
+            while not self.file(name, path).exists():
+                await asyncio.sleep(0.01)
+        return self.file(name, path).read_text()
+
     async def wait_for(self, name: str, marker: str) -> None:
         """Wait until the fake writes ``marker`` in container ``name``'s folder."""
         async with asyncio.timeout(10):
@@ -304,6 +318,27 @@ def fake_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     fake = FakeDocker(root)
     yield fake
     fake.shutdown()
+
+
+def running(pid: int) -> bool:
+    """Whether process ``pid`` exists and has not exited (a zombie, killed but not yet reaped, has)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    stat = Path(f"/proc/{pid}/stat")
+    with contextlib.suppress(OSError):
+        return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    return True
+
+
+async def stopped(pid: int) -> bool:
+    """Whether process ``pid`` ends within two seconds: a kill takes effect once the process is scheduled."""
+    for _ in range(200):
+        if not running(pid):
+            return True
+        await asyncio.sleep(0.01)
+    return False
 
 
 def collection(provider: DockerProvider, document: dict, *, timeout_s: float) -> AsyncSandboxCompose:
@@ -348,4 +383,171 @@ async def test_a_cancelled_create_removes_its_container_even_when_cancelled_agai
     with pytest.raises(asyncio.CancelledError):
         await create
     assert fake_docker.removed() == {created}
+    assert fake_docker.containers() == set()
+
+
+# --------------------------------------------------------------------------- #
+# Compose services run detached and hold no exec slot
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_a_detached_command_runs_on_after_the_call_with_the_exec_overrides(fake_docker):
+    provider = DockerProvider(exec={"exec_shell": "sh"})
+    assert isinstance(provider, SupportsSandboxDetachedExec)
+    handle = await provider.create(SandboxSpec(image="image", env={"BASE": "1"}))
+    name = handle.sandbox_id
+    try:
+        result = await provider.exec_detached(
+            handle, 'echo $$ > pid; printf %s "$K" > value; exec sleep 60', cwd="/work", env={"K": "V"}, user=0
+        )
+        assert (result.return_code, result.error_type) == (0, None)
+        assert fake_docker.calls()[-1] == [
+            "exec",
+            "-d",
+            "-w",
+            "/work",
+            "--env",
+            "BASE=1",
+            "--env",
+            "K=V",
+            "--user",
+            "0",
+            name,
+            "sh",
+            "-c",
+            'echo $$ > pid; printf %s "$K" > value; exec sleep 60',
+        ]
+        assert await fake_docker.read(name, "/work/value") == "V"
+        pid = int(await fake_docker.read(name, "/work/pid"))
+        assert running(pid)
+        # A command Docker cannot start fails the result.
+        refused = await provider.exec_detached(handle, "true", user="no-such-user")
+        assert refused.return_code == 126
+        assert "no-such-user" in refused.stderr
+    finally:
+        await provider.close(handle)
+    assert fake_docker.removed() == {name}
+    assert await stopped(pid)
+
+
+@pytest.mark.asyncio
+async def test_a_running_service_leaves_the_exec_capacity_to_other_commands(fake_docker):
+    """With ``exec.concurrency: 1`` a service that runs for a minute does not hold the one slot: startup (whose
+    started-marker probe needs it) finishes within the five-second deadline, and other commands run while the service
+    does, one at a time and each within its own timeout. Stopping the collection removes the container and so ends the
+    service. The service's user, working directory and environment apply to its command."""
+    provider = DockerProvider(exec={"exec_shell": "sh", "concurrency": 1})
+    command = 'echo $$ > /tmp/service.pid; printf %s "$GREETING" > greeting; exec sleep 60'
+    document = {
+        "services": {
+            "main": {
+                "image": "image",
+                "user": "1000",
+                "working_dir": "/srv",
+                "environment": {"GREETING": "hello"},
+                "command": ["sh", "-c", command],
+            }
+        }
+    }
+    group = collection(provider, document, timeout_s=5)
+    async with group:
+        (name,) = fake_docker.containers()
+        runtime = f"/tmp/{group.project}/main"
+        (launch,) = [call for call in fake_docker.calls() if call[:2] == ["exec", "-d"]]
+        assert launch == [
+            "exec",
+            "-d",
+            "-w",
+            "/srv",
+            "--env",
+            "GREETING=hello",
+            "--user",
+            "1000",
+            name,
+            "sh",
+            "-c",
+            f"sh {runtime}/run.sh >{runtime}/log 2>&1 </dev/null",
+        ]
+        pid = int(await fake_docker.read(name, "/tmp/service.pid"))
+        assert await fake_docker.read(name, "/srv/greeting") == "hello"
+        main = group.services["main"]
+        result = await main.exec("echo ok", timeout_s=5)
+        assert (result.return_code, result.stdout) == (0, "ok\n")
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        results = await asyncio.gather(*(main.exec("sleep 0.2", timeout_s=5) for _ in range(3)))
+        assert [result.return_code for result in results] == [0, 0, 0]
+        assert loop.time() - began >= 0.6
+        timed_out = await main.exec("sleep 30", timeout_s=0.5)
+        assert timed_out.error_type == "timeout"
+        assert fake_docker.peak() == 1
+        assert running(pid)
+        assert not fake_docker.file(name, f"{runtime}/exit").exists()
+    assert fake_docker.containers() == set()
+    assert fake_docker.removed() == {name}
+    assert await stopped(pid)
+
+
+@pytest.mark.asyncio
+async def test_a_later_startup_failure_removes_every_container(fake_docker):
+    """A failure after a service started (here the next service's ``post_start`` hook) stops the collection: every
+    container is removed, in reverse order of creation, and the running service ends with its container."""
+    provider = DockerProvider(exec={"exec_shell": "sh", "concurrency": 1})
+    document = {
+        "services": {
+            "db": {"image": "image", "command": ["sh", "-c", "echo $$ > /tmp/service.pid; exec sleep 60"]},
+            "app": {
+                "image": "image",
+                "command": ["sleep", "60"],
+                "depends_on": {"db": {"condition": "service_started"}},
+                "post_start": [{"command": "exit 3"}],
+            },
+        }
+    }
+    group = collection(provider, document, timeout_s=5)
+    with pytest.raises(RuntimeError, match=r"post_start hook 0 exited \(3\)"):
+        await group.start()
+    db, app = fake_docker.created()
+    pid = int(await fake_docker.read(db, "/tmp/service.pid"))
+    assert fake_docker.containers() == set()
+    assert [call[-1] for call in fake_docker.calls() if call[0] == "rm"] == [app, db]
+    assert await stopped(pid)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [0, 7])
+async def test_a_detached_one_shot_service_reports_its_exit_to_its_dependents(fake_docker, code):
+    """The run script records a detached service's exit status as it does an attached one's:
+    ``service_completed_successfully`` starts the dependent after exit 0 and refuses it after any other."""
+    provider = DockerProvider(exec={"exec_shell": "sh", "concurrency": 1})
+    document = {
+        "services": {
+            "seed": {"image": "image", "command": ["sh", "-c", f"exit {code}"]},
+            "app": {
+                "image": "image",
+                "command": ["sh", "-c", 'printf %s "$VALUE" > /tmp/value; exec sleep 60'],
+                "environment": {"VALUE": "compose"},
+                "depends_on": {"seed": {"condition": "service_completed_successfully"}},
+            },
+        }
+    }
+    group = collection(provider, document, timeout_s=5)
+    if code:
+        with pytest.raises(RuntimeError, match=r"'seed' exited \(7\)"):
+            await group.start()
+        seed, app = fake_docker.created()
+        assert not fake_docker.file(app, "/tmp/value").exists()
+    else:
+        async with group:
+            seed, app = fake_docker.created()
+            assert await fake_docker.read(app, "/tmp/value") == "compose"
+    assert fake_docker.containers() == set()
+
+
+@pytest.mark.asyncio
+async def test_a_service_docker_cannot_start_fails_the_collection(fake_docker):
+    provider = DockerProvider(exec={"exec_shell": "sh", "concurrency": 1})
+    document = {"services": {"main": {"image": "image", "user": "no-such-user", "command": ["sleep", "60"]}}}
+    group = collection(provider, document, timeout_s=5)
+    with pytest.raises(RuntimeError, match="'main' did not start: unable to find user no-such-user"):
+        await group.start()
     assert fake_docker.containers() == set()

@@ -45,6 +45,7 @@ from nemo_gym.sandbox.observability import span_attributes
 from nemo_gym.sandbox.providers import SandboxSpec, create_provider
 from nemo_gym.sandbox.providers.base import (
     COMPOSE_SERVICE_OPTION_FIELDS,
+    SupportsSandboxDetachedExec,
     SupportsSandboxEndpoint,
     SupportsSandboxNetwork,
     SupportsSandboxPortForwarding,
@@ -1062,19 +1063,36 @@ class AsyncSandboxCompose:
                         path = Path(temp) / "run.sh"
                         path.write_text(script)
                         await self.services[name].upload(path, runtime + "/run.sh")
-                    # Keep the exec request alive: some providers reap background
-                    # children as soon as their launching shell exits.
-                    process = asyncio.create_task(
-                        self.services[name].exec(
-                            f"sh {runtime}/run.sh >{runtime}/log 2>&1 </dev/null",
-                            user=plan["user"],
+                    launch = f"sh {runtime}/run.sh >{runtime}/log 2>&1 </dev/null"
+                    provider = self._provider_for(name)
+                    process: asyncio.Task | None = None
+                    if isinstance(provider, SupportsSandboxDetachedExec):
+                        # The service runs on after this call returns and holds none of the provider's command
+                        # capacity, which the checks below and every later command need. The started and exit
+                        # files track it as they track an attached one.
+                        sandbox = self.services[name]
+                        launched = await provider.exec_detached(
+                            sandbox._require_handle(),
+                            launch,
+                            cwd=sandbox.default_workdir,
                             env=plan.get("resolved_env"),
-                            timeout_s=None,
+                            user=plan["user"] if plan["user"] is not None else sandbox.default_user,
                         )
-                    )
-                    self._processes[name] = process
+                        if launched.return_code or launched.error_type:
+                            raise RuntimeError(
+                                f"Compose service {name!r} did not start: {launched.stderr or launched.stdout}"
+                            )
+                    else:
+                        # Keep the exec request alive: some providers reap background
+                        # children as soon as their launching shell exits.
+                        process = asyncio.create_task(
+                            self.services[name].exec(
+                                launch, user=plan["user"], env=plan.get("resolved_env"), timeout_s=None
+                            )
+                        )
+                        self._processes[name] = process
                     while True:
-                        finished = process.done()
+                        finished = process is not None and process.done()
                         result = await self.services[name].exec(f"test -f {runtime}/started")
                         if result.return_code == 0:
                             break

@@ -196,10 +196,10 @@ to skip. Same fields as the other providers: `command`, `expected_stdout`, `time
 
 ## Compose services
 
-The provider implements `SupportsSandboxNetwork` and `SupportsSandboxSharedStorage`, so `AsyncSandboxCompose` and
-Compose task folders (the `harbor` Environment Server) run on it with no extra configuration. It needs **Docker
-26.0 or newer**: an Engine with API 1.45, which the provider checks, and a `docker` CLI that knows
-`--mount volume-subpath` (an older CLI fails `docker run` with `unexpected key 'volume-subpath'`).
+The provider implements `SupportsSandboxNetwork`, `SupportsSandboxSharedStorage` and `SupportsSandboxDetachedExec`,
+so `AsyncSandboxCompose` and Compose task folders (the `harbor` Environment Server) run on it with no extra
+configuration. It needs **Docker 26.0 or newer**: an Engine with API 1.45, which the provider checks, and a `docker`
+CLI that knows `--mount volume-subpath` (an older CLI fails `docker run` with `unexpected key 'volume-subpath'`).
 
 - **Networking.** Each service is a container on `create.network` (the default bridge unless set). `network_address`
   reads the container's IP with `docker inspect`; `set_hosts` appends `<ip> <name>` lines to its `/etc/hosts` as root,
@@ -214,6 +214,10 @@ Compose task folders (the `harbor` Environment Server) run on it with no extra c
   provider checks the daemon's API version (an Engine older than 26.0 would ignore `volume-subpath` and mount the whole
   volume) and creates the volume if it is missing, labeled `nemo-gym.shared-storage=1`. The volume is never removed by
   Gym; a collection's folders are, when it stops. Nothing is bind-mounted from the host, so a remote daemon works.
+- **Service commands.** `exec_detached` starts each service's command with `docker exec -d`, which returns once the
+  command has started: a running service holds no `exec.concurrency` slot, so services cannot take the capacity their
+  startup checks and later commands need. The command's user, environment and working directory apply as in `exec`;
+  the adapter tracks it through the files its run script writes when it starts and exits.
 - **Cleanup after a crash.** Compose containers run their own keep-alive, so `ttl_s` does not expire them. Each carries
   the `nemo.nvidia.com/placement-group=<group>` label, where the group is the collection's id `compose-<id>` (also the
   name of its folder) unless the caller passed its own `placement_group`: remove them with
@@ -282,7 +286,9 @@ Source: [`provider.py`](./provider.py) and [`pty.py`](./pty.py). It implements t
 Unit tests live in
 [`tests/unit_tests/sandbox/test_docker_provider.py`](../../../../tests/unit_tests/sandbox/test_docker_provider.py),
 [`tests/unit_tests/sandbox/test_docker_provider_compose.py`](../../../../tests/unit_tests/sandbox/test_docker_provider_compose.py)
-(shared storage, networking, and the Compose adapter against a fake daemon) and
+(shared storage, networking, and the Compose adapter against a fake daemon),
+[`tests/unit_tests/sandbox/test_docker_provider_cli.py`](../../../../tests/unit_tests/sandbox/test_docker_provider_cli.py)
+(the provider and Compose services against a fake `docker` executable on `PATH`, `exec.concurrency` included) and
 [`tests/unit_tests/sandbox/test_docker_pty.py`](../../../../tests/unit_tests/sandbox/test_docker_pty.py)
 and run as part of the core suite — **no Docker required**:
 

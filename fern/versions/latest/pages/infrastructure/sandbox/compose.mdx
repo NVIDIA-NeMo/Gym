@@ -154,6 +154,11 @@ are passed to the API. Images need a POSIX shell and basic utilities. Lifecycle
 and health commands use the image's default user unless YAML overrides it.
 Host-file configuration requires root access by default.
 
+Each service's command runs from a script that records when it starts and
+exits. A provider that implements `SupportsSandboxDetachedExec`, such as Docker,
+starts it detached, so a running service holds none of the provider's command
+capacity. Other providers keep the service's exec attached for its lifetime.
+
 Deployment-specific settings remain configurable:
 
 - `service_specs={name: SandboxSpec(...)}` supplies sandbox TTL, resources and

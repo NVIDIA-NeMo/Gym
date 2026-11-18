@@ -302,7 +302,8 @@ class FakeDockerDaemon:
     A named volume is a folder. ``docker run`` makes a container folder from its image's files and records its
     ``--mount`` targets, each backed by its volume's folder or the ``volume-subpath`` inside it, which must exist.
     ``docker exec`` runs the command in a host shell with every absolute path mapped through the container's mounts,
-    else into its folder, which is how the copy-up and the cleanup reach the volume.
+    else into its folder, which is how the copy-up and the cleanup reach the volume; ``docker exec -d`` (a service's
+    command) returns once the command started, and ``docker rm`` kills what it left running.
     """
 
     def __init__(self, root: Path, images: dict[str, dict[str, str]]):
@@ -352,7 +353,13 @@ class FakeDockerDaemon:
             container = self.containers[argv[-1]]
             return 0, json.dumps({"bridge": {"IPAddress": container.address, "GlobalIPv6Address": ""}}), ""
         if command == "rm":
-            self.containers.pop(argv[-1])
+            for process in self.containers.pop(argv[-1]).detached:
+                if process.returncode is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                await process.wait()
             self.removed.append(argv[-1])
             return 0, argv[-1], ""
         raise AssertionError(f"unexpected docker command: {argv}")
@@ -383,7 +390,13 @@ class FakeDockerDaemon:
         workdir = options[options.index("-w") + 1] if "-w" in options else "/"
         labels = dict(options[index + 1].split("=", 1) for index, token in enumerate(options) if token == "--label")
         container = SimpleNamespace(
-            image=image, fs=fs, mounts=mounts, workdir=workdir, labels=labels, address=f"172.17.0.{len(self.runs) + 1}"
+            image=image,
+            fs=fs,
+            mounts=mounts,
+            workdir=workdir,
+            labels=labels,
+            address=f"172.17.0.{len(self.runs) + 1}",
+            detached=[],
         )
         self.containers[name] = container
         Path(self.host_path(container, workdir)).mkdir(parents=True, exist_ok=True)
@@ -392,7 +405,8 @@ class FakeDockerDaemon:
     async def exec(self, argv: list[str]):
         flags, index = {"env": {}}, 2
         while argv[index].startswith("-"):
-            if argv[index] == "-i":
+            if argv[index] in ("-i", "-d"):
+                flags[argv[index]] = True
                 index += 1
                 continue
             value = argv[index + 1]
@@ -405,16 +419,20 @@ class FakeDockerDaemon:
         container = self.containers[argv[index]]
         command = self.rewrite(container, argv[index + 3])
         cwd = self.host_path(container, flags.get("-w", container.workdir))
+        output = asyncio.subprocess.DEVNULL if "-d" in flags else asyncio.subprocess.PIPE
         process = await asyncio.create_subprocess_exec(
             "/bin/sh",
             "-c",
             command,
             cwd=cwd,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **flags["env"]},
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=output,
+            stderr=output,
             start_new_session=True,
         )
+        if "-d" in flags:
+            container.detached.append(process)
+            return 0, "", ""
         try:
             out, err = await process.communicate()
         except asyncio.CancelledError:

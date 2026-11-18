@@ -829,10 +829,43 @@ class DockerProvider:
         ``user`` maps to ``--user`` (root/0 -> 0). A timeout kills the local docker client only; the
         in-container process is reaped when the sandbox is closed.
         """
+        argv = self._exec_argv(handle, command, mode=["-i"] if stdin is not None else [], cwd=cwd, env=env, user=user)
+        effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
+        return await self._run_exec(argv, timeout_s=effective_timeout, stdin=stdin)
+
+    async def exec_detached(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        """Start ``<shell> -c <command>`` with ``docker exec -d`` and return once Docker has started it.
+
+        Only that short ``docker exec -d`` call takes an ``exec.concurrency`` slot (bounded by
+        ``exec.default_timeout_s``); the command then runs on in the container until it ends or the container is
+        removed, and its output is discarded unless it redirects it. ``cwd``, ``env`` and ``user`` map as in
+        :meth:`exec`. A command Docker cannot start (a missing user, a stopped container) fails the result.
+        """
+        argv = self._exec_argv(handle, command, mode=["-d"], cwd=cwd, env=env, user=user)
+        return await self._run_exec(argv, timeout_s=self._exec_config.default_timeout_s)
+
+    def _exec_argv(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        mode: list[str],
+        cwd: str | None,
+        env: dict[str, str] | None,
+        user: str | int | None,
+    ) -> list[str]:
+        """The ``docker exec`` command line of ``command``: ``mode`` flags (``-i``, ``-d``), then the working
+        directory, the sandbox's and the call's environment, the user and ``exec.extra_exec_args``."""
         inst = handle.raw
-        flags: list[str] = []
-        if stdin is not None:
-            flags.append("-i")
+        flags: list[str] = list(mode)
         if cwd is not None:
             flags += ["-w", cwd]
         merged_env = dict(getattr(inst, "env", {}))
@@ -843,11 +876,15 @@ class DockerProvider:
         if user is not None:
             flags += ["--user", _user_flag(user)]
         flags += list(self._exec_config.extra_exec_args)
+        return [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]
 
-        argv = [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]
-        effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
+    async def _run_exec(
+        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
+    ) -> SandboxExecResult:
+        """Run a ``docker exec`` command line as a result: a timeout or a daemon-side failure is reported, not
+        raised."""
         try:
-            code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
+            code, out, err = await self._run(argv, timeout_s=timeout_s, stdin=stdin)
         except TimeoutError as e:
             return SandboxExecResult(
                 stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="timeout"

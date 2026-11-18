@@ -432,6 +432,29 @@ class SupportsSandboxBackgroundServices(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxDetachedExec(Protocol):
+    """Optional provider capability: start a command that keeps running after the call returns.
+
+    ``exec_detached`` returns once the command has started, without waiting for it to end, and the running command
+    holds none of the provider's command capacity (such as Docker's ``exec.concurrency``). The command ends by itself
+    or with the sandbox; its output is discarded unless it redirects it. The result reports whether the command could
+    be started, never how it ends. ``cwd``, ``env`` and ``user`` apply as they do in ``exec``. The Compose adapter
+    starts each service this way where the provider can, so that running services cannot take the capacity their
+    startup checks need; elsewhere a service's exec stays attached for the service's lifetime.
+    """
+
+    async def exec_detached(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult: ...
+
+
+@runtime_checkable
 class SupportsSandboxNetwork(Protocol):
     """Optional direct networking between sandboxes, preserving service ports."""
 
