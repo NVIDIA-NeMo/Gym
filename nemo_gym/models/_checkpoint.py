@@ -54,6 +54,7 @@ from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
 from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.external_capture import publish_deferred_commit
 from nemo_gym.models.token_capture.fingerprint import conversation_digest
+from nemo_gym.models.token_capture.records import CallIdentity
 from nemo_gym.models.token_capture.sink import CaptureContext
 from nemo_gym.models.token_capture.staging.records import CaptureAdmission, GenerationCutContinuation
 from nemo_gym.server_runtime._checkpoint.control import (
@@ -642,9 +643,17 @@ def export_model_records(
         # A restored attempt reissues undelivered calls with new IDs; carrying their
         # intents over would leave captures pending forever, including across servers.
         # Closure also belongs to the old attempt; the replacement must admit new calls.
+        live_rows = ledger.export_rows(key)
+        # A row written without an agent instance reads it from its call's intent in the live manifest.
+        # The intents stay behind, so each kept row takes that identity with it.
+        intent_identity = {
+            row["model_call_id"]: CallIdentity.from_columns(row).columns() for row in live_rows if row.get("intent")
+        }
         rows = [
             row
-            for row in ledger.export_rows(key)
+            if row.get("agent_instance") is not None
+            else {**intent_identity.get(row.get("model_call_id"), {}), **row}
+            for row in live_rows
             if not row.get("intent")
             and not row.get("admissions_closed")
             and row.get("model_call_id") not in undelivered
@@ -838,7 +847,7 @@ class PolicyModelParticipant(CheckpointParticipant):
             return []
         return export_model_records(self.ledger, episode_ids, [self.gate.snapshot()], self._restored_cuts)
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
         if self.ledger is None:
             return []
         # Snapshot on the event loop, then read every episode's ledger off it.

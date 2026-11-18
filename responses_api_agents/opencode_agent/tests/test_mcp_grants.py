@@ -115,7 +115,15 @@ def test_mcp_grants_are_configured_and_checked(setup, scenario):  # noqa: F811
         assert closed.status_code == 200, closed.text
     skipped = [gap for gap in closed.json()["agent_observations"]["gaps"] if gap["code"] == "mcp_server_skipped"]
     assert skipped == (
-        [{"code": "mcp_server_skipped", "invocation_id": None, "detail": "extra: failed (connection refused)"}]
+        [
+            {
+                "code": "mcp_server_skipped",
+                "invocation_id": None,
+                "agent_instance": None,
+                "span_id": None,
+                "detail": "extra: failed (connection refused)",
+            }
+        ]
         if scenario == "optional-failed"
         else []
     )

@@ -6,12 +6,12 @@
 > Do not build new benchmarks, agents or configs on this harness. Where the resources server returns
 > `sandbox_access`, switch to a session harness that its `allowed_agents` lists, under an environment server:
 > [`opencode_agent`](../opencode_agent/README.md#environmentserver-sessions) where it is listed (Terminal Bench 2.1),
-> otherwise another such as `pi_agent` or `codex_agent` (SWE-bench Pro).
+> otherwise another such as `pi_agent` or `codex_agent` (SWE-bench Pro). `vibench_agent`, which extends this agent,
+> is replaced by `resources_servers/vibench/configs/vibench.yaml`, which runs `opencode_agent`.
 >
 > Some setups have no session path yet and stay on this agent until they do: the SWE resources servers that
-> return only a `sandbox_handle` (such as `swebench`, `swe_gym` and `r2e_gym`), the HLE search presets
-> (`tool_servers`), and `vibench_agent`, which extends this agent. Existing configs keep working; the agent logs a
-> deprecation warning when it starts.
+> return only a `sandbox_handle` (such as `swebench`, `swe_gym` and `r2e_gym`) and the HLE search presets
+> (`tool_servers`). Existing configs keep working; the agent logs a deprecation warning when it starts.
 
 ```bash
 # In terminal 1
@@ -63,6 +63,10 @@ installation is needed. The default is `null`, preserving existing behavior.
 
 ## Offline scientific evaluation with OpenCode or Pi
 
+The plain-named HLE and APEX Shortlist presets (`hle/opencode`, `hle/opencode_search`, `hle/pi`, `hle/pi_search`,
+`apex_shortlist/opencode`, `apex_shortlist/pi`) run `opencode_agent` and `pi_agent` sessions instead; this section
+describes their `*_legacy_agent` presets, and the benchmark READMEs list what differs.
+
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native
 CLIs inside a provider-managed sandbox. Gym stays on the host: it provisions the
 sandbox, routes model requests, seeds authenticated MCP tools, collects transcripts,
@@ -81,7 +85,7 @@ only per-session Gym MCP headers. See [Tavily search](../../fern/versions/latest
 for exclusions, retry limits, and the source-only search response contract.
 
 ```bash
-gym eval run --benchmark hle/pi_search --model-type vllm_model
+gym eval run --benchmark hle/pi_search_legacy_agent --model-type vllm_model
 ```
 
 The presets use 512 concurrent requests per agent worker, 2 CPUs and 8 GiB per

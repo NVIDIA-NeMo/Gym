@@ -17,11 +17,35 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
-- For session lifecycle and routing terms (lock, fence, close retry window, saved reply, release, owner, episode session),
-  use the names in the Sessions section of `fern/versions/latest/pages/about/concepts/key-terminology.mdx` and do not add
-  synonyms.
+- Follow [Terminology](#terminology) in code, docs, and PR text.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
+
+## Terminology
+
+One concept gets one name, everywhere: identifiers, config keys, CLI flags, wire fields, docstrings, comments, log and
+error messages, test names, docs, commit messages, and PR text.
+
+- `fern/versions/latest/pages/about/concepts/key-terminology.mdx` is the source of truth. Use its terms in every
+  section, not only Sessions, and never use a term its **Not** column rejects. Its "Other features" list names the few
+  features that keep a word in their own sense.
+- When a change introduces a concept, add it to the glossary in the same PR: the term, a one-sentence definition, and
+  any synonyms to reject. Before naming it, grep `nemo_gym/` and the docs for an existing term for the same concept,
+  and reuse it.
+- Do not reuse an existing name for different behavior. Two operations share a name only when they behave the same;
+  for example, token capture's retire, delete, and fence mean the same thing in every store that offers them.
+- Renaming a public name is an API change: keep the old name working with a deprecation warning
+  (`nemo_gym/_moved_paths.py` for modules and names), and update the glossary.
+- Spell out Gym components: resources server, agent server, model server, environment server. Never "resource server",
+  "env server", or invented abbreviations such as "RS". Established names (HTTP, JSON, MCP, GPU) and abbreviations the
+  glossary lists are fine. Code identifiers and command names stay verbatim.
+- Name what a thing is, not its age or origin. Do not use "native", "new", "old", or "v2" as part of a concept's name,
+  and use "legacy" only for the `legacy_agent` path and an agent's own `/run` episode. For example, say "episode
+  request" or "flat row", not "native request" or "legacy row".
+- Gym serves evaluation and training alike, so its terms must read correctly for both. Do not adopt a training
+  framework's vocabulary for a Gym concept; integration docs map the framework's terms onto Gym's.
+- Metric and attribute names follow `fern/versions/latest/pages/observability/metrics.mdx`: durations in milliseconds
+  end in `_ms`, counters end in `_total`, and Gym attributes live under `nemo.gym.`.
 
 ## Code provenance
 
@@ -46,6 +70,8 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
   must comment `/ok to test <full 40-character commit SHA>` on the PR (get it with `git rev-parse HEAD`; a short SHA
   is not enough). After the head changes, the new full SHA needs a new comment. If CI checks are missing, check this
   first. That comment authorizes CI to run contributor code, so never post it yourself unless the user explicitly asks.
+  The same approval also triggers suggested reviewers (`# suggest:` lines in `.github/CODEOWNERS`): they are requested
+  only after the `pull-request/<n>` mirror is pushed, so a PR with no suggested reviewers may just be waiting on it.
   Details: [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration-ci).
 - Keep incomplete work as a draft. Mark it ready for review only after reviewing the final diff and recording the
   applicable local checks. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and label selection.
@@ -74,13 +100,24 @@ BaseServer (Pydantic model with config + server_client)
 └── SimpleServer (FastAPI app setup, middleware stack)
     ├── SimpleResourcesServer  →  implement verify()
     ├── SimpleResponsesAPIModel  →  implement chat_completions(), responses()
-    └── SimpleResponsesAPIAgent  →  implement responses(), run()
+    ├── SimpleResponsesAPIAgent  →  implement responses(); run() is deprecated
+    └── BaseEnvironmentServer  →  implement run()
 ```
+
+Who owns what (details in `fern/versions/latest/pages/about/architecture.mdx`):
+
+- The environment server owns the episode: which servers it binds and the order of their calls. A new interaction
+  pattern gets its own environment server; do not put episode ordering into an agent server. An agent's own `run()`
+  is deprecated: new agents implement agent sessions, and custom episode logic goes in an environment server.
+- The resources server owns environment tools, per-task state, and verification. The agent server owns the loop of
+  model and tool calls. The model server owns inference.
+- Whoever creates a session, sandbox, or other per-task resource releases it, on every path.
 
 `BaseServer` and `SimpleServer` live in `nemo_gym/server_runtime/base_server.py`, `SimpleResourcesServer` in
 `nemo_gym/server_runtime/base_resources_server.py`, `SimpleResponsesAPIModel` in
-`nemo_gym/models/base_responses_api_model.py`, and `SimpleResponsesAPIAgent` in
-`nemo_gym/agents/base_responses_api_agent.py`.
+`nemo_gym/models/base_responses_api_model.py`, `SimpleResponsesAPIAgent` in
+`nemo_gym/agents/base_responses_api_agent.py`, and `BaseEnvironmentServer` in
+`nemo_gym/server_runtime/base_environment_server.py`.
 
 `nemo_gym/` is split into layered packages. From top to bottom: `cli`, `environment`, `eval`, `orchestration`,
 `rollouts`, `data`, `agents`, `models`, `server_runtime`, `artifacts`, `metrics`, `verification`, `trajectory`,
@@ -89,6 +126,12 @@ import-linter contract in `pyproject.toml` enforces the order; its `ignore_impor
 which are removed as the code moves and must not grow. `nemo_gym/verifiers/` sits outside the layers: it runs inside
 Harbor verifier sandboxes and uses only the standard library. Each package's `__init__.py` docstring says what it holds. Old flat paths such as `nemo_gym.server_utils` still import, with a deprecation warning, until 0.10.0
 (`nemo_gym/_moved_paths.py`). For a summary of each package, see `fern/versions/latest/pages/api-reference/index.mdx`.
+
+`nemo_gym.orchestration` is a Gym-aware orchestrator (submit, Slurm/Kubernetes executors, job tracking). It provides no
+core functionality. No module in `nemo_gym/` outside `nemo_gym/orchestration/`, and no server, benchmark or script built on it, may import it, except `nemo_gym/cli/main.py`, which wires the
+orchestration entrypoint into the CLI. If another package needs something that lives there, move that code into the
+package that owns it. Deleting `orchestration/` should leave only the CLI wiring to change.
+`tests/unit_tests/test_orchestration_boundary.py` and the import-linter contract "only the CLI entrypoint imports orchestration" in `pyproject.toml` enforce this.
 
 For full architecture and concepts (environments, training approaches, verification), see `fern/versions/latest/pages/about/`.
 
@@ -104,11 +147,16 @@ The typical workflow is to create your own environments tailored to your evaluat
 
 The second way to define tasks is task folders in the Harbor format (`task.toml` and usually `instruction.md`, `environment/`, `tests/`, `solution/`), run by the `harbor` Environment Server: it seeds a sandbox from the folder, runs the agent, then runs the task's own verifier, with no Resources Server. Copy `environments/hello_world`, then read `fern/versions/latest/pages/data/task-folders/harbor-tasks.mdx` (tutorial), `data/task-folders/task-folder-format.mdx` (canonical spec), `data/task-folders/task-folder-verifiers.mdx` and `agent-interactions/harbor.mdx`. For where a new task-folder benchmark goes, its name and the checks before a PR, follow "Task-folder benchmarks" in `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`; `gym dataset validate <folder>`, the oracle run of every `solution/`, must pass, apart from known upstream failures the README lists (leave those out with `--exclude-tasks`).
 
+To contribute an environment or benchmark, search for an existing one first (`gym search`), scaffold with
+`gym env init`, then run `gym env validate` and `gym env test`. See
+`fern/versions/latest/pages/contribute/environments/` and the `add-benchmark` skill. For an agent harness, see
+`fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx` and the `add-harness` skill.
+
 For guidance on how to build environments, see `fern/versions/latest/pages/environment-tutorials/`. For evaluation, see `fern/versions/latest/pages/get-started/quickstart.mdx`. For training framework integrations, see `fern/versions/latest/pages/training-tutorials/`.
 
 ## Environment Design Recommendations
 
-- **Use NeMo Gym's Model Server for inference** — standardizes different model providers behind a common format and manages token IDs needed for training.
+- **Use NeMo Gym's Model Server for inference** — standardizes different model providers behind a common format and manages token IDs needed for training. Route every policy model call through it: capture and training see only those calls.
 - **Hydra YAML for configuration** — pass configuration through Gym's Hydra config system so it's composable and reproducible across runs.
 - **Graceful error handling** — environments must handle tool failures and bad model outputs with meaningful error responses, not crash the server.
 - **Async endpoints** — the `/run` endpoint must be async. Use `asyncio.Semaphore` for concurrency control if shelling out to external processes.
@@ -116,7 +164,7 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 
 ## Communication & Async Patterns
 
-Servers communicate via `ServerClient`, which wraps aiohttp with retry logic (3 tries, exponential backoff) and connection pooling via a singleton aiohttp client.
+Servers communicate via `ServerClient`, which wraps aiohttp with retries and connection pooling via a singleton aiohttp client.
 
 - **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.client.http_client.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
 - **Propagate session cookies** through all downstream calls (`cookies=request.cookies`) for stateful environments.
@@ -124,6 +172,11 @@ Servers communicate via `ServerClient`, which wraps aiohttp with retry logic (3 
 - For Ray remote tasks in async code: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` directly in async context.
 - Decode all subprocess output with `errors="replace"` to handle non-UTF8
 - Guard optional nested fields: `(body.field or {}).get("key", default)`
+- Build a payload sent to another library, server, or persisted output from the fields that consumer reads, for
+  example `model_dump(include=set(ConsumerModel.model_fields), exclude_none=True)`, not a dump of the whole model.
+- Name a Gym-defined HTTP header like the existing constants in `nemo_gym` (`git grep -n '_HEADER = ' nemo_gym`):
+  lowercase, `x-ng-` prefix, hyphenated words that say what it carries. Define it once as a constant and import it.
+  Headers another system defines keep that system's name.
 
 ## External Tool Auto-Install
 
@@ -179,7 +232,7 @@ gym env start \
     --model-type vllm_model
 
 # Run tests for a specific server (creates .venv per server, installs deps, runs pytest)
-# First run is slow. Use skip_venv_if_present config or place a .venv to skip venv creation.
+# First run is slow. Use skip_venv_if_present to reuse a .venv that has the .nemo-gym-setup-complete marker.
 gym env test --resources-server example_single_tool_call
 
 # Run all server tests (slow: one venv per server, so it needs an explicit opt-in)
@@ -200,6 +253,10 @@ pre-commit run --all-files
 
 # Check server health
 gym env status
+
+# Collect rollouts and score them (gym <group> --help lists every command)
+gym eval run --config ...
+gym eval profile ...
 
 # Dev test (runs the core unit tests with coverage: pytest --cov)
 gym dev test
@@ -263,15 +320,18 @@ gym env resolve --config ...
   observability; extract helpers when they genuinely improve clarity or reuse.
 - Add parameter and return annotations to new or changed public functions and methods, and explicit types to public
   dataclass and Pydantic fields. Avoid `Any` at public boundaries when a concrete model, protocol, `TypedDict`, or
-  `object` plus narrowing expresses the contract. Match surrounding annotation style and do not perform unrelated
-  `Optional`/`List` syntax migrations.
+  `object` plus narrowing expresses the contract.
+- Annotations on lines you add, change, or move, including code moved unchanged into a new file, follow current Python
+  typing guidance for the Python version in `pyproject.toml`, not forms the `typing` docs mark as deprecated or
+  superseded; for example, `X | None` over `Optional[X]`, `A | B` over `Union[A, B]`, and `list[int]` over
+  `List[int]`. You may also update annotations elsewhere in a function or class you already edit. Converting
+  annotations in code the change does not otherwise touch belongs in a separate PR.
 - Mypy is available as a development dependency but is not a repository-wide strict CI gate. Run it on a focused area
   when that area is already type-checkable; do not claim repo-wide `mypy --strict` compliance.
 - Public APIs and objects included in generated reference docs need useful docstrings. Comments should explain intent,
-  invariants, or tradeoffs rather than narrating the code.
-- Name things by what they are. Avoid qualifiers that carry no information, such as "native", "legacy", "new", or
-  "old"; name the specific mechanism, owner, or format instead (for example, "agent session" rather than "native
-  session"). This applies to identifiers, comments, docs, error messages, and test names.
+  invariants, or tradeoffs rather than narrating the code. Describe the behavior and the contract, not the provider,
+  hosted endpoint, or model where the behavior was seen; that evidence goes in the PR description or test data. Code
+  that integrates one provider may name it.
 - Use keyword-only arguments for new public parameters that are easy to swap or misread, especially repeated same-type
   values and boolean controls.
 - Use module loggers for library and server diagnostics. Direct console output is acceptable in CLI/user-facing paths;
@@ -285,7 +345,7 @@ gym env resolve --config ...
 
 Notable custom hooks that auto-modify files:
 - `add-verified-flag`: Adds `verified: false` to new resources server YAML configs (`verified: true` means the benchmark has been baselined and reviewed; new servers start as `false`)
-- `update-readme-table`: Updates the resources server table in root README.md
+- `update-readme-table`: Updates the environment list in root README.md
 - `ruff-format`: Auto-formats code
 
 First run may fail as hooks modify files. Stage the changes and commit again.

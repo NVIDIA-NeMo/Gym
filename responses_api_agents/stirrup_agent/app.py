@@ -20,7 +20,7 @@ supervisor. Shell commands run in the sandbox; task tools are the resources serv
 import asyncio
 import time
 from asyncio import Semaphore
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, ClassVar, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -28,15 +28,18 @@ from pydantic import ConfigDict, Field, ValidationError, model_validator
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
     sandbox_server_url,
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
@@ -66,6 +69,7 @@ from nemo_gym.trajectory import (
     ObservationGap,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
@@ -207,6 +211,14 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "(messages + tool-schema JSON) and the exact prompt the server sees after chat-template "
         "rendering. See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
     )
+    image_token_estimate: int = Field(
+        default=1536,
+        ge=0,
+        description="Prompt tokens counted for each image when sizing per-call max_completion_tokens; the image's "
+        "base64 bytes are not counted. A model that spends more than this on an image takes the difference out of "
+        "``completion_token_buffer``, so the buffer has to cover n_images * (real tokens per image - this estimate). "
+        "Raise this value to the model's real per-image cost (or raise the buffer) for high-resolution images.",
+    )
     context_window_tokens: int = Field(
         default=262144,
         ge=1,
@@ -253,6 +265,15 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "recorded in the trajectory, so it is off by default to keep rollouts unsteered; the GDPVal "
         "benchmark config opts in.",
     )
+    context_overflow_recovery: bool = Field(
+        default=False,
+        description="When the model server rejects a request with HTTP 400 or 413 and the structured error "
+        "code `context_length_exceeded`, let Stirrup drop the latest completed turn and send the request "
+        "again instead of ending the episode on the rejection. A dropped turn no longer counts against "
+        "`agent_max_turns`, so only `sandbox_runner_timeout_seconds` bounds repeated recovery. It changes "
+        "which turns a rollout keeps, so it is off by default; a benchmark config opts in. Pair it with the "
+        "model server settings the README lists, so that the code means the prompt alone fills the window.",
+    )
     min_compaction_summary_words: int = Field(
         default=1,
         ge=1,
@@ -281,6 +302,8 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
 
 class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     config: StirrupAgentWrapperConfig
+    # The runner runs inside the sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -408,6 +431,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 ),
                 "max_tokens": self.config.context_window_tokens,
                 "completion_token_buffer": self.config.completion_token_buffer,
+                "image_token_estimate": self.config.image_token_estimate,
                 "temperature": self.config.temperature if body.temperature is None else body.temperature,
                 "top_p": self.config.top_p if body.top_p is None else body.top_p,
                 "enable_thinking": self.config.enable_thinking,
@@ -415,12 +439,15 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "min_completion_tokens": self.config.min_completion_tokens,
                 "prompt_estimator_truncate_history_thinking": self.config.prompt_estimator_truncate_history_thinking,
                 "truncation_recovery": self.config.truncation_recovery,
+                "context_overflow_recovery": self.config.context_overflow_recovery,
             },
         }
+        # A task row's own budget shortens the run; it never extends the configured one.
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.sandbox_runner_timeout_seconds)
         try:
             output = await state.execute(
                 payload,
-                timeout=self.config.sandbox_runner_timeout_seconds,
+                timeout=timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
         except TimeoutError:
@@ -447,6 +474,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             tools=[],
             metadata={
                 "elapsed_seconds": str(output["elapsed_seconds"]),
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
                 **({"stop_reason": output["stop_reason"]} if output["stop_reason"] else {}),
             },
             status=output["observations"]["status"],
@@ -460,12 +488,12 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         agent_session_id = self._agent_session_id_from_request(request)
         if agent_session_id is None:
-            raise HTTPException(409, "Stirrup runs only in agent sessions; use an environment server")
+            raise AgentSessionConflictError("Stirrup runs only in agent sessions; use an environment server")
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         state = self._require_agent_session(agent_session_id)
         if state.request.episode_id.capture_key != rollout_id:
-            raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
+            raise AgentSessionConflictError("Agent-session episode_id does not match the rollout route")
         if state.task is None:
             # No await until the task and its request binding are installed.
             state.activation_request = body.model_copy(deep=True)
@@ -476,10 +504,13 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
             state.task = asyncio.create_task(activate())
         elif body != state.activation_request:
-            raise HTTPException(409, "Stirrup sandbox sessions support one activation; retry the same request")
+            raise AgentSessionConflictError("Stirrup sandbox sessions support one activation; retry the same request")
         # Session close owns cancellation; a disconnected waiter must not cancel the activation.
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 
 
 if __name__ == "__main__":
     StirrupAgentWrapper.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StirrupAgentWrapper.run_webserver()  # noqa: F401

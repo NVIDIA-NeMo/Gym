@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# The sandbox runner imports this module with only Harbor installed, so it imports nemo_gym lazily.
 import re
 from typing import Any, cast
 
@@ -23,19 +24,24 @@ from harbor.llms.base import (
     OutputLengthExceededError,
 )
 from harbor.models.metric import UsageInfo
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
-
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 
 _RoutedExperts = list[list[list[int]]] | str
 _RolloutDetailsKey = tuple[tuple[int, ...], tuple[int, ...], tuple[float, ...] | None]
+
+_RETRYABLE_STATUS_CODES = frozenset({408, 425, 429})
+
+
+def _is_transient_model_error(exc: BaseException) -> bool:
+    """Whether a failed model call may succeed when sent again: HTTP 408, 425, 429 or 5xx, or a transport error.
+
+    Any other 4xx (400, 401, 403, 404, 413, 422, ...) fails the same way on every attempt.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return status_code in _RETRYABLE_STATUS_CODES or 500 <= status_code < 600
+    return isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError))
 
 
 _CONTEXT_LENGTH_ERROR_PHRASES = (
@@ -50,6 +56,29 @@ _THINK_CLOSE = "</think>"
 _THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 
+def chat_completion_params(
+    responses_create_params: dict[str, Any], *, collect_rollout_details: bool = False
+) -> dict[str, Any]:
+    """The Chat Completions fields, other than messages, that Gym's Chat Completions converter derives."""
+    if not responses_create_params:
+        return {}
+
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.models import ChatCompletionsConverter
+
+    params_for_conversion = {key: value for key, value in responses_create_params.items() if key != "input"}
+    params_for_conversion["input"] = []
+    responses_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_for_conversion)
+
+    converter = ChatCompletionsConverter(
+        return_token_id_information=collect_rollout_details,
+    )
+    chat_params = converter.responses_to_chat_completion_create_params(responses_params).model_dump(exclude_unset=True)
+
+    chat_params.pop("messages", None)
+    return chat_params
+
+
 class NemoGymLLM(BaseLLM):
     """LLM backend that calls NeMo Gym model servers via chat completions."""
 
@@ -61,14 +90,22 @@ class NemoGymLLM(BaseLLM):
         model_info: dict[str, Any] | None = None,
         responses_create_params: dict[str, Any] | None = None,
         timeout_sec: float = 600.0,
+        *,
+        chat_params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
+        """``chat_params`` replaces the conversion of ``responses_create_params`` where nemo_gym is not installed.
+
+        ``headers`` go on every model request, for example an ``x-session-id`` that model-call capture joins on.
+        """
         super().__init__(**kwargs)
         self._model_name = model_name
         self._api_base = api_base.rstrip("/")
         self._collect_rollout_details = collect_rollout_details
         self._model_info = model_info or {}
         self._timeout_sec = timeout_sec
+        self._headers = dict(headers or {})
 
         # Reuse the session cookie so every turn reaches the same vLLM engine and
         # retains prefix-cache locality.
@@ -84,20 +121,24 @@ class NemoGymLLM(BaseLLM):
 
         self.context_length_exceeded = False
         self.last_response_id: str | None = None
-        self._extra_chat_params = self._build_extra_chat_params(responses_create_params or {})
+        # Every answered call, in order; pending or unaccounted attempts keep aggregate usage unknown.
+        self.response_ids: list[str] = []
+        self.calls_without_usage = 0
+        self.cached_usage_known = True
+        self._extra_chat_params = (
+            dict(chat_params)
+            if chat_params is not None
+            else chat_completion_params(
+                responses_create_params or {}, collect_rollout_details=self._collect_rollout_details
+            )
+        )
 
+    # The only retry layer for Terminus-2's model calls (StandaloneTerminus2 drops Harbor's): at most 3 attempts with
+    # at most 15 s between them, so a call waits at most 30 s beyond its request timeouts.
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=15),
-        retry=(
-            retry_if_exception_type(Exception)
-            & retry_if_not_exception_type(
-                (
-                    ContextLengthExceededError,
-                    OutputLengthExceededError,
-                )
-            )
-        ),
+        retry=retry_if_exception(_is_transient_model_error),
         reraise=True,
     )
     async def call(
@@ -127,6 +168,9 @@ class NemoGymLLM(BaseLLM):
         }
         payload.update(self._extra_chat_params)
 
+        # The signal handler snapshots this counter before cancellation unwinds the await.
+        # Keep failed/retried attempts unknown too; only a fully accounted response clears its entry.
+        self.calls_without_usage += 1
         response_dict = await self._post_chat_completions(payload)
 
         # Gym's proxy uses this sentinel when it turns a vLLM context error into HTTP 200.
@@ -138,6 +182,7 @@ class NemoGymLLM(BaseLLM):
         response_id = response_dict.get("id")
         if isinstance(response_id, str) and response_id:
             self.last_response_id = response_id
+            self.response_ids.append(response_id)
 
         choices = response_dict.get("choices", [])
         choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -192,7 +237,7 @@ class NemoGymLLM(BaseLLM):
                 routed_experts,
             )
 
-        return LLMResponse(
+        result = LLMResponse(
             content=content,
             reasoning_content=reasoning_content,
             usage=usage,
@@ -200,6 +245,9 @@ class NemoGymLLM(BaseLLM):
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
         )
+        if usage is not None:
+            self.calls_without_usage -= 1
+        return result
 
     def get_model_context_limit(self) -> int:
         fallback_context_limit = 1000000
@@ -245,7 +293,7 @@ class NemoGymLLM(BaseLLM):
         endpoint = self._chat_completions_endpoint()
         timeout = timeout_sec if timeout_sec is not None else self._timeout_sec
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=timeout)
+            self._http_client = httpx.AsyncClient(timeout=timeout, headers=self._headers)
         response = await self._http_client.post(endpoint, json=payload, timeout=timeout)
 
         if response.status_code >= 400:
@@ -285,26 +333,6 @@ class NemoGymLLM(BaseLLM):
             self._normalize_token_ids(prompt_token_ids),
             self._normalize_token_ids(completion_token_ids),
         )
-
-    def _build_extra_chat_params(self, responses_create_params: dict[str, Any]) -> dict[str, Any]:
-        if not responses_create_params:
-            return {}
-
-        from nemo_gym.models import ChatCompletionsConverter
-
-        params_for_conversion = {key: value for key, value in responses_create_params.items() if key != "input"}
-        params_for_conversion["input"] = []
-        responses_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_for_conversion)
-
-        converter = ChatCompletionsConverter(
-            return_token_id_information=self._collect_rollout_details,
-        )
-        chat_params = converter.responses_to_chat_completion_create_params(responses_params).model_dump(
-            exclude_unset=True
-        )
-
-        chat_params.pop("messages", None)
-        return chat_params
 
     def _extract_logprobs(self, response: dict[str, Any]) -> list[float] | None:
         choices = response.get("choices", [])
@@ -392,15 +420,19 @@ class NemoGymLLM(BaseLLM):
 
     def _extract_usage_info(self, response: dict[str, Any]) -> UsageInfo | None:
         usage = response.get("usage")
-        if not isinstance(usage, dict):
+        if not isinstance(usage, dict) or not all(
+            type(usage.get(key)) is int and usage[key] >= 0 for key in ("prompt_tokens", "completion_tokens")
+        ):
             return None
 
-        prompt_tokens = usage.get("prompt_tokens", 0) or 0
-        completion_tokens = usage.get("completion_tokens", 0) or 0
+        prompt_tokens = usage["prompt_tokens"]
+        completion_tokens = usage["completion_tokens"]
         prompt_tokens_details = usage.get("prompt_tokens_details") or {}
-        cache_tokens = (
-            prompt_tokens_details.get("cached_tokens", 0) if isinstance(prompt_tokens_details, dict) else 0
-        ) or 0
+        cache_tokens = prompt_tokens_details.get("cached_tokens") if isinstance(prompt_tokens_details, dict) else None
+        if type(cache_tokens) is not int or cache_tokens < 0:
+            self.cached_usage_known = False
+            # Harbor's UsageInfo requires a number; keep the missing detail separately for the Gym response.
+            cache_tokens = 0
 
         return UsageInfo(
             prompt_tokens=int(prompt_tokens),

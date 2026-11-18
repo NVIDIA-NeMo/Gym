@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Nemotron 3 Ultra policy for HealthBench and HealthBench Professional.
+policy_model:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: ${oc.env:NVIDIA_API_KEY}
+      model: nvidia/nvidia/nemotron-3-ultra
+      uses_reasoning_parser: true
+      num_concurrent_requests: 4
+      extra_body:
+        reasoning_effort: high
+
+# Keep Lightning's temperature for a rough comparison; allow more output for Ultra's reasoning.
+responses_create_params:
+  temperature: 0.7
+  max_output_tokens: 16384
+
+# HealthBench uses GPT-4.1. Override judge_model_name with azure/openai/gpt-5.4
+# when running HealthBench Professional.
+judge_base_url: https://inference-api.nvidia.com/v1
+judge_api_key: ${oc.env:NVIDIA_API_KEY}
+judge_model_name: azure/openai/gpt-4.1

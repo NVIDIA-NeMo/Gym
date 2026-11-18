@@ -197,6 +197,7 @@ def test_confirmed_oom_activation_retains_failure_observation(setup):
         assert result["status"] == "failed" and result["output"] == []
         observation = SandboxObservation.model_validate_json(result["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
         assert observation.outcome == "oom" and observation.sandbox_id == sandbox.sandbox_id
+        assert result["_ng_agent_observations"]["schema_version"] == "2.0"
         [invocation] = roots(result["_ng_agent_observations"])
         assert invocation["activation_id"] == 1
         assert invocation["status"] == "failed" and invocation["error_type"] == "server_error"
@@ -377,7 +378,13 @@ async def test_close_without_recovered_root_preserves_activation(
     }
     assert observations["gaps"] == [
         *retained["gaps"],
-        {"code": "agent_artifact_unavailable", "invocation_id": None, "detail": None},
+        {
+            "code": "agent_artifact_unavailable",
+            "invocation_id": None,
+            "agent_instance": None,
+            "span_id": None,
+            "detail": None,
+        },
     ]
     assert (receipt.trajectory.model_dump(mode="json") if receipt.trajectory is not None else None) == trajectory
     assert receipt.cleanup_confirmed is True
@@ -394,7 +401,7 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
         request = start(client)
         state = agent._require_agent_session(request.agent_session_id)
         assert state.is_continuation
-        assert state.conversation_directory is None and state.activation_id is None
+        assert state.session.session_dir == state.persistent_directory and state.activation_id is None
         results = []
         for index, prompt in enumerate(("First version", "Correction: handle empty inputs"), 1):
             response = activate(client, index, prompt)

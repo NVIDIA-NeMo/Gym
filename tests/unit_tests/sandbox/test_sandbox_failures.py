@@ -345,6 +345,30 @@ async def test_pty_uses_the_same_explicit_evidence(state, reason, message, kind)
         assert "lifecycle status" in failure.failure_reason
 
 
+@pytest.mark.parametrize(
+    "report,expected",
+    [
+        ("Pod sb-0 was evicted: The node was low on resource: ephemeral-storage.", "ephemeral-storage"),
+        ("x" * 1000, "x" * 256),
+        ("", None),
+    ],
+    ids=["evicted", "truncated", "empty"],
+)
+async def test_unavailable_sandbox_keeps_a_bounded_lifecycle_report_without_typing_it(report, expected):
+    provider = module.OpenSandboxProvider(diagnostics={"timeout_s": 0.01, "poll_interval_s": 0.001})
+    status = SimpleNamespace(state="Failed", reason="FAILED", message=report)
+    handle = SandboxHandle(
+        "sb", "opensandbox", SimpleNamespace(get_info=AsyncMock(return_value=SimpleNamespace(status=status)))
+    )
+    failure = await provider._pty_failure(handle, ConnectionError("socket closed"))
+    assert failure.failure_kind == PROVIDER_UNAVAILABLE
+    if expected is None:
+        assert failure.failure_reason.endswith("reason='FAILED'")
+    else:
+        assert expected in failure.failure_reason
+        assert "x" * 257 not in failure.failure_reason
+
+
 @pytest.mark.parametrize("command", [True, False])
 async def test_renewal_failure_prevents_new_provider_operation(command):
     provider = module.OpenSandboxProvider()

@@ -38,6 +38,10 @@ there. The response carries the turns completed so far, with `status: failed`, a
 `metadata.stop_reason: model_error`, and the resources server verifies it. Any other model server error fails the
 episode.
 
+The one exception is opt-in: with `context_overflow_recovery` on, an HTTP 400 or 413 rejection that carries the error
+code `context_length_exceeded` does not end the episode while Stirrup can still drop a completed turn. See
+[Context overflow recovery](#context-overflow-recovery).
+
 ## Configuration
 
 `configs/stirrup_agent.yaml` is the stand-alone config. Keys:
@@ -45,15 +49,16 @@ episode.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `model_server` | required | The policy model. |
-| `agent_max_turns` | `250` | Turn cap for the agent loop. |
+| `agent_max_turns` | `250` | Turn cap for the agent loop. A run that uses every turn without a finish call answers `status: incomplete` with `metadata.stop_reason: max_turns`. |
 | `concurrency` | `32` | Maximum concurrent episodes. |
 | `temperature` | `0.6` | Sampling temperature when the request sets none. |
 | `finish_tool_names` | `null` | Request tools that end the episode when they succeed; `null` uses Stirrup's own finish tool. |
 | `code_exec` | `true` | Whether the model gets the `code_exec` shell tool. Off when the request's tools are the only tools the task allows (EnterpriseOps-Gym). |
 | `sandbox_install_timeout_seconds` | `900` | Bound on building, uploading and installing the runtime at seed. |
-| `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode. At the limit the response carries the turns completed so far, with `status: incomplete` and `metadata.stop_reason: wall_time`. |
+| `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode; a request's `metadata.agent_timeout_sec` (as Harbor task rows carry) can shorten it, never extend it, and the response metadata records the applied `agent_timeout_sec`. At the limit the response carries the turns completed so far, with `status: incomplete` and `metadata.stop_reason: wall_time`. |
 | `session_close_timeout_seconds` | `30` | Bound on each cleanup phase at close. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
+| `image_token_estimate` | `1536` | Prompt tokens counted per image when sizing `max_completion_tokens`; the base64 bytes are not counted. |
 
 ## Dynamic `max_completion_tokens` sizing
 
@@ -78,6 +83,12 @@ The wrapper ships a `DynamicMaxTokensChatCompletionsClient`
 (chat-template wrappers, tool-schema injection). The default `1000` works in practice; raise it (e.g. 2000–5000) if
 you see sporadic HTTP 400 responses at the vLLM proxy.
 
+Each image counts as `image_token_estimate` tokens (default `1536`) instead of its base64 length. A model that spends
+more than that on an image takes the difference out of `completion_token_buffer`, so the buffer has to cover
+`N_images × (real tokens per image − image_token_estimate)`. For high-resolution screenshots or many images, raise
+`image_token_estimate` to the model's real per-image cost, or raise the buffer. `input_video` parts are not covered:
+stirrup serializes them as `file` parts, which are still counted by their characters.
+
 The character estimate can substantially overcount retained reasoning, so the client still dispatches the configured
 completion floor; the hard completion cap always applies.
 
@@ -91,12 +102,43 @@ These are constructor arguments of `DynamicMaxTokensChatCompletionsClient`
 | `min_completion_tokens` (client) | `1024` | Target per-call completion floor. The hard cap always applies, and the approximate estimate keeps this floor even when it exceeds the context. Agents that write a whole script or deliverable in one tool call may need a higher floor: a 1024-token completion cannot reliably hold one. |
 | `prompt_estimator_truncate_history_thinking` (client) | `None` | Estimator-only. When `True`, the character estimate drops completed reasoning from assistant turns before the last user turn, as Nemotron's template does. It is never sent to the provider and never changes the recorded history. |
 | `truncation_recovery` (client) | `False` | When `True`, a turn that uses its whole completion budget without a schema-valid tool call is followed by one turn that requests thinking off and appends a one-time instruction to act now. The instruction is sent to the model but not recorded in the trajectory. |
+| `context_overflow_recovery` (client) | `False` | When `True`, a request the model server rejects with HTTP 400 or 413 and the error code `context_length_exceeded` does not end the episode while a completed turn can still be dropped: Stirrup drops the latest one and sends the request again. See [Context overflow recovery](#context-overflow-recovery) for the model server settings it needs and what bounds repeated recovery. |
 | `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and never replaces the history with an unusable summary: when every attempt is unusable, the episode ends as a failed response on the turns so far, classified `agent_invalid_output`, so it is graded as the model's result and not retried. |
 
 Thinking control (`enable_thinking`, and the thinking-off turn of
 `truncation_recovery`) is sent as `extra_body.chat_template_kwargs`. It only
 takes effect if the model server passes request `chat_template_kwargs` through
 to vLLM.
+
+### Context overflow recovery
+
+With `context_overflow_recovery: true`, a request the model server rejects with HTTP 400 or 413 and the structured
+error code `context_length_exceeded` is handed to Stirrup's own overflow handling. Stirrup removes the latest
+completed turn from the history and sends the policy call, or the compaction summary request, again. Only the error
+code counts, not the message text; every other rejection ends the episode.
+
+Stirrup never removes the original task or anything before the latest compaction summary, and at least one completed
+turn must remain after that point. When no further turn can be removed, the episode ends as any rejected request
+does: `status: failed`, `metadata.stop_reason: model_error`, and the model server's own status and message. If the
+rejected request was a compaction summary request, the turn completed just before it is missing from the output
+items, although its model call, token usage and tool executions are reported.
+
+The model server has to be set up for it. For `vllm_model`:
+
+- `propagate_context_overflow_errors: true`, so that the rejection reaches the agent. With the default, an overflow
+  comes back as an empty `finish_reason=length` completion and nothing is recovered.
+- A budget fit such as `refit_output_budget_to_prompt: true`. The same error code is sent when the prompt fits and
+  only the prompt plus the requested output budget overflow, which this client can cause because it keeps its
+  `min_completion_tokens` floor past its own estimate. With the fit, the model server answers that case by lowering
+  the budget itself, so a turn is dropped for a prompt that alone fills the context window and not for a budget the
+  model server could have lowered.
+
+A dropped turn is absent from the response's output items, but it did run: its model call, token usage and tool
+executions stay in the reported evidence, although no output item refers to those tool executions, and whatever its
+commands changed in the sandbox stays changed. Stirrup counts turns by the assistant messages still in the history,
+so a dropped turn is refunded against `agent_max_turns` and an episode can make more model calls than that limit. A
+turn that is redone can overflow again, so recovery can repeat without progress. Only the wall-clock limit
+`sandbox_runner_timeout_seconds` bounds that, and an episode stopped there answers `metadata.stop_reason: wall_time`.
 
 ## Licensing
 
