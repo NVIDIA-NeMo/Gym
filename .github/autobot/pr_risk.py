@@ -80,13 +80,14 @@ def changed_lines(base: Path, head: Path) -> dict[str, int]:
 def public_surface(tree: Path) -> set[str]:
     """Return each package initializer in ``tree`` that assigns an export table and every submodule it lists.
 
-    Only regular files are read, so an initializer symlinked to a FIFO or device cannot stall grading.
+    Only regular files are read, and an initializer that cannot be probed is skipped, so an initializer symlinked to
+    a FIFO, a device or an invalid path cannot stop grading.
     """
     files = set()
     for init in (tree / "nemo_gym").rglob("__init__.py"):
-        if not init.is_file():
-            continue
         try:
+            if not init.is_file():
+                continue
             body = ast.parse(init.read_bytes()).body
         except (OSError, SyntaxError, ValueError):
             continue

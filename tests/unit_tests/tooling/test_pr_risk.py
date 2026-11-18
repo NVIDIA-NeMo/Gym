@@ -142,12 +142,13 @@ def test_cli_prints_the_tier_on_stdout(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
-def test_special_file_initializer_does_not_block(tmp_path: Path) -> None:
+def test_special_initializers_do_not_stop_grading(tmp_path: Path) -> None:
     fifo = tmp_path / "fifo"
     os.mkfifo(fifo)
     base, head = worktrees(tmp_path, {}, {"scripts/a.py": "x\n"})
-    (head / "nemo_gym/extra").mkdir()
-    (head / "nemo_gym/extra/__init__.py").symlink_to(fifo)
+    for package, target in (("fifo", fifo), ("long", "x" * 256)):
+        (head / "nemo_gym" / package).mkdir()
+        (head / "nemo_gym" / package / "__init__.py").symlink_to(target)
     commit(head, {})
     result = subprocess.run(
         [sys.executable, SCRIPT, "--base", base, "--head", head],
