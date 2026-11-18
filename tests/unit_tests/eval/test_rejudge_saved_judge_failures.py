@@ -150,6 +150,16 @@ def test_a_rejudgment_that_fails_again_spends_a_failure_attempt(tmp_path, classe
     assert RolloutStore.read(output)._state.failure_count(identity) == spent + 1
 
 
+@pytest.mark.parametrize("classes", JUDGE_CLASSES)
+def test_a_spent_judge_failure_is_refused_whichever_class_names_it(tmp_path, monkeypatch, classes):
+    """The budget check is the binding's other single-field comparison, which neither case above reaches."""
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+    output, _ = _run(tmp_path, judge_failures=1, evidence=classes)
+    with pytest.raises(ConfigError, match="has spent its 1 saved failure attempts"):
+        bind_judge_failures(output)
+    assert bind_judge_failures(output, skip_spent=True)["failures"] == {}
+
+
 async def test_a_run_with_nothing_due_runs_no_pass(tmp_path, monkeypatch):
     output, _ = _run(tmp_path, judge_failures=0)
     before = output.read_bytes()
