@@ -23,9 +23,10 @@ rows were materialized (see ``nemo_gym.data.tasks.harbor``).
   ``harbor_oracle_agent``, first gets the snapshot's ``solution/`` at ``/solution`` and the
   task's ``[solution].env``), post the task's ``responses_create_params`` to it, then close
   the session and keep what the agent observed;
-- verify: write the agent transcript to ``/logs/agent/trajectory.json`` (ATIF v1.7), run
-  ``tests/test.sh`` inside the same sandbox (Harbor's shared verifier mode) or in a fresh one
-  (separate mode), then read ``/logs/verifier/reward.json`` or ``reward.txt``;
+- verify: write the agent transcript to ``/logs/agent/trajectory.json`` (ATIF v1.7; none for
+  the oracle, as Harbor's oracle writes none), run ``tests/test.sh`` inside the same sandbox
+  (Harbor's shared verifier mode) or in a fresh one (separate mode), then read
+  ``/logs/verifier/reward.json`` or ``reward.txt``;
 - cleanup: stop the sandbox, whatever happened before.
 
 Every episode runs under its task's own time budget unless ``enforce_task_timeouts`` is off, and

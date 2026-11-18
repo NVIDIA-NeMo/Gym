@@ -409,7 +409,8 @@ def _separate_mode(task: HarborTask, separate: bool | None) -> bool:
     return (not task.config.is_shared_verifier) if separate is None else separate
 
 
-# The agent transcript in ATIF v1.7, written under AGENT_LOGS_DIR before every verify; Harbor verifiers may read it.
+# The agent transcript in ATIF v1.7, written under AGENT_LOGS_DIR before every verify of a harness other than the
+# Harbor oracle (which, as under Harbor, leaves none); Harbor verifiers may read it.
 TRAJECTORY_FILE_NAME = "trajectory.json"
 
 # Top-level names in a verification's host logs folder that this server writes itself, beside what it downloads from
@@ -473,7 +474,8 @@ class HarborVerificationMixin:
         """Run ``tests/test.sh`` and read the reward it wrote, in the agent's sandbox or a separate one.
 
         ``trajectory`` is the exported ATIF transcript, written to ``/logs/agent/trajectory.json`` in the
-        sandbox that runs ``test.sh`` before it starts. ``response`` is the agent's final response, handed to a
+        sandbox that runs ``test.sh`` before it starts, unless the harness is the Harbor oracle
+        (:meth:`_upload_trajectory`). ``response`` is the agent's final response, handed to a
         Python verifier that declares it (:meth:`_verifier_shim`).
         """
         if self._separate_verifier(session.task):
@@ -795,7 +797,13 @@ class HarborVerificationMixin:
                 archive.unlink(missing_ok=True)
             # An artifact that covers /logs/agent brought the agent's tree, planted entries included, into
             # this fresh sandbox: the transcript's destination is cleared again before it is written.
-            await self._upload_trajectory(verifier, trajectory, logs_dir, restored=[source for *_, source in restored])
+            await self._upload_trajectory(
+                verifier,
+                trajectory,
+                logs_dir,
+                restored=[source for *_, source in restored],
+                place_in_sandbox=not session.solution_for_oracle,
+            )
             if verifier_entrypoint is not None:
                 # The last look before test.sh, in a fresh sandbox the agent never had: its exit status is trusted.
                 await self._check_entrypoint(verifier, start, verifier_entrypoint)
@@ -1095,7 +1103,8 @@ class HarborVerificationMixin:
         ``[[verifier.collect]]`` hooks run first, as in Harbor: what they produce under ``/logs/artifacts``
         is there for ``test.sh``, and for the run's logs. ``/logs/agent`` is left as the agent wrote it,
         except for ``trajectory.json``: whatever the agent left at that reserved path (a link, a directory)
-        is removed and the server writes the transcript there, so verifiers that read it find it.
+        is removed and the server writes the transcript there, so verifiers that read it find it, for every
+        harness but the Harbor oracle, which gets none (:meth:`_upload_trajectory`).
 
         ``test_dirs`` are uploaded to ``/tests`` in order, each over the last (a step's ``tests/`` over the
         task's); missing folders are skipped. By default the task's ``tests/`` and ``[verifier]`` apply.
@@ -1144,7 +1153,9 @@ class HarborVerificationMixin:
                 await upload_dir(sandbox, tests, TESTS_DIR, ignore=is_ignored)
             await self._upload_verifier_shim(sandbox, session, response)
             await _make_test_script_executable(sandbox)
-            await self._upload_trajectory(sandbox, trajectory, logs_dir)
+            await self._upload_trajectory(
+                sandbox, trajectory, logs_dir, place_in_sandbox=not session.solution_for_oracle
+            )
             # One plain exec for the whole run. The provider keeps it alive for as long as
             # `timeout_s` says (OpenSandbox polls a background command, Docker streams), and
             # `timeout` inside the container is the cap that stops the tests themselves.
@@ -1376,7 +1387,13 @@ class HarborVerificationMixin:
         return resolve_env_templates(settings.env, self.config.secrets)
 
     async def _upload_trajectory(
-        self, sandbox: AsyncSandbox, trajectory: bytes, logs_dir: Path, *, restored: Sequence[str] = ()
+        self,
+        sandbox: AsyncSandbox,
+        trajectory: bytes,
+        logs_dir: Path,
+        *,
+        restored: Sequence[str] = (),
+        place_in_sandbox: bool = True,
     ) -> None:
         """Keep a host copy of the transcript beside the verifier logs and place it where the verifier reads it.
 
@@ -1385,6 +1402,12 @@ class HarborVerificationMixin:
         the agent's tree came back with it, so whatever the agent planted there (a link the upload would follow,
         a directory it would fail on) is removed first, as the shared-mode prepare does. Otherwise the sandbox is
         fresh at that path, or it was already cleared, and the upload needs no extra round trip.
+
+        ``place_in_sandbox=False`` keeps the host copy only, for the Harbor oracle: Harbor's oracle writes no ATIF
+        trajectory (0.22.0 ``BaseAgent.SUPPORTS_ATIF`` is false for it), so its verifier finds ``oracle.txt`` and,
+        after a failed ``solve.sh``, ``exit-code.txt`` under ``/logs/agent`` and no ``trajectory.json``. A verifier
+        that tells an oracle run from a coding agent's by that file then reads both the same way here. The reserved
+        path is still cleared after a covering restore, so nothing but the server's transcript is ever found there.
         """
         host = logs_dir / TRAJECTORY_FILE_NAME
         host.write_bytes(trajectory)
@@ -1398,6 +1421,8 @@ class HarborVerificationMixin:
             )
             if clear.return_code != 0:
                 raise RuntimeError(f"Could not clear the restored {target}: {clear.stderr or clear.stdout}")
+        if not place_in_sandbox:
+            return
         await upload_path(sandbox, host, target)
         # The host copy is created under the server's umask and the archive carries that mode, which root `tar`
         # keeps: under umask 077 the transcript would land root-owned 0600, unreadable by a non-root `[verifier].user`

@@ -144,7 +144,9 @@ reward or, without one, the sum of all its values. To grade in Python instead, r
 ### solution/
 
 The reference solution. The oracle runs `solution/solve.sh` in the task's sandbox in place of an agent, then runs
-the verifier. No other harness receives `solution/`. A task graded on a
+the verifier. No other harness receives `solution/`. As under Harbor, the verifier of an oracle run finds the
+output of `solve.sh` in `/logs/agent/oracle.txt`, its exit code in `/logs/agent/exit-code.txt` when it is not 0,
+and no `/logs/agent/trajectory.json`. A task graded on a
 written answer can ship `solution/answer.md` instead (see
 [Reference answers](/main/data/task-folders/task-folder-verifiers#reference-answers)).
 
