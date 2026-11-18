@@ -364,7 +364,7 @@ def test_validate_needs_no_model_even_with_unused_endpoint_settings(tmp_path, mo
             "_probe_endpoint",
             lambda *args: pytest.fail("Oracle must not probe an unused model"),
         )
-        env.RunHelper().wait_for_model_endpoints(config)
+        env.ServerSupervisor().wait_for_model_endpoints(config)
         write_jsonl(Path(config.output_jsonl_fpath), [result()])
 
     monkeypatch.setattr(main_module, "dispatch", collect)
@@ -428,7 +428,7 @@ def oracle_collection(monkeypatch, validation_cli):
     """
     from types import SimpleNamespace
 
-    from nemo_gym.cli.eval import RunHelper
+    from nemo_gym.cli.eval import ServerSupervisor
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper, _CompletedRollout
 
     collection = SimpleNamespace(dispatched=[], payload=lambda row: result())
@@ -437,8 +437,8 @@ def oracle_collection(monkeypatch, validation_cli):
         collection.dispatched.append(row)
         return _CompletedRollout(row=row, result=collection.payload(row), rollout_latency_ms=1.0)
 
-    monkeypatch.setattr(RunHelper, "start", lambda *args: None)
-    monkeypatch.setattr(RunHelper, "shutdown", lambda *args: None)
+    monkeypatch.setattr(ServerSupervisor, "start", lambda *args: None)
+    monkeypatch.setattr(ServerSupervisor, "shutdown", lambda *args: None)
     monkeypatch.setattr(
         RolloutCollectionHelper,
         "setup_server_client",

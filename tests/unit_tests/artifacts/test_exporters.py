@@ -1184,7 +1184,7 @@ def test_cli_collection_failure_status(
     # Exercise the CLI failure-to-exporter wiring without starting servers or telemetry; the run is tracked in a
     # real local MLflow store, opened as config resolution opens it.
     monkeypatch.setattr(cli, "get_global_config_dict", lambda: config)
-    monkeypatch.setattr(cli, "RunHelper", MagicMock())
+    monkeypatch.setattr(cli, "ServerSupervisor", MagicMock())
     monkeypatch.setattr(cli.GlobalConfigDictParser, "filter_for_server_instance_configs", lambda *args, **kwargs: {})
     monkeypatch.setattr(cli, "_validate_split_datasets_declared", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "_terminated", False)

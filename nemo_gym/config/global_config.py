@@ -106,6 +106,10 @@ HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 HEAD_SERVER_CONSTRAINTS_KEY_NAME = "head_server_constraints"
+# true: the head server's /global_config_dict_yaml keeps credential values (api keys, passwords, *_token). By default
+# it masks them: anything on the head server's network (an agent sandbox sharing its loopback) can read that route,
+# and Gym-launched servers get the unmasked config from their environment instead.
+HEAD_SERVER_SERVE_CREDENTIALS_KEY_NAME = "head_server_serve_credentials"
 PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
@@ -174,6 +178,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
+    HEAD_SERVER_SERVE_CREDENTIALS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
@@ -258,6 +263,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "stirrup_agent",
         "terminus_2_agent",
         "terminus_2_sandboxed_agent",
+        "wildclawbench_agent",
     }
 )
 # Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.

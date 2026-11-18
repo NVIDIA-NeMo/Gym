@@ -9,9 +9,14 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .core import digest, judge, read, write
+
+
+if TYPE_CHECKING:
+    from nemo_gym.core import NeMoGymResponse
 
 
 class SSE:
@@ -121,6 +126,46 @@ def delivered(response: dict) -> dict:
     if not (fields["content"].strip() or fields["refusal"].strip()):
         raise ValueError("Empty or reasoning-only delivery")
     return {"status": "complete", "finish_reason": "stop", "message": message}
+
+
+def project_gym_response(response: NeMoGymResponse) -> dict:
+    """Make a judging copy; keep the original Gym response and token metadata intact."""
+    if (
+        response.status != "completed"
+        or response.error
+        or response.incomplete_details
+        or getattr(response, "native_finish_reason", None) == "repetition"
+        or getattr(response, "native_stop_reason", None) == "repetition_detected"
+    ):
+        raise ValueError("Incomplete Gym response")
+    message = {"role": "assistant", "content": "", "refusal": ""}
+    reasoning, messages = [], 0
+    for item in response.output:
+        if item.type == "reasoning":
+            # Gym's Chat adapter puts parsed reasoning in summary; Responses
+            # providers may expose full reasoning in content instead.
+            reasoning.extend(part.text for part in (item.content or item.summary))
+        elif item.type == "message" and item.status == "completed":
+            messages += 1
+            for part in item.content:
+                field = "content" if part.type == "output_text" else "refusal"
+                message[field] += part.text if field == "content" else part.refusal
+        else:
+            raise ValueError("Incomplete message or native action in Gym response")
+    if messages != 1:
+        raise ValueError("Expected one assistant message")
+    if reasoning:
+        message["reasoning_content"] = "\n\n".join(reasoning)
+    return delivered({"choices": [{"finish_reason": "stop", "message": message}]})
+
+
+def gym_response_completion(response: NeMoGymResponse) -> dict:
+    """Project only for judging; the saved Responses payload retains its token information."""
+    try:
+        message = project_gym_response(response)["message"]
+    except ValueError:
+        return {"choices": [{"finish_reason": "incomplete", "message": {"role": "assistant", "content": ""}}]}
+    return {"choices": [{"finish_reason": "stop", "message": message}]}
 
 
 def validate_endpoint(endpoint: str) -> None:
@@ -272,14 +317,19 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
 
 
 def verified_response(receipt: dict) -> dict:
-    """Reconstruct the delivered fields from the saved authoritative HTTP bytes."""
+    """Reconstruct delivery from the declared HTTP or Gym Responses receipt format."""
     if receipt["status"] != "generated" or not receipt["raw_attempts"]:
         raise ValueError("No complete transport receipt")
     for raw in receipt["raw_attempts"]:
         if digest(Path(raw["path"])) != raw["sha256"]:
             raise ValueError("Raw transport binding changed")
     raw_path = Path(receipt["raw_attempts"][-1]["path"])
-    actual = replay_sse(raw_path) if "text/event-stream" in receipt.get("content_type", "") else read(raw_path)
+    if receipt.get("response_format") == "gym_responses_v1":
+        from nemo_gym.core import NeMoGymResponse
+
+        actual = gym_response_completion(NeMoGymResponse.model_validate(read(raw_path)))
+    else:
+        actual = replay_sse(raw_path) if "text/event-stream" in receipt.get("content_type", "") else read(raw_path)
     if actual != receipt["response"]:
         raise ValueError("Saved response differs from raw delivery")
     return actual
