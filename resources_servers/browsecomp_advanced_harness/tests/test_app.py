@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 from fastapi.testclient import TestClient
-from pytest import approx, fixture
+from pytest import approx, fixture, mark
 
 from nemo_gym.client import SESSION_ID_KEY
 from resources_servers.browsecomp_advanced_harness import app as browsecomp_advanced_harness_app
@@ -133,6 +133,63 @@ class TestApp:
         assert parsed_ok is True
         assert is_correct is False
         assert extracted == "Right"
+
+    @mark.parametrize(
+        ("text", "expected_correct", "expected_extracted"),
+        [
+            ("extracted_final_answer: Paris\ncorrect: yes", True, "Paris"),
+            ("**extracted_final_answer:** Paris\n**correct:** yes", True, "Paris"),
+            ("**extracted_final_answer:** Paris\n**correct:** no", False, "Paris"),
+            ("**extracted_final_answer**: Paris\n**correct**: yes", True, "Paris"),
+            ("extracted_final_answer: **Paris**\ncorrect: **yes**", True, "Paris"),
+            ("*extracted_final_answer:* Paris\n*correct:* yes", True, "Paris"),
+            ("extracted_final_answer: Paris\n- **Correct:** No", False, "Paris"),
+            # The reply shape the hosted claude-sonnet-4-5 judge returned in the 2026-11-13 QA regression.
+            (
+                "**extracted_final_answer:** China\n\n**reasoning:** R3 applies -- 'China' is the common short "
+                "form of 'People's Republic of China'.\n\n**correct:** yes\n\n**confidence:** 100",
+                True,
+                "China",
+            ),
+        ],
+    )
+    def test_parse_judge_accepts_markdown_emphasis(
+        self, server: TavilySearchResourcesServer, text: str, expected_correct: bool, expected_extracted: str
+    ) -> None:
+        assert server._parse_judge(text) == (expected_correct, expected_extracted, True)
+
+    @mark.parametrize(
+        "text",
+        [
+            # The label must be the `correct` field itself.
+            "**extracted_final_answer:** yes",
+            "incorrect: yes",
+            "**incorrect:** yes",
+            "[correct_answer]: yes",
+            # The value must be exactly yes or no.
+            "**correct:** maybe",
+            "correct: **yesterday**",
+        ],
+    )
+    def test_parse_judge_rejects_near_misses(self, server: TavilySearchResourcesServer, text: str) -> None:
+        assert server._parse_judge(text) == (False, "", False)
+
+    def test_parse_judge_last_match_wins_over_plain_echo_before_bold_verdict(
+        self, server: TavilySearchResourcesServer
+    ) -> None:
+        """A plain `correct: yes` echoed in the think block must not outrank a later bold `no` verdict."""
+        text = (
+            "<think>the rubric says correct: yes when they match; these differ</think>\n"
+            "**extracted_final_answer:** Lyon\n**correct:** no"
+        )
+        assert server._parse_judge(text) == (False, "Lyon", True)
+
+    def test_parse_judge_bold_template_echo_is_unparsed(self, server: TavilySearchResourcesServer) -> None:
+        text = (
+            "**extracted_final_answer**: The final exact answer extracted from the [response]. "
+            "Put the extracted answer as 'None'...\n**correct**: yes"
+        )
+        assert server._parse_judge(text) == (False, "", False)
 
     # ---- _is_url_excluded ----
 
@@ -294,6 +351,35 @@ class TestApp:
 
         assert res.reward == approx(0.0)
         assert res.extracted_final_answer == "London"
+
+    async def test_verify_scores_a_bold_judge_verdict_on_the_first_call(
+        self, config: TavilySearchResourcesServerConfig
+    ) -> None:
+        """A `**correct:** yes` reply grades the answer 1.0 on the first judge call, with no parse-error retries."""
+        server_client = MagicMock(spec=ServerClient)
+        server = TavilySearchResourcesServer(config=config, server_client=server_client)
+
+        post_mock = MagicMock()
+        post_mock.json = AsyncMock(
+            return_value=self._create_judge_response(
+                "**extracted_final_answer:** China\n\n**reasoning:** R3 applies.\n\n**correct:** yes\n\n"
+                "**confidence:** 100"
+            )
+        )
+        post_mock.read = AsyncMock(return_value=orjson.dumps(post_mock.json.return_value))
+        server_client.post = AsyncMock(return_value=post_mock)
+
+        req = TavilySearchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._create_model_response("The answer is China."),
+            ground_truth="People's Republic of China",
+            question="What country has Beijing as its capital?",
+        )
+        res = await server.verify(self._create_dummy_request(), req)
+
+        assert res.reward == approx(1.0)
+        assert res.extracted_final_answer == "China"
+        assert server_client.post.await_count == 1
 
     # ---- _verify_answer_with_regex ----
 

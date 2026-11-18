@@ -93,7 +93,11 @@ from nemo_gym.verification import JudgeError, call_judge
 # under a point, in opposite directions, and does NOT explain the gap between the two arms,
 # which survives under either prompt at high significance. Quote that re-grade, not an identity
 # claim, whenever these numbers are compared.
-from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
+from resources_servers.browsecomp_advanced_harness.judge_prompt import (
+    JUDGE_EXTRACTED_ANSWER_RE,
+    JUDGE_PROMPT_TEMPLATE,
+    JUDGE_VERDICT_RE,
+)
 from resources_servers.opencode_search.exa_cache import ExaCache
 
 
@@ -125,15 +129,16 @@ def parse_judge_verdict(text: str) -> Tuple[bool, str, bool]:
     """Parse a judge reply into (is_correct, extracted_answer, parsed_ok).
 
     The LAST 'correct: yes|no' wins: reasoning judges echo the template inside their think
-    block, so a first-match parse grades the echo instead of the verdict.
+    block, so a first-match parse grades the echo instead of the verdict. Markdown emphasis
+    around the label or value (`**correct:** yes`) is accepted; see JUDGE_VERDICT_RE.
     """
-    matches = list(re.finditer(r"correct:\s*(yes|no)\b", text or "", re.IGNORECASE))
+    matches = list(JUDGE_VERDICT_RE.finditer(text or ""))
     if not matches:
         return False, "", False
 
     is_correct = matches[-1].group(1).lower() == "yes"
 
-    ans_matches = list(re.finditer(r"extracted_final_answer:\s*(.+?)(?:\n|$)", text or ""))
+    ans_matches = list(JUDGE_EXTRACTED_ANSWER_RE.finditer(text or ""))
     extracted = ans_matches[-1].group(1).strip() if ans_matches else ""
 
     if extracted and _JUDGE_TEMPLATE_ECHO in extracted:

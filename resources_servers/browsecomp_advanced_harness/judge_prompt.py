@@ -31,9 +31,23 @@
 # (a different entity) are evaluated BEFORE R3 (same entity, surface-form difference), so
 # accepting a spelling variant cannot smuggle in a partial or wrong answer.
 #
-# The `correct:` field is required: the response parser keys off `correct:\s*(yes|no)`,
+# The `correct:` field is required: the response parsers key off JUDGE_VERDICT_RE below,
 # and a judge reply without that line does not parse and grades the row wrong. It is
 # worded to report the verdict of the rule that fired rather than to re-decide it.
+
+import re
+
+
+# The reply lines the parsers read (browsecomp_advanced_harness `_parse_judge`, opencode_search
+# `parse_judge_verdict`; both take the LAST match). A hosted judge (claude-sonnet-4-5) sometimes
+# wraps a label and/or its value in markdown emphasis -- `**correct:** yes`, `**correct**: yes`,
+# `correct: **yes**`, `*correct:* yes` -- although the template asks for plain `correct: yes`.
+# A literal `correct:\s*(yes|no)` scan misses those forms, so the reply does not parse. `\b` keeps
+# the label the `correct` field (not the `correct` inside `incorrect`); the value stays exactly
+# yes/no. The answer line accepts the same emphasis and leaves it out of the captured answer, so
+# the field reads `China`, not `** China`, and the template-echo check still sees a bold echo.
+JUDGE_VERDICT_RE = re.compile(r"\**\bcorrect\**\s*:\s*\**\s*(yes|no)\b", re.IGNORECASE)
+JUDGE_EXTRACTED_ANSWER_RE = re.compile(r"extracted_final_answer\**\s*:\s*\**\s*(.+?)[ \t]*\**[ \t]*(?:\n|$)")
 
 JUDGE_PROMPT_TEMPLATE = """\
 Judge whether the following [response] to [question] is correct or not \
