@@ -266,11 +266,11 @@ Command failures return `SandboxExecResult` with the command's exit code. A comm
 
 ## Compose Services
 
-The provider implements `SupportsSandboxNetwork`, `SupportsSandboxSharedStorage` and `SupportsSandboxDetachedExec`,
-so [Compose Services](/main/infrastructure/sandbox/compose) and Compose task folders run on Docker without extra
-configuration. It needs Docker 26.0 or newer: an Engine with API 1.45, which the provider checks, and a `docker` CLI
-that knows `--mount volume-subpath` (an older CLI fails `docker run` with `unexpected key 'volume-subpath'`). The
-daemon may be remote: nothing is mounted from the host that runs NeMo Gym.
+The provider implements `SupportsSandboxNetwork`, `SupportsSandboxSharedStorage`, `SupportsSandboxDetachedExec` and
+`SupportsSandboxExecAsAnyUser`, so [Compose Services](/main/infrastructure/sandbox/compose) and Compose task folders
+run on Docker without extra configuration. It needs Docker 26.0 or newer: an Engine with API 1.45, which the provider
+checks, and a `docker` CLI that knows `--mount volume-subpath` (an older CLI fails `docker run` with
+`unexpected key 'volume-subpath'`). The daemon may be remote: nothing is mounted from the host that runs NeMo Gym.
 
 Each service's command starts with `docker exec -d`, which returns once the command is running. A running service
 therefore holds no `exec.concurrency` slot, and a collection with many services still has capacity for its startup
@@ -281,6 +281,8 @@ checks and later commands.
 - Each service is one container on `create.network`, the default bridge unless you set one.
 - Gym reads each container's IP with `docker inspect` and, as root, appends the names and aliases of the services it
   shares a network with to its `/etc/hosts`. Services then reach each other by name.
+- Each `docker exec` names its own user, so this holds for a service whose image runs as a non-root user too. Such a
+  service keeps its Compose `user`, its peers' names and its `extra_hosts`.
 - `network: none`, `host` and `container:<name>` give a container no address of its own, so a Compose collection is
   refused on them before any container starts.
 - Every collection, and every other sandbox, shares the configured network: containers can reach each other by IP

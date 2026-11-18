@@ -85,9 +85,10 @@ from nemo_gym.sandbox.compose_fields import (
     ComposeFieldError,
     ComposeSubstitutionError,
     check_compose_fields,
+    service_gpus,
 )
 from nemo_gym.sandbox.compose_volumes import ComposeVolumeError
-from nemo_gym.sandbox.providers.registry import provider_service_option_fields
+from nemo_gym.sandbox.providers.registry import provider_execs_as_any_user, provider_service_option_fields
 
 
 LOGGER = logging.getLogger(__name__)
@@ -582,21 +583,49 @@ def _compose_field_error(
     return ImageConfigError(f"{task.task_id}: {compose_source(task, overlay)}: {exc}")
 
 
+def exec_as_any_user_sidecars(
+    task: HarborTask, document: Mapping[str, Any], *, provider: str | None, gpu_provider: str | None = None
+) -> frozenset[str]:
+    """The sidecars of ``document`` whose provider runs each command as the user it names, whatever user the image
+    runs as (``provider_execs_as_any_user``: Docker). Such a sidecar keeps its Compose ``user``, its host entries
+    and its ``extra_hosts`` when its image runs as a non-root user
+    (:func:`~nemo_gym.sandbox.compose_config.adapt_non_root_sidecars`). Each sidecar is routed as
+    :func:`check_task_compose_fields` routes it: to ``gpu_provider`` when ``task.toml`` declares GPUs or the sidecar
+    reserves GPUs through ``deploy.resources``, else to ``provider``; ``document`` is one that check normalized, as
+    the routing reads ``deploy`` in its normalized form. Without a provider name (a provider instance in place of
+    the config) a sidecar is not counted."""
+    if gpu_provider is not None and task_declares_gpus(task):
+        provider = gpu_provider
+    sidecars: set[str] = set()
+    for name, service in document["services"].items():
+        if name == "main" or not isinstance(service, dict):
+            continue
+        runs_on = gpu_provider if gpu_provider is not None and service_gpus(service) else provider
+        if runs_on is not None and provider_execs_as_any_user(runs_on):
+            sidecars.add(name)
+    return frozenset(sidecars)
+
+
 def check_task_sidecar_extra_hosts(
     task: HarborTask,
     document: dict[str, Any],
     image_configs: Mapping[str, Any],
     *,
+    provider: str | None = None,
+    gpu_provider: str | None = None,
     overlay: HarborComposeOverlay | None = None,
 ) -> None:
     """The check that needs the recorded images: a sidecar whose image runs as a non-root user, which the group
     starts without host injection, must declare no ``extra_hosts``
-    (:func:`~nemo_gym.sandbox.compose_config.check_sidecar_extra_hosts`). Prepare runs it once the images are
+    (:func:`~nemo_gym.sandbox.compose_config.check_sidecar_extra_hosts`). A sidecar whose provider runs each
+    command as any user (:func:`exec_as_any_user_sidecars`, from the provider names ``provider`` and
+    ``gpu_provider``) gets its host entries and so may declare them. Prepare runs it once the images are
     recorded; the seed runs it on the merged document before anything is provisioned, where ``adapt_non_root_sidecars``
     would otherwise raise it inside the group's start. Raises :class:`ImageConfigError` naming the task and its
     Compose source (with the overlay files merged onto it, :func:`compose_source`)."""
+    exec_as_any_user = exec_as_any_user_sidecars(task, document, provider=provider, gpu_provider=gpu_provider)
     try:
-        check_sidecar_extra_hosts(document, image_configs)
+        check_sidecar_extra_hosts(document, image_configs, exec_as_any_user=exec_as_any_user)
     except ComposeFieldError as exc:
         raise _compose_field_error(task, exc, overlay) from exc
 
@@ -834,9 +863,10 @@ def record_compose_images(
     ``skipped`` given it is recorded there by task id with the reason and left out,
     otherwise one :class:`ImageConfigError` at the end names every such task. Its images are still recorded, so
     a fixed task file needs no new registry round-trip. Once the image configurations are recorded, a sidecar
-    whose image runs as a non-root user (which the group starts without host injection) must declare no
-    ``extra_hosts`` (:func:`check_task_sidecar_extra_hosts`), the way the adapter decides it at seed. An image the
-    registry cannot resolve still raises for the whole set, as :func:`record_image_configs` says.
+    whose image runs as a non-root user (which the group starts without host injection, unless its provider runs
+    each command as any user) must declare no ``extra_hosts`` (:func:`check_task_sidecar_extra_hosts`), the way the
+    adapter decides it at seed. An image the registry cannot resolve still raises for the whole set, as
+    :func:`record_image_configs` says.
     """
     references: dict[str, list[str]] = {}
     failures: dict[str, str] = {}
@@ -880,7 +910,14 @@ def record_compose_images(
         recorded = json.loads(path.read_text())
         for task, document in documents:
             try:
-                check_task_sidecar_extra_hosts(task, document, recorded, overlay=overlay)
+                check_task_sidecar_extra_hosts(
+                    task,
+                    document,
+                    recorded,
+                    provider=sandbox_provider,
+                    gpu_provider=gpu_sandbox_provider,
+                    overlay=overlay,
+                )
             except ImageConfigError as exc:
                 if skipped is None:
                     raise

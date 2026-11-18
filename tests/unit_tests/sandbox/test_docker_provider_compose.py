@@ -22,6 +22,7 @@ from nemo_gym.sandbox.adapters.docker_compose import PLACEMENT_GROUP_KEY, AsyncS
 from nemo_gym.sandbox.providers.base import (
     SandboxHandle,
     SandboxSpec,
+    SupportsSandboxExecAsAnyUser,
     SupportsSandboxNetwork,
     SupportsSandboxSharedStorage,
 )
@@ -62,6 +63,16 @@ def test_the_provider_implements_both_compose_capabilities():
     provider = docker_provider.DockerProvider()
     assert isinstance(provider, SupportsSandboxSharedStorage)
     assert isinstance(provider, SupportsSandboxNetwork)
+
+
+def test_the_provider_runs_commands_as_any_user_and_prepare_reads_it_by_name():
+    """``docker exec --user`` sets each command's user from outside the container, so a Compose sidecar whose image
+    runs as a non-root user keeps its user and host injection on Docker; OpenSandbox switches users inside."""
+    from nemo_gym.sandbox.providers import provider_execs_as_any_user
+
+    assert isinstance(docker_provider.DockerProvider(), SupportsSandboxExecAsAnyUser)
+    assert provider_execs_as_any_user("docker") is True
+    assert provider_execs_as_any_user("opensandbox") is False
 
 
 # --------------------------------------------------------------------------- #

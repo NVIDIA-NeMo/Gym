@@ -196,16 +196,19 @@ to skip. Same fields as the other providers: `command`, `expected_stdout`, `time
 
 ## Compose services
 
-The provider implements `SupportsSandboxNetwork`, `SupportsSandboxSharedStorage` and `SupportsSandboxDetachedExec`,
-so `AsyncSandboxCompose` and Compose task folders (the `harbor` Environment Server) run on it with no extra
-configuration. It needs **Docker 26.0 or newer**: an Engine with API 1.45, which the provider checks, and a `docker`
-CLI that knows `--mount volume-subpath` (an older CLI fails `docker run` with `unexpected key 'volume-subpath'`).
+The provider implements `SupportsSandboxNetwork`, `SupportsSandboxSharedStorage`, `SupportsSandboxDetachedExec` and
+`SupportsSandboxExecAsAnyUser`, so `AsyncSandboxCompose` and Compose task folders (the `harbor` Environment Server) run
+on it with no extra configuration. It needs **Docker 26.0 or newer**: an Engine with API 1.45, which the provider
+checks, and a `docker` CLI that knows `--mount volume-subpath` (an older CLI fails `docker run` with
+`unexpected key 'volume-subpath'`).
 
 - **Networking.** Each service is a container on `create.network` (the default bridge unless set). `network_address`
   reads the container's IP with `docker inspect`; `set_hosts` appends `<ip> <name>` lines to its `/etc/hosts` as root,
-  so services reach each other by name. `validate_networking` refuses `network: none`, `host` and `container:<name>`,
-  on which a container has no address of its own. Collections share the network with each other and every other
-  sandbox on it; `read_only: true` also makes `/etc/hosts` read-only, so Compose services cannot start under it.
+  so services reach each other by name. Each `docker exec` names its own user (`EXEC_AS_ANY_USER`), so a sidecar
+  whose image runs as a non-root user keeps its Compose `user`, its host entries and its `extra_hosts`.
+  `validate_networking` refuses `network: none`, `host` and `container:<name>`, on which a container has no address
+  of its own. Collections share the network with each other and every other sandbox on it; `read_only: true` also
+  makes `/etc/hosts` read-only, so Compose services cannot start under it.
 - **Shared storage.** `shared_volume_options(source, target, read_only=...)` mounts folder `source` of the named
   volume `create.shared_volume` at `target` with
   `--mount type=volume,source=<volume>,target=<target>,volume-subpath=<source>[,readonly],volume-nocopy`

@@ -533,6 +533,22 @@ class SupportsSandboxServiceOptions(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxExecAsAnyUser(Protocol):
+    """Optional provider capability: ``exec`` runs a command as the user it names, root included, whatever user the
+    sandbox's image runs as.
+
+    Docker sets the user of each ``docker exec`` from outside the container. A provider that switches users inside
+    the sandbox (``su``) can only do so from root, so in a sandbox whose image runs as a non-root user its commands
+    run as that user. ``EXEC_AS_ANY_USER`` is a class attribute, ``True``, so prepare can read it by provider name
+    without instantiating the provider (``provider_execs_as_any_user``). A Compose sidecar whose image runs as a
+    non-root user keeps its ``user`` and its hosts-file entries on such a provider; on others it stays on its image's
+    user without host injection (``nemo_gym.sandbox.compose_config.adapt_non_root_sidecars``).
+    """
+
+    EXEC_AS_ANY_USER: bool
+
+
+@runtime_checkable
 class SupportsSandboxPullPolicy(Protocol):
     """Optional per-sandbox image pull policy: ``always``, ``missing`` or ``never`` (Compose's ``pull_policy``).
 

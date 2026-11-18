@@ -21,8 +21,11 @@ from unittest.mock import Mock
 import pytest
 
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+from nemo_gym.sandbox.compose_config import adapt_non_root_sidecars, resolve_compose
+from nemo_gym.sandbox.compose_fields import check_compose_fields
 from nemo_gym.sandbox.providers.base import SandboxSpec, SupportsSandboxDetachedExec
 from nemo_gym.sandbox.providers.docker.provider import DockerProvider
+from nemo_gym.sandbox.providers.registry import provider_execs_as_any_user
 
 
 pytestmark = [
@@ -643,4 +646,48 @@ async def test_a_service_docker_cannot_start_fails_the_collection(fake_docker):
     group = collection(provider, document, timeout_s=5)
     with pytest.raises(RuntimeError, match="'main' did not start: unable to find user no-such-user"):
         await group.start()
+    assert fake_docker.containers() == set()
+
+
+# --------------------------------------------------------------------------- #
+# A sidecar whose image runs as a non-root user
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_a_non_root_sidecar_keeps_its_compose_user_and_its_host_entries(fake_docker):
+    """The document as Harbor prepares it (field check, ``resolve_compose``, ``adapt_non_root_sidecars``) with every
+    sidecar on Docker, which runs each command as the user it names: ``web``, whose image runs as user 1000, starts
+    its command as its Compose ``user: "2000"``, and root adds its peer ``db`` and its ``extra_hosts`` to its hosts
+    file."""
+    images = {"org/main:1": {}, "org/web:1": {"User": "1000"}, "org/db:1": {}}
+    configs = {
+        image: {"os": "linux", "architecture": "amd64", "image": image, "config": config}
+        for image, config in images.items()
+    }
+    published = {
+        "services": {
+            "main": {"image": "org/main:1"},
+            "web": {
+                "image": "org/web:1",
+                "user": "2000",
+                "command": ["sleep", "60"],
+                "extra_hosts": ["licence.example:198.51.100.7"],
+            },
+            "db": {"image": "org/db:1", "command": ["sleep", "60"]},
+        }
+    }
+    document = resolve_compose(check_compose_fields(published), "org/main:1", configs)
+    assert provider_execs_as_any_user("docker")
+    document = adapt_non_root_sidecars(document, configs, exec_as_any_user={"web", "db"})
+    provider = DockerProvider(exec={"exec_shell": "sh"})
+    group = collection(provider, document, timeout_s=5)
+    async with group:
+        web = group.services["web"]._require_handle()
+        db_address = await provider.network_address(group.services["db"]._require_handle())
+        (launch,) = [call for call in fake_docker.calls() if call[:2] == ["exec", "-d"] and web.sandbox_id in call]
+        assert launch[launch.index("--user") + 1] == "2000"
+        (hosts_write,) = [call for call in fake_docker.calls() if "/etc/hosts" in call[-1] and web.sandbox_id in call]
+        assert hosts_write[hosts_write.index("--user") + 1] == "0"
+        hosts = fake_docker.file(web.sandbox_id, "/etc/hosts").read_text()
+        assert f"{db_address} db\n" in hosts
+        assert "198.51.100.7 licence.example\n" in hosts
     assert fake_docker.containers() == set()

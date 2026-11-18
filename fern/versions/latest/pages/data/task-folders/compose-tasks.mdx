@@ -184,7 +184,7 @@ with no `user:` it runs as the image's user. The agent keeps its own user.
 | `platform` | Must match the server's `sandbox_provider_options.platform`, `linux/amd64` by default. |
 | `networks` | Become name scopes on the group's one network. `internal: true`, `ipam`, `driver_opts` and static addresses fail. |
 | `ports` | A container port alone. Fixed published ports, `host_ip`, non-TCP protocols and ranges fail. |
-| `extra_hosts` | Host-to-IP entries. `host-gateway` fails, and a non-root sidecar cannot take them. |
+| `extra_hosts` | Host-to-IP entries. `host-gateway` fails. On OpenSandbox, a sidecar whose image runs as a non-root user cannot take them. |
 | `post_start` | Run once the command starts. `privileged` hooks and `pre_stop` fail. |
 | `tmpfs`, `ulimits`, `sysctls`, `security_opt` | Applied by Docker as the matching `docker run` flags. Not supported on OpenSandbox, so the task is left out there. |
 

@@ -414,6 +414,9 @@ class DockerProvider:
     name = "docker"
     # Compose service options this provider applies, each as the matching ``docker run`` flag.
     SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
+    # ``docker exec --user`` picks each command's user from outside the container, root included, whatever user
+    # the image runs as (see ``SupportsSandboxExecAsAnyUser``).
+    EXEC_AS_ANY_USER = True
 
     def __init__(
         self,
