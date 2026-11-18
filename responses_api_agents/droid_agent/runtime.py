@@ -26,7 +26,8 @@ REGISTRY = "https://registry.npmjs.org"
 # Droid publishes one native binary per platform as @factory/cli-<target>. The baseline x64 build runs
 # on CPUs without AVX2. There is no musl build.
 TARGETS = frozenset({"linux-x64", "linux-x64-baseline", "linux-arm64"})
-# npm integrity of the default release's packages, so they are checked independently of registry metadata.
+# npm integrity of the default release's and other tested releases' packages, so they are checked independently of
+# registry metadata.
 PINNED_INTEGRITY = {
     (
         "1.1.0",
@@ -40,6 +41,18 @@ PINNED_INTEGRITY = {
         "1.1.0",
         "linux-arm64",
     ): "sha512-oNx51G1tWLydrpWWxdKKW98ws3g+pOKsibUkSaSq8hjOXVjyRrgsU1PHqn/a/CifdjxL2NLbBASuxwUhn5FZyw==",  # pragma: allowlist secret
+    (
+        "1.12.1",
+        "linux-x64",
+    ): "sha512-oTabn4biJCjBvynL7zgN8AX7n4lGDt/CR9XEe2o6Mlo1KjybYzyVEWXVlb786nHiLgiNpTmr86CxKJCg85qGAA==",  # pragma: allowlist secret
+    (
+        "1.12.1",
+        "linux-x64-baseline",
+    ): "sha512-Tbzkz38wMlLGvMbrmPkeOsrKH1OJ2ekm5a8gVulbY08YqHUwQldjutSYSw7suIdgzRjsQdYt/eHbZkAIqXVQ3g==",  # pragma: allowlist secret
+    (
+        "1.12.1",
+        "linux-arm64",
+    ): "sha512-dolQ+xEMXkuaNUmWVLteIOCirj8oo3Ar8h/TSUjyoNQeR0mTCviWodftmdkwy9st0VHUouHy7EgvqKllyGdhKw==",  # pragma: allowlist secret
 }
 # Musl tooling can put musl's loader into a glibc image, so the image counts as musl only when glibc is missing.
 PLATFORM_PROBE = (

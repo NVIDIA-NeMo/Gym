@@ -4,7 +4,7 @@
 
 import json
 import re
-from typing import Annotated, Any, ClassVar
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import (
     BaseModel,
@@ -15,6 +15,7 @@ from pydantic import (
     model_validator,
 )
 
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.server_runtime import BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 
@@ -29,8 +30,12 @@ def final_assistant_text(output: list[dict[str, Any]], *, block_separator: str =
     return ""
 
 
+class ToolEvidenceError(ValueError):
+    """Tool shaping cannot be measured from the supplied execution evidence."""
+
+
 class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
-    shell_tool_name: str = Field(
+    shell_tool_name: str | None = Field(
         default="bash",
         min_length=1,
         description="Shell tool used for call counts, duplicate normalization and bonuses.",
@@ -40,6 +45,19 @@ class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
         min_length=1,
         description="Shell tools sharing one count and bonus schedule. Set this or shell_tool_name, not both.",
     )
+    search_tool_name: str | None = "websearch"
+    rate_limit_error_pattern: str | None = r"StatusCode: non 2xx status code \(429 POST https?://[^\s()]+\)"
+
+    @field_validator("rate_limit_error_pattern")
+    @classmethod
+    def valid_rate_limit_pattern(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                re.compile(value)
+            except re.error as error:
+                raise ValueError("Invalid rate-limit error pattern") from error
+        return value
+
     correct_answer_reward_threshold: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     correct_tool_call_bonuses: tuple[Annotated[float, Field(ge=0, allow_inf_nan=False)], ...] = Field(
         default=(0.0,), min_length=1
@@ -49,7 +67,17 @@ class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
     invalid_tool_call_penalty: float = Field(default=-0.05, le=0, allow_inf_nan=False)
     duplicate_tool_call_penalty: float = Field(default=-0.02, le=0, allow_inf_nan=False)
 
-    correct_only: bool = Field(default=True, description="Apply auxiliary rewards only to correct answers.")
+    correct_only: bool = Field(
+        default=True, description="Apply bonuses and default-mode penalties only to correct answers."
+    )
+    penalty_mode: Literal["default", "proportional"] = Field(
+        default="default",
+        description=(
+            "Default preserves correct_only and the correctness threshold. Proportional applies failure, duplicate "
+            "and shell-usage penalties at every positive score, scales them by that score, and caps their total "
+            "at the score. Positive bonuses retain their existing gates and amounts."
+        ),
+    )
     correct_bash_call_penalties: tuple[Annotated[float, Field(le=0, allow_inf_nan=False)], ...] = Field(
         default=(0.0, 0.0, 0.0, -0.025, -0.05, -0.075, -0.10),
         min_length=1,
@@ -62,13 +90,15 @@ class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
 
     @property
     def effective_shell_tool_names(self) -> tuple[str, ...]:
-        return self.shell_tool_names if self.shell_tool_names is not None else (self.shell_tool_name,)
+        if self.shell_tool_names is not None:
+            return self.shell_tool_names
+        return (self.shell_tool_name,) if self.shell_tool_name is not None else ()
 
     @model_validator(mode="after")
     def default_failure_filter_to_shell(self) -> "OpenCodeToolRewardConfig":
         if self.shell_tool_names is not None and "shell_tool_name" in self.model_fields_set:
             raise ValueError("Set either shell_tool_name or shell_tool_names, not both")
-        if "invalid_tool_call_names" not in self.model_fields_set:
+        if "invalid_tool_call_names" not in self.model_fields_set and self.effective_shell_tool_names:
             self.invalid_tool_call_names = self.effective_shell_tool_names
         return self
 
@@ -92,15 +122,29 @@ class OpenCodeToolReward(BaseModel):
     base_reward: float
     auxiliary_reward: float
     exploration_reward: float
+    success_reward: float
     penalty_reward: float
     bash_success_count: int
     tool_call_count: int
     tool_error_count: int
     duplicate_tool_call_count: int
     bash_call_count: int = 0
+    rate_limited_search_count: int = 0
 
     def for_answer(self, base_reward: float, config: OpenCodeToolRewardConfig) -> "OpenCodeToolReward":
         """Apply the verifier result to the recorded tool evidence."""
+        if config.penalty_mode == "proportional":
+            # Keep the capped success bonus independent of penalties and their ordering.
+            bonus = 0.0 if config.correct_only else self.success_reward
+            if base_reward >= config.correct_answer_reward_threshold:
+                bonuses = config.correct_tool_call_bonuses
+                bonus = bonuses[min(self.bash_success_count, len(bonuses) - 1)]
+            penalties = config.correct_bash_call_penalties
+            cost = self.penalty_reward + penalties[min(self.bash_call_count, len(penalties) - 1)]
+            # Do not compound an already-negative verifier score with additional penalties.
+            auxiliary = bonus + max(0.0, base_reward) * max(-1.0, cost)
+            return self.model_copy(update={"base_reward": base_reward, "auxiliary_reward": auxiliary})
+
         auxiliary = 0.0 if config.correct_only else self.exploration_reward
         if base_reward >= config.correct_answer_reward_threshold:
             bonuses = config.correct_tool_call_bonuses
@@ -139,32 +183,55 @@ def score_opencode_tools(
 
     A completed bash tool can still have a nonzero process exit code. Use the
     native state/exit metadata, never model-visible output text, to distinguish
-    success from failure. Missing or unfinished execution records are errors so
+    success from failure. Failed native websearch HTTP 429 results retain failure
+    counts but are exempt from failure and duplicate penalties. A retry after a
+    rate limit starts a fresh duplicate comparison. Missing or unfinished execution records are errors so
     the caller can mask the rollout instead of inventing a reward.
     """
     calls = [item for item in output if item.get("type") == "function_call"]
+    tool_outputs: dict[str, list[Any]] = {}
+    for item in output:
+        if item.get("type") == "function_call_output":
+            tool_outputs.setdefault(item["call_id"], []).append(item.get("output"))
     previous = None
     records = execution_records
     if len({item["call_id"] for item in calls}) != len(calls):
-        raise ValueError("Repeated call ID in the live tool trajectory")
+        raise ToolEvidenceError("Repeated call ID in the live OpenCode trajectory")
 
     exploration = penalties = 0.0
-    successes = errors = duplicates = 0
+    successes = errors = duplicates = rate_limits = 0
     for item in calls:
         identity = _identity(item, config)
         duplicate = identity == previous
         previous = identity
         record = records.get(item["call_id"])
         if record is None or record[0] != item["name"] or record[1] not in ("completed", "error"):
-            raise ValueError(f"Missing or unfinished tool record: {item['call_id']}")
+            raise ToolEvidenceError(f"Missing or unfinished OpenCode tool record: {item['call_id']}")
         tool, status, exit_code = record
         if tool in config.effective_shell_tool_names and status == "completed" and not isinstance(exit_code, int):
             # Timeout/abort has a null exit code in OpenCode's shell tool.
             failed = True
         else:
             failed = status == "error" or (tool in config.effective_shell_tool_names and exit_code != 0)
+        results = tool_outputs.get(item["call_id"], [])
+        # This is OpenCode's native error envelope, matched only for a recorded failed websearch.
+        # Neither prose mentioning 429 nor a successful tool result supplies an exemption.
+        rate_limited_search = (
+            tool == config.search_tool_name
+            and status == "error"
+            and len(results) == 1
+            and isinstance(results[0], str)
+            and config.rate_limit_error_pattern is not None
+            and re.fullmatch(config.rate_limit_error_pattern, results[0].strip()) is not None
+        )
         if failed:
             errors += 1
+        if rate_limited_search:
+            rate_limits += 1
+            # The search supplied no usable result; retrying it is not redundant work.
+            previous = None
+            continue
+        if failed:
             if config.invalid_tool_call_names is None or tool in config.invalid_tool_call_names:
                 penalties += config.invalid_tool_call_penalty
                 exploration += config.invalid_tool_call_penalty
@@ -179,8 +246,10 @@ def score_opencode_tools(
         base_reward=base_reward,
         auxiliary_reward=0.0,
         exploration_reward=exploration,
+        success_reward=min(successes * config.tool_success_reward, config.tool_success_reward_cap),
         penalty_reward=penalties,
         bash_success_count=successes,
+        rate_limited_search_count=rate_limits,
         tool_call_count=len(calls),
         tool_error_count=errors,
         duplicate_tool_call_count=duplicates,
@@ -222,9 +291,9 @@ def trajectory_tool_reward(
         if call_id not in wanted:
             continue
         if call_id in records:
-            raise ValueError(f"Ambiguous tool evidence for {call_id}")
+            raise ToolEvidenceError(f"Ambiguous tool evidence for {call_id}")
         if tool.status in {"incomplete", "unknown"}:
-            raise ValueError(f"Unfinished tool evidence for {call_id}")
+            raise ToolEvidenceError(f"Unfinished tool evidence for {call_id}")
         success = tool.status == "completed"
         records[call_id] = (tool.tool_name, "completed" if success else "error", 0 if success else None)
     return score_opencode_tools(records, output, base_reward, config)
@@ -287,13 +356,26 @@ class ToolRewardVerifier:
         if result.mask_sample:
             return ToolRewardVerifyResponse.model_validate(result.model_dump(mode="json") | {"response": original})
         base = float(result.reward)
-        tools = (
-            trajectory_tool_reward(
-                original, body.ng_trajectory, base, self.config.tool_rewards, body.ng_agent_observations
+        try:
+            tools = (
+                trajectory_tool_reward(
+                    original, body.ng_trajectory, base, self.config.tool_rewards, body.ng_agent_observations
+                )
+                if self.config.tool_rewards is not None
+                else None
             )
-            if self.config.tool_rewards is not None
-            else None
-        )
+        except ToolEvidenceError as error:
+            # An unusable tool trace is a verifier failure, not a wrong answer or judge outage.
+            masked = result.model_dump(mode="json") | {
+                "response": original,
+                "reward": 0.0,
+                "mask_sample": True,
+                "failure_kind": VERIFIER_ERROR,
+                "failure_reason": str(error),
+            }
+            if "evaluation_completed" in masked:
+                masked["evaluation_completed"] = False
+            return ToolRewardVerifyResponse.model_validate(masked)
         bonus = tools.auxiliary_reward if tools is not None else 0.0
         source = result.model_dump(mode="json")
         source = {key: source[key] for key in ("response", "reward", "reward_components") if key in source}
