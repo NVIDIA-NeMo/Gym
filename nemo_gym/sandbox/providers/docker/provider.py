@@ -17,17 +17,19 @@
 import asyncio
 import contextlib
 import ipaddress
+import json
 import logging
 import math
 import os
 import posixpath
+import re
 import shlex
 import shutil
 import signal
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from nemo_gym.sandbox.providers.base import (
@@ -78,6 +80,18 @@ DOCKER_NAME_CONFLICT_MARKERS = (
     "is already in use by container",
 )
 DOCKER_RECONCILE_FORMAT = '{{index .Config.Labels "nemo-gym.sandbox"}}\t{{.Config.Image}}\t{{.State.Status}}'
+# The named volume that holds shared storage (Compose volumes) unless ``create.shared_volume`` names another, and
+# the label it is created with, so an operator can find it after a run that did not clean up.
+DEFAULT_SHARED_VOLUME = "nemo-gym-shared-storage"
+SHARED_STORAGE_LABEL = "nemo-gym.shared-storage"
+# ``volume-subpath`` mounts arrived in Docker Engine 26.0 (API 1.45). An older daemon ignores the field and would
+# mount the whole shared volume, every collection's directories with it, so shared storage refuses it.
+MIN_SUBPATH_API_VERSION = (1, 45)
+# Docker's own rule for volume names.
+_VOLUME_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+")
+# Networks on which a container has no address of its own for peers to reach.
+_NETWORKS_WITHOUT_PEERS = ("none", "host")
+_HOSTNAME_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?")
 
 
 class DockerCreateError(SandboxCreateError):
@@ -147,10 +161,14 @@ class DockerCreateConfig:
     publish_host: str = "127.0.0.1"
     transport_retries: int = 2
     transport_retry_delay_s: float = 1.0
+    # The named volume that backs shared storage (see ``DockerProvider.shared_volume_options``); created on first use.
+    shared_volume: str = DEFAULT_SHARED_VOLUME
 
     def __post_init__(self) -> None:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
             raise ValueError("create.start_timeout_s must be > 0")
+        if not _VOLUME_NAME.fullmatch(self.shared_volume):
+            raise ValueError("create.shared_volume must be a Docker volume name ([a-zA-Z0-9][a-zA-Z0-9_.-]+)")
         if self.pids_limit is not None and self.pids_limit <= 0:
             raise ValueError("create.pids_limit must be > 0")
         if self.transport_retries < 0:
@@ -207,6 +225,86 @@ class _DockerContainer:
     shell: str = "sh"
     env: dict[str, str] = field(default_factory=dict)
     published_ports: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True)
+class DockerVolumeMount:
+    """A mount of a Docker named volume, or of one directory inside it, as ``docker run --mount`` takes it.
+
+    ``DockerProvider.shared_volume_options`` returns these in ``provider_options["volumes"]``, beside any ``-v``
+    strings. Docker's own copy of the image's files into an empty volume is always off (``volume-nocopy``): the
+    Compose adapter seeds a volume itself, once per collection.
+    """
+
+    volume: str
+    target: str
+    subpath: str | None = None
+    read_only: bool = False
+
+    def mount_arg(self) -> str:
+        """The ``--mount`` value."""
+        fields = ["type=volume", f"source={self.volume}", f"target={self.target}"]
+        if self.subpath is not None:
+            fields.append(f"volume-subpath={self.subpath}")
+        if self.read_only:
+            fields.append("readonly")
+        fields.append("volume-nocopy")
+        return ",".join(fields)
+
+
+def _volume_args(value: Any) -> tuple[list[str], list[str]]:
+    """``provider_options["volumes"]`` as ``docker run`` flags, with the named volumes its mounts use.
+
+    A :class:`DockerVolumeMount` becomes ``--mount``; anything else is a ``src:dst[:opts]`` string for ``-v``.
+    """
+    if value is None:
+        entries = []
+    elif isinstance(value, (str, DockerVolumeMount)):
+        entries = [value]
+    elif isinstance(value, (list, tuple)):
+        entries = list(value)
+    else:
+        raise DockerCreateError(f"provider_options['volumes'] must be a string or list, got {type(value).__name__}")
+    args: list[str] = []
+    volumes: list[str] = []
+    for entry in entries:
+        if isinstance(entry, DockerVolumeMount):
+            args += ["--mount", entry.mount_arg()]
+            if entry.volume not in volumes:
+                volumes.append(entry.volume)
+        else:
+            args += ["-v", str(entry)]
+    return args, volumes
+
+
+def _mount_path(path: str, what: str) -> str:
+    """``path`` for one field of a ``--mount`` value, which the docker CLI reads as comma-separated CSV."""
+    if any(character in path for character in ',"\n\r\x00'):
+        raise ValueError(f"Shared storage {what} cannot contain a comma, quote, newline or NUL: {path!r}")
+    return path
+
+
+def _api_version(text: str) -> tuple[int, ...] | None:
+    """``1.47`` as ``(1, 47)``; ``None`` for anything else."""
+    parts = text.strip().split(".")
+    return tuple(int(part) for part in parts) if all(part.isdecimal() for part in parts) else None
+
+
+def _metadata_label_args(metadata: Mapping[str, Any]) -> list[str]:
+    """``spec.metadata`` as ``--label key=value`` flags.
+
+    The ownership label ``nemo-gym.sandbox``, which reconciliation and the reap filter trust, is never taken from
+    metadata. Neither is a key the docker CLI cannot carry as one label name: it splits ``--label`` on the first
+    ``=`` (``nemo-gym.sandbox=0`` as a key would replace the ownership label) and refuses an empty name or one with
+    whitespace. Such keys are logged and skipped, as all metadata was before it became labels.
+    """
+    args: list[str] = []
+    for key, value in metadata.items():
+        if key == SANDBOX_LABEL or not key or "=" in key or any(character.isspace() for character in key):
+            LOGGER.warning("docker: metadata key %r is not used as a container label", key)
+            continue
+        args += ["--label", f"{key}={value}"]
+    return args
 
 
 def _normalize_image(image: str) -> str:
@@ -311,6 +409,9 @@ class DockerProvider:
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
         # Live PTY sessions by container name; closed with their container and at provider shutdown.
         self._pty_sessions: dict[str, set[docker_pty.DockerPtySession]] = {}
+        # Named volumes this provider has checked or created for shared-storage mounts (see _ensure_volumes).
+        self._ready_volumes: set[str] = set()
+        self._volume_lock = asyncio.Lock()
 
     def service_options(
         self,
@@ -371,8 +472,9 @@ class DockerProvider:
         """Start a detached keep-alive container (image ENTRYPOINT overridden) and probe readiness.
 
         ``spec.ttl_s`` bounds the lifetime (the keep-alive sleeps for it and ``--rm`` self-removes on
-        exit). ``spec.provider_options`` may carry ``volumes`` (-> ``-v``) and ``run_args`` (extra run
-        flags). A half-created container is force-removed on any failure.
+        exit). ``spec.provider_options`` may carry ``volumes`` (strings -> ``-v``, shared-storage mounts
+        -> ``--mount``) and ``run_args`` (extra run flags). ``spec.metadata`` entries become container labels
+        beside ``nemo-gym.sandbox=1``. A half-created container is force-removed on any failure.
         """
         if spec.image is None:
             raise DockerCreateError("spec.image is required for the docker provider")
@@ -380,10 +482,13 @@ class DockerProvider:
         image = _normalize_image(spec.image)
         cfg = self._create_config
         name = CONTAINER_NAME_PREFIX + uuid.uuid4().hex
-        volumes = _coerce_str_list(spec.provider_options.get("volumes"), "volumes")
+        volume_args, named_volumes = _volume_args(spec.provider_options.get("volumes"))
         per_sandbox_args = _coerce_str_list(spec.provider_options.get("run_args"), "run_args")
+        if named_volumes:
+            await self._ensure_volumes(named_volumes)
 
         argv: list[str] = [self._binary, "run", "-d", "--name", name, "--label", f"{SANDBOX_LABEL}=1"]
+        argv += _metadata_label_args(spec.metadata)
         if cfg.use_init:
             argv.append("--init")
         if spec.workdir:
@@ -407,8 +512,7 @@ class DockerProvider:
             argv += ["--pids-limit", str(cfg.pids_limit)]
         for port in spec.ports:
             argv += ["--publish", _publish_arg(cfg.publish_host, port)]
-        for vol in volumes:
-            argv += ["-v", vol]
+        argv += volume_args
         argv += list(cfg.extra_run_args) + per_sandbox_args
         # ttl_s (no custom entrypoint): keep-alive sleeps ttl_s, --rm self-removes when it exits.
         enforce_ttl = spec.ttl_s is not None and not spec.entrypoint
@@ -930,6 +1034,129 @@ class DockerProvider:
         if host in {"0.0.0.0", "::"}:
             host = self._create_config.publish_host
         return SandboxEndpoint(endpoint=_http_endpoint(host, host_port))
+
+    def shared_volume_metadata(self) -> dict[str, str]:
+        """No placement settings: every sandbox runs on this provider's one daemon, next to the volume."""
+        return {}
+
+    def shared_volume_options(self, source: str | None, target: str, *, read_only: bool = False) -> dict[str, Any]:
+        """Mount directory ``source`` of the shared volume (``create.shared_volume``) at ``target``.
+
+        ``source`` is relative to the volume's root and must exist when the sandbox is created (Docker's
+        ``volume-subpath``); ``None`` mounts the whole volume, as the Compose adapter does for the helper that
+        creates and removes those directories. The volume is created on first use, labeled
+        ``nemo-gym.shared-storage=1``, and outlives the provider: it is the root, collections own directories in it.
+        """
+        if source is not None:
+            path = PurePosixPath(source)
+            if not path.parts or path.is_absolute() or ".." in source.split("/") or "\\" in source:
+                raise ValueError("Shared storage source must be a safe path relative to the shared volume")
+            source = _mount_path(str(path), "source")
+        if not PurePosixPath(target).is_absolute() or ".." in target.split("/"):
+            raise ValueError("Shared storage target must be an absolute container path without traversal")
+        mount = DockerVolumeMount(
+            volume=self._create_config.shared_volume,
+            target=_mount_path(target, "target"),
+            subpath=source,
+            read_only=read_only,
+        )
+        return {"volumes": [mount]}
+
+    async def _ensure_volumes(self, volumes: list[str]) -> None:
+        """Before the first create that mounts them: check that the daemon can mount a volume's subdirectory
+        (Engine 26.0, API 1.45), then create each named volume that does not exist yet, labeled
+        ``nemo-gym.shared-storage=1``. Both are done once per provider."""
+        async with self._volume_lock:
+            missing = [volume for volume in volumes if volume not in self._ready_volumes]
+            if not missing:
+                return
+            timeout_s = self._exec_config.default_timeout_s
+            if not self._ready_volumes:
+                code, out, err = await self._run(
+                    [self._binary, "version", "--format", "{{.Server.APIVersion}}"], timeout_s=timeout_s
+                )
+                version = _api_version(out) if code == 0 else None
+                if version is None:
+                    raise DockerCreateError(
+                        f"cannot read the Docker daemon's API version for shared storage: {(err or out).strip()}"
+                    )
+                if version < MIN_SUBPATH_API_VERSION:
+                    raise DockerCreateError(
+                        "Docker shared storage (Compose volumes) needs Docker Engine 26.0 or newer, whose API 1.45 "
+                        f"mounts a volume's subdirectory (--mount volume-subpath); the daemon reports API {out.strip()}"
+                    )
+            for volume in missing:
+                code, _out, _err = await self._run(
+                    [self._binary, "volume", "inspect", "--format", "{{.Name}}", volume], timeout_s=timeout_s
+                )
+                if code != 0:
+                    code, _out, err = await self._run(
+                        [self._binary, "volume", "create", "--label", f"{SHARED_STORAGE_LABEL}=1", volume],
+                        timeout_s=timeout_s,
+                    )
+                    if code != 0:
+                        raise DockerCreateError(f"cannot create the shared-storage volume {volume!r}: {err.strip()}")
+                self._ready_volumes.add(volume)
+
+    def validate_networking(self) -> None:
+        """Refuse a ``create.network`` that gives a sandbox no address of its own for its peers to reach: ``none``,
+        ``host`` and ``container:<name>``. On the default bridge or a named network, sandboxes reach each other by IP.
+        """
+        network = self._create_config.network
+        if network in _NETWORKS_WITHOUT_PEERS or (network or "").startswith("container:"):
+            raise NotImplementedError(
+                "Docker networking between sandboxes needs a network that gives each container its own address; "
+                f"create.network is {network!r}"
+            )
+
+    async def network_address(self, handle: SandboxHandle) -> str:
+        """The container's IP address from ``docker inspect``: on ``create.network`` when the container is on it,
+        else on the first network it is on (the default bridge, normally its only one)."""
+        self.validate_networking()
+        name = handle.raw.name
+        code, out, err = await self._run(
+            [self._binary, "inspect", "--format", "{{json .NetworkSettings.Networks}}", name],
+            timeout_s=self._exec_config.default_timeout_s,
+        )
+        if code != 0:
+            raise RuntimeError(f"docker inspect failed (code={code}) for {name!r}: {err.strip()}")
+        try:
+            networks = json.loads(out) or {}
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"docker inspect returned unreadable networks for {name!r}: {out.strip()!r}") from exc
+        if not isinstance(networks, Mapping):
+            raise RuntimeError(f"docker inspect returned unreadable networks for {name!r}: {out.strip()!r}")
+        configured = self._create_config.network
+        candidates = [networks[configured]] if configured in networks else list(networks.values())
+        for entry in candidates:
+            address = (
+                (entry.get("IPAddress") or entry.get("GlobalIPv6Address")) if isinstance(entry, Mapping) else None
+            )
+            if address:
+                return str(ipaddress.ip_address(address))
+        raise RuntimeError(
+            f"Docker sandbox {name!r} has no IP address on its networks {sorted(networks)}; peers cannot reach it"
+        )
+
+    async def set_hosts(self, handle: SandboxHandle, hosts: Mapping[str, str]) -> None:
+        """Append an ``<address> <name>`` line per entry of ``hosts`` to the container's ``/etc/hosts``, as root.
+
+        Docker bind-mounts that file into every container, read-only under ``create.read_only``, which then
+        fails this call."""
+        self.validate_networking()
+        lines = []
+        for hostname, address in hosts.items():
+            if len(hostname) > 253 or not all(_HOSTNAME_LABEL.fullmatch(label) for label in hostname.split(".")):
+                raise ValueError(f"Invalid sandbox hostname: {hostname!r}")
+            lines.append(shlex.quote(f"{ipaddress.ip_address(address)} {hostname}\n"))
+        if not lines:
+            return
+        result = await self.exec(handle, f"printf '%s' {' '.join(lines)} >> /etc/hosts", user="root")
+        if result.return_code != 0 or result.error_type is not None:
+            raise RuntimeError(
+                f"Could not add host names to Docker sandbox {handle.sandbox_id!r}: "
+                f"{(result.stderr or result.stdout or '').strip()}"
+            )
 
     async def close(self, handle: SandboxHandle) -> None:
         """Force-remove the container (already-gone counts as success); its PTY clients are released first."""

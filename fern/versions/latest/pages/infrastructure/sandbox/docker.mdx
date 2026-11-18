@@ -58,7 +58,7 @@ The provider constructor accepts three optional config sections:
 
 | Section | Purpose |
 | --- | --- |
-| `create` | Keep-alive command, `docker run` start timeout, `--init` zombie reaping, isolation flags (network, read-only root, dropped capabilities, security options, pids limit), and CPU/memory limit behavior. |
+| `create` | Keep-alive command, `docker run` start timeout, `--init` zombie reaping, isolation flags (network, read-only root, dropped capabilities, security options, pids limit), CPU/memory limit behavior, and `shared_volume`, the named volume that holds Compose volumes (see Compose Services). |
 | `exec` | Per-command timeout, the shell used for `<shell> -c <command>` (auto-detected when unset), extra `docker exec` flags, and subprocess concurrency. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
 
@@ -76,7 +76,7 @@ sandbox_spec:
 
 | Option | Purpose |
 | --- | --- |
-| `volumes` | A `src:dst[:opts]` bind-mount string or list of them, added as `-v` at `docker run`. |
+| `volumes` | A `src:dst[:opts]` bind-mount string or list of them, added as `-v` at `docker run`. The shared-storage mounts the Compose adapter adds are added as `--mount` (see Compose Services). |
 | `run_args` | Extra raw flags appended to `docker run` for this sandbox. |
 
 ## Relevant SandboxSpec Fields
@@ -87,6 +87,7 @@ sandbox_spec:
 | `env` | Passed as `--env KEY=VALUE` at `docker run` and re-applied on each `exec()`. |
 | `workdir` | `-w` at `docker run` (created if absent) and the default `exec()` working directory. |
 | `files` | Seed files uploaded before the first command. |
+| `metadata` | Container labels (`--label key=value`), beside `nemo-gym.sandbox=1`, which metadata cannot replace. A key that is empty or holds `=` or whitespace is logged and skipped. |
 | `resources` | Mapped to CPU, memory, and GPU flags (see Resource Mapping). |
 | `entrypoint` | Overrides the keep-alive: the container runs this as its main process instead. |
 | `provider_options` | `volumes` and `run_args`, applied per-sandbox. |
@@ -247,7 +248,7 @@ Docker containers share the host kernel. This is process and namespace isolation
 - Networking is on by default because most tasks need egress (pip, git). Set `network: none` to cut it entirely, or `network: <name>` to attach a locked-down internal network.
 - Harden with `read_only: true`, `cap_drop: ["ALL"]`, `security_opt: ["no-new-privileges"]`, and `pids_limit: <n>` as a fork-bomb guard. Enforce `resources` so one sandbox cannot starve the host. `read_only: true` leaves `/tmp` read-only too (add `extra_run_args: ["--tmpfs", "/tmp"]` for programs that need one); PTY sessions keep working, their pid record moves to `/dev/shm` (see Interactive Terminals).
 - Rootless Docker narrows the blast radius (container root is not host root) and is recommended for shared machines; `docker cp` ownership and some `--user` behaviors differ under it.
-- Every container is labeled `nemo-gym.sandbox=1`. Reap leaks from an unclean shutdown with `docker rm -f $(docker ps -aq --filter label=nemo-gym.sandbox=1)`.
+- Every container is labeled `nemo-gym.sandbox=1`. Reap leaks from an unclean shutdown with `docker rm -f $(docker ps -aq --filter label=nemo-gym.sandbox=1)`. For the containers and volume directory of one Compose collection, see Compose Services.
 
 ## User and Runtime Notes
 
@@ -263,6 +264,60 @@ By default `exec_shell` is unset, so the provider auto-detects `bash` once the c
 
 Command failures return `SandboxExecResult` with the command's exit code. A command timeout returns code `125` with `error_type="timeout"`, and a docker runtime failure — daemon down or container gone, detected via stderr markers — returns code `125` with `error_type="sandbox"`. A timed-out command's in-container process is reaped when the sandbox is closed, since `docker rm -f` stops the whole process tree.
 
+## Compose Services
+
+The provider implements `SupportsSandboxNetwork` and `SupportsSandboxSharedStorage`, so
+[Compose Services](/main/infrastructure/sandbox/compose) and Compose task folders run on Docker without extra
+configuration. It needs Docker 26.0 or newer: an Engine with API 1.45, which the provider checks, and a `docker` CLI
+that knows `--mount volume-subpath` (an older CLI fails `docker run` with `unexpected key 'volume-subpath'`). The
+daemon may be remote: nothing is mounted from the host that runs NeMo Gym.
+
+### Networking
+
+- Each service is one container on `create.network`, the default bridge unless you set one.
+- Gym reads each container's IP with `docker inspect` and, as root, appends the names and aliases of the services it
+  shares a network with to its `/etc/hosts`. Services then reach each other by name.
+- `network: none`, `host` and `container:<name>` give a container no address of its own, so a Compose collection is
+  refused on them before any container starts.
+- Every collection, and every other sandbox, shares the configured network: containers can reach each other by IP
+  across collections, as they can outside Compose. A daemon started with `--icc=false` blocks the traffic between
+  services.
+- `read_only: true` also makes `/etc/hosts` read-only, so a Compose service cannot start under it.
+
+### Volumes
+
+- Volumes live on one named volume, `nemo-gym-shared-storage` (set `create.shared_volume` to use another). The provider
+  creates it the first time a sandbox mounts it, labeled `nemo-gym.shared-storage=1`, and never removes it.
+- Each collection gets its own folder in it, `compose-<id>/<volume name>`. Unless the volume sets `nocopy`, the folder
+  is filled from the service image's files at the mount target before the service starts, as Docker fills a new
+  named volume. The service mounts the folder (`--mount type=volume,...,volume-subpath=compose-<id>/<volume name>`),
+  read-only when the Compose file says so.
+- Stopping the collection deletes its folder, so every attempt starts with fresh volumes and concurrent rollouts of a
+  task never share one, as under Harbor's `docker compose down --volumes`.
+- `volume_sources` maps an external volume or a host path to a folder you create in the shared volume yourself. That
+  folder is kept.
+- Before the first shared-volume mount, the provider checks the daemon's API version. A daemon older than Engine 26.0
+  would ignore `volume-subpath` and mount the whole shared volume, so it is refused.
+
+### Cleanup after a crash
+
+Compose services, the volume helper and the copy-up containers run their own keep-alive, so they do not expire with
+`ttl_s`. Every container of a collection is labeled `nemo.nvidia.com/placement-group=<group>`. For a task folder the
+group is the collection's id, `compose-<id>`, which also names its folder in the shared volume; a caller that passes
+its own `placement_group` to `AsyncSandboxCompose` gets that label instead. If a run stops without cleaning up:
+
+```bash
+docker rm -f $(docker ps -aq --filter label=nemo.nvidia.com/placement-group=compose-<id>)
+docker run --rm -v nemo-gym-shared-storage:/v alpine rm -rf /v/compose-<id>
+# Or, once no run uses it, remove the whole shared volume:
+docker volume rm nemo-gym-shared-storage
+```
+
+### Not supported
+
+`cap_add`, `shm_size` and `network_mode: service:<name>` need capabilities the Docker provider does not implement. A
+task that uses them fails at seed with a message naming the missing support.
+
 ## Task folders
 
 When the `harbor` Environment Server runs [task folders](/main/data/task-folders/harbor-tasks) on Docker:
@@ -271,12 +326,9 @@ When the `harbor` Environment Server runs [task folders](/main/data/task-folders
   holds while no build repository is set. When `builds.repository` or `NEMO_GYM_BUILD_REPOSITORY` names one, the
   image is built with `builds.tool`, else the first of buildah, podman or docker on `PATH`, and pushed there (see
   [Harbor image builds](/main/reference/configuration#harbor-image-builds)).
-- Compose tasks do not start on Docker, which cannot network a group of sandboxes. A task with a Compose file in
-  `environment/`, or any task when the server's `compose_overlay` names Compose `files`, fails at seed with
-  `Could not set up sandbox for '<task>': Sandbox provider does not support networking between sandboxes`. The
-  failure is reported as retryable, so `--resume` runs these tasks again, and they fail the same way, until each has
-  used its `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` attempts (3 by default). Leave them
-  out with `--exclude-tasks`, or run them on OpenSandbox (see [Multi-Container Tasks](/main/data/task-folders/compose-tasks)).
+- A task with a Compose file in `environment/`, or any task when the server's `compose_overlay` names Compose
+  `files`, starts as a group of containers, one per service, with no extra configuration (see Compose Services and
+  [Multi-Container Tasks](/main/data/task-folders/compose-tasks)).
 - Gym holds a running image `ENTRYPOINT` in one `docker exec`. That exec ends at `exec.default_timeout_s` (180
   seconds by default), but the entrypoint keeps running, untracked. If it then exits non-zero during the rollout, the
   sample is still scored, not masked with `harbor:entrypoint_failed`. The exit status is only logged and kept as

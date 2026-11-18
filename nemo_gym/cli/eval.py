@@ -1560,11 +1560,11 @@ def _block_volume_sources(overrides: list[str], sandbox: str | None, block: str)
 
 
 def shared_storage_from_overrides(overrides: list[str], sandbox: str | None) -> bool | None:
-    """Whether the ``sandbox:`` block's provider configures shared storage, for checking Compose named volumes and
-    shared logs binds at prepare: OpenSandbox's ``shared_storage.host_path`` under the block's one provider key,
-    read from the ``--sandbox`` provider file and the configuration the command names. ``None`` when the block
-    names no single provider (the adapter then decides at seed); otherwise whether the path is set, which is
-    the one setting the server's provider requires for every such volume."""
+    """Whether the ``sandbox:`` block's provider has shared storage, for checking Compose named volumes and
+    shared logs binds at prepare: always on Docker, which keeps it on a named volume of its own, and on another
+    provider whether the block sets OpenSandbox's ``shared_storage.host_path`` under its one provider key, read
+    from the ``--sandbox`` provider file and the configuration the command names. ``None`` when the block names no
+    single provider (the adapter then decides at seed)."""
     return _block_shared_storage(overrides, sandbox, SANDBOX_BLOCK_KEY)
 
 
@@ -1583,6 +1583,9 @@ def _block_shared_storage(overrides: list[str], sandbox: str | None, block: str)
     provider = _block_provider_name(overrides, sandbox, block)
     if provider is None:
         return None
+    if provider == "docker":
+        # Nothing to configure: the provider creates its shared volume on first use (`create.shared_volume`).
+        return True
     files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
     host_path = _block_from_overrides(overrides, f"{block}.{provider}.shared_storage.host_path", config_files=files)
     return bool(host_path)
