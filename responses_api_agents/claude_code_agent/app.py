@@ -22,6 +22,7 @@ import re
 import shutil
 import tempfile
 from asyncio import Semaphore
+from collections import Counter
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
@@ -71,7 +72,7 @@ from nemo_gym.rollouts import (
     read_available_model_call_records,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
-from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
@@ -150,9 +151,9 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     network_access: SandboxNetworkAccess = Field(
         default="inherit",
         description=(
-            "Egress of a sandbox Claude creates: `model_only` allows only the model endpoint's host. Claude uses no "
-            "tool grants, so `model_and_tools` is rejected. A borrowed task sandbox keeps its owner's network, so a "
-            "session that borrows one rejects any other value than `inherit`."
+            "Egress of a sandbox Claude creates: `model_only` allows only the model endpoint's host, `model_and_tools` "
+            "also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a session that "
+            "borrows one rejects any other value than `inherit`."
         ),
     )
     sandbox_executable_path: str | None = None
@@ -596,9 +597,22 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> ClaudeCodeSandboxSession:
         """Install/reuse the harness runtime before the first activation."""
-        if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(
-                422, "Claude sandbox execution uses native tools; required remote tools are unsupported"
+        tool_accesses = self.effective_tool_accesses(body)
+        unsupported = sorted(
+            access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
+        )
+        if unsupported:
+            raise AgentSeedRejectedError(
+                "Claude Code in the sandbox supports only MCP tool grants; required grants it cannot use: "
+                + ", ".join(unsupported)
+            )
+        mcp_grants = [access for access in tool_accesses if isinstance(access, MCPToolAccess)]
+        colliding = self._colliding_mcp_server_names(mcp_grants)
+        if colliding:
+            raise AgentSeedRejectedError(
+                "MCP tool grants collide with another grant or an mcp_config server in Claude Code's tool names "
+                "(mcp__<server>__<tool>, where characters other than letters, digits, '_' and '-' become '_'): "
+                + ", ".join(colliding)
             )
         version = self.config.claude_code_version
         if not version or not re.fullmatch(r"\d+\.\d+\.\d+", version):
@@ -611,8 +625,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "A supplied Claude binary requires sandbox_executable_sha256")
         access = body.sandbox_access
         owns_sandbox = access is None
-        if self.config.network_access == "model_and_tools":
-            raise AgentSeedRejectedError("Claude uses no tool grants; set network_access to model_only or inherit")
         if not owns_sandbox and self.config.network_access != "inherit":
             raise AgentSeedRejectedError(
                 "Claude network_access applies only to a sandbox it creates, not a borrowed one"
@@ -645,6 +657,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     # With neither a Gym model server nor anthropic_base_url, the CLI calls Anthropic's own API.
                     # Only the allowlist needs that host; activation still leaves ANTHROPIC_BASE_URL unset.
                     model_base_url=self._resolve_base_url() or "https://api.anthropic.com",
+                    tool_urls=[str(access.connection.url) for access in mcp_grants],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[str(access.connection.url) for access in mcp_grants if access.required],
                 )
             except BaseException:
                 await provider.aclose()
@@ -701,6 +716,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
             raise
+
+    def _colliding_mcp_server_names(self, mcp_grants: list[MCPToolAccess]) -> list[str]:
+        """The grants whose tools would share their names with another grant's or a static ``mcp_config`` server's.
+
+        Claude Code names a server's tools ``mcp__<server>__<tool>``, after replacing each character other than a
+        letter, digit, ``_`` or ``-`` in the server name with ``_``.
+        """
+        if not mcp_grants:
+            return []
+        names = [*self._get_static_mcp_config()["mcpServers"], *(access.name for access in mcp_grants)]
+        servers = Counter(re.sub(r"[^A-Za-z0-9_-]", "_", name) for name in names)
+        return sorted(access.name for access in mcp_grants if servers[re.sub(r"[^A-Za-z0-9_-]", "_", access.name)] > 1)
 
     @staticmethod
     def _check_sandbox_setup(result: SandboxExecResult) -> None:
@@ -781,15 +808,22 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 ANTHROPIC_BASE_URL=base_url,
                 ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
             )
+        mcp_grants = [
+            access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
+        ]
         artifacts = None
         failure = None
         try:
             # Close can fence the staging phase just as it fences the execution phase.
             async with self.sem:
-                mcp_config = directory + "/mcp.json" if self.config.mcp_config else None
+                mcp_config = self._session_mcp_config(mcp_grants)
                 skills_path = self._configured_skills_path()
                 command = self._build_command(
-                    model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
+                    model,
+                    prompt,
+                    system,
+                    mcp_config=directory + "/mcp.json" if mcp_config is not None else None,
+                    skills_active=bool(skills_path),
                 )
                 command[0] = state.runtime + "/claude"
                 artifacts = await state.execute(
@@ -798,7 +832,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "cwd": state.session.workdir,
                         "env": env,
                         "settings": self._build_settings(),
-                        "mcp_config": self._get_static_mcp_config() if mcp_config else None,
+                        "mcp_config": mcp_config,
+                        "required_mcp_servers": [access.name for access in mcp_grants if access.required],
                         "skills_path": skills_path,
                     },
                     timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
@@ -823,6 +858,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             status, reason = "failed", "sandbox_error"
         else:
             status, reason = _invocation_outcome(run_metadata, cleanup["return_code"] if cleanup else None)
+        mcp_error, mcp_gaps = self._check_mcp_grants(mcp_grants, run_metadata, outcome=f"{status} ({reason})")
+        # An activation that raised or timed out keeps that cause.
+        if mcp_error is not None and failure is None and not (cleanup and cleanup["timed_out"]):
+            status, reason = "failed", "required_mcp_server_unavailable"
+        else:
+            mcp_error = None
         if artifacts is not None:
             state.observations = await asyncio.to_thread(
                 parse_artifact_observations,
@@ -841,6 +882,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         )
         if state.runtime_info is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        state.observations.gaps.extend(mcp_gaps)
+        if mcp_error is not None:
+            # Environment Servers keep the observations, not the 502 body, in their failure records.
+            state.observations.gaps.append(ObservationGap(code="agent_startup_failed", detail=mcp_error))
         if cleanup:
             access = state.request.sandbox_access
             state.observations.records.append(
@@ -862,7 +907,64 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if failure is not None:
             raise failure
+        if mcp_error is not None:
+            raise HTTPException(502, mcp_error)
         return self._response_from_output(body, items, model, run_metadata, status=status)
+
+    def _session_mcp_config(self, mcp_grants: list[MCPToolAccess]) -> Optional[dict[str, Any]]:
+        """The ``--mcp-config`` of a sandbox session: the static ``mcp_config`` plus a server per MCP grant.
+
+        Each grant becomes a streamable HTTP (``http``) server under the grant's name, with the grant's URL and
+        headers, which carry the session's tool token. Seeding refused grants whose names the static config uses.
+        """
+        if not mcp_grants and not self.config.mcp_config:
+            return None
+        config = copy.deepcopy(self._get_static_mcp_config())
+        for access in mcp_grants:
+            server: dict[str, Any] = {"type": "http", "url": str(access.connection.url)}
+            if access.connection.headers:
+                server["headers"] = dict(access.connection.headers)
+            config["mcpServers"][access.name] = server
+        return config
+
+    @staticmethod
+    def _check_mcp_grants(
+        mcp_grants: list[MCPToolAccess], run_metadata: dict[str, Any], *, outcome: str
+    ) -> tuple[str | None, list[ObservationGap]]:
+        """Check the grants against the MCP server statuses of Claude Code's init event.
+
+        Claude Code writes the init event once it has tried each server, before its first model request, and gives
+        the model only the tools of servers that are ``connected`` then. Returns the error for required grants that
+        were not, or that no init event confirmed (naming the run's ``outcome``), and a gap for each optional grant
+        that was not.
+        """
+        if not mcp_grants:
+            return None, []
+        required = [access.name for access in mcp_grants if access.required]
+        statuses = run_metadata.get("mcp_servers")
+        if not isinstance(statuses, dict):
+            error = (
+                f"Claude Code ended {outcome} without an init event, so these required MCP servers were never "
+                "confirmed: " + ", ".join(required)
+                if required
+                else None
+            )
+            return error, [ObservationGap(code="mcp_status_unavailable")]
+        missing = []
+        gaps = []
+        for access in mcp_grants:
+            status = statuses.get(access.name, "not listed")
+            if status == "connected":
+                continue
+            if access.required:
+                missing.append(f"{access.name} ({status})")
+            else:
+                gaps.append(ObservationGap(code="mcp_server_skipped", detail=f"{access.name}: {status}"))
+        if missing:
+            return (
+                "Required MCP servers did not connect before Claude Code's first model request: " + ", ".join(missing)
+            ), gaps
+        return None, gaps
 
     async def responses(
         self,

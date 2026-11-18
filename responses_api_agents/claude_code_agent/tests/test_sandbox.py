@@ -22,7 +22,7 @@ from responses_api_agents.claude_code_agent import app
 from responses_api_agents.claude_code_agent import sandbox as adapter
 
 
-def seed(*, borrowed=True, workdir="/app"):
+def seed(*, borrowed=True, workdir="/app", tool_accesses=()):
     return AgentSeedSessionRequest(
         agent_session_id="session",
         episode_id={"rollout_id": "rollout"},
@@ -33,6 +33,7 @@ def seed(*, borrowed=True, workdir="/app"):
         }
         if borrowed
         else None,
+        tool_accesses=list(tool_accesses),
     )
 
 
@@ -211,7 +212,7 @@ def test_unenforceable_network_access_is_a_terminal_seed_refusal(monkeypatch, pr
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("borrowed", "network_access", "message"),
-    [(True, "model_only", "not a borrowed one"), (False, "model_and_tools", "no tool grants")],
+    [(True, "model_only", "not a borrowed one"), (True, "model_and_tools", "not a borrowed one")],
 )
 async def test_unusable_network_access_is_rejected_before_connecting(monkeypatch, borrowed, network_access, message):
     constructor = MagicMock()
@@ -655,6 +656,7 @@ async def test_skills_are_staged_before_launch_and_disable_bare(monkeypatch, tmp
         "env": {},
         "settings": {},
         "mcp_config": None,
+        "required_mcp_servers": [],
         "skills_path": str(tmp_path / "skills"),
     }
     staged = AsyncMock()

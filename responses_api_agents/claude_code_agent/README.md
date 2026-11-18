@@ -266,13 +266,15 @@ sandbox**. These two options are mutually exclusive and require
 
 `network_access: model_only` limits an agent-owned sandbox's egress to the model
 endpoint's host. The CLI is uploaded from the Agent Server, so setup needs no other
-host. The OpenSandbox policy is set when the sandbox is created, so a session that
-borrows a task sandbox rejects any value other than `inherit` (the default, the
-provider's network). Only the OpenSandbox provider enforces the policy, so every
-other provider rejects a restricted value, including ones with network controls of
-their own. `network_access` cannot be combined with
-`sandbox_config.provider_options.network_policy`. Claude uses no tool grants, so
-`model_and_tools` is rejected. Each of these refusals fails the seed with HTTP 422.
+host. `model_and_tools` also allows the host of each MCP tool grant; `model_only`
+blocks those hosts, so it refuses a seed with a required MCP grant. The OpenSandbox
+policy is set when the sandbox is created, so a session that borrows a task sandbox
+rejects any value other than `inherit` (the default, the provider's network). Only
+the OpenSandbox provider enforces the policy, so every other provider rejects a
+restricted value, including ones with network controls of their own.
+`network_access` cannot be combined with
+`sandbox_config.provider_options.network_policy`. Each of these refusals fails the
+seed with HTTP 422.
 Under `model_only` the image must already include `bash`: the step that installs a
 missing one on a root image runs after the sandbox starts, when the package mirrors
 are out of reach. A borrowed sandbox relies on its owner's network policy. The policy
@@ -305,8 +307,8 @@ resource-bound recipes retain their bindings.
 For borrowed execution, the seed request supplies `sandbox_access` with a direct
 provider connection descriptor and an absolute task `workdir`. Resources prepares
 the task directory; Claude Code only stages its own runtime and settings outside
-it. Required remote tool accesses are rejected: this adapter runs Claude Code's
-native tools. Optional static `mcp_config` and `settings` JSON files are staged
+it. Sessions take MCP tool grants, as described in [MCP tool grants](#mcp-tool-grants).
+Optional static `mcp_config` and `settings` JSON files are staged
 from the agent server, with the same command options as local execution. A
 `skills.path` in the merged server config is copied into the session's
 `CLAUDE_CONFIG_DIR/skills`, including supporting files; skills disable `--bare`
@@ -314,6 +316,37 @@ through the same command builder used locally. This fallback is sandbox-only:
 local `/run` uses only its explicit `skills_ref`, and unseeded `/v1/responses` does
 not pick up configured skills. The collector's
 run-level skills option remains unsupported for materialized task rows.
+
+### MCP tool grants
+
+A session takes the `mcp` (streamable HTTP) tool grants in its seed request's `tool_accesses`,
+required and optional, such as the Resources Server's `/mcp` endpoint with `resources_tool_transports: [mcp]`
+or the MCP servers of a Harbor task that the `harbor` Environment Server grants. Each grant becomes an `http` server under the
+grant's name in the session's `mcp.json`, with the grant's URL and headers, which carry the session's tool token,
+next to the servers of the static `mcp_config`. The CLI gets that file with `--mcp-config`, which applies with
+`--bare` too, and the model sees each grant's tools as `mcp__<grant>__<tool>`. The file lives in the session
+directory, where the model can read it; a grant gives access to its own episode's tools only.
+
+The seed refuses with HTTP 422:
+
+- a required grant of another kind, such as `direct_http`, which Claude Code cannot use; an optional one is
+  left out;
+- a grant whose tool names would collide with another grant's or a static `mcp_config` server's. Claude Code
+  replaces each character other than a letter, digit, `_` or `-` in a server name with `_`, so `my.server` and
+  `my_server` would share their tool names, and one server's tools would hide the other's;
+- a required grant under `network_access: model_only`.
+
+Claude Code has no setting that makes an MCP server required: in print mode it tries each configured server, for
+up to `MCP_TIMEOUT` (30 seconds by default), writes its stream-json `init` event with each server's status, then
+sends its first model request with the tools of the servers that connected. A server still connecting is
+`pending` and its tools are missing. When a session has required grants, the CLI therefore runs under
+`require_mcp_servers.sh`, which reads the `init` event as it is written and stops the CLI when a required server's
+status is not `connected`, so the run ends at its first model request. After the run, the agent server checks the `init` event
+itself: a required grant that it does not list as `connected`, or a run without an `init` event, fails the
+activation with HTTP 502 and an `agent_startup_failed` gap that names the servers and their status, so the turn is
+never graded. An activation that timed out or failed for another reason keeps that cause. An optional grant that
+did not connect is left out of the tools and recorded as an `mcp_server_skipped` gap. A server lost later in the
+run shows up as failed tool calls. The connection check needs no tool in the image besides `bash` and `sleep`.
 
 Sandbox requests accept one user text prompt (a string or a single user message),
 optionally preceded by one system message. Assistant/developer messages, multiple
@@ -353,4 +386,7 @@ include `bash`.
 
 HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
 Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
-benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it as shipped. With
+`resources_tool_transports: [mcp]` on its Environment Server, the session takes an MCP grant instead (see
+[MCP tool grants](#mcp-tool-grants)), and the profile's `network_access: model_only` then refuses the seed until it
+is set to `model_and_tools`.
