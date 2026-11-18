@@ -1437,6 +1437,8 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Some harnesses replay reasoning on assistant history in Chat Completions.
     reasoning_content: str | None
     reasoning: str | None
+    # Provider-signed thinking (LiteLLM's Anthropic `thinking_blocks`), replayed verbatim.
+    thinking_blocks: List[Dict[str, Any]]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
