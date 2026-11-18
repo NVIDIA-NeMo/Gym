@@ -123,6 +123,45 @@ def test_the_row_tools_are_the_environment_tools() -> None:
         assert (tools[tool.name]["parameters"], tools[tool.name]["strict"]) == (tool.parameters, tool.strict)
 
 
+def _strict_schema_violations(schema: dict[str, Any], path: str = "parameters") -> list[str]:
+    """Where `schema` breaks strict function calling, which requires every object to require all its keys and
+    to forbid any other key, at every level."""
+    violations = []
+    if schema.get("type") == "object":
+        if schema.get("additionalProperties") is not False:
+            violations.append(f"{path}: additionalProperties is not false")
+        if set(schema.get("required", [])) != set(schema.get("properties", {})):
+            violations.append(f"{path}: required does not list every property")
+    children = [(f"{path}.properties.{name}", child) for name, child in schema.get("properties", {}).items()]
+    for key in ("$defs", "definitions"):
+        children += [(f"{path}.{key}.{name}", child) for name, child in schema.get(key, {}).items()]
+    for key in ("anyOf", "allOf", "oneOf"):
+        children += [(f"{path}.{key}[{index}]", child) for index, child in enumerate(schema.get(key, []))]
+    if isinstance(schema.get("items"), dict):
+        children.append((f"{path}.items", schema["items"]))
+    for child_path, child in children:
+        violations += _strict_schema_violations(child, child_path)
+    return violations
+
+
+def test_every_tool_a_row_sends_as_strict_has_a_valid_strict_schema() -> None:
+    for line in EXAMPLE_FPATH.read_text().splitlines():
+        for tool in json.loads(line)["responses_create_params"]["tools"]:
+            if tool["strict"]:
+                assert _strict_schema_violations(tool["parameters"]) == [], tool["name"]
+
+
+def test_api_fetch_keeps_free_form_params_and_body_and_is_sent_non_strict() -> None:
+    api_fetch = next(tool for tool in app_module.tool_env().tool_defs if tool.name == "api_fetch")
+
+    # A strict schema would have to list every key of params and body; any query parameter or body field must fit.
+    for name in ("params", "body"):
+        schema = api_fetch.parameters["properties"][name]
+        assert schema["type"] == "object"
+        assert "properties" not in schema and "additionalProperties" not in schema
+    assert api_fetch.strict is False
+
+
 def test_an_untouched_world_scores_zero_with_its_guardrails_kept(client):
     assert _post_seed(client, _seed()).status_code == 200
 
