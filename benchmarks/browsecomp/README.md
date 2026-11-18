@@ -128,7 +128,7 @@ whatever export the run left, unless its `/run` fails:
 | The export holds an assistant part type the relay agent does not convert (any but text, reasoning, tool, step-start, step-finish and patch), such as `retry` | The agent's `/run` answers 500: a failure row | Graded without that part |
 | The seed cannot create the working directory in the sandbox | Not applicable: the agent's sandbox keeps the image's working directory | The Resources Server's seed answers 422 when `mkdir` exits non-zero, which every episode would repeat: a terminal failure row. A `mkdir` that does not complete answers 500: a non-terminal failure row |
 | The plugins did not load as configured | The agent's `/run` answers 500 when the sentinel's line is missing: a failure row | Scored 0 without a judge call, as below |
-| The plugin log is missing, unsafe to read or lacks a line it must hold, as when the run's tools deleted, replaced, filled or edited it | Not applicable: the agent reads its run output | Scored 0 without a judge call, unmasked and counted as the model's (`failure_outcome_action: count_as_zero`): `opencode_search:plugin_log_missing` when it is absent; `opencode_search:plugin_log_unsafe` for a link, a file that is not regular or cannot be read, or one over 4 MiB; `opencode_search:plugin_log_incomplete` when it lacks the sentinel's line or a required line. After `plugin_log_max_consecutive_failures` (25) such episodes in a row, `/verify` answers 500 for each later one until a log passes: a non-terminal failure row |
+| The plugin log is missing, unsafe to read or lacks a line it must hold, as when the run's tools deleted, replaced, filled or edited it | Not applicable: the agent reads its run output | Scored 0 without a judge call, unmasked and counted as the model's (`failure_outcome_action: count_as_zero`): `opencode_search:plugin_log_missing` when it is absent; `opencode_search:plugin_log_unsafe` for a link, a file that is not regular or cannot be read, or one over 4 MiB; `opencode_search:plugin_log_incomplete` when it lacks the sentinel's line or a required line. After `plugin_log_max_consecutive_failures` (25) such episodes in a row, `/verify` answers 500 for each later one until a log passes: a non-terminal failure row (see the note below the table) |
 | `/verify` cannot read the plugin log | Not applicable: the agent reads its run output | `/verify` answers 500 when the read fails, times out or comes back cut short or malformed: a non-terminal failure row |
 | The run budget runs out | Graded, not masked | The same |
 | The episode outlives `default_episode_timeout_seconds` | No episode deadline | A non-terminal failure row ("Episode timed out") |
@@ -143,6 +143,12 @@ without it, the first one ends the run. A session-preset failure is a failure ro
 kind for a `/verify` that failed, such as `provider_io_timeout` for a plugin-log read that timed out, the session row
 carries it in its `_ng_failure_events`, as the cause of the failed episode. A row scored 0 for its plugin log is no
 failure row: it carries its kind in `failure_kind` and the reason in `failure_reason`.
+
+The plugin-log breaker (`plugin_log_max_consecutive_failures`, 25 by default) keeps a run whose plugins do not load
+from scoring every remaining episode 0 as the model's. The Resources Server cannot tell that from a model whose tools
+break the log in every episode, which trips the breaker too. Set to 0, the breaker is off, and every such episode
+scores 0. After a trip, find the cause and start a fresh run rather than `gym eval resubmit --recover`: the zeros
+scored before the trip are settled, and recovery does not run them again.
 
 ### Training
 

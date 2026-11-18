@@ -388,7 +388,10 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # Verify answers 500 once this many episodes in a row are scored 0 for their plugin log, rather than score every
     # remaining episode 0 as the model's: a plugin bundle that does not load, or required_plugin_markers that do not
     # match the run's plugins, fails every episode. It goes on answering 500 for each later episode whose log fails,
-    # until a log that passes resets the count. 0 disables it.
+    # until a log that passes resets the count. A model whose tools break the log in every episode trips it too: the
+    # server cannot tell that from a broken bundle. 0 disables it, and every such episode then scores 0. The zeros
+    # scored before a trip are settled, and gym eval resubmit --recover does not run them again: after a trip, find
+    # the cause and start a fresh run.
     plugin_log_max_consecutive_failures: int = Field(default=25, ge=0)
     # Where the harness writes its session exports in the lent sandbox: opencode_agent's export_dir. opencode_agent's
     # rules apply: an absolute directory other than /, outside its storage, and neither sandbox_workdir, inside it nor
