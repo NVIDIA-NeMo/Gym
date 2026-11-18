@@ -185,13 +185,27 @@ async def test_each_steps_harness_is_seeded_after_task_json_is_written_again(tmp
     and the harness would then copy nothing and run the step without its skills. Each step's preparation writes it
     again, after the step's setup."""
     steps = '\n[[steps]]\nname = "one"\n\n[[steps]]\nname = "two"\n'
+    # Step two's setup.sh removes what the episode's seed wrote. Written before the server loads the task, so the
+    # task digest covers it.
+    step_workdir = tmp_path / "datasets" / "ds" / "hello" / "steps" / "two" / "workdir"
+    step_workdir.mkdir(parents=True)
+    (step_workdir / "setup.sh").write_text("#!/bin/bash\nrm -rf /tmp/.nemo-gym\n")
     server, task, sandbox, _ = multi_turn_server(
         tmp_path, monkeypatch, steps, {"one": "a", "two": "b"}, base=TASK_TOML + 'skills_dir = "/app/.skills"\n'
     )
     server.server_client.supports_task_tool_context = False
     server.server_client.supports_task_skills = True
-    activations: list[int] = []
-    server.server_client.turn_hooks.append(lambda: activations.append(len(sandbox.execs)))
+    # Claude Code and Codex read task.json when their session is seeded, so record where each seed falls among the
+    # sandbox's execs (not only where each activation falls).
+    seed_positions: list[int] = []
+    post = type(server.server_client).post
+
+    async def record_seed(client, server_name, url_path, **kwargs):
+        if url_path == "/v1/agent_sessions":
+            seed_positions.append(len(sandbox.execs))
+        return await post(client, server_name, url_path, **kwargs)
+
+    monkeypatch.setattr(type(server.server_client), "post", record_seed)
 
     response = await server.run_request(request_for(task))
 
@@ -199,8 +213,11 @@ async def test_each_steps_harness_is_seeded_after_task_json_is_written_again(tmp
     assert [turn.reward for turn in response.result.turns] == [1.0, 1.0]
     writes = [i for i, call in enumerate(sandbox.execs) if "/tmp/.nemo-gym/task.json" in call["command"]]
     assert all('"skills_dir": "/app/.skills"' in sandbox.execs[i]["command"] for i in writes)
-    # Step two's harness starts from a task.json written after step one's turn, not only from the episode seed's.
-    assert len(activations) == 2 and any(activations[0] <= i < activations[1] for i in writes)
+    # Step two's harness is seeded from a task.json written after step two's setup.sh ran, not only from the
+    # episode seed's.
+    setup_index = next(i for i, call in enumerate(sandbox.execs) if call["command"] == "bash /app/setup.sh")
+    assert len(seed_positions) == 2
+    assert any(setup_index < i < seed_positions[1] for i in writes)
 
 
 async def test_a_multi_step_episode_traces_its_final_score_at_debug_level_only(tmp_path, monkeypatch, caplog):
