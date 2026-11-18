@@ -18,6 +18,9 @@ These cover the parts that decide whether a task counts as resolved. The sandbox
 itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
 """
 
+import re
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -209,7 +212,7 @@ class TestDropTestPatchFiles:
 
 class _FakeSandbox:
     def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=return_code)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):
@@ -448,7 +451,9 @@ class TestAntiCheating:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swe_rebench.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swe_rebench_legacy_agent.yaml").read_text()
+        )
         assert (
             config["swe_rebench_resources_server"]["resources_servers"]["swe_rebench"]["apply_anti_cheating"] is True
         )
@@ -479,7 +484,9 @@ class TestMultiWorkerEntrypoint:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swe_rebench.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swe_rebench_legacy_agent.yaml").read_text()
+        )
         for name, block in config.items():
             workers = block["resources_servers"]["swe_rebench"].get("num_workers")
             if workers and workers > 1:
@@ -579,3 +586,201 @@ class TestMavenMirror:
 
         merged = JVM_MIRROR_ENV | {"GRADLE_USER_HOME": "/custom"}
         assert merged["GRADLE_USER_HOME"] == "/custom"
+
+
+class _RecordingAsyncSandbox:
+    def __init__(self, provider_config) -> None:
+        self.spec = None
+        self.setup = None
+
+    async def start(self, spec) -> None:
+        self.spec = spec
+
+    async def start_with_setup(self, spec, setup) -> None:
+        self.spec = spec
+        self.setup = setup
+
+
+class TestSweAgentsContainerSetup:
+    """sandbox_config.legacy_container_setup gives the agent's and the evaluator's sandbox the
+    toolchain setup the Apptainer swe_agents harness applied to both of its containers."""
+
+    @staticmethod
+    async def _create(
+        monkeypatch,
+        sandbox_config: dict,
+        files: dict[str, str] | None = None,
+        *,
+        overwrite_maven_settings: bool = True,
+    ):
+        import resources_servers.swe_rebench.app as app
+
+        monkeypatch.setattr(app, "AsyncSandbox", _RecordingAsyncSandbox)
+        monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {})
+        monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
+        server = SimpleNamespace(
+            config=app.SWERebenchResourcesServerConfig(
+                host="127.0.0.1",
+                port=8000,
+                entrypoint="resources_servers/swe_rebench",
+                sandbox_config=sandbox_config,
+                sandbox_provider="sandbox",
+                name="swe_rebench",
+                overwrite_maven_settings=overwrite_maven_settings,
+            )
+        )
+        body = app.SWERebenchInstanceRequest(instance_id="o__r-1", repo="o/r", base_commit="abc", image_name="img")
+        return await app.SWERebenchResourcesServer._create_sandbox(server, body, files=files)
+
+    async def test_off_by_default(self, monkeypatch) -> None:
+        from resources_servers.swebench.swe_agents_container_setup import CHROME_WRAPPER_PATH
+
+        sandbox = await self._create(monkeypatch, {})
+        assert "CHROME_BIN" not in sandbox.spec.env and "_JAVA_OPTIONS" not in sandbox.spec.env
+        assert CHROME_WRAPPER_PATH not in sandbox.spec.files
+        assert sandbox.setup is None
+
+    async def test_agent_sandbox_gets_the_env_files_and_setup(self, monkeypatch) -> None:
+        from resources_servers.swebench.swe_agents_container_setup import (
+            SWE_AGENTS_CONTAINER_ENV,
+            apply_swe_agents_container_setup,
+            swe_agents_container_files,
+        )
+
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True})
+        assert SWE_AGENTS_CONTAINER_ENV.items() <= sandbox.spec.env.items()
+        assert sandbox.spec.files == swe_agents_container_files()
+        assert sandbox.setup is apply_swe_agents_container_setup
+
+    async def test_eval_sandbox_keeps_its_verification_files(self, monkeypatch) -> None:
+        from resources_servers.swebench.swe_agents_container_setup import CHROME_WRAPPER_PATH
+
+        files = verification_files(_inputs())
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True}, files=files)
+        assert files.items() <= sandbox.spec.files.items()
+        assert CHROME_WRAPPER_PATH in sandbox.spec.files
+
+    async def test_explicit_config_env_still_wins(self, monkeypatch) -> None:
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True, "env": {"CHROME_BIN": "/custom"}})
+        assert sandbox.spec.env["CHROME_BIN"] == "/custom"
+
+    async def test_maven_settings_stay_with_the_provider_when_not_overwritten(self, monkeypatch) -> None:
+        """overwrite_maven_settings: false must hold for the agent sandbox too, or the swe_agents files
+        would write the settings.xml the provider mounts read-only."""
+        from resources_servers.swebench.swe_agents_container_setup import GRADLE_INIT_PATH, MAVEN_SETTINGS_PATH
+
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True}, overwrite_maven_settings=False)
+        assert MAVEN_SETTINGS_PATH not in sandbox.spec.files
+        assert GRADLE_INIT_PATH in sandbox.spec.files
+
+    def test_one_mirror_copy_per_eval_sandbox(self) -> None:
+        """Both ship the same files to the same paths; a second Gradle init script under another
+        name would add the mirror repository twice."""
+        from resources_servers.swe_rebench.verification import _mirror_files
+        from resources_servers.swebench.swe_agents_container_setup import swe_agents_container_files
+
+        assert _mirror_files().items() <= swe_agents_container_files().items()
+
+
+class TestLogParserPin:
+    """Graded results must not move when SWE-rebench-V2 changes upstream.
+
+    A parser cache filled from another commit must not stand in for the pinned one.
+    """
+
+    @staticmethod
+    def _fake_git(calls: list, fail_on: str | None = None):
+        def run(args, cwd=None, check=False, capture_output=False):
+            command = args[1]
+            calls.append(args)
+            if command == fail_on:
+                raise subprocess.CalledProcessError(128, args, stderr=b"fatal: remote error: not our ref")
+            if command == "init":
+                Path(args[-1]).mkdir(parents=True)
+            elif command in ("clone", "checkout"):
+                # Nothing in log_parsers calls `git clone`.
+                # A clone here puts main's parsers in the destination before the pin is fetched.
+                # The visibility test relies on this to fail for code that clones into place.
+                root = Path(args[-1]) if command == "clone" else Path(cwd)
+                parser = root / "lib" / "agent" / "log_parsers.py"
+                parser.parent.mkdir(parents=True, exist_ok=True)
+                parser.write_text(f"NAME_TO_PARSER = {{{command!r}: lambda log: {{}}}}\n")
+
+        return run
+
+    def test_pinned_to_a_full_commit(self) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        assert re.fullmatch(r"[0-9a-f]{40}", log_parsers.UPSTREAM_COMMIT)
+        assert log_parsers._repo_dir_name() == f"SWE-rebench-V2-{log_parsers.UPSTREAM_COMMIT[:12]}"
+
+    def test_a_cached_clone_of_main_is_not_reused(self, monkeypatch, tmp_path) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        stale = tmp_path / "SWE-rebench-V2" / "lib" / "agent" / "log_parsers.py"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("NAME_TO_PARSER = {'stale': lambda log: {}}\n")
+        calls: list = []
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git(calls))
+        monkeypatch.setattr(log_parsers, "_MODULE", None)
+        module = log_parsers.load_parsers(tmp_path)
+        assert [args[1] for args in calls] == ["init", "fetch", "checkout"]
+        assert calls[1][-1] == log_parsers.UPSTREAM_COMMIT
+        assert set(module.NAME_TO_PARSER) == {"checkout"}
+
+    def test_the_tree_is_visible_only_once_the_pin_is_checked_out(self, monkeypatch, tmp_path) -> None:
+        """A worker waiting on the clone lock returns as soon as a parser file exists.
+
+        No parser file may appear under the destination before the pinned checkout is complete.
+        """
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        seen: list = []
+        fake = self._fake_git([])
+
+        def run(args, **kwargs):
+            fake(args, **kwargs)
+            seen.append((args[1], log_parsers._parser_path(destination)))
+
+        monkeypatch.setattr(log_parsers.subprocess, "run", run)
+        log_parsers._clone_locked(destination)
+        assert [command for command, _ in seen] == ["init", "fetch", "checkout"]
+        assert all(path is None for _, path in seen), seen
+        assert log_parsers._parser_path(destination) is not None
+        assert [p.name for p in tmp_path.iterdir()] == [destination.name]
+
+    def test_a_killed_workers_lock_is_named_and_its_staging_tree_removed_once_cleared(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A worker killed mid-fetch skips its cleanup, so it leaves both its staging tree and the lock."""
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        lock_path = tmp_path / f".{destination.name}.clone.lockdir"
+        lock_path.mkdir()
+        orphan = tmp_path / f".{destination.name}.tmp-999999"
+        orphan.mkdir()
+        (orphan / "partial").write_text("left by a worker killed mid-fetch")
+        calls: list = []
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git(calls))
+        monkeypatch.setattr(log_parsers.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(TimeoutError, match=re.escape(str(lock_path))):
+            log_parsers._clone_locked(destination, timeout_s=0)
+        assert calls == []
+
+        lock_path.rmdir()
+        log_parsers._clone_locked(destination)
+        assert [p.name for p in tmp_path.iterdir()] == [destination.name]
+
+    @pytest.mark.parametrize("step", ["fetch", "checkout"])
+    def test_a_failed_git_step_leaves_no_tree_behind(self, monkeypatch, tmp_path, step: str) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([], fail_on=step))
+        with pytest.raises(RuntimeError, match=f"git {step} .* failed: fatal: remote error: not our ref"):
+            log_parsers._clone_locked(destination)
+        assert list(tmp_path.iterdir()) == [], f"no clone, staging tree, or lock may survive a failed {step}"

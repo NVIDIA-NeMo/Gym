@@ -17,6 +17,7 @@ import atexit
 import json
 import logging
 import resource
+import signal
 import socket
 import sys
 from abc import abstractmethod
@@ -63,6 +64,7 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.core.correlation import CorrelationPathError, parse_path
 from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.ray_support import (
@@ -85,10 +87,7 @@ from nemo_gym.server_runtime.request_handling.session_routing import (
     create_session_socket_dir,
     install_session_routing,
 )
-from nemo_gym.server_runtime.request_handling.trace_context import (
-    _ROLLOUT_PREFIX_RE,
-    install_trace_context_path,
-)
+from nemo_gym.server_runtime.request_handling.trace_context import install_trace_context_path
 from nemo_gym.server_runtime.uvicorn_reuse_port import reuse_port_supported, run_with_reuse_port
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.connection_pool import (
@@ -257,6 +256,14 @@ def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
     reason = server.multiple_workers_unsupported_reason()
     if reason is not None:
         raise ValueError(f"{server.config.name} needs num_workers=1: {reason}")
+
+
+def _unblock_shutdown_signals() -> None:
+    """Let SIGINT and SIGTERM, on which uvicorn shuts a server down, reach this process. A process starts with the
+    signal mask of the thread that launched it, so a server launched from a thread that blocks these signals, such as
+    any thread of a Ray worker, would otherwise leave RunHelper's interrupt pending and never run its shutdown.
+    Unblocking a signal that is not blocked changes nothing."""
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGINT, signal.SIGTERM))
 
 
 class SimpleServer(BaseServer):
@@ -477,6 +484,7 @@ repr(e): {repr(e)}"""
 
     @classmethod
     def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
+        _unblock_shutdown_signals()
         startup = ServerStartupTimeline(
             getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, cls.__name__),
             _telemetry_server_type(cls),
@@ -715,7 +723,12 @@ def with_rollout_prefix(url: str, base_urls: Sequence[str]) -> str:
         ] != base_segments:
             continue
         rest = "/" + "/".join(segments[len(base_segments) :])
-        if _ROLLOUT_PREFIX_RE.match(rest):
+        try:
+            resolved = parse_path(rest, allow_empty_rest=True)
+        except CorrelationPathError:
+            # The receiving server answers a malformed prefix; adding a second one would only hide it.
+            return url
+        if resolved is not None and resolved[0].capture_key is not None:
             return url
         rollout_id = current_rollout_id()
         if not rollout_id:

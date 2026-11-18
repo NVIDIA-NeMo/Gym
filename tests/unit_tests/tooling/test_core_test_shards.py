@@ -330,6 +330,7 @@ def test_workflow_requires_all_shards_sandbox_and_coverage_and_preserves_routing
         "sandbox-tests",
         "core-coverage",
         "changed-server-tests",
+        "longmt-scoring",
     }
     assert jobs["test-result"]["name"] == "Test"
     assert jobs["test-result"]["if"] == "always()"
@@ -338,16 +339,24 @@ def test_workflow_requires_all_shards_sandbox_and_coverage_and_preserves_routing
 
 
 @pytest.mark.parametrize(
-    "failed", ["DETECT_RESULT", "CORE_RESULT", "SANDBOX_RESULT", "COVERAGE_RESULT", "SERVERS_RESULT", None]
+    "failed",
+    ["DETECT_RESULT", "CORE_RESULT", "SANDBOX_RESULT", "COVERAGE_RESULT", "SERVERS_RESULT", "LONGMT_RESULT", None],
 )
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
 def test_existing_test_gate_fails_closed(failed, result):
     command = yaml.safe_load(WORKFLOW.read_text())["jobs"]["test-result"]["steps"][0]["run"]
     env = {
         name: "success"
-        for name in ("DETECT_RESULT", "CORE_RESULT", "SANDBOX_RESULT", "COVERAGE_RESULT", "SERVERS_RESULT")
+        for name in (
+            "DETECT_RESULT",
+            "CORE_RESULT",
+            "SANDBOX_RESULT",
+            "COVERAGE_RESULT",
+            "SERVERS_RESULT",
+            "LONGMT_RESULT",
+        )
     }
-    env.update(RUN_FULL="true", RUN_SERVERS="true")
+    env.update(RUN_FULL="true", RUN_SERVERS="true", RUN_LONGMT="true")
     if failed:
         env[failed] = result
     completed = subprocess.run(["bash", "-c", command], env=env)
@@ -357,6 +366,42 @@ def test_existing_test_gate_fails_closed(failed, result):
 def test_docs_only_gate_needs_successful_detection_but_no_tests():
     command = yaml.safe_load(WORKFLOW.read_text())["jobs"]["test-result"]["steps"][0]["run"]
     completed = subprocess.run(
-        ["bash", "-c", command], env={"DETECT_RESULT": "success", "RUN_FULL": "false", "RUN_SERVERS": "false"}
+        ["bash", "-c", command],
+        env={
+            "DETECT_RESULT": "success",
+            "RUN_FULL": "false",
+            "RUN_SERVERS": "false",
+            "RUN_LONGMT": "false",
+            "LONGMT_RESULT": "skipped",
+        },
     )
     assert completed.returncode == 0
+
+
+def test_migration_modules_have_weights_and_span_runner_shards():
+    """The expensive migration suite must remain schedulable as separate files."""
+    files = [
+        "tests/unit_tests/tooling/test_add_legacy_agent_environment_servers.py",
+        *sorted(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "tests/unit_tests/tooling").glob("test_agent_environment_*.py")
+        ),
+    ]
+    durations = json.loads(DURATIONS_PATH.read_text())["files"]
+    assert len(files) > 4
+    assert all(file in durations for file in files)
+    # Other expensive suites can fill a runner first; the migration suite must
+    # span runners, not occupy every runner in the full inventory.
+    assignments = partition_files(list(durations), durations, 4)
+    assert len({assignments[file] for file in files}) > 1
+    assert set(partition_files(files, durations, 4).values()) == set(range(4))
+
+
+def test_migration_script_instances_do_not_share_patchable_state(tmp_path, monkeypatch):
+    from tests.helpers.agent_environment_migration import load_migration
+
+    first, second = load_migration(), load_migration()
+    original_root = second.RESOURCES_SERVERS_ROOT
+    monkeypatch.setattr(first, "RESOURCES_SERVERS_ROOT", tmp_path)
+    assert first.main.__globals__["RESOURCES_SERVERS_ROOT"] == tmp_path
+    assert second.main.__globals__["RESOURCES_SERVERS_ROOT"] == original_root

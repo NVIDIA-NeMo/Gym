@@ -231,6 +231,104 @@ class TestExaProvider:
         app_module.os._exit.assert_called_once_with(1)
         fake_request.assert_awaited_once()
 
+    _EXA_REFUSAL = {
+        "requestId": "r",
+        "error": "Sorry, we've detected unsafe content and can't process this request.",
+        "tag": "PROHIBITED_CONTENT",
+    }
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            _EXA_REFUSAL,
+            {"requestId": "r", "error": "Content was rejected by a safety policy.", "tag": "CONTENT_FILTER_ERROR"},
+        ],
+    )
+    async def test_exa_content_refusal_fails_only_the_call(self, body: dict, monkeypatch) -> None:
+        # Exa tags a 403 that refuses one request on content-safety grounds; that is not a bad key.
+        client = ExaAIOHTTPClient(headers={}, base_url="https://api.exa.ai", debug=False)
+        fake_request = AsyncMock(return_value=self._http_response(403, body))
+        monkeypatch.setattr(app_module, "request", fake_request)
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+
+        with pytest.raises(app_module.SearchProviderRefusal, match=body["tag"]):
+            await client.search("q", num_results=5)
+        app_module.os._exit.assert_not_called()
+        fake_request.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "provider,status,body",
+        [
+            # An account-level 403 tag aborts even when its message reads like a refusal.
+            ("exa", 403, {"requestId": "r", "error": "Team API access has been revoked.", "tag": "TEAM_BLOCKED"}),
+            ("exa", 403, {"requestId": "r", "error": "Blocked: unsafe content policy.", "tag": "FEATURE_DISABLED"}),
+            # Only a 403 can be a refusal; a 401 is always a bad key.
+            ("exa", 401, _EXA_REFUSAL),
+            ("tavily", 401, {"detail": {"error": "Sorry, we've detected unsafe content."}}),
+            # Without a tag, only the refusal wording counts; a policy-sounding account error aborts.
+            ("tavily", 403, {"detail": {"error": "Account suspended for a content policy violation."}}),
+        ],
+    )
+    async def test_auth_failure_that_is_not_a_content_refusal_aborts(
+        self, provider: str, status: int, body: dict, monkeypatch
+    ) -> None:
+        fake_request = AsyncMock(return_value=self._http_response(status, body))
+        monkeypatch.setattr(app_module, "request", fake_request)
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+
+        with pytest.raises(SystemExit):
+            if provider == "exa":
+                await ExaAIOHTTPClient(headers={}, debug=False).search("q", num_results=5)
+            else:
+                client = TavilySearchAIOHTTPClient(headers={}, base_url="https://api.tavily.com", debug=False)
+                await client.post("/search", json.dumps({"query": "q"}), 30)
+        app_module.os._exit.assert_called_once_with(1)
+        fake_request.assert_awaited_once()
+
+    async def test_refused_search_reaches_the_agent_as_a_failed_search(
+        self, server: TavilySearchResourcesServer, monkeypatch
+    ) -> None:
+        # Drives the real Exa client, so the refusal must cross ExaAIOHTTPClient._post and _exa_search_one.
+        fake_request = AsyncMock(return_value=self._http_response(403, self._EXA_REFUSAL))
+        monkeypatch.setattr(app_module, "request", fake_request)
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+
+        result = await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+
+        assert result.results_string == f"Search failed: exa refused this request: {json.dumps(self._EXA_REFUSAL)}"
+        app_module.os._exit.assert_not_called()
+        fake_request.assert_awaited_once()
+
+    @pytest.mark.parametrize("workspace", ["none", "per_session"])
+    async def test_tavily_refused_search_reaches_the_agent_as_a_failed_search(
+        self, workspace: str, tmp_path, monkeypatch
+    ) -> None:
+        # Drives the real Tavily client, so the refusal must cross tavily-python and both search helpers.
+        kwargs = {}
+        if workspace == "per_session":
+            kwargs = {"workspace": "per_session", "workspace_root": str(tmp_path)}
+        config = TavilySearchResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            search_provider="tavily",
+            tavily_api_key="test_tavily_key",  # pragma: allowlist secret
+            exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
+            **kwargs,
+        )
+        server = TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        body = {"detail": {"error": "Sorry, we've detected unsafe content and can't process this request."}}
+        fake_request = AsyncMock(return_value=self._http_response(403, body))
+        monkeypatch.setattr(app_module, "request", fake_request)
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+
+        result = await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+
+        assert "Search failed: tavily refused this request" in result.results_string
+        app_module.os._exit.assert_not_called()
+        fake_request.assert_awaited_once()
+
     # ---- dispatch ----
 
     async def test_dispatch_routes_to_exa_not_tavily(self, server: TavilySearchResourcesServer) -> None:

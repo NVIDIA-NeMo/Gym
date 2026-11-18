@@ -55,7 +55,9 @@ for setup, recipes, service lifecycle and observation limits.
 Sandboxed mode requires the Resources server to provide `sandbox_access`; otherwise seeding returns HTTP 422.
 Its provider must support `AsyncSandbox.connect`. The Gym model server address must be reachable from inside
 the task sandbox: configure `use_absolute_ip` / `default_host` for the deployment instead of a controller-only
-loopback address. Runtime packaging runs in a thread so seeding does not block other agent requests.
+loopback address. Harbor runs (`gym eval run <target> --agent <name>`) set `use_absolute_ip` for the model server
+automatically, so this applies only outside Harbor. Runtime packaging runs in a thread so seeding does not block
+other agent requests.
 
 Close raises if the worker stop is unconfirmed or the remaining activation cannot be joined within its budget;
 the session stays available for a close retry. The bounded join also applies to embedded mode. An activation

@@ -15,7 +15,6 @@
 
 """Endpoint and authenticated MCP helpers for dedicated sandboxed agents."""
 
-import ipaddress
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -26,6 +25,10 @@ from nemo_gym.config.config_types import ResourcesServerRef
 from nemo_gym.core.failure_kinds import AGENT_RUN_ERROR
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.server_runtime.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest
+
+# Defined beside the other import-free helpers, so a resources server's sandbox lending can use them too.
+from nemo_gym.utils.network_policy import reachable_host as _reachable_host
+from nemo_gym.utils.network_policy import restricted_network_policy as restricted_network_policy
 
 
 def sandbox_server_url(name: str, *, require_reachable: bool = False) -> str:
@@ -40,35 +43,6 @@ def sandbox_server_url(name: str, *, require_reachable: bool = False) -> str:
         host = "[::1]" if parsed.hostname == "::" else "127.0.0.1"
         return urlunsplit((parsed.scheme, f"{host}:{parsed.port}" if parsed.port else host, parsed.path, "", ""))
     return base
-
-
-def _reachable_host(url: str) -> str:
-    target = urlsplit(url).hostname
-    try:
-        address = ipaddress.ip_address(target) if target else None
-    except ValueError:
-        address = None
-    if (
-        not target
-        or target.lower().rstrip(".") == "localhost"
-        or (address and (address.is_loopback or address.is_unspecified))
-    ):
-        raise ValueError(
-            "Model/tool endpoint must advertise a sandbox-reachable host. Set use_absolute_ip=true "
-            "or bind the server to an explicitly reachable host; rewriting a loopback URL is insufficient."
-        )
-    return target
-
-
-def restricted_network_policy(provider_name: str, urls: list[str]) -> dict[str, object]:
-    """Fail closed when a provider or endpoint cannot support network isolation."""
-    if provider_name != "opensandbox":
-        raise ValueError("Restricted network access requires the OpenSandbox network-policy provider")
-    targets = set()
-    for url in urls:
-        # The egress sidecar strips a query name's trailing dot, so a rule written with one would never match.
-        targets.add(_reachable_host(url).rstrip("."))
-    return {"defaultAction": "deny", "egress": [{"action": "allow", "target": t} for t in sorted(targets)]}
 
 
 async def seed_mcp_servers(
@@ -103,13 +77,12 @@ async def seed_mcp_servers(
 
 def verification_failure_fields(response: NeMoGymResponse | None = None) -> dict[str, Any]:
     """Forward bounded diagnostic events, including a restored response's report, without selecting a failure."""
-    from nemo_gym.core.failure_records import FailureReport
     from nemo_gym.core.failure_transport import RequestFailureLog
 
     log = RequestFailureLog.current() or RequestFailureLog()
     saved = getattr(response, "failure_report", None) if response is not None else None
     if saved is not None:
-        log.add(FailureReport.model_validate(saved))
+        log.add_saved(saved)
     report = log.report
     # Explicit None clears any unrelated report copied from the run-request body.
     return {"failure_report": report.model_dump(mode="json") if report.events or report.omitted else None}

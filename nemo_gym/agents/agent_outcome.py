@@ -9,15 +9,14 @@ applies it to a response. The Environment Servers then choose verify, retry or f
 ``agent_response_action``.
 """
 
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
-from aiohttp import ClientConnectorError, ClientResponseError
+from aiohttp import ClientConnectorError, ClientResponseError, ConnectionTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
+from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON, _error_body_is_context_overflow
 from nemo_gym.core.failure_kinds import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
@@ -27,6 +26,7 @@ from nemo_gym.core.failure_kinds import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_REQUEST_REJECTED,
+    MODEL_SERVER_QUEUE_TIMEOUT,
     MODEL_TRANSPORT_ERROR,
     PROVIDER_COMMAND_OUTCOME_UNKNOWN,
     PROVIDER_INTERNAL_ERROR,
@@ -49,7 +49,6 @@ from nemo_gym.core.outcome_policy import OutcomePolicyConfig as OutcomePolicyCon
 from nemo_gym.core.outcome_policy import choose_action as choose_action
 from nemo_gym.core.outcome_policy import failure_outcome_policy as failure_outcome_policy
 from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure
-from nemo_gym.models.token_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
 
 
@@ -60,6 +59,11 @@ if TYPE_CHECKING:
 AGENT_OUTCOME_METADATA_KEY = "ng_agent_outcome"
 # Response metadata naming the outcome ladder's row that decided the response (``RunDecision.stop_reason``).
 AGENT_STOP_REASON_METADATA_KEY = "ng_agent_stop_reason"
+# Response metadata a harness adapter sets to "true" when the last prompt made at least as many model calls as the
+# harness's own step limit allows. The harness may only ask for a final answer at that limit (OpenCode adds a note and
+# still offers the tools), so the mark says the limit was reached, not how the model answered. The environment decides
+# whether a marked answer is scored.
+HARNESS_STEP_LIMIT_METADATA_KEY = "harness_step_limit_reached"
 
 
 class AgentOutcome(BaseModel):
@@ -90,7 +94,9 @@ class AgentOutcome(BaseModel):
 
 
 class AgentOutcomePolicyConfig(OutcomePolicyConfig):
-    """Existing Environment Server defaults for classified failed agent responses."""
+    """Agent outcome rules: status, then kind, then class, then ``default_action``.
+
+    Partial overrides replace matching entries and retain the other defaults."""
 
     supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset(
         {OutcomeAction.VERIFY, OutcomeAction.RETRY, OutcomeAction.FAIL}
@@ -108,6 +114,7 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
             # The model never answered a request the run's setup made invalid: not graded, and a retry fails the same.
             MODEL_REQUEST_REJECTED: OutcomeAction.FAIL,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            MODEL_SERVER_QUEUE_TIMEOUT: OutcomeAction.RETRY,
             # Transient sandbox-provider failures reported by an agent: the episode runs again, which is not a
             # replay of the uncertain operation inside the provider.
             **dict.fromkeys(
@@ -206,12 +213,39 @@ def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
     )
 
 
+def queued_policy_response_timeout(report: FailureReport | None) -> bool:
+    """Whether a confirmed policy response timeout (``confirmed_policy_response_timeout``) waited in the model
+    server's queue: every attempt recorded the server's queue at its timeout, with requests waiting.
+
+    An attempt without a queue reading, or with an empty queue, keeps the timeout the model's.
+    """
+    if not confirmed_policy_response_timeout(report):
+        return False
+    final = report.events[report.failure_id]
+    attempts = [
+        event
+        for event in report.events.values()
+        if event.boundary == FailureBoundary.MODEL
+        and event.operation == "model_request"
+        and event.operation_id == final.operation_id
+    ]
+    return all(
+        isinstance(event.details, ModelFailureDetails)
+        and event.details.server_requests_waiting is not None
+        and event.details.server_requests_waiting > 0
+        for event in attempts
+    )
+
+
 # The classified policy-request timeout whose outcome an agent boundary selects.
 POLICY_TIMEOUT_OPERATION = "agent.policy_request"
 
 
 def policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None:
     """The agent's policy-timeout failure for a failed model reply, or ``None``.
+
+    The kind is ``MODEL_SERVER_QUEUE_TIMEOUT`` when every attempt waited in the model server's queue
+    (``queued_policy_response_timeout``), else ``MODEL_POLICY_RESPONSE_TIMEOUT``.
 
     The reply's report must show that the final model call timed out after its upload on every attempt
     (``confirmed_policy_response_timeout``). The failure is caused by ``error``, so its reply keeps the model's
@@ -220,10 +254,16 @@ def policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None:
     report = FailureHeader.decode(error.headers)
     if not confirmed_policy_response_timeout(report):
         return None
+    # Waiting in the model server's queue is that server's capacity, not the model's answer.
+    queued = queued_policy_response_timeout(report)
     failure = NgFailureEvent(
         boundary=FailureBoundary.AGENT,
-        failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
-        failure_reason="Policy model request timed out on every attempt",
+        failure_kind=MODEL_SERVER_QUEUE_TIMEOUT if queued else MODEL_POLICY_RESPONSE_TIMEOUT,
+        failure_reason=(
+            "Policy model request timed out on every attempt while the model server queued requests"
+            if queued
+            else "Policy model request timed out on every attempt"
+        ),
         operation=POLICY_TIMEOUT_OPERATION,
         operation_id=report.events[report.failure_id].operation_id,
     )
@@ -277,7 +317,8 @@ class RunEvidence:
     400 or 413 alone is not this evidence."""
 
     model_limit: Literal["output", "turns"] | None = None
-    """The run stopped at the model's output limit or at the harness's configured turn or step limit."""
+    """The run stopped at the model's output limit, or at its turn/step limit without a final answer (``turns``).
+    An answer at the step limit is ``has_result``, marked with ``HARNESS_STEP_LIMIT_METADATA_KEY`` instead."""
 
     refusal: bool = False
     """The model refused the task. The refusal is the model's answer and is graded."""
@@ -287,9 +328,9 @@ class RunEvidence:
     (a retried model call, a subagent's error) is not this."""
 
     infra_fault: NgFailureEvent | None = None
-    """A recorded server or provider fault in the run's window, such as a model call that failed with a 5xx, a
-    transport error or a queue timeout, or a sandbox provider failure. It decides only a timed-out run: a deadline
-    spent on our servers is retried instead of graded."""
+    """An unrecovered or in-flight server or provider fault at the deadline, such as a model 5xx, transport error,
+    queue timeout or sandbox provider failure. A fault the harness recovered from does not qualify. It decides
+    only a timed-out run, by the fault kind's policy (retry for transient server and provider faults)."""
 
     retry_deadline_before_reply: bool = False
     """Keeps today's retry for a deadline that ended the run before any model reply, for an adapter whose harness
@@ -298,9 +339,12 @@ class RunEvidence:
     ``infra_fault`` for every harness: a deadline is then graded unless ``infra_fault`` is set."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class RunDecision:
-    """The response the ladder decided for one run."""
+    """The response the ladder decided for one run.
+
+    ``status`` is the response status ``finish_response`` sets; ``stop_reason`` names the deciding row and is written
+    to ``ng_agent_stop_reason``; ``outcome`` is written to ``ng_agent_outcome`` exactly when ``status`` is ``failed``."""
 
     status: Literal["completed", "incomplete", "failed"]
     stop_reason: StopReason
@@ -324,7 +368,8 @@ def decide_outcome(evidence: RunEvidence) -> RunDecision:
 
     1. stopped -> incomplete
     2. context limit -> incomplete
-    3. deadline with a recorded infrastructure fault -> failed with the fault's kind
+    3. deadline with an unrecovered or in-flight infrastructure fault -> failed with the fault's kind, by that
+       kind's policy (retry for transient server and provider faults)
     4. deadline -> incomplete (until the flip, a deadline before any reply that the adapter keeps retried -> failed
        ``unknown``)
     5. error -> failed with the classified outcome; a 4xx other than 408, 425 and 429 before any model reply ->
@@ -338,15 +383,15 @@ def decide_outcome(evidence: RunEvidence) -> RunDecision:
     outcome; completed and incomplete responses are graded.
     """
     if evidence.stopped:
-        return RunDecision("incomplete", "stopped")
+        return RunDecision(status="incomplete", stop_reason="stopped")
     if evidence.context_limit or (evidence.error is not None and evidence.error.failure_kind == MODEL_CONTEXT_LIMIT):
-        return RunDecision("incomplete", "context_limit")
+        return RunDecision(status="incomplete", stop_reason="context_limit")
     if evidence.timed_out:
         if evidence.infra_fault is not None:
-            return RunDecision("failed", "infra", _fault_outcome(evidence.infra_fault))
+            return RunDecision(status="failed", stop_reason="infra", outcome=_fault_outcome(evidence.infra_fault))
         if evidence.retry_deadline_before_reply and evidence.model_replied is not True:
-            return RunDecision("failed", "timeout", AgentOutcome(failure_kind="unknown"))
-        return RunDecision("incomplete", "timeout")
+            return RunDecision(status="failed", stop_reason="timeout", outcome=AgentOutcome(failure_kind="unknown"))
+        return RunDecision(status="incomplete", stop_reason="timeout")
     if evidence.error is not None:
         error = evidence.error
         if (
@@ -355,17 +400,19 @@ def decide_outcome(evidence: RunEvidence) -> RunDecision:
             and not is_retryable_dependency_status(error.status_code)
             and evidence.model_replied is False
         ):
-            return RunDecision("failed", "error", AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED))
-        return RunDecision("failed", "error", error)
+            return RunDecision(
+                status="failed", stop_reason="error", outcome=AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED)
+            )
+        return RunDecision(status="failed", stop_reason="error", outcome=error)
     if evidence.model_limit == "output":
-        return RunDecision("incomplete", "output_limit")
+        return RunDecision(status="incomplete", stop_reason="output_limit")
     if evidence.model_limit == "turns":
-        return RunDecision("incomplete", "agent_limit")
+        return RunDecision(status="incomplete", stop_reason="agent_limit")
     if evidence.refusal:
-        return RunDecision("completed", "refusal")
+        return RunDecision(status="completed", stop_reason="refusal")
     if evidence.has_result:
-        return RunDecision("completed", "completed")
-    return RunDecision("failed", "no_result", AgentOutcome(failure_kind=AGENT_RUN_ERROR))
+        return RunDecision(status="completed", stop_reason="completed")
+    return RunDecision(status="failed", stop_reason="no_result", outcome=AgentOutcome(failure_kind=AGENT_RUN_ERROR))
 
 
 def model_http_error_outcome(status: int, *, error_body: bytes | str | None = None) -> AgentOutcome:
@@ -375,21 +422,13 @@ def model_http_error_outcome(status: int, *, error_body: bytes | str | None = No
     the raw JSON a CLI prints verbatim. A 400 whose body is OpenAI's error envelope with code
     ``context_length_exceeded`` is ``model_context_limit``: Gym's model servers answer a context overflow they
     propagate that way, and the ladder grades it as incomplete, before or after the first reply. Any other failure is
-    ``model_request_error`` with its status.
+    ``model_request_error`` with its status. A status outside 400–599 is ``unknown``.
     """
-    if status == 400 and _openai_error_code(error_body) == CONTEXT_LENGTH_EXCEEDED_ERROR_CODE:
+    if type(status) is not int or not 400 <= status <= 599:
+        return AgentOutcome(failure_kind="unknown")
+    if status == 400 and _error_body_is_context_overflow(error_body or b""):
         return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
     return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
-
-
-def _openai_error_code(body: bytes | str | None) -> str | None:
-    """The ``error.code`` string of an OpenAI error envelope (``{"error": {"code": ...}}``), else ``None``."""
-    try:
-        error = json.loads(body or b"").get("error")
-    except (TypeError, ValueError, AttributeError):
-        return None
-    code = error.get("code") if isinstance(error, dict) else None
-    return code if isinstance(code, str) else None
 
 
 # --- Environment Server side: what to do with an agent's response before grading ---------------------------------- #
@@ -425,9 +464,9 @@ def reported_agent_failure(response: "NeMoGymResponse") -> NgFailureEvent | None
     return rebuild_failure(report)
 
 
-def model_request_not_sent(response: "NeMoGymResponse") -> bool:
+def _model_request_not_sent(response: "NeMoGymResponse") -> bool:
     """Whether every attempt of the model request a response's report selects failed to connect, so the request was
-    never sent."""
+    never sent. A refused connection and a connection timeout both mean it was never made."""
     report = FailureReport.model_validate(response.model_extra["failure_report"])
     selected = report.events[report.failure_id]
     if (
@@ -445,12 +484,15 @@ def model_request_not_sent(response: "NeMoGymResponse") -> bool:
     if any(not event.operation_id or not event.attempt_id for event in observed):
         return False
     attempts = [event for event in observed if event.operation_id == selected.operation_id]
-    connector_type = f"{ClientConnectorError.__module__}.{ClientConnectorError.__qualname__}"
+    unconnected_types = {
+        f"{error_type.__module__}.{error_type.__qualname__}"
+        for error_type in (ClientConnectorError, ConnectionTimeoutError)
+    }
     return len({event.attempt_id for event in attempts}) == len(attempts) and all(
         isinstance(event.details, ModelFailureDetails)
         and event.details.request_upload_complete is False
         and event.foreign_error is not None
-        and event.foreign_error.exception_type == connector_type
+        and event.foreign_error.exception_type in unconnected_types
         for event in attempts
     )
 
@@ -487,5 +529,5 @@ def agent_response_action(
                 action = timeout_action(action)
         elif cause is not None and cause.failure_kind == MODEL_REQUEST_ERROR and cause.http_status is None:
             # An enclosing HTTP 500 is not a provider verdict or evidence of an unexecuted request.
-            action = action if model_request_not_sent(response) else OutcomeAction.FAIL
+            action = action if _model_request_not_sent(response) else OutcomeAction.FAIL
     return action, cause

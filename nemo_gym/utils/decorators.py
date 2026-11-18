@@ -21,14 +21,26 @@ from rich.console import Console
 _stderr = Console(stderr=True)
 
 
-def experimental(fn):
-    """Decorator that warns on stderr that a function is experimental, then runs it."""
+_warned: set[str] = set()
 
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        _stderr.print(
-            f"[yellow]Warning:[/yellow] [bold]{fn.__name__}[/bold] is experimental and may change or be removed without notice."
-        )
-        return fn(*args, **kwargs)
 
-    return wrapper
+def experimental(fn=None, *, once=False):
+    """Decorator that warns on stderr that a function is experimental, then runs it.
+
+    It warns on every call, or with `once=True` only the first time the function is called in a process.
+    """
+
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = f"{fn.__module__}.{fn.__qualname__}"
+            if not once or key not in _warned:
+                _warned.add(key)
+                _stderr.print(
+                    f"[yellow]Warning:[/yellow] [bold]{fn.__qualname__}[/bold] is experimental and may change or be removed without notice."
+                )
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    return decorate if fn is None else decorate(fn)

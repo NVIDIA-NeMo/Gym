@@ -25,18 +25,22 @@ if TYPE_CHECKING:
     from nemo_gym.agents.agent_outcome import (
         AGENT_OUTCOME_METADATA_KEY,
         AGENT_STOP_REASON_METADATA_KEY,
+        HARNESS_STEP_LIMIT_METADATA_KEY,
         AgentOutcome,
         AgentOutcomePolicyConfig,
         OutcomeAction,
         OutcomePolicyConfig,
         RunDecision,
         RunEvidence,
+        StopReason,
         agent_outcome_policy,
         agent_response_action,
         confirmed_policy_response_timeout,
         decide_outcome,
         failure_outcome_policy,
         model_http_error_outcome,
+        queued_policy_response_timeout,
+        reported_agent_failure,
     )
     from nemo_gym.agents.agent_tools import (
         restricted_network_policy,
@@ -67,10 +71,11 @@ if TYPE_CHECKING:
     from nemo_gym.agents.skills import stage_skills
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+    from nemo_gym.agents.utils.agent_context import resolve_agent_context_artifact
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
     from nemo_gym.agents.utils.sandbox_network import SandboxNetworkAccess, restrict_sandbox_network
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
-    from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime
+    from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime, probe_sandbox_platform
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
@@ -127,12 +132,14 @@ _PUBLIC_API = {
     "HARNESS_RUNNER_FAILED": "utils.sandbox_session",
     "HARNESS_RUNNER_FILE": "utils.sandbox_session",
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
+    "HARNESS_STEP_LIMIT_METADATA_KEY": "agent_outcome",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
     "OrderedOperationLedger": "utils.ordered_operations",
     "OutcomeAction": "agent_outcome",
     "OutcomePolicyConfig": "agent_outcome",
     "RunDecision": "agent_outcome",
     "RunEvidence": "agent_outcome",
+    "StopReason": "agent_outcome",
     "ROLLOUT_STOP_METADATA_KEY": "base_responses_api_agent",
     "RolloutStopRequest": "base_responses_api_agent",
     "STOP_REQUEST_FILE": "utils.supervisor_client",
@@ -149,6 +156,7 @@ _PUBLIC_API = {
     "check_agent_seed_rejected": "testing.agent_session_conformance",
     "confirmed_policy_response_timeout": "agent_outcome",
     "decide_outcome": "agent_outcome",
+    "queued_policy_response_timeout": "agent_outcome",
     "exec_timeout": "utils.supervisor_client",
     "failure_outcome_policy": "agent_outcome",
     "harness_termination_failure": "utils.supervisor_client",
@@ -156,7 +164,10 @@ _PUBLIC_API = {
     "lifecycle_observation": "utils.sandbox_observation",
     "model_http_error_outcome": "agent_outcome",
     "parse_cleanup_receipt": "utils.supervisor_client",
+    "probe_sandbox_platform": "utils.sandbox_python",
     "raises_agent_failure": "testing.failure_assertions",
+    "reported_agent_failure": "agent_outcome",
+    "resolve_agent_context_artifact": "utils.agent_context",
     "resolve_agent_timeout": "utils.task_timeout",
     "restrict_sandbox_network": "utils.sandbox_network",
     "restricted_network_policy": "agent_tools",

@@ -71,6 +71,7 @@ from nemo_gym.environment.registry import (
     EnvironmentCatalogEntry,
     RegistryError,
     discover_environment_catalog,
+    manifest_workloads_for_server,
     read_environment_details,
     resolve_catalog_entry,
 )
@@ -80,14 +81,14 @@ from nemo_gym.environment.validation import (
     resolve_config_servers,
     validate_environment,
 )
-from nemo_gym.orchestration.server_supervisor import (
+from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
+from nemo_gym.server_runtime.server_status import StatusCommand
+from nemo_gym.server_runtime.supervisor.server_supervisor import (
     RunHelper,
     _configured_servers,
     _resolve_server_dir,
 )
-from nemo_gym.orchestration.server_venv import get_venv_path, run_command, setup_env_command
-from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
-from nemo_gym.server_runtime.server_status import StatusCommand
+from nemo_gym.server_runtime.supervisor.server_venv import get_venv_path, run_command, setup_env_command
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -253,6 +254,21 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     if test_config.dir_path.parts[0] != "resources_servers":
         return
 
+    # A server that only manifest workloads use carries verifier fixtures instead of the legacy five-row rollout
+    # artifacts (see manifest_workloads_for_server). Exercise every workload sharing it, offline and without requiring
+    # its full dataset to be downloaded on CI workers.
+    manifest_entries = manifest_workloads_for_server(
+        test_config.dir_path.name, test_config.resolved_dir_path, discover_environment_catalog()
+    )
+    if manifest_entries:
+        conflict_paths = glob(str(test_config.resolved_dir_path / "data/*conflict*"))
+        assert not conflict_paths, f"Found conflicting paths: {conflict_paths}"
+        for entry in manifest_entries:
+            validation = validate_environment(entry.manifest_path, entry.config_path, validate_datasets=False)
+            _run_manifest_verifier(entry, update_expected=False, validation=validation)
+        print(f"The verifier fixtures for {test_config.dir_path} have been successfully validated!")
+        return
+
     # Check that the required examples and example metrics are present. Read from the resolved dir
     # (built-ins live under the install root) while messages reference the relative entrypoint.
     example_fpath = test_config.resolved_dir_path / "data/example.jsonl"
@@ -353,6 +369,7 @@ def _setup_single(test_config: TestConfig, global_config_dict: DictConfig) -> Po
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
+@exit_cleanly_on_config_error
 def test():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_config = TestConfig.model_validate(global_config_dict)
@@ -464,6 +481,7 @@ Server venv setup failed {_format_pct(len(setup_failed), len(dir_paths))}:{_disp
         exit(1)
 
 
+@exit_cleanly_on_config_error
 def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
@@ -1184,12 +1202,20 @@ def _inspect_environment(
         domain=entry.domain or parsed["domain"],
         description=description,
         details=details,
-        usage=(
-            f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
-            if entry.resources_server_selector
-            else f"gym env start --{entry.kind} {name} --model-type vllm_model"
-        ),
+        usage=_inspect_usage(name, entry),
     )
+
+
+def _inspect_usage(name: str, entry: EnvironmentCatalogEntry) -> str:
+    """The example command an inspected entry shows: a Harbor-backed one runs through `gym eval run`, which composes
+    its Harbor environment server; `gym env start` does not."""
+    if entry.harbor_target and entry.kind == "benchmark":
+        return f"gym eval run --benchmark {name} --sandbox <provider> --model-type vllm_model"
+    if entry.harbor_target:
+        return f"gym eval run {entry.harbor_target} --agent <harness> --sandbox <provider> --model-type vllm_model"
+    if entry.resources_server_selector:
+        return f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
+    return f"gym env start --{entry.kind} {name} --model-type vllm_model"
 
 
 def _entry_servers(

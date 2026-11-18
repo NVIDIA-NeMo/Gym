@@ -113,8 +113,9 @@ async def _run_episode(config, body, report=None, *, execute_error=None, artifac
     """Run one episode against a state whose sandbox runner returns ``report`` (or raises); return response, payload, state."""
     sent = []
 
-    async def execute(payload, **_):
+    async def execute(payload, **kwargs):
         sent.append(payload)
+        state.execute_kwargs = kwargs
         if execute_error:
             raise execute_error
         return report or _report()
@@ -262,6 +263,7 @@ class TestApp:
         assert response.status == "incomplete"
         assert response.metadata == {
             "elapsed_seconds": "1.5",
+            "agent_timeout_sec": "12600.0",
             "stop_reason": "wall_time",
             "ng_agent_stop_reason": "timeout",
         }
@@ -269,6 +271,27 @@ class TestApp:
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (20, 10, 30)
         assert response.usage.input_tokens_details.cached_tokens == 8
         assert response.usage.output_tokens_details.reasoning_tokens == 4
+
+    @pytest.mark.parametrize(
+        "metadata,budget",
+        [
+            (None, 900.0),
+            ({"agent_timeout_sec": "600"}, 600.0),
+            ({"agent_timeout_sec": "5000"}, 900.0),
+            ({"agent_timeout_sec": "not-a-number"}, 900.0),
+        ],
+    )
+    async def test_task_timeout_shortens_but_never_extends_the_configured_budget(
+        self, metadata: dict | None, budget: float
+    ) -> None:
+        """A Harbor task row carries `metadata.agent_timeout_sec`; the runner gets min(config, task) seconds."""
+        response, _, state = await _run_episode(
+            _make_config(sandbox_runner_timeout_seconds=900),
+            NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy", metadata=metadata),
+        )
+
+        assert state.execute_kwargs["timeout"] == budget
+        assert response.metadata["agent_timeout_sec"] == str(budget)
 
     @pytest.mark.asyncio
     async def test_a_run_whose_model_calls_reported_no_usage_has_none(self) -> None:
@@ -363,7 +386,7 @@ class TestApp:
                 "timeout",
             ),
             (
-                _report(observations={"status": "incomplete", "model_response_ids": ["chatcmpl-1"]}),
+                _report(stop_reason="max_turns", observations={"status": "incomplete", "model_response_ids": ["c"]}),
                 "incomplete",
                 None,
                 "agent_limit",

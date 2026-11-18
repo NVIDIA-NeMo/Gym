@@ -15,12 +15,14 @@
 import asyncio
 import hashlib
 import json
+import logging
+import os
 import re
 import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, List, Literal, Optional
+from typing import Any, ClassVar, List, Optional
 from uuid import uuid4
 
 import aiohttp
@@ -81,11 +83,15 @@ from nemo_gym.server_runtime import (
     MCPToolAccess,
 )
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.browsecomp_agent.sandbox import (
     _ERROR_DETAIL_CHARS,
     BrowsecompSandboxSession,
     SandboxIsolationError,
 )
+
+
+LOG = logging.getLogger(__name__)
 
 
 # Connection retries for the sandboxed loop's model, tool and token-count calls. Gym's client waits 0.5 s between
@@ -181,7 +187,6 @@ _ANSWER_COMMIT_RE = re.compile(
 class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
-    num_workers: Literal[1] = 1
     allow_host_execution: bool = False
     sandbox_provider: str | None = None
     sandbox_config: dict[str, JsonValue] = Field(
@@ -498,7 +503,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
                 )
                 # Retain ownership before start: failed file delivery can also fail its automatic stop.
+                started = time.monotonic()
                 await sandbox.start(SandboxSpec(**spec))
+                state.started_at = time.monotonic()
+                LOG.info(
+                    "[browsecomp][sandbox_start] role=agent session=%s provider=%s id=%s start_s=%.3f",
+                    body.agent_session_id,
+                    sandbox.provider_name,
+                    sandbox.sandbox_id,
+                    state.started_at - started,
+                )
             await state.install_runtime(timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:
@@ -694,6 +708,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         loop_started = time.monotonic() if started_at is None else started_at
         deadline = loop_started + self.config.rollout_timeout_s if self.config.rollout_timeout_s is not None else None
         timed_out = False
+        stop_reason = None  # why the loop ended: answered / max_steps / max_output_tokens / context_full / timeout
         model_response = None
         # The model call error an agent session's run ended on.
         model_error: aiohttp.ClientResponseError | aiohttp.ClientConnectionError | None = None
@@ -935,6 +950,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                # The cut is the model's own when it used the whole requested output budget. Otherwise the context
+                # window filled: the model server answers a context overflow with an empty, length-cut response.
+                # The model server echoes the budget it applied, which a training framework's per-call cap
+                # (`_ng_model_sampling`) can lower or set when the request has none.
+                output_budget = model_response.max_output_tokens or new_body.max_output_tokens
+                output_tokens = model_response.usage.output_tokens if model_response.usage else None
+                if output_budget and output_tokens is not None and output_tokens >= output_budget:
+                    stop_reason = "max_output_tokens"
+                else:
+                    stop_reason = "context_full"
                 break
 
             # --- If the model decided to answer (no tool calls), we are done ---
@@ -943,6 +968,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
             if not all_fn_calls and all_output_messages:
+                stop_reason = "answered"
                 break
 
             # --- Execute tool calls ---
@@ -1154,6 +1180,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}", flush=True)
+                stop_reason = "max_steps"
                 break
 
         # --- Board-answer fallback (ported from an internal reference harness): if the run
@@ -1246,6 +1273,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.num_tool_calls = num_tool_calls
         model_response.pre_reset_warning_steps = pre_reset_warning_steps
         model_response.timed_out = timed_out
+        # For training-side filters; nothing in Gym reads it.
+        model_response.stop_reason = "timeout" if timed_out else stop_reason
         if timed_out:
             model_response.status = "incomplete"
         if model_error is not None:
@@ -1565,5 +1594,20 @@ def _prompt_tokens_from_tokenize_response(tokenize_response: dict) -> int:
     raise KeyError(f"/tokenize response has neither 'count' nor 'tokens'; got keys: {sorted(tokenize_response)}")
 
 
+def _configure_logging() -> None:
+    """Show this server's INFO diagnostics (sandbox lifecycle, cache and phase lines) by default.
+
+    Root stays at WARNING: at INFO the HTTP client logs a line per call. NEMO_GYM_LOG_LEVEL overrides
+    the level of this server's own loggers, for example WARNING to silence the diagnostics."""
+    logging.basicConfig(level=logging.WARNING)
+    for logger_name in (__name__, "responses_api_agents.browsecomp_agent"):
+        logging.getLogger(logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
+
+
 if __name__ == "__main__":
+    _configure_logging()
     BrowsecompAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    _configure_logging()
+    app = BrowsecompAgent.run_webserver()  # noqa: F401
