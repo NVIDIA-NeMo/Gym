@@ -55,6 +55,8 @@ from nemo_gym.core import (
     model_sampling_path_segment,
     observe_scored_despite_failure,
     rebuild_failure,
+    restore_saved_failure_report,
+    with_saved_failure_report,
 )
 from nemo_gym.metrics import add_perf_metrics
 from nemo_gym.server_runtime import (
@@ -254,6 +256,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             SingleAgentTurnResult.model_validate(continuation["result"]) if continuation.get("result") else None
         )
 
+        if stage == "return":
+            # The diagnostics observed before this boundary were not observed by this replacement request.
+            # Their events keep their ids, so a replay adds each once, and no failure is selected.
+            restore_saved_failure_report(dict(continuation))
+
         # Register cleanup before seeding so a lost seed reply cannot hide the caller-assigned session ID.
         # Final cleanup runs after run() returns, outside the episode deadline.
         resources_cleanup = cleanup.register_cleanup(
@@ -428,13 +435,17 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         # and park before the final cleanup, so a replacement restored here does not end before resume.
         await self.checkpoint_boundary(
             request,
-            lambda: {
-                "next": "return",
-                "handles": handles.model_dump(),
-                "result": verification.model_dump(mode="json"),
-                "observations": dumped_observations(),
-                "trajectory": dumped_trajectory(),
-            },
+            lambda: (
+                {
+                    "next": "return",
+                    "handles": handles.model_dump(),
+                    "result": verification.model_dump(mode="json"),
+                    "observations": dumped_observations(),
+                    "trajectory": dumped_trajectory(),
+                }
+                # Kept outside the result, which collection rejects reserved diagnostic keys in.
+                | with_saved_failure_report({})
+            ),
         )
 
         # Keep one bounded retry in final unwind without erasing a completed verdict.

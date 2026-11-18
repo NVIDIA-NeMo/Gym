@@ -29,10 +29,12 @@ from pytest import MonkeyPatch
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    FailureHeader,
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    observe_scored_despite_failure,
 )
 from responses_api_agents.cvdp_agent import app as cvdp_app
 from responses_api_agents.cvdp_agent.app import (
@@ -672,9 +674,20 @@ class TestSimpleRunAttemptEvidence:
         return body
 
     def _run(
-        self, model_replies: list, parse_failed: list[bool], *, capture: bool = True, max_steps: int | None = None
+        self,
+        model_replies: list,
+        parse_failed: list[bool],
+        *,
+        capture: bool = True,
+        max_steps: int | None = None,
+        limit_replies: list[bool] | None = None,
     ):
-        """Run /run in process: model and resources servers are scripted, the self-call reaches this agent's app."""
+        """Run /run in process: model and resources servers are scripted, the self-call reaches this agent's app.
+
+        ``limit_replies`` names, for each self-call, whether its reply carried a step-limit event. The client merges a
+        reply's events into the /run request's failure log; here the script does, and ``self.run_headers`` keeps the
+        /run's own reply headers.
+        """
         config = CVDPAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -688,7 +701,10 @@ class TestSimpleRunAttemptEvidence:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": capture}
         agent = CVDPAgent(config=config, server_client=server_client)
-        client = TestClient(agent.setup_webserver())
+        app = agent.setup_webserver()
+        agent.setup_exception_middleware(app)  # `run_webserver` installs it; it opens the failure log of a request
+        client = TestClient(app)
+        limit_replies = list(limit_replies or [])
         model_requests, verify_payloads, self_replies = [], [], []
         model_replies, parse_failed = list(model_replies), list(parse_failed)
 
@@ -706,6 +722,10 @@ class TestSimpleRunAttemptEvidence:
             if server_name == "cvdp_agent":
                 result = client.post(url_path, json=payload)
                 self_replies.append(result.json())
+                if limit_replies and limit_replies.pop(0):
+                    observe_scored_despite_failure(
+                        boundary="agent", failure_kind="agent_limit", failure_reason="cap", stage="agent"
+                    )
                 return reply(result.status_code, result.json())
             if server_name == "policy_model":
                 model_requests.append(payload)
@@ -725,6 +745,7 @@ class TestSimpleRunAttemptEvidence:
         }
         result = client.post("/run", json=row)
         assert result.status_code == 200, result.text
+        self.run_headers = result.headers
         return result.json(), model_requests, verify_payloads, self_replies
 
     def test_parse_retry_owns_both_calls_and_reports_the_episode_usage(self) -> None:
@@ -887,6 +908,36 @@ class TestSimpleRunAttemptEvidence:
         assert [(call["failure_kind"], call["stage"]) for call in recorded] == (
             [("agent_limit", "agent")] if limit_recorded else []
         )
+
+    @pytest.mark.parametrize(
+        ("limit_replies", "parse_failed", "marked"),
+        [
+            ([True, False], [True, False], 0),  # the capped attempt was discarded and the retry finished normally
+            ([True, True], [True, False], 1),  # the retry that is scored was capped too
+            ([False, True], [False], 1),  # no retry: the one attempt is scored
+            ([False, False], [False], 0),
+        ],
+        ids=["recovered", "terminal-after-retry", "single-capped", "never-capped"],
+    )
+    @pytest.mark.parametrize("capture", [True, False])
+    def test_only_the_scored_attempt_marks_the_rollout_as_capped(
+        self, limit_replies: list[bool], parse_failed: list[bool], marked: int, capture: bool
+    ) -> None:
+        # With one attempt only the last reply is used; the extra scripted flag of a one-attempt case is unused.
+        replies = [self._reply(f"resp_{i}", "module a; endmodule", (10, 5)) for i in range(len(parse_failed))]
+        limit_replies = limit_replies[-len(parse_failed) :] if len(parse_failed) == 1 else limit_replies
+
+        result, _, verified, _ = self._run(replies, parse_failed, capture=capture, limit_replies=limit_replies)
+
+        report = FailureHeader.decode(self.run_headers)
+        events = report.events.values() if report is not None else []
+        assert sum(e.operation == "scored_despite_failure" for e in events) == marked
+        # A discarded attempt stays in the report as an ordinary diagnostic, and no failure is selected.
+        assert sum(e.operation == "discarded_attempt" for e in events) == (
+            sum(limit_replies[: len(parse_failed) - 1]) if len(parse_failed) > 1 else 0
+        )
+        assert report is None or report.failure_id is None
+        assert len(verified) == len(parse_failed) and result["reward"] == 0.0  # requests and result as before
 
     def test_recovered_iteration_limit_uses_final_attempt_outcome_and_keeps_both_calls(self) -> None:
         first = self._reply("resp_a", None, None)

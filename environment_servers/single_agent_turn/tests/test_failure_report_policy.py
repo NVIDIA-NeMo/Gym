@@ -557,3 +557,38 @@ async def test_confirmed_sandbox_oom_uses_environment_outcome_policy(action):
         assert partial.failure_report["events"][failure.event_id]["failure_kind"] == PROVIDER_OOM_KILLED
         saved = SandboxObservation.model_validate_json(partial.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY])
         assert saved.failure_id == failure.event_id
+
+
+async def test_the_scored_despite_failure_event_survives_a_return_stage_checkpoint(monkeypatch):
+    from nemo_gym.core import SAVED_FAILURE_REPORT_KEY, RequestFailureLog
+
+    environment, client = _environment_server()
+    response = _agent_response().model_dump(mode="json")
+    response.update(status="failed", error={"code": "server_error", "message": "harness exited with status 3"})
+    client.responses[2] = _Response(response)
+    boundaries = []
+
+    async def record_boundary(self, request, state):
+        boundaries.append(state() if callable(state) else state)
+
+    monkeypatch.setattr(type(environment), "checkpoint_boundary", record_boundary)
+
+    with RequestFailureLog.capture() as log:
+        await environment.run_request(_request())
+
+    (returning,) = [state for state in boundaries if state["next"] == "return"]
+    (original_id,) = [i for i, e in log.report.events.items() if e.operation == "scored_despite_failure"]
+    # The saved report is beside the result, not in it, and holds the event under its id.
+    assert SAVED_FAILURE_REPORT_KEY not in returning["result"]
+    assert list(returning[SAVED_FAILURE_REPORT_KEY]["events"]) == [original_id]
+    # A boundary of a reply without failures carries no report.
+    assert all(SAVED_FAILURE_REPORT_KEY not in state for state in boundaries if state["next"] != "return")
+
+    # A replacement restored at the return stage observes the same event, once, and selects no failure.
+    environment, client = _environment_server()
+    monkeypatch.setattr(type(environment), "checkpoint_continuation", lambda self, request: dict(returning))
+    with RequestFailureLog.capture() as restored:
+        await environment.run_request(_request())
+
+    assert [(i, e.failure_kind) for i, e in restored.report.events.items()] == [(original_id, "agent_run_error")]
+    assert restored.report.failure_id is None

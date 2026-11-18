@@ -370,6 +370,43 @@ class TestApp:
     @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
     @patch("asyncio.to_thread")
+    async def test_a_cached_crash_is_recorded_again(
+        self,
+        mock_to_thread,
+        mock_runner_ray_remote,
+        mock_get_config_path,
+        mock_get_first_server_config_dict,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = create_test_config(env="docker").model_copy(update={"skip_if_exists": True})
+        mock_server_client = MagicMock(spec=ServerClient)
+        server = MiniSWEAgent(config=config, server_client=mock_server_client)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
+        setup_config_path_mock(mock_get_config_path)
+        mock_to_thread.side_effect = Exception("run_swegym failed")
+        run_request = create_run_request(instance_id="cached_instance")
+
+        with RequestFailureLog.capture() as first:
+            await server.run(run_request)
+        mock_to_thread.reset_mock()
+        with RequestFailureLog.capture() as replay:
+            replayed = await server.run(run_request)
+
+        # The run is not repeated; the cached result is returned with the event it was first saved with.
+        mock_to_thread.assert_not_called()
+        assert replayed.reward == 0.0
+        assert "ng_saved_failure_report" not in replayed.model_dump()
+        original = [e for e in first.report.events.items() if e[1].operation == "scored_despite_failure"]
+        cached = [e for e in replay.report.events.items() if e[1].operation == "scored_despite_failure"]
+        assert len(cached) == 1 and cached == original
+        assert replay.report.failure_id is None
+
+    @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
+    @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
+    @patch("asyncio.to_thread")
     async def test_run_swegym_not_found(
         self,
         mock_to_thread,

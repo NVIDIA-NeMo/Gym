@@ -5632,12 +5632,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                                     url_path="/run",
                                     json=request_body,
                                     **({"_resend_after_disconnect": False} if not retry_requests else {}),
+                                    # Observed whether or not the attempts are bounded, so a resent /run is recorded.
+                                    _on_transport_failure=lambda error, _: attempt_errors.append(error),
                                     **(
-                                        {
-                                            "_max_num_tries": _max_num_tries,
-                                            "_retry_other_errors": False,
-                                            "_on_transport_failure": lambda error, _: attempt_errors.append(error),
-                                        }
+                                        {"_max_num_tries": _max_num_tries, "_retry_other_errors": False}
                                         if _max_num_tries is not None
                                         else {}
                                     ),

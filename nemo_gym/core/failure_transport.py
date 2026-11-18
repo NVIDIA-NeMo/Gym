@@ -17,7 +17,7 @@ Flow for one request a Gym server serves:
 import json
 import logging
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -211,6 +211,28 @@ class RequestFailureLog:
             failure_id=None, events=new | kept, omitted=self.report.omitted or omitted
         )
 
+    def discard_scored_despite_failures(self, known_event_ids: Collection[str]) -> None:
+        """Keep the scored-despite-failure events observed since ``known_event_ids`` as ordinary diagnostics.
+
+        A caller that retries an attempt whose result it throws away calls this before the next attempt: what the
+        discarded attempt swallowed no longer describes the result that will be scored, so it must not mark that
+        result. The events stay in the report, with the operation ``DISCARDED_ATTEMPT_OPERATION``.
+        """
+        if not any(
+            event.operation == SCORED_DESPITE_FAILURE_OPERATION and key not in known_event_ids
+            for key, event in self.report.events.items()
+        ):
+            return
+        events = {
+            key: event.model_copy(update={"operation": DISCARDED_ATTEMPT_OPERATION})
+            if event.operation == SCORED_DESPITE_FAILURE_OPERATION and key not in known_event_ids
+            else event
+            for key, event in self.report.events.items()
+        }
+        self.report = FailureReport.model_construct(
+            failure_id=self.report.failure_id, events=events, omitted=self.report.omitted
+        )
+
     def reply_report(self, error: BaseException | None) -> FailureReport:
         """The report for this request's reply: its own failure (``error``, ``None`` on success) and the log."""
         return failure_report_for(error).merged(self.report)
@@ -263,6 +285,10 @@ SCORED_DESPITE_FAILURE_OPERATION = "scored_despite_failure"
 """The ``operation`` of an event that ``observe_scored_despite_failure`` records, so a reader can pick these out."""
 
 
+DISCARDED_ATTEMPT_OPERATION = "discarded_attempt"
+"""The ``operation`` a scored-despite-failure event takes once the attempt that swallowed it was discarded."""
+
+
 def observe_scored_despite_failure(
     *,
     boundary: FailureBoundary | str,
@@ -287,6 +313,36 @@ def observe_scored_despite_failure(
             stage=stage,
         )
     )
+
+
+SAVED_FAILURE_REPORT_KEY = "ng_saved_failure_report"
+"""The key under which a server persists the request's observed failure report beside a result it will replay."""
+
+
+def with_saved_failure_report(payload: dict[str, Any]) -> dict[str, Any]:
+    """``payload`` plus the current request's observed failure events, for a server that persists a result.
+
+    A result served again from disk (a cache hit, a restored checkpoint) did not run again, so the events observed when
+    it ran are saved with it and handed back by ``restore_saved_failure_report``. Nothing is added when none were
+    observed, so a result without failures is saved as before.
+    """
+    log = RequestFailureLog.current()
+    if log is None or not (log.report.events or log.report.omitted):
+        return payload
+    return {**payload, SAVED_FAILURE_REPORT_KEY: log.report.model_dump(mode="json")}
+
+
+def restore_saved_failure_report(payload: dict[str, Any]) -> dict[str, Any]:
+    """Observe the failure events saved with ``payload`` in the current request, and return it without them.
+
+    The events keep their ids, so replaying one result any number of times adds each event once. No ``failure_id`` is
+    selected: the events are diagnostics, as when they were first observed.
+    """
+    saved = payload.pop(SAVED_FAILURE_REPORT_KEY, None)
+    log = RequestFailureLog.current()
+    if saved is not None and log is not None:
+        log.add_saved(saved)
+    return payload
 
 
 class StreamFailureReportReader:

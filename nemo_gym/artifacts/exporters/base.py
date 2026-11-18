@@ -564,6 +564,10 @@ class BaseExporter(Exporter):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if exc_type is not None:
+            # An export that raised did not deliver everything; teardown marks the run failed. The exception still
+            # propagates.
+            self._delivery_failed = True
         self.teardown()
 
 

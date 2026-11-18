@@ -43,6 +43,8 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     observe_scored_despite_failure,
+    restore_saved_failure_report,
+    with_saved_failure_report,
 )
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
@@ -866,7 +868,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
                     with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "r") as f:
                         print(f"Skipping {instance_id} because it already exists")
-                        verify_response = MiniSWEAgentVerifyResponse.model_validate_json(f.read())
+                        # The events observed when it ran are restored, so a cached crash is still recorded.
+                        saved = restore_saved_failure_report(json.loads(f.read()))
+                        verify_response = MiniSWEAgentVerifyResponse.model_validate(saved)
                     return verify_response
 
             #### RUN MINI-SWE-AGENT #####
@@ -945,7 +949,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             output_path.mkdir(parents=True, exist_ok=True)
 
             with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "w") as f:
-                json.dump(verify_response.model_dump(), f)
+                json.dump(with_saved_failure_report(verify_response.model_dump()), f)
 
             return verify_response
 

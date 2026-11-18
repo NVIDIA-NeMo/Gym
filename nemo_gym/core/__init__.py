@@ -87,6 +87,7 @@ if TYPE_CHECKING:
         SdkErrorDetails,
     )
     from nemo_gym.core.failure_transport import (
+        SAVED_FAILURE_REPORT_KEY,
         FailureHeader,
         FailureReportRow,
         RequestFailureLog,
@@ -95,6 +96,8 @@ if TYPE_CHECKING:
         observe_scored_despite_failure,
         reply_failure_report,
         report_for_current_request,
+        restore_saved_failure_report,
+        with_saved_failure_report,
     )
     from nemo_gym.core.media import MediaFile, UnsupportedContentError, split_text_and_media
     from nemo_gym.core.model_call_sampling import (
@@ -318,6 +321,9 @@ _PUBLIC_API = {
     "model_sampling_path_segment": "model_call_sampling",
     "observe_failure": "failure_transport",
     "observe_scored_despite_failure": "failure_transport",
+    "restore_saved_failure_report": "failure_transport",
+    "SAVED_FAILURE_REPORT_KEY": "failure_transport",
+    "with_saved_failure_report": "failure_transport",
     "rebuild_failure": "typed_exceptions",
     "reply_failure_report": "failure_transport",
     "report_for_current_request": "failure_transport",

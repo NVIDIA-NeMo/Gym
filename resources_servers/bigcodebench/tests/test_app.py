@@ -307,10 +307,22 @@ class TestRunnerFailuresAreRecorded:
         (event,) = recorded
         assert event.failure_kind == "verifier_error" and "0.5 s" in event.failure_reason
 
+    async def test_a_runner_that_reports_its_own_error_is_recorded(self, server, tmp_path, monkeypatch) -> None:
+        script = (
+            "import json\n"
+            "print(json.dumps({'status': 'error', 'details': {'traceback': 'ImportError: bigcodebench'}}))\n"
+        )
+        result, recorded = await self._run(server, tmp_path, monkeypatch, script)
+
+        assert result == {"status": "error", "details": {"traceback": "ImportError: bigcodebench"}}  # unchanged
+        (event,) = recorded
+        assert event.failure_kind == "verifier_error" and "ImportError: bigcodebench" in event.failure_reason
+
     async def test_a_runner_that_grades_the_solution_is_not_recorded(self, server, tmp_path, monkeypatch) -> None:
-        for status in ("pass", "fail", "timeout"):  # the runner's own timeout is the solution running too long
+        # The runner's own timeout is the solution running too long; null is its documented no-status result.
+        for status in ("pass", "fail", "timeout", None):
             result, recorded = await self._run(
-                server, tmp_path, monkeypatch, f"import json\nprint(json.dumps({{'status': '{status}'}}))\n"
+                server, tmp_path, monkeypatch, f"import json\nprint(json.dumps({{'status': {status!r}}}))\n"
             )
 
             assert result["status"] == status

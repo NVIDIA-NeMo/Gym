@@ -131,6 +131,13 @@ record the cases they swallow: a crashed harness (`agent_run_error`), a step lim
 answer (`judge_failed`), a verifier that could not run its sandbox (`verifier_error`), an agent that reported failure
 without a classified outcome, and a `/run` that was resent after it may have been delivered.
 
+A result that is served again without running again keeps its events. A server that persists a result it will replay (a
+cache hit, a restored checkpoint) saves the request's events with it using `with_saved_failure_report(payload)` and
+observes them again with `restore_saved_failure_report(payload)`, so the replayed result carries the same events under
+the same ids. When an agent retries an attempt and throws its result away, it calls
+`RequestFailureLog.discard_scored_despite_failures(known_event_ids)` first: what the discarded attempt swallowed stays in
+the report as an ordinary diagnostic (`discarded_attempt`) and does not mark the result that is scored.
+
 ## Causes and transport
 
 An environment uses `handled_episode_failure(...)` with event fields, its local

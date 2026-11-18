@@ -53,6 +53,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseUsage,
+    RequestFailureLog,
     accumulate_response_usage,
     observe_scored_despite_failure,
 )
@@ -494,9 +495,12 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         attempt_usages: list[Optional[NeMoGymResponseUsage]] = []
         invocation: Optional[AgentInvocation] = None
         attempt = 0
+        failure_log = RequestFailureLog.current()
         while True:
             attempt += 1
             replied = False
+            # What this attempt swallows is told apart from what earlier attempts left in the request's log.
+            known_events = set(failure_log.report.events) if failure_log is not None else set()
             try:
                 response = await self.server_client.post(
                     server_name=self.config.name,
@@ -538,6 +542,10 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 if getattr(result, "parse_failed", False) and retries_left > 0:
                     retries_left -= 1
                     print(f"[RETRY] parse_failed for task_id={task_id}, retries_left={retries_left}")
+                    # This attempt's result is discarded, so what it swallowed (a step limit) must not mark the
+                    # result of the attempt that is scored.
+                    if failure_log is not None:
+                        failure_log.discard_scored_despite_failures(known_events)
                     continue
 
                 # Accounted outside the retry handler, so recording evidence can never start another attempt.
@@ -553,6 +561,8 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 if retries_left > 0:
                     retries_left -= 1
                     print(f"[RETRY] exception for task_id={task_id}, retries_left={retries_left}, error={e}")
+                    if failure_log is not None:
+                        failure_log.discard_scored_despite_failures(known_events)
                     continue
                 raise
         return self._with_attempt_evidence(result, body, rollout_id, turns, gaps, attempt_usages, invocation)
