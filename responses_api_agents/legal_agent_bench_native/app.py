@@ -12,13 +12,14 @@ from time import time
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
-from fastapi import Body, HTTPException, Request
+from fastapi import Body, Request
 from pydantic import Field
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SandboxCommand,
@@ -140,16 +141,16 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(409, "Seed a LAB agent session before activation")
+            raise AgentSessionConflictError("Seed a LAB agent session before activation")
         state = self._require_agent_session(session_id)
         if not isinstance(state, LabNativeSession):
             raise TypeError("Expected LAB native session")
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Activation does not match the seeded rollout")
+            raise AgentSessionConflictError("Activation does not match the seeded rollout")
         if state.session.closing:
-            raise HTTPException(409, "LAB agent session is closing")
+            raise AgentSessionConflictError("LAB agent session is closing")
         if state.activation_request is not None and state.activation_request != body:
-            raise HTTPException(409, "Native LAB accepts only one activation per episode")
+            raise AgentSessionConflictError("Native LAB accepts only one activation per episode")
         if state.task is None:
             state.activation_request = body.model_copy(deep=True)
             model_path = self.url_path_for_request("/v1/responses", request)

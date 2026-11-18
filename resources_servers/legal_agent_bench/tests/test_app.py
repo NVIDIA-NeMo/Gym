@@ -59,6 +59,7 @@ async def test_successful_rewards_are_preserved(tmp_path, reward):
         timed_out=False,
         rewards={"reward": reward, "judge_error_count": 0},
         problem=None,
+        separate=True,
     )
     assert result["reward"] == reward
     assert not result.get("mask_sample", False)
@@ -76,6 +77,7 @@ async def test_grading_errors_are_masked_in_the_verifier_result(tmp_path, failur
         timed_out=False,
         rewards={"reward": 0, failure_field: 1},
         problem=None,
+        separate=True,
     )
     assert result["mask_sample"] is True
     assert result["failure_kind"] == "lab_judge_failed"
@@ -159,6 +161,7 @@ async def test_missing_grades_fail_but_measured_timeouts_remain_scoreable(
         timed_out=timed_out,
         rewards=rewards,
         problem="No reward written",
+        separate=True,
     )
     assert bool(outcome.get("mask_sample")) is masked
     assert outcome["reward"] == reward
@@ -197,3 +200,25 @@ async def test_staging_copies_only_public_inputs_using_shared_transfer(tmp_path)
     assert "/workspace/vdr" in commands and "/workspace/skills" in commands
     assert not sandbox.stopped
     await app.shutdown()
+
+
+@pytest.mark.parametrize("separate", [True, False])
+async def test_verifier_unavailable_retains_the_shared_trust_boundary(tmp_path, separate):
+    from environment_servers.harbor.verifier import EXIT_RECORD_NAME, VERIFIER_UNAVAILABLE_KIND
+
+    app = server(tmp_path)
+    (tmp_path / EXIT_RECORD_NAME).write_text("75 100 101")
+    outcome = app._score(
+        SimpleNamespace(task_id="one"),
+        SimpleNamespace(network_mode="public", timeout_sec=30),
+        SandboxExecResult(return_code=75, stdout="", stderr=""),
+        tmp_path,
+        asyncio.get_running_loop().time(),
+        timed_out=False,
+        rewards=None,
+        problem="No reward written",
+        separate=separate,
+    )
+    assert outcome["mask_sample"] is True
+    assert outcome["failure_kind"] == (VERIFIER_UNAVAILABLE_KIND if separate else "lab_judge_failed")
+    assert outcome["verifier_return_code"] == 75

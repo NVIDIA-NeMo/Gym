@@ -166,10 +166,21 @@ class LegalAgentBenchEnvironmentServer(HarborEnvironmentServer):
         timed_out: bool,
         rewards: dict[str, float] | None,
         problem: str | None,
+        separate: bool,
     ) -> dict[str, Any]:
         result = super()._score(
-            task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
+            task,
+            settings,
+            result,
+            logs_dir,
+            started,
+            timed_out=timed_out,
+            rewards=rewards,
+            problem=problem,
+            separate=separate,
         )
+        if result.get("mask_sample"):
+            return result
         missing_aggregate = rewards is None and not timed_out or rewards is not None and "reward" not in rewards
         failed_grading = bool(rewards and (rewards.get("verifier_error") or rewards.get("judge_error_count")))
         if missing_aggregate or failed_grading:

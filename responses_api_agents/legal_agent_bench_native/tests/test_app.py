@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.agents import AgentSeedRejectedError, AgentSeedSessionRequest
+from nemo_gym.agents import AgentSeedRejectedError, AgentSeedSessionRequest, AgentSessionConflictError
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from responses_api_agents.legal_agent_bench_native.app import (
@@ -256,7 +256,7 @@ async def test_close_cancels_running_loop_and_disconnects_borrower():
 
 @pytest.mark.asyncio
 async def test_duplicate_activation_joins_one_loop_and_conflicting_body_is_rejected(monkeypatch):
-    from fastapi import HTTPException, Request
+    from fastapi import Request
 
     runner = agent()
     state = LabNativeSession(request=seed(), session=SimpleNamespace(closing=False))
@@ -275,9 +275,34 @@ async def test_duplicate_activation_joins_one_loop_and_conflicting_body_is_rejec
     body = NeMoGymResponseCreateParamsNonStreaming(input=[])
     first, second = await asyncio.gather(runner.responses(request, body), runner.responses(request, body))
     assert first == second and loop.await_count == 1
-    with pytest.raises(HTTPException) as error:
+    with pytest.raises(AgentSessionConflictError) as error:
         await runner.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="another task"))
     assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize("conflict", ["unseeded", "wrong_rollout", "closing"])
+async def test_activation_session_conflicts_do_not_start_the_loop(monkeypatch, conflict):
+    from fastapi import Request
+
+    runner = agent()
+    state = LabNativeSession(request=seed(), session=SimpleNamespace(closing=conflict == "closing"))
+    monkeypatch.setattr(LegalAgentBenchNativeAgent, "_require_agent_session", lambda self, session_id: state)
+    loop = AsyncMock(return_value=response())
+    monkeypatch.setattr(LegalAgentBenchNativeAgent, "_run_loop", loop)
+    request = Request(
+        {
+            "type": "http",
+            "session": {} if conflict == "unseeded" else {"agent_session_id": "a"},
+            "path_params": {"rollout_id": "other" if conflict == "wrong_rollout" else "r"},
+            "headers": [],
+            "path": "/rollouts/r/v1/responses",
+        }
+    )
+    with pytest.raises(AgentSessionConflictError) as error:
+        await runner.responses(request, NeMoGymResponseCreateParamsNonStreaming(input=[]))
+    assert error.value.status_code == 409
+    loop.assert_not_called()
+    assert state.task is None and state.activation_request is None
 
 
 @pytest.mark.asyncio
