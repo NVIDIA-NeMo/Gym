@@ -38,7 +38,9 @@ from tests.session_harness_profiles import (
 @pytest.mark.parametrize("agent", HARNESSES)
 def test_profile_is_not_a_standalone_agent_variant(agent: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(REPO_ROOT)
-    assert list(discover_agents()[agent].variants) == [agent]
+    # OpenCode also ships an explicit legacy episode entry point; profiles remain excluded.
+    expected = ["opencode_agent", "opencode_legacy_agent"] if agent == "opencode_agent" else [agent]
+    assert list(discover_agents()[agent].variants) == expected
 
 
 @pytest.mark.parametrize("agent", HARNESSES)
@@ -58,14 +60,16 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
     assert settings.get("network_access", "inherit") == ("model_only" if agent in MODEL_ONLY_PROFILES else "inherit")
     for key in REQUIRED_SETTINGS[agent]:
         assert settings[key] == REQUIRED_SETTING_VALUES[key]
-    # Hermes derives its TTL from its own timeouts; the others would get OpenSandbox's 10-minute default.
-    assert settings.sandbox_config.get("ttl_s") == (None if agent == "hermes_agent" else 14400)
+    # Hermes and Terminus derive their TTL from their own timeouts; the others would get OpenSandbox's 10-minute
+    # default.
+    assert settings.sandbox_config.get("ttl_s") == (None if agent in {"hermes_agent", "terminus_2_agent"} else 14400)
     if agent == "claude_code_agent":
         assert settings.claude_code_version == "2.1.108"
         assert settings.model_server.name == "policy_model"
     environment = get_first_server_config_dict(config, HLE_ENVIRONMENT)
     assert environment.agent_server.name == composed
-    assert list(environment.resources_tool_transports) == []
+    # HLE's judge serves no tools, so its Environment Server sets no transports and grants none.
+    assert list(environment.get("resources_tool_transports", [])) == []
     # Sandboxes reach the model server at the caller's address; the head server and the agent stay on loopback.
     assert config.head_server.host == "127.0.0.1"
     assert settings.host == "127.0.0.1"

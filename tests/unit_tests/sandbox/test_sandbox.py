@@ -858,6 +858,22 @@ def test_resolve_provider_volume_sources() -> None:
         resolve_provider_volume_sources({"opensandbox": {}, "volume_sources": {"pgdata": {"path": "x"}}})
 
 
+def test_async_sandbox_start_uploads_spec_files_byte_for_byte() -> None:
+    class RecordingProvider(TransferOnlySandboxProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.uploaded: dict[str, bytes] = {}
+
+        async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+            self.uploaded[target_path] = source_path.read_bytes()
+
+    png = b"\x89PNG\r\n\x1a\n\x00\xff\xfe"
+    provider = RecordingProvider()
+    files = {"/remote/image.png": png, "/remote/note.txt": "héllo"}
+    asyncio.run(AsyncSandbox(provider).start(SandboxSpec(image="image:tag", files=files)))
+    assert provider.uploaded == {"/remote/image.png": png, "/remote/note.txt": "héllo".encode()}
+
+
 def test_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: Path) -> None:
     asyncio.run(_assert_async_sandbox_transfer_fallback_and_unknown_status(tmp_path))
 
@@ -982,6 +998,26 @@ def test_sync_loop_runner_times_out_async_operations() -> None:
         runner.close()
 
 
+def test_sync_loop_runner_keeps_a_timeout_raised_by_the_operation() -> None:
+    # On Python 3.11+ the wait's FutureTimeoutError is the builtin TimeoutError, so an
+    # operation's own TimeoutError must not be reported as a sync-loop wait timeout.
+    runner = _AsyncLoopRunner()
+
+    async def provider_timeout() -> None:
+        raise TimeoutError("e2b command did not complete")
+
+    def call_timeout() -> None:
+        raise TimeoutError("e2b command did not complete")
+
+    try:
+        with pytest.raises(TimeoutError, match="^e2b command did not complete$"):
+            runner.run("exec", provider_timeout)
+        with pytest.raises(TimeoutError, match="^e2b command did not complete$"):
+            runner.call("exec", call_timeout)
+    finally:
+        runner.close()
+
+
 def test_sync_sandbox_file_operations(tmp_path: Path) -> None:
     provider = FakeSandboxProvider()
     with Sandbox(provider) as sandbox:
@@ -1066,6 +1102,120 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
 
 
 @requires_tenacity
+def _opensandbox_create_kwargs(monkeypatch, spec: SandboxSpec, **provider_options: Any) -> dict[str, Any]:
+    opensandbox_provider_module, OpenSandboxProvider, _, _ = _require_opensandbox_provider()
+
+    class FakeSDKSandbox:
+        create_calls: list[dict[str, Any]] = []
+
+        def __init__(self, sandbox_id: str) -> None:
+            self.id = sandbox_id
+
+        @classmethod
+        async def create(cls, **kwargs: Any) -> "FakeSDKSandbox":
+            cls.create_calls.append(kwargs)
+            return cls("sdk-sandbox-1")
+
+    monkeypatch.setattr(
+        opensandbox_provider_module,
+        "_require_opensandbox_sdk",
+        lambda: (FakeSDKSandbox, object, object, object, object),
+    )
+    provider = OpenSandboxProvider(probe={"command": None})
+    monkeypatch.setattr(provider, "_connection_config", lambda request_timeout_s=None: object())
+    asyncio.run(provider.create(spec))
+    return FakeSDKSandbox.create_calls[0]
+
+
+def test_opensandbox_create_without_entrypoint_runs_the_keepalive_loop(monkeypatch) -> None:
+    from nemo_gym.sandbox.providers.opensandbox.provider import DEFAULT_KEEPALIVE_ENTRYPOINT
+
+    kwargs = _opensandbox_create_kwargs(monkeypatch, SandboxSpec(image="image:tag"))
+
+    assert kwargs["entrypoint"] == list(DEFAULT_KEEPALIVE_ENTRYPOINT)
+    assert kwargs["entrypoint"] != ["tail", "-f", "/dev/null"]
+
+
+def test_opensandbox_create_keeps_an_explicit_entrypoint(monkeypatch) -> None:
+    kwargs = _opensandbox_create_kwargs(monkeypatch, SandboxSpec(image="image:tag", entrypoint=["python", "app.py"]))
+
+    assert kwargs["entrypoint"] == ["python", "app.py"]
+
+
+def test_opensandbox_create_from_a_snapshot_leaves_the_entrypoint_to_the_snapshot(monkeypatch) -> None:
+    kwargs = _opensandbox_create_kwargs(monkeypatch, SandboxSpec(provider_options={"snapshot_id": "snapshot-1"}))
+
+    assert "entrypoint" not in kwargs
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="reads the process table from /proc")
+def test_opensandbox_keepalive_survives_killing_a_process_that_matches_tail() -> None:
+    """``pkill -9 -f tail`` ended the sandbox with exit 137 while the entrypoint was ``tail -f /dev/null``.
+
+    ``pkill -f`` matches the pattern against each process's full command line, so this applies the same match to the
+    keep-alive's own process tree (not to the host's processes) and kills what it finds.
+    """
+    import signal
+    import subprocess
+    import time
+
+    import psutil
+
+    from nemo_gym.sandbox.providers.opensandbox.provider import DEFAULT_KEEPALIVE_ENTRYPOINT
+
+    def wait_for(predicate, what: str):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            value = predicate()
+            if value:
+                return value
+            time.sleep(0.05)
+        raise AssertionError(f"timed out waiting for {what}")
+
+    def tree(root: psutil.Process) -> list[psutil.Process]:
+        return [root, *root.children(recursive=True)]
+
+    def pkill_f(root: psutil.Process, pattern: str) -> list[int]:
+        killed = []
+        for process in tree(root):
+            try:
+                if pattern in " ".join(process.cmdline()):
+                    process.send_signal(signal.SIGKILL)
+                    killed.append(process.pid)
+            except psutil.NoSuchProcess:
+                pass
+        return killed
+
+    entrypoint = subprocess.Popen(list(DEFAULT_KEEPALIVE_ENTRYPOINT), start_new_session=True)
+    try:
+        root = psutil.Process(entrypoint.pid)
+        first_sleep = wait_for(lambda: root.children(), "the loop to start its first sleep")[0]
+
+        assert pkill_f(root, "tail") == []
+        assert entrypoint.poll() is None
+
+        first_sleep.kill()
+        second_sleep = wait_for(
+            lambda: [child for child in root.children() if child.pid != first_sleep.pid], "the loop to restart sleep"
+        )[0]
+        assert second_sleep.pid != first_sleep.pid
+        assert entrypoint.poll() is None
+
+        # The old entrypoint is what the same match used to take down.
+        old = subprocess.Popen(["tail", "-f", "/dev/null"], start_new_session=True)
+        try:
+            assert pkill_f(psutil.Process(old.pid), "tail") == [old.pid]
+            assert wait_for(lambda: old.poll() is not None, "tail to die") is True
+            assert old.returncode == -signal.SIGKILL
+        finally:
+            if old.poll() is None:
+                old.kill()
+            old.wait()
+    finally:
+        os.killpg(entrypoint.pid, signal.SIGKILL)
+        entrypoint.wait()
+
+
 def test_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch))
 

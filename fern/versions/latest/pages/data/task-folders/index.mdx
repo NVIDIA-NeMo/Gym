@@ -1,0 +1,27 @@
+---
+title: "Harbor Task Folders"
+description: "Write, validate and run tasks as task folders in the Harbor format, on the harbor Environment Server."
+position: 3
+---
+
+A task folder holds everything one task needs: the instruction, the container the agent works in, the tests that score
+it and, optionally, a reference solution. Because each task brings its own environment and tests, there's no server to
+write.
+
+Tasks that share one verifier and toolset, such as math, instruction following or tool calling, fit
+[JSONL Datasets](/main/data/jsonl) better.
+
+## Guides
+
+| Page | Read it when |
+| --- | --- |
+| [Author Task Folders](/main/data/task-folders/harbor-tasks) | You are writing your first task: scaffold a dataset, write a task, check it and run an agent on it. Already use Harbor? Start at [Coming from Harbor](/main/data/task-folders/harbor-tasks#coming-from-harbor). |
+| [Task Folder Format](/main/data/task-folders/task-folder-format) | You need a file or a setting: the folder layout, `task.toml`, `dataset.toml` and Dockerfile modes. |
+| [Task Folder Verifiers](/main/data/task-folders/task-folder-verifiers) | You are writing `tests/`: reward files, Python verifiers, and shared or separate verification. |
+| [Multi-Step Task Folders](/main/data/task-folders/multi-step-tasks) | A task runs several steps in one sandbox. |
+| [Multi-Container Tasks](/main/data/task-folders/compose-tasks) | A task needs sidecar services from a Compose file. |
+| [Task Folder Patterns](/main/data/task-folders/task-folder-patterns) | You want parameterized tasks, typed task fields, task MCP tools or shared verifier code. |
+
+You pick the harness that runs the tasks with `--agent`; [Integrate Existing Agents](/main/agent-server/integrate-existing-agents#sandboxed-harnesses)
+lists which harnesses run task folders. [Harbor Environment Server](/main/agent-interactions/harbor) explains how an
+episode runs.

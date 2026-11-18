@@ -230,3 +230,52 @@ Older SkillsBench configurations using `harbor_agent`, `instance_id`, or
 `harbor_*` forwarding fields must be re-prepared and migrated to the native
 Harbor `job` configuration shown here. Existing benchmark scores should retain
 the adapter version with their provenance; this migration is not a new baseline.
+
+## Runtime recovery and qualification
+
+OpenHands uses its native LLM summarizing condenser with the same model and
+rollout capture URL as task execution. Self-hosted model aliases retain
+interleaved reasoning, and seeded repeats forward their seed to the SDK.
+`skillsbench_max_output_tokens` controls the per-request output limit (default
+32768); `skillsbench_llm_timeout_s` retains the existing 3600-second request
+budget. The task's official agent deadline and resource limits do not change.
+
+Terminal observations carry completion status and the current directory in the
+SDK metadata. Terminal action timeouts are soft waits: the command keeps running,
+returns status -1, and an empty terminal action polls its eventual output. A new
+foreground command is refused until that result is collected. Output is buffered
+until completion; interactive key input is unavailable. The official task deadline
+still deletes the sandbox and joins the worker, including a command left pending
+when the conversation finishes. Provider timeouts remain infrastructure failures.
+A removed current directory is a recoverable tool error. A sandbox
+transport failure stops the conversation and disposes the sandbox; it cannot be
+converted into an agent-deadline score. Cancellation also stops further model
+retries and joins the SDK worker before returning.
+
+OpenSandbox uses process-level OOM killing and checks `memory.oom.group=0` at
+startup so an agent command cannot take down the exec daemon with it. Task CPU,
+memory, disk, and time limits stay official. A typed provider OOM report
+does not establish task-limit versus node-pressure attribution at this Harbor
+boundary: it stays unscored and terminal for review. The provider retains its
+shared failure contract and trusted current-container evidence checks. Disk
+exhaustion, node eviction, and transport errors remain infrastructure failures
+unless Harbor reports a normal graded outcome; text in a command-status HTTP
+410 body cannot establish a model fault. An unknown command exit (-1) discards
+the sandbox before verification. A narrowly recognized transient Maven transfer failure in a failed
+verifier assertion is also infrastructure failure; its original result is kept
+as `result.failed.json`.
+
+The OpenSandbox environment records the native verifier command's actual exit
+on the host, outside sandbox-downloadable logs. Only a record inside the trial's
+completed verification phase supplies test-execution evidence; rewards and genuine
+nonzero command exits are preserved. Historical runs without this record remain
+unverified. SDK action/message response IDs identify policy calls for trajectory
+collection, while the wrapped LLM is explicitly registered with OpenHands' token
+accounting. This registration preserves the SDK's built-in prompt and condenser.
+
+Qualification must retain the resolved config, aggregate metrics, rollout health
+summary, and evidence-gate report from the exact candidate revision. Historical
+runs of a private branch are supporting regression evidence, not certificates
+for a new pin. OpenHands/Harbor is not registered in the P0 conformance registry;
+the evidence-gate result is informational and any gaps still require explicit
+acceptance by the benchmark owner.

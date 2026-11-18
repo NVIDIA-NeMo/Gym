@@ -1,0 +1,364 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Where the policy's code runs in the coding scenarios: a sandbox, never this host.
+
+The upstream harness runs the policy's code in python subprocesses (pytest in the policy's workspace, and the probes of a
+few checkers). The agent starts the harness through boxed_cli.py, which sends each of those subprocesses to the agent's
+/ci_exec route instead. There the workspace goes into one sandbox per phase, the command runs in it, and its output and
+the files it changed come back, so the harness sees the directory as if the command had run in it.
+
+The sandbox must have no network: a probe checks it when the sandbox starts. A provider failure, a sandbox with egress or
+a run that changes too much is a SandboxExecError, which fails the episode (an evaluation failure, not a policy
+failure). The code never falls back to this host.
+"""
+
+import asyncio
+import base64
+import json
+import logging
+import shlex
+import tempfile
+import uuid
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from nemo_gym.agents import lifecycle_observation
+from nemo_gym.sandbox import AsyncSandbox, SandboxProvider, SandboxSpec, create_provider
+
+
+logger = logging.getLogger(__name__)
+
+# the wrapper, the runtime and the run directories live here: root's, mode 0755, so the policy's uid cannot plant a
+# module the root wrapper would import
+CONTROL_DIR = "ci-ctl"
+RUNTIME_DIR = "_rt"
+# the policy's commands run as this user, so they cannot change the wrapper, the runtime or the report. A uid no account
+# in the image has (the wrapper checks), so killing what its commands leave behind never hits a service of the sandbox.
+POLICY_UID = 10001
+RUNS_DIR = "runs"
+# the changed files of one run that come back, in bytes
+MAX_CHANGED_BYTES = 8 * 1024 * 1024
+# one stop attempt; one that runs longer is kept and retried at close, and the spec's ttl is the backstop
+STOP_TIMEOUT_S = 120
+# a connect() to a public address, on a port that is not DNS (a deny policy still lets port 53 through): "egress" if it
+# succeeds
+EGRESS_PROBE = (
+    "import socket\n"
+    "try:\n"
+    "    socket.create_connection(('1.1.1.1', 443), 3).close()\n"
+    "    print('egress')\n"
+    "except OSError:\n"
+    "    print('blocked')\n"
+)
+# runs in the sandbox for one command ("@python" is its interpreter, "@dir" the unpacked workspace): unpack the
+# workspace, run, report the output and the files the run changed
+WRAPPER = """import base64, hashlib, json, os, pwd, shutil, subprocess, sys, tarfile, time
+a = json.loads(base64.b64decode(sys.argv[1]))
+d, uid = a["dir"], a["policy_uid"]
+if uid is not None and uid in [u.pw_uid for u in pwd.getpwall()]:
+    print(json.dumps({"uid_in_use": True}))
+    sys.exit(0)
+if uid is not None and os.geteuid() != 0:
+    print(json.dumps({"not_root": True}))
+    sys.exit(0)
+os.makedirs(d)
+with tarfile.open(a["tar"]) as t:
+    t.extractall(d, filter="data")
+os.remove(a["tar"])
+if uid is not None:  # only the workspace is the policy's: this file, the runtime and the report stay root's
+    for root, dirs, names in os.walk(d):
+        for p in [root] + [os.path.join(root, n) for n in dirs + names]:
+            os.lchown(p, uid, uid)
+
+
+def policy_alive():  # the uid's processes, zombies left out
+    alive = []
+    for p in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            with open("/proc/" + p + "/stat") as f:
+                state = f.read().rsplit(")", 1)[1].split()[0]
+            if os.stat("/proc/" + p).st_uid == uid and state != "Z":
+                alive.append(p)
+        except (OSError, IndexError):
+            pass
+    return alive
+
+
+# A process the command left behind could change a later command's workspace. Signal every process of the uid as that
+# uid (kill -1), and again until none is left, since one forked during a pass survives it.
+def kill_policy():
+    for _ in range(50):
+        if not policy_alive():
+            return True
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.setgid(uid)
+                os.setuid(uid)
+                os.kill(-1, 9)
+            finally:
+                os._exit(0)
+        os.waitpid(pid, 0)
+        time.sleep(0.1)
+    return not policy_alive()
+
+
+def snapshot():
+    out = {}
+    for root, dirs, names in os.walk(d):
+        dirs[:] = [x for x in dirs if x not in ("__pycache__", ".pytest_cache")]
+        for n in names:
+            p = os.path.join(root, n)
+            if os.path.isfile(p) and not os.path.islink(p):
+                with open(p, "rb") as f:
+                    out[os.path.relpath(p, d)] = hashlib.sha256(f.read()).hexdigest()
+    return out
+
+
+before = snapshot()
+argv = [sys.executable if x == "@python" else x.replace("@dir", d) for x in a["argv"]]
+env = {k: v.replace("@dir", d) for k, v in a["env"].items()}
+env |= {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": a["pythonpath"]}
+drop = {"user": uid, "group": uid, "extra_groups": []} if uid is not None else {}
+try:
+    r = subprocess.run(argv, cwd=d, capture_output=True, text=True, errors="replace", timeout=a["timeout"], env=env,
+                       check=False, **drop)
+    res = {"rc": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+except subprocess.TimeoutExpired:
+    res = {"rc": None, "stdout": "", "stderr": ""}
+if uid is not None and not kill_policy():
+    res["leftover"] = True
+after = snapshot()
+changed, size = {}, 0
+for n, h in after.items():
+    if before.get(n) != h:
+        with open(os.path.join(d, n), "rb") as f:
+            data = f.read()
+        size += len(data)
+        if size > a["max_bytes"]:
+            res["too_large"] = True
+            break
+        changed[n] = base64.b64encode(data).decode()
+res["changed"] = changed
+res["deleted"] = sorted(set(before) - set(after))
+shutil.rmtree(d, ignore_errors=True)
+print(json.dumps(res))
+"""
+
+
+class SandboxExecError(RuntimeError):
+    """The code could not run in the sandbox: a provider failure, a sandbox with egress, or a request that does not fit.
+    Never a policy outcome."""
+
+
+class _ProviderError(SandboxExecError):
+    """The provider failed a start or a command, rather than the sandbox being unfit: a fresh sandbox may work."""
+
+
+def _runtime_unpack(tar: str, target: str) -> str:
+    return (
+        f"python -c \"import sys, tarfile; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter='data')\" "
+        f"{shlex.quote(tar)} {shlex.quote(target)}"
+    )
+
+
+class BoxedExec:
+    """One sandbox per phase, created when the phase's first command arrives and stopped when the phase ends.
+
+    A box is dropped only once its stop succeeded, so a later release or close retries a failed one. An ended phase
+    takes no more commands, and a box that finished starting after its phase ended is stopped, not used."""
+
+    def __init__(
+        self,
+        provider: Mapping[str, Any] | SandboxProvider,
+        spec: SandboxSpec,
+        *,
+        require_no_egress: bool = True,
+        start_retries: int = 2,
+    ) -> None:
+        self._provider = create_provider(provider) if isinstance(provider, Mapping) else provider
+        self._spec = spec
+        self._require_no_egress = require_no_egress
+        self._start_retries = max(start_retries, 0)
+        self._workdir = (spec.workdir or "/tmp").rstrip("/")
+        self._control = f"{self._workdir}/{CONTROL_DIR}"
+        self._boxes: dict[str, AsyncSandbox] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._ended: set[str] = set()
+        self._failed: set[str] = set()  # phases with a command that failed in the sandbox
+        self._unstopped: list[AsyncSandbox] = []  # boxes that never served a phase and whose stop failed
+
+    async def _put(self, box: AsyncSandbox, data: bytes, remote: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="ci-box-upload-") as tmp:
+            local = Path(tmp) / "payload"
+            local.write_bytes(data)
+            await box.upload(local, remote)
+
+    async def _sh(self, box: AsyncSandbox, command: str, *, timeout_s: float = 120) -> str:
+        result = await box.exec(command, cwd=self._workdir, timeout_s=timeout_s)
+        if result.error_type is not None or result.return_code != 0:
+            raise _ProviderError(f"sandbox command failed ({result.error_type or result.return_code})")
+        return result.stdout or ""
+
+    async def _start(self, phase: str, runtime: bytes | None) -> AsyncSandbox:
+        """The phase's sandbox, with the runtime (pytest and its pure-python dependencies) unpacked in it. A provider
+        failure is retried on a fresh sandbox, start_retries times."""
+        async with self._locks.setdefault(phase, asyncio.Lock()):
+            if phase in self._ended:
+                raise SandboxExecError("the phase has ended")
+            if phase in self._boxes:
+                return self._boxes[phase]
+            if runtime is None:
+                raise SandboxExecError("the first command of a phase must carry the runtime")
+            for attempt in range(self._start_retries + 1):
+                try:
+                    box = await self._new_box(runtime)
+                    break
+                except _ProviderError as exc:
+                    if attempt == self._start_retries:
+                        raise SandboxExecError(str(exc)) from None
+                    logger.warning("collab_intel %s, retrying on a fresh sandbox", exc)
+            if phase in self._ended:  # the phase ended while its sandbox was starting
+                await self._stop_or_keep(box)
+                raise SandboxExecError("the phase has ended")
+            self._boxes[phase] = box
+            return box
+
+    async def _new_box(self, runtime: bytes) -> AsyncSandbox:
+        box = AsyncSandbox(self._provider, owns_provider=False)
+        try:
+            await box.start(self._spec)
+        except Exception as exc:
+            await self._stop_or_keep(box)
+            raise _ProviderError(f"sandbox did not start ({type(exc).__name__})") from None
+        try:
+            probe = (await self._sh(box, f"python -c {shlex.quote(EGRESS_PROBE)}")).strip()
+            if probe not in ("blocked", "egress"):
+                raise SandboxExecError("the sandbox has no working python")
+            if probe == "egress" and self._require_no_egress:
+                raise SandboxExecError(
+                    "the sandbox can open connections to other hosts: set a network policy that blocks them in "
+                    "sandbox_spec.provider_options, or require_no_egress: false to run with egress"
+                )
+            if probe == "egress":
+                logger.warning("collab_intel sandbox has network egress (require_no_egress is false)")
+            ctl = self._control
+            await self._sh(box, f"mkdir -m 0755 {ctl} {ctl}/{RUNTIME_DIR} {ctl}/{RUNS_DIR}")  # fails if planted
+            await self._put(box, runtime, f"{ctl}/{RUNTIME_DIR}.tar")
+            await self._sh(box, _runtime_unpack(f"{ctl}/{RUNTIME_DIR}.tar", f"{ctl}/{RUNTIME_DIR}"))
+            await self._put(box, WRAPPER.encode(), f"{ctl}/wrap.py")
+        except BaseException as exc:
+            await self._stop_or_keep(box)
+            if isinstance(exc, (SandboxExecError, asyncio.CancelledError)):
+                raise  # an unfit sandbox (egress, no python) is not retried: a fresh one would be the same
+            raise _ProviderError(f"sandbox setup failed ({type(exc).__name__})") from None
+        return box
+
+    async def run(self, phase: str, request: dict[str, Any]) -> dict[str, Any]:
+        """One command of the harness: request has argv ("@python" for the interpreter), env, timeout, a tar of the
+        workspace (files), and on the phase's first command the runtime tar. Returns the exit code (None on a
+        timeout), stdout, stderr, the changed files by relative path (base64) and the deleted paths."""
+        if phase in self._ended:
+            raise SandboxExecError("the phase has ended")
+        try:
+            return await self._run(phase, request)
+        except SandboxExecError:
+            self._failed.add(phase)
+            raise
+
+    async def _run(self, phase: str, request: dict[str, Any]) -> dict[str, Any]:
+        try:
+            runtime = base64.b64decode(request["runtime"]) if request.get("runtime") else None
+            box = await self._start(phase, runtime)
+            run_dir = f"{self._control}/{RUNS_DIR}/{uuid.uuid4().hex}"
+            await self._put(box, base64.b64decode(request["files"]), f"{run_dir}.tar")
+            args = {
+                "dir": run_dir,
+                "tar": f"{run_dir}.tar",
+                "argv": request["argv"],
+                "env": request["env"],
+                "timeout": request["timeout"],
+                "pythonpath": f"{self._control}/{RUNTIME_DIR}",
+                "max_bytes": MAX_CHANGED_BYTES,
+                "policy_uid": POLICY_UID,
+            }
+            encoded = base64.b64encode(json.dumps(args).encode()).decode()
+            out = await self._sh(
+                box,
+                f"python -I {shlex.quote(self._control + '/wrap.py')} {shlex.quote(encoded)}",
+                timeout_s=request["timeout"] + 120,
+            )
+            result = json.loads(out.strip().splitlines()[-1])
+        except SandboxExecError:
+            raise
+        except (KeyError, ValueError, TypeError) as exc:
+            raise SandboxExecError(f"bad sandbox run ({type(exc).__name__})") from None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise SandboxExecError(f"sandbox run failed ({type(exc).__name__})") from None
+        if result.get("not_root"):
+            raise SandboxExecError(
+                "the sandbox does not run commands as root, so the policy's code could change the wrapper and its report"
+            )
+        if result.get("uid_in_use"):
+            raise SandboxExecError(f"uid {POLICY_UID} belongs to an account of the sandbox image: use another image")
+        if result.get("leftover"):
+            raise SandboxExecError("processes the command started survived every kill: the sandbox is not reusable")
+        if result.pop("too_large", False):
+            raise SandboxExecError(f"the command changed more than {MAX_CHANGED_BYTES} bytes of files")
+        return result
+
+    async def _stop(self, box: AsyncSandbox) -> bool:
+        try:
+            await asyncio.wait_for(box.stop(), STOP_TIMEOUT_S)  # a hung delete must not hold the phase's release
+            return True
+        except Exception as exc:  # kept for a later retry; the spec's ttl is the backstop
+            logger.warning("collab_intel sandbox stop failed (%s)", type(exc).__name__)
+            return False
+
+    async def _stop_or_keep(self, box: AsyncSandbox) -> None:
+        if not await self._stop(box):
+            self._unstopped.append(box)
+
+    async def release(self, phase: str) -> dict[str, Any] | None:
+        """End the phase and stop its sandbox. Idempotent: a call after a failed stop retries it. Returns the
+        sandbox's observation (None if the phase had none): completed, or sandbox_error if a command or the stop
+        failed."""
+        self._ended.add(phase)
+        self._locks.pop(phase, None)
+        box = self._boxes.get(phase)
+        if box is None:
+            return None
+        if await self._stop(box):
+            self._boxes.pop(phase, None)
+        observation = lifecycle_observation(box, role="agent")
+        if observation is not None and observation["outcome"] == "unknown":
+            observation["outcome"] = "sandbox_error" if phase in self._failed else "completed"
+        return observation
+
+    async def close(self) -> None:
+        for phase in list(self._boxes):
+            await self.release(phase)
+        self._unstopped = [box for box in self._unstopped if not await self._stop(box)]
+        if self._boxes or self._unstopped:
+            logger.warning(
+                "collab_intel: %d sandboxes did not stop, left to their ttl", len(self._boxes) + len(self._unstopped)
+            )
+        try:
+            await self._provider.aclose()
+        except Exception as exc:
+            logger.warning("sandbox provider close failed (%s)", type(exc).__name__)

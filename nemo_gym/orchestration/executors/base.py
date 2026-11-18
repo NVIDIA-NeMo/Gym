@@ -21,6 +21,14 @@ from typing import Any, ClassVar
 import yaml
 from pydantic import BaseModel
 
+from nemo_gym.eval.recovery.budgets import OperatorBudget
+from nemo_gym.eval.recovery.decision import (
+    RecoveryAction,
+    RecoveryDecision,
+    RecoveryOutcome,
+)
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
 from nemo_gym.orchestration.jobs import (
     MANIFEST_NAME,
@@ -29,14 +37,6 @@ from nemo_gym.orchestration.jobs import (
     SubmissionEnvironment,
     SubmissionRecord,
     SubmissionTelemetry,
-)
-from nemo_gym.orchestration.recovery import (
-    CollectedEvidence,
-    OperatorBudget,
-    RecoveryAction,
-    RecoveryDecision,
-    RecoveryOutcome,
-    RecoveryOutcomePolicyConfig,
 )
 
 
@@ -71,7 +71,7 @@ class BaseExecutor(ABC):
 
     def installed_commit(self) -> str | None:
         """The Gym commit this launcher runs, as ``installed_gym_commit`` reports it."""
-        from nemo_gym.orchestration.jobs import installed_gym_commit
+        from nemo_gym.utils.gym_commit import installed_gym_commit
 
         return installed_gym_commit()
 

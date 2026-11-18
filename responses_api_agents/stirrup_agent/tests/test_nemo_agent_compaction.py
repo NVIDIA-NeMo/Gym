@@ -4,9 +4,13 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import json
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from openai import APIStatusError, AsyncOpenAI
+from pydantic import BaseModel
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -14,17 +18,21 @@ from stirrup.core.models import (
     SummaryMessage,
     SystemMessage,
     TokenUsage,
+    Tool,
+    ToolCall,
     ToolMessage,
     UserMessage,
 )
 from stirrup.prompts import MESSAGE_SUMMARIZER
 
 from responses_api_agents.stirrup_agent.nemo_agent import (
+    CompactionSummaryError,
     NeMoAgent,
     NeMoSessionAgent,
     _is_meaningful_compaction_summary,
     _sanitize_compaction_summary,
 )
+from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
 
 
 def _words(count: int) -> str:
@@ -190,8 +198,10 @@ async def test_summarization_fails_closed_after_three_degenerate_outputs() -> No
     agent = _agent(client, logger, min_words=50)
     metadata = {"assistant-1": {"code_exec": []}}
 
-    with pytest.raises(RuntimeError, match="usable text after 3 attempts"):
+    with pytest.raises(CompactionSummaryError, match="usable text after 3 attempts") as raised:
         await agent.summarize_messages(_history(), metadata)
+
+    assert raised.value.messages == _history()
 
     assert len(client.calls) == 3
     assert metadata == {"assistant-1": {"code_exec": []}}
@@ -219,6 +229,126 @@ async def test_summarization_preserves_context_overflow_unwind_semantics() -> No
     assert "assistant-2" not in metadata
     assert any(isinstance(message, SummaryMessage) for message in compacted)
     assert len(client.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_http_context_rejection_compacts_after_unwinding_only_the_latest_turn() -> None:
+    """Exercise SDK decoding, the client's opt-in exception and the summarizer's overflow unwind together."""
+    requests = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(
+                400,
+                json={"error": {"code": "context_length_exceeded", "message": "rendered prompt is full"}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "summary-response",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "Keep the first result and continue."},
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
+            },
+        )
+
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="test-model",
+        api_key="test",
+        max_tokens=4096,
+        min_completion_tokens=4096,
+        max_completion_tokens_cap=4096,
+        enable_thinking=True,
+        truncation_recovery=False,
+        context_overflow_recovery=True,
+    )
+    await client._client.close()
+
+    class CodeExecParams(BaseModel):
+        cmd: str
+
+    code_exec = Tool(
+        name="code_exec",
+        description="Run a command.",
+        parameters=CodeExecParams,
+        executor=lambda _: None,
+    )
+    history = [
+        SystemMessage(content="system"),
+        UserMessage(content="original task"),
+        AssistantMessage(
+            id="first",
+            content="first completed turn",
+            tool_calls=[ToolCall(tool_call_id="call-1", name="code_exec", arguments='{"cmd":"true"}')],
+            token_usage=TokenUsage(input=1, answer=1, reasoning=0),
+        ),
+        ToolMessage(content="first result", tool_call_id="call-1", name="code_exec", success=True),
+        _assistant("latest partial work", message_id="latest"),
+    ]
+    metadata = {"first": {"code_exec": ["first-result"]}, "latest": {"discarded": []}}
+    async with AsyncOpenAI(
+        api_key="test",
+        base_url="http://test/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ) as sdk:
+        client._client = sdk
+        agent = NeMoAgent(client=client, name="test_agent", tools=[code_exec], logger=MagicMock())
+        archived, compacted = await agent.summarize_messages(history, metadata)
+
+    assert archived == history[:4]
+    assert len(history) == 5
+    assert metadata == {"first": {"code_exec": ["first-result"]}}
+    assert len(requests) == 2
+    assert requests[0]["messages"][-2]["content"] == [{"type": "text", "text": "latest partial work"}]
+    assert requests[1]["messages"][-2]["content"] == [{"type": "text", "text": "first result"}]
+    assert requests[1]["messages"][-3]["tool_calls"][0]["id"] == "call-1"
+    assert requests[1]["messages"][-2]["tool_call_id"] == "call-1"
+    assert any(tool["function"]["name"] == "code_exec" for tool in requests[1]["tools"])
+    assert all(request["max_completion_tokens"] == 4096 for request in requests)
+    assert all(request["chat_template_kwargs"]["enable_thinking"] for request in requests)
+    assert compacted[:2] == history[:2]
+    summary = next(message for message in compacted if isinstance(message, SummaryMessage))
+    assert "Keep the first result and continue." in summary.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summarized", [False, True])
+async def test_http_context_recovery_cannot_discard_the_only_turn_after_a_progress_boundary(summarized) -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="test-model", api_key="test", truncation_recovery=False, context_overflow_recovery=True
+    )
+    await client._client.close()
+    error = APIStatusError(
+        "rendered prompt is full",
+        response=httpx.Response(400, request=httpx.Request("POST", "http://test/chat/completions")),
+        body={"code": "context_length_exceeded"},
+    )
+    client._client = MagicMock()
+    client._client.chat.completions.create = AsyncMock(side_effect=error)
+    history = [SystemMessage(content="system"), UserMessage(content="original task")]
+    if summarized:
+        history.extend([SummaryMessage(content="earlier progress"), UserMessage(content="Got it, thanks!")])
+    history.append(_assistant("only completed turn", message_id="only"))
+    before = list(history)
+    metadata = {"only": {"work": []}}
+    agent = _agent(client)
+
+    with pytest.raises(ContextOverflowError, match="summarized context" if summarized else "original prompt"):
+        await agent.summarize_messages(history, metadata)
+
+    assert history == before
+    assert metadata == {"only": {"work": []}}
+    assert client._client.chat.completions.create.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -286,3 +416,25 @@ async def test_session_run_replays_only_the_sanitized_summary_after_compaction()
     assert good_summary in serialized_context
     assert "private summary reasoning" not in serialized_context
     assert "<think>" not in serialized_context.lower()
+
+
+@pytest.mark.asyncio
+async def test_summary_exhaustion_after_an_overflow_unwind_preserves_the_original_history() -> None:
+    """The failed compaction reports the turn an overflowing summary request dropped from the summarizer's context."""
+    history = _history()
+    history.extend([_assistant("second turn", message_id="assistant-2"), UserMessage(content="continue")])
+    client = _FakeClient(
+        ContextOverflowError("too large"),
+        AssistantMessage(content="", reasoning=Reasoning(content="reasoning without an answer")),
+        _assistant("<think>unclosed"),
+        _assistant("   "),
+    )
+    agent = _agent(client)
+    metadata = {"assistant-1": {"first": []}, "assistant-2": {"second": []}}
+
+    with pytest.raises(CompactionSummaryError, match="usable text after 3 attempts") as raised:
+        await agent.summarize_messages(history, metadata)
+
+    assert raised.value.messages == history
+    assert len(client.calls) == 4
+    assert "assistant-2" not in metadata

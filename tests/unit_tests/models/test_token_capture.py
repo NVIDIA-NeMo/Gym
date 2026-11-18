@@ -47,13 +47,14 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
 )
 from nemo_gym.models.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     SimpleResponsesAPIModel,
     _request_messages,
 )
-from nemo_gym.models.model_call_capture import CaptureStore
+from nemo_gym.models.model_call_capture import CaptureStore, _reconstruct_streamed_response
 from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.external_capture import TOKEN_FIELDS
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
@@ -77,6 +78,8 @@ from nemo_gym.models.token_capture.records import (
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     UNCOMMITTED_CALL_REASON,
     UNSERVED_CALL_FAILURE_REASONS,
+    CallIdentity,
+    ModelRef,
     ParentResolutionStatus,
     TokenEntry,
     compute_digest,
@@ -87,6 +90,7 @@ from nemo_gym.models.token_capture.records import (
 )
 from nemo_gym.models.token_capture.sink import (
     CaptureContext,
+    _mark_incomplete,
     capture_engine_refusal,
     capture_tokens,
     commit_entry,
@@ -351,7 +355,7 @@ def test_register_call_intent_uses_optional_sink_extension():
     calls: list[tuple[str, str]] = []
 
     class Sink:
-        async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        async def begin_call(self, rollout_id: str, model_call_id: str, *, identity=None) -> None:
             calls.append((rollout_id, model_call_id))
 
     token = set_token_sink(CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink()))
@@ -494,7 +498,7 @@ def test_record_refusal_without_a_lineage_decision_records_no_parent():
 
 def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_dangling(caplog):
     class Sink:
-        async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        async def begin_call(self, rollout_id: str, model_call_id: str, *, identity=None) -> None:
             pass
 
     context = CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink())
@@ -1098,7 +1102,7 @@ def test_parent_resolution_modes(mode):
 
 @pytest.mark.parametrize("staging,backend", [(False, "vllm_worker"), (True, "megatron_worker")])
 def test_source_history_requires_external_vllm_staging(staging, backend):
-    with pytest.raises(ValueError, match="source_history requires external vLLM staging"):
+    with pytest.raises(ValueError, match="source_history requires external vLLM or Dynamo staging"):
         TokenCaptureConfig.model_validate(
             _block(
                 external_staging=staging,
@@ -1329,6 +1333,137 @@ def test_responses_call_captures_tokens_joined_to_eval_record(tmp_path):
     assert tokens[0].model_call_id == records[0].model_call_id
 
 
+def test_two_agent_instances_on_one_model_server_name_every_record(tmp_path):
+    from nemo_gym.models.token_capture.records import ModelRef
+
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    for name in ("assistant", "judge.2"):
+        response = client.post(
+            f"/ng-rollout/two-agents/ng-agent-instance/{name}/training-token-capture/v1/responses",
+            json={"input": name},
+        )
+        assert response.status_code == 200
+
+    entries = TokenCaptureStore(tmp_path).read_entries("two-agents")
+    records = read_model_call_records(CaptureStore(tmp_path), "two-agents")
+    assert sorted((entry.agent_instance, entry.agent_kind) for entry in entries) == [
+        ("assistant", "assistant"),
+        ("judge.2", "judge"),
+    ]
+    assert {entry.model_ref for entry in entries} == {ModelRef(name="srv")}
+    by_call = {record.model_call_id: record for record in records}
+    for entry in entries:
+        assert (by_call[entry.model_call_id].agent_instance, by_call[entry.model_call_id].agent_kind) == (
+            entry.agent_instance,
+            entry.agent_kind,
+        )
+        assert by_call[entry.model_call_id].model_ref.name == "srv"
+    intents = TokenCaptureStore(tmp_path).intents_path_for("two-agents").read_text().splitlines()
+    assert sorted(json.loads(line)["agent_instance"] for line in intents) == ["assistant", "judge.2"]
+
+
+def test_an_unnamed_call_records_only_the_model_server(tmp_path):
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    client.post("/ng-rollout/one-agent/training-token-capture/v1/responses", json={"input": "hi"})
+
+    [entry] = TokenCaptureStore(tmp_path).read_entries("one-agent")
+    payload = entry.model_dump(mode="json")
+    assert "agent_instance" not in payload and "agent_kind" not in payload
+    assert payload["model_ref"] == {"type": "responses_api_models", "name": "srv"}
+    [record] = read_model_call_records(CaptureStore(tmp_path), "one-agent")
+    assert record.agent_instance is None and record.agent_kind is None
+    [exchange] = CaptureStore(tmp_path).read("one-agent")
+    assert "agent_instance" not in exchange and "agent_kind" not in exchange
+    [intent] = TokenCaptureStore(tmp_path).intents_path_for("one-agent").read_text().splitlines()
+    assert json.loads(intent) == {"model_call_id": entry.model_call_id, "model_ref": payload["model_ref"]}
+
+
+_JUDGE = CallIdentity(agent_instance="judge.1", model_ref=ModelRef(name="policy"))
+
+
+def _put_root_entry(store: TokenCaptureStore, rollout_id: str, model_call_id: str) -> None:
+    entry = TokenEntry(
+        capture_key=rollout_id,
+        model_call_id=model_call_id,
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    asyncio.run(store.put(entry))
+
+
+def test_an_intents_file_mixing_bare_and_json_lines_is_read(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    # A rollout whose first intent is a bare call id, the form a call without an identity leaves.
+    store.intents_path_for("resolved").write_bytes(b"bare-1\n")
+    asyncio.run(store.begin_call("resolved", "json-1", identity=_JUDGE))
+    for call_id in ("bare-1", "json-1"):
+        _put_root_entry(store, "resolved", call_id)
+    assert store.freeze_now("resolved").incomplete is False
+
+    for rollout_id, lost in (("bare-lost", None), ("json-lost", _JUDGE)):
+        store.intents_path_for(rollout_id).write_bytes(b"bare-1\n")
+        asyncio.run(store.begin_call(rollout_id, "json-1", identity=_JUDGE))
+        asyncio.run(store.begin_call(rollout_id, "lost", identity=lost))
+        for call_id in ("bare-1", "json-1"):
+            _put_root_entry(store, rollout_id, call_id)
+        assert store.freeze_now(rollout_id).incomplete is True
+
+
+@pytest.mark.parametrize("keep", [40, 1], ids=["mid-object", "first-byte"])
+def test_a_torn_json_intent_line_masks_the_rollout_instead_of_failing_freeze(tmp_path, keep):
+    """A crash during ``begin_call`` can leave part of a line; such a rollout freezes incomplete, every time."""
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(store.begin_call("r", "call-1", identity=_JUDGE))
+    _put_root_entry(store, "r", "call-1")
+    path = store.intents_path_for("r")
+    whole = path.read_bytes()
+    path.write_bytes(whole + whole[:keep])
+
+    assert store.freeze_now("r").incomplete is True
+    assert store.freeze_now("r").incomplete is True
+
+
+def test_a_lost_call_marks_the_rollout_incomplete_under_its_identity(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    context = CaptureContext(
+        capture_key="r1",
+        model_call_id="c9",
+        agent_instance=_JUDGE.agent_instance,
+        model_ref=_JUDGE.model_ref,
+        token_sink=store,
+    )
+
+    assert asyncio.run(_mark_incomplete(context)) is True
+
+    [mark] = store.incomplete_path_for("r1").read_text().splitlines()
+    assert json.loads(mark) == {
+        "model_call_id": "c9",
+        "agent_instance": "judge.1",
+        "agent_kind": "judge",
+        "model_ref": {"type": "responses_api_models", "name": "policy"},
+    }
+    assert store.is_incomplete("r1")
+
+
+def test_a_call_that_raises_is_still_recorded_under_its_agent_instance(tmp_path):
+    class _Failing(_CapturingModel):
+        async def responses(self, request: Request, body=Body()):
+            raise RuntimeError("engine down")
+
+    client = TestClient(
+        _server(_both_enabled(tmp_path), model_cls=_Failing).setup_webserver(), raise_server_exceptions=False
+    )
+    response = client.post(
+        "/ng-rollout/failed/ng-agent-instance/judge.1/training-token-capture/v1/responses", json={"input": "hi"}
+    )
+    assert response.status_code == 500
+
+    [exchange] = CaptureStore(tmp_path).read("failed")
+    assert (exchange["agent_instance"], exchange["agent_kind"]) == ("judge.1", "judge")
+
+
 def test_captured_entry_carries_content(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     client.post("/ng-rollout/task0-rollC/training-token-capture/v1/responses", json={"input": "hi"})
@@ -1552,7 +1687,8 @@ def test_unknown_request_without_response_start_fails_closed(tmp_path):
     app.mount("/silent", silent_app)
     client = TestClient(app)
 
-    with pytest.raises(RuntimeError, match="No response returned"):
+    # No Gym middleware here answers for the app, so the client gets no reply at all.
+    with pytest.raises(AssertionError, match="did not receive any response"):
         client.get("/ng-rollout/silent-roll0/training-token-capture/silent/")
 
     assert TokenCaptureStore(tmp_path).freeze_now("silent-roll0").incomplete is True
@@ -1865,7 +2001,7 @@ class _RecordingSink:
     async def put(self, entry: TokenEntry) -> None:
         self.entries.append(entry)
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         self.incomplete.append((rollout_id, model_call_id))
 
     async def close(self) -> None:
@@ -2458,6 +2594,43 @@ def test_served_calls_link_to_their_parent(tmp_path):
     assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
 
 
+class _BlankTextToolModel(_CapturingModel):
+    """Serve whitespace text before a tool call, as a policy can between its reasoning and the call."""
+
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        response = _training_response(" \n")
+        call = NeMoGymResponseFunctionToolCall(
+            type="function_call", id="call-1", call_id="call-1", name="check", arguments="{}", status="completed"
+        )
+        return response.model_copy(update={"output": [*response.output, call]})
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_messages_echo_with_blank_text_links_to_its_parent(tmp_path, stream):
+    """Serve blank text as generated, so an unchanged Messages echo matches ordinary capture."""
+    client = TestClient(_server(_both_enabled(tmp_path), model_cls=_BlankTextToolModel).setup_webserver())
+    path = "/ng-rollout/blank0/training-token-capture/v1/messages"
+    first = [{"role": "user", "content": "task"}]
+    response = client.post(path, json={"messages": first, "stream": stream, **_MSG_ARGS})
+    served = _reconstruct_streamed_response(response.content, "messages") if stream else response.json()
+    assert [block["type"] for block in served["content"]] == ["text", "tool_use"]
+    result = {"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}
+    second = first + [{"role": "assistant", "content": served["content"]}, {"role": "user", "content": [result]}]
+    client.post(path, json={"messages": second, "stream": stream, **_MSG_ARGS})
+
+    entries = TokenCaptureStore(tmp_path).read_entries("blank0")
+    assert len(entries) == 2
+    assert entries[0].prompt_token_ids == PTOKS
+    assert entries[0].generation_token_ids == GTOKS
+    assert entries[0].generation_log_probs == LPS
+    assert entries[0].token_item_index == 0
+    assert entries[0].output_items[0]["content"][0]["text"] == " \n"
+    assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
+    assert entries[1].parent_call_id == entries[0].model_call_id
+
+
 def test_separate_model_worker_instances_share_committed_lineage(tmp_path):
     config = _both_enabled(tmp_path)
     worker_a = TestClient(_server(config, num_workers=2).setup_webserver())
@@ -2786,7 +2959,7 @@ class _ConfiguredSink:
     async def put(self, entry) -> None:
         type(self).entries.append(entry)
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         pass
 
     async def close(self) -> None:
@@ -2818,7 +2991,7 @@ class _NotASink:
 class _NotCallableSink:
     put = "not a method"
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         pass
 
     async def close(self) -> None:
@@ -2832,7 +3005,7 @@ class _KwargSink:
     async def put(self, entry) -> None:
         pass
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         pass
 
     async def close(self) -> None:

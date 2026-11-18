@@ -1,0 +1,8 @@
+# Original SciCode execution environment. Keep separate from the Python 3.13+ Gym server.
+# SciPy matches NeMo-Skills eval_scicode; newer SciPy removes integrate.simps.
+numpy==1.26.4
+scipy==1.10.1
+matplotlib==3.8.4
+h5py==3.12.1
+sympy==1.12
+networkx==3.2.1

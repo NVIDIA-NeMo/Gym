@@ -1,1 +1,3 @@
-Create `/workspace/shout.txt` containing an uppercase greeting to NeMo Gym.
+Create `/workspace/shout.txt` containing this greeting in uppercase:
+
+Hello from NeMo Gym!
