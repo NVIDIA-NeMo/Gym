@@ -44,7 +44,7 @@ from time import time
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
-from pydantic import Field
+from pydantic import Field, PositiveFloat, PositiveInt
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -284,6 +284,14 @@ class BaseModelServerConfig(BaseResponsesAPIModelConfig):
     openai_api_key: str
     openai_model: str
 
+    # Optional bounds on a call to the endpoint. Each defaults to None, which keeps the client's unbounded behaviour.
+    # request_timeout_seconds limits each HTTP attempt (a timed-out attempt is retried like any other transport
+    # error), max_connection_retries caps how often one call retries a connection error, and
+    # connection_retry_timeout_s caps the wall-clock time it may spend doing so.
+    request_timeout_seconds: Optional[PositiveFloat] = None
+    max_connection_retries: Optional[PositiveInt] = None
+    connection_retry_timeout_s: Optional[PositiveFloat] = None
+
     # Which action wire the trace was shaped on. THE DRIVER MUST MATCH HOW THE
     # TRACE WAS SHAPED, not which benchmark it is: cross them and every forward
     # produces a well-formed action the agent cannot execute. Sets the defaults
@@ -327,6 +335,9 @@ class BaseModelServer(SimpleResponsesAPIModel):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
+            request_timeout_seconds=self.config.request_timeout_seconds,
+            max_connection_retries=self.config.max_connection_retries,
+            connection_retry_timeout_s=self.config.connection_retry_timeout_s,
         )
         self._semaphore = (
             asyncio.Semaphore(self.config.max_concurrent_requests)

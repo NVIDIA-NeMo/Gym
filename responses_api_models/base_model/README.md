@@ -34,6 +34,9 @@ against a path that does not exist, which scores as a quiet 0.
 | `tool_definitions_json` | none | the tool schema as a JSON string, rendered verbatim into the prompt |
 | `max_tool_calls_per_turn` | 3 | calls beyond this in one turn are dropped |
 | `max_tokens`, `temperature`, `top_p` | 1024, 0.6, none | sampling |
+| `request_timeout_seconds` | none | time limit for each HTTP attempt to the endpoint; a timed-out attempt is retried like any other transport error. None means no limit |
+| `max_connection_retries` | none | how often one call retries a connection error before raising it. None retries without limit |
+| `connection_retry_timeout_s` | none | wall-clock seconds one call may spend retrying connection errors. None means no limit |
 
 `configs/base_model.yaml` defines `policy_model`, which reads `policy_base_url` and `policy_model_name` from
 `env.yaml`. The prefix pass@K benchmark (`benchmarks/prefix_pass_k/`) serves checkpoints through this server on both

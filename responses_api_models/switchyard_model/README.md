@@ -120,6 +120,18 @@ such as OpenAI's o-series models.
 ++policy_model.responses_api_models.switchyard_model.sampling_overrides.max_tokens=null
 ```
 
+## Bounding a call
+
+A call to the proxy has no time limit by default. Three optional settings bound it; each is off (`null`) until set:
+
+- `request_timeout_seconds`: time limit for each HTTP attempt. A timed-out attempt is retried like any other transport
+  error, so a call can take about the limit times the number of attempts.
+- `max_connection_retries`: how often one call retries a connection error before raising it.
+- `connection_retry_timeout_s`: wall-clock seconds one call may spend retrying connection errors.
+
+Set `request_timeout_seconds` above the longest generation a route can legitimately take; a shorter limit ends good
+calls as `model_policy_response_timeout` failures.
+
 ## Dependency direction
 
 Gym knows Switchyard; Switchyard does not know Gym.
