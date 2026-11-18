@@ -217,7 +217,7 @@ not sampled and is absent from the backend.
 
 ### Startup Traces
 
-Server startup is its own trace, separate from the `gym.job` trace of the run. Both traces carry the same `run_id`, so a backend can group them.
+Server startup is its own trace, separate from the `gym.job` trace of the run. If the supervisor's environment carries a `TRACEPARENT`, `gym.startup` becomes a child of that span instead of a new root, so the startup joins the trace of whatever launched the supervisor. Both traces carry the same `run_id`, so a backend can group them.
 
 The supervisor, which is the process running `gym env start` or `gym eval run`, opens a `gym.startup` span. Under it, the supervisor adds one span per stage of its own work, such as `spawn_servers` and `wait_for_servers`. It also adds one `gym.startup.server` span per server, which runs from spawning the server to the server's first answered health probe.
 

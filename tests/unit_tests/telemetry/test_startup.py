@@ -39,6 +39,7 @@ from nemo_gym.telemetry import (
 )
 from nemo_gym.telemetry import setup as telemetry_setup  # noqa: E402
 from nemo_gym.telemetry.startup import (  # noqa: E402
+    INBOUND_TRACEPARENT_ENV,
     STARTUP_SERVE_NS_ENV,
     STARTUP_SETUP_DONE_NS_ENV,
     STARTUP_SPAWN_NS_ENV,
@@ -66,7 +67,13 @@ def otel(monkeypatch):
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
     monkeypatch.setattr(startup, "is_span_group_enabled", lambda group: True)
     gym_metrics._INSTRUMENTS.clear()
-    for name in (STARTUP_SPAWN_NS_ENV, STARTUP_SETUP_DONE_NS_ENV, STARTUP_SERVE_NS_ENV, STARTUP_TRACEPARENT_ENV):
+    for name in (
+        STARTUP_SPAWN_NS_ENV,
+        STARTUP_SETUP_DONE_NS_ENV,
+        STARTUP_SERVE_NS_ENV,
+        STARTUP_TRACEPARENT_ENV,
+        INBOUND_TRACEPARENT_ENV,
+    ):
         monkeypatch.delenv(name, raising=False)
 
     class _Collected:
@@ -213,6 +220,31 @@ def test_server_spans_join_the_supervisors_trace_through_the_environment(otel, m
     assert len({span.context.trace_id for span in spans.values()}) == 1
     assert per_server.parent.span_id == root.context.span_id
     assert server_root.parent.span_id == per_server.context.span_id
+
+
+def test_supervisor_startup_joins_the_trace_of_its_launcher_through_the_environment(otel, monkeypatch):
+    launcher = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    monkeypatch.setenv(INBOUND_TRACEPARENT_ENV, launcher)
+    supervisor = SupervisorStartup()
+    supervisor.begin_trace()
+    supervisor.server_env("srv", "resources_servers")
+    supervisor.server_ready("srv")
+    supervisor.finish()
+
+    spans = {span.name: span for span in otel.spans()}
+    root = spans["gym.startup"]
+    assert format(root.context.trace_id, "032x") == "0af7651916cd43dd8448eb211c80319c"
+    assert format(root.parent.span_id, "016x") == "b7ad6b7169203331"
+    assert spans["gym.startup.server"].context.trace_id == root.context.trace_id
+
+
+def test_supervisor_startup_without_a_launcher_context_is_its_own_trace(otel):
+    supervisor = SupervisorStartup()
+    supervisor.begin_trace()
+    supervisor.finish()
+
+    (root,) = [span for span in otel.spans() if span.name == "gym.startup"]
+    assert root.parent is None
 
 
 def test_supervisor_spans_its_stages_and_each_servers_spawn_to_ready(otel):
