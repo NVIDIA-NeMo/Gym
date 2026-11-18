@@ -16,7 +16,7 @@ from nemo_gym.data import TaskDataValidator, load_task_data_schema, validate_jso
 from resources_servers.video_mcqa.app import AccuracyCohort, VideoMCQAVerifyRequest
 from resources_servers.video_mcqa.prepare import prepare_dataset
 from resources_servers.video_mcqa.task import VerifierMetadata, VideoQuestion, prepare_agentic, prepare_single_turn
-from resources_servers.video_mcqa.task_data import VideoBinding, VideoMCQATaskData
+from resources_servers.video_mcqa.task_data import PreloadedMedia, VideoBinding, VideoMCQATaskData
 from resources_servers.video_mcqa.tests.helpers import REVISION, lv_record, media, response, v1_record
 from resources_servers.videomme_v2.app import CohortManifest, VideoMMEV2VerifyRequest
 
@@ -247,8 +247,14 @@ def test_schema_fields_match_the_runtime_models():
     }
     # task_id is read in both places, so it is the one VerifierMetadata field not marked nested-only.
     assert marked == nested - {"task_id"}
-    assert set(VideoMCQATaskData.model_fields) == nested | {"setting", "video_binding", "annotation_warnings"}
+    assert set(VideoMCQATaskData.model_fields) == nested | {
+        "setting",
+        "video_binding",
+        "preloaded_media",
+        "annotation_warnings",
+    }
     assert set(VideoBinding.model_fields) == {"source", "sandbox_path", "sha256"}
+    assert set(PreloadedMedia.model_fields) == {"image", "catalog", "catalog_sha256", "files"}
     for request in WIRE.values():
         assert {"task_id", "setting", "verifier_metadata"} <= set(request.model_fields)
 

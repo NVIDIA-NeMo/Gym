@@ -1,11 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Task-data schemas of open-ended question rows graded against a weighted-points rubric.
+"""Task-data schemas of open-ended question rows graded by a judge model.
 
-Mirrors the wire: ``VideoQARubricVerifyRequest`` reads ``task_id`` and ``setting`` top-level and ``question`` and
-``rubric`` from ``verifier_metadata``. A rubric is checked against ``Rubric`` but kept as the row has it, because the
-judge sees it unchanged; criterion guidance, evidence and an ``answer_policy`` are free-form. An agentic row may carry
-a ``video_binding``: the video a lending resources server puts into the episode's sandbox (video_mcqa's shape).
+Mirrors the wire: ``VideoQARubricVerifyRequest`` reads ``task_id`` and ``setting`` top-level and the grading data from
+``verifier_metadata``. ``grading`` names the protocol: ``weighted_points`` (the default, when a row has no
+``grading``) checks the ``rubric`` against ``Rubric``; ``reference_levels`` (reference_levels.py) also needs a
+``reference_answer`` and takes any JSON object as its rubric. Either rubric is kept as the row has it, because the
+judge sees it unchanged; criterion guidance, evidence and an ``answer_policy`` are free-form. ``subset`` names the
+part of a question set a row belongs to, for per-subset metrics. An agentic row may carry a ``video_binding`` (the
+video a lending resources server puts into the episode's sandbox) or a ``preloaded_media`` (media its sandbox image
+already holds): video_mcqa's shapes.
 """
 
 import math
@@ -13,13 +17,14 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
-from resources_servers.video_mcqa.task_data import VideoBinding
+from resources_servers.video_mcqa.task_data import PreloadedMedia, VideoBinding
 
 
 _NESTED = {"legacy_location": "verifier_metadata"}
 
 Points = Annotated[float, Field(strict=True, ge=0, le=100, allow_inf_nan=False)]
 Text = Annotated[str, Field(min_length=1, pattern=r"\S")]
+Grading = Literal["weighted_points", "reference_levels"]
 
 
 class Criterion(BaseModel):
@@ -75,6 +80,24 @@ class TaskData(BaseModel):
 
     task_id: Text = Field(json_schema_extra={"consumed_by": ["provenance"]})
     setting: Literal["single_turn", "agentic"] = Field(json_schema_extra={"consumed_by": ["verify"]})
+    grading: Grading = Field(default="weighted_points", json_schema_extra={**_NESTED, "consumed_by": ["verify"]})
     question: Text = Field(json_schema_extra={**_NESTED, "consumed_by": ["verify"]})
-    rubric: RubricDict = Field(json_schema_extra={**_NESTED, "consumed_by": ["verify"]})
+    # The weighted-points format (Rubric), or any JSON object for reference_levels.
+    rubric: dict[str, Any] = Field(json_schema_extra={**_NESTED, "consumed_by": ["verify"]})
+    # Required by reference_levels, absent otherwise.
+    reference_answer: Text | None = Field(default=None, json_schema_extra={**_NESTED, "consumed_by": ["verify"]})
+    subset: Text | None = Field(default=None, json_schema_extra={**_NESTED, "consumed_by": ["metrics"]})
     video_binding: VideoBinding | None = None
+    preloaded_media: PreloadedMedia | None = None
+
+    @model_validator(mode="after")
+    def grading_data(self) -> Self:
+        if self.grading == "weighted_points":
+            validate_rubric(self.rubric)
+            if self.reference_answer is not None:
+                raise ValueError("A weighted_points row has no reference_answer")
+        elif self.reference_answer is None:
+            raise ValueError("A reference_levels row needs its reference_answer")
+        if self.video_binding is not None and self.preloaded_media is not None:
+            raise ValueError("A row takes a video_binding or preloaded_media, not both")
+        return self
