@@ -246,13 +246,13 @@ The task cannot name what the harness needs in the sandbox, so the policy also a
 | Extra host | Why |
 | --- | --- |
 | The model endpoint the harness calls, usually the Model Server's address | The harness runs in the sandbox and calls the model from there. Harbor adds the inference host the same way. |
-| Where the harness's session setup downloads its runtime | `codex_agent`: `nodejs.org`, `unofficial-builds.nodejs.org`, `registry.npmjs.org` and `dl-cdn.alpinelinux.org`, none with `sandbox_runtime_dir`. `claude_code_agent` and `harbor_oracle_agent`: none (Claude Code's binary is uploaded from the Agent Server). |
+| Where the harness's session setup downloads its runtime | `codex_agent`: `nodejs.org`, `unofficial-builds.nodejs.org`, `registry.npmjs.org` and `dl-cdn.alpinelinux.org`, none with `sandbox_runtime_dir`. `miniswe_sandboxed_agent`: `pypi.org` and `files.pythonhosted.org`, where `uv pip install` gets mini-SWE (uv and Python are uploaded from the Agent Server). `claude_code_agent` and `harbor_oracle_agent`: none (Claude Code's binary is uploaded from the Agent Server). |
 | The host of each MCP server that `task_mcp_grants` grants | The harness connects to the server from the sandbox. |
 
 The agent can therefore reach more than the task asked for: these hosts, and any other Gym server that listens on the
 Model Server's address. Each harness declares its hosts in its session capabilities (`sandbox_egress`); a harness
-that declares none is refused for such a task rather than guessed at. Today `codex_agent`, `claude_code_agent` and
-`harbor_oracle_agent` declare them. A harness installer's fallback to `apt-get` or `apk` for a tool the image lacks
+that declares none is refused for such a task rather than guessed at. Today `codex_agent`, `claude_code_agent`,
+`miniswe_sandboxed_agent` and `harbor_oracle_agent` declare them. A harness installer's fallback to `apt-get` or `apk` for a tool the image lacks
 reaches the image's package mirrors, which are not allowed: the image must already have it (for Codex `curl`, `tar`,
 `gzip`, `sha256sum`, `awk` and CA certificates; for Claude Code `bash`).
 

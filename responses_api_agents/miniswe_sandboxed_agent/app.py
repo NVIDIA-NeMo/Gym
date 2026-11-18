@@ -22,6 +22,7 @@ from pydantic import Field, field_validator
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentSandboxEgress,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
     AgentSessionState,
@@ -89,6 +90,9 @@ def _warn_deprecated_once() -> None:
 
 # The harbor resources server leaves the task's in-sandbox tool declarations here at seed time.
 TASK_CONTEXT_FILE = "/tmp/.nemo-gym/task.json"
+# Where setup's `uv pip install` downloads mini-SWE (and a task's MCP client) inside a borrowed sandbox: PyPI's index
+# and its file host. uv and Python are downloaded on the Agent Server host and uploaded.
+MINISWE_INSTALL_HOSTS = ("pypi.org", "files.pythonhosted.org")
 
 
 @dataclass
@@ -241,6 +245,13 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     def supports_task_tool_context(self) -> bool:
         """mini-SWE reads the task's MCP servers and skills directory from ``task.json`` at its first turn."""
         return True
+
+    def sandbox_egress(self) -> AgentSandboxEgress:
+        """In a borrowed sandbox mini-SWE calls the Model Server at ``sandbox_model_base_url``, else its configured
+        address, and setup installs its packages from PyPI (:data:`MINISWE_INSTALL_HOSTS`)."""
+        return AgentSandboxEgress(
+            model_hosts=[urlsplit(self._model_base_url()).hostname or ""], install_hosts=list(MINISWE_INSTALL_HOSTS)
+        )
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
