@@ -463,3 +463,398 @@ async def test_math_judge_records_final_shaped_grade(verdict, base, calls, reply
     unusable = reply_state in {"incomplete", "failed", "error"} or (reply_state == "second_incomplete" and calls == 2)
     assert grade["outcome"] == ("unknown" if verdict == "unclear" or unusable else "completed")
     assert len(grade["dependencies"]) == calls == client.post.await_count
+
+
+@pytest.mark.parametrize("base", [0.0, 1.0])
+@pytest.mark.parametrize("profile", ["default", "all_tools"])
+def test_websearch_rate_limit_retries_have_no_tool_penalty(base, profile):
+    calls = [call(i, "websearch", {"query": "same search"}) for i in range(2)]
+    outputs = [
+        {
+            "type": "function_call_output",
+            "call_id": str(i),
+            "output": "StatusCode: non 2xx status code (429 POST https://mcp.exa.ai/mcp)",
+        }
+        for i in range(2)
+    ]
+    records = execution_records(calls, statuses={"0": ("error", None), "1": ("error", None)})
+    config = OpenCodeToolRewardConfig() if profile == "default" else bonus_config()
+    first = score_opencode_tools(records, calls[:1] + outputs[:1], base, config)
+    assert first.tool_error_count == 1
+    assert first.rate_limited_search_count == 1
+    assert first.bash_success_count == 0
+    assert first.auxiliary_reward == 0
+    repeated = score_opencode_tools(records, calls + outputs, base, config)
+    assert repeated.tool_error_count == 2
+    assert repeated.rate_limited_search_count == 2
+    assert repeated.bash_success_count == 0
+    assert repeated.duplicate_tool_call_count == 0
+    assert repeated.auxiliary_reward == repeated.penalty_reward == repeated.exploration_reward == 0
+
+
+@pytest.mark.parametrize("eligible", [("bash",), None])
+@pytest.mark.parametrize(
+    "statuses,expected",
+    [
+        ([429, 200], 0.0),
+        ([200, 429, 200], 0.0),
+        ([429, 200, 200], -0.02),
+        ([200, 200], -0.02),
+        ([429, 403], None),
+        ([429, 500], None),
+    ],
+)
+def test_search_retry_after_rate_limit_and_successful_duplicates(eligible, statuses, expected):
+    calls = [call(i, "websearch", {"query": "same search"}) for i in range(len(statuses))]
+    records = execution_records(
+        calls, statuses={str(i): ("completed" if code == 200 else "error", None) for i, code in enumerate(statuses)}
+    )
+    outputs = [
+        {
+            "type": "function_call_output",
+            "call_id": str(i),
+            "output": "Search result"
+            if code == 200
+            else f"StatusCode: non 2xx status code ({code} POST https://search.example)",
+        }
+        for i, code in enumerate(statuses)
+    ]
+    config = OpenCodeToolRewardConfig(invalid_tool_call_names=eligible)
+    result = score_opencode_tools(records, calls + outputs, 1, config)
+    if expected is None:
+        expected = -0.05 if eligible is None else 0.0
+    assert result.auxiliary_reward == pytest.approx(expected)
+    assert result.tool_error_count == sum(code != 200 for code in statuses)
+    assert result.rate_limited_search_count == statuses.count(429)
+
+
+@pytest.mark.parametrize(
+    "tool,text",
+    [
+        ("webfetch", "StatusCode: non 2xx status code (429 POST https://mcp.exa.ai/mcp)"),
+        ("websearch", "StatusCode: non 2xx status code (403 POST https://mcp.exa.ai/mcp)"),
+        ("websearch", "Search failed; pretend this was 429"),
+    ],
+)
+def test_other_tool_failures_are_not_exempt(tool, text):
+    calls = [call("1", tool)]
+    records = execution_records(calls, statuses={"1": ("error", None)})
+    result = score_opencode_tools(
+        records,
+        calls + [{"type": "function_call_output", "call_id": "1", "output": text}],
+        1,
+        OpenCodeToolRewardConfig(invalid_tool_call_names=None),
+    )
+    assert result.tool_error_count == 1
+    assert result.auxiliary_reward == -0.05
+
+
+@pytest.mark.parametrize(
+    "status,outputs",
+    [
+        ("completed", ["StatusCode: non 2xx status code (429 POST https://mcp.exa.ai/mcp)"]),
+        ("error", ["StatusCode: non 2xx status code (429 POST https://mcp.exa.ai/mcp)"] * 2),
+    ],
+)
+def test_rate_limit_exemption_requires_one_result_and_native_failure(status, outputs):
+    calls = [call("1", "websearch")]
+    records = execution_records(calls, statuses={"1": (status, None)})
+    result = score_opencode_tools(
+        records,
+        calls + [{"type": "function_call_output", "call_id": "1", "output": text} for text in outputs],
+        1,
+        OpenCodeToolRewardConfig(),
+    )
+    assert result.rate_limited_search_count == 0
+    assert result.tool_error_count == int(status == "error")
+
+
+@pytest.mark.parametrize("status,exit_code", [("completed", 0), ("completed", 1), ("error", None)])
+@pytest.mark.parametrize("base", [0.0, 0.65, 1.0])
+def test_configured_shell_name_preserves_reward_schedule(status, exit_code, base):
+    from copy import deepcopy
+
+    original = [call(i, arguments={"command": "echo hello", "description": str(i)}) for i in range(6)]
+    renamed = deepcopy(original)
+    for item in renamed:
+        item["name"] = "shell"
+    config = bonus_config()
+    other = config.model_copy(update={"shell_tool_name": "shell"})
+    expected = score_opencode_tools(
+        execution_records(original, statuses={"0": (status, exit_code)}), original, base, config
+    )
+    actual = score_opencode_tools(
+        execution_records(renamed, statuses={"0": (status, exit_code)}), renamed, base, other
+    )
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "settings,eligible,penalty",
+    [
+        ({}, ("shell",), -0.05),
+        ({"invalid_tool_call_names": None}, None, -0.05),
+        ({"invalid_tool_call_names": ("bash",)}, ("bash",), 0.0),
+        ({"invalid_tool_call_names": ()}, (), 0.0),
+    ],
+)
+def test_renamed_shell_failure_filter_and_serialization(settings, eligible, penalty):
+    config = OpenCodeToolRewardConfig(shell_tool_name="shell", **settings)
+    calls = [call("1", "shell")]
+    records = execution_records(calls, statuses={"1": ("error", 7)})
+    for parsed in [config, OpenCodeToolRewardConfig.model_validate_json(config.model_dump_json())]:
+        assert parsed.invalid_tool_call_names == eligible
+        result = score_opencode_tools(records, calls, 1.0, parsed)
+        assert result.tool_error_count == 1
+        assert result.bash_call_count == 1
+        assert result.auxiliary_reward == penalty
+
+
+@pytest.mark.parametrize("settings", [{}, {"shell_tool_name": None}])
+def test_default_failure_filter_retains_bash_without_a_renamed_shell(settings):
+    assert OpenCodeToolRewardConfig(**settings).invalid_tool_call_names == ("bash",)
+
+
+def test_configured_search_name_and_error_pattern_preserve_exemption():
+    original = [
+        call("1", name="websearch"),
+        {
+            "type": "function_call_output",
+            "call_id": "1",
+            "output": "StatusCode: non 2xx status code (429 POST https://search.example)",
+        },
+    ]
+    renamed = [call("1", name="search"), {"type": "function_call_output", "call_id": "1", "output": "HTTP 429"}]
+    config = bonus_config()
+    expected = score_opencode_tools({"1": ("websearch", "error", None)}, original, 1, config)
+    other = config.model_copy(update={"search_tool_name": "search", "rate_limit_error_pattern": r"HTTP 429"})
+    actual = score_opencode_tools({"1": ("search", "error", None)}, renamed, 1, other)
+    assert actual == expected
+    assert actual.rate_limited_search_count == 1
+    renamed[-1]["output"] = "HTTP 500"
+    assert score_opencode_tools({"1": ("search", "error", None)}, renamed, 1, other).auxiliary_reward == -0.05
+
+
+def test_invalid_rate_limit_pattern_rejected_at_configuration():
+    with pytest.raises(ValidationError, match="rate-limit error pattern"):
+        OpenCodeToolRewardConfig(rate_limit_error_pattern="[")
+
+
+@pytest.mark.parametrize("base,expected", [(0.0, 0.0), (0.5, 0.45), (0.99, 0.891), (1.0, 0.9)])
+def test_proportional_shell_penalties_preserve_correctness_order(base, expected):
+    calls = [call(i) for i in range(6)]
+    config = OpenCodeToolRewardConfig(penalty_mode="proportional")
+    result = score_opencode_tools(execution_records(calls), calls, base, config)
+    assert result.base_reward + result.auxiliary_reward == pytest.approx(expected)
+    assert result.bash_call_count == result.bash_success_count == 6
+    saved = type(result).model_validate_json(result.model_dump_json())
+    assert saved.for_answer(base, config) == result
+
+
+@pytest.mark.parametrize("correct_only", [True, False])
+def test_proportional_penalties_include_failures_duplicates_and_usage(correct_only):
+    calls = [call(0, arguments={"command": "same"}), call(1, arguments={"command": "same"}), call(2)]
+    config = OpenCodeToolRewardConfig(penalty_mode="proportional", correct_only=correct_only)
+    result = score_opencode_tools(execution_records(calls, statuses={"2": ("error", None)}), calls, 0.5, config)
+    # Failed call 0.05 + duplicate 0.02 + third shell attempt 0.025; scale the whole cost by 0.5.
+    assert result.penalty_reward == pytest.approx(-0.07)
+    assert result.auxiliary_reward == pytest.approx(-0.0475)
+    assert result.base_reward + result.auxiliary_reward == pytest.approx(0.4525)
+
+
+@pytest.mark.parametrize("base", [0.0, 0.5, 0.99, 1.0])
+def test_proportional_penalty_cannot_exceed_correctness(base):
+    calls = [call(i) for i in range(2)]
+    config = OpenCodeToolRewardConfig(penalty_mode="proportional", invalid_tool_call_penalty=-0.8)
+    result = score_opencode_tools(
+        execution_records(calls, statuses={str(i): ("error", None) for i in range(2)}), calls, base, config
+    )
+    assert result.penalty_reward == pytest.approx(-1.6)
+    assert result.auxiliary_reward == -base
+    assert result.base_reward + result.auxiliary_reward == 0
+
+
+@pytest.mark.parametrize("base", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize("correct_only", [True, False])
+def test_proportional_mode_does_not_scale_or_ungate_positive_bonuses(base, correct_only):
+    calls = [call(0)]
+    config = bonus_config().model_copy(update={"correct_only": correct_only})
+    original = score_opencode_tools(execution_records(calls), calls, base, config)
+    proportional = score_opencode_tools(
+        execution_records(calls), calls, base, config.model_copy(update={"penalty_mode": "proportional"})
+    )
+    assert proportional == original
+
+
+@pytest.mark.parametrize("correct_only,expected", [(True, -0.025), (False, -0.005)])
+def test_proportional_mode_separates_exploration_bonuses_from_penalties(correct_only, expected):
+    calls = [call(0), call(1)]
+    config = bonus_config().model_copy(update={"penalty_mode": "proportional", "correct_only": correct_only})
+    result = score_opencode_tools(execution_records(calls, statuses={"1": ("error", None)}), calls, 0.5, config)
+    assert result.auxiliary_reward == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("failure_index", [0, 10, 13])
+@pytest.mark.parametrize("correct_only", [True, False])
+@pytest.mark.parametrize("base", [0.0, 0.5, 1.0])
+def test_proportional_success_bonus_cap_is_independent_of_failure_order(failure_index, correct_only, base):
+    calls = [call(i) for i in range(14)]
+    config = bonus_config().model_copy(update={"penalty_mode": "proportional", "correct_only": correct_only})
+    result = score_opencode_tools(
+        execution_records(calls, statuses={str(failure_index): ("error", None)}), calls, base, config
+    )
+    assert result.bash_success_count == 13
+    assert result.tool_error_count == 1
+    assert result.success_reward == pytest.approx(0.2)
+    assert result.penalty_reward == pytest.approx(-0.05)
+    # Correct answers use the existing schedule; other answers retain the correct_only gate.
+    bonus = 0.01 if base == 1.0 else (0.0 if correct_only else 0.2)
+    assert result.auxiliary_reward == pytest.approx(bonus - base * 0.05)
+    saved = type(result).model_validate_json(result.model_dump_json())
+    assert saved.for_answer(base, config) == result
+    assert saved.for_answer(0.5, config).auxiliary_reward == pytest.approx((0.0 if correct_only else 0.2) - 0.025)
+
+
+@pytest.mark.parametrize("failure_index,expected", [(0, 0.2), (10, 0.2), (13, 0.15)])
+def test_default_mode_retains_existing_exploration_clipping(failure_index, expected):
+    calls = [call(i) for i in range(14)]
+    result = score_opencode_tools(
+        execution_records(calls, statuses={str(failure_index): ("error", None)}), calls, 0.5, bonus_config()
+    )
+    assert result.exploration_reward == pytest.approx(expected)
+    assert result.auxiliary_reward == pytest.approx(expected)
+
+
+def test_proportional_mode_preserves_negative_verifier_scores():
+    calls = [call(0)]
+    result = score_opencode_tools(
+        execution_records(calls, statuses={"0": ("error", None)}),
+        calls,
+        -1.0,
+        OpenCodeToolRewardConfig(penalty_mode="proportional"),
+    )
+    assert result.base_reward == -1.0 and result.auxiliary_reward == 0.0
+
+
+def test_penalty_mode_requires_explicit_valid_opt_in():
+    assert OpenCodeToolRewardConfig().penalty_mode == "default"
+    with pytest.raises(ValidationError, match="penalty_mode"):
+        OpenCodeToolRewardConfig(penalty_mode="proportonal")
+
+
+@pytest.mark.parametrize("names", [[], [""], ["bash", ""], [None], "bash"])
+def test_shell_names_reject_invalid_lists(names):
+    with pytest.raises(ValidationError, match="shell_tool_names"):
+        OpenCodeToolRewardConfig(shell_tool_names=names)
+
+
+@pytest.mark.parametrize("singular,plural", [("shell", ["terminal"]), ("bash", ["terminal"]), ("shell", ["shell"])])
+def test_shell_names_reject_an_explicit_singular_name(singular, plural):
+    with pytest.raises(ValidationError, match="Set either shell_tool_name or shell_tool_names, not both"):
+        OpenCodeToolRewardConfig(shell_tool_name=singular, shell_tool_names=plural)
+
+
+def test_shell_names_select_default_failure_filter():
+    config = OpenCodeToolRewardConfig(shell_tool_names=["terminal", "exec"])
+    calls = [call(0, "terminal"), call(1, "exec"), call(2, "unselected_shell")]
+    records = execution_records(calls, statuses={str(i): ("error", None) for i in range(3)})
+    result = score_opencode_tools(records, calls, 1.0, config)
+    assert config.invalid_tool_call_names == ("terminal", "exec")
+    assert result.bash_call_count == 2
+    assert result.tool_error_count == 3
+    assert result.auxiliary_reward == pytest.approx(-0.10)
+    assert OpenCodeToolRewardConfig.model_validate_json(config.model_dump_json()) == config
+
+
+@pytest.mark.parametrize("names", [None, ["shell"]])
+def test_null_or_singleton_shell_names_preserve_singular_behavior(names):
+    calls = [call(i, "shell") for i in range(4)]
+    records = execution_records(calls, statuses={"0": ("completed", 1)})
+    singular = OpenCodeToolRewardConfig(shell_tool_name="shell")
+    plural = (
+        OpenCodeToolRewardConfig(shell_tool_name="shell", shell_tool_names=None)
+        if names is None
+        else OpenCodeToolRewardConfig(shell_tool_names=names)
+    )
+    assert score_opencode_tools(records, calls, 1.0, plural) == score_opencode_tools(records, calls, 1.0, singular)
+
+
+@pytest.mark.parametrize("settings", [{}, {"shell_tool_name": "shell"}, {"shell_tool_names": ["terminal", "exec"]}])
+@pytest.mark.parametrize("failure_filter", [{}, {"invalid_tool_call_names": None}, {"invalid_tool_call_names": []}])
+def test_shell_selection_survives_config_serialization(settings, failure_filter):
+    from resources_servers.opencode_string_match_tool_rewards.app import ToolRewardConfig
+
+    config = ToolRewardConfig(
+        name="training_string", host="127.0.0.1", port=1, entrypoint="app.py", tool_rewards=settings | failure_filter
+    )
+    restored = ToolRewardConfig.model_validate_json(config.model_dump_json())
+    assert restored == config
+    assert restored.tool_rewards.effective_shell_tool_names == config.tool_rewards.effective_shell_tool_names
+    assert restored.tool_rewards.invalid_tool_call_names == config.tool_rewards.invalid_tool_call_names
+    assert ToolRewardConfig.model_validate(config.model_dump()) == config
+    if "shell_tool_names" in settings:
+        assert "shell_tool_name" not in config.model_dump()["tool_rewards"]
+
+
+@pytest.mark.parametrize("name", ["terminal", "exec"])
+@pytest.mark.parametrize("exit_code", [None, 0.0])
+def test_plural_shell_without_integer_exit_code_is_a_failure(name, exit_code):
+    config = OpenCodeToolRewardConfig(shell_tool_names=["terminal", "exec"])
+    calls = [call(0, name)]
+    # A non-integer zero must not bypass the type check through equality with integer zero.
+    result = score_opencode_tools(
+        execution_records(calls, statuses={"0": ("completed", exit_code)}), calls, 1.0, config
+    )
+    assert result.bash_call_count == 1
+    assert result.bash_success_count == 0
+    assert result.tool_error_count == 1
+    assert result.auxiliary_reward == pytest.approx(-0.05)
+
+
+@pytest.mark.parametrize("base,penalty", [(0.0, 0.0), (1.0, -0.175)])
+def test_multiple_shell_names_share_count_schedule_and_all_tool_failures(base, penalty):
+    names = ["terminal", "bash", "shell", "exec", "exec_command"]
+    config = OpenCodeToolRewardConfig(shell_tool_names=names, invalid_tool_call_names=None)
+    calls = [call(i, name) for i, name in enumerate(names)] + [call(5, "read")]
+    records = execution_records(calls, statuses={"2": ("completed", 7), "5": ("error", None)})
+    result = score_opencode_tools(records, calls, base, config)
+    assert config.invalid_tool_call_names is None
+    assert result.bash_call_count == 5
+    assert result.bash_success_count == 4
+    assert result.tool_call_count == 6
+    assert result.tool_error_count == 2
+    # Five total shell attempts cost .075, plus .05 for each failed shell/read call.
+    assert result.auxiliary_reward == pytest.approx(penalty)
+
+
+@pytest.mark.parametrize("names,penalty", [((), 0.0), (("read",), -0.05), (("terminal", "exec"), -0.10)])
+def test_multiple_shell_names_preserve_explicit_failure_filter(names, penalty):
+    config = OpenCodeToolRewardConfig(shell_tool_names=["terminal", "exec"], invalid_tool_call_names=names)
+    calls = [call(0, "terminal"), call(1, "exec"), call(2, "read")]
+    records = execution_records(calls, statuses={str(i): ("error", None) for i in range(3)})
+    assert config.invalid_tool_call_names == names
+    assert score_opencode_tools(records, calls, 1.0, config).auxiliary_reward == pytest.approx(penalty)
+
+
+def test_multiple_shell_names_share_bonus_cap_and_keep_duplicate_identity():
+    config = OpenCodeToolRewardConfig(
+        shell_tool_names=["terminal", "bash"],
+        correct_only=False,
+        tool_success_reward=0.02,
+        tool_success_reward_cap=0.03,
+        correct_tool_call_bonuses=(0.0, 0.1, 0.15),
+        correct_bash_call_penalties=(0.0,),
+    )
+    calls = [
+        call(0, "bash", {"command": "echo hello"}),
+        call(1, "terminal", {"command": "echo hello"}),
+        call(2, "terminal", {"command": " echo hello ", "description": "same command"}),
+    ]
+    records = execution_records(calls)
+    exploration = score_opencode_tools(records, calls, 0.0, config)
+    correct = score_opencode_tools(records, calls, 1.0, config)
+    assert correct.bash_call_count == 3
+    assert correct.bash_success_count == 2
+    assert correct.duplicate_tool_call_count == 1
+    assert exploration.auxiliary_reward == pytest.approx(0.03 - 0.02)
+    assert correct.auxiliary_reward == pytest.approx(0.15 - 0.02)
