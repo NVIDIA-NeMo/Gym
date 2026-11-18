@@ -70,6 +70,8 @@ The archive uses the pinned dependency set in Gym's visual-coding image. The har
 
 OpenCode 1.17.11 supports the request `temperature` and `top_p` fields supplied by NeMo RL. Set NeMo RL's `max_new_tokens` to at least 8192, the environment's configured per-call `max_output_tokens`; smaller request limits are rejected by the harness.
 
+Each sandbox holds a copy of its task's selected PDFs. `sandbox_disk_gib` sets the sandbox's ephemeral storage limit, so it must cover the dataset's largest selection plus the agent's working files. The default of 24 GiB fits selections up to about 17.5 GiB; raise it for datasets with larger selections.
+
 Before running on a deployment, check sandbox access and model connectivity:
 
 ```bash

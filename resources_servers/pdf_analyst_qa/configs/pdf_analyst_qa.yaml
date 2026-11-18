@@ -23,5 +23,5 @@ pdf_analyst_qa_resources_server:
       sandbox_queue_timeout_s: 120
       sandbox_cpu: 2
       sandbox_memory_mib: 8192
-      sandbox_disk_gib: 10
+      sandbox_disk_gib: 24
       sandbox_ready_timeout_s: 180
