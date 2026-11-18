@@ -10,12 +10,13 @@ an observed verification belongs to that verification instead (see ``verifier_ob
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.observability import add_stopped_sandbox_listener
@@ -27,6 +28,8 @@ from nemo_gym.trajectory.trajectory_record import (
     resource_usage_fields,
 )
 
+
+LOGGER = logging.getLogger(__name__)
 
 # Usage fields of the measured sandboxes stopped during the current request, by sandbox id.
 _stopped_sandbox_usage: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
@@ -48,9 +51,13 @@ add_stopped_sandbox_listener(_record_stopped_sandbox)
 
 
 @contextmanager
-def stopped_sandbox_usage() -> Iterator[dict[str, dict[str, Any]]]:
-    """Collect the usage of the measured sandboxes stopped while the block runs, by sandbox id."""
-    registry: dict[str, dict[str, Any]] = {}
+def stopped_sandbox_usage(*, registry: dict[str, dict[str, Any]] | None = None) -> Iterator[dict[str, dict[str, Any]]]:
+    """Collect the usage of the measured sandboxes stopped while the block runs, by sandbox id.
+
+    Pass a ``registry`` that outlives the block when the stop may finish in a shielded task after the block's
+    waiter was cancelled, so a retry that joins that task still finds the usage.
+    """
+    registry = {} if registry is None else registry
     token = _stopped_sandbox_usage.set(registry)
     try:
         yield registry
@@ -62,24 +69,37 @@ def fill_sandbox_usage(bundle: AgentObservationBundle | Mapping[str, Any] | None
     """Add collected usage to each sandbox observation in ``bundle`` whose ``sandbox_id`` matches, in place.
 
     ``bundle`` is an observation bundle or its JSON form. An observation that already carries usage keeps it,
-    so a sandbox's usage is recorded once whether its observation was built before or after the stop.
+    so a sandbox's usage is recorded once whether its observation was built before or after the stop; a usage field
+    a producer already set is never overwritten. A JSON record that is not a valid observation is left as it is
+    (trajectory building reports it), and only the filled keys are added to it.
     """
     if not usage or bundle is None:
         return
     records = bundle.records if isinstance(bundle, AgentObservationBundle) else bundle.get("records")
-    for index, record in enumerate(records if isinstance(records, list) else []):
+    for record in records if isinstance(records, list) else []:
         if isinstance(record, SandboxObservation):
             if record.resource_usage is None and record.sandbox_id in usage:
                 for name, value in usage[record.sandbox_id].items():
-                    setattr(record, name, value)
+                    if getattr(record, name, None) is None:
+                        setattr(record, name, value)
         elif isinstance(record, dict) and record.get("kind") == "sandbox" and record.get("sandbox_id") in usage:
-            if record.get("resource_usage") is None:
-                filled = SandboxObservation.model_validate(record).model_copy(update=usage[record["sandbox_id"]])
-                records[index] = filled.model_dump(mode="json")
+            if record.get("resource_usage") is not None:
+                continue
+            updates = {name: value for name, value in usage[record["sandbox_id"]].items() if record.get(name) is None}
+            try:
+                filled = SandboxObservation.model_validate({**record, **updates})
+            except ValidationError:
+                LOGGER.debug("Sandbox observation left without usage: not a valid observation", exc_info=True)
+                continue
+            record.update(filled.model_dump(mode="json", include=set(updates)))
 
 
 # The fields that carry an agent observation bundle: a run or episode reply, and an agent-session close reply.
 _BUNDLE_FIELDS = (NG_AGENT_OBSERVATIONS_KEY, "agent_observations")
+# Conversation and trajectory payloads, which never hold a bundle and can be large: never walked.
+_PAYLOAD_FIELDS = frozenset(
+    ("responses_create_params", "response", "ng_trajectory", "trajectory", "ng_model_call_capture")
+)
 
 
 def fill_reply_sandbox_usage(reply: Any, usage: Mapping[str, Any], *, depth: int = 4) -> None:
@@ -87,6 +107,7 @@ def fill_reply_sandbox_usage(reply: Any, usage: Mapping[str, Any], *, depth: int
 
     Bundles are found under ``ng_agent_observations`` or ``agent_observations`` in the reply, a model or its JSON
     form, including nested results and turns (an Environment Server's episode result), down to ``depth`` levels.
+    Conversation and trajectory payloads are skipped.
     """
     if not usage or depth < 0:
         return
@@ -104,5 +125,5 @@ def fill_reply_sandbox_usage(reply: Any, usage: Mapping[str, Any], *, depth: int
     for name, value in items:
         if name in _BUNDLE_FIELDS and isinstance(value, (AgentObservationBundle, Mapping)):
             fill_sandbox_usage(value, usage)
-        elif isinstance(value, (BaseModel, Mapping, list)):
+        elif name not in _PAYLOAD_FIELDS and isinstance(value, (BaseModel, Mapping, list)):
             fill_reply_sandbox_usage(value, usage, depth=depth - 1)

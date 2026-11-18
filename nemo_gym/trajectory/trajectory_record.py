@@ -437,6 +437,16 @@ class SandboxUsageMeasurement(ObservationModel):
     memory_file_bytes: Optional[int] = Field(default=None, ge=0)
     includes_page_cache: Optional[bool] = None
     process_count: Optional[int] = Field(default=None, ge=0)
+    final_read: Optional[bool] = Field(
+        default=None,
+        description="Whether the read at close measured this source; without it the totals and peak are null. "
+        "Null from producers that predate the field.",
+    )
+    unavailable_reason: Optional[str] = Field(
+        default=None,
+        description="Why the read at close did not measure: final_read_timeout, final_read_failed, "
+        "not_cgroup_root or sandbox_gone.",
+    )
 
 
 class SandboxObservation(ObservationModel):
