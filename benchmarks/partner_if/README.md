@@ -7,7 +7,7 @@ task checks whether the model follows its instructions, graded against versioned
 ## Data
 
 - **Source:** NVIDIA-internal rows in Gym's GitLab dataset registry: dataset `partner_if`, version
-  `2.1.7`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
+  `2.1.8`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
   rows are not in this repository.
 - **Public examples:** the rows above are internal, but the partner_if resources server ships synthetic rows in
   the same format: five text tasks in
@@ -107,7 +107,7 @@ The full-release route-coverage test stays enabled as a readiness gate.
 - **Reward:** a rollout scores 1 when every IF rubric item passes, and 0 otherwise. Code checks
   (partner_if's built-in and fixed checks) and an LLM judge grade the items. Completion items are
   reported but never change the reward.
-- **Provisional rubrics:** 25 of the 28 contracts in 2.1.7 are unsigned (`audit_signoff: false`); the 3 SWE
+- **Provisional rubrics:** 25 of the 28 contracts in 2.1.8 are unsigned (`audit_signoff: false`); the 3 SWE
   contracts are signed. The config sets `allow_provisional_rubrics: true`, so the unsigned rows are scored and
   marked `provisional`.
 - **Metrics:** reported on a 0–100 scale.
@@ -115,7 +115,7 @@ The full-release route-coverage test stays enabled as a readiness gate.
     with equal weight.
   - Also `if_partial`, the passed fraction of IF items.
   - `coverage/*` counts masked rollouts.
-- **Historical reference score (not a baseline for the expanded 2.1.7 cohort):** 57.33 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±9.5 points (95%), on dataset 2.1.4.
+- **Historical reference score (not a baseline for the expanded 2.1.8 cohort):** 57.33 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±9.5 points (95%), on dataset 2.1.4.
   - Policy: GLM 5.3 (`nvidia/zai-org/glm-5.3`) at its standard sampling, set on the model server: temperature
     1.0 and top_p 0.95, maximum reasoning effort, 262,144 output tokens, 16 rollouts in parallel.
   - Judge: the default GPT-6 Sol (`azure/openai/gpt-6-sol`).
@@ -199,19 +199,18 @@ with temperature 0.7, top_p 0.95 and 8,192 tokens per call. The other task route
 and their sampling are unchanged. The dispatcher lifts Resources' terminal report
 into the collector row, retaining terminal tool outputs, all fresh usage and grades.
 
-`prepare.py` still verifies the published private 2.1.7 source rows and data-only
-assets. A local release-candidate command marks the changed harness in pif_029,
-keeps every other row and all asset bytes, and records candidate digests:
+`prepare.py` pins the published private **2.1.8** registry release. It identifies
+pif_029's stock-agent harness as `gymnasium-v1` / `gym-responses-to-chat` while
+preserving the other 27 task rows and every asset byte from immutable 2.1.7.
+Both release files were downloaded from the registry and verified before repinning:
 
-```bash
-.venv/bin/python -m benchmarks.partner_if.stage_recorded_context_release \
-  --output-dir benchmarks/partner_if/data/release-candidate-2.1.8
-```
+- `partner_if.jsonl`: SHA256 `b3ca9f1d103c20b92ec6ed6ce5842d2a5dbf6c57639b0ecc550f2e635c3438b0`.
+- `partner_if_replay_assets.json`: SHA256 `6aeb50eee500bc6d3a6ffe9d0ff29ad497f44f8044eb2eb0bd154b4adb53b3fd`.
 
-The candidate is not published. Registry publication under a new version and
-updating `prepare.py` to its verified pin remain release steps before merging;
-2.1.7 must not be overwritten. Local development can use its pinned inputs with
-the new configuration. See [recorded-context.md](recorded-context.md) for the
-transport normalization and limitations, and
-[recorded-context-provenance.md](recorded-context-provenance.md) for provenance.
+The release retains 28 tasks, 89 IF items and four completion items; three repeats
+produce 84 rollouts. The strict task-data schema preserves the harness metadata.
+Future local staging requires an explicit unused `--version`; the staging command
+never publishes or overwrites registry versions. See
+[recorded-context.md](recorded-context.md) for transport normalization and limitations,
+and [recorded-context-provenance.md](recorded-context-provenance.md) for provenance.
 The historical 25-task reference score does not apply to this 28-task review release.

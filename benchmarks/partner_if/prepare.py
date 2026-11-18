@@ -24,10 +24,10 @@ OUTPUT_FPATH = DATA_DIR / "partner_if_benchmark.jsonl"
 TOOLS_FPATH = DATA_DIR / "partner_if_tools.jsonl"
 
 DATASET_NAME = "partner_if"
-VERSION = "2.1.7"
+VERSION = "2.1.8"
 ARTIFACT = "partner_if.jsonl"
 # The registry download neither checks the HTTP status nor verifies content, so the digest guards both.
-SHA256 = "2ecfb2e50b3bc5165356394dba7f73b53c255eb8b91e27996a3b10ab7b44cb9e"  # pragma: allowlist secret
+SHA256 = "b3ca9f1d103c20b92ec6ed6ce5842d2a5dbf6c57639b0ecc550f2e635c3438b0"  # pragma: allowlist secret
 ROW_COUNT = 28
 REPLAY_ASSET_ARTIFACT = "partner_if_replay_assets.json"
 REPLAY_ASSET_SHA256 = "6aeb50eee500bc6d3a6ffe9d0ff29ad497f44f8044eb2eb0bd154b4adb53b3fd"  # pragma: allowlist secret - registry asset checksum

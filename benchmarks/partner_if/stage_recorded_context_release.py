@@ -23,7 +23,7 @@ HARNESS = {
 }
 
 
-def stage(rows_path: Path, assets_path: Path, output: Path, *, version: str = "2.1.8") -> Path:
+def stage(rows_path: Path, assets_path: Path, output: Path, *, version: str) -> Path:
     """Preserve every other row verbatim and mark pif_029's changed harness for a new release."""
     if version == prepare.VERSION or not version.strip():
         raise ValueError("A changed harness requires a new registry version")
@@ -79,6 +79,6 @@ if __name__ == "__main__":
     parser.add_argument("--input-jsonl", type=Path, default=prepare.OUTPUT_FPATH)
     parser.add_argument("--assets", type=Path, default=prepare.REPLAY_ASSET_FPATH)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--version", default="2.1.8")
+    parser.add_argument("--version", required=True, help="New immutable registry version to stage")
     args = parser.parse_args()
     print(stage(args.input_jsonl, args.assets, args.output_dir, version=args.version))

@@ -110,6 +110,8 @@ def test_registry_prepare_verifies_assets_before_replacing_existing_data(tmp_pat
 def test_release_staging_changes_only_harness_metadata_and_never_publishes(tmp_path, assets, monkeypatch, fault):
     from benchmarks.partner_if.stage_recorded_context_release import HARNESS, stage
 
+    # Exercise the published migration independently of the benchmark's current release pin.
+    monkeypatch.setattr(registry, "VERSION", "2.1.7")
     # The second row's spacing and Unicode separator must survive byte for byte.
     other = {
         "responses_create_params": {"input": "preserve \u0085 spacing"},

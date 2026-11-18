@@ -32,7 +32,7 @@ Responses input and tools. Gym's stock Model Server converts Responses to Chat
 for the provider. That conversion can normalize null or whitespace-only assistant
 content and `strict: false` tool fields; it does not promise byte-for-byte equality
 with the old custom Chat request. This is an explicit harness revision, which the
-local 2.1.8 release candidate records as `gymnasium-v1` / `gym-responses-to-chat`.
+published 2.1.8 registry row records as `gymnasium-v1` / `gym-responses-to-chat`.
 Frozen row and asset actor parameters are checked before execution.
 
 Stock Gymnasium omits terminal tool output from its own response and counts only
@@ -53,10 +53,14 @@ restart an interrupted rollout after process failure.
 
 ## Assets, release and local verification
 
-The published private 2.1.7 source release remains immutable and its version-2
-asset envelope includes `runtime.json`. The local release staging command in the
-benchmark README writes a proposed 2.1.8 dataset plus unchanged assets and their
-digests without uploading anything. Publication and repinning are pending.
+The published private 2.1.8 registry release is pinned by `prepare.py`. Its
+pif_029 row adds the stock-agent harness marker; the other 27 rows and all asset
+bytes match the immutable 2.1.7 source release. The unchanged version-2 asset
+envelope includes `runtime.json`. Both registry artifacts were downloaded and
+verified against the pinned SHA256 values in the benchmark README before repinning.
+All 28 rows pass Gym's task-data validation, including the typed harness metadata.
+Local release staging remains separate from publication and requires an explicit
+unused version; it never overwrites either published release.
 
 `config_recorded_context.yaml` is included by the full benchmark configuration.
 Set `recorded_context_package_dir` in a private override to select another pinned
