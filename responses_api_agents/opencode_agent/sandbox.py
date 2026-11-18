@@ -207,6 +207,8 @@ class OpenCodeSandboxSession(AgentSessionState):
     opencode2: bool = False
     # Whether the OpenCode 2 plugin records model-call labels, which it does with model-call capture on.
     model_call_labels: bool = False
+    # The task's ``skills_dir``, when the seed copied it into OpenCode's skills folder; its runs allow the skill tool.
+    task_skills: str | None = None
     _export_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
     # Gaps of the latest capture's store translation, added to that capture's observations.
     _capture_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)

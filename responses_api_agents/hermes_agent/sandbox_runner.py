@@ -23,6 +23,8 @@ def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 _MODEL_API_KEY = "gym"
+# The session's HERMES_HOME, a folder of the session directory; the seed stages a task's skills in its skills folder.
+HERMES_HOME_FOLDER = "hermes-home"
 _COMPRESSION_CONFIG_KEY = "compression"
 
 
@@ -61,7 +63,7 @@ def _connect_mcp_servers(required: list[str]) -> None:
 def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None = None) -> dict[str, Any]:
     # Hermes reads .env/config and caches state paths at import time. Configure its session home before any
     # harness imports, including sibling modules that may import Hermes transitively; preserve the task's HOME.
-    hermes_home = session_dir / "hermes-home"
+    hermes_home = session_dir / HERMES_HOME_FOLDER
     hermes_home.mkdir(parents=True, exist_ok=True)
     import yaml
 

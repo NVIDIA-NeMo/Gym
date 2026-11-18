@@ -179,6 +179,47 @@ async def test_each_step_is_a_turn_in_a_fresh_session_on_one_sandbox(tmp_path, m
     ]
 
 
+async def test_each_steps_harness_is_seeded_after_task_json_is_written_again(tmp_path, monkeypatch):
+    """A harness that declares supports_task_skills copies the skills that task.json names at its seed, and a fresh
+    session seeds every step: the previous step's agent or verifier, or the step's setup.sh, may have removed the file
+    the episode's seed wrote, and the harness would then copy nothing and run the step without its skills. Each
+    step's preparation writes it again, after the step's setup."""
+    steps = '\n[[steps]]\nname = "one"\n\n[[steps]]\nname = "two"\n'
+    # Step two's setup.sh removes what the episode's seed wrote. Written before the server loads the task, so the
+    # task digest covers it.
+    step_workdir = tmp_path / "datasets" / "ds" / "hello" / "steps" / "two" / "workdir"
+    step_workdir.mkdir(parents=True)
+    (step_workdir / "setup.sh").write_text("#!/bin/bash\nrm -rf /tmp/.nemo-gym\n")
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path, monkeypatch, steps, {"one": "a", "two": "b"}, base=TASK_TOML + 'skills_dir = "/app/.skills"\n'
+    )
+    server.server_client.supports_task_tool_context = False
+    server.server_client.supports_task_skills = True
+    # Claude Code and Codex read task.json when their session is seeded, so record where each seed falls among the
+    # sandbox's execs (not only where each activation falls).
+    seed_positions: list[int] = []
+    post = type(server.server_client).post
+
+    async def record_seed(client, server_name, url_path, **kwargs):
+        if url_path == "/v1/agent_sessions":
+            seed_positions.append(len(sandbox.execs))
+        return await post(client, server_name, url_path, **kwargs)
+
+    monkeypatch.setattr(type(server.server_client), "post", record_seed)
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0]
+    writes = [i for i, call in enumerate(sandbox.execs) if "/tmp/.nemo-gym/task.json" in call["command"]]
+    assert all('"skills_dir": "/app/.skills"' in sandbox.execs[i]["command"] for i in writes)
+    # Step two's harness is seeded from a task.json written after step two's setup.sh ran, not only from the
+    # episode seed's.
+    setup_index = next(i for i, call in enumerate(sandbox.execs) if call["command"] == "bash /app/setup.sh")
+    assert len(seed_positions) == 2
+    assert any(setup_index < i < seed_positions[1] for i in writes)
+
+
 async def test_a_multi_step_episode_traces_its_final_score_at_debug_level_only(tmp_path, monkeypatch, caplog):
     """Review (round 38, non-blocking): the multi-step branch returned from `_run_turns` before the single-turn
     path's final-score DEBUG trace, so a `--verbose` run traced every single-turn episode's score but no multi-step

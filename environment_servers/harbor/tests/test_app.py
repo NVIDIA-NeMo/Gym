@@ -1307,6 +1307,69 @@ class TestAgentStage:
         assert ("task_mcp_grants: required" in failure.failure_reason) is (grants != "required")
         assert not any("test.sh" in call["command"] for call in sandbox.execs)
 
+    async def test_a_task_with_only_skills_runs_on_a_harness_that_stages_task_skills(self, tmp_path, monkeypatch):
+        """A harness that declares ``supports_task_skills`` copies the task's ``skills_dir`` into its CLI's own skills
+        folder at seed, but reads no MCP servers: a skills-only task is admitted, with no grants needed."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=task_tool_context_toml("skills_dir"))
+        server.server_client.supports_task_tool_context = False
+        server.server_client.supports_task_skills = True
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        assert server.server_client.paths() == [
+            "/v1/agent_sessions",
+            "/ng-rollout/r1/v1/responses",
+            "/v1/agent_sessions/close",
+        ]
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+
+    async def test_a_task_with_skills_and_mcp_servers_is_judged_per_part(self, tmp_path, monkeypatch):
+        """A harness that stages skills reaches the skills, not the MCP servers: the refusal names only the servers."""
+        toml = TASK_TOML + TASK_TOOL_CONTEXT_DECLARATIONS["skills_dir"] + GRANTABLE_MCP_SERVER
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml)
+        server.server_client.supports_task_tool_context = False
+        server.server_client.supports_task_skills = True
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert response.result is None and failure.stage == "agent" and failure.terminal
+        assert "MCP server 'user-server'" in failure.failure_reason
+        assert "skills_dir" not in failure.failure_reason
+        # The advice is the grant that would reach the server, not a harness for the skills it already has.
+        assert "task_mcp_grants: required" in failure.failure_reason
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+
+    async def test_a_task_with_skills_and_granted_mcp_servers_runs_on_a_harness_that_stages_task_skills(
+        self, tmp_path, monkeypatch
+    ):
+        """Each part is reached its own way: the skills by the harness's staging, the server by a required grant."""
+        toml = TASK_TOML + TASK_TOOL_CONTEXT_DECLARATIONS["skills_dir"] + GRANTABLE_MCP_SERVER
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, task_mcp_grants="required")
+        server.server_client.supports_task_tool_context = False
+        server.server_client.supports_task_skills = True
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        (seed,) = server.server_client.seed_bodies()
+        assert [(access["name"], access["required"]) for access in seed["tool_accesses"]] == [("user-server", True)]
+
+    async def test_the_refusal_of_a_skills_only_task_names_the_declaration_that_would_admit_it(
+        self, tmp_path, monkeypatch
+    ):
+        server, task, _, _ = make_server(tmp_path, monkeypatch, toml=task_tool_context_toml("skills_dir"))
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        reason = response.failure.failure_reason
+        assert response.result is None and "(skills_dir)" in reason
+        assert "supports_task_skills or supports_task_tool_context" in reason
+
     async def test_a_task_without_tool_declarations_runs_on_any_harness(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         server.server_client.supports_task_tool_context = False

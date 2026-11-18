@@ -15,7 +15,9 @@ There are two ways to run it:
   [`skillsbench_no_skill`](../../environments/harbor/skillsbench_no_skill/README.md), that `gym eval run` resolves
   by name. The [`harbor` environment server](../../environment_servers/harbor/README.md) owns
   the sandbox, the skills and the verifier; any harness that accepts a borrowed task sandbox and declares
-  `supports_task_tool_context` works in it, at this revision `miniswe_sandboxed_agent`.
+  `supports_task_tool_context` or `supports_task_skills` is admitted: `miniswe_sandboxed_agent`, `claude_code_agent`,
+  `codex_agent`, `opencode_agent` (OpenCode 1), `hermes_agent` and `pi_agent` at this revision. Admission is not a validation: check a pairing with a real model before you
+  rely on it, and read [Skills and harnesses](#skills-and-harnesses) for how the harnesses differ.
 - **OpenHands through `harbor_agent_general`** (`skillsbench/harbor`, `skillsbench/harbor_opensandbox`). A whole
   Harbor job with an OpenHands SDK agent runs behind a `legacy_agent` relay. See
   [OpenHands through `harbor_agent_general`](#openhands-through-harbor_agent_general).
@@ -89,14 +91,29 @@ Rows, results and verifier logs are labelled by the entry's name (`skillsbench` 
 Skills stay plain files: in the with-skill condition the environment server places each task's skills at
 `/skills` (the location Harbor's own skills example uses, outside every task's working directory) and writes
 the path to `/tmp/.nemo-gym/task.json` in the sandbox. A harness that declares `supports_task_tool_context` reads it
-there and points its model at the folder, so loading and the tools the model uses do not depend on the harness. A
-task with `skills_dir` is refused to a harness that does not declare it, rather than run without its skills; at
-this revision `miniswe_sandboxed_agent` declares it and tells the model where the skills are. The no-skill
-condition declares no `skills_dir` and runs on any sandboxed harness.
+there and points its model at the folder, so loading and the tools the model uses are the same on every such harness.
+One that declares `supports_task_skills` copies the folder into where its runtime discovers skills at seed (Claude
+Code, Codex, OpenCode 1, Hermes and Pi), so its model finds the skills through the runtime's own mechanism. A task with `skills_dir` is refused to a
+harness that declares neither, rather than run without its skills; at this revision `miniswe_sandboxed_agent` tells
+the model where the skills are. The no-skill condition declares no `skills_dir` and runs on any sandboxed harness.
+
+With Claude Code the two conditions differ in more than the skills. The with-skill condition declares `skills_dir`,
+so the harness drops `--bare` (Claude Code finds its skills only then) and also lets Claude Code read hooks, plugins,
+memory and `CLAUDE.md` or project settings from the working directory. The no-skill condition declares none and keeps
+`--bare`. Set `bare: false` on `claude_code_agent` for both conditions to run them alike; otherwise do not read the
+with-skill minus no-skill difference as the effect of the skills alone. Codex needs no such setting: it discovers
+skills natively and runs the same way with or without them. Pi passes the skills with `--skill` and otherwise runs the
+same way too. OpenCode and Hermes get their skill tool only in the with-skill condition: OpenCode's default profile
+denies the `skill` tool, which also offers OpenCode's built-in `customize-opencode` skill, and a Harbor run gives
+Hermes only its `terminal` toolset, to which the with-skill condition adds `skills` (`skills_list`, `skill_view` and
+`skill_manage`).
 
 Three tasks' skills (`3d-scan-calc`, `lean4-proof`, `video-silence-remover`) name their own scripts under
-`/root/.claude/skills/`; the skills reach the model under `/skills/`, so the model must follow the
-folder it was given, as with any non-Claude harness in the official runner.
+`/root/.claude/skills/`. No harness here puts the skills there: they reach the model under `/skills/` for a harness
+that reads `task.json`, in the session's `config/skills` folder for Claude Code, in its `home/.codex/skills`
+folder for Codex, in its `config/opencode/skills` folder for OpenCode, in its `hermes-home/skills` folder for Hermes
+and in its `home/.pi/agent/skills` folder for Pi. So the model must follow the folder it was given, as with any non-Claude harness in the official
+runner, and those script paths do not resolve unless the task's image holds them.
 
 ### Differences from the official runner
 

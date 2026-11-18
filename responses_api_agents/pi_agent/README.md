@@ -129,6 +129,16 @@ stdout and stderr so provider status messages do not hide the actual failure.
 Project extensions, skills, prompt templates, and themes are disabled; repository context
 files may still be read by Pi.
 
+A Harbor task that declares `skills_dir` is taken in a task sandbox, and the seed response declares
+`supports_task_skills`. At seed the adapter reads `skills_dir` from `/tmp/.nemo-gym/task.json` inside the sandbox and
+copies that folder to the session's `PI_CODING_AGENT_DIR/skills`, Pi's own skills folder, and the activation passes
+that folder with `--skill`. Discovery stays off (`--no-skills`), so Pi loads only the task's skills: it lists them in
+its system prompt and the model reads a skill's `SKILL.md` with its `read` tool, as Pi's skills work. Pi lists skills
+only when its `read` tool is on, so with `enable_tools: false` the seed declares no `supports_task_skills` and the
+server refuses such a task. The server makes a relative `skills_dir` absolute; a `skills_dir` only a shell resolves
+(starting with `~` or containing `$`) or one that is not a folder in the sandbox fails the seed with a terminal
+message. The task's MCP servers stay with grants, judged separately from its skills.
+
 Pi provides its own sandbox tools. It can also use the Resources server's tools through MCP tool grants:
 
 - Set `expose_tools_over_mcp: true` on the Resources server and `resources_tool_transports: [mcp]` on the

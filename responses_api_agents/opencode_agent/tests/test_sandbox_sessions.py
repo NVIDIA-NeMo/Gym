@@ -42,7 +42,12 @@ from nemo_gym.core import (
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
-from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
+from responses_api_agents.opencode_agent.app import (
+    OpenCodeAgent,
+    OpenCodeAgentConfig,
+    _allow_skill_tool,
+    _sandbox_prepare_command,
+)
 from responses_api_agents.opencode_agent.legacy_app import OpenCodeLegacyAgent
 from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
 
@@ -1928,7 +1933,8 @@ async def test_caller_assigned_seed_is_serialized_and_binds_all_inputs(setup):
         agent.seed_agent_session(first_request, body), agent.seed_agent_session(retry_request, body)
     )
     assert first.agent_session_id == retry.agent_session_id == body.agent_session_id
-    assert sandbox.exec.await_count == 2
+    # One seed ran: the prepare step, the installer and the read of the task's task.json.
+    assert sandbox.exec.await_count == 3
     changed = body.model_copy(deep=True)
     changed.sandbox_access.workdir = "/different"
     with pytest.raises(HTTPException, match="another seed request"):
@@ -2691,3 +2697,99 @@ def test_explicit_native_model_and_runtime_paths_are_passed_to_the_harness(setup
         assert config["provider"]["nemo_gym"]["models"]["gpt-5.5"]["reasoning"] is True
         # The runner puts the preinstalled runtime first and keeps the image PATH after it.
         assert params["setup"].endswith("PATH=/runtime/bin:$PATH\n")
+
+
+# The default permission profile, which denies the skill tool for every task.
+DEFAULT_PROFILE = OmegaConf.to_container(
+    OmegaConf.load(Path(__file__).parents[1] / "configs" / "permissions" / "default.yaml")
+)["opencode_agent"]["responses_api_agents"]["opencode_agent"]["opencode_config"]
+
+
+def hold_task_context(sandbox, context: str, *, copy_code: int = 0) -> None:
+    """Make ``sandbox`` hold ``context`` as ``/tmp/.nemo-gym/task.json``, and answer the copy of the task's skills
+    with exit code ``copy_code``; every other command is answered as before."""
+
+    async def run(command, **kwargs):
+        if "task.json" in command:
+            return SimpleNamespace(error_type=None, return_code=0, stdout=context, stderr="")
+        if " cp -R -- " in command:
+            return SimpleNamespace(error_type=None, return_code=copy_code, stdout="", stderr="cp: not allowed")
+        return await sandbox.run_exec(command, **kwargs)
+
+    sandbox.exec.side_effect = run
+
+
+def launched_permission(agent, sandbox, context: str) -> tuple[dict, str, list[str]]:
+    """Seed and run one activation of a task whose ``task.json`` is ``context``; return the run's permission rules,
+    its XDG_CONFIG_HOME and every command the sandbox ran."""
+    agent.config.opencode_config = DEFAULT_PROFILE
+    hold_task_context(sandbox, context)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Use the skill"})
+        assert result.status_code == 200, result.text
+        env = sandbox.params()["env"]
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    return json.loads(env["OPENCODE_CONFIG_CONTENT"])["permission"], env["XDG_CONFIG_HOME"], commands
+
+
+def test_a_task_that_declares_skills_gets_them_in_the_opencode_config_folder_and_the_skill_tool(setup):
+    agent, sandbox = setup
+    permission, config_home, commands = launched_permission(
+        agent, sandbox, json.dumps({"mcp_servers": [], "skills_dir": "/workspace/skills"})
+    )
+    # OpenCode finds skills in the skills folder of XDG_CONFIG_HOME/opencode, the folder the seed filled.
+    (copy,) = [command for command in commands if " cp -R -- " in command]
+    assert f"mkdir -p -- {config_home}/opencode/skills && cp -R -- /workspace/skills/. " in copy
+    assert copy.endswith(f" {config_home}/opencode/skills/")
+    # OpenCode applies the last matching rule: the skill rule follows "*", and the profile's other rules stay.
+    assert list(permission)[-1] == "skill" and permission["skill"] == "allow"
+    assert permission["webfetch"] == permission["websearch"] == "deny"
+    assert permission["bash"] == DEFAULT_PROFILE["permission"]["bash"]
+    # The shared configuration still denies the tool for the next task.
+    assert agent.config.opencode_config["permission"]["skill"] == "deny"
+
+
+@pytest.mark.parametrize("context", ["", json.dumps({"mcp_servers": [{"name": "search"}], "skills_dir": None})])
+def test_a_task_without_skills_keeps_the_skill_tool_denied(setup, context):
+    agent, sandbox = setup
+    permission, _, commands = launched_permission(agent, sandbox, context)
+    assert permission == DEFAULT_PROFILE["permission"] and permission["skill"] == "deny"
+    assert not any(" cp -R -- " in command for command in commands)
+
+
+def test_skills_that_cannot_be_staged_refuse_the_seed_and_release_the_sandbox(setup):
+    agent, sandbox = setup
+    hold_task_context(sandbox, json.dumps({"skills_dir": "/workspace/skills"}), copy_code=2)
+    with TestClient(agent.setup_webserver()) as client:
+        refused = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert refused.status_code == 422
+    assert "Could not stage the task's skills_dir '/workspace/skills'" in refused.json()["detail"]
+    sandbox.disconnect.assert_awaited_once()
+    assert not active_sessions(agent)
+
+
+@pytest.mark.parametrize(("version", "declared"), [("1.17.11", True), ("2.2.7", False)])
+def test_only_opencode_1_declares_that_it_stages_task_skills(setup, version, declared):
+    agent, _ = setup
+    agent.config.opencode_version = version
+    assert agent.supports_task_skills() is declared
+    assert asyncio.run(agent.agent_session_capabilities()).supports_task_skills is declared
+    assert agent.supports_task_tool_context() is False
+
+
+@pytest.mark.parametrize(
+    ("permission", "rules"),
+    [
+        (None, {"skill": "allow"}),
+        ("deny", {"*": "deny", "skill": "allow"}),
+        # The skill rule moves after "*", which would otherwise decide it.
+        ({"skill": "allow", "*": "deny"}, {"*": "deny", "skill": "allow"}),
+        ({"*": "allow", "skill": {"*": "deny"}, "bash": "ask"}, {"*": "allow", "bash": "ask", "skill": "allow"}),
+    ],
+)
+def test_the_skill_rule_is_the_last_rule(permission, rules):
+    allowed = _allow_skill_tool(permission)
+    assert allowed == rules and list(allowed) == list(rules)

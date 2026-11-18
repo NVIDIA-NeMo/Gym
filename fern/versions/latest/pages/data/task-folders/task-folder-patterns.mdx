@@ -129,10 +129,13 @@ starts task tool servers itself, such as `miniswe_sandboxed_agent`, reads it the
 the task with a terminal failure that names the reason, rather than run without the tool. The oracle of
 `gym dataset validate` always takes the task.
 
-A harness that does not start servers itself can take a task whose MCP servers are all `streamable-http` with a `url`,
-and that has no `skills_dir`, when you set `task_mcp_grants: required` on the server (see
+A harness that does not start servers itself can take a task whose MCP servers are all `streamable-http` with a `url`
+when you set `task_mcp_grants: required` on the server (see
 [Configure the server](/main/agent-interactions/harbor#configure-the-server)). The server then grants the tools to the
-agent's session.
+agent's session. A `skills_dir` is not a grant: Claude Code, Codex, OpenCode 1, Hermes and Pi take it by copying the
+folder into their runtime's skills folder at seed, so a task with skills and granted MCP servers runs on Codex, which
+takes the grants. A harness
+that declares neither `supports_task_tool_context` nor `supports_task_skills` is refused the task.
 
 The example's Dockerfile has `RUN` and `COPY` lines, so prepare builds it. With `--sandbox docker`, Gym builds it into
 the local Docker daemon. With OpenSandbox, the image must be pushed to a registry, so set `builds.repository` (see

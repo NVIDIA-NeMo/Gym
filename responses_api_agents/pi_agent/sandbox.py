@@ -53,6 +53,13 @@ class PiSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
+    # The task's ``skills_dir``, when the seed copied it into ``task_skills_dir``.
+    task_skills: str | None = None
+
+    @property
+    def task_skills_dir(self) -> str:
+        """Pi's own skills folder, ``<PI_CODING_AGENT_DIR>/skills``, where the seed copies the task's skills."""
+        return f"{self.session.session_dir}/home/.pi/agent/skills"
 
     async def read_text(self, name: str) -> str:
         """Read adapter output using file transfer."""
