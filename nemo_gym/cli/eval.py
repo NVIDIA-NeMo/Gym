@@ -131,7 +131,7 @@ from nemo_gym.eval.eval_plan import (
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
-from nemo_gym.server_runtime.supervisor.server_supervisor import RunHelper
+from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
 from nemo_gym.utils.path_utils import materialized_path_for
 
 
@@ -421,8 +421,8 @@ def e2e_rollout_collection():  # pragma: no cover
 
     write_resolved_config(global_config_dict, output_fpath)
 
-    rh = RunHelper()
-    rh.start(None)
+    supervisor = ServerSupervisor()
+    supervisor.start(None)
 
     rch = RolloutCollectionHelper()
     rch._termination_requested = lambda: _terminated
@@ -492,7 +492,7 @@ def e2e_rollout_collection():  # pragma: no cover
                     disabled=not health_check_enabled,
                 )
         finally:
-            rh.shutdown()
+            supervisor.shutdown()
     _exit_if_terminated()
     try:
         _check_collection_completion(
@@ -1297,15 +1297,15 @@ def export_run() -> None:  # pragma: no cover
 def reverify_rollouts():  # pragma: no cover
     from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 
-    rh = RunHelper()
-    rh.start(None)
+    supervisor = ServerSupervisor()
+    supervisor.start(None)
     try:
         global_config_dict = get_global_config_dict()
         config = RolloutReverificationConfig.model_validate(global_config_dict)
         # The judge-only recovery job's pass settles, refreshes the run and ends with a receipt; any other runs as before.
         _reverify_with_receipt(global_config_dict, config)
     finally:
-        rh.shutdown()  # stop the servers this command started
+        supervisor.shutdown()  # stop the servers this command started
 
 
 @exit_cleanly_on_config_error

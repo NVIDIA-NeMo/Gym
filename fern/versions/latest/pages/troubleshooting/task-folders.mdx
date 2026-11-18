@@ -144,7 +144,8 @@ The Model Server listens on that one address, not on loopback or `0.0.0.0`, and 
 calls. During the run, any machine that can reach the address and port, such as another host on the same Wi-Fi,
 office network or VPN, can send it requests, which it forwards to `<url>` with your `--model-api-key`. The other
 servers stay on loopback. `+default_host` moves every server to the address, including the head server, whose
-`/global_config_dict_yaml` endpoint returns the merged configuration with that key. Run on a network you trust.
+`/global_config_dict_yaml` endpoint returns the merged configuration (credentials masked unless
+`head_server_serve_credentials` is `true`). Run on a network you trust.
 
 ## The model rejects every request
 
