@@ -63,10 +63,14 @@ def git(tree: Path, *args: str) -> str:
 
 
 def changed_lines(base: Path, head: Path) -> dict[str, int]:
-    """Return each path changed from ``base``'s commit to ``head``'s and its added plus removed lines."""
-    base_commit = git(base, "rev-parse", "HEAD").strip()
+    """Return each path changed from ``base``'s commit to ``head``'s and its added plus removed lines.
+
+    The diff runs in ``base`` so the target branch's ``.gitattributes`` apply: a pull request that marks its own
+    files ``-diff`` or ``binary`` cannot hide their lines.
+    """
+    head_commit = git(head, "rev-parse", "HEAD").strip()
     stats = {}
-    for record in git(head, "diff", "--numstat", "-z", "--no-renames", base_commit, "HEAD").split("\0"):
+    for record in git(base, "diff", "--numstat", "-z", "--no-renames", "HEAD", head_commit).split("\0"):
         if record:
             added, removed, path = record.split("\t", 2)
             stats[path] = 0 if added == "-" else int(added) + int(removed)

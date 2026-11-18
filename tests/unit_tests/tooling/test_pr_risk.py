@@ -84,6 +84,11 @@ def test_non_utf8_filename_is_counted(tmp_path: Path) -> None:
     assert grade(tmp_path, {}, {os.fsdecode(b"scripts/bad\xff.py"): lines(401)})[0] == "high"
 
 
+def test_pull_request_attributes_cannot_hide_lines(tmp_path: Path) -> None:
+    after = {".gitattributes": "* -diff\n", "scripts/a.py": lines(500)}
+    assert grade(tmp_path, {}, after) == ("high", ["501 changed lines in 2 non-doc files"])
+
+
 def test_docs_lockfiles_and_data_are_not_counted(tmp_path: Path) -> None:
     after = {"docs/guide.md": lines(500), "README.md": lines(500), "a.lock": lines(500), "s/data/x.jsonl": lines(500)}
     assert grade(tmp_path, {}, after) == ("low", ["0 changed lines in 2 non-doc files"])
@@ -124,7 +129,7 @@ def test_protected_patterns(tmp_path: Path) -> None:
     listed.write_text("# comment\n- a.toml\n- 'b/*'\n")
     assert pr_risk.protected_patterns(listed) == ["a.toml", "b/*"]
     assert pr_risk.protected_patterns(tmp_path / "missing.yaml") == []
-    assert {"pyproject.toml", "uv.lock"} <= set(pr_risk.protected_patterns())
+    assert {".github/*", ".gitattributes", "pyproject.toml", "uv.lock"} <= set(pr_risk.protected_patterns())
 
 
 def test_cli_prints_the_tier_on_stdout(tmp_path: Path) -> None:
