@@ -7,8 +7,9 @@ and passes the session's ``opencode_config`` keys (``permission``, ``tools``, ``
 OpenCode 1 form the agent configuration and ``configs/permissions/default.yaml`` use. OpenCode 2 reads that form
 and migrates it: ``bash`` rules apply to ``shell``, ``task`` rules to ``subagent``, ``agent.build.steps`` stays the
 build agent's step limit and ``agent.build.prompt`` its system prompt. ``attachment`` is renamed to ``media``. The
-seed refuses any other ``opencode_config`` key, for both versions (``app._session_opencode_config_error``). Code Mode
-is off (``code_mode_off``).
+compaction buffer is the exception: OpenCode 2 reads ``compaction.buffer``, and the seed refuses OpenCode 1's
+``compaction.reserved``. The seed refuses any other ``opencode_config`` key, for both versions
+(``app._session_opencode_config_error``). Code Mode is off (``code_mode_off``).
 """
 
 import copy

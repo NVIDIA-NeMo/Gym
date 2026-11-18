@@ -64,8 +64,17 @@ and grades the final answer with an LLM judge:
 
 | Preset | Agent | How an episode runs |
 | --- | --- | --- |
-| `configs/browsecomp_opencode.yaml` | `opencode_sandboxed_search_agent`, the deprecated `opencode_sandboxed_agent` | A `legacy_agent` relay calls the agent's own `/run`, which seeds the Resources Server, runs OpenCode in the sandbox it gets back, and calls `/verify` |
-| `configs/browsecomp_opencode_sessions.yaml` | `browsecomp_opencode_agent`, an `opencode_agent` | `single_agent_turn_legacy` seeds the Resources Server, which starts the sandbox, stages the OpenCode plugins in it and lends it to the agent's session. After the session closes, `/verify` reads how the run ended from the plugins' log and stops the sandbox before grading; `/close_session` then fences the session, and releases the sandbox if verify did not run |
+| `configs/browsecomp_opencode.yaml` | `browsecomp_opencode_agent`, an `opencode_agent` | `single_agent_turn_legacy` seeds the Resources Server, which starts the sandbox, stages the OpenCode plugins in it and lends it to the agent's session. After the session closes, `/verify` reads how the run ended from the plugins' log and stops the sandbox before grading; `/close_session` then fences the session, and releases the sandbox if verify did not run |
+| `configs/browsecomp_opencode_legacy_agent.yaml` | `opencode_sandboxed_search_agent`, the deprecated `opencode_sandboxed_agent` | A `legacy_agent` relay calls the agent's own `/run`, which seeds the Resources Server, runs OpenCode in the sandbox it gets back, and calls `/verify` |
+
+`configs/browsecomp_opencode.yaml` was the relay preset until the session preset took its name. A launcher, overlay or
+training config that composes it for the relay must now name `configs/browsecomp_opencode_legacy_agent.yaml`, and a
+command that selects it with `--benchmark browsecomp/configs/browsecomp_opencode` must use
+`--benchmark browsecomp/configs/browsecomp_opencode_legacy_agent`. Under the old name it gets the session preset, which
+does not compose without the OpenCode pins and the judge (see [Run the session preset](#run-the-session-preset)) and
+declares no `opencode_sandboxed_search_agent`, so a relay launch fails instead of running the other harness. A relay
+run started under the old name resumes under the new one: the preset's settings are unchanged, and the identity a run
+saves for its resume holds no config file path.
 
 The session preset repeats the relay preset's settings where `opencode_agent` has them: OpenCode 1.17.11 with its
 stock system prompt and thinking on; the same questions and user turn (`prepare_opencode.py` writes them without the
@@ -118,11 +127,12 @@ whatever export the run left, unless its `/run` fails:
 | OpenCode leaves no usable export, for example after a crash | The agent's `/run` answers 500: a failure row | The agent answers 5xx: a non-terminal failure row |
 | The export holds an assistant part type the relay agent does not convert (any but text, reasoning, tool, step-start, step-finish and patch), such as `retry` | The agent's `/run` answers 500: a failure row | Graded without that part |
 | The seed cannot create the working directory in the sandbox | Not applicable: the agent's sandbox keeps the image's working directory | The Resources Server's seed answers 422 when `mkdir` exits non-zero, which every episode would repeat: a terminal failure row. A `mkdir` that does not complete answers 500: a non-terminal failure row |
-| The plugins did not load as configured | The agent's `/run` answers 500 when the sentinel's line is missing: a failure row | `/verify` answers 422 when the plugin log, even a missing or empty one, lacks the sentinel's line or a required line: a terminal failure row |
-| `/verify` cannot read the plugin log | Not applicable: the agent reads its run output | `/verify` answers 500 when the read fails, times out or comes back cut short: a non-terminal failure row |
+| The plugins did not load as configured | The agent's `/run` answers 500 when the sentinel's line is missing: a failure row | Scored 0 without a judge call, as below |
+| The plugin log is missing, unsafe to read or lacks a line it must hold, as when the run's tools deleted, replaced, filled or edited it | Not applicable: the agent reads its run output | Scored 0 without a judge call, unmasked (`failure_outcome_action: count_as_zero`): `opencode_search:plugin_log_missing` when it is absent and `opencode_search:plugin_log_incomplete` when it lacks the sentinel's line or a required line, both counted against the evaluation (`failure_outcome_attribution: evaluation`), since a broken image or plugin bundle can cause them too; `opencode_search:plugin_log_unsafe` for a link, a file that is not regular or cannot be read, or one over 4 MiB, counted as the model's (`failure_outcome_attribution: model`). When `plugin_log_max_consecutive_failures` (25) such episodes come in a row, `/verify` answers 500 instead of a 0 for the last of them and for each later such episode, until a log passes: a non-terminal failure row, so one fewer in a row is scored 0 (see the note below the table) |
+| `/verify` cannot read the plugin log | Not applicable: the agent reads its run output | `/verify` answers 500 when the read fails, times out or comes back cut short or malformed: a non-terminal failure row |
 | The run budget runs out | Graded, not masked | The same |
 | The episode outlives `default_episode_timeout_seconds` | No episode deadline | A non-terminal failure row ("Episode timed out") |
-| The judge gives no verdict in any attempt | Masked, `judge_unparseable` (a run that ended on its budget keeps that kind) | The same |
+| The judge gives no verdict in any attempt | Scored 0, unmasked, `judge_unparseable`, as a 0 counted against the evaluation (`failure_outcome_action: count_as_zero`, `failure_outcome_attribution: evaluation`); masked instead with `unparseable_verdict_policy: mask`, which training sets (see [Training](#training)). A run that ended on its budget keeps that kind and mask | The same |
 | The judge never answers | A `judge_failed` failures-sidecar row | The same |
 | `judge_max_consecutive_failures` rollouts in a row get no verdict | `/verify` answers 500 for that rollout and each later one without a verdict, until a verdict resets the count, so the agent's `/run` answers 500: a failure row | The same `/verify` 500: a non-terminal failure row |
 
@@ -130,8 +140,30 @@ A relay cell that reads "Graded" assumes an export the relay agent can convert. 
 a failures-sidecar row (`agent_run_error`, which a resume retries) only with `++route_failures_to_sidecar=true`;
 without it, the first one ends the run. A session-preset failure is a failure row either way. Run both presets with
 `++route_failures_to_sidecar=true` and compare the failure rows by `failure_kind`. When the Resources Server names a
-kind for a `/verify` that failed, such as `opencode_search:plugins_not_loaded`, the session row carries it in its
-`_ng_failure_events`, as the cause of the failed episode.
+kind for a `/verify` that failed, such as `provider_io_timeout` for a plugin-log read that timed out, the session row
+carries it in its `_ng_failure_events`, as the cause of the failed episode. A row scored 0 for its plugin log is no
+failure row: it carries its kind in `failure_kind` and the reason in `failure_reason`.
+
+The plugin-log breaker (`plugin_log_max_consecutive_failures`, 25 by default) keeps a run whose plugins do not load
+from scoring every remaining episode 0 against the evaluation. The Resources Server cannot tell that from a model whose
+tools break the log in every episode, which trips the breaker too. Set to 0, the breaker is off, and every such episode
+scores 0. After a trip, stop the run, find the cause and start a fresh run rather than `gym eval resubmit --recover`:
+the zeros scored before the trip are settled, and recovery does not run them again. A resumable run carries on by
+itself: when its job ends, the next job in its chain resumes the run as `--recover` would, with a new Resources Server
+whose count starts at 0, so each later job can score as many episodes 0 again before the breaker trips. To stop the
+run, cancel its running job and the follow-up and sentinel jobs queued in its chain.
+
+### Training
+
+Training keeps the relay preset, `configs/browsecomp_opencode_legacy_agent.yaml`. Both presets score a rollout the
+judge gave no verdict 0, which an evaluation counts in its score and its acceptance gate counts as an evaluation-side
+fault. That 0 says nothing about the model, so a training run masks the rollout instead: set
+`unparseable_verdict_policy: mask` on the Resources Server, in NeMo RL's environment config (under `env.nemo_gym`) or
+with `++search_browsecomp_resources_server.resources_servers.opencode_search.unparseable_verdict_policy=mask` on a Gym
+rollout collection (see `resources_servers/opencode_search/README.md`). A row masked this way, and a lost session's,
+also sets `instance_config.mask_sample`, where NeMo RL reads the mask that keeps a sample out of the loss. A run that
+ended on its budget, with a verdict or without an answer, is the model's outcome: it is masked on its row only, which
+keeps it out of Gym's quality metrics, and training keeps its reward.
 
 ### Time limits
 
@@ -145,7 +177,7 @@ The session preset's limits, from admission to cleanup:
 | Run | `timeout: 21600`, from when the session's one activation holds a concurrency slot | `opencode_agent` | OpenCode is stopped; the `incomplete` response is graded on what the run produced, not masked |
 | Agent close | `session_close_timeout_seconds: 300` for each phase of the close, and `cleanup_timeout_seconds` for the whole close | `opencode_agent`; `single_agent_turn_legacy` for the whole close | The close fails, and the episode with it, before `/verify`: a non-terminal failure row |
 | Episode | `default_episode_timeout_seconds: 25200`, from the seed through `/verify` | `single_agent_turn_legacy` | A non-terminal failure row ("Episode timed out"); the cleanup then closes both sessions |
-| Judge | `judge_timeout_seconds: 300` for each request of the first attempt and `judge_retry_timeout_seconds: 120` for each request of a later one, up to `judge_max_attempts: 4`, `judge_retry_delay_seconds: 30` apart. Each attempt is one `call_judge`, which tries up to 3 times after a timeout, a lost connection, 408, 429 or 5xx | `opencode_search`, in `/verify` | No verdict in any attempt: masked, `judge_unparseable`. No reply at all: a `judge_failed` failures-sidecar row |
+| Judge | `judge_timeout_seconds: 300` for each request of the first attempt and `judge_retry_timeout_seconds: 120` for each request of a later one, up to `judge_max_attempts: 4`, `judge_retry_delay_seconds: 30` apart. Each attempt is one `call_judge`, which tries up to 3 times after a timeout, a lost connection, 408, 429 or 5xx | `opencode_search`, in `/verify` | No verdict in any attempt: scored 0 as `judge_unparseable`, or masked with `unparseable_verdict_policy` set to `mask`. No reply at all: a `judge_failed` failures-sidecar row |
 | Cleanup | `cleanup_timeout_seconds: 600` for each step after the episode: the agent's close if it is still open, then the resources server's | `single_agent_turn_legacy` | Logged ("Episode cleanup timed out") and recorded in the row's failure report as `session_release_failed`; the row keeps its result, and a sandbox still running is stopped when the server shuts down or reclaimed after `ttl_s` |
 | Sandbox lifetime | `sandbox_config.ttl_s: 27000` | The sandbox provider | The provider reclaims the sandbox |
 
@@ -171,7 +203,7 @@ observations and the plugin log instead:
 | `opencode_failed`, `opencode_exit_code`, `opencode_error_type` | No such fields: `response.status` says how the run ended, and a run the outcome policy does not grade is a failure row. The agent's invocation and sandbox observation in `ng_agent_observations` give the run's status, error type and exit code |
 | `opencode_export_found`, `opencode_finished` | None: a run that leaves no assistant result fails before `/verify` |
 | `opencode_results_fpath` (OpenCode's export, saved on the host), `opencode_run_stdout`, `opencode_run_stderr` | `opencode_plugin_log`, the plugins' lines. OpenCode's exports reach the host only with the Resources Server's `episode_export_copy_dir` set: `opencode_export_copy` then names the host directory that holds them (see [Compare the two presets](#compare-the-two-presets)) |
-| `opencode_plugins_loaded`, `opencode_terminal_reason` | The same fields, read from the plugin log |
+| `opencode_plugins_loaded`, `opencode_terminal_reason` | The same fields, read from the plugin log: false and empty on a row scored 0 for its plugin log |
 | `opencode_attachment_count` | None: the rows hold no images |
 | `ng_trajectory` and `ng_agent_observations`, only when the agent correlates rollouts, for example with `++observability_enabled=true` | Both, from the agent's close |
 | `response.output`: the assistant items, and the user messages OpenCode adds during the run, such as the one that continues it after a compaction | The assistant items only |
@@ -224,7 +256,7 @@ Then start the servers and collect rollouts. Compose a sandbox provider config, 
 
 ```bash
 gym env start \
-    --config benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml \
+    --config benchmarks/browsecomp/configs/browsecomp_opencode.yaml \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config <sandbox provider config> \
     ++policy_base_url=... ++policy_api_key=... ++policy_model_name=...
@@ -232,7 +264,7 @@ gym env start \
 gym eval run --no-serve <the same --config and ++ arguments> \
     --agent browsecomp_opencode_agent \
     --input benchmarks/browsecomp/data/browsecomp_opencode_benchmark.jsonl \
-    --output results/browsecomp_opencode_sessions/rollouts.jsonl \
+    --output <output file> \
     ++route_failures_to_sidecar=true
 ```
 
@@ -267,10 +299,10 @@ gym eval run --no-serve <the same --config and ++ arguments> \
 - Pin the session preset to the OpenCode binary the relay agent installs, so both run one build.
 - Compare question by question: each row's `reward`, `mask_sample` and `failure_kind`, and the failure rows.
 - A row graded again from its saved answer carries no budget mask on either preset (see
-  `resources_servers/opencode_search/README.md`): one from `gym eval reverify`, or one whose judge failed or gave no
-  verdict and that Gym judged again at the end of the collection or when the run resumed, which names that re-judge in
-  `_ng_rejudge_operation_id`. Leave such rows out of the `mask_sample` and `failure_kind` comparison and report them on
-  their own.
+  `resources_servers/opencode_search/README.md`): one from `gym eval reverify`, or one whose judge failed, or gave no
+  verdict under `unparseable_verdict_policy: mask`, and that Gym judged again at the end of the collection or when the
+  run resumed, which names that re-judge in `_ng_rejudge_operation_id`. Leave such rows out of the `mask_sample` and
+  `failure_kind` comparison and report them on their own.
 - Compare token counts by `response.usage.input_tokens` and `output_tokens`, which both presets count the same way;
   for a total, add the two on both, since the relay's `total_tokens` is OpenCode's stored total. Leave out the cached
   and reasoning details (see Token usage above).
@@ -291,9 +323,9 @@ gym eval run --no-serve <the same --config and ++ arguments> \
   `/verify` copies the files before it stops the sandbox, to
   `<episode_export_copy_dir>/<capture key>/<task id>/attempt-<attempt>/`, and records the outcome in the row's
   `opencode_export_copy`. A copy that fails, runs past 300 seconds or exceeds `episode_export_max_bytes` (256 MiB) is
-  recorded there and never changes the grade. A `/verify` refused for its plugin log (422), or one that answers 500
-  once `judge_max_consecutive_failures` trips, still copies the files there, but its failure row has no
-  `opencode_export_copy`; one whose plugin log cannot be read copies nothing.
+  recorded there and never changes the grade. A row scored 0 for its plugin log records its copy too. A `/verify` that
+  answers 500 once `judge_max_consecutive_failures` or `plugin_log_max_consecutive_failures` trips still copies the
+  files there, but its failure row has no `opencode_export_copy`; one whose plugin log cannot be read copies nothing.
 - `++observability_enabled=true` with a `++model_call_capture_dir` records each model call in the rollouts, as the
   harness conformance checker needs. It also adds a plugin to OpenCode, so use it in a run of its own.
 
@@ -311,17 +343,18 @@ SMOKE="++policy_base_url=http://127.0.0.1:8900/v1 ++policy_api_key=dummy ++polic
     ++search_judge_model.responses_api_models.vllm_model.model=scripted-judge ++inference_api_key=dummy \
     ++use_absolute_ip=true ++uvicorn_logging_show_200_ok=true"
 
-gym env start --config benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml \
+gym env start --config benchmarks/browsecomp/configs/browsecomp_opencode.yaml \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml --config <sandbox provider config> $SMOKE
 
-gym eval run --no-serve --config benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml \
+gym eval run --no-serve --config benchmarks/browsecomp/configs/browsecomp_opencode.yaml \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml --config <sandbox provider config> $SMOKE \
-    --agent browsecomp_opencode_agent --input smoke.jsonl --output results/smoke-sessions/rollouts.jsonl \
+    --agent browsecomp_opencode_agent --input <input file> --output <output file> \
     --limit 5 --num-repeats 2 --concurrency 2 ++route_failures_to_sidecar=true
 ```
 
 With `++uvicorn_logging_show_200_ok=true` the logs show each episode's calls in order: `/seed_session`, the agent
 session, the model calls, the agent's close, `/verify` and `/close_session`. Run the relay preset the same way, with
+`--config benchmarks/browsecomp/configs/browsecomp_opencode_legacy_agent.yaml` in place of the session preset's,
 `--agent opencode_sandboxed_search_agent` and `prepare.py`'s rows; it has no `/close_session`. In a run with the search
 cache on (`NEMO_GYM_EXA_CACHE_ROOT`), drop `++uvicorn_logging_show_200_ok=true` from `SMOKE`: it turns on every
 server's access log, which would record the search key that the sandbox's searches send to the Resources Server's

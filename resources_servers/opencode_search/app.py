@@ -52,7 +52,7 @@ from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Tupl
 
 import aiohttp
 import anyio
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, Request, Response
 from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym import PARENT_DIR
@@ -70,12 +70,12 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     PROVIDER_IO_TIMEOUT,
     PROVIDER_REQUEST_FAILED,
-    FailureBoundary,
+    FailureClass,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
-    observe_failure,
+    OutcomeAction,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -136,8 +136,11 @@ from resources_servers.opencode_search.task_data import TaskData
 
 LOGGER = logging.getLogger(__name__)
 
-# A judge that echoes this instead of grading has repeated the template back at us.
-_JUDGE_TEMPLATE_ECHO = "The final exact answer extracted from the [response]"
+# The answer a judge reply says it extracted from the response, as parse_judge_verdict reads it.
+_EXTRACTED_ANSWER = re.compile(r"extracted_final_answer:\s*(.+?)(?:\n|$)")
+# The grading template's own instruction for that line, read with the same pattern so the two cannot drift: a judge
+# that gives exactly this as the extracted answer has repeated the template back at us instead of grading.
+_JUDGE_TEMPLATE_ECHO = _EXTRACTED_ANSWER.search(JUDGE_PROMPT_TEMPLATE).group(1).strip()
 
 # Every line the OpenCode plugins report starts with this marker.
 _PLUGIN_MARKER = "[nemo-gym-plugin] "
@@ -146,10 +149,37 @@ _PLUGIN_MARKER = "[nemo-gym-plugin] "
 _PLUGIN_SENTINEL = "[nemo-gym-plugin] loaded sentinel"
 # The variable the receipts plugin (opencode_bundle/nemo_gym_receipts.js) takes the plugin log's path from.
 _PLUGIN_LOG_ENV = "NEMO_GYM_PLUGIN_LOG"
-# The failure kind of an episode's verify refused because its plugin log lacks a line it must hold.
-PLUGINS_NOT_LOADED = "opencode_search:plugins_not_loaded"
-# How many characters of each end of the plugin log a refusal shows: an Environment Server keeps 2,000 characters of
-# a refused reply in the row's failure_reason, so both ends fit with the rest of the detail.
+# The failure kinds of an episode that verify scores 0, without a judge call, for its plugin log (see
+# _plugin_log_fault): no file at plugin_log_path; a path the read does not open (a symbolic link, not a regular file,
+# a file it cannot read) or a file longer than _PLUGIN_LOG_MAX_BYTES; and a file read whole that lacks the sentinel's
+# line or a required marker.
+PLUGIN_LOG_MISSING = "opencode_search:plugin_log_missing"
+PLUGIN_LOG_UNSAFE = "opencode_search:plugin_log_unsafe"
+PLUGIN_LOG_INCOMPLETE = "opencode_search:plugin_log_incomplete"
+# The side the 0 of each kind is counted against: the failure_outcome_attribution of its row (see _grade). A log that
+# is missing or lacks a line can come from a broken image or plugin bundle as well as from the model's tools, so its 0
+# counts against the evaluation, and Gym's acceptance gate counts it as an evaluation-side fault. A path the read does
+# not open, or a file over the cap, is taken as tampered with: its 0 stays the model's.
+_PLUGIN_LOG_ATTRIBUTION = {
+    PLUGIN_LOG_MISSING: FailureClass.EVALUATION,
+    PLUGIN_LOG_UNSAFE: FailureClass.MODEL,
+    PLUGIN_LOG_INCOMPLETE: FailureClass.EVALUATION,
+}
+# The most of the plugin log verify reads, in bytes: 4 MiB. A run within its turn budget writes a few short lines per
+# model call, far less than this. The read stops one byte past it, so a longer file is seen to be longer without its
+# size being measured.
+_PLUGIN_LOG_MAX_BYTES = 4 << 20
+# What the plugin log read found instead of a file it would read, as the failure_reason of the row says it.
+_PLUGIN_LOG_NOT_READ = {
+    "absent": "is absent",
+    "symlink": "is a symbolic link",
+    "not_regular": "is not a regular file",
+    "unreadable": "cannot be read",
+}
+# The end of the plugin log read's output, which base64 never holds: output without it was cut short.
+_PLUGIN_LOG_READ_END = ":end"
+# How many characters of each end of the plugin log the failure_reason of a row scored 0 for its plugin log shows: both
+# ends fit in its 2,000 characters with the rest of the reason.
 _PLUGIN_LOG_SLICE_CHARS = 600
 # The most of the plugin log a verify response carries. A run within its turn budget writes a few short lines per
 # model call, far less than this; a longer log keeps its two ends.
@@ -184,11 +214,16 @@ def _last_assistant_text(response: NeMoGymResponse) -> str:
     return text
 
 
-def parse_judge_verdict(text: str) -> Tuple[bool, str, bool]:
-    """Parse a judge reply into (is_correct, extracted_answer, parsed_ok).
+def parse_judge_verdict(text: str, response: str = "") -> Tuple[bool, str, bool]:
+    """Parse a judge reply to the grading of response into (is_correct, extracted_answer, parsed_ok).
 
     The LAST 'correct: yes|no' wins: reasoning judges echo the template inside their think
     block, so a first-match parse grades the echo instead of the verdict.
+
+    A reply whose extracted answer is exactly the template's instruction for it (_JUDGE_TEMPLATE_ECHO) repeated the
+    template instead of grading, and is unparsed, unless response holds that line itself, which the judge may then
+    have extracted: its verdict counts. An extracted answer that only quotes part of the instruction, or adds to it, is
+    graded on its verdict.
     """
     matches = list(re.finditer(r"correct:\s*(yes|no)\b", text or "", re.IGNORECASE))
     if not matches:
@@ -196,10 +231,10 @@ def parse_judge_verdict(text: str) -> Tuple[bool, str, bool]:
 
     is_correct = matches[-1].group(1).lower() == "yes"
 
-    ans_matches = list(re.finditer(r"extracted_final_answer:\s*(.+?)(?:\n|$)", text or ""))
+    ans_matches = list(_EXTRACTED_ANSWER.finditer(text or ""))
     extracted = ans_matches[-1].group(1).strip() if ans_matches else ""
 
-    if extracted and _JUDGE_TEMPLATE_ECHO in extracted:
+    if extracted == _JUDGE_TEMPLATE_ECHO and _JUDGE_TEMPLATE_ECHO not in (response or ""):
         return False, "", False
 
     return is_correct, extracted, True
@@ -276,6 +311,27 @@ def _plugin_log_on_the_row(plugin_log: str) -> str:
     return plugin_log[:end] + gap + plugin_log[-end:]
 
 
+def _plugin_log_read_command(plugin_log_path: str) -> str:
+    """The sh command that reads the plugin log at plugin_log_path (see _read_plugin_log).
+
+    It prints what it found instead of a file it would read, or "file:" and at most _PLUGIN_LOG_MAX_BYTES + 1 bytes of
+    the file in base64, and then _PLUGIN_LOG_READ_END. A pipeline's status is its last command's, and sh cannot be
+    relied on to have pipefail (dash has none), so head's own exit status goes out on fd 4, which the command
+    substitution captures, while base64 writes to fd 3, the command's output. When head or base64 fails or is
+    missing, the command prints both exit statuses on stderr and exits 1 without printing the end, so what head read
+    before it failed is never taken for the log.
+    """
+    path = shlex.quote(plugin_log_path)
+    return (
+        f"if test -L {path}; then printf symlink; elif ! test -e {path}; then printf absent; "
+        f"elif ! test -f {path}; then printf not_regular; elif ! test -r {path}; then printf unreadable; "
+        f"else printf file: && {{ s=$( {{ {{ head -c {_PLUGIN_LOG_MAX_BYTES + 1} -- {path} 2>/dev/null; "
+        f'echo $? >&4; }} | base64 >&3; }} 4>&1 ); b=$?; test "$s" = 0 && test "$b" = 0 || '
+        f'{{ echo "plugin log read failed: head status ${{s:-unknown}}, base64 status $b" >&2; exit 1; }}; }} 3>&1; '
+        f"fi; printf {_PLUGIN_LOG_READ_END}"
+    )
+
+
 class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # ---- Exa response cache -------------------------------------------------------------------
     # Shared by every shard and every sandbox: the store is a directory on Lustre, so it outlives
@@ -303,9 +359,9 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # STATELESS: a verify for a session this server holds no sandbox, earlier verify, seed under way or close for, sent
     # without the close-follows header that an Environment Server sends with an episode's verify, such as gym eval
     # reverify's, grades only its body (question, ground truth, saved response), so a saved run can be re-graded under
-    # another judge or prompt without running the model again. Such a re-grade cannot reproduce a budget mask: the body
-    # built from a saved row carries no ending, and an episode's ending was read from the plugin log in its sandbox,
-    # which stopped with the episode (see README).
+    # another judge or prompt without running the model again. Such a re-grade cannot reproduce a budget mask, nor a 0
+    # scored for the plugin log: the body built from a saved row carries no ending, and an episode's plugin log was read
+    # in its sandbox, which stopped with the episode (see README).
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     # Sandbox the agent works in. One fixed image for every row: these tasks carry no
@@ -330,13 +386,26 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # another address.
     episode_sandbox_env: Dict[str, str] = Field(default_factory=dict)
     # Where the receipts plugin (opencode_bundle/nemo_gym_receipts.js) copies the OpenCode plugins' lines in the lent
-    # sandbox; it also sets NEMO_GYM_PLUGIN_LOG there. An episode's verify reads it before the sandbox stops, masks a
-    # run that ended on its budget as the relay does, and refuses one whose plugins did not load. It lies outside
-    # sandbox_workdir, where the model's tools could change it. None reads nothing and refuses nothing, for a harness
-    # that brings no such plugins.
+    # sandbox; it also sets NEMO_GYM_PLUGIN_LOG there. An episode's verify reads it before the sandbox stops, and masks
+    # a run that ended on its budget as the relay does. The model's tools can reach this file: it lies outside
+    # sandbox_workdir, but /tmp, where the BrowseComp preset keeps it, is writable to the agent in the same sandbox. So
+    # verify reads it only as a regular file that is not a link, of at most _PLUGIN_LOG_MAX_BYTES, and scores 0, without
+    # a judge call, a run whose log is missing, unsafe to read or lacks a required line. A forged line, such as an
+    # appended context_overflow, is not detected, as on the relay. None reads nothing and scores nothing 0 for it, for a
+    # harness that brings no such plugins.
     plugin_log_path: Optional[str] = None
     # Lines the plugin log must also hold for a run to be graded, such as the tool surface the run must have had.
     required_plugin_markers: List[str] = Field(default_factory=list)
+    # Verify answers 500 once this many episodes in a row fail the plugin log check, for the last of them too, and goes
+    # on answering 500 for each later episode whose log fails, until a log that passes resets the count. So one fewer
+    # in a row is scored 0, rather than every remaining episode: a plugin bundle that does not load, or
+    # required_plugin_markers that do not match the run's plugins, fails every episode. A model whose tools break the
+    # log in every episode trips it too: the server cannot tell that from a broken bundle. 0 disables it, and every
+    # such episode then scores 0. The zeros scored before a trip are settled, and gym eval resubmit --recover does not
+    # run them again. A resumable run's next job resumes the run on its own, as --recover would, with a new server
+    # whose count starts at 0, so it can score as many again before it trips: after a trip, cancel the run's running
+    # and queued jobs, find the cause and start a fresh run.
+    plugin_log_max_consecutive_failures: int = Field(default=25, ge=0)
     # Where the harness writes its session exports in the lent sandbox: opencode_agent's export_dir. opencode_agent's
     # rules apply: an absolute directory other than /, outside its storage, and neither sandbox_workdir, inside it nor
     # above it. Nothing is copied from it without episode_export_copy_dir.
@@ -344,9 +413,9 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # An absolute directory on this host, one per run, which a run's overlay sets. An episode's verify then copies the
     # regular files directly in episode_export_dir to <capture key>/<task id>/attempt-<attempt>/ under it, after the
     # plugin log read and before the sandbox stops, and reports the copy in the row as opencode_export_copy, except in
-    # the reply of a verify refused for its plugin log (422) or answering 500 once the judge breaker trips. A copy
-    # that fails or is refused is logged and reported there, and never changes the reward, mask_sample or
-    # evaluation_completed. None copies nothing.
+    # the reply of a verify answering 500 once the judge breaker or the plugin log breaker trips. A copy that fails or
+    # is refused is logged and reported there, and never changes the reward, mask_sample or evaluation_completed. None
+    # copies nothing.
     episode_export_copy_dir: Optional[str] = None
     # The most that an episode's exports may hold in all for them to be copied, in bytes: 256 MiB.
     episode_export_max_bytes: int = Field(default=256 << 20, gt=0)
@@ -424,7 +493,7 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     @model_validator(mode="after")
     def _plugin_log_settings_agree(self) -> "SearchResourcesServerConfig":
         # The plugin writes where NEMO_GYM_PLUGIN_LOG points and verify reads plugin_log_path: were they to differ,
-        # every episode would read a log that no plugin wrote and be refused.
+        # every episode would read a log that no plugin wrote and score 0.
         named = self.episode_sandbox_env.get(_PLUGIN_LOG_ENV)
         if named and named != self.plugin_log_path:
             raise ValueError(
@@ -471,13 +540,21 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     judge_retry_delay_seconds: float = 30.0
     judge_retry_timeout_seconds: float = 120.0
     # Verify answers 500 once this many rollouts in a row fail to grade: the judge never answered, or never gave a
-    # parseable verdict (verify masks that row). It goes on answering 500 for each later rollout without a verdict
-    # until a verdict resets the count. The first 500 ends a relay run without route_failures_to_sidecar; otherwise
-    # each is a failure row. Guards the silent-starvation mode where a dead judge masks every sample and the run burns
-    # its wall producing nothing.
+    # parseable verdict (verify scores that row 0, or masks it, by unparseable_verdict_policy). It goes on answering
+    # 500 for each later rollout without a verdict until a verdict resets the count. The first 500 ends a relay run
+    # without route_failures_to_sidecar; otherwise each is a failure row. Guards the silent-starvation mode where a dead
+    # judge masks or zeroes every sample and the run burns its wall producing nothing.
     # Counted per ROLLOUT, not per attempt, so one transient burst cannot trip it. 0 disables.
     # With num_workers > 1, each worker counts the rollouts it graded, so the breaker trips in each worker separately.
     judge_max_consecutive_failures: int = 25
+    # What verify does with a rollout the judge gave no parseable verdict in any attempt; one that ended on its budget
+    # keeps that ending's kind and mask either way. "zero", the default, for evaluation: the row scores 0, unmasked, and
+    # the 0 is counted against the evaluation rather than the model (failure_kind judge_unparseable,
+    # failure_outcome_action count_as_zero, failure_outcome_attribution evaluation). "mask", which a training run sets:
+    # the reward measures nothing about the model, so the row is masked (mask_sample, and instance_config.mask_sample,
+    # which NeMo RL reads, on a budget ending too), and Gym's recovery judges it again. Named and valued as in
+    # webvoyager_judge.
+    unparseable_verdict_policy: Literal["zero", "mask"] = "zero"
     # Budget covers reasoning + final message combined. 2048 makes reasoning judges burn the
     # whole budget thinking, emitting no final message, which reads as an unparseable verdict.
     judge_max_output_tokens: int = 10240
@@ -523,7 +600,9 @@ class SearchVerifyRequest(SearchRunRequest, BaseVerifyRequest):
 # GRADIENT, not the eval metric. Its published comparator scored the capped rows: its denominator
 # is the full row count including max_iteration endings. So these rows keep their judged reward,
 # and a number on that denominator is computed from the rows; Gym's own aggregate metrics leave
-# masked rows out (see aggregate_metrics).
+# masked rows out (see aggregate_metrics). Here the mask stays on the row: NeMo RL reads its loss
+# mask from instance_config.mask_sample, which a budget ending alone does not set (_training_mask),
+# so training keeps these rows' rewards.
 # agent_timed_out joins these: legacy masked it in the same branch (app.py:5742-5751, the
 # eval_timed_out/agent_timed_out arm), and it is masked the same way.
 MASKED_TERMINAL_REASONS = frozenset({"max_iteration", "context_window", "agent_timed_out"})
@@ -546,23 +625,29 @@ class SearchVerifyResponse(BaseVerifyResponse):
     judge_attempts: int
     judge_time_taken: float
     # True when the reward is not a measurement of the answer: the session was lost before verify,
-    # or the judge gave no verdict (reward 0). Also true when the rollout ran out of budget rather
-    # than answering wrongly; that row keeps its judged reward. Gym's aggregate metrics leave masked
-    # rows out of the quality scores.
+    # or the judge gave no verdict with unparseable_verdict_policy "mask" (reward 0). Also true when the rollout ran
+    # out of budget rather than answering wrongly; that row keeps its judged reward. Gym's aggregate metrics leave
+    # masked rows out of the quality scores. The first two also set instance_config.mask_sample, where NeMo RL reads
+    # the training mask, whatever the ending; a budget ending's own mask does not, so training keeps its reward
+    # (_training_mask).
     mask_sample: bool = False
     # Whether grading reached a result: the judge's verdict, or the empty answer that needs none.
-    # False for a lost session and a judge that gave no verdict.
+    # False for a lost session, a judge that gave no verdict and an episode scored 0 for its plugin log.
     evaluation_completed: bool
 
 
 @dataclass(frozen=True)
 class _PluginLog:
-    """The plugin log an episode's verify read from its sandbox."""
+    """The plugin log an episode's verify read from its sandbox, or what the read found at its path instead."""
 
-    text: str
-    # Bytes in the file; 0 when it did not exist.
-    size: int
-    exists: bool
+    # "file" for a regular file that is not a symbolic link, which the read read; otherwise what it found there, a key
+    # of _PLUGIN_LOG_NOT_READ, which it did not open.
+    status: Literal["file", "absent", "symlink", "not_regular", "unreadable"]
+    # What the read read, decoded as UTF-8 with invalid bytes replaced; "" when it read nothing.
+    text: str = ""
+    # Bytes read: at most _PLUGIN_LOG_MAX_BYTES + 1, so a longer file reads one byte over the cap; 0 when it read
+    # nothing.
+    size: int = 0
 
 
 @dataclass(frozen=True)
@@ -588,7 +673,7 @@ class _ExportCopy:
 class _VerifyEvidence:
     """What a session's verify keeps for its retries: a digest of the body it graded, the plugin log it read from the
     sandbox and how it copied the session exports, both before stopping the sandbox, and, once grading reached a
-    result, the grading fields it answered with.
+    result or the plugin log scored the episode 0, the grading fields it answered with.
 
     A retry must send the same body, so the grading fields and that body rebuild the first reply; a retry with
     another body gets 409 rather than a grade of a different answer.
@@ -606,7 +691,9 @@ def _body_digest(body: SearchVerifyRequest) -> str:
     return hashlib.sha256(json.dumps(body.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
 
 
-# The grading fields of a verify response whose answer no judge graded.
+# The grading fields of a verify response whose answer no judge graded. Every grade names the applied failure outcome
+# (failure_outcome_action and failure_outcome_attribution), None on most rows: verify merges the grade over the request,
+# so a request field of the same name never reaches the row.
 _NOT_GRADED: Dict[str, Any] = {
     "extracted_final_answer": "",
     "final_text": "",
@@ -614,7 +701,25 @@ _NOT_GRADED: Dict[str, Any] = {
     "judge_attempts": 0,
     "judge_time_taken": 0.0,
     "evaluation_completed": False,
+    "failure_outcome_action": None,
+    "failure_outcome_attribution": None,
 }
+
+
+def _training_mask(body: SearchVerifyRequest, unmeasured: bool) -> Dict[str, Any]:
+    """For a row whose reward is no outcome of the model, the request's instance_config with mask_sample set; nothing
+    for another row.
+
+    NeMo RL masks a sample's loss by its instance_config.mask_sample rather than by the row's own mask_sample, so such a
+    row sets both, as judge_failsafe does for the rows it answers with: a lost session, and a judge without a verdict
+    under unparseable_verdict_policy "mask", whatever the ending. A rollout that ended on its budget is the model's
+    outcome: it sets only the row's mask_sample, which leaves it out of Gym's quality metrics, and training keeps its
+    reward.
+    """
+    if not unmeasured:
+        return {}
+    instance_config = getattr(body, "instance_config", None)
+    return {"instance_config": {**(instance_config if isinstance(instance_config, dict) else {}), "mask_sample": True}}
 
 
 async def _stop(sandbox: AsyncSandbox) -> None:
@@ -643,6 +748,8 @@ class SearchResourcesServer(SimpleResourcesServer):
     _episode_files: Dict[str, bytes] = PrivateAttr(default_factory=dict)
     # Rollouts in a row whose judge never produced a verdict. Reset by any success.
     _judge_consecutive_failures: int = PrivateAttr(default=0)
+    # Episodes in a row scored 0 for their plugin log. Reset by a plugin log that passes the check.
+    _plugin_log_consecutive_failures: int = PrivateAttr(default=0)
     _exa_cache: Any = PrivateAttr(default=None)
 
     def model_post_init(self, context: Any, /) -> None:
@@ -852,9 +959,9 @@ class SearchResourcesServer(SimpleResourcesServer):
         """Grade final_text against ground_truth. Returns a dict of result fields.
 
         Two failure modes are deliberately kept distinct: a judge that answered but could not be
-        parsed returns judge_parsed False, which verify masks as inconclusive, while a judge that
-        never answered is infrastructure noise and raises JudgeError so judge_failsafe routes the
-        row to the failures sidecar. Both count toward judge_max_consecutive_failures.
+        parsed returns judge_parsed False, which _grade scores 0 or masks (unparseable_verdict_policy),
+        while a judge that never answered is infrastructure noise and raises JudgeError so judge_failsafe
+        routes the row to the failures sidecar. Both count toward judge_max_consecutive_failures.
         """
         answer = re.sub(r"<think>.*?</think>", "", final_text or "", flags=re.DOTALL).strip()
 
@@ -877,7 +984,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         started = time()
         last_error: Optional[str] = None
         # Did the judge ever actually reply? A judge that answers but cannot be parsed leaves a
-        # masked row in the rollouts (see verify); only a judge we could never reach is
+        # row scored 0 or masked in the rollouts (see _grade); only a judge we could never reach is
         # infrastructure noise worth routing to the failures sidecar.
         had_response = False
         for attempt in range(self.config.judge_max_attempts):
@@ -888,7 +995,7 @@ class SearchResourcesServer(SimpleResourcesServer):
                     self.config.judge_timeout_seconds if attempt == 0 else self.config.judge_retry_timeout_seconds
                 )
                 _judge_response, judge_text = await self._call_judge(judge_create_params, timeout_s)
-                is_correct, extracted, parsed_ok = parse_judge_verdict(judge_text)
+                is_correct, extracted, parsed_ok = parse_judge_verdict(judge_text, response=answer)
                 if parsed_ok:
                     self._judge_consecutive_failures = 0
                     return {
@@ -912,8 +1019,8 @@ class SearchResourcesServer(SimpleResourcesServer):
             if attempt + 1 < self.config.judge_max_attempts:
                 await asyncio.sleep(max(0.0, self.config.judge_retry_delay_seconds))
 
-        # The rollout went ungraded either way. A verdict that never parsed leaves the quality metrics as quietly as a
-        # judge that never answered, since verify masks it, so both count toward the breaker.
+        # The rollout went ungraded either way, so both count toward the breaker: a verdict that never parsed scores the
+        # row 0 or masks it as quietly as a judge that never answered sends it to the failures sidecar.
         self._judge_consecutive_failures += 1
         outcome = "gave no parseable verdict in" if had_response else "unreachable after"
         print(
@@ -925,7 +1032,7 @@ class SearchResourcesServer(SimpleResourcesServer):
 
         if had_response:
             # The judge talked to us every time and we could never read a verdict out of it. There
-            # is no grade to report: verify masks the row as inconclusive, so a regrade can revisit it.
+            # is no grade to report: _grade scores the row 0 or masks it, by unparseable_verdict_policy.
             return {
                 "reward": 0.0,
                 "extracted_final_answer": "",
@@ -941,19 +1048,20 @@ class SearchResourcesServer(SimpleResourcesServer):
         )
 
     def _maybe_abort_on_judge_failures(self) -> None:
-        """Make verify answer 500 once the judge looks dead, rather than mask every remaining row.
+        """Make verify answer 500 once the judge looks dead, rather than score 0 or mask every remaining row.
 
         Ported from the legacy stack (the legacy stack's swe_agents/app.py).
-        Without it a dead grader is indistinguishable from a model that answers nothing: every row
-        is masked or routes to the failures sidecar, the headline metric is computed over whatever survived,
-        and the run burns its whole wall clock producing a number from a handful of samples.
+        Without it a dead grader is indistinguishable from a model that answers nothing: every row is scored 0 or
+        masked (unparseable_verdict_policy) or routes to the failures sidecar, the headline metric counts those zeros
+        or is computed over whatever survived, and the run burns its whole wall clock producing a number that
+        measures nothing.
         """
         limit = self.config.judge_max_consecutive_failures
         if limit and self._judge_consecutive_failures >= limit:
             raise RuntimeError(
                 f"judge appears dead: {self._judge_consecutive_failures} consecutive rollouts "
                 f"failed to grade (judge_max_consecutive_failures={limit}). Aborting rather than "
-                f"masking the rest of the run."
+                f"grading the rest of the run without a verdict."
             )
 
     # ---- Exa cache proxy ----------------------------------------------------------------------
@@ -1086,10 +1194,10 @@ class SearchResourcesServer(SimpleResourcesServer):
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Gym's default aggregate metrics, which leave mask_sample rows out of the quality scores.
 
-        A masked row is either not a measurement (a lost session, a judge that gave no verdict) or
-        a rollout that ran out of budget, which keeps its judged reward. The flag stays on every
-        row, so a training consumer can mask on it and an analysis can split on it or recompute a
-        number over every row.
+        A masked row is either not a measurement (a lost session, a judge that gave no verdict under
+        unparseable_verdict_policy "mask") or a rollout that ran out of budget, which keeps its judged
+        reward. The flag stays on every row, so a training consumer can mask on it and an analysis can
+        split on it or recompute a number over every row.
         """
         masked = sum(1 for vr in body.verify_responses if vr.get("mask_sample"))
         if masked:
@@ -1109,17 +1217,18 @@ class SearchResourcesServer(SimpleResourcesServer):
         body gets 409. A verify after the session's close is masked as lost.
 
         With plugin_log_path set, an episode session's verify first reads the plugin log from its sandbox, and the
-        ending and plugin receipts in it stand in for what the relay agent sends (_take_plugin_receipts). With
-        episode_export_copy_dir set, it then copies the harness's session exports to this host (_copy_exports), which
-        never changes the grade. An episode's verify for a sandbox this server no longer holds is masked as lost too
-        (_lost_session_reason).
+        ending and plugin receipts in it stand in for what the relay agent sends (_take_plugin_receipts); a log that
+        fails the check scores the episode 0 without a judge call (_plugin_log_fault). With episode_export_copy_dir
+        set, it then copies the harness's session exports to this host (_copy_exports), which never changes the grade.
+        An episode's verify for a sandbox this server no longer holds is masked as lost too (_lost_session_reason).
         """
         session_id = request.session[SESSION_ID_KEY]
         digest = _body_digest(body)
         async with self.verifying(session_id, allow_missing=True) as verification:
             lost = self._lost_session_reason(request, verification)
             if lost is not None:
-                return SearchVerifyResponse(**(body.model_dump() | _NOT_GRADED | lost_session_verification(lost)))
+                lost_row = _NOT_GRADED | lost_session_verification(lost) | _training_mask(body, True)
+                return SearchVerifyResponse(**(body.model_dump() | lost_row))
             evidence = verification.retained
             if not isinstance(evidence, _VerifyEvidence):
                 # Read and copied while the sandbox still runs: it is stopped before the judge. A read that fails
@@ -1135,8 +1244,9 @@ class SearchResourcesServer(SimpleResourcesServer):
             if evidence.export_copy is not None:
                 # On the body, where the plugin receipts go, so every reply built from it carries the copy.
                 body.opencode_export_copy = asdict(evidence.export_copy)
+            plugin_log_fault = None
             if evidence.plugin_log is not None:
-                self._take_plugin_receipts(body, evidence.plugin_log)
+                plugin_log_fault = self._take_plugin_receipts(body, evidence.plugin_log)
             if evidence.grade is not None:
                 return SearchVerifyResponse(**(body.model_dump() | evidence.grade))
             if self.has_session_state(session_id):
@@ -1148,8 +1258,12 @@ class SearchResourcesServer(SimpleResourcesServer):
                     LOGGER.warning(
                         "Failed to stop the sandbox of session %s before grading", session_id, exc_info=True
                     )
-            grade = await self._grade(body)
-            if grade["evaluation_completed"]:
+            if evidence.plugin_log is not None:
+                self._count_plugin_log_check(session_id, plugin_log_fault)
+            grade = await self._grade(body, plugin_log_fault)
+            # A 0 scored for the plugin log is kept too: a retry would read the same log, and its replay is not
+            # counted again toward plugin_log_max_consecutive_failures.
+            if grade["evaluation_completed"] or plugin_log_fault is not None:
                 verification.retain(replace(evidence, grade=grade))
             return SearchVerifyResponse(**(body.model_dump() | grade))
 
@@ -1157,7 +1271,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         """Why this verify cannot grade a session this server no longer holds, or None.
 
         Besides a closed session: with plugin_log_path set, an episode's grade depends on the plugin log in its sandbox
-        (the plugin gate and the budget masks), so an episode's verify for a session this server holds neither the
+        (the plugin log check and the budget masks), so an episode's verify for a session this server holds neither the
         sandbox nor a first attempt's evidence for, as after a restart, which stops every sandbox, cannot be graded
         either. Of this server's callers, only an Environment Server's episode verify sends
         CHECKPOINT_CLOSE_FOLLOWS_HEADER; a verify without it, from the relay agent or gym eval reverify, reads only its
@@ -1175,35 +1289,37 @@ class SearchResourcesServer(SimpleResourcesServer):
         return None
 
     async def _read_plugin_log(self, session_id: str) -> Optional[_PluginLog]:
-        """The plugin log in an episode session's sandbox, empty when no plugin wrote one; None when there is none to
-        read.
+        """The plugin log in an episode session's sandbox, or what the read found at its path instead; None when there
+        is none to read.
 
         There is none without plugin_log_path, so a harness that brings no such plugins is graded as before, and none
         for an agent's own /run, whose agent sends the ending in the verify body.
 
-        The read prints the file's size in bytes and then its bytes in base64, or that the file is absent. Base64,
-        because a provider may return a command's output as messages joined by newlines, and a message boundary inside
-        a plugin line would split it; decoding comes after every whitespace character is dropped. The size, because a
-        provider that caps a command's output could cut the base64 at the end of a group, which decodes to a log
-        without its last lines, its ending among them: a read whose bytes differ from the size has failed.
+        The model's tools can replace the file, so the read opens only a regular file that is not a symbolic link, and
+        reads at most one byte more than _PLUGIN_LOG_MAX_BYTES of it. A link, a FIFO, a directory or a device is
+        reported and never opened, a file of any size is read only up to that cap, and no size of a file the model
+        controls is measured. The read prints what it found instead of such a file (a key of _PLUGIN_LOG_NOT_READ), or
+        "file:" and the bytes it read in base64, and then _PLUGIN_LOG_READ_END. Base64, because a provider may return a
+        command's output as messages joined by newlines, and a message boundary inside a plugin line would split it;
+        decoding comes after every whitespace character is dropped. Base64 also has no ':', so the file's bytes cannot
+        print a status or the end. The end, because a provider that caps a command's output could cut the base64 at the
+        end of a group, which decodes to a log without its last lines, its ending among them: output without the end
+        has failed.
 
         A read that fails raises a sandbox failure with a provider failure kind, and the server answers 500, which an
         Environment Server treats as retryable: the episode fails ungraded and runs again on resume, as a relay run
-        whose output could not be captured does. A row masked instead would stay in the results with a reward that
-        measured nothing, and lower a score that counts masked rows.
+        whose output could not be captured does. The read fails when head, base64 or sh fails or is missing
+        (_plugin_log_read_command), so a head that read nothing or stopped early is never taken for an empty or shorter
+        log, which would score the episode 0 or grade it without its ending. A row masked instead would stay in the
+        results with a reward that measured nothing, and lower a score that counts masked rows. What the read found in
+        place of a file it would read, and a file over the cap, are no failure of the read: _plugin_log_fault scores
+        such an episode 0.
         """
         sandbox = None if self._lent_sandboxes is None else self._lent_sandboxes.get(session_id)
         if self.config.plugin_log_path is None or sandbox is None:
             return None
-        path = shlex.quote(self.config.plugin_log_path)
-        # From /, which exists whatever the harness did to its workdir. head copies exactly the bytes wc counted, so a
-        # plugin that is still writing cannot make the two disagree.
-        result = await sandbox.exec(
-            f"if test -e {path}; then size=$(wc -c < {path}) && printf '%s:' $size "
-            f"&& head -c $size -- {path} | base64; else printf absent:; fi",
-            cwd="/",
-            timeout_s=60,
-        )
+        # From /, which exists whatever the harness did to its workdir. Each test runs before anything opens the path.
+        result = await sandbox.exec(_plugin_log_read_command(self.config.plugin_log_path), cwd="/", timeout_s=60)
         if result.return_code != 0 or result.error_type is not None:
             raise self._plugin_log_read_failure(
                 sandbox,
@@ -1214,19 +1330,20 @@ class SearchResourcesServer(SimpleResourcesServer):
                 exit_code=result.return_code if result.error_type is None else None,
             )
         output = "".join((result.stdout or "").split())
-        if output == "absent:":
-            return _PluginLog(text="", size=0, exists=False)
-        size, _, encoded = output.partition(":")
-        try:
-            expected, data = int(size), base64.b64decode(encoded, validate=True)
-        except ValueError:  # Also binascii.Error, for base64 cut inside a group.
-            expected, data = None, b""
-        if len(data) != expected:
+        found = output.removesuffix(_PLUGIN_LOG_READ_END) if output.endswith(_PLUGIN_LOG_READ_END) else None
+        if found in _PLUGIN_LOG_NOT_READ:
+            return _PluginLog(status=found)
+        data = None
+        if found is not None and found.startswith("file:"):
+            # binascii.Error, a ValueError, for base64 cut inside a group or holding another character.
+            with suppress(ValueError):
+                data = base64.b64decode(found.removeprefix("file:"), validate=True)
+        if data is None:
             raise self._plugin_log_read_failure(
                 sandbox,
-                f"it returned {len(data)} of the file's {size[:20]!r} bytes: its output was cut short or malformed",
+                f"its output was cut short or malformed: {len(output)} characters, ending {output[-12:]!r}",
             )
-        return _PluginLog(text=data.decode("utf-8", errors="replace"), size=len(data), exists=True)
+        return _PluginLog(status="file", text=data.decode("utf-8", errors="replace"), size=len(data))
 
     def _plugin_log_read_failure(
         self, sandbox: AsyncSandbox, what: str, *, failure_kind: str = PROVIDER_REQUEST_FAILED, **facts: Any
@@ -1241,40 +1358,83 @@ class SearchResourcesServer(SimpleResourcesServer):
             **facts,
         )
 
-    def _take_plugin_receipts(self, body: SearchVerifyRequest, plugin_log: _PluginLog) -> None:
+    def _take_plugin_receipts(self, body: SearchVerifyRequest, plugin_log: _PluginLog) -> Optional[Tuple[str, str]]:
         """Put the ending and plugin receipts from an episode's plugin log on its verify body, where the relay agent
-        puts them, so every reply built from the body carries them, judge_failsafe's included. The ending comes from
-        the whole log, of which the body carries at most _PLUGIN_LOG_ROW_CHARS characters.
+        puts them, so every reply built from the body carries them, judge_failsafe's included, and return the failure
+        kind and reason of a log that fails the check, or None for one that passes (_plugin_log_fault). The ending
+        comes from the whole log, of which the body carries at most _PLUGIN_LOG_ROW_CHARS characters.
 
-        A log without the sentinel or a required marker means the run did not have the plugins it was configured with,
-        and its answer is not graded. The refusal is terminal (422): the log was read, and it would read the same
-        again. Its detail names the missing lines and gives whether the file existed, its size in bytes and both ends
-        of it, with line breaks escaped; its failure report names PLUGINS_NOT_LOADED.
+        A log that fails the check gives no ending, so it never masks the row, and its opencode_plugins_loaded is
+        false.
+        """
+        fault = self._plugin_log_fault(plugin_log)
+        body.opencode_terminal_reason = "" if fault is not None else terminal_reason_from_plugin_log(plugin_log.text)
+        body.opencode_plugins_loaded = fault is None
+        body.opencode_plugin_log = _plugin_log_on_the_row(plugin_log.text)
+        return fault
+
+    def _plugin_log_fault(self, plugin_log: _PluginLog) -> Optional[Tuple[str, str]]:
+        """The failure kind and reason of an episode whose plugin log fails the check, or None for one that passes.
+
+        The check: the path holds a regular file that is not a symbolic link (else PLUGIN_LOG_MISSING when it holds
+        nothing, PLUGIN_LOG_UNSAFE when it holds anything else), of at most _PLUGIN_LOG_MAX_BYTES (else
+        PLUGIN_LOG_UNSAFE), which holds the sentinel's line and every required marker (else PLUGIN_LOG_INCOMPLETE). The
+        model's tools can cause each failure, by deleting, replacing, filling or editing the file, so _grade scores
+        such an episode 0, without a judge call, rather than refuse it: a refused episode would be neither scored nor
+        penalized. A missing or incomplete log can also come from a broken image or plugin bundle, so its 0 counts
+        against the evaluation; an unsafe log's 0 counts against the model (_PLUGIN_LOG_ATTRIBUTION). A plugin that did
+        not load, or required_plugin_markers that do not match the run's plugins, fail the check too, and every episode
+        with them: plugin_log_max_consecutive_failures stops such a run. No other line is checked, so a forged line is
+        not detected.
+
+        The reason names the failure and gives the log's size in bytes and its first and last _PLUGIN_LOG_SLICE_CHARS
+        characters, with line breaks escaped, in at most 2,000 characters.
         """
         text = plugin_log.text
-        missing = [marker for marker in (_PLUGIN_SENTINEL, *self.config.required_plugin_markers) if marker not in text]
-        if missing:
-            reason = f"The harness's OpenCode plugins did not load as configured: the plugin log lacks {missing}"
-            observe_failure(
-                NgFailureEvent(
-                    boundary=FailureBoundary.RESOURCES_SERVER,
-                    failure_kind=PLUGINS_NOT_LOADED,
-                    failure_reason=bounded_text(reason, 2000),
-                    operation="verify.plugin_log",
-                    stage="verification",
-                )
+        if plugin_log.status != "file":
+            kind = PLUGIN_LOG_MISSING if plugin_log.status == "absent" else PLUGIN_LOG_UNSAFE
+            what = _PLUGIN_LOG_NOT_READ[plugin_log.status]
+        elif plugin_log.size > _PLUGIN_LOG_MAX_BYTES:
+            kind, what = PLUGIN_LOG_UNSAFE, f"holds more than {_PLUGIN_LOG_MAX_BYTES} bytes"
+        else:
+            required = (_PLUGIN_SENTINEL, *self.config.required_plugin_markers)
+            missing = [marker for marker in required if marker not in text]
+            if not missing:
+                return None
+            kind, what = PLUGIN_LOG_INCOMPLETE, f"lacks {missing!r}"
+        reason = (
+            f"Scored 0 without a judge call: the plugin log {self.config.plugin_log_path} {what}; "
+            f"log_bytes={plugin_log.size} head={text[:_PLUGIN_LOG_SLICE_CHARS]!r} "
+            f"tail={text[-_PLUGIN_LOG_SLICE_CHARS:]!r}"
+        )
+        return kind, bounded_text(reason, 2000)
+
+    def _count_plugin_log_check(self, session_id: str, fault: Optional[Tuple[str, str]]) -> None:
+        """Count an episode whose plugin log failed the check, and make verify answer 500 once
+        plugin_log_max_consecutive_failures of them came in a row; a plugin log that passes starts the count again.
+
+        As the dead-judge breaker does for the judge: without it, a plugin bundle that does not load would score every
+        remaining episode 0, and the run would finish with a number that measured nothing.
+        """
+        if fault is None:
+            self._plugin_log_consecutive_failures = 0
+            return
+        self._plugin_log_consecutive_failures += 1
+        failure_kind, failure_reason = fault
+        LOGGER.warning(
+            "Scoring the episode of session %s 0 for its plugin log (%s, %d in a row): %s",
+            session_id,
+            failure_kind,
+            self._plugin_log_consecutive_failures,
+            failure_reason,
+        )
+        limit = self.config.plugin_log_max_consecutive_failures
+        if limit and self._plugin_log_consecutive_failures >= limit:
+            raise RuntimeError(
+                f"{self._plugin_log_consecutive_failures} episodes in a row failed the plugin log check, the last with "
+                f"{failure_kind} (plugin_log_max_consecutive_failures={limit}): the plugins do not seem to load as "
+                f"configured. Aborting rather than scoring the rest of the run 0."
             )
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"{reason}. Refusing to grade a run that ran without them. exists={plugin_log.exists} "
-                    f"log_bytes={plugin_log.size} head={text[:_PLUGIN_LOG_SLICE_CHARS]!r} "
-                    f"tail={text[-_PLUGIN_LOG_SLICE_CHARS:]!r}"
-                ),
-            )
-        body.opencode_terminal_reason = terminal_reason_from_plugin_log(text)
-        body.opencode_plugins_loaded = True
-        body.opencode_plugin_log = _plugin_log_on_the_row(text)
 
     async def _copy_exports(self, session_id: str) -> Optional[_ExportCopy]:
         """Copy the session exports out of an episode's sandbox to this host, and say how that went; None when there is
@@ -1385,8 +1545,37 @@ class SearchResourcesServer(SimpleResourcesServer):
             )
         return {match[2]: int(match[1]) for match in listed}
 
-    async def _grade(self, body: SearchVerifyRequest) -> Dict[str, Any]:
-        """The grading fields of the verify response: reward, mask and failure fields, and the judge's diagnostics."""
+    async def _grade(
+        self, body: SearchVerifyRequest, plugin_log_fault: Optional[Tuple[str, str]] = None
+    ) -> Dict[str, Any]:
+        """The grading fields of the verify response: reward, mask and failure fields, and the judge's diagnostics.
+
+        An episode whose plugin log failed the check (plugin_log_fault, see _plugin_log_fault) scores 0 without a judge
+        call: unmasked, with evaluation_completed false, and with the outcome applied to it on the row,
+        failure_outcome_action count_as_zero and the failure_outcome_attribution of its kind (_PLUGIN_LOG_ATTRIBUTION):
+        evaluation for a log that is missing or incomplete, model for one that is unsafe to read. Gym counts it in the
+        score, reports it under its failure_kind, settles it and never judges it again; its acceptance gate counts a 0
+        attributed to the evaluation as an evaluation-side fault.
+
+        A rollout the judge gave no parseable verdict, unless it ended on its budget, follows
+        unparseable_verdict_policy: "zero" scores it 0 as the evaluation's (count_as_zero, attribution evaluation),
+        which Gym counts in the score, settles and does not judge again; "mask" masks it, and Gym judges it again from
+        its saved answer. Either way judge_parsed and evaluation_completed are false, so an identical retry of the verify
+        asks the judge again. Under "mask" such a grade also sets instance_config.mask_sample, which keeps it out of a
+        training run's loss, also when the rollout ended on its budget; a budget ending's own mask does not set it, so
+        training keeps that reward (_training_mask).
+        """
+        if plugin_log_fault is not None:
+            failure_kind, failure_reason = plugin_log_fault
+            return _NOT_GRADED | {
+                "reward": 0.0,
+                "mask_sample": False,
+                "failure_kind": failure_kind,
+                "failure_reason": failure_reason,
+                "failure_outcome_action": OutcomeAction.COUNT_AS_ZERO,
+                "failure_outcome_attribution": _PLUGIN_LOG_ATTRIBUTION[failure_kind],
+            }
+
         # The turn-budget plugin's ending, which the relay agent forwards and an episode's plugin log gives; "" on a
         # normal ending.
         terminal_reason = getattr(body, "opencode_terminal_reason", "")
@@ -1416,12 +1605,23 @@ class SearchResourcesServer(SimpleResourcesServer):
             # inconclusive there.
             body.evaluation_completed = False
             raise
+        outcome_action = outcome_attribution = None
+        # Without a verdict the judge, not the model, decided this reward: under "mask", which a training run sets, the
+        # row stays out of the training loss, whatever the ending.
+        unjudged = not result["judge_parsed"] and self.config.unparseable_verdict_policy == "mask"
         if not result["judge_parsed"] and not masked:
-            # Without a verdict the reward measures nothing. A budget ending keeps its own kind, and judge_parsed and
-            # evaluation_completed record the missing verdict: recovery re-judges a judge_unparseable row from its
-            # saved answer, with no ending to mask it again.
-            masked, failure_kind = True, JUDGE_UNPARSEABLE
+            # Without a verdict the reward measures nothing about the answer, and the judge failed rather than the
+            # model. An evaluation counts it as a 0 against the evaluation, with its kind; a training run masks it. A
+            # budget ending keeps its own kind and mask, and judge_parsed and evaluation_completed record the missing
+            # verdict: recovery re-judges a masked judge_unparseable row from its saved answer, with no ending to mask
+            # it again.
+            failure_kind = JUDGE_UNPARSEABLE
             failure_reason = f"The judge gave no parseable verdict in {result['judge_attempts']} attempt(s)"
+            if self.config.unparseable_verdict_policy == "mask":
+                masked, failure_reason = True, f"{failure_reason}; masked"
+            else:
+                failure_reason = f"{failure_reason}; scored 0"
+                outcome_action, outcome_attribution = OutcomeAction.COUNT_AS_ZERO, FailureClass.EVALUATION
 
         return {
             "reward": result["reward"],
@@ -1434,7 +1634,9 @@ class SearchResourcesServer(SimpleResourcesServer):
             "failure_kind": failure_kind,
             "failure_reason": failure_reason,
             "evaluation_completed": result["judge_parsed"],
-        }
+            "failure_outcome_action": outcome_action,
+            "failure_outcome_attribution": outcome_attribution,
+        } | _training_mask(body, unjudged)
 
 
 if __name__ == "__main__":
