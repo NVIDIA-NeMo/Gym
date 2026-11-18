@@ -143,8 +143,10 @@ gym job logs ID BENCHMARK [--source NAME] [--instance ID] [--tail N]
 gym job resubmit ID BENCHMARK
 ```
 
-`resubmit` queues the benchmark's `job.sh` again from its job directory and prints the new job id. It refuses while a job of that benchmark is still queued or running in that directory, so two jobs never write one run.
+`resubmit` queues the benchmark's `job.sh` again from its job directory and prints the new job id. It refuses while a job of that benchmark is still queued or running in that directory, so two jobs never write one run. The record is updated with the new job id.
+
+`gym job resubmit` is the plain resubmit. It decides nothing from the run's saved evidence, and it resets the budgets. A benchmark that uses the built-in `gym eval run` runner resumes from its saved rollouts and gives every eligible failed rollout a fresh attempt budget; when an auto-resume chain is configured, the queued job also starts with a fresh retry count and walltime budget. A benchmark with a custom `command` runs that command again, so the command has to preserve or resume its own outputs.
 
 <Note>
-`gym eval resubmit` runs the same command and adds recovery: `--recover` decides from the run's saved evidence what to run again, and `--inspect` shows that decision without queuing anything. `gym job resubmit` has neither.
+`gym eval resubmit` runs the same command and adds recovery: `--recover` decides from the run's saved evidence what to run again and keeps the run's budgets, and `--inspect` shows that decision without queuing anything. `gym job resubmit` has neither, so use `gym eval resubmit --recover` for a run that has failed work.
 </Note>
