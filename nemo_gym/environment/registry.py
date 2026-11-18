@@ -78,7 +78,8 @@ class EnvironmentCatalogEntry:
     # The Harbor target a Harbor-backed workload runs (the manifest's `harbor_target`); `gym eval run` composes its
     # environment server, `gym env start` does not.
     harbor_target: Optional[str] = None
-    # The main manifest that lists this config as a setup or protocol; `manifest_path` is that manifest's file.
+    # What lists this config: `setup_of` names the main manifest or the protocol that lists it as a setup, and
+    # `protocol_of` the main manifest that lists it as a protocol. `manifest_path` is the main manifest's file.
     setup_of: Optional[str] = None
     protocol_of: Optional[str] = None
 
@@ -125,7 +126,12 @@ def _manifest_entries(
     for listed in main.listed_configs():
         manifest = resolve_listed_manifest(main, listed)
         config_path = resolve_manifest_config_path(manifest_path, manifest)
-        relation = {"setup_of" if isinstance(listed, ManifestSetup) else "protocol_of": main.name}
+        protocol = main.listing_protocol(listed)
+        relation = (
+            {"setup_of": main.name if protocol is None else protocol.name}
+            if isinstance(listed, ManifestSetup)
+            else {"protocol_of": main.name}
+        )
         entries.append(_catalog_entry(manifest_path, manifest, expected_kind, path=config_path.parent, **relation))
     return entries
 

@@ -439,7 +439,7 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | `adopted_from` | object or null | Optional; requires source URL, upstream ref, and reconciliation date |
 | `lifecycle` | string | Optional; `active` (default) or `deprecated` |
 | `setups` | list of objects | Optional; configs that run these tasks and scoring with another harness or runtime; see [Setups and Protocols](#setups-and-protocols) |
-| `protocols` | list of objects | Optional, benchmarks only; configs that score these tasks under another prompt, tools, or scoring |
+| `protocols` | list of objects | Optional, benchmarks only; configs that score these tasks under another prompt, tools, or scoring. Each may list `setups` of its own |
 
 Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `train`, `validation`, `example`, or `benchmark`; benchmark datasets also require `prepare_script`. `num_repeats` defaults to `1`. `canonical_split` records the source split being measured, while dataset `type: benchmark` selects its role in Gym.
 
@@ -476,9 +476,27 @@ protocols:
 - An entry may set `description`, `maintainers`, `requirements`, `primary_metric`, `integration_profile`, and `dataset_owner`. A protocol must set `description`, saying how its prompt, tools, or scoring differ, and may also set `standard_prompt_config`.
 - The composition fields `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, `grading_mode`, and `harbor_target` mirror the entry's own config. `gym env validate --sync` writes the ones that differ from the main manifest's and removes those that match it again. `null` clears a value the main manifest sets, as for a harness that reaches the model itself.
 
+A protocol that several harnesses run lists them as its own `setups`. Such a setup takes the protocol's facts, not only the main manifest's, so the protocol's prompt and rows are written once, and validation checks the setup against the protocol: the same task datasets, scoring and prompt templates. A setup lists no setups of its own; one more level would add nothing, since a setup of a setup runs the same tasks and prompt as its parent.
+
+```yaml
+protocols:
+- name: my_benchmark/harness_neutral
+  config_path: opencode.yaml
+  description: My benchmark with a prompt that names no harness's tools, run by OpenCode.
+  standard_prompt_config: benchmarks/my_benchmark/prompts/harness-neutral.yaml
+  agent_server: opencode_agent
+  setups:
+  - name: my_benchmark/pi
+    config_path: pi.yaml
+    description: My benchmark with the harness-neutral prompt, run by Pi.
+    agent_server: pi_agent
+```
+
+Scores from setups of one protocol are comparable with each other, not with the main manifest's or another protocol's.
+
 `gym env validate --manifest <path>` validates the main manifest and then each setup and protocol it lists; `gym env validate <name>` validates one of them. A config with tasks of its own, such as a sub-benchmark, keeps a manifest of its own instead.
 
-The catalog lists each setup and protocol as an entry of its own, combining the main manifest's facts with the ones the entry sets. In `gym list environments --json`, such an entry carries `setup_of` or `protocol_of`, the main manifest's name.
+The catalog lists each setup and protocol as an entry of its own, combining the main manifest's facts with the ones the entry sets. In `gym list environments --json`, such an entry carries `setup_of` or `protocol_of`: the name of the main manifest, or of the protocol that lists the setup.
 
 `dataset_owner` names a config instance, not a component implementation. It selects the intended dataset declaration when multiple instances have datasets; runtime agent routing must still be unambiguous. New task scaffolds put datasets on the resources-server instance. Existing agent-owned declarations, including the reuse-verifier scaffold, remain supported.
 

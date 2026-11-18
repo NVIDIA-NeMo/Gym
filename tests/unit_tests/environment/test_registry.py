@@ -423,12 +423,15 @@ class TestEnvironmentCatalog:
                     "name": "suite/config_with_system",
                     "config_path": "config_with_system.yaml",
                     "description": "System prompt",
+                    "setups": [
+                        {"name": "suite/pi_with_system", "config_path": "pi_with_system.yaml", "agent_server": "pi"}
+                    ],
                 }
             ],
         }
         manifest_path = _write_manifest(tmp_path, "benchmarks", "suite", _manifest("suite", "benchmark", **listing))
         benchmark_config = "agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n"
-        for name in ("codex", "config_with_system"):
+        for name in ("codex", "config_with_system", "pi_with_system"):
             manifest_path.with_name(f"{name}.yaml").write_text(benchmark_config, encoding="utf-8")
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
 
@@ -445,8 +448,16 @@ class TestEnvironmentCatalog:
         assert (setup.agent_server, setup.description, setup.version) == ("codex", "Codex", "0.1.0")
         assert (setup.setup_of, setup.protocol_of) == ("suite", None)
         assert (protocol.setup_of, protocol.protocol_of) == (None, "suite")
+        # A setup that the protocol lists names the protocol, and takes the protocol's description.
+        nested = entries[("benchmark", "suite/pi_with_system")]
+        assert (nested.setup_of, nested.protocol_of, nested.agent_server, nested.description) == (
+            "suite/config_with_system",
+            None,
+            "pi",
+            "System prompt",
+        )
         assert (entries[("benchmark", "suite")].setup_of, entries[("benchmark", "suite")].protocol_of) == (None, None)
-        assert len([key for key in entries if key[1].startswith("suite")]) == 3
+        assert len([key for key in entries if key[1].startswith("suite")]) == 4
 
     def test_resolution_requires_kind_only_for_cross_kind_collision(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(tmp_path, "environments", "shared", _manifest("shared"))

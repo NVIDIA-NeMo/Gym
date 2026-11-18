@@ -1025,7 +1025,8 @@ def _synchronize(
     """The main manifest with the config's composition written where it belongs.
 
     A difference in the main config updates the main manifest's own fields. One in a listed config updates that
-    setup or protocol, which keeps a value only while it differs from the main manifest's.
+    setup or protocol, which keeps a value only while it differs from what it inherits: the main manifest's, or the
+    protocol's for a setup that a protocol lists.
     """
     data = main.model_dump(mode="json", exclude={"setups", "protocols"})
     for key in ("setups", "protocols"):
@@ -1033,10 +1034,15 @@ def _synchronize(
     if listed is None:
         data.update({field: _json_value(value) for field, value in differences.items()})
     else:
-        key = "setups" if isinstance(listed, ManifestSetup) else "protocols"
-        values = data[key][getattr(main, key).index(listed)]
+        protocol = main.listing_protocol(listed)
+        if protocol is None:
+            key = "setups" if isinstance(listed, ManifestSetup) else "protocols"
+            values, inherited = data[key][getattr(main, key).index(listed)], main
+        else:
+            listing = data["protocols"][main.protocols.index(protocol)]["setups"]
+            values, inherited = listing[protocol.setups.index(listed)], resolve_listed_manifest(main, protocol)
         for field, value in differences.items():
-            if _json_value(value) == _json_value(getattr(main, field)):
+            if _json_value(value) == _json_value(getattr(inherited, field)):
                 values.pop(field, None)
             else:
                 values[field] = _json_value(value)
@@ -1068,7 +1074,7 @@ def _prompt_templates(manifest: EnvironmentManifest) -> tuple[str | None, set[tu
 
 
 def _validate_setup(main: EnvironmentManifest, setup: EnvironmentManifest) -> None:
-    """Check that a setup runs the main manifest's tasks and scoring.
+    """Check that a setup runs the tasks and scoring of ``main``: the main manifest, or the protocol that lists it.
 
     A setup runs them with another harness or runtime, so both declare the same task datasets or Harbor target,
     resources server and grading mode. When both build prompts from templates, they also declare the same templates:
@@ -1154,7 +1160,8 @@ def validate_environment(
             manifest = main
         synchronized = tuple(differences)
     if isinstance(listed, ManifestSetup):
-        _validate_setup(main, manifest)
+        protocol = main.listing_protocol(listed)
+        _validate_setup(main if protocol is None else resolve_listed_manifest(main, protocol), manifest)
 
     with _with_component_root(resolved_config_path):
         if composition.harbor_target is not None:

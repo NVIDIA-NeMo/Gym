@@ -1455,6 +1455,77 @@ def test_a_setup_keeps_the_benchmarks_prompt_template(tmp_path: Path) -> None:
         )
 
 
+def _protocol_with_a_setup(tmp_path: Path, *, nested_edit: tuple[str, str] | None = None) -> Path:
+    """The demo benchmark with a system-prompt protocol that lists a setup, whose config ``nested_edit`` changes."""
+    with_system = "benchmarks/demo/prompts/with_system.yaml"
+    prompt_line = f"prompt_config: {with_system}"
+    edit = (
+        "prepare_script: benchmarks/demo/prepare.py",
+        f"prepare_script: benchmarks/demo/prepare.py\n        {prompt_line}",
+    )
+    dataset = {
+        "name": "example",
+        "type": "benchmark",
+        "jsonl_fpath": "benchmarks/demo/data/example.jsonl",
+        "prepare_script": "benchmarks/demo/prepare.py",
+        "prompt_config": with_system,
+    }
+    main_path = _listing(
+        tmp_path, listed_as="protocols", config_edit=edit, standard_prompt_config=with_system, datasets=[dataset]
+    )
+    (tmp_path / with_system).write_text("system: Answer briefly.\nuser: '{question}'\n", encoding="utf-8")
+    nested = main_path.with_name("variant.yaml").read_text(encoding="utf-8")
+    if nested_edit is not None:
+        assert nested_edit[0] in nested
+        nested = nested.replace(*nested_edit)
+    main_path.with_name("nested.yaml").write_text(nested, encoding="utf-8")
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    raw["protocols"][0]["setups"] = [{"name": "demo/nested", "config_path": "nested.yaml", "description": "Nested."}]
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+    return main_path
+
+
+def test_a_setup_a_protocol_lists_runs_the_protocols_prompt_not_the_main_manifests(tmp_path: Path) -> None:
+    main_path = _protocol_with_a_setup(tmp_path)
+    report = validate_environment(main_path, name="demo/nested")
+    assert (report.name, Path(report.config_path).name) == ("demo/nested", "nested.yaml")
+    assert validate_environment(main_path).name == "demo"
+
+    # Another config with the main manifest's prompt, listed under the protocol, runs another template than it.
+    main_path.with_name("other.yaml").write_text(
+        main_path.with_name("config.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    main_dataset = {key: value for key, value in raw["datasets"][0].items()}
+    raw["protocols"][0]["setups"].append(
+        {"name": "demo/other", "config_path": "other.yaml", "datasets": [main_dataset]}
+    )
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="demo/other uses another prompt template than demo/variant"):
+        validate_environment(main_path, name="demo/other")
+
+
+def test_sync_writes_a_nested_setups_composition_into_it_and_drops_what_matches_its_protocol(tmp_path: Path) -> None:
+    with_system = "benchmarks/demo/prompts/with_system.yaml"
+    main_path = _protocol_with_a_setup(
+        tmp_path,
+        nested_edit=(f"prompt_config: {with_system}", f"prompt_config: {with_system}\n        num_repeats: 2"),
+    )
+
+    with pytest.raises(EnvironmentValidationError, match="composition of demo/nested is stale"):
+        validate_environment(main_path, name="demo/nested")
+    assert validate_environment(main_path, name="demo/nested", sync=True).synchronized_fields == ("datasets",)
+
+    protocol = yaml.safe_load(main_path.read_text(encoding="utf-8"))["protocols"][0]
+    assert protocol["datasets"][0].get("num_repeats", 1) == 1
+    assert protocol["setups"][0]["datasets"][0]["num_repeats"] == 2
+
+    nested = main_path.with_name("nested.yaml")
+    nested.write_text(nested.read_text(encoding="utf-8").replace("num_repeats: 2", "num_repeats: 1"), encoding="utf-8")
+    validate_environment(main_path, name="demo/nested", sync=True)
+    assert "datasets" not in yaml.safe_load(main_path.read_text(encoding="utf-8"))["protocols"][0]["setups"][0]
+
+
 def test_an_environment_setup_shares_its_example_datasets(tmp_path: Path) -> None:
     # An environment declares only example datasets, so those are what a setup must share.
     main_path = _listing(tmp_path, kind="environment")

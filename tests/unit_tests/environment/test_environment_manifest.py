@@ -651,6 +651,65 @@ def test_a_listing_dumps_only_what_each_config_sets_and_round_trips() -> None:
     assert "setups" not in yaml.safe_load(dump_manifest(EnvironmentManifest.model_validate(_manifest())))
 
 
+def _nested_listing_manifest() -> dict:
+    """The listing manifest, with a Pi setup that runs its system-prompt protocol under another harness."""
+    raw = _listing_manifest()
+    raw["protocols"][0]["setups"] = [
+        {
+            "name": "my_eval/pi_with_system",
+            "config_path": "pi_with_system.yaml",
+            "description": "Competition mathematics with a system prompt, run by Pi",
+            "agent_server": "pi_agent",
+        }
+    ]
+    return raw
+
+
+def test_a_setup_a_protocol_lists_takes_the_protocols_facts() -> None:
+    main = EnvironmentManifest.model_validate(_nested_listing_manifest())
+    protocol = main.protocols[0]
+    [nested] = protocol.setups
+
+    setup = resolve_listed_manifest(main, nested)
+
+    assert [listed.name for listed in main.listed_configs()] == [
+        "my_eval/codex",
+        "my_eval/config_with_system",
+        "my_eval/pi_with_system",
+    ]
+    assert main.listing_protocol(nested) == protocol and main.listing_protocol(protocol) is None
+    # The protocol's prompt and rows, the setup's own harness, and the main manifest's version.
+    assert (setup.standard_prompt_config, setup.datasets[0].prompt_config) == (
+        "prompts/with_system.yaml",
+        "prompts/with_system.yaml",
+    )
+    assert (setup.agent_server, setup.version, setup.setups, setup.protocols) == ("pi_agent", main.version, [], [])
+    raw = _nested_listing_manifest()
+    assert yaml.safe_load(dump_manifest(main))["protocols"] == raw["protocols"]
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize("backend", ["pydantic", "schema"])
+def test_a_setup_lists_no_setups_of_its_own(backend: str) -> None:
+    raw = _nested_listing_manifest()
+    nested = raw["protocols"][0]["setups"][0]
+    raw["setups"][0]["setups"] = [{**nested, "name": "my_eval/codex_again", "config_path": "codex_again.yaml"}]
+
+    if backend == "schema":
+        assert list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+    else:
+        with pytest.raises(ValidationError, match="setups"):
+            EnvironmentManifest.model_validate(raw)
+
+
+def test_a_setup_a_protocol_lists_needs_a_name_of_its_own_across_the_manifest() -> None:
+    raw = _nested_listing_manifest()
+    raw["protocols"][0]["setups"][0]["name"] = "my_eval/codex"
+
+    with pytest.raises(ValidationError, match="their own name"):
+        EnvironmentManifest.model_validate(raw)
+
+
 def test_load_listed_manifest_returns_the_main_manifest_or_a_listed_config(tmp_path: Path) -> None:
     path = tmp_path / "manifest.yaml"
     path.write_text(dump_manifest(_listing_manifest()), encoding="utf-8")
@@ -659,6 +718,8 @@ def test_load_listed_manifest_returns_the_main_manifest_or_a_listed_config(tmp_p
     assert load_listed_manifest(path, "my_eval/codex").agent_server == "codex_agent"
     with pytest.raises(ManifestError, match="lists no setup or protocol named 'my_eval/other'"):
         load_listed_manifest(path, "my_eval/other")
+    path.write_text(dump_manifest(_nested_listing_manifest()), encoding="utf-8")
+    assert load_listed_manifest(path, "my_eval/pi_with_system").standard_prompt_config == "prompts/with_system.yaml"
 
 
 @pytest.mark.parametrize("backend", ["pydantic", "schema"])

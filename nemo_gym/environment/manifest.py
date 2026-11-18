@@ -294,10 +294,18 @@ class ManifestSetup(_ListedConfig):
 
 
 class ManifestProtocol(_ListedConfig):
-    """A config that scores a benchmark's tasks under another prompt, tools or scoring."""
+    """A config that scores a benchmark's tasks under another prompt, tools or scoring.
+
+    It may list its own setups: configs that run the protocol with another harness or runtime. They take the
+    protocol's facts, not only the main manifest's. A setup lists nothing, so the nesting stops there.
+    """
 
     description: NonEmptyString = Field(description="How the protocol's prompt, tools or scoring differ.")
     standard_prompt_config: NonEmptyString | None = None
+    setups: list[ManifestSetup] = Field(
+        default_factory=list,
+        description="Configs that run this protocol's tasks, prompt and scoring with another harness or runtime.",
+    )
 
 
 def _profile_schema_conditions() -> list[dict[str, Any]]:
@@ -591,15 +599,19 @@ class EnvironmentManifest(_ManifestModel):
             except ValidationError as error:
                 issue = error.errors(include_url=False, include_context=False, include_input=False)[0]
                 location = ".".join(str(part) for part in issue["loc"])
+                inherited = "the main manifest" if self.listing_protocol(listed) is None else "its protocol"
                 raise ValueError(
-                    f"{listed.name}, combined with the main manifest: {f'{location}: ' if location else ''}"
-                    f"{issue['msg']}"
+                    f"{listed.name}, combined with {inherited}: {f'{location}: ' if location else ''}{issue['msg']}"
                 ) from error
         return self
 
     def listed_configs(self) -> tuple[ManifestSetup | ManifestProtocol, ...]:
-        """The setups, then the protocols, in the order the manifest lists them."""
-        return (*self.setups, *self.protocols)
+        """The setups, then each protocol followed by its own setups, in the order the manifest lists them."""
+        return (*self.setups, *(listed for protocol in self.protocols for listed in (protocol, *protocol.setups)))
+
+    def listing_protocol(self, listed: ManifestSetup | ManifestProtocol) -> ManifestProtocol | None:
+        """The protocol that lists ``listed`` as one of its setups; ``None`` when the main manifest lists it."""
+        return next((protocol for protocol in self.protocols if listed in protocol.setups), None)
 
 
 class ManifestError(ConfigError):
@@ -609,13 +621,16 @@ class ManifestError(ConfigError):
 def resolve_listed_manifest(
     main: EnvironmentManifest, listed: ManifestSetup | ManifestProtocol
 ) -> EnvironmentManifest:
-    """The complete manifest of a setup or protocol: the main manifest's facts with the ones it sets.
+    """The complete manifest of a setup or protocol: the facts it inherits with the ones it sets.
 
-    Its ``config_path`` stays relative to the main manifest, and it lists no setups or protocols of its own. The
-    catalog, validation and publication all get a setup or protocol from here, so none of them combines the two.
+    A setup a protocol lists inherits the protocol's complete manifest; any other listed config inherits the main
+    manifest's. Its ``config_path`` stays relative to the main manifest, and it lists no setups or protocols of its
+    own. The catalog, validation and publication all get a setup or protocol from here, so none of them combines them.
     """
-    data = main.model_dump(mode="json", exclude={"setups", "protocols"})
-    data.update(listed.model_dump(mode="json", exclude_unset=True))
+    protocol = main.listing_protocol(listed)
+    inherited = main if protocol is None else resolve_listed_manifest(main, protocol)
+    data = inherited.model_dump(mode="json", exclude={"setups", "protocols"})
+    data.update(listed.model_dump(mode="json", exclude_unset=True, exclude={"setups"}))
     return EnvironmentManifest.model_validate(data)
 
 
