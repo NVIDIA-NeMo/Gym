@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -39,7 +40,6 @@ MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
 FENCED_BLOCK = re.compile(r"```.*?```", re.DOTALL)
 UNPINNED_BLOB_LINK = re.compile(r"github\.com/[^/\s]+/[^/\s]+/blob/(?![0-9a-f]{40}/)[^\s)]+")
 BARE_FILE_LINE = re.compile(r"\b[\w./-]+\.(?:py|yaml|yml|md|mdx|toml|json):\d+")
-STRUCTURE = re.compile(r"^\s*(?:async\s+def|def|class|return)\b", re.MULTILINE)
 
 
 def right_side_hunks(diff_text: str) -> dict[str, list[range]]:
@@ -67,14 +67,16 @@ def check_comment(comment: dict, worktree: Path, hunks: dict[str, list[range]]) 
     body = comment["body"]
     results: dict[str, str] = {}
 
-    in_one_hunk = any(start in hunk and end in hunk for hunk in hunks.get(path, []))
-    results["hunk"] = "ok" if in_one_hunk else f"FAIL: lines {start}-{end} are not inside one hunk of {path}"
+    in_one_hunk = 1 <= start <= end and any(start in hunk and end in hunk for hunk in hunks.get(path, []))
+    results["hunk"] = "ok" if in_one_hunk else f"FAIL: lines {start}-{end} are not a range inside one hunk of {path}"
 
     file_path = worktree / path
     lines = file_path.read_text().splitlines() if file_path.is_file() else []
     anchored = "\n".join(lines[start - 1 : end])
     expect = comment.get("_expect")
-    if not lines:
+    if comment.get("side", "RIGHT") != "RIGHT" or comment.get("start_side", "RIGHT") != "RIGHT":
+        results["anchor"] = "FAIL: only RIGHT-side comments are supported"
+    elif not lines:
         results["anchor"] = f"FAIL: {path} does not exist in the worktree"
     elif expect is None:
         results["anchor"] = "warn: no _expect given"
@@ -99,28 +101,34 @@ def check_comment(comment: dict, worktree: Path, hunks: dict[str, list[range]]) 
     elif len(blocks) > 1:
         results["sugg"] = "FAIL: more than one suggestion block in one comment"
     else:
-        results["sugg"] = check_suggestion(path, lines, start, end, blocks[0])
+        results["sugg"] = check_suggestion(worktree, path, lines, start, end, blocks[0])
 
     results["mermaid"] = "warn: render it with mermaid-cli" if "```mermaid" in body else "n/a"
     return results
 
 
-def check_suggestion(path: str, lines: list[str], start: int, end: int, block: str) -> str:
+def check_suggestion(worktree: Path, path: str, lines: list[str], start: int, end: int, block: str) -> str:
     """Apply a suggestion block to the file and check the result still parses and keeps its structure."""
-    replaced = "\n".join(lines[start - 1 : end])
-    if len(STRUCTURE.findall(block)) < len(STRUCTURE.findall(replaced)):
-        return "FAIL: the block removes a def, class, or return that the anchored lines contain"
     new_text = "\n".join(lines[: start - 1] + block.rstrip("\n").split("\n") + lines[end:]) + "\n"
     if path.endswith(".py"):
         try:
-            ast.parse(new_text)
+            new_tree = ast.parse(new_text)
         except SyntaxError as error:
             return f"FAIL: the file no longer parses: {error.msg} at line {error.lineno}"
+        try:
+            old_tree = ast.parse("\n".join(lines) + "\n")
+        except SyntaxError:
+            old_tree = None
+        if old_tree is not None:
+            removed = python_structure(old_tree) - python_structure(new_tree)
+            if removed:
+                return f"FAIL: the block removes {', '.join(sorted(removed))}"
         ruff = shutil.which("ruff")
         if ruff is None:
             return "warn: parses; ruff not found, formatting not checked"
         check = subprocess.run(
-            [ruff, "format", "--check", "--stdin-filename", path, "-"],
+            [str(Path(ruff).resolve()), "format", "--check", "--stdin-filename", path, "-"],
+            cwd=worktree,
             input=new_text,
             capture_output=True,
             text=True,
@@ -134,6 +142,29 @@ def check_suggestion(path: str, lines: list[str], start: int, end: int, block: s
         except yaml.YAMLError as error:
             return f"FAIL: the file no longer parses as YAML: {error}"
     return "ok"
+
+
+def python_structure(tree: ast.Module) -> Counter[str]:
+    """Count each def and class by qualified name, and the returns that each function owns.
+
+    A return belongs to the nearest enclosing function, so a class or a nested function added by a
+    suggestion cannot make up for a return it removes from the outer function.
+    """
+    counts: Counter[str] = Counter()
+
+    def visit(node: ast.AST, scope: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = f"{scope}.{child.name}" if scope else child.name
+                counts[f"`{name}`"] += 1
+                visit(child, name)
+            else:
+                if isinstance(child, ast.Return):
+                    counts[f"a return in `{scope}`"] += 1
+                visit(child, scope)
+
+    visit(tree, "")
+    return counts
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -51,12 +51,12 @@ python3 .agents/skills/review-pr-team/scripts/audit_review_payload.py \
 
 | Check | Fails when |
 |---|---|
-| `hunk` | the commented lines are not all inside one changed section (hunk) of the PR's diff. GitHub rejects the whole review if any comment is outside the diff. |
-| `anchor` | the commented lines at the PR head do not contain the comment's `_expect` text |
+| `hunk` | the commented lines are not a forward range inside one changed section (hunk) of the PR's diff. GitHub rejects the whole review if any comment is outside the diff. |
+| `anchor` | the comment is on the left (old) side of the diff, or the commented lines at the PR head do not contain the comment's `_expect` text |
 | `perm` | a link to code points at a branch instead of a commit, or a `file:line` reference is not a link |
-| `sugg` | applying the suggestion block to the file removes a `def`, `class`, or `return` that the replaced lines had |
+| `sugg` | applying the suggestion block to a Python file removes a `def` or `class`, or a `return` from the function that owned it. Comments and strings do not count, and a new declaration or a return in a nested function does not make up for one removed. |
 | `sugg` | the file with the block applied no longer parses (Python or YAML) |
-| `sugg` | the file with the block applied fails `ruff format --check` |
+| `sugg` | the file with the block applied fails `ruff format --check`, run in the PR worktree so its formatter settings apply |
 | `mermaid` | (warning only) a mermaid diagram is present. Render it once with mermaid-cli (`npx -y @mermaid-js/mermaid-cli`) or GitHub's preview before posting. |
 
 Two checks need the lead's judgment rather than the script:
@@ -139,8 +139,9 @@ gh pr comment <PR> --repo NVIDIA-NeMo/Gym --body-file "$STATE_DIR/summary.md"
 ```
 
 **Through the API, when the reviewer asks.** Submit with the chosen verdict as the event
-(`APPROVE`, `COMMENT`, or `REQUEST_CHANGES`). Add `-F body=@"$STATE_DIR/summary.md"` only when there
-is a summary:
+(`APPROVE`, `COMMENT`, or `REQUEST_CHANGES`) and no body. After the submission succeeds, post the
+summary, if there is one, with the same `gh pr comment` step as the UI path, then set
+`summary_posted` to `true`. Either path posts the summary once:
 
 ```bash
 gh api repos/NVIDIA-NeMo/Gym/pulls/<PR>/reviews/<review_id>/events --method POST -f event=COMMENT

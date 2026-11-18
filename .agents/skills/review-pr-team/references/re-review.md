@@ -17,13 +17,27 @@ review. Confirm with the reviewer before every GitHub write, one action per ques
   `gh pr view <PR> --repo NVIDIA-NeMo/Gym --json headRefOid,baseRefName,commits,mergeStateStatus` and
   `gh pr checks <PR> --repo NVIDIA-NeMo/Gym`.
 - Your review threads, through GraphQL, because REST under-reports pending and threaded comments.
-  Keep the unresolved threads whose first comment is yours (`gh api user --jq .login`):
+  Collect every page first, then keep the unresolved threads whose first comment is yours
+  (`gh api user --jq .login`), outdated ones included. `--paginate` follows `$endCursor` through
+  all threads:
 
   ```bash
-  gh api graphql -F pr=<PR> -f query='
-    query($pr: Int!) { repository(owner: "NVIDIA-NeMo", name: "Gym") { pullRequest(number: $pr) {
-      reviewThreads(first: 100) { nodes { id isResolved isOutdated path line
-        comments(first: 50) { nodes { databaseId author { login } body url } } } } } } }'
+  gh api graphql --paginate -F pr=<PR> -f query='
+    query($pr: Int!, $endCursor: String) { repository(owner: "NVIDIA-NeMo", name: "Gym") { pullRequest(number: $pr) {
+      reviewThreads(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor }
+        nodes { id isResolved isOutdated path line
+          comments(first: 100) { pageInfo { hasNextPage endCursor }
+            nodes { databaseId author { login } body url } } } } } } }' > "$STATE_DIR/threads.json"
+  ```
+
+  A thread whose `comments.pageInfo.hasNextPage` is true has more replies. Fetch the rest before
+  reading it, because the author's last reply may name the fix:
+
+  ```bash
+  gh api graphql --paginate -F id=<thread-id> -f query='
+    query($id: ID!, $endCursor: String) { node(id: $id) { ... on PullRequestReviewThread {
+      comments(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor }
+        nodes { databaseId author { login } body url } } } } }'
   ```
 - Any pending review of yours, read from GitHub. Its comments are the reviewer's to change.
 - Set up a fresh worktree and venv at the new head, as in SKILL.md §1.1 and §1.6.

@@ -90,6 +90,12 @@ mechanics are in [references/posting.md](references/posting.md). Re-review is in
 
 ## Phase 1: Set up and gather context
 
+If the assistant can name its session, name it after the review, so the reviewer can find it among
+other sessions: `Gym Team PR <PR> review - <summary>` for a GitHub pull request, and
+`Gym Team MR <MR> review - <summary>` for a GitLab merge request. The summary is a few words on what
+the PR does, taken from its title without the type prefix, such as
+`Gym Team PR 5782 review - team review skill and AGENTS.md conventions`.
+
 ### 1.1 Check out the PR in its own worktree
 
 Never review in your main checkout, because other work and other reviews may be using it.
@@ -103,19 +109,20 @@ keeps the review record that a later re-review reads.
 STATE_DIR="$HOME/.cache/gym-pr-review/pr-<PR>"
 mkdir -p "$STATE_DIR"
 GYM_URL=https://github.com/NVIDIA-NeMo/Gym.git
-git fetch "$GYM_URL" "+pull/<PR>/head:refs/pr-review/<PR>/head" "+main:refs/pr-review/<PR>/main"
+BASE_BRANCH=$(gh pr view <PR> --repo NVIDIA-NeMo/Gym --json baseRefName --jq .baseRefName)
+git fetch "$GYM_URL" "+pull/<PR>/head:refs/pr-review/<PR>/head" \
+  "+refs/heads/$BASE_BRANCH:refs/pr-review/<PR>/base" "+main:refs/pr-review/<PR>/main"
 HEAD_SHA=$(git rev-parse refs/pr-review/<PR>/head)
-BASE_SHA=$(git merge-base refs/pr-review/<PR>/main "$HEAD_SHA")
+BASE_SHA=$(git merge-base refs/pr-review/<PR>/base "$HEAD_SHA")
 WORKTREE="$STATE_DIR/worktree-$HEAD_SHA"
 git worktree add --detach "$WORKTREE" "$HEAD_SHA"
-cat > "$STATE_DIR/state.env" <<EOF
-STATE_DIR=$STATE_DIR
-HEAD_SHA=$HEAD_SHA
-BASE_SHA=$BASE_SHA
-WORKTREE=$WORKTREE
-MAIN_REF=refs/pr-review/<PR>/main
-EOF
+printf 'STATE_DIR=%q\nHEAD_SHA=%q\nBASE_SHA=%q\nWORKTREE=%q\nMAIN_REF=%q\n' \
+  "$STATE_DIR" "$HEAD_SHA" "$BASE_SHA" "$WORKTREE" "refs/pr-review/<PR>/main" > "$STATE_DIR/state.env"
 ```
+
+`BASE_SHA` comes from the PR's own base branch, so for a PR in a stack the diff from `BASE_SHA` holds
+only this PR's changes, not the lower PR's. `printf %q` quotes each value, so a path with spaces or
+`$` survives `source`.
 
 Fetching by URL works whatever the remotes in your clone are called. The worktree is shared by all
 agents and is read-only for them. Any agent that runs code makes its own worktree (§1.6).
@@ -143,8 +150,10 @@ gh pr checks <PR> --repo NVIDIA-NeMo/Gym
 A PR is reviewed in the context of its neighbors. Build a related-PR map:
 
 1. **Stack.** If the base branch is not `main`, find the PR whose head is that branch. Also find open
-   PRs whose base is this PR's head branch. A finding that a later PR in the stack already fixes is
-   dropped. A finding that no PR fixes ships through the whole stack, so say so. A valid finding
+   PRs whose base is this PR's head branch. A finding this PR introduces stays until the reviewed
+   head fixes it. If a later PR in the stack fixes it, link that PR, and tell the reviewer when the
+   two need to land together. An unmerged later PR does not resolve the finding, because this PR can
+   merge without it. A finding that no PR fixes ships through the whole stack, so say so. A valid finding
    about code that a lower PR in the stack, or an already merged PR, introduced is not dropped
    either. Route it to that PR's author, as a comment on that PR or an issue linked from it, and
    list it in the preview as routed elsewhere.
@@ -424,5 +433,6 @@ source "$HOME/.cache/gym-pr-review/pr-<PR>/state.env"
 for tree in "$WORKTREE" "$STATE_DIR"/agent-*; do git worktree remove --force "$tree"; done
 git worktree prune
 git update-ref -d refs/pr-review/<PR>/head
+git update-ref -d refs/pr-review/<PR>/base
 git update-ref -d refs/pr-review/<PR>/main
 ```

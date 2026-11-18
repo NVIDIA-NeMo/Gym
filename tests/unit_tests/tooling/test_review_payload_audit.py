@@ -13,9 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -33,9 +36,11 @@ DIFF = """diff --git a/pkg/math.py b/pkg/math.py
 """
 
 
-def run_audit(tmp_path: Path, comments: list[dict]) -> tuple[int, str, dict]:
+def run_audit(tmp_path: Path, comments: list[dict], ruff_config: str | None = None) -> tuple[int, str, dict]:
     worktree = tmp_path / "worktree"
     (worktree / "pkg").mkdir(parents=True)
+    if ruff_config is not None:
+        (worktree / "ruff.toml").write_text(ruff_config)
     (worktree / "pkg/math.py").write_text(SOURCE)
     (tmp_path / "pr.diff").write_text(DIFF)
     (tmp_path / "review.json").write_text(json.dumps({"commit_id": SHA, "comments": comments}))
@@ -99,3 +104,72 @@ def test_each_check_fails_on_its_own_defect(tmp_path: Path) -> None:
     assert any("perm: FAIL: file reference is not a link: pkg/other.py:10" in line for line in lines)
     assert any("sugg: FAIL: the block removes" in line for line in lines)
     assert any("sugg: FAIL: the file no longer parses" in line for line in lines)
+
+
+def test_anchors_must_be_a_forward_range_on_the_right_side(tmp_path: Path) -> None:
+    comments = [
+        {"path": "pkg/math.py", "start_line": 3, "line": 2, "body": "Reversed range."},
+        {"path": "pkg/math.py", "line": 2, "side": "LEFT", "body": "Old side.", "_expect": "a + b"},
+        {"path": "pkg/math.py", "start_line": 2, "line": 3, "start_side": "LEFT", "body": "Mixed sides."},
+    ]
+    code, out, _ = run_audit(tmp_path, comments)
+    lines = out.splitlines()
+
+    assert code == 1
+    assert any("hunk: FAIL: lines 3-2" in line for line in lines)
+    assert sum("anchor: FAIL: only RIGHT-side comments" in line for line in lines) == 2
+
+
+def test_a_valid_range_with_context_lines_passes(tmp_path: Path) -> None:
+    comments = [
+        {"path": "pkg/math.py", "start_line": 1, "line": 3, "side": "RIGHT", "body": "Whole hunk.", "_expect": "def"},
+    ]
+    code, out, _ = run_audit(tmp_path, comments)
+
+    assert code == 0, out
+
+
+def test_an_added_class_or_nested_function_does_not_hide_a_removed_return(tmp_path: Path) -> None:
+    comments = [
+        # Two declarations or returns before and after, but add() no longer returns.
+        {
+            "path": "pkg/math.py",
+            "start_line": 1,
+            "line": 3,
+            "body": "```suggestion\ndef add(a, b):\n    class Result:\n        pass\n```",
+        },
+        # The return moves into a nested function, so add() still returns None.
+        {
+            "path": "pkg/math.py",
+            "start_line": 2,
+            "line": 3,
+            "body": "```suggestion\n    def inner():\n        return a + b\n```",
+        },
+    ]
+    code, out, _ = run_audit(tmp_path, comments)
+    failures = [line for line in out.splitlines() if "sugg: FAIL" in line]
+
+    assert code == 1
+    assert len(failures) == 2
+    assert all("a return in `add`" in line for line in failures)
+
+
+def test_a_return_turned_into_a_string_counts_as_removed(tmp_path: Path) -> None:
+    # The block still has a line starting with "return", but it is inside a string, so add() returns None.
+    body = '```suggestion\n    total = a + b\n    """\n    return total\n    """\n```'
+    comment = {"path": "pkg/math.py", "start_line": 2, "line": 3, "body": body, "_expect": "total"}
+    code, out, _ = run_audit(tmp_path, [comment])
+
+    assert code == 1
+    assert "sugg: FAIL: the block removes a return in `add`" in out
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="ruff is not installed")
+def test_formatting_uses_the_pr_worktree_configuration(tmp_path: Path) -> None:
+    # Fine at the repository's line length, but too long for the PR worktree's 40-column setting.
+    body = "```suggestion\n    total = int(a) + int(b) + int(a) + int(b)\n```"
+    comment = {"path": "pkg/math.py", "line": 2, "body": body, "_expect": "total"}
+    code, out, _ = run_audit(tmp_path, [comment], ruff_config="line-length = 40\n")
+
+    assert code == 1
+    assert "sugg: FAIL: ruff format would change the file" in out
