@@ -1,5 +1,6 @@
 ---
 name: nemo-gym-analyzing-results
+license: Apache-2.0
 description: >
   Read, compare and explain finished NeMo Gym evaluation results. Compares a baseline run with a
   candidate (for example BF16 vs a quantized checkpoint, two models, two harnesses) with confidence

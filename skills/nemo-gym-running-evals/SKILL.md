@@ -1,5 +1,6 @@
 ---
 name: nemo-gym-running-evals
+license: Apache-2.0
 description: >
   Run a model or agent evaluation with NeMo Gym and get a result you can trust: a first local run
   against an API or vLLM endpoint, a named benchmark (IFBench, GPQA, SWE-bench, Terminal-Bench and
