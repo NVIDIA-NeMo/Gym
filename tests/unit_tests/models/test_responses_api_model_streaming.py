@@ -1362,6 +1362,34 @@ class TestResponsesDispatchRoute:
         )
         assert not server.backend_called
 
+    @pytest.mark.parametrize(
+        "tool_choice,detail",
+        [
+            ({"type": "file_search"}, "Responses tool choice type 'file_search' has no Chat representation."),
+            (
+                {"type": "allowed_tools", "mode": "auto", "tools": [{"type": "file_search"}]},
+                "Responses tool reference type 'file_search' has no Chat representation.",
+            ),
+        ],
+        ids=["tool_choice", "allowed_tools"],
+    )
+    @pytest.mark.parametrize("stream", [False, True], ids=["json", "stream"])
+    def test_hosted_tool_choice_on_a_chat_converting_server_is_refused_with_422(
+        self, stream: bool, tool_choice: dict, detail: str
+    ) -> None:
+        # The tool choice is converted before the tool list, so it must carry the same refusal.
+        client, server = _client(_ChatConvertingModel)
+        body = {
+            "input": "q",
+            "stream": stream,
+            "tools": [{"type": "file_search", "vector_store_ids": ["vs_1"]}],
+            "tool_choice": tool_choice,
+        }
+        response = client.post("/v1/responses", json=body)
+        assert response.status_code == 422
+        assert response.json()["detail"] == detail
+        assert not server.backend_called
+
     def test_non_streaming_backend_error_still_raises(self) -> None:
         # Without the streaming contract, a backend failure is a normal exception (HTTP 500), not a
         # synthesized response.failed — only the stream path swallows it into a terminal event.

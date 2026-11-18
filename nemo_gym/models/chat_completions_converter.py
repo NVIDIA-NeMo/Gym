@@ -326,7 +326,7 @@ _BRIDGE_GRAMMAR_DROP_WARNED: set = set()
 
 
 class UnsupportedToolTypeError(NotImplementedError):
-    """A Responses tool type that the Chat Completions conversion cannot express.
+    """A Responses tool type, or a tool choice naming one, that the Chat Completions conversion cannot express.
 
     Chat Completions carries function and custom tools only. A provider-hosted tool such as ``web_search`` runs
     on the provider that serves the Responses API, so no backend reached through this conversion can execute it.
@@ -1003,7 +1003,7 @@ class ChatCompletionsConverter(BaseModel):
     def _tool_reference_to_chat(tool: dict) -> dict:
         tool_type = tool.get("type")
         if tool_type not in {"function", "custom"}:
-            raise NotImplementedError(f"Responses tool reference type {tool_type!r} has no Chat representation.")
+            raise UnsupportedToolTypeError(f"Responses tool reference type {tool_type!r} has no Chat representation.")
         return {"type": tool_type, tool_type: {key: value for key, value in tool.items() if key != "type"}}
 
     @staticmethod
@@ -1149,7 +1149,7 @@ class ChatCompletionsConverter(BaseModel):
                     "tools": [self._tool_reference_to_chat_lowered(tool) for tool in tool_choice["tools"]],
                 },
             }
-        raise NotImplementedError(f"Responses tool choice type {tool_type!r} has no Chat representation.")
+        raise UnsupportedToolTypeError(f"Responses tool choice type {tool_type!r} has no Chat representation.")
 
     def _chat_completion_to_responses_tools(
         self, chat_completions_tools: Optional[List[NeMoGymChatCompletionToolUnionParam]]
