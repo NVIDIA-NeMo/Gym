@@ -501,10 +501,16 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     if not turns and not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
     python_verifier = python_verifier_for(path, root) if not turns else None
-    if python_verifier is not None and config.verifier.reward_key is not None:
+    # A Python verifier's runner writes a returned number as `reward`, which is also the score key of a returned dict
+    # that has one, so `reward` is the one reward_key it can honor; a mixed dataset sets it for such a task.
+    if python_verifier is not None and config.verifier.reward_key not in (None, "reward"):
+        where = (
+            f"tests/{VERIFIER_FILE}" if python_verifier.parent == path / "tests" else f"the dataset's {VERIFIER_FILE}"
+        )
         raise HarborTaskError(
-            f"{path.name}: reward_key applies to test.sh verifiers; a {VERIFIER_FILE} verifier names its score by "
-            "returning a number or a dict with a `reward` key"
+            f"{path.name}: reward_key {config.verifier.reward_key!r} applies to test.sh verifiers, and {where} grades "
+            f'this task (its runner writes a returned number as `reward`). Set reward_key = "reward" for it in '
+            f'[gym.tasks."{path.name}".verifier]; verify() must then return a number or a dict with a `reward` key'
         )
     if not turns and python_verifier is None and not (path / "tests").is_dir():
         raise HarborTaskError(f"{path} has no tests/ folder (and the dataset has no {VERIFIER_FILE} to grade it with)")

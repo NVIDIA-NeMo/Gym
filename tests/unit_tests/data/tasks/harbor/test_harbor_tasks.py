@@ -2717,15 +2717,35 @@ def test_a_task_local_reward_key_does_not_drop_the_task_from_preparation(tmp_pat
         assert "ignoring unknown key `verifier.reward_key`" in caplog.text
 
 
-def test_reward_key_is_refused_for_a_dataset_python_verifier(tmp_path):
+def test_a_python_verifier_takes_reward_key_reward_alone(tmp_path):
+    """A Python verifier's runner writes a returned number as `reward`, so another reward_key is refused at load for a
+    task graded by the dataset's verifier.py or by its own tests/verifier.py, with the file named. `reward` is the
+    per-task setting that keeps such a task in a dataset whose test.sh tasks score another key."""
     folder = tmp_path / "ds"
-    write_task(folder / "a")
-    shutil.rmtree(folder / "a" / "tests")
+    write_task(folder / "shared")
+    shutil.rmtree(folder / "shared" / "tests")
     (folder / "verifier.py").write_text("def verify(workspace):\n    return 1.0\n")
-    assert load_task(folder / "a").python_verifier is not None
+    write_task(folder / "local")
+    (folder / "local" / "tests" / "test.sh").unlink()
+    (folder / "local" / "tests" / "verifier.py").write_text("def verify(workspace):\n    return 1.0\n")
+    write_task(folder / "script")
+    assert load_task(folder / "shared").python_verifier == folder / "verifier.py"
+    assert load_task(folder / "local").python_verifier == folder / "local" / "tests" / "verifier.py"
     (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
-    with pytest.raises(HarborTaskError, match="reward_key applies to test.sh verifiers"):
-        load_task(folder / "a")
+    with pytest.raises(HarborTaskError, match="reward_key 'overall' applies to test.sh verifiers, and the dataset's"):
+        load_task(folder / "shared")
+    with pytest.raises(
+        HarborTaskError, match=r"and tests/verifier\.py grades this task .*\[gym\.tasks\.\"local\"\.verifier\]"
+    ):
+        load_task(folder / "local")
+    assert load_task(folder / "script").config.verifier.reward_key == "overall"
+    overrides = (
+        '[gym.tasks."shared".verifier]\nreward_key = "reward"\n[gym.tasks."local".verifier]\nreward_key = "reward"\n'
+    )
+    (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n' + overrides)
+    assert load_task(folder / "shared").config.verifier.reward_key == "reward"
+    assert load_task(folder / "local").config.verifier.reward_key == "reward"
+    assert load_task(folder / "script").config.verifier.reward_key == "overall"
 
 
 def test_an_unset_reward_key_leaves_the_digest_of_a_shaping_dataset_unchanged(tmp_path):
