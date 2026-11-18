@@ -24,7 +24,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, FrozenSet, List, Optional
 
 
 ResultRow = tuple[Any, ...]
@@ -333,6 +333,180 @@ async def execute_postgres_async(
             return None
 
 
+# Functions SQLite has and Snowflake does not (Snowflake spells them LISTAGG, IFF, POSITION, ...) that DuckDB, under the
+# local Snowflake stand-in, still runs or rewrites. Not verified on a Snowflake account.
+_SQLITE_ONLY_FUNCTIONS = frozenset({"GROUP_CONCAT", "IIF", "INSTR", "JULIANDAY", "STRFTIME", "TOTAL"})
+# Output columns of ``LATERAL FLATTEN(...)``.
+_FLATTEN_COLUMNS = frozenset({"SEQ", "KEY", "PATH", "INDEX", "VALUE", "THIS"})
+
+
+def snowflake_rejection(
+    sql: str, db_id: str, tables: Dict[str, FrozenSet[str]], database: str = "BIRD"
+) -> Optional[str]:
+    """Why Snowflake would refuse ``sql``, though the local stand-in (DuckDB under fakesnow) might run it; else ``None``.
+
+    ``tables`` is the ``db_id`` schema's catalog, ``{table: columns}``, with exact names. Checks, statically:
+
+    - exactly one query (``SELECT``/``WITH``/set operation): the data is shared by every rollout;
+    - identifiers resolve as on Snowflake, where an unquoted name means its upper-case spelling and a quoted one is
+      exact (DuckDB matches names in any case);
+    - no SQLite-only function (``_SQLITE_ONLY_FUNCTIONS``), ``LIMIT offset, count``, or two-argument ``MAX``/``MIN``.
+
+    The identifier check knows the catalog, the query's own aliases and CTEs, and ``FLATTEN``'s columns; a column is
+    accepted if any table of the schema has it. A column qualified by a catalog table (or its alias) must be a catalog
+    column, and ``JOIN ... USING`` names are checked too. It is a static approximation, not Snowflake's resolver.
+    """
+    import sqlglot
+    from sqlglot import exp
+    from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
+    from sqlglot.optimizer.scope import traverse_scope
+    from sqlglot.tokens import TokenType
+
+    try:
+        tokens = sqlglot.tokenize(sql, read="snowflake")
+        statements = [s for s in sqlglot.parse(sql, read="snowflake") if s is not None]
+    except sqlglot.errors.SqlglotError:
+        return "unparsable"
+    if len(statements) != 1 or not isinstance(statements[0], exp.Query):
+        return "not_a_single_query"
+    cte_names = {cte.alias.upper() for cte in statements[0].find_all(exp.CTE)}  # `WITH total(x) AS ...` is no call
+    for i, tok in enumerate(tokens[:-1]):
+        nxt = tokens[i + 1]
+        if tok.token_type != TokenType.IDENTIFIER and nxt.token_type == TokenType.L_PAREN:
+            if tok.text.upper() in _SQLITE_ONLY_FUNCTIONS and tok.text.upper() not in cte_names:
+                return f"sqlite_function:{tok.text.upper()}"
+        if tok.token_type == TokenType.LIMIT and i + 2 < len(tokens) and tokens[i + 2].token_type == TokenType.COMMA:
+            return "limit_offset_comma"
+    tree = normalize_identifiers(statements[0], dialect="snowflake")
+    if any(f.expressions for f in tree.find_all(exp.Max, exp.Min)):
+        return "scalar_max_min"
+
+    ctes = {cte.alias for cte in tree.find_all(exp.CTE)}
+    table_aliases = list(tree.find_all(exp.TableAlias))
+    qualifiers = ctes | {a.name for a in table_aliases}
+    for table in tree.find_all(exp.Table):
+        if not isinstance(table.this, exp.Identifier):
+            continue  # a table function, e.g. FLATTEN
+        if table.catalog and table.catalog != database:
+            return f"unknown_database:{table.catalog}"
+        if table.db and table.db != db_id:
+            return f"unknown_schema:{table.db}"
+        if not table.db and table.name in ctes:
+            continue
+        if table.name not in tables:
+            return f"unknown_table:{table.name}"
+        qualifiers.add(table.name)
+    catalog_columns = set().union(*tables.values())
+    columns = (
+        catalog_columns
+        | {a.alias for a in tree.find_all(exp.Alias)}
+        | {c.name for a in table_aliases for c in a.columns}
+        | _FLATTEN_COLUMNS
+    )
+    for join in tree.find_all(exp.Join):
+        for name in join.args.get("using") or []:
+            ident = name.this if isinstance(name, exp.Column) else name
+            if (ident.name if ident.quoted else ident.name.upper()) not in catalog_columns:
+                return f"unknown_column:{ident.name}"
+    for column in tree.find_all(exp.Column):
+        if isinstance(column.this, exp.Star):
+            continue
+        if column.name not in columns:
+            return f"unknown_column:{column.name}"
+        if column.table and column.table not in qualifiers:
+            return f"unknown_qualifier:{column.table}"
+        if column.db and column.db != db_id:
+            return f"unknown_schema:{column.db}"
+    # A select alias can't be qualified by a table: in each scope, a column qualified by a catalog table (by name or
+    # alias) must be one of the catalog's columns. Scopes matter: one alias can name a table in one subquery and a
+    # derived table in another.
+    try:
+        scopes = traverse_scope(tree)
+    except sqlglot.errors.SqlglotError:
+        scopes = []
+    for scope in scopes:
+        for column in scope.columns:
+            source = scope.sources.get(column.table) if column.table else None
+            if (
+                isinstance(source, exp.Table)
+                and source.name in tables
+                and not isinstance(column.this, exp.Star)
+                and column.name not in catalog_columns
+            ):
+                return f"unknown_column:{column.table}.{column.name}"
+    return None
+
+
+def _is_snowflake_infra_error(e: Exception) -> bool:
+    """Whether ``e`` means the engine or its connection failed, not the query.
+
+    The connector's errors carry a SQLSTATE (a closed connection is ``08003``), judged by the same classes as
+    PostgreSQL's. DuckDB's own I/O, fatal, internal and connection errors can also surface through the stand-in.
+    Anything else the query raised, including a result Python cannot hold (``'infinity'::date``), is the query's.
+    """
+    import duckdb
+
+    sqlstate = getattr(e, "sqlstate", None)
+    if sqlstate:
+        return sqlstate[:2] in _POSTGRES_INFRA_SQLSTATE_CLASSES
+    return isinstance(
+        e, (duckdb.IOException, duckdb.FatalException, duckdb.InternalException, duckdb.ConnectionException)
+    )
+
+
+def execute_snowflake(snowflake: Any, db_id: str, sql: str, connections: List[Any]) -> Optional[ResultSet]:
+    """Run one query on the Snowflake engine (see ``setup_bird_snowflake``) and return all rows.
+
+    Returns ``None`` if ``snowflake_rejection`` finds a reason Snowflake would refuse the query, or if the query fails.
+    Raises ``TimeoutError`` when the server cancels it at its statement timeout (SQLSTATE ``57014``), and re-raises
+    engine and connection failures, so they are not scored as the model's mistake. The connection is appended to
+    ``connections`` so a caller that times out can interrupt it.
+    """
+    if snowflake_rejection(sql, db_id, snowflake.tables.get(db_id, {})) is not None:
+        return None
+    conn = snowflake.connect(db_id)
+    connections.append(conn)
+    try:
+        cur = conn.cursor()
+        cur.execute(sql.strip().rstrip(";"))
+        return normalize_rows(snowflake.fetch_all(cur))
+    except Exception as e:
+        if getattr(e, "sqlstate", None) == "57014":
+            raise TimeoutError("Snowflake query exceeded its statement timeout") from None
+        if _is_snowflake_infra_error(e):
+            raise
+        return None
+    finally:
+        conn.close()
+
+
+async def execute_snowflake_async(
+    snowflake: Any,
+    db_id: str,
+    sql: str,
+    semaphore: asyncio.Semaphore,
+    timeout_s: float = 30.0,
+    raise_on_timeout: bool = False,
+) -> Optional[ResultSet]:
+    """Execute SQL on the Snowflake engine in a worker thread, bounded by semaphore.
+
+    Returns ``None`` on timeout (unless ``raise_on_timeout`` is True) or query error. On timeout the query is
+    interrupted; ``asyncio.wait_for`` alone would leave it running.
+    """
+    async with semaphore:
+        connections: List[Any] = []
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(execute_snowflake, snowflake, db_id, sql, connections), timeout=timeout_s
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            for conn in connections:
+                snowflake.interrupt(conn)
+            if raise_on_timeout:
+                raise asyncio.TimeoutError from None
+            return None
+
+
 Runner = Callable[[str], Awaitable[Optional[ResultSet]]]
 
 
@@ -415,5 +589,30 @@ async def execute_and_compare_postgres(
 
     async def run_pred(sql: str) -> Optional[ResultSet]:
         return await execute_postgres_async(pool, db_id, sql, semaphore, timeout_s, raise_on_timeout=True)
+
+    return await _compare(run_gold, run_pred, gold_sql, pred_sql)
+
+
+async def execute_and_compare_snowflake(
+    db_path: Path,
+    snowflake: Any,
+    db_id: str,
+    gold_sql: str,
+    pred_sql: str,
+    semaphore: asyncio.Semaphore,
+    timeout_s: float = 30.0,
+) -> tuple[bool, Optional[ResultSet], Optional[ResultSet], Optional[str]]:
+    """Run the BIRD gold SQL on SQLite and the model's Snowflake SQL on the Snowflake engine, then compare. Same return
+    as above.
+
+    No gold transpilation: the gold stays the original SQLite query and only its result set is compared.
+    """
+
+    async def run_gold(sql: str) -> Optional[ResultSet]:
+        rows = await execute_sqlite_async(db_path, sql, semaphore, timeout_s, raise_on_timeout=True)
+        return None if rows is None else normalize_rows(rows)
+
+    async def run_pred(sql: str) -> Optional[ResultSet]:
+        return await execute_snowflake_async(snowflake, db_id, sql, semaphore, timeout_s, raise_on_timeout=True)
 
     return await _compare(run_gold, run_pred, gold_sql, pred_sql)
