@@ -40,11 +40,14 @@ from nemo_gym.verification import (
 
 _CODE_GEN_DIR = Path(__file__).parent
 _RUNNER = _CODE_GEN_DIR / "sandbox" / RUNNER_FILE
-# The grading harness, uploaded under the same relative paths so the runner can import it.
+# The grading harnesses, uploaded under the same relative paths so the runner can import them.
 _HARNESS_FILES = (
     "lcb_integration/__init__.py",
     "lcb_integration/correctness.py",
     "lcb_integration/testing_util.py",
+    "assertion_harness/__init__.py",
+    "assertion_harness/check.py",
+    "sandbox_limits.py",
 )
 DEFAULT_WORK_DIR = "/tmp/code_gen_verify"
 # Interpreter start-up, Manager start/stop and result serialization on top of the
@@ -77,6 +80,13 @@ def _with_memory(config: SandboxVerificationConfig, memory_limit_mb: int) -> San
     return config.model_copy(update={"resources": dataclasses.replace(config.resources, memory_mib=needed)})
 
 
+def _runner_files() -> dict[str, str]:
+    return {
+        RUNNER_FILE: _RUNNER.read_text(encoding="utf-8"),
+        **{name: (_CODE_GEN_DIR / name).read_text(encoding="utf-8") for name in _HARNESS_FILES},
+    }
+
+
 async def check_correctness_in_sandbox(
     sample: dict[str, str],
     generation: str,
@@ -104,12 +114,43 @@ async def check_correctness_in_sandbox(
     parsed = await run_verification_sandbox(
         provider=provider,
         config=config,
-        files={
-            RUNNER_FILE: _RUNNER.read_text(encoding="utf-8"),
-            **{name: (_CODE_GEN_DIR / name).read_text(encoding="utf-8") for name in _HARNESS_FILES},
-        },
+        files=_runner_files(),
         request=request,
         exec_timeout_s=exec_timeout_s(timeout, num_tests, deadline_s=deadline_s),
+        parse_result=_RunnerResult.model_validate_json,
+        metadata=metadata,
+        work_dir=work_dir,
+    )
+    return parsed.result, parsed.metadata
+
+
+async def check_assertions_in_sandbox(
+    generation: str,
+    tests: list[str],
+    *,
+    time_limit_s: float,
+    memory_limit_mb: int,
+    provider: Mapping[str, Any] | SandboxProvider,
+    config: SandboxVerificationConfig,
+    metadata: Mapping[str, str],
+    work_dir: str = DEFAULT_WORK_DIR,
+) -> tuple[list[bool | int], dict[str, Any] | None]:
+    """Sandboxed equivalent of ``check_assertions``; raises ``SandboxVerificationError`` on infra failure."""
+    # One time limit covers the candidate and all its tests; the 5 s slack matches check_correctness's.
+    deadline_s = time_limit_s + 5
+    parsed = await run_verification_sandbox(
+        provider=provider,
+        config=_with_memory(config, memory_limit_mb),
+        files=_runner_files(),
+        request={
+            "format": "assertions",
+            "generation": generation,
+            "tests": tests,
+            "time_limit_s": time_limit_s,
+            "memory_limit_mb": memory_limit_mb,
+            "deadline_s": deadline_s,
+        },
+        exec_timeout_s=exec_timeout_s(time_limit_s, len(tests), deadline_s=deadline_s),
         parse_result=_RunnerResult.model_validate_json,
         metadata=metadata,
         work_dir=work_dir,

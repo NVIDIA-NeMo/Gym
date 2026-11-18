@@ -21,8 +21,9 @@ Kept free of server dependencies for execution inside a verification sandbox
 
 import json
 import multiprocessing
-import resource
 import sys
+
+from sandbox_limits import address_space_bytes, limit_address_space
 
 from lcb_integration.testing_util import run_test
 
@@ -30,33 +31,9 @@ from lcb_integration.testing_util import run_test
 # Process-wide, so it must be set wherever grading runs, not only in the server process.
 sys.set_int_max_str_digits(50000)
 
-MEMORY_POLICY = "address-space-above-baseline-v1"
-
-
-def _address_space_bytes() -> int:
-    """This process's mapped address space: the total RLIMIT_AS is checked against (statm's first field)."""
-    with open("/proc/self/statm") as statm:
-        return int(statm.read().split()[0]) * resource.getpagesize()
-
-
-def _limit_address_space(memory_limit_mb: int) -> dict[str, int | str]:
-    """Cap address space at its current size plus *memory_limit_mb*; free space already mapped is not counted."""
-    baseline = _address_space_bytes()
-    _, hard = resource.getrlimit(resource.RLIMIT_AS)
-    limit = baseline + memory_limit_mb * 1024 * 1024
-    if hard != resource.RLIM_INFINITY:
-        limit = min(limit, hard)
-    # Lowering the hard limit too stops candidate code from raising it again.
-    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-    return {
-        "memory_policy": MEMORY_POLICY,
-        "baseline_address_space_bytes": baseline,
-        "effective_address_space_limit_bytes": limit,
-    }
-
 
 def _temp_run(in_outs, generation, debug, result, metadata_list, timeout, memory_limit_mb):
-    memory = _limit_address_space(memory_limit_mb) if memory_limit_mb is not None else None
+    memory = limit_address_space(memory_limit_mb) if memory_limit_mb is not None else None
     res, metadata = run_test(in_outs, test=generation, debug=debug, timeout=timeout)
     if memory is not None:
         metadata = {**(metadata or {}), "memory": memory}
@@ -77,7 +54,7 @@ def check_correctness(sample, generation, timeout, debug=True, *, memory_limit_m
         return [-1], None
     if memory_limit_mb is not None:
         # Fails here, in the runner, so a sandbox that cannot measure memory masks the sample.
-        _address_space_bytes()
+        address_space_bytes()
 
     manager = multiprocessing.Manager()
     p: multiprocessing.Process | None = None

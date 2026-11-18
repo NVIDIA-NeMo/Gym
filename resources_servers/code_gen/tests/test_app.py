@@ -382,6 +382,32 @@ class TestSandboxVerify:
         assert (kwargs["memory_limit_mb"], kwargs["deadline_s"]) == (memory_limit_mb, deadline_s)
         assert res.limits == {"time_limit_s": timeout, "memory_limit_mb": memory_limit_mb}
 
+    @pytest.mark.parametrize(
+        "resource_limits, time_limit_s, memory_limit_mb",
+        [(None, 10, 4096), ({"time_limit_s": 1.5, "memory_limit_mb": 256}, 1.5, 256)],
+    )
+    async def test_assertion_tests_use_the_assertion_harness(
+        self, monkeypatch, resource_limits, time_limit_s, memory_limit_mb
+    ) -> None:
+        calls = []
+
+        async def _passing(generation, tests, **kwargs):
+            calls.append((tests, kwargs))
+            return [True], None
+
+        monkeypatch.setattr(code_gen_app, "check_assertions_in_sandbox", _passing)
+        request = _verify_request("def f(x):\n    return x")
+        request.verifier_metadata["unit_tests"] = {"type": "assertions", "tests": ["assert f(1) == 1"]}
+        if resource_limits is not None:
+            request.verifier_metadata["resource_limits"] = resource_limits
+        res = await self._sandbox_server().verify(request)
+
+        ((tests, kwargs),) = calls
+        assert tests == ["assert f(1) == 1"]
+        assert (kwargs["time_limit_s"], kwargs["memory_limit_mb"]) == (time_limit_s, memory_limit_mb)
+        assert res.reward == 1.0
+        assert res.limits == {"time_limit_s": time_limit_s, "memory_limit_mb": memory_limit_mb}
+
     async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
         async def _failing(*args, **kwargs):
             raise SandboxVerificationError(VERIFIER_ERROR, "runner failed (exit=137)")

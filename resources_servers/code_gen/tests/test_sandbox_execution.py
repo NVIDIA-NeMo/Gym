@@ -23,7 +23,12 @@ from pathlib import Path
 
 import pytest
 import yaml
-from sandbox_execution import check_correctness_in_sandbox, exec_timeout_s, task_deadline_s
+from sandbox_execution import (
+    check_assertions_in_sandbox,
+    check_correctness_in_sandbox,
+    exec_timeout_s,
+    task_deadline_s,
+)
 
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
@@ -100,6 +105,9 @@ class TestSandboxLifecycle:
             f"/tmp/code_gen_verify/{call_dir}/lcb_integration/__init__.py",
             f"/tmp/code_gen_verify/{call_dir}/lcb_integration/correctness.py",
             f"/tmp/code_gen_verify/{call_dir}/lcb_integration/testing_util.py",
+            f"/tmp/code_gen_verify/{call_dir}/assertion_harness/__init__.py",
+            f"/tmp/code_gen_verify/{call_dir}/assertion_harness/check.py",
+            f"/tmp/code_gen_verify/{call_dir}/sandbox_limits.py",
             f"/tmp/code_gen_verify/{call_dir}/request.json",
         }
         # check_correctness allows (timeout + 1) * num_tests + 5 seconds; the runner gets that plus overhead.
@@ -119,6 +127,34 @@ class TestSandboxLifecycle:
         assert (request["memory_limit_mb"], request["deadline_s"]) == (512, 3 + (3 + 1) * 2 + 5)
         # The sandbox grows to hold the task's limit plus the runner and harness.
         assert spec.resources.memory_mib == 512 + 2048
+        (_, timeout_s), *_ = provider.execs
+        assert timeout_s == request["deadline_s"] + 60
+
+    async def test_assertion_tests_reach_the_runner(self) -> None:
+        provider = _FakeProvider(result_json='{"result": [true], "metadata": null}')
+        config = SandboxVerificationConfig(image="code-gen-verifier:test", resources={"cpu": 1})
+        result, _ = await check_assertions_in_sandbox(
+            "def f(x):\n    return x",
+            ["assert f(1) == 1"],
+            time_limit_s=2,
+            memory_limit_mb=256,
+            provider=provider,
+            config=config,
+            metadata={},
+        )
+
+        assert result == [True]
+        (spec,) = provider.specs
+        request = json.loads(next(text for path, text in spec.files.items() if path.endswith("/request.json")))
+        assert request == {
+            "format": "assertions",
+            "generation": "def f(x):\n    return x",
+            "tests": ["assert f(1) == 1"],
+            "time_limit_s": 2,
+            "memory_limit_mb": 256,
+            "deadline_s": 2 + 5,
+        }
+        assert spec.resources.memory_mib == 256 + 2048
         (_, timeout_s), *_ = provider.execs
         assert timeout_s == request["deadline_s"] + 60
 
@@ -272,3 +308,64 @@ class TestDockerProvider:
         memory = metadata["memory"]
         assert memory["memory_policy"] == "address-space-above-baseline-v1"
         assert memory["effective_address_space_limit_bytes"] - memory["baseline_address_space_bytes"] == 256 * 1024**2
+
+
+_ASSERTION_PROVIDERS = [
+    pytest.param(
+        {"local": {}},
+        SandboxVerificationConfig(python=sys.executable),
+        id="local",
+        marks=pytest.mark.skipif(not Path("/proc/self/statm").exists(), reason="measures memory in /proc"),
+    ),
+    pytest.param(
+        {
+            "docker": yaml.safe_load(
+                (_REPO_ROOT / "nemo_gym/sandbox/providers/docker/configs/docker.yaml").read_text()
+            )["sandbox"]["docker"]
+        },
+        SandboxVerificationConfig(image=_DOCKER_IMAGE or "unset", resources={"cpu": 1, "memory_mib": 2048}),
+        id="docker",
+        marks=pytest.mark.skipif(
+            shutil.which("docker") is None or not _DOCKER_IMAGE,
+            reason="needs docker and CODE_GEN_SANDBOX_IMAGE built from sandbox/",
+        ),
+    ),
+]
+_STATEFUL_SOLUTION = (
+    "class Solution:\n"
+    "    def __init__(self):\n"
+    "        self.calls = 0\n"
+    "    def add(self, a, b=0):\n"
+    "        self.calls += 1\n"
+    "        return a + b"
+)
+
+
+@pytest.mark.parametrize("provider, config", _ASSERTION_PROVIDERS)
+@pytest.mark.parametrize(
+    "generation, tests, expected",
+    [
+        # Setup statements, keyword arguments and state the tests create themselves.
+        (_STATEFUL_SOLUTION, ["s = Solution()", "assert s.add(1, b=2) == 3", "assert s.calls == 1"], [True] * 3),
+        ("def f(x):\n    return x + 1", ["assert f(1) == 2", "assert f(2) == 5"], [True, -2]),
+        # Python's own comparison, with no float tolerance.
+        ("x = 1", ["assert 0.1 + 0.2 == 0.3"], [-2]),
+        ("import sys\nsys.exit(0)", ["assert True"], [-4]),
+        ("import os\nos._exit(0)", ["assert True"], [-4]),
+        ("while True:\n    pass", ["assert True"], [-3]),
+        ("def f(:", ["assert True"], [-1]),
+        ("x = bytearray(320 * 1024 * 1024)", ["assert True"], [-4]),
+    ],
+)
+async def test_assertions_run_as_written(tmp_path, provider, config, generation, tests, expected) -> None:
+    result, metadata = await check_assertions_in_sandbox(
+        generation,
+        tests,
+        time_limit_s=1,
+        memory_limit_mb=256,
+        provider=provider,
+        config=config,
+        metadata={},
+        work_dir=str(tmp_path / "work"),
+    )
+    assert result == expected, metadata
