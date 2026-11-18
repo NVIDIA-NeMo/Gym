@@ -445,9 +445,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "Hermes Agent supports only stdio and streamable HTTP MCP tool grants (its MCP client has no SSE "
                 "transport); required grants it cannot use: " + ", ".join(unsupported)
             )
-        # Hermes exposes each MCP server as a toolset of the same name, so a name must not shadow a built-in one.
+        # Hermes exposes each MCP server it configures as a toolset of the same name, so such a name must not shadow a
+        # built-in one. An optional grant over a transport Hermes cannot use is left out at activation, so it is not
+        # checked here.
         colliding = [
-            access.name for access in tool_accesses if isinstance(access, MCPToolAccess) and access.name in TOOLSETS
+            access.name for access in mcp_grants_over(tool_accesses, HERMES_MCP_TRANSPORTS) if access.name in TOOLSETS
         ]
         if colliding:
             raise AgentSeedRejectedError(

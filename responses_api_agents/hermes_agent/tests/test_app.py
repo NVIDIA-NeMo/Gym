@@ -451,6 +451,35 @@ class TestSanity:
         with pytest.raises(ValueError, match="collide with Hermes toolsets: terminal"):
             await hermes.seed_agent_session(SimpleNamespace(session={}), seed("terminal"))
 
+    async def test_seed_ignores_a_toolset_name_on_an_optional_grant_it_will_skip(self) -> None:
+        """An optional SSE grant is left out at activation, so its name cannot shadow a Hermes toolset and must not
+        refuse an otherwise valid seed; a usable grant with the same name still does."""
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        hermes._initialize_agent_session_state = AsyncMock()
+        skipped = MCPToolAccess(
+            name="terminal", required=False, connection=MCPSSEConnection(url="http://memory:9000/sse")
+        )
+        body = AgentSeedSessionRequest(
+            agent_session_id="session-optional-sse",
+            episode_id=EpisodeId(rollout_id="rollout-optional-sse"),
+            task_id=TaskId(taskset="test", task_id="task"),
+            tool_accesses=[skipped],
+        )
+
+        await hermes.seed_agent_session(SimpleNamespace(session={}), body)
+
+        hermes._initialize_agent_session_state.assert_awaited_once()
+        usable = body.model_copy(
+            update={
+                "agent_session_id": "session-optional-stdio",
+                "tool_accesses": [
+                    MCPToolAccess(name="terminal", required=False, connection=MCPStdioConnection(command="python3"))
+                ],
+            }
+        )
+        with pytest.raises(ValueError, match="collide with Hermes toolsets: terminal"):
+            await hermes.seed_agent_session(SimpleNamespace(session={}), usable)
+
     @pytest.mark.parametrize(
         ("unsupported", "reason"),
         [
