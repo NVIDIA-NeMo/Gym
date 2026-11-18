@@ -5703,14 +5703,39 @@ class TestAgentNetwork:
             ],
         }
         assert created == [("hello", "/app")] and sandbox.network_policy == expected
-        # The real `_create_sandbox` passes it on: the spec carries it as the provider's create-time option.
-        assert server._sandbox_spec(task, "/app", network_policy=expected).provider_options == {
-            "network_policy": expected
-        }
         assert json.dumps(expected) in caplog.text and "install hosts ['registry.npmjs.org', 'nodejs.org']" in (
             caplog.text
         )
         assert server.server_client.paths().count("/v1/agent_sessions/capabilities") == 1
+
+    async def test_the_real_create_hands_the_policy_to_the_provider(self, tmp_path, monkeypatch):
+        """The real `_create_sandbox` puts the policy on the spec the provider starts the agent's sandbox from, as its
+        create-time option; without it the sandbox would start public."""
+        server, task, sandbox, _ = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)
+        monkeypatch.setattr(server, "_create_sandbox", HarborEnvironmentServer._create_sandbox.__get__(server))
+        specs: list[SandboxSpec] = []
+
+        class Provider:
+            def __init__(self, provider_config):
+                pass
+
+            async def start(self, spec):
+                specs.append(spec)
+                sandbox.created_in(spec.workdir)
+
+            def __getattr__(self, name):
+                return getattr(sandbox, name)
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", Provider)
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        (spec,) = specs
+        assert spec.provider_options["network_policy"] == {
+            "defaultAction": "deny",
+            "egress": [
+                {"action": "allow", "target": target} for target in ("10.1.2.3", "registry.npmjs.org", "nodejs.org")
+            ],
+        }
 
     async def test_an_environment_restriction_with_a_harness_that_needs_nothing_is_exactly_the_tasks(
         self, tmp_path, monkeypatch
