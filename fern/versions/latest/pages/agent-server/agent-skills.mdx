@@ -9,7 +9,7 @@ Skills are reusable units of operational knowledge an agent can load at runtime,
 NeMo Gym treats skills as an **environment-level variable you can sweep**, the same way it treats prompts. You point a run at a directory of skills, the agent loads them with its own native mechanism, and each rollout result is tagged so you can compare variants. NeMo Gym does not interpret or activate skills — it sets up the skill environment and measures the outcome.
 
 <Note>
-Task folders don't yet support run-level skills: rollout collection refuses `+skills.path` for their rows. A task folder can bring its own skills, as described below, and Claude Code and Codex take them.
+Task folders don't yet support run-level skills: rollout collection refuses `+skills.path` for their rows. A task folder can bring its own skills, as described below, and Claude Code, Codex, OpenCode, Hermes and Pi take them.
 </Note>
 
 ## Skills are a run-level knob, not a dataset field
@@ -19,7 +19,17 @@ Skills are specified on `gym eval run` and applied to a **fixed, skill-agnostic 
 The exception is a [Harbor task](/main/data/task-folders/harbor-tasks) that brings its own skills: it declares `skills_dir` in `[environment]` and ships `environment/skills/`. At seed, the `harbor` environment server uploads that folder to `skills_dir` unless the image already has skills there, and writes the folder's absolute path to `/tmp/.nemo-gym/task.json` in the sandbox, again before each step of a multi-step task. A harness takes such a task in one of two ways, and refuses it otherwise, so a run never scores a task without its skills:
 
 - It declares `supports_task_tool_context`, reads `task.json` itself and points its model at the skills (`miniswe_sandboxed_agent`).
-- It declares `supports_task_skills` in its seed response. At seed it reads `skills_dir` from `task.json` inside the sandbox and copies that folder to where its CLI discovers skills, so the model finds them through the CLI's own skill mechanism and not by browsing `skills_dir`: `<CLAUDE_CONFIG_DIR>/skills` for Claude Code, which then runs without `--bare`, and `<CODEX_HOME>/skills` for Codex.
+- It declares `supports_task_skills` in its seed response. At seed it reads `skills_dir` from `task.json` inside the sandbox and copies that folder to where its runtime discovers skills, so the model finds them through the runtime's own skill mechanism and not by browsing `skills_dir`. Some runtimes also need their skill tool turned on, for that task only:
+
+  | Harness | Skills copied to | For a task that declares `skills_dir` |
+  |---|---|---|
+  | Claude Code | `<CLAUDE_CONFIG_DIR>/skills` | Runs without `--bare` |
+  | Codex | `<CODEX_HOME>/skills` | Nothing else changes |
+  | OpenCode 1 | `<XDG_CONFIG_HOME>/opencode/skills` | Allows the `skill` tool, which the default permission profile denies for every other task |
+  | Hermes | `<HERMES_HOME>/skills` | Turns on the `skills` toolset, which a Harbor run otherwise leaves out |
+  | Pi | `<PI_CODING_AGENT_DIR>/skills` | Passes the folder with `--skill`; discovery stays off. Needs Pi's `read` tool (`enable_tools`) |
+
+  OpenCode 2 is not staged yet, so it refuses such a task.
 
 The server writes `skills_dir` to `task.json` as an absolute path, a relative one resolved in the working directory. A folder missing in the sandbox fails the seed with a message naming it, and so does a `skills_dir` only a shell resolves (one starting with `~` or containing `$`), which the server cannot make absolute. A declared folder is copied even when it is empty, so the baseline arm of a skills comparison that declares an empty `skills_dir` runs the harness the way the arm with skills does. A task that declares no `skills_dir` stays as it was: Claude Code then keeps `--bare` unless you set `bare: false` on the agent, so give both arms of a comparison the same setting.
 

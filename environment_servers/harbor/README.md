@@ -47,8 +47,9 @@ configuration with a per-taskset instance of this server, and bind it to a harne
 with `--agent`, or `harbor_oracle_agent` for `gym dataset validate`. The harness must accept a sandbox in its
 session seed and leave the sandbox to the server when the session closes. A task with MCP servers not granted
 through `task_mcp_grants: required` needs a harness that reports `supports_task_tool_context`, and a task with a
-`skills_dir` needs one that reports it or `supports_task_skills` (Claude Code and Codex copy the folder into their
-CLI's skills folder at seed), or it fails terminally at `stage: agent`; the two parts of a task are judged separately.
+`skills_dir` needs one that reports it or `supports_task_skills` (Claude Code, Codex, OpenCode 1, Hermes and Pi copy
+the folder into their runtime's skills folder at seed), or it fails terminally at `stage: agent`; the two parts of a
+task are judged separately.
 `turn_sessions: continue` needs a harness that declares multi-turn continuation. `harbor_agent` and `harbor_agent_general` are separate Agent Servers that run
 Harbor's own runtime; they are not this path.
 
