@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 
 from nemo_gym import component_search_roots
+from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
+from nemo_gym.environment.registry import find_named_manifest
 from nemo_gym.utils.text import did_you_mean
 
 
@@ -74,6 +76,13 @@ def asset_config_path(flag: str, value: str) -> str:
         )
     if matches:
         return str(matches[0])
+
+    # A manifest's name is its ID and need not match its folder, so a benchmark or environment that moved still
+    # resolves by the name its manifest declares. A config at the path is tried first and keeps today's names working.
+    if flag in {"benchmark", "environment"}:
+        manifest_path = find_named_manifest(value, subdir=parent, roots=roots)
+        if manifest_path is not None:
+            return str(resolve_manifest_config_path(manifest_path, load_manifest(manifest_path)))
 
     # No match: build a "did you mean?" hint and the roots searched
     if flag == "benchmark":

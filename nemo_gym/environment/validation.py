@@ -51,6 +51,7 @@ from nemo_gym.environment.manifest import (
     resolve_listed_manifest,
     resolve_manifest_config_path,
 )
+from nemo_gym.environment.registry import declared_manifests
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
@@ -957,16 +958,6 @@ def _write_manifest_atomically(path: Path, manifest: EnvironmentManifest) -> Non
 
 def _validate_manifest_location(manifest_path: Path, manifest: EnvironmentManifest) -> None:
     catalog_directory = _catalog_directory(manifest_path)
-    catalog_name = (
-        manifest_path.parent.relative_to(catalog_directory).as_posix()
-        if catalog_directory is not None
-        else manifest_path.parent.name
-    )
-    if manifest.name != catalog_name:
-        raise EnvironmentValidationError(
-            f"Manifest identity name '{manifest.name}' does not match its catalog path '{catalog_name}'."
-        )
-
     catalog_kind = catalog_directory.name if catalog_directory is not None else None
     expected_kind = {
         "environments": EnvironmentKind.ENVIRONMENT,
@@ -1059,6 +1050,37 @@ def _synchronize(
         ) from error
 
 
+def _validate_unique_name(manifest_path: Path, manifest: EnvironmentManifest, config_path: Path) -> None:
+    """Check that a manifest's name identifies only this manifest within its catalog tree.
+
+    The name is the environment ID and stays the same when the folder moves, so it need not match the folder path.
+    No other manifest in the tree may declare it. A name that differs from its folder path also may not be the path
+    of another config, because ``--benchmark`` and ``--environment`` read a name as a path before they look for a
+    manifest that declares it.
+    """
+    catalog_directory = _catalog_directory(manifest_path)
+    if catalog_directory is None:
+        return
+    for other_path, other in declared_manifests(catalog_directory):
+        if other.name == manifest.name and other_path.resolve() != manifest_path:
+            raise EnvironmentValidationError(
+                f"Manifest name '{manifest.name}' is also declared by {other_path}. "
+                f"A manifest's name is its ID and must be unique within {catalog_directory.name}/."
+            )
+    if manifest.name == manifest_path.parent.relative_to(catalog_directory).as_posix():
+        return
+    # The paths `asset_config_path` tries for a benchmark or environment name, in its order.
+    path_configs = [catalog_directory / manifest.name / "config.yaml"]
+    if "/" in manifest.name:
+        path_configs.append(catalog_directory / f"{manifest.name}.yaml")
+    for path_config in path_configs:
+        if path_config.is_file() and path_config.resolve() != config_path:
+            raise EnvironmentValidationError(
+                f"Manifest name '{manifest.name}' is the path of another config, {path_config}, which "
+                "--benchmark and --environment would select instead. Choose another name."
+            )
+
+
 def _task_datasets(manifest: EnvironmentManifest) -> tuple[ManifestDataset, ...]:
     """The datasets a setup shares with its main manifest: the task datasets, or every dataset of an environment that
     declares only examples."""
@@ -1149,6 +1171,7 @@ def validate_environment(
     _validate_listing(resolved_manifest_path, main, listed)
     if not resolved_config_path.is_file():
         raise EnvironmentValidationError(f"Gym config was not found: {resolved_config_path}")
+    _validate_unique_name(resolved_manifest_path, manifest, resolved_config_path)
 
     composition = _resolve_manifest_composition(resolved_config_path, dataset_owner=manifest.dataset_owner)
     differences = _mirror_differences(manifest, composition)

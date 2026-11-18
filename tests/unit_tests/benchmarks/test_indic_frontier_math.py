@@ -54,7 +54,7 @@ def test_manifest_and_committed_requests() -> None:
     benchmark = prep.BENCHMARK_DIR
     manifest = load_manifest(benchmark / "manifest.yaml")
     assert manifest.name == "indic/frontier_math"
-    entry = _manifest_entries(benchmark.parents[1], benchmark / "manifest.yaml", "benchmark")[0]
+    entry = _manifest_entries(benchmark.parents[1], benchmark / "manifest.yaml", manifest, "benchmark")[0]
     config_path = Path(asset_config_path("benchmark", entry.name))
     assert config_path == benchmark / "config.yaml"
     assert manifest.canonical_split == "benchmark"
