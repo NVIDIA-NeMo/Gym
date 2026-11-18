@@ -84,14 +84,13 @@ class SiteControl:
 
     def reset(self) -> None:
         deadline = time.monotonic() + self.timeout_seconds
-        acknowledged = observed_reset = False
+        observed_reset = False
         try:
             with self._opener.open(
                 urllib.request.Request(self.reset_url, headers=self._headers), timeout=min(20, self.timeout_seconds)
             ) as response:
                 if response.status not in {200, 202}:
                     raise RuntimeError(f"site reset rejected with HTTP {response.status}")
-                acknowledged = True
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f"site reset rejected with HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, ConnectionError):
@@ -106,18 +105,21 @@ class SiteControl:
                 ) as response:
                     status = response.read().decode("utf-8", errors="replace")
                 if "Ready for duty!" in status:
-                    if not (acknowledged or observed_reset):
-                        raise RuntimeError("reset response was lost and a reset transition was not observed")
-                    return
-                if "Reset ongoing" not in status:
+                    if observed_reset:
+                        return
+                    # A 200/202 only acknowledges the trigger. The service
+                    # may still be reporting the previous deployment's ready
+                    # state before its asynchronous reset starts.
+                elif "Reset ongoing" in status:
+                    observed_reset = True
+                else:
                     raise RuntimeError("site-control service returned an unrecognized reset state")
-                observed_reset = True
             except urllib.error.HTTPError as exc:
                 raise RuntimeError(f"site reset status failed with HTTP {exc.code}") from exc
             except (urllib.error.URLError, TimeoutError, ConnectionError):
                 pass
             time.sleep(min(self.poll_seconds, max(0, deadline - time.monotonic())))
-        raise TimeoutError("site reset did not reach readiness before its deadline")
+        raise TimeoutError("site reset did not prove a reset transition and readiness before its deadline")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -253,7 +255,8 @@ def run(
         collecting = reset_pending = False
         try:
             for name, epoch, ids in phases:
-                requested_mode = fcntl.LOCK_EX if epoch else fcntl.LOCK_SH
+                initial_phase = lease_mode is None
+                requested_mode = fcntl.LOCK_EX if epoch or initial_phase else fcntl.LOCK_SH
                 if requested_mode != lease_mode:
                     if lease_mode is not None:
                         fcntl.flock(lease, fcntl.LOCK_UN)
@@ -266,13 +269,22 @@ def run(
                     )
                 phase_dir = output_dir / name
                 phase_dir.mkdir()
-                if epoch:
+                if epoch or initial_phase:
                     _write_json(phase_dir / "idle-before.json", control.require_idle())
                     transition(epoch, "resetting")
                     reset_pending = True
                     control.reset()
                     reset_pending = False
                     transition(epoch, "running", True)
+                    if not epoch:
+                        # Lock conversion need not be atomic on every shared
+                        # filesystem. Validate ownership again under the shared
+                        # lease so an intervening reset can never be overlooked.
+                        fcntl.flock(lease, fcntl.LOCK_SH)
+                        lease_mode = fcntl.LOCK_SH
+                        lease.seek(0)
+                        if json.load(lease).get("run_id") != run_id:
+                            raise RuntimeError("site reset ownership changed before ordinary collection")
                 inputs = []
                 for task_id in sorted(ids, key=int):
                     row = copy.deepcopy(by_id[task_id])

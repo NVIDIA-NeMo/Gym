@@ -105,7 +105,7 @@ def test_normal_waves_and_six_reset_epochs_reconcile_every_task(collection_bound
         ["340"],
         ["92"],
     ]
-    assert control.resets == 6
+    assert control.resets == 7
     output = runner._read_jsonl(path)
     assert {r["task_id"] for r in output} == set(rows) and len(output) == len(rows)
     assert len(list(arguments["state_root"].glob("*/epoch-*-task-*.json"))) == 8
@@ -165,12 +165,12 @@ def test_failed_collector_with_uncertain_cleanup_prevents_later_resets(collectio
     with pytest.raises(subprocess.CalledProcessError):
         runner.run(**arguments, control=control)
     assert len(list(arguments["state_root"].glob("requires-recovery-*.json"))) == 1
-    assert control.resets == 0
+    assert control.resets == 1
     control.busy = False
     arguments["output_dir"] = arguments["output_dir"].with_name("retry")
     with pytest.raises(RuntimeError, match="unresolved cleanup"):
         runner.run(**arguments, control=control)
-    assert control.resets == 0
+    assert control.resets == 1
 
 
 def test_population_rejects_missing_or_changed_task_identities():
@@ -187,16 +187,33 @@ def test_population_rejects_missing_or_changed_task_identities():
         runner._population(rows)
 
 
-def test_normal_stage_keeps_shared_lease_and_parallel_collection(collection_boundary):
+def test_normal_stage_resets_exclusively_then_keeps_shared_lease_and_parallel_collection(
+    collection_boundary, monkeypatch
+):
     arguments, calls, rows = collection_boundary
     root = arguments["state_root"]
     root.mkdir()
     control = _Control()
-    control.busy = True  # Other normal jobs may legitimately still be active.
-    with (root / "site.lease").open("a+") as other:
-        fcntl.flock(other, fcntl.LOCK_SH)
-        path = runner.run(**arguments, control=control, stage="read-only", concurrency=2)
-    assert control.resets == 0
+    reset = control.reset
+    collect = runner.subprocess.run
+
+    def reset_exclusively():
+        with (root / "site.lease").open("a+") as other:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        reset()
+
+    def collect_under_shared_lease(*args, **kwargs):
+        with (root / "site.lease").open("a+") as other:
+            fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return collect(*args, **kwargs)
+
+    monkeypatch.setattr(control, "reset", reset_exclusively)
+    monkeypatch.setattr(runner.subprocess, "run", collect_under_shared_lease)
+    path = runner.run(**arguments, control=control, stage="read-only", concurrency=2)
+    assert control.resets == 1
     assert {r["task_id"] for r in runner._read_jsonl(path)} == {"0", "2"}
     command = json.loads((arguments["output_dir"] / "read-only/command.json").read_text())
     assert command[command.index("--concurrency") + 1] == "2"
@@ -233,14 +250,34 @@ def test_phase_annotations_preserve_real_site_pool_reader_writer_concurrency(col
     asyncio.run(exercise())
 
 
-def test_protected_reset_waits_for_every_normal_shared_lease(collection_boundary):
+def test_nonatomic_lock_downgrade_cannot_admit_another_runs_state(collection_boundary, monkeypatch):
+    arguments, calls, rows = collection_boundary
+    control = _Control()
+    flock = runner.fcntl.flock
+
+    def intervening_reset(lease, mode):
+        flock(lease, mode)
+        if mode == fcntl.LOCK_SH:
+            lease.seek(0)
+            lease.truncate()
+            json.dump({"run_id": "intervening-reset-owner"}, lease)
+            lease.flush()
+
+    monkeypatch.setattr(runner.fcntl, "flock", intervening_reset)
+    with pytest.raises(RuntimeError, match="ownership changed"):
+        runner.run(**arguments, control=control, task_ids={"0"})
+    assert control.resets == 1 and not calls
+
+
+@pytest.mark.parametrize("task_id", ["0", "1", "345"])
+def test_initial_reset_waits_for_every_other_normal_shared_lease(collection_boundary, task_id):
     arguments, calls, rows = collection_boundary
     root = arguments["state_root"]
     root.mkdir()
     control = _Control()
     with (root / "site.lease").open("a+") as other, ThreadPoolExecutor(max_workers=1) as pool:
         fcntl.flock(other, fcntl.LOCK_SH)
-        result = pool.submit(runner.run, **arguments, control=control, task_ids={"345"})
+        result = pool.submit(runner.run, **arguments, control=control, task_ids={task_id})
         try:
             time.sleep(0.05)
             assert not result.done() and control.resets == 0
@@ -248,3 +285,38 @@ def test_protected_reset_waits_for_every_normal_shared_lease(collection_boundary
             fcntl.flock(other, fcntl.LOCK_UN)
         assert result.result(timeout=3).is_file()
     assert control.resets == 1
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_next_normal_run_resets_state_left_by_success_or_failed_protected_epoch(
+    collection_boundary, monkeypatch, failed
+):
+    arguments, calls, rows = collection_boundary
+    control = _Control()
+    collect = runner.subprocess.run
+    dirty = False
+
+    def reset():
+        nonlocal dirty
+        dirty = False
+        control.resets += 1
+
+    def collect_and_mutate(*args, **kwargs):
+        nonlocal dirty
+        assert not dirty, "a previous run's mutation survived the initial reset"
+        dirty = True
+        if failed and control.resets == 1:
+            raise subprocess.CalledProcessError(1, args[0])
+        return collect(*args, **kwargs)
+
+    monkeypatch.setattr(control, "reset", reset)
+    monkeypatch.setattr(runner.subprocess, "run", collect_and_mutate)
+    if failed:
+        with pytest.raises(subprocess.CalledProcessError):
+            runner.run(**arguments, control=control, task_ids={"345"})
+    else:
+        runner.run(**arguments, control=control, task_ids={"345"})
+    assert dirty
+    arguments["output_dir"] = arguments["output_dir"].with_name("second-run")
+    runner.run(**arguments, control=control, task_ids={"0"})
+    assert control.resets == 2

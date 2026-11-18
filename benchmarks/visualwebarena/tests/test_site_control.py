@@ -18,6 +18,7 @@ def service():
         "lost_trigger": False,
         "lost_status": False,
         "immediate_ready": False,
+        "delayed_start": False,
         "ongoing": False,
         "failure": False,
         "redirect": False,
@@ -48,11 +49,12 @@ def service():
                     self.close_connection = True
                     return
                 self.send_response(500 if state["failure"] else 200)
-                body = (
-                    b"Reset ongoing"
-                    if state["ongoing"] or (state["polls"] < 2 and not state["immediate_ready"])
-                    else b"Ready for duty!"
-                )
+                if state["immediate_ready"] or (state["delayed_start"] and state["polls"] == 1):
+                    body = b"Ready for duty!"
+                elif state["ongoing"] or state["polls"] < (4 if state["lost_status"] else 3):
+                    body = b"Reset ongoing"
+                else:
+                    body = b"Ready for duty!"
             elif self.path == "/healthz":
                 self.send_response(200)
                 body = json.dumps(
@@ -123,9 +125,19 @@ def test_active_browser_workers_prevent_global_reset(service):
     assert state["triggers"] == 0
 
 
-def test_lost_trigger_cannot_accept_a_stale_ready_state(service):
+@pytest.mark.parametrize("lost_trigger", [False, True])
+def test_acknowledged_or_lost_trigger_cannot_accept_a_stale_ready_state(service, lost_trigger):
     control, state = service
-    state["lost_trigger"] = state["immediate_ready"] = True
-    with pytest.raises(RuntimeError, match="reset transition was not observed"):
+    state["lost_trigger"] = lost_trigger
+    state["immediate_ready"] = True
+    control.timeout_seconds = 0.03
+    with pytest.raises(TimeoutError, match="did not prove a reset transition"):
         control.reset()
-    assert state["triggers"] == 1 and state["polls"] == 1
+    assert state["triggers"] == 1 and state["polls"] > 0
+
+
+def test_202_then_stale_ready_waits_for_the_actual_reset_transition(service):
+    control, state = service
+    state["delayed_start"] = True
+    control.reset()
+    assert state["triggers"] == 1 and state["polls"] >= 3

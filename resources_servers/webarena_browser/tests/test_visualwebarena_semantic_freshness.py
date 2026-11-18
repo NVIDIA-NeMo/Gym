@@ -123,6 +123,23 @@ async def test_semantic_freshness_preserves_mixed_context(monkeypatch, entrypoin
     assert await _score(entrypoint, task, before, after, monkeypatch, _capture) == expected
 
 
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+@pytest.mark.parametrize("kind,expected", [("must_include", 1), ("fuzzy_match", 0)])
+@pytest.mark.parametrize(
+    "before,after",
+    [("saved", "saved\nnot saved"), ("saved\nnot", "saved\nnot\nsaved")],
+)
+@pytest.mark.asyncio
+async def test_literal_count_preserves_reference_semantics_while_fuzzy_checks_negation(
+    monkeypatch, entrypoint, kind, expected, before, after
+):
+    task = _task(kind)
+    monkeypatch.setenv("WEBARENA_JUDGE_API_KEY", "test-only")
+    monkeypatch.setattr(vwa, "_llm_fuzzy_match", lambda **kw: float(_saved_claims(kw["pred"]) > 0))
+    monkeypatch.setattr(vwa, "_judge_chat", _freshness_judge_response)
+    assert await _score(entrypoint, task, before, after, monkeypatch, _capture) == expected
+
+
 @pytest.mark.parametrize("label,expected", [("correct", 1), ("incorrect", 0), ("partially correct", 0)])
 def test_freshness_judge_receives_complete_observations_and_logs_them(monkeypatch, tmp_path, label, expected):
     before = "&#115;aved\nnot\n" + "retained context\n" * 1000

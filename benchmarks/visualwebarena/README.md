@@ -91,31 +91,36 @@ population before any reset. It runs 492 read-only tasks, then 408 ordinary
 mutating tasks, followed by eight protected tasks in six reset epochs:
 `346,678`; `345,751`; `336`; `335`; `340`; `92`. These are runtime row indices;
 their original source IDs include `visualwebarena-680` and
-`visualwebarena-753` for rows 678 and 751. Initialize/reset the owned deployment
-before ordinary jobs are admitted, as with the original deployment workflow.
-The coordinator resets only the protected epochs. A subset can be
+`visualwebarena-753` for rows 678 and 751. The coordinator resets the owned
+deployment under the exclusive lease before the first ordinary wave as well
+as before each protected epoch. A subset can be
 selected with `--task-ids`, while `--input` must still contain the full
 identity-checked population. The reference epoch numbers remain stable for
 subsets. The default concurrency is one; `--concurrency` requires sufficient
 isolated browser capacity.
 
-Ordinary phases hold a shared filesystem lease and retain their requested Gym
-collection concurrency. Before protected epochs, the coordinator releases its
+After the initial verified reset, ordinary phases hold a shared filesystem
+lease and retain their requested Gym collection concurrency. After downgrading
+the exclusive reset lease, the coordinator checks its ownership record again;
+if an intervening reset changed ownership, collection aborts. Before protected
+epochs, the coordinator releases its
 shared lease and waits for exclusive ownership. Every job sharing the site
 deployment must use the same state root and cooperate with that lease; it does
 not discover unrelated jobs that bypass it. Before each reset and after each
 protected phase, every declared worker must report zero active, creating and
 pending-cleanup sessions and browser leases. An ambiguous reset response
-leads to status polling rather than another reset trigger. A reset must reach
-`Ready for duty!` before tasks are dispatched. Redirected control requests,
-service errors and readiness timeouts abort the run.
-If the trigger response was lost, an observed `Reset ongoing` state must precede
-readiness; an immediate ready response could belong to the prior deployment
-state and requires operator recovery instead of task dispatch.
+leads to status polling rather than another reset trigger. Every reset must
+show `Reset ongoing` followed by `Ready for duty!` before tasks are dispatched,
+even when the trigger returned HTTP 200/202. An immediate ready response can
+belong to the prior deployment; polling continues until the actual transition
+is observed or the deadline expires. Redirected control requests, service
+errors and readiness timeouts abort the run.
 
-Shared normal leases are for shards of the same initialized run. Independent
-benchmark runs or checkpoint comparisons need separate site deployments, or
-must finish and reset the prior deployment before admitting the next run.
+Each coordinator invocation acquires exclusive ownership and resets before
+starting, so a second run cannot inherit mutations from a completed or failed
+run. Separate invocations sharing one deployment wait for existing ordinary
+leases before their initial reset. Use one coordinator's collection concurrency
+for parallel tasks, or separate site deployments for parallel benchmark runs.
 The lease does not provide separate site snapshots to independent runs.
 
 The coordinator attaches the audited read/write classification to task data,
@@ -184,7 +189,8 @@ that exceeds the previous 25 MiB default; input images are not resized to
 work around that limit.
 
 This composition enables `nano_omni_stop_at_step_budget`: the penultimate
-observation asks the model for a terminal `N/A` answer, and the last two model
+observation asks the model to terminate with failure and an empty answer,
+and the last two model
 requests disable thinking while retaining other template options. The shared
 agent's default remains disabled, and the option applies only to the Nano Omni
 protocol. This prompt/template change and the clean-state schedule define a

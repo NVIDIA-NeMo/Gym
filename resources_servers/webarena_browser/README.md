@@ -31,6 +31,15 @@ WebArena judge with both observations. This can add one judge request per
 changed target record, with both observations included without truncation.
 Judge transport or response errors leave verification inconclusive.
 
+The literal shortcut deliberately retains the reference `must_include`
+semantics: it counts required words or phrases without interpreting negation.
+For `must_include: [saved]`, both `saved` → `saved\nnot saved` and
+`saved\nnot` → `saved\nnot\nsaved` add a matching literal and score one.
+The `fuzzy_match` path instead sends these complete observations to the
+semantic judge. A new paraphrase without a new literal, including
+`saved\nnot` → `saved\nnot\npersisted`, also goes to that judge; the retained
+negation cannot be dropped to manufacture a positive claim.
+
 One process supports one active session on one X display. Distributed Gym
 workers scale through isolated resource-server processes or containers, not
 threads sharing a display. Mutable WebArena deployments additionally require
