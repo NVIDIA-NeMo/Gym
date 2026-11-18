@@ -204,8 +204,12 @@ OpenCode sessions send no `chat_template_kwargs`. For a model whose chat
 template takes `enable_thinking`, set it on the policy model
 server, which applies it to every call:
 `++policy_model.responses_api_models.vllm_model.chat_template_kwargs.enable_thinking=true`.
-Sessions run with a fixed title and without compaction, so every call is a call
-of OpenCode's build agent.
+Sessions run with a fixed title and without compaction. As in our agentic video
+training data, the model is offered OpenCode's own tools besides the video
+tools, and the shell tool runs commands with `sh` (`SHELL` in the resources
+server's `sandbox_config.env`). Every call is a call of OpenCode's build agent,
+except those of a subagent that a `task` call starts in an OpenCode session of
+its own.
 
 ## Verification and metrics
 

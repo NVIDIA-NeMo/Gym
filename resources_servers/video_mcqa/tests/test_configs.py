@@ -74,6 +74,8 @@ def test_actual_composed_agentic_configs_resolve_and_validate(tmp_path, monkeypa
     assert resource.host == agent.host == "127.0.0.1"
     assert agent.resources_server.name == name and agent.plugins == [str(PLUGIN_PATH)]
     assert agent.image_input and agent.opencode_config["compaction"] == {"auto": False}
+    # OpenCode's own tools, and its shell tool on sh, as in the sandbox the training data was generated in.
+    assert "tools" not in agent.opencode_config and resource.sandbox_config.env == {"SHELL": "/bin/sh"}
     assert agent.network_access == "inherit" and agent.sandbox_provider is None
     # The image's Dockerfile installs the binary and the plugin dependencies these pins name.
     dockerfile = (SANDBOX_IMAGE_DIR / "Dockerfile").read_text()
