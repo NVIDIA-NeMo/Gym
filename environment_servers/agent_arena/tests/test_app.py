@@ -23,13 +23,14 @@ from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, AggregateMetricsRequest, ResourcesServerRef
 from nemo_gym.core import (
+    MODEL_SAMPLING_NULL,
     MODEL_TRANSPORT_ERROR,
     EpisodeId,
     MaterializedTask,
     NeMoGymResponse,
     TaskId,
+    current_model_sampling_segment,
 )
-from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, current_model_sampling_segment
 from nemo_gym.server_runtime import (
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,

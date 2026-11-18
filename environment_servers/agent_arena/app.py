@@ -70,6 +70,7 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
+    MODEL_SAMPLING_NULL,
     EpisodeId,
     FailureBoundary,
     FailureReportRow,
@@ -78,11 +79,12 @@ from nemo_gym.core import (
     NgFailureEvent,
     RequestFailureLog,
     maybe_rollout_id_from_run_body,
+    model_call_sampling_config,
+    model_sampling_context,
     model_sampling_from_run_body,
     model_sampling_path_segment,
     skips_token_capture,
 )
-from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, model_call_sampling_config, model_sampling_context
 from nemo_gym.data import materialize_task
 from nemo_gym.metrics import add_perf_metrics, compute_aggregate_metrics
 from nemo_gym.server_runtime import (
