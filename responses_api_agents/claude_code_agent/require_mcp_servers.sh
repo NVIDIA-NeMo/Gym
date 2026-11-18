@@ -7,8 +7,9 @@
 # usage: require_mcp_servers.sh EVENTS NAME... -- COMMAND...
 #
 # EVENTS is the file COMMAND's stdout goes to. In print mode Claude Code first tries every configured MCP server,
-# waiting up to MCP_TIMEOUT, then writes its stream-json init event with each server's status, and only then sends
-# its first model request. When the init event gives a NAMEd server any status other than "connected", COMMAND is
+# waiting as long as its version does (2.1.292 up to MCP_TIMEOUT, 2.1.108 about 5 seconds; a server still connecting
+# is "pending"), then writes its stream-json init event with each server's status, and only then sends its first
+# model request. When the init event gives a NAMEd server any status other than "connected", COMMAND is
 # stopped, so the turn ends at that first request instead of running without the server. The agent server reads the
 # init event again and fails the turn; this script only cuts the turn short. It reads the init event as text, so a
 # format it does not recognize stops nothing. Exits with COMMAND's status. Needs only bash and sleep.

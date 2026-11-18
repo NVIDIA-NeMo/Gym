@@ -336,18 +336,23 @@ The seed refuses with HTTP 422:
   `my_server` would share their tool names, and one server's tools would hide the other's;
 - a required grant under `network_access: model_only`.
 
-Claude Code has no setting that makes an MCP server required: in print mode it tries each configured server, for
-up to `MCP_TIMEOUT` (30 seconds by default), writes its stream-json `init` event with each server's status, then
-sends its first model request with the tools of the servers that connected. A server still connecting is
-`pending` and its tools are missing. When a session has required grants, the CLI therefore runs under
+Claude Code has no setting that makes an MCP server required: in print mode it tries each configured server,
+writes its stream-json `init` event with each server's status, then sends its first model request with the tools
+of the servers that connected. A server still connecting is `pending` and its tools are missing. How long the CLI
+waits depends on its version: 2.1.292 waits up to `MCP_TIMEOUT` (30 seconds by default), while 2.1.108, which the
+benchmark profile pins, waits about 5 seconds and has no setting to wait longer. A required server that takes
+longer to connect than the pinned version waits fails the activation as described below, which real runs
+confirmed on both versions. When a session has required grants, the CLI therefore runs under
 `require_mcp_servers.sh`, which reads the `init` event as it is written and stops the CLI when a required server's
 status is not `connected`, so the run ends at its first model request. After the run, the agent server checks the `init` event
 itself: a required grant that it does not list as `connected`, or a run without an `init` event, fails the
 activation with HTTP 502 and an `agent_startup_failed` gap that names the servers and their status, so the turn is
 never graded. This holds when the run then timed out, too: only a run that timed out before the `init` event, or
-that failed for another reason, keeps that cause. An optional grant that
-did not connect is left out of the tools and recorded as an `mcp_server_skipped` gap. A server lost later in the
-run shows up as failed tool calls. The connection check needs no tool in the image besides `bash` and `sleep`.
+that failed for another reason, keeps that cause. An optional grant that did not connect is left out of the tools
+and recorded as an `mcp_server_skipped` gap. The `harbor` Environment Server refuses a task with
+`task_mcp_grants: optional` for a harness that does not declare `supports_task_tool_context`, as this one does
+not, so run Harbor tasks with `task_mcp_grants: required`. A server lost later in the run shows up as failed tool
+calls. The connection check needs no tool in the image besides `bash` and `sleep`.
 
 Sandbox requests accept one user text prompt (a string or a single user message),
 optionally preceded by one system message. Assistant/developer messages, multiple
