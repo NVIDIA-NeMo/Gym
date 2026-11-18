@@ -344,7 +344,8 @@ sends its first model request with the tools of the servers that connected. A se
 status is not `connected`, so the run ends at its first model request. After the run, the agent server checks the `init` event
 itself: a required grant that it does not list as `connected`, or a run without an `init` event, fails the
 activation with HTTP 502 and an `agent_startup_failed` gap that names the servers and their status, so the turn is
-never graded. An activation that timed out or failed for another reason keeps that cause. An optional grant that
+never graded. This holds when the run then timed out, too: only a run that timed out before the `init` event, or
+that failed for another reason, keeps that cause. An optional grant that
 did not connect is left out of the tools and recorded as an `mcp_server_skipped` gap. A server lost later in the
 run shows up as failed tool calls. The connection check needs no tool in the image besides `bash` and `sleep`.
 

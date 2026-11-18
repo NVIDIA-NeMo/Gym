@@ -859,8 +859,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         else:
             status, reason = _invocation_outcome(run_metadata, cleanup["return_code"] if cleanup else None)
         mcp_error, mcp_gaps = self._check_mcp_grants(mcp_grants, run_metadata, outcome=f"{status} ({reason})")
-        # An activation that raised or timed out keeps that cause.
-        if mcp_error is not None and failure is None and not (cleanup and cleanup["timed_out"]):
+        # An activation that raised keeps that cause, and so does one that timed out before the init event. Once the
+        # init event shows a required server that did not connect, the model ran without its tools, so a timeout
+        # after it fails the activation too: graded as a timeout, the turn would be scored without those tools.
+        timed_out_before_init = bool(cleanup and cleanup["timed_out"]) and "mcp_servers" not in run_metadata
+        if mcp_error is not None and failure is None and not timed_out_before_init:
             status, reason = "failed", "required_mcp_server_unavailable"
         else:
             mcp_error = None

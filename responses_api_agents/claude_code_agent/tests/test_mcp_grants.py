@@ -309,14 +309,41 @@ async def test_an_optional_server_that_did_not_connect_is_a_gap(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_timeout_keeps_its_cause(monkeypatch):
-    # The run hit its time limit before Claude Code wrote the init event: it is graded as a timeout.
+@pytest.mark.parametrize(
+    ("raw", "gap"),
+    [(events(), "mcp_status_unavailable"), (events(init_event(magic="connected"), ANSWER), None)],
+    ids=["before_the_init_event", "with_the_server_connected"],
+)
+async def test_a_timeout_keeps_its_cause(monkeypatch, raw, gap):
+    # The run hit its time limit before the init event, or with its required server connected: a timeout.
     state = activation_state([mcp_grant()], timed_out=True, return_code=None)
-    mock_execute(monkeypatch, events())
+    mock_execute(monkeypatch, raw)
     response = await respond(agent(), state)
     assert response.status == "incomplete"
-    assert "mcp_status_unavailable" in [code for code, _ in gap_codes(state)]
-    assert "agent_startup_failed" not in [code for code, _ in gap_codes(state)]
+    codes = [code for code, _ in gap_codes(state)]
+    assert gap is None or gap in codes
+    assert "agent_startup_failed" not in codes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("init", "status"),
+    [(init_event(magic="failed"), "failed"), (init_event(), "not listed")],
+    ids=["failed", "not_listed"],
+)
+async def test_a_timeout_after_an_init_event_without_a_required_server_fails_the_turn(monkeypatch, init, status):
+    # The CLI was not stopped at the init event (the in-sandbox check missed it) and the model ran without the tool
+    # until the time limit: graded as a timeout, that answer would be scored without the required tool.
+    state = activation_state([mcp_grant()], timed_out=True, return_code=None)
+    mock_execute(monkeypatch, events(init, ANSWER))
+    with pytest.raises(HTTPException) as error:
+        await respond(agent(), state)
+    message = f"Required MCP servers did not connect before Claude Code's first model request: magic ({status})"
+    assert error.value.status_code == 502
+    assert error.value.detail == message
+    assert ("agent_startup_failed", message) in gap_codes(state)
+    sandbox = next(record for record in state.observations.records if record.kind == "sandbox")
+    assert (sandbox.outcome, sandbox.error_type) == ("timeout", "required_mcp_server_unavailable")
 
 
 def test_parsing_keeps_the_statuses_of_the_first_init_event():
