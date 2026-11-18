@@ -12,7 +12,7 @@ This server runs the OfficeEnv release the OfficeEnv server's README names ("The
 apart from both servers' locked dependencies, the same way, into this server's venv:
 
 ```bash
-uv pip install --python resources_servers/officeenv_sandbox/.venv/bin/python "officeenv @ git+${OFFICEENV_GIT_URL}@v1.14.0"
+uv pip install --python resources_servers/officeenv_sandbox/.venv/bin/python "officeenv @ git+${OFFICEENV_GIT_URL}@v1.14.2"
 ```
 
 Workspace mode and the file call (`officeenv.files`) need OfficeEnv 1.13.0 or later: with an older release, or none,
@@ -22,8 +22,9 @@ the server stops at start naming the step that installs it.
 
 `data/example.jsonl` holds the first five of `data/sandbox_pilot.jsonl`'s rows, and
 `data/example_rollouts.jsonl` Pi's rollouts of them on Docker sandboxes (`configs/officeenv_sandbox.yaml`),
-collected on 2026-11-13 with `azure/openai/gpt-5.5` against OfficeEnv 1.14.0. All five score 1.0; the
-episodes saved 8 files to their workspaces, uploaded 5 and attached 1, and no sandbox was left running.
+collected on 2026-11-13 with `azure/openai/gpt-5.5` against OfficeEnv 1.14.0 (the rows, emitted again by 1.14.2,
+changed only in their version stamp). All five score 1.0; the episodes saved 8 files to their workspaces, uploaded 5
+and attached 1, and no sandbox was left running.
 
 ## Sandboxed harnesses
 
@@ -244,7 +245,7 @@ for Pi and OpenCode, `mcp__company__` for Codex, each set on the harness's own s
 `/verify` adds `sandbox_commands`, `sandbox_commands_refused` and `sandbox_endpoint_calls`.
 
 Rows come from OfficeEnv's sandbox example tasks: `sandbox/prepare_rows.py` writes
-`data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its sandbox tasks, nine in 1.14.0). A
+`data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its sandbox tasks, nine in 1.14.2). A
 row holds a system and a user message and the TaskSpec, and no tool list, since the harness takes
 its tools from the MCP grant. `--exposure cli` or `--exposure api_search` writes the same tasks in
 that exposure, with a prompt that says how the apps are reached, to

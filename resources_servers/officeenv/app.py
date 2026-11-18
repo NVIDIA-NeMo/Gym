@@ -10,7 +10,7 @@ and adds only Gym's own response fields.
 A row (one JSONL line, written by ``officeenv emit`` or ``officeenv.emit.gym_row``):
 
     {"responses_create_params": {"input": [...], "tools": [...]},
-     "officeenv": {<TaskSpec>}, "officeenv_version": "1.14.0", "task_id": "..."}
+     "officeenv": {<TaskSpec>}, "officeenv_version": "1.14.2", "task_id": "..."}
 
 An Agent's ``/run`` (the simple agent) POSTs the row to ``/seed_session``, each function call to
 ``POST /<tool_name>`` with the call's arguments as the body, and the row plus the model's response
