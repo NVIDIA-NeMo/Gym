@@ -165,6 +165,13 @@ class Sandbox:
             self.files[shlex.split(destination)[0]] = self.files.pop(shlex.split(source)[0])
         if "exec bash " in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
+        if command.startswith("tail -c "):
+            # preserve_failure_artifacts trims a log inside the sandbox before downloading it.
+            limit, source, _, target = shlex.split(command)[2:6]
+            if source not in self.files:
+                return SimpleNamespace(error_type=None, return_code=1, stdout="", stderr=f"tail: {source}: missing")
+            self.files[target] = self.files[source][-int(limit) :]
+            return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
         if command.startswith("readlink ") and "launch.claim" in command:
             # stop_and_confirm_cleanup asks who won the launch claim.
             return SimpleNamespace(error_type=None, return_code=0, stdout="launch\n", stderr="")
@@ -738,6 +745,26 @@ def test_missing_receipt_confirmed_by_provider_completes_and_keeps_diagnostics(s
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
     sandbox.disconnect.assert_awaited_once()
+
+
+def test_failure_logs_are_trimmed_inside_the_sandbox_before_the_download(setup, tmp_path, monkeypatch):
+    from responses_api_agents.codex_agent import sandbox as sandbox_module
+
+    agent, sandbox = setup
+    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    _supervisor_left_no_receipt(sandbox)
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    monkeypatch.setattr(sandbox_module, "FAILURE_ARTIFACT_MAX_BYTES", 10)
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+    (saved,) = (tmp_path / "failures").iterdir()
+    # Only the tail crossed into the Agent Server: the sandbox trimmed "supervisor diagnostics" first.
+    assert (saved / "output.log").read_text() == "iagnostics"
+    commands = [
+        str(call.args[0] if call.args else call.kwargs.get("command")) for call in sandbox.exec.await_args_list
+    ]
+    assert any(command.startswith("tail -c 10 ") and "output.log" in command for command in commands)
 
 
 def test_unprovable_missing_receipt_fails_closed_and_preserves_logs(setup, tmp_path):

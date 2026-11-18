@@ -44,6 +44,8 @@ FAILURE_ARTIFACT_FILES = (
     "events.jsonl",
 )
 FAILURE_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024
+# Suffix of the trimmed copy of a session file that preserve_failure_artifacts downloads.
+FAILURE_ARTIFACT_TAIL_SUFFIX = ".gym-tail"
 # Runner setup for raise_oom_score_adj: make the runner, and with it Codex and every tool, the memory-cgroup OOM
 # killer's preferred victims. Raise oom_score_adj to 1000, or to 0 when the sandbox starts it below zero (a
 # Guaranteed pod's -997), so the sandbox never becomes the node's first victim in a global OOM. Raising needs no
@@ -240,6 +242,20 @@ class CodexSandboxSession(AgentSessionState):
         except Exception:
             LOG.exception("Codex session rollouts not copied")
 
+    async def _read_tail(self, name: str, max_bytes: int) -> str:
+        """The last ``max_bytes`` of a session file, trimmed inside the sandbox before the download, so a huge log
+        never reaches the Agent Server whole."""
+        path = f"{self.session.session_dir}/{name}"
+        tail = f"{name}{FAILURE_ARTIFACT_TAIL_SUFFIX}"
+        result = await self.session.sandbox.exec(
+            f"tail -c {int(max_bytes)} {shlex.quote(path)} > {shlex.quote(f'{self.session.session_dir}/{tail}')}",
+            cwd="/",
+            timeout_s=30,
+        )
+        if result.return_code != 0 or result.error_type:
+            raise FileNotFoundError(f"{name}: {(result.stderr or '').strip()[:200] or result.error_type}")
+        return await self.read_text(tail)
+
     async def preserve_failure_artifacts(self, root: str, detail: dict[str, JsonValue]) -> Path | None:
         """Copy the session's diagnostics to ``root/<episode>-<id>/`` before the sandbox is released.
 
@@ -252,7 +268,7 @@ class CodexSandboxSession(AgentSessionState):
             copied, unavailable = [], {}
             for name in FAILURE_ARTIFACT_FILES:
                 try:
-                    text = await self.read_text(name)
+                    text = await self._read_tail(name, FAILURE_ARTIFACT_MAX_BYTES)
                 except Exception as error:  # noqa: BLE001 - diagnostics only
                     unavailable[name] = f"{type(error).__name__}: {error}"[:300]
                     continue
