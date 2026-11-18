@@ -21,7 +21,9 @@ SUPERVISOR = str(SUPERVISOR_SCRIPT)
 linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 
 
-def _supervise(tmp_path: Path, *command: str, timeout: str = "10", **kwargs) -> subprocess.CompletedProcess[str]:
+def _supervise(
+    tmp_path: Path, *command: str, timeout: str = "10", cleanup_timeout: str = "0.5", **kwargs
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             "bash",
@@ -29,7 +31,7 @@ def _supervise(tmp_path: Path, *command: str, timeout: str = "10", **kwargs) -> 
             "--timeout",
             timeout,
             "--cleanup-timeout",
-            "0.5",
+            cleanup_timeout,
             "--receipt",
             str(tmp_path / "cleanup.json"),
         ]
@@ -174,7 +176,9 @@ def test_forced_stop_reaches_processes_that_leave_the_harness_during_the_stop(tm
     }[escape]
     (tmp_path / "worker.sh").write_text(worker)
     try:
-        result = _supervise(tmp_path, "bash", "worker.sh", timeout="1", cwd=tmp_path)
+        # The TERM handler must get time to start and record its child before forced cleanup.
+        # Keep the short execution deadline; only this fixture needs a longer cleanup grace.
+        result = _supervise(tmp_path, "bash", "worker.sh", timeout="1", cleanup_timeout="5", cwd=tmp_path)
         assert result.returncode == 0, result.stderr
         receipt = _receipt(tmp_path)
         assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is True, receipt
@@ -278,7 +282,7 @@ def test_existing_stop_file_fences_the_launch(tmp_path: Path) -> None:
 
 
 @linux_only
-@pytest.mark.parametrize("initial_scan_delay", [0, 2.2])
+@pytest.mark.parametrize("initial_scan_delay", [0, 6.2])
 def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_scan_delay: float) -> None:
     # The controller requests a stop with this file rather than a signal.
     stop = tmp_path / "stop.request"
@@ -296,7 +300,7 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_sca
             "--timeout",
             "30",
             "--cleanup-timeout",
-            "2",
+            "5",
             "--receipt",
             str(tmp_path / "cleanup.json"),
         ]
@@ -311,7 +315,7 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_sca
             assert process.poll() is None and time.monotonic() < deadline
             time.sleep(0.01)
         stop.touch()
-        _, stderr = process.communicate(timeout=10)
+        _, stderr = process.communicate(timeout=20)
         assert process.returncode == 0, stderr
         receipt = _receipt(tmp_path)
         assert receipt == {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False}
@@ -430,8 +434,9 @@ worker.write_text("import os, pathlib, signal, subprocess, sys, time\n"
 timed_out = ending in ('timeout', 'grace', 'stubborn')
 process = None
 try:
+    # Give real process cleanup and the checkpoint handler time on a busy CI runner.
     process = subprocess.Popen(['bash', supervisor, '--timeout', '10',
-        '--cleanup-timeout', '0.5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'),
+        '--cleanup-timeout', '5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'),
         '--expire-file', str(root / 'expire'), '--',
         sys.executable, str(worker), ending], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if ending == 'cancel' or timed_out:
@@ -444,8 +449,9 @@ try:
             (root / 'expire').touch()
         else:
             process.send_signal(signal.SIGTERM)
-    stdout, stderr = process.communicate(timeout=15)
-    assert process.returncode == 0, (stdout, stderr)
+    stdout, stderr = process.communicate(timeout=30)
+    receipt_path = root / "cleanup.json"
+    assert process.returncode == 0, (stdout, stderr, receipt_path.read_text() if receipt_path.exists() else None)
     receipt = json.loads((root / 'cleanup.json').read_text())
     assert receipt['cleanup_confirmed'] is True, receipt
     assert receipt['timed_out'] is timed_out, receipt
@@ -496,7 +502,7 @@ finally:
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=40,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
 

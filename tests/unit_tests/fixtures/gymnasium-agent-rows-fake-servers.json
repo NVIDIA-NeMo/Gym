@@ -1,0 +1,458 @@
+{
+  "finished": {
+    "step": {
+      "observation": null,
+      "reward": 1.0,
+      "terminated": true,
+      "truncated": false,
+      "info": {}
+    },
+    "response": {
+      "id": "resp-1",
+      "created_at": 0.0,
+      "model": "m",
+      "object": "response",
+      "output": [
+        {
+          "id": "msg",
+          "content": [
+            {
+              "annotations": [],
+              "text": "a",
+              "type": "output_text"
+            }
+          ],
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "tool_choice": "auto",
+      "tools": [],
+      "usage": {
+        "input_tokens": 1,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 1,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 2
+      }
+    },
+    "row": {
+      "responses_create_params": {
+        "background": null,
+        "include": null,
+        "input": [
+          {
+            "content": "play",
+            "role": "user",
+            "type": "message",
+            "phase": null
+          },
+          {
+            "content": "go",
+            "role": "user",
+            "type": "message",
+            "phase": null
+          }
+        ],
+        "instructions": null,
+        "max_output_tokens": null,
+        "max_tool_calls": null,
+        "metadata": null,
+        "model": null,
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "prompt": null,
+        "reasoning": null,
+        "service_tier": null,
+        "store": null,
+        "context_management": null,
+        "conversation": null,
+        "moderation": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": null,
+        "prompt_cache_options": null,
+        "safety_identifier": null,
+        "stream_options": null,
+        "temperature": null,
+        "text": null,
+        "tool_choice": "auto",
+        "tools": [],
+        "top_logprobs": null,
+        "top_p": null,
+        "truncation": null,
+        "user": null,
+        "stream": null
+      },
+      "response": {
+        "id": "resp-1",
+        "created_at": 0.0,
+        "error": null,
+        "incomplete_details": null,
+        "instructions": null,
+        "metadata": null,
+        "model": "m",
+        "object": "response",
+        "output": [
+          {
+            "id": "msg",
+            "content": [
+              {
+                "annotations": [],
+                "text": "a",
+                "type": "output_text",
+                "logprobs": null
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+            "phase": null
+          }
+        ],
+        "parallel_tool_calls": true,
+        "temperature": null,
+        "tool_choice": "auto",
+        "tools": [],
+        "top_p": null,
+        "background": null,
+        "completed_at": null,
+        "conversation": null,
+        "max_output_tokens": null,
+        "max_tool_calls": null,
+        "moderation": null,
+        "previous_response_id": null,
+        "prompt": null,
+        "prompt_cache_key": null,
+        "prompt_cache_options": null,
+        "prompt_cache_retention": null,
+        "reasoning": null,
+        "safety_identifier": null,
+        "service_tier": null,
+        "status": null,
+        "text": null,
+        "top_logprobs": null,
+        "truncation": null,
+        "usage": {
+          "input_tokens": 1,
+          "input_tokens_details": {
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          },
+          "output_tokens": 1,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 2
+        },
+        "user": null,
+        "metrics": null
+      },
+      "reward": 1.0,
+      "mask_sample": false,
+      "failure_kind": null,
+      "failure_reason": null,
+      "terminated": true,
+      "truncated": false,
+      "info": {},
+      "result": {
+        "reward_info": {
+          "reward": 1.0
+        }
+      },
+      "ng_agent_observations": {
+        "source": "gymnasium_agent",
+        "records": [
+          {
+            "kind": "agent_invocation",
+            "invocation_id": "gymnasium_00000000000000000000000000000000",
+            "in_session": false,
+            "verification_skipped": null,
+            "parent_invocation_id": null,
+            "spawned_by_tool_call_id": null,
+            "status": "completed",
+            "stop_reason": null,
+            "duration_ms": null,
+            "error_type": null,
+            "model_calls": [
+              {
+                "model_call_id": null,
+                "model_ref": {
+                  "type": "responses_api_models",
+                  "name": "policy_model"
+                },
+                "response_id": "resp-1"
+              }
+            ],
+            "conversation": [
+              {
+                "content": "play",
+                "role": "user",
+                "type": "message",
+                "phase": null
+              },
+              {
+                "content": "go",
+                "role": "user",
+                "type": "message",
+                "phase": null
+              },
+              {
+                "id": "msg",
+                "content": [
+                  {
+                    "annotations": [],
+                    "text": "a",
+                    "type": "output_text",
+                    "logprobs": null
+                  }
+                ],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+                "phase": null
+              }
+            ]
+          }
+        ],
+        "gaps": []
+      }
+    }
+  },
+  "cut_off": {
+    "step": {
+      "observation": null,
+      "reward": 0.0,
+      "terminated": true,
+      "truncated": false,
+      "info": {}
+    },
+    "response": {
+      "id": "resp-1",
+      "created_at": 0.0,
+      "model": "m",
+      "object": "response",
+      "output": [
+        {
+          "id": "msg",
+          "content": [
+            {
+              "annotations": [],
+              "text": "a",
+              "type": "output_text"
+            }
+          ],
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "tool_choice": "auto",
+      "tools": [],
+      "usage": {
+        "input_tokens": 1,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 1,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 2
+      },
+      "status": "incomplete",
+      "incomplete_details": {
+        "reason": "max_output_tokens"
+      }
+    },
+    "row": {
+      "responses_create_params": {
+        "background": null,
+        "include": null,
+        "input": [
+          {
+            "content": "play",
+            "role": "user",
+            "type": "message",
+            "phase": null
+          },
+          {
+            "content": "go",
+            "role": "user",
+            "type": "message",
+            "phase": null
+          }
+        ],
+        "instructions": null,
+        "max_output_tokens": null,
+        "max_tool_calls": null,
+        "metadata": null,
+        "model": null,
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "prompt": null,
+        "reasoning": null,
+        "service_tier": null,
+        "store": null,
+        "context_management": null,
+        "conversation": null,
+        "moderation": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": null,
+        "prompt_cache_options": null,
+        "safety_identifier": null,
+        "stream_options": null,
+        "temperature": null,
+        "text": null,
+        "tool_choice": "auto",
+        "tools": [],
+        "top_logprobs": null,
+        "top_p": null,
+        "truncation": null,
+        "user": null,
+        "stream": null
+      },
+      "response": {
+        "id": "resp-1",
+        "created_at": 0.0,
+        "error": null,
+        "incomplete_details": {
+          "reason": "max_output_tokens"
+        },
+        "instructions": null,
+        "metadata": null,
+        "model": "m",
+        "object": "response",
+        "output": [
+          {
+            "id": "msg",
+            "content": [
+              {
+                "annotations": [],
+                "text": "a",
+                "type": "output_text",
+                "logprobs": null
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+            "phase": null
+          }
+        ],
+        "parallel_tool_calls": true,
+        "temperature": null,
+        "tool_choice": "auto",
+        "tools": [],
+        "top_p": null,
+        "background": null,
+        "completed_at": null,
+        "conversation": null,
+        "max_output_tokens": null,
+        "max_tool_calls": null,
+        "moderation": null,
+        "previous_response_id": null,
+        "prompt": null,
+        "prompt_cache_key": null,
+        "prompt_cache_options": null,
+        "prompt_cache_retention": null,
+        "reasoning": null,
+        "safety_identifier": null,
+        "service_tier": null,
+        "status": "incomplete",
+        "text": null,
+        "top_logprobs": null,
+        "truncation": null,
+        "usage": {
+          "input_tokens": 1,
+          "input_tokens_details": {
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          },
+          "output_tokens": 1,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 2
+        },
+        "user": null,
+        "metrics": null
+      },
+      "reward": 0.0,
+      "mask_sample": false,
+      "failure_kind": null,
+      "failure_reason": null,
+      "terminated": true,
+      "truncated": false,
+      "info": {},
+      "result": {
+        "reward_info": {
+          "reward": 0.0
+        }
+      },
+      "ng_agent_observations": {
+        "source": "gymnasium_agent",
+        "records": [
+          {
+            "kind": "agent_invocation",
+            "invocation_id": "gymnasium_00000000000000000000000000000000",
+            "in_session": false,
+            "verification_skipped": null,
+            "parent_invocation_id": null,
+            "spawned_by_tool_call_id": null,
+            "status": "incomplete",
+            "stop_reason": null,
+            "duration_ms": null,
+            "error_type": null,
+            "model_calls": [
+              {
+                "model_call_id": null,
+                "model_ref": {
+                  "type": "responses_api_models",
+                  "name": "policy_model"
+                },
+                "response_id": "resp-1"
+              }
+            ],
+            "conversation": [
+              {
+                "content": "play",
+                "role": "user",
+                "type": "message",
+                "phase": null
+              },
+              {
+                "content": "go",
+                "role": "user",
+                "type": "message",
+                "phase": null
+              },
+              {
+                "id": "msg",
+                "content": [
+                  {
+                    "annotations": [],
+                    "text": "a",
+                    "type": "output_text",
+                    "logprobs": null
+                  }
+                ],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+                "phase": null
+              }
+            ]
+          }
+        ],
+        "gaps": []
+      }
+    }
+  }
+}
