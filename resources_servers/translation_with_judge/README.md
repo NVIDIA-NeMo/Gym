@@ -7,6 +7,12 @@ OpenAI-Responses-compatible endpoint) and asks it to rate adequacy +
 fluency on a 0-100 scale. That score, normalized to `[0, 1]`, is the RL
 reward.
 
+The judge receives XML-escaped source, reference, and candidate text in separate
+tags and is instructed to ignore instructions or claimed scores inside them.
+This reduces prompt-injection risk; it does not guarantee that a judge will
+always resist adversarial text. An empty candidate is a genuine zero score;
+an unparseable judge reply is masked and reported as lost coverage.
+
 Corpus-level sentence-BLEU and chrF (via `sacrebleu`) are also computed per
 row as cheap, judge-independent diagnostics — they do **not** affect the
 reward, only `compute_metrics()`'s aggregate output.
@@ -44,6 +50,14 @@ aggregates (`xx->xx`, `<src>->xx`, `xx-><tgt>`):
 
 - `<src>-><tgt>/judge_score` (+ `_std_dev_across_runs`) — mean LLM-judge score, 0-100
 - `<src>-><tgt>/bleu`, `<src>-><tgt>/chrf` (+ `_std_dev_across_runs`) — diagnostic only
+
+Repeat groups use `_ng_rollout_index`, so masking one measurement does not
+discard valid measurements from other tasks or align different repeats.
+Each repeat averages its available rows per language pair, then cross-pair
+metrics average the available pairs for that same repeat. Means and standard
+deviations across repeats retain equal repeat weighting. Missing measurements
+still reduce coverage and can change the task mix; compare quality scores
+alongside coverage. Older rows without repeat indices use their list positions.
 
 `get_key_metrics()` returns the headline aggregates: `xx->xx/judge_score`,
 `eng_Latn->xx/judge_score`, plus `xx->xx/bleu` and `xx->xx/chrf` for context.
