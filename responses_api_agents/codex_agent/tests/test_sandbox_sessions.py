@@ -2307,6 +2307,27 @@ def test_the_close_reports_each_tool_result_as_the_model_read_it(setup):
     assert trajectory.steps[-1].message == "NeMo Gym 0.9.0 is installed."
 
 
+@pytest.mark.parametrize("damaged", [False, True])
+def test_an_unreadable_tool_result_record_reports_the_conversation_incomplete(damaged):
+    """A session record the parser cannot read is skipped, so the conversation keeps the poll without its result. Two
+    gaps on the invocation say so (an unparseable record that may have been a conversation item), which is what the
+    harbor Environment Server reads to export the response output instead; an intact rollout has neither."""
+    from responses_api_agents.codex_agent.observability import parse_codex_observations
+
+    lines = ROLLOUT_JSONL.read_text().splitlines()
+    (index,) = [i for i, line in enumerate(lines) if '"function_call_output","call_id":"call_poll"' in line]
+    if damaged:
+        lines[index] = lines[index][: len(lines[index]) // 2]
+
+    bundle = parse_codex_observations("\n".join(lines), "root", returncode=0, timed_out=False)
+
+    results = [item.call_id for item in bundle.records[0].conversation if item.type == "function_call_output"]
+    assert results == (["call_install"] if damaged else ["call_install", "call_poll"])
+    lost = {"agent_artifact_record_unparseable", "tool_timing_unavailable"}
+    reported = {gap.code for gap in bundle.gaps if gap.invocation_id == "root"}
+    assert lost & reported == (lost if damaged else set())
+
+
 async def test_collect_copies_session_rollouts_after_reading_events(setup):
     agent, sandbox = setup
     agent.config.sandbox_logs_dir = "/logs/agent"

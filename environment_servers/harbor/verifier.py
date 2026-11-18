@@ -109,7 +109,11 @@ VERIFIER_UNAVAILABLE_KIND = "harbor:verifier_unavailable"
 
 def _reported_transcript(observations: AgentObservationBundle | None) -> list[dict[str, Any]] | None:
     """The conversation of the one root invocation in ``observations``, as items for the transcript converter; None
-    when there is not exactly one root invocation or its conversation is empty.
+    when there is not exactly one root invocation or its conversation is empty. Raises :class:`AtifExportError` when
+    the observations show the conversation may be missing items: a record of the agent's session log could not be
+    read (``agent_artifact_record_unparseable``) and its tool history is then incomplete
+    (``tool_timing_unavailable``), as Codex reports a skipped record that may have held a tool call or its result.
+    The converter accepts a call without its result, so such a conversation would export without that evidence.
 
     ATIF has one tool-call shape, so a freeform custom tool call (Codex's ``apply_patch``) and its output are given
     as a function call and its output. Its arguments are what Harbor's Codex agent exports: the input when it is a
@@ -127,6 +131,9 @@ def _reported_transcript(observations: AgentObservationBundle | None) -> list[di
     ]
     if len(roots) != 1 or not roots[0].conversation:
         return None
+    root_gaps = {gap.code for gap in observations.gaps if gap.invocation_id in (None, roots[0].invocation_id)}
+    if {"agent_artifact_record_unparseable", "tool_timing_unavailable"} <= root_gaps:
+        raise AtifExportError("records of the agent's session log could not be read, so it may be missing items")
     items = []
     for item in roots[0].conversation:
         raw = item.model_dump(mode="json")
@@ -1507,8 +1514,8 @@ class HarborVerificationMixin:
         ``observations`` are the session close's observations of a harness that reports the conversation the
         model received (``reports_model_conversation`` in its seed). Their one root invocation's conversation is
         exported instead, as Harbor's installed agents write the file from their own session records, so each tool
-        result reads as the model read it. Without such a conversation, or one the converter cannot represent, the
-        Gym transcript is exported as above.
+        result reads as the model read it. Without such a conversation, or with one the converter cannot represent or
+        that may be missing items (:func:`_reported_transcript`), the Gym transcript is exported as above.
         """
         usage = agent_response.usage.model_dump(mode="json") if agent_response.usage is not None else None
         identity = {
@@ -1518,16 +1525,16 @@ class HarborVerificationMixin:
             "model_name": agent_response.model,
             "usage": usage,
         }
-        reported = _reported_transcript(observations)
-        if reported is not None:
-            try:
-                trajectory = transcript_to_atif(None, reported, **identity)
-            except AtifExportError as error:
-                LOGGER.warning(
-                    f"{request.task.task_id}: the agent's reported conversation is not representable in ATIF "
-                    f"({error}); exporting its response output instead"
-                )
-            else:
+        try:
+            reported = _reported_transcript(observations)
+            trajectory = transcript_to_atif(None, reported, **identity) if reported is not None else None
+        except AtifExportError as error:
+            LOGGER.warning(
+                f"{request.task.task_id}: the agent's reported conversation is not representable in ATIF "
+                f"({error}); exporting its response output instead"
+            )
+        else:
+            if trajectory is not None:
                 trajectory.extra["nemo_gym"]["source"] = {"format": "agent_observations"}
                 return encode_atif_trajectory(trajectory)
         params: Any = request.task.task_input.responses_create_params

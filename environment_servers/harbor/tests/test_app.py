@@ -4953,6 +4953,66 @@ class TestGeneralization:
         unrepresentable = "not representable in ATIF" in caplog.text
         assert unrepresentable is (observations is not None)
 
+    async def test_a_reported_conversation_missing_a_record_falls_back_to_the_response_transcript(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Codex skips a session record it cannot read and says so: the record is unparseable and, since it may have
+        been a conversation item, the tool history is incomplete. The command's result was in that record, so the
+        conversation holds the call without it; the turn is graded on its response output, which still has it."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.reports_model_conversation = True
+        observations = reported_conversation()
+        del observations["records"][0]["conversation"][3]
+        observations["gaps"] = [
+            {"code": "agent_artifact_record_unparseable", "invocation_id": "r1"},
+            {"code": "tool_timing_unavailable", "invocation_id": "r1"},
+        ]
+        server.server_client.observations = observations
+
+        with caplog.at_level("WARNING"):
+            response = await run_episode(server, task)
+
+        result = response.result
+        assert result is not None and result.mask_sample is False and result.reward == 1.0, response.failure
+        trajectory = json.loads((Path(result.verifier_logs_dir) / "trajectory.json").read_text())
+        assert trajectory["extra"]["nemo_gym"]["source"] == {"format": "responses_transcript"}
+        assert [step["source"] for step in trajectory["steps"]] == ["user", "agent"]
+        assert trajectory["steps"][1]["message"] == "echo hello > hello.txt"
+        assert "could not be read" in caplog.text
+
+    @pytest.mark.parametrize(
+        "gaps",
+        [
+            # The skipped record was a native event (a token count), never a conversation item.
+            [{"code": "agent_artifact_record_unparseable", "invocation_id": "r1"}],
+            # Gaps about usage, outcomes and timing, not about lost records.
+            [
+                {"code": "cached_token_usage_unavailable"},
+                {"code": "tool_outcome_unavailable", "invocation_id": "r1", "detail": "call_1"},
+                {"code": "tool_timing_unavailable", "detail": "call_1"},
+            ],
+        ],
+        ids=["native-event", "unrelated"],
+    )
+    async def test_a_reported_conversation_with_gaps_that_lose_no_record_is_exported(
+        self, tmp_path, monkeypatch, gaps
+    ):
+        """Only a skipped record that may have been a conversation item sends the export back to the response output."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.reports_model_conversation = True
+        observations = reported_conversation()
+        observations["gaps"] = gaps
+        server.server_client.observations = observations
+
+        response = await run_episode(server, task)
+
+        result = response.result
+        assert result is not None and result.mask_sample is False, response.failure
+        trajectory = json.loads((Path(result.verifier_logs_dir) / "trajectory.json").read_text())
+        assert trajectory["extra"]["nemo_gym"]["source"] == {"format": "agent_observations"}
+        (observed,) = trajectory["steps"][2]["observation"]["results"]
+        assert (observed["source_call_id"], observed["content"]) == ("call_1", CODEX_TOOL_RESULT)
+
     async def test_terminus_shaped_transcript_exports_user_turns_as_observations(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
         turn = agent_response().model_dump(mode="json")
