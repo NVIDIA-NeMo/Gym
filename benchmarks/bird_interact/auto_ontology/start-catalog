@@ -4,8 +4,8 @@
 #
 # Start the release's PostgreSQL, which holds the source databases and the catalog, on $POSTGRES_PORT, and wait until
 # it takes connections. The Auto Ontology agent runs this at each episode's seed, since the sandbox keeps its own
-# entrypoint. Auto Ontology keeps a connection pool to each source database for each lookup of its connectors, so the
-# server takes more connections than PostgreSQL's default of 100.
+# entrypoint. The server takes more connections than PostgreSQL's default of 100, as build_catalog.py's does: the
+# catalog build ran out of them.
 set -euo pipefail
 gosu postgres pg_ctl -D "$PGDATA" -l "$PGDATA/server.log" -w -t 120 \
   -o "-p $POSTGRES_PORT -c listen_addresses=localhost -c max_connections=500" start >/dev/null
