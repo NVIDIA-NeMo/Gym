@@ -243,8 +243,8 @@ def _sync_from_mirror(command: list[str], project: Path, venv: Path, env: dict[s
                 str(requirements),
             ]
             if index:
-                install += ["--default-index", index]
-            # The caller's index variables would outrank --default-index.
+                install += ["--no-config", "--default-index", index]
+            # The caller's index variables and configured indexes would outrank --default-index.
             subprocess.run(install, env=lock_env if index else env, cwd=project, check=True)
 
 

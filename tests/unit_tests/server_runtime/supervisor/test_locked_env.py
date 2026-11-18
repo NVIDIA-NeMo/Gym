@@ -492,22 +492,50 @@ def test_imported_components_retain_managed_dependency_contracts(component, extr
         assert {"tenacity", "opensandbox", "daytona", "e2b", "boto3"} <= packages.keys()
 
 
-def test_mirror_sync_installs_index_pinned_packages_from_their_index(tmp_path: Path, monkeypatch) -> None:
-    index = "https://download.pytorch.org/whl/cpu"
-    (tmp_path / "pyproject.toml").write_text(
-        f'[project]\nname="p"\nversion="0"\n[[tool.uv.index]]\nname="cpu"\nurl="{index}"\nexplicit=true\n'
+def test_mirror_sync_installs_index_pinned_packages_from_their_index(tmp_path, monkeypatch):
+    """A package pinned to an explicit index installs from it while the caller sets a mirror index."""
+    for index, name, version in [
+        ("mirror", "nemo-gym-mirror-plain", "1.0"),
+        ("mirror", "nemo-gym-mirror-pinned", "1.0"),
+        ("cpu", "nemo-gym-mirror-pinned", "1.0+cpu"),
+    ]:
+        directory = tmp_path / index / name
+        directory.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(directory / f"{name.replace('-', '_')}-{version}-py3-none-any.whl", "w") as archive:
+            metadata = f"{name.replace('-', '_')}-{version}.dist-info/"
+            archive.writestr(metadata + "METADATA", f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+            archive.writestr(metadata + "WHEEL", "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+            archive.writestr(metadata + "RECORD", "")
+    server = ThreadingHTTPServer(("localhost", 0), partial(SimpleHTTPRequestHandler, directory=str(tmp_path)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname="mirror-smoke"\nversion="0"\ndependencies=["nemo-gym-mirror-plain", "nemo-gym-mirror-pinned", "packaging"]\n'
+        "[tool.uv]\npackage=false\n"
+        f'[[tool.uv.index]]\nname="mirror"\nurl="http://{host}:{port}/mirror/"\n'
+        f'[[tool.uv.index]]\nname="cpu"\nurl="http://{host}:{port}/cpu/"\nexplicit=true\n'
+        '[tool.uv.sources]\nnemo-gym-mirror-pinned={index="cpu"}\n'
     )
-    (tmp_path / "uv.lock").write_text(
-        f'[[package]]\nname = "torch"\nversion = "2.6.0+cpu"\nsource = {{ registry = "{index}" }}\n'
-        '[[package]]\nname = "six"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" }\n'
+    venv = tmp_path / "venv"
+    try:
+        subprocess.run(["uv", "lock", "--project", str(project)], check=True)
+        # PyPI provides only pip for the venv seed and packaging for the parent-requirement check.
+        monkeypatch.setenv("UV_INDEX_URL", f"http://{host}:{port}/mirror/")
+        monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://pypi.org/simple/")
+        _locked_env.sync_environment(project, venv, sys.executable, [], [])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    versions = subprocess.check_output(
+        [
+            str(venv / "bin/python"),
+            "-c",
+            "import importlib.metadata as m; print(*map(m.version, ['nemo-gym-mirror-plain', 'nemo-gym-mirror-pinned']))",
+        ],
+        text=True,
     )
-    run = Mock()
-    monkeypatch.setattr(_locked_env.subprocess, "run", run)
-    command = ["uv", "sync", "--python", "3.12", "--no-dev"]
-    _locked_env._sync_from_mirror(command, tmp_path, tmp_path / "venv", {"UV_EXTRA_INDEX_URL": "https://mirror"})
-    _, export, install, pinned_export, pinned_install = run.call_args_list
-    assert "--no-emit-package=torch" in export.args[0]
-    assert "--default-index" not in install.args[0] and install.kwargs["env"]["UV_EXTRA_INDEX_URL"]
-    assert "--no-emit-package=six" in pinned_export.args[0] and "--no-emit-package=torch" not in pinned_export.args[0]
-    assert pinned_install.args[0][-2:] == ["--default-index", index]
-    assert "UV_EXTRA_INDEX_URL" not in pinned_install.kwargs["env"]
+    assert versions.split() == ["1.0", "1.0+cpu"]
