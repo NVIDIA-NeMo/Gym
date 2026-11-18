@@ -292,6 +292,75 @@ def _effective_budget_key(outbound: Dict[str, Any], keys: tuple[str, ...]) -> st
     return next((key for key in keys if outbound.get(key) is not None), None)
 
 
+def apply_sampling_overrides(
+    body_dict: Dict[str, Any],
+    *,
+    sampling_overrides: Dict[str, Any],
+    api: Literal["chat", "completions", "responses"],
+) -> Dict[str, Any]:
+    """Force ``sampling_overrides`` onto an outbound body for the ``api`` endpoint, in place.
+
+    A pinned output-token limit replaces the request's limit under every name and is sent under
+    the name the ``api`` endpoint reads. Otherwise a request that names the limit differently
+    from the pin reaches the engine with both, and the engine may read the request's. A pin that
+    names the limit more than once sends the value of the first name in ``_OUTPUT_BUDGET_KEYS``
+    order on every endpoint, so one config caps a run alike whichever endpoint serves it.
+
+    A null pin removes the parameter from the body instead of sending ``null``, so the engine
+    applies its own default. A null limit removes the request's limit under every name and
+    sends none. On Chat and Responses the engine then sets no limit of its own. On
+    ``/v1/completions`` its default for a request without ``max_tokens`` is 16 tokens, so a
+    null limit does not lift the limit on that endpoint.
+    """
+    overrides = dict(sampling_overrides)
+    pinned_limits = {key: overrides.pop(key) for key in _OUTPUT_BUDGET_KEYS if key in overrides}
+    for key, value in overrides.items():
+        if value is None:
+            body_dict.pop(key, None)
+        else:
+            body_dict[key] = value
+    if pinned_limits:
+        for key in _OUTPUT_BUDGET_KEYS:
+            body_dict.pop(key, None)
+        if api == "chat":
+            limit_key = next((key for key in _CHAT_BUDGET_KEYS if key in pinned_limits), "max_tokens")
+        else:
+            limit_key = _OUTPUT_BUDGET_KEY_BY_API[api]
+        limit = next(iter(pinned_limits.values()))
+        if limit is not None:
+            body_dict[limit_key] = limit
+    return body_dict
+
+
+def warn_on_mismatched_limit_pins(*, server_name: str, sampling_overrides: Dict[str, Any]) -> None:
+    """Warn when ``sampling_overrides`` pins the output-token limit to different values under different names.
+
+    ``apply_sampling_overrides`` then sends only the first pinned name's value, so a server calls this at startup to
+    say which one.
+    """
+    pinned_limits = [(key, sampling_overrides[key]) for key in _OUTPUT_BUDGET_KEYS if key in sampling_overrides]
+    if any(value != pinned_limits[0][1] for _, value in pinned_limits[1:]):
+        first_name, first_value = pinned_limits[0]
+        LOG.warning(
+            "`%s` pins the output-token limit to different values under different names %s; every endpoint sends %s",
+            server_name,
+            dict(pinned_limits),
+            f"no limit, because {first_name} is null" if first_value is None else f"{first_name}={first_value}",
+        )
+
+
+def merge_chat_extra_body(body_dict: Dict[str, Any], *, extra_body: Dict[str, Any]) -> Dict[str, Any]:
+    """A Chat request body with ``extra_body``'s defaults merged under it.
+
+    The request's own fields win. Its output-token limit wins under either Chat name: when the request sets one, an
+    ``extra_body`` limit is dropped, since a Chat endpoint reads ``max_completion_tokens`` first and would otherwise
+    apply the default under that name.
+    """
+    if _effective_budget_key(body_dict, _CHAT_BUDGET_KEYS) is not None:
+        extra_body = {key: value for key, value in extra_body.items() if key not in _CHAT_BUDGET_KEYS}
+    return extra_body | body_dict
+
+
 def _stated_prompt_tokens(message: str) -> int | None:
     """The prompt length a length refusal states, or None when it states none."""
     match = _PROMPT_TOKEN_COUNT.search(message)
@@ -1196,22 +1265,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 self.config.name,
                 self.config.sampling_overrides,
             )
-            pinned_limits = [
-                (key, self.config.sampling_overrides[key])
-                for key in _OUTPUT_BUDGET_KEYS
-                if key in self.config.sampling_overrides
-            ]
-            if any(value != pinned_limits[0][1] for _, value in pinned_limits[1:]):
-                first_name, first_value = pinned_limits[0]
-                LOG.warning(
-                    "`%s` pins the output-token limit to different values under different names %s; "
-                    "every endpoint sends %s",
-                    self.config.name,
-                    dict(pinned_limits),
-                    f"no limit, because {first_name} is null"
-                    if first_value is None
-                    else f"{first_name}={first_value}",
-                )
+            warn_on_mismatched_limit_pins(
+                server_name=self.config.name, sampling_overrides=self.config.sampling_overrides
+            )
 
         self._clients = [
             NeMoGymAsyncOpenAI(
@@ -1373,19 +1429,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         over both what the client sent and anything ``extra_body`` merged in, and are present when
         the client sent nothing. Every path has to call this: a harness picks its own endpoint, and
         a pin that covers only one of them yields off-policy generation while reporting that
-        sampling is pinned.
-
-        A pinned output-token limit replaces the request's limit under every name and is sent under
-        the name the ``api`` endpoint reads. Otherwise a request that names the limit differently
-        from the pin reaches the engine with both, and the engine may read the request's. A pin that
-        names the limit more than once sends the value of the first name in ``_OUTPUT_BUDGET_KEYS``
-        order on every endpoint, so one config caps a run alike whichever endpoint serves it.
-
-        A null pin removes the parameter from the body instead of sending ``null``, so the engine
-        applies its own default. A null limit removes the request's limit under every name and
-        sends none. On Chat and Responses the engine then sets no limit of its own. On
-        ``/v1/completions`` its default for a request without ``max_tokens`` is 16 tokens, so a
-        null limit does not lift the limit on that endpoint.
+        sampling is pinned. ``apply_sampling_overrides`` says how a null pin and a pinned output-token
+        limit are sent.
         """
         if not self.config.sampling_overrides:
             return body_dict
@@ -1399,24 +1444,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "from this Model Server's sampling_overrides, and give an untrained agent that needs a pin a "
                 "Model Server of its own.",
             )
-        overrides = dict(self.config.sampling_overrides)
-        pinned_limits = {key: overrides.pop(key) for key in _OUTPUT_BUDGET_KEYS if key in overrides}
-        for key, value in overrides.items():
-            if value is None:
-                body_dict.pop(key, None)
-            else:
-                body_dict[key] = value
-        if pinned_limits:
-            for key in _OUTPUT_BUDGET_KEYS:
-                body_dict.pop(key, None)
-            if api == "chat":
-                limit_key = next((key for key in _CHAT_BUDGET_KEYS if key in pinned_limits), "max_tokens")
-            else:
-                limit_key = _OUTPUT_BUDGET_KEY_BY_API[api]
-            limit = next(iter(pinned_limits.values()))
-            if limit is not None:
-                body_dict[limit_key] = limit
-        return body_dict
+        return apply_sampling_overrides(body_dict, sampling_overrides=self.config.sampling_overrides, api=api)
 
     async def _responses_native(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
@@ -1682,11 +1710,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise NotImplementedError
 
         if extra_body:
-            if _effective_budget_key(body_dict, _CHAT_BUDGET_KEYS) is not None:
-                # The request body's limit wins under either name. An extra_body limit under the other
-                # name would otherwise reach the engine too, and vLLM reads max_completion_tokens first.
-                extra_body = {key: value for key, value in extra_body.items() if key not in _CHAT_BUDGET_KEYS}
-            body_dict = extra_body | body_dict
+            body_dict = merge_chat_extra_body(body_dict, extra_body=extra_body)
 
         self._splice_audio_from_metadata(body_dict, metadata)
 

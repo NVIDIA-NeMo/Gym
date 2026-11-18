@@ -126,6 +126,8 @@ from responses_api_models.vllm_model.app import (
     _redacted_error_repr,
     _transport_images,
     _transport_log_context,
+    apply_sampling_overrides,
+    merge_chat_extra_body,
 )
 
 
@@ -7722,6 +7724,25 @@ class TestSamplingOverrides:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
             self._server({"max_output_tokens": None, "max_tokens": None, "max_completion_tokens": None})
         assert "different values under different names" not in caplog.text
+
+    @mark.parametrize("api", ["chat", "completions", "responses"])
+    def test_a_null_limit_pin_removes_every_limit_name_and_keeps_the_other_pins(self, api: str) -> None:
+        """Other pins still apply, the limit is removed under every name, and the caller's pins are not mutated."""
+        pins = {"temperature": 1.0, "max_tokens": None}
+        body = {"temperature": 0.2, "max_tokens": 500, "max_completion_tokens": 500, "max_output_tokens": 500}
+        assert apply_sampling_overrides(body, sampling_overrides=pins, api=api) == {"temperature": 1.0}
+        assert pins == {"temperature": 1.0, "max_tokens": None}
+
+    def test_a_request_limit_beats_an_extra_body_limit_under_either_chat_name(self) -> None:
+        """extra_body's limit is a default: it applies only when the request sets no limit of its own."""
+        extra_body = {"max_completion_tokens": 64, "temperature": 0.5}
+        assert merge_chat_extra_body({"max_tokens": 500}, extra_body=extra_body) == {
+            "max_tokens": 500,
+            "temperature": 0.5,
+        }
+        assert merge_chat_extra_body({}, extra_body=extra_body) == extra_body
+        # A null request limit sets no limit, so the default still applies.
+        assert merge_chat_extra_body({"max_tokens": None}, extra_body=extra_body) == {**extra_body, "max_tokens": None}
 
     def test_transport_log_records_the_request_the_engine_receives(
         self, monkeypatch: MonkeyPatch, tmp_path, capsys
