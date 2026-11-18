@@ -70,8 +70,8 @@ from nemo_gym.sandbox.resource_telemetry import (
 from nemo_gym.sandbox.usage import (
     SandboxUsageSummary,
     SandboxUsageTracker,
-    sample_interval,
     sampling_enabled,
+    usage_sample_interval,
     usage_span_attributes,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
@@ -697,7 +697,7 @@ class AsyncSandbox:
             and isinstance(self._provider, SupportsSandboxUsage)
             and callable(getattr(type(self._provider), "usage", None))
         ):
-            self._usage_tracker = SandboxUsageTracker(self._provider, handle, interval=sample_interval())
+            self._usage_tracker = SandboxUsageTracker(self._provider, handle, interval=usage_sample_interval())
             self._usage_tracker.start()
         interval = sampling_interval()
         if interval and isinstance(self._provider, ResourceProvider):

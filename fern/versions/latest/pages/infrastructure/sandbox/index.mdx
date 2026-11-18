@@ -388,6 +388,26 @@ Other providers, including OpenSandbox, report no usage yet.
 
 - `container` values are kernel counters for the sandbox's own cgroup; memory includes page cache.
 
+Totals come from the read in `stop()`. Each summary's `final_read` says whether that read measured it; when it did
+not, `cpu_usage_usec_total`, `cpu_usage_usec_delta` and `memory_peak_bytes` are empty rather than the create-time
+reading, and `unavailable_reason` says why (`final_read_timeout`, `final_read_failed`, `not_cgroup_root` or
+`sandbox_gone`).
+
+### Usage summaries and OpenSandbox resource telemetry
+
+These lifetime summaries are separate from the live resource records OpenSandbox exports through its
+`ResourceProvider` capability ([Sandbox resources](/observability/opentelemetry#sandbox-resources)):
+
+| | Usage summaries (`SupportsSandboxUsage`) | Resource telemetry (`ResourceProvider`) |
+| --- | --- | --- |
+| Providers | Docker | OpenSandbox |
+| Mechanism | Lifetime accounting: cumulative CPU and peak memory, read after create and before close | Allocation plus instantaneous CPU % and memory in use, every `NEMO_GYM_OTEL_SANDBOX_RESOURCE_SAMPLE_INTERVAL_SECONDS` |
+| Output | `sandbox.resource_usage` and `gym.sandbox.stop` span attributes | `gym.sandbox.resource.*` spans and `gym.sandbox.*` gauges |
+| Needs an OTel exporter | No | Yes |
+
+Both are sampled only by the process that created the sandbox. They are expected to merge once one provider
+implements both.
+
 ## Image Rewrites
 
 Use `rewrite_image()` when a benchmark's upstream image needs to run through an internal registry mirror.
