@@ -9,6 +9,10 @@
 # episode's video under /testbed and checks at each seed that /opt/video-mcqa holds this repository's video tools, so
 # rebuild the image after changing them.
 #
+# The image is the full node:22 Debian bookworm image, pinned by digest, that our agentic video training data was
+# generated in, so that evaluation and RL run in the same system: its shell, ImageMagick, git, compilers and other
+# programs. The tools stage installs the programs above, and the last stage copies them into that image.
+#
 # The first two stages build OpenCode's plugin dependencies from the lockfile in opencode/ (a copy of
 # benchmarks/agentic_if/opencode) as visual_coding_opencode/sandbox_image/Dockerfile does, so the archive matches its
 # pinned SHA-256. Without it, OpenCode tries to install them from npm at each start, and an offline start waits about
@@ -43,7 +47,9 @@ RUN curl -fsSL -o /ffmpeg.tar.xz "https://johnvansickle.com/ffmpeg/releases/ffmp
     && tar -xJf /ffmpeg.tar.xz -C /ffmpeg --strip-components=1 \
         ffmpeg-7.0.2-amd64-static/ffmpeg ffmpeg-7.0.2-amd64-static/ffprobe
 
-FROM python:3.13-slim-bookworm
+# Python 3.13 (the python image pinned by digest, so its files stay the same) with the tools' packages, ripgrep,
+# OpenCode and the video tools.
+FROM python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72 AS tools
 
 # bash for OpenCode's shell tool, ripgrep for its grep and glob tools, curl and tar for the OpenCode download below.
 RUN apt-get update \
@@ -81,5 +87,24 @@ COPY video_tools /opt/video-mcqa/video_tools
 RUN python3 -c "import pathlib, site; pathlib.Path(site.getsitepackages()[0], 'video-mcqa.pth').write_text('/opt/video-mcqa\n')" \
     && python3 -I -c "import video_tools.cli" \
     && mkdir -p /testbed/videos /testbed/work
+
+# node:22.23.3-bookworm as it was when the training data was generated (the tag has been rebuilt since), with the tools
+# copied in. Its PATH puts /usr/local/bin first, so python3 is the tools' Python 3.13.
+FROM node:22.23.3-bookworm@sha256:363e1587494626837fa7f9a23bdb453d13b0ff3c67c705c2805cfc69c2d2fad7
+
+COPY --from=tools --chown=0:0 /usr/local /usr/local
+COPY --from=tools --chown=0:0 /opt/opencode /opt/opencode
+COPY --from=tools --chown=0:0 /opt/video-mcqa /opt/video-mcqa
+COPY --from=tools /usr/bin/rg /usr/bin/rg
+
+# The tools stage's thread limits, and its locale (the python image's).
+ENV OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    VECLIB_MAXIMUM_THREADS=1 \
+    LANG=C.UTF-8
+
+RUN mkdir -m 1777 /testbed && mkdir /testbed/work
 
 WORKDIR /testbed/work

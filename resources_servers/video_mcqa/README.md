@@ -121,7 +121,9 @@ dataset terms below still apply.
 dependencies (the pins of `visual_coding_opencode`), the static FFmpeg 7.0.2
 build of johnvansickle.com, Python 3.13 with NumPy 2.4.6, Pillow 12.3.0 and
 Pydantic 2.13.5, and the video tools in `/opt/video-mcqa`. Each pin is checked
-during the build.
+during the build. They go into the full `node:22.23.3-bookworm` image (pinned
+by digest) that our agentic video training data was generated in, so that
+evaluation and RL run in the same system.
 
 ```bash
 docker build --platform linux/amd64 -t <registry>/video-mcqa-sandbox:<tag> \
