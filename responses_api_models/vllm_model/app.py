@@ -37,6 +37,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
+from nemo_gym.config import model_call_sampling_config
 from nemo_gym.core import (
     MODEL_SAMPLING_HEADER,
     MODEL_SAMPLING_NULL,
@@ -54,7 +55,6 @@ from nemo_gym.core import (
     current_rollout_id,
     current_session_key,
     failure_report_for,
-    model_call_sampling_config,
 )
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,

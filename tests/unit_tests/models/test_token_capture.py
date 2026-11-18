@@ -47,13 +47,14 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
 )
 from nemo_gym.models.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     SimpleResponsesAPIModel,
     _request_messages,
 )
-from nemo_gym.models.model_call_capture import CaptureStore
+from nemo_gym.models.model_call_capture import CaptureStore, _reconstruct_streamed_response
 from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.external_capture import TOKEN_FIELDS
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
@@ -2620,6 +2621,43 @@ def test_served_calls_link_to_their_parent(tmp_path):
     assert len(entries) == 2
     assert entries[1].parent_call_id == entries[0].model_call_id
     assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
+
+
+class _BlankTextToolModel(_CapturingModel):
+    """Serve whitespace text before a tool call, as a policy can between its reasoning and the call."""
+
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        response = _training_response(" \n")
+        call = NeMoGymResponseFunctionToolCall(
+            type="function_call", id="call-1", call_id="call-1", name="check", arguments="{}", status="completed"
+        )
+        return response.model_copy(update={"output": [*response.output, call]})
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_messages_echo_with_blank_text_links_to_its_parent(tmp_path, stream):
+    """Serve blank text as generated, so an unchanged Messages echo matches ordinary capture."""
+    client = TestClient(_server(_both_enabled(tmp_path), model_cls=_BlankTextToolModel).setup_webserver())
+    path = "/ng-rollout/blank0/training-token-capture/v1/messages"
+    first = [{"role": "user", "content": "task"}]
+    response = client.post(path, json={"messages": first, "stream": stream, **_MSG_ARGS})
+    served = _reconstruct_streamed_response(response.content, "messages") if stream else response.json()
+    assert [block["type"] for block in served["content"]] == ["text", "tool_use"]
+    result = {"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}
+    second = first + [{"role": "assistant", "content": served["content"]}, {"role": "user", "content": [result]}]
+    client.post(path, json={"messages": second, "stream": stream, **_MSG_ARGS})
+
+    entries = TokenCaptureStore(tmp_path).read_entries("blank0")
+    assert len(entries) == 2
+    assert entries[0].prompt_token_ids == PTOKS
+    assert entries[0].generation_token_ids == GTOKS
+    assert entries[0].generation_log_probs == LPS
+    assert entries[0].token_item_index == 0
+    assert entries[0].output_items[0]["content"][0]["text"] == " \n"
+    assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
+    assert entries[1].parent_call_id == entries[0].model_call_id
 
 
 def test_separate_model_worker_instances_share_committed_lineage(tmp_path):

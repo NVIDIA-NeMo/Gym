@@ -126,6 +126,7 @@ class CaptureContext:
     # strict tri-state of the lineage result.
     external_staging: bool = False
     parent_resolution_mode: ParentResolutionMode = "fingerprint"
+    allow_system_suffix: bool = False
     # Record the served call's last output item on its ledger row in every mode.
     record_last_output_item: bool = False
     # Stamped once when the middleware admits the call. The ledger row reuses
@@ -420,7 +421,10 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
             # proof before using an empty-content-equivalent prefix.
             same_replay_source(prefixes[replay.item_count], replay, allow_empty_tool_content=True) and suffix
         ):
-            if all(item.role in ("user", "tool") for item in suffix):
+            if all(
+                item.role in ("user", "tool") or (context.allow_system_suffix and item.role == "system")
+                for item in suffix
+            ):
                 matches.append(record)
             else:
                 root_reason = "non_user_suffix"
