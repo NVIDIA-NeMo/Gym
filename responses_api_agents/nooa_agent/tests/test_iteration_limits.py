@@ -8,12 +8,13 @@ from json import dumps as json_dumps
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
-from fastapi import HTTPException
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
 
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymResponse,
@@ -24,7 +25,6 @@ from nemo_gym.core import (
 )
 from nemo_gym.rollouts.rollout_collection import _episode_record
 from responses_api_agents.nooa_agent.app import NOOAAgent
-from responses_api_agents.nooa_agent.runner import NOOARunFailure
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 from responses_api_agents.nooa_agent.tests.test_app import close, open_session
 from responses_api_agents.nooa_agent.tests.test_config import agent_config
@@ -259,8 +259,12 @@ async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation
     instance, model_calls = iteration_agent(scenario=scenario)
     req = await open_session(instance)
     try:
-        with pytest.raises((NOOARunFailure, HTTPException)):
-            await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        # A failed run answers 200 failed for the outcome ladder (main: 500, or 503 for the model outage).
+        response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        assert response.status == "failed"
+        assert orjson.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {
+            "failure_kind": "model_transport_error" if scenario == "model_outage" else "agent_run_error"
+        }
         assert len(model_calls) == (2 if scenario == "model_outage" else 1)
         assert instance._require_agent_session("session").result.episode.response.output
         assert instance._require_agent_session("session").result.trajectory.invocations[0].status == "failed"
@@ -280,8 +284,8 @@ async def test_matching_generation_error_message_is_not_a_gradable_execution_lim
     req = await open_session(instance)
     instance._require_agent_session("session").runner._invocation_adapter = invoke_error
     try:
-        with pytest.raises(NOOARunFailure):
-            await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        assert orjson.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "agent_run_error"}
         assert model_calls == []
     finally:
         receipt = await close(instance)

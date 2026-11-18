@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -22,7 +23,15 @@ from responses_api_agents.stirrup_agent import sandbox_runner
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
 from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES
 from responses_api_agents.stirrup_agent.sandbox_runner import LocalShell, Observer, main, remote_tool, run
-from responses_api_agents.stirrup_agent.tests.fakes import _TOOLS, _call, _ModelServer, _Resources, _resources_app
+from responses_api_agents.stirrup_agent.tests.fakes import (
+    _TOOLS,
+    CONTEXT_OVERFLOW_ERROR,
+    STUB_ERROR,
+    _call,
+    _ModelServer,
+    _Resources,
+    _resources_app,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -234,12 +243,26 @@ def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turn
     assert output["stop_reason"] == "model_error"
     assert str(status) in output["model_error"]
     assert output["model_error_status"] == status
+    assert json.loads(output["model_error_body"]) == {"error": STUB_ERROR}
     observations = output["observations"]
     assert observations["status"] == "failed"
     assert observations["model_response_ids"] == ["chatcmpl-1"]
     assert [t["tool_name"] for t in observations["tool_calls"]] == ["code_exec"]
     assert [item["type"] for item in output["output_items"]] == ["function_call", "function_call_output"]
     assert [u["total_tokens"] for u in output["usages"]] == [15]
+
+
+def test_a_context_overflow_keeps_the_endpoint_error_body_for_the_agent_server(tmp_path, resources):
+    """The agent server tells a context overflow from another 400 only by the body's OpenAI error code."""
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"})), (400, CONTEXT_OVERFLOW_ERROR)])
+    try:
+        output = _run_main(tmp_path, _payload(model.base_url, resources.base_url, tmp_path))
+    finally:
+        model.close()
+
+    assert (output["stop_reason"], output["model_error_status"]) == ("model_error", 400)
+    assert json.loads(output["model_error_body"]) == {"error": CONTEXT_OVERFLOW_ERROR}
+    assert output["observations"]["model_response_ids"] == ["chatcmpl-1"]
 
 
 def test_a_run_whose_compaction_summaries_are_unusable_ends_as_failed_with_the_turns_so_far(
@@ -274,16 +297,40 @@ def test_a_run_whose_compaction_summaries_are_unusable_ends_as_failed_with_the_t
 
 
 @pytest.mark.parametrize("status", [401, 403, 404])
-def test_a_model_server_error_that_is_not_a_rejected_request_still_fails_the_run(tmp_path, resources, status):
+def test_every_model_http_error_ends_the_run_with_its_status(tmp_path, resources, status):
+    """main re-raised these out of the runner, so the agent server answered 500 without the status."""
     model = _ModelServer([status])
     try:
         output = _run_main(tmp_path, _payload(model.base_url, resources.base_url, tmp_path))
     finally:
         model.close()
 
-    assert str(status) in output["error"]
+    assert "error" not in output
+    assert (output["stop_reason"], output["model_error_status"], output["model_transport_error"]) == (
+        "model_error",
+        status,
+        False,
+    )
     assert output["observations"]["status"] == "failed"
-    assert "model_error" not in output
+    assert output["observations"]["model_response_ids"] == []
+
+
+def test_a_model_server_that_cannot_be_reached_ends_the_run_with_a_transport_error(tmp_path, resources):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    payload = _payload(f"http://127.0.0.1:{port}/v1", resources.base_url, tmp_path)
+    payload["client"]["max_retries"] = 0
+
+    output = _run_main(tmp_path, payload)
+
+    assert "error" not in output
+    assert (output["stop_reason"], output["model_error_status"], output["model_transport_error"]) == (
+        "model_error",
+        None,
+        True,
+    )
+    assert output["observations"]["status"] == "failed"
 
 
 def test_a_timed_out_command_is_a_timeout_observation_and_the_model_sees_the_failure(tmp_path, resources, monkeypatch):

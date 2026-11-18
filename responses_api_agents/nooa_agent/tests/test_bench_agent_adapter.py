@@ -662,7 +662,6 @@ async def test_real_benchagent_loop_guard_preserves_gradable_evidence(tmp_path, 
 async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
     tmp_path, monkeypatch, wire_boundary: str, cleanup_boundary: str, error_type: type[Exception]
 ) -> None:
-    from fastapi import HTTPException
     from nooa.tools._bash_session import BashSession
 
     module = pytest.importorskip("nooa_bench.bench_agent")
@@ -670,7 +669,6 @@ async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
     from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
     from responses_api_agents.nooa_agent.app import NOOAAgent
     from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
-    from responses_api_agents.nooa_agent.runner import NOOARunFailure
     from responses_api_agents.nooa_agent.termination import NOOATerminationReason
     from responses_api_agents.nooa_agent.tests.test_app import close, open_session
     from responses_api_agents.nooa_agent.tests.test_config import agent_config
@@ -752,13 +750,11 @@ async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
         )
         request = await open_session(instance)
         try:
-            with pytest.raises(HTTPException if transient else NOOARunFailure) as caught:
-                await instance.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-            failure = caught.value.__cause__ if transient else caught.value
-            assert isinstance(failure, NOOARunFailure)
-            assert failure.__cause__ is solve_errors[0]
-            if transient:
-                assert caught.value.status_code == 503
+            # A cleanup failure is the run's own failure, not the model's: 200 failed agent_run_error, retried by
+            # default (main answered 503 for a transient one and 500 otherwise).
+            response = await instance.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+            assert response.status == "failed"
+            assert response.metadata["ng_agent_outcome"] == '{"failure_kind":"agent_run_error"}'
             state = instance._require_agent_session("session")
             assert state.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
             diagnostic = state.result.termination_error

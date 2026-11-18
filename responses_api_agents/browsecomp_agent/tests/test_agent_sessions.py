@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientResponseError
+from aiohttp import ClientConnectorError, ClientResponseError
 from fastapi import Request, Response
 from fastapi.testclient import TestClient
 
@@ -30,10 +30,11 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
     TaskId,
 )
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
-from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, BrowsecompAgentConfig
+from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, BrowsecompAgentConfig, _model_error_message
 from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession
 
 
@@ -101,17 +102,21 @@ class _Harness:
 
 
 def _agent(model_replies: list, monkeypatch: pytest.MonkeyPatch, **config) -> tuple[TestClient, MagicMock, _Harness]:
-    """An agent app whose model returns ``model_replies`` in order (a dict, or an int HTTP error status)."""
+    """An agent app whose model returns ``model_replies`` in order.
+
+    A reply is a dict, an int HTTP error status, or an HTTP error status with its error body.
+    """
 
     async def post(server_name=None, url_path=None, json=None, cookies=None):
         reply = model_replies.pop(0)
-        if isinstance(reply, int):
-            response = MagicMock(ok=False, status=reply, cookies={})
+        if isinstance(reply, (int, tuple)):
+            status, body = reply if isinstance(reply, tuple) else (reply, b"model refused the request")
+            response = MagicMock(ok=False, status=status, cookies={})
             request_info = SimpleNamespace(url="http://model", method="POST", headers={}, real_url="http://model")
             response.raise_for_status = MagicMock(
-                side_effect=ClientResponseError(request_info, (), status=reply, message="refused")
+                side_effect=ClientResponseError(request_info, (), status=status, message="refused")
             )
-            response.content.read = AsyncMock(return_value=b"model refused the request")
+            response.content.read = AsyncMock(return_value=body)
             return response
         response = MagicMock(ok=True, status=200, cookies={})
         response.read = AsyncMock(return_value=jsonlib.dumps(reply).encode())
@@ -267,24 +272,197 @@ def test_a_model_http_error_is_a_failed_response_for_the_outcome_policy(
     assert reply.status_code == 200, reply.text
     response = NeMoGymResponse.model_validate(reply.json())
     assert response.status == "failed"
-    assert response.output == []
+    assert jsonlib.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status,
+    }
+    # The trajectory up to the failed call is kept (main returned an empty output).
+    assert [item.type for item in response.output] == ["function_call", "function_call_output"]
     assert f"Model HTTP {status}: model refused the request" in response.error.message
     assert agent_outcome_policy(response) == action
+
+
+@pytest.mark.parametrize(("status", "kind"), [(401, "model_request_rejected"), (503, "model_request_error")])
+def test_a_model_error_before_any_reply_is_classified_by_the_ladder(
+    status: int, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _, _ = _agent([status], monkeypatch)
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+
+    response = NeMoGymResponse.model_validate(client.post(ROUTE, json=QUESTION).json())
+
+    assert response.status == "failed" and response.output == []
+    assert jsonlib.loads(response.metadata["ng_agent_outcome"])["failure_kind"] == kind
+    assert agent_outcome_policy(response) == (OutcomeAction.FAIL if status == 401 else OutcomeAction.RETRY)
+
+
+# How Gym's model servers answer a context overflow they propagate: HTTP 400 with OpenAI's error envelope.
+CONTEXT_OVERFLOW = (
+    400,
+    jsonlib.dumps(
+        {
+            "error": {
+                "message": "This model's maximum context length is 32768 tokens.",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "context_length_exceeded",
+            }
+        }
+    ).encode(),
+)
+
+
+@pytest.mark.parametrize("replied", [False, True], ids=["first-request", "after-a-reply"])
+def test_a_context_overflow_is_incomplete_and_graded(replied: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A propagated context overflow is a context limit: incomplete and graded, before or after the first reply.
+
+    Classified by its status alone, it failed: model_request_rejected (fail) on the first request, and
+    model_request_error 400 after a reply.
+    """
+    client, _, _ = _agent(
+        [_model_response(_tool_call("ls")), CONTEXT_OVERFLOW] if replied else [CONTEXT_OVERFLOW], monkeypatch
+    )
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+
+    reply = client.post(ROUTE, json=QUESTION)
+
+    assert reply.status_code == 200, reply.text
+    response = NeMoGymResponse.model_validate(reply.json())
+    assert response.status == "incomplete"
+    assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+    assert "ng_agent_outcome" not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    # The trajectory before the overflow is kept for grading.
+    assert [item.type for item in response.output] == (["function_call", "function_call_output"] if replied else [])
+    # A graded response carries no error (finish_response clears it).
+    assert response.error is None
+
+
+def _length_cut(output_tokens: int, budget: int) -> dict:
+    """A length-cut reply; below its output budget it is how the model server answers a context overflow."""
+    reply = _model_response()
+    reply.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"}, max_output_tokens=budget)
+    reply["usage"] = {
+        "input_tokens": 10,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": 10 + output_tokens,
+    }
+    return reply
+
+
+@pytest.mark.parametrize(
+    "replies,config,loop_stop,status,stop_reason",
+    [
+        (
+            [_model_response(_tool_call("ls")), _length_cut(100, 100)],
+            {},
+            "max_output_tokens",
+            "incomplete",
+            "output_limit",
+        ),
+        ([_model_response(_tool_call("ls")), _length_cut(0, 100)], {}, "context_full", "incomplete", "context_limit"),
+        ([_model_response(_tool_call("ls"))] * 2, {"max_steps": 2}, "max_steps", "incomplete", "agent_limit"),
+        (
+            [_model_response(_tool_call("ls")), _model_response(_message("Answer: 42"), _tool_call("ls"))],
+            {"max_steps": 2},
+            "max_steps",
+            "completed",
+            "completed",
+        ),
+        ([_model_response(_tool_call("ls"))], {"rollout_timeout_s": 0.0}, "timeout", "incomplete", "timeout"),
+    ],
+    ids=["max_output_tokens", "context_full", "max_steps", "max_steps-with-an-answer", "deadline"],
+)
+def test_each_loop_end_reaches_its_outcome_ladder_row(
+    replies: list, config: dict, loop_stop: str, status: str, stop_reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _, _ = _agent(list(replies), monkeypatch, **config)
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+
+    reply = client.post(ROUTE, json=QUESTION)
+
+    assert reply.status_code == 200, reply.text
+    response = NeMoGymResponse.model_validate(reply.json())
+    assert response.model_extra["stop_reason"] == loop_stop
+    assert (response.status, response.metadata["ng_agent_stop_reason"]) == (status, stop_reason)
+    assert "ng_agent_outcome" not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    # Only an answer given at the step limit carries the step-limit mark; the environment decides whether it counts.
+    assert ("harness_step_limit_reached" in response.metadata) == (stop_reason == "completed")
+    if stop_reason == "output_limit":
+        assert response.incomplete_details.reason == "max_output_tokens"
+
+
+def test_a_400_after_an_empty_answer_retry_counts_the_earlier_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The retried attempt's own trajectory is empty, but the model already replied: not a rejected first request."""
+    client, server_client, _ = _agent(
+        [_model_response(_message("<think>no answer</think>")), 400], monkeypatch, max_run_retries=2
+    )
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+
+    response = NeMoGymResponse.model_validate(client.post(ROUTE, json=QUESTION).json())
+
+    assert server_client.post.await_count == 2
+    assert response.status == "failed"
+    assert response.metadata["ng_agent_outcome"] == '{"failure_kind":"model_request_error","status_code":400}'
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+
+
+def test_a_model_transport_error_keeps_the_trajectory_and_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, server_client, _ = _agent([_model_response(_tool_call("ls"))], monkeypatch)
+    first = server_client.post.side_effect
+
+    async def post(**kwargs):
+        if server_client.post.await_count > 1:
+            raise ClientConnectorError(SimpleNamespace(ssl=None, host="model", port=9001), OSError("refused"))
+        return await first(**kwargs)
+
+    server_client.post.side_effect = post
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+
+    response = NeMoGymResponse.model_validate(client.post(ROUTE, json=QUESTION).json())
+
+    assert response.status == "failed"
+    assert jsonlib.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "model_transport_error"}
+    assert [item.type for item in response.output] == ["function_call", "function_call_output"]
+    assert response.error.message.startswith("Model transport error: ClientConnectorError")
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+
+
+def test_a_failed_token_count_is_not_reported_as_a_model_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """main reported a token-count endpoint failure as model_request_error; it now ends the loop with an error."""
+    monkeypatch.setattr(
+        "responses_api_agents.browsecomp_agent.app.get_first_server_config_dict",
+        lambda *args: {"base_url": "http://10.0.0.5:9001/v1", "api_key": "unused"},
+    )
+    client, server_client, _ = _agent([], monkeypatch, save_model_call_using_vllm_tokenize_endpoint=True)
+    request_info = SimpleNamespace(url="http://tokenize", method="POST", headers={}, real_url="http://tokenize")
+    monkeypatch.setattr(
+        BrowsecompAgent,
+        "_count_prompt_tokens",
+        AsyncMock(side_effect=ClientResponseError(request_info, (), status=500, message="tokenize failed")),
+    )
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+
+    with pytest.raises(NgFailureEvent) as failed:  # The sandbox runner records it in an error receipt.
+        client.post(ROUTE, json=QUESTION)
+
+    assert isinstance(failed.value.__cause__, ClientResponseError)
+    server_client.post.assert_not_awaited()
 
 
 def _agent_of(client: TestClient) -> BrowsecompAgent:
     return next(route.endpoint.__self__ for route in client.app.routes if route.path == "/v1/browsecomp/token_count")
 
 
-def test_a_model_http_error_keeps_only_the_start_of_a_long_upstream_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    client, _, _ = _agent([], monkeypatch)
+def test_a_model_http_error_keeps_only_the_start_of_a_long_upstream_body() -> None:
     request_info = SimpleNamespace(url="http://model", method="POST", headers={}, real_url="http://model")
     error = ClientResponseError(request_info, (), status=502, message="Bad Gateway")
     error.response_content = b"<html>" + b"x" * 10_000
-    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(QUESTION)
-    response = _agent_of(client)._model_request_failure(body, error)
     # The rollout row carries this message, so an upstream error page cannot bloat it.
-    assert response.error.message == "Model HTTP 502: <html>" + "x" * 3994
+    assert _model_error_message(error) == "Model HTTP 502: <html>" + "x" * 3994
 
 
 async def test_a_cancelled_waiter_leaves_the_activation_running_for_its_retry(monkeypatch: pytest.MonkeyPatch) -> None:

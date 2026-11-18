@@ -17,7 +17,7 @@ from aiohttp import web
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
-from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest
+from responses_api_agents.nooa_agent.runner import NOOARunRequest
 from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxCheckpoint, write_checkpoint
 from responses_api_agents.nooa_agent.sandbox_runner import SandboxNOOARunner
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
@@ -199,11 +199,12 @@ async def test_sigkill_recovers_model_and_tool_checkpoints_before_cleanup(tmp_pa
         assert "completed-tool-evidence" in json.dumps(tool.output)
         assert sandbox.process is not None
         sandbox.process.send_signal(signal.SIGKILL)
-        with pytest.raises(NOOARunFailure, match="did not exit successfully") as caught:
-            await asyncio.wait_for(execution, timeout=10)
+        # A killed worker is a run without a usable result, returned with its checkpoint evidence for the outcome
+        # ladder (agent_run_error); main raised NOOARunFailure, which the agent answered with a 500.
+        result = await asyncio.wait_for(execution, timeout=10)
         assert sandbox.process.returncode == -signal.SIGKILL
         assert not (sandbox.directory / "result.json").exists()
-        result = caught.value.result
+        assert result.termination_error == f"NOOA sandbox worker did not exit successfully (exit {-signal.SIGKILL})"
         assert result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
         assert result.episode.response.status == "failed"
         assert result.episode.response.error is not None

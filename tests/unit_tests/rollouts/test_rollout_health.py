@@ -991,6 +991,41 @@ def test_call_failures_and_token_mismatches_have_separate_check_ids(tmp_path: Pa
     }
 
 
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        ({"input_tokens": 0, "output_tokens": 0}, "healthy"),
+        ({"input_tokens": 9, "output_tokens": 4}, "mismatch"),
+        (None, "unobserved"),
+    ],
+)
+def test_failure_row_accounts_tokens_from_its_partial_response(
+    tmp_path: Path, usage: dict | None, expected: str
+) -> None:
+    # A first request the endpoint rejected fails the episode, so its row is a failure record whose
+    # response is the agent's failed partial response, not "response".
+    record = _record(0, 0, answer=None, include_response_output=False)
+    del record["response"]
+    record["_ng_failure_partial_response"] = {"status": "failed", "output": [], "usage": usage}
+    rejected = _call(
+        status_code=400, response_status=None, finish_reason=None, tokens_in=None, tokens_out=None, response=None
+    )
+    _write_fixture(tmp_path, [(record, [rejected])])
+    stored = orjson.loads((tmp_path / "rollouts.jsonl").read_bytes())
+
+    digest = health.evaluate_record(stored, frozenset())
+
+    mismatches = [finding for finding in digest.findings if finding.check == "rollout_token_count_mismatch"]
+    if expected == "healthy":
+        assert not mismatches and "rollout_token_count_mismatch" not in digest.unobserved
+    elif expected == "mismatch":
+        assert [finding.detail for finding in mismatches] == [
+            {"transcript_prompt": 9, "transcript_completion": 4, "capture_prompt": 0, "capture_completion": 0}
+        ]
+    else:
+        assert not mismatches and "rollout_token_count_mismatch" in digest.unobserved
+
+
 @pytest.mark.parametrize("gap", [None, "tool_timing_unavailable", "turn_model_call_scope_incomplete"])
 def test_turn_call_scope_gap_only_gates_completeness_checks(tmp_path: Path, gap: str | None) -> None:
     # The reported usage includes an invocation-owned helper that is not a task turn.

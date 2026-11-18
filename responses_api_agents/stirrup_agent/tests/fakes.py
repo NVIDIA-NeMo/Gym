@@ -22,13 +22,24 @@ def _call(name: str, arguments: str) -> dict:
     return {"role": "assistant", "content": None, "tool_calls": [tool_call]}
 
 
+STUB_ERROR = {"message": "rejected", "type": "stub_error"}
+# The error object of the envelope Gym's model servers answer a context overflow with (HTTP 400).
+CONTEXT_OVERFLOW_ERROR = {
+    "message": "This model's maximum context length is 32768 tokens.",
+    "type": "invalid_request_error",
+    "param": None,
+    "code": "context_length_exceeded",
+}
+
+
 class _ModelServer:
     """Answer chat completions in order and record each request body.
 
-    A ``None`` answer hangs until closed; an ``int`` answer is an HTTP error status.
+    A ``None`` answer hangs until closed; an ``int`` answer is an HTTP error status, and an ``(int, dict)`` answer
+    an HTTP error status with the ``error`` object of its OpenAI error envelope.
     """
 
-    def __init__(self, answers: list[dict | int | None]) -> None:
+    def __init__(self, answers: list[dict | int | tuple[int, dict] | None]) -> None:
         self.answers = answers
         self.blocked = threading.Event()
         self.release = threading.Event()
@@ -41,9 +52,10 @@ class _ModelServer:
                 server.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
                 server.session_ids.append(self.headers.get("x-session-id"))
                 message = server.answers[len(server.requests) - 1]
-                if isinstance(message, int):
-                    body = json.dumps({"error": {"message": "rejected", "type": "stub_error"}}).encode()
-                    self.send_response(message)
+                if isinstance(message, (int, tuple)):
+                    status, error = message if isinstance(message, tuple) else (message, STUB_ERROR)
+                    body = json.dumps({"error": error}).encode()
+                    self.send_response(status)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()

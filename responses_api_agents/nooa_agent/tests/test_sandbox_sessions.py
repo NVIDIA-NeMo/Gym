@@ -8,7 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.agents import SUPERVISOR_FILE, AgentCloseSessionRequest
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AGENT_STOP_REASON_METADATA_KEY,
+    SUPERVISOR_FILE,
+    AgentCloseSessionRequest,
+    OutcomeAction,
+    agent_outcome_policy,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
@@ -344,6 +351,39 @@ async def test_worker_budget_failure_is_not_reported_as_retryable_dependency_out
         await instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
     receipt = await close(instance)
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+
+
+@pytest.mark.parametrize("has_checkpoint", [False, True])
+async def test_worker_killed_without_a_result_answers_failed_agent_run_error(setup, has_checkpoint: bool) -> None:
+    """A worker killed before it wrote result.json left no result: the activation answers, retried by default.
+
+    main raised it (NOOARunFailure with a checkpoint, else RuntimeError), which the agent answered with a 500 that
+    dropped the partial trajectory.
+    """
+    import json
+
+    from responses_api_agents.nooa_agent.tests.test_sandbox_runner import checkpoint_artifact, cleanup_receipt
+
+    instance, sandbox, _, _ = setup
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    runner = instance._require_agent_session("session").runner
+    sandbox.files[runner.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(return_code=137))
+    if has_checkpoint:
+        sandbox.files[runner.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+
+    response = await instance.responses(
+        request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task")
+    )
+
+    assert response.status == "failed"
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "agent_run_error"}
+    assert response.metadata[AGENT_STOP_REASON_METADATA_KEY] == "no_result"
+    assert response.error.message == "NOOA sandbox worker did not exit successfully (exit 137)"
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    assert response.output == (checkpoint_artifact().response.output if has_checkpoint else [])
+    receipt = await close(instance)
+    assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+    sandbox.disconnect.assert_awaited_once()
 
 
 async def test_cancelled_request_stays_cancelled_even_when_session_is_closing(setup) -> None:
