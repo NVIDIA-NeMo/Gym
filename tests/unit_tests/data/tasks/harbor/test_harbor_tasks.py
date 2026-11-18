@@ -2791,6 +2791,49 @@ def test_phase_networks_respell_only_hosts_whose_rule_cannot_change():
         assert PhaseNetwork.of("allowlist", [host]) != PhaseNetwork.of("allowlist", ["example.com"])
 
 
+def test_a_dotted_ipv4_address_is_the_same_network_as_the_address(tmp_path):
+    """The policy builder reads an IPv4 address with one trailing dot as a host name and drops the dot, which makes the
+    address's own rule, so the phases that must agree on a network agree on the two spellings (a shared verifier and
+    the agent in either order, every step's agent). A dotted IPv6 address is not a host name the builder accepts, so it
+    stays as written, for the builder to refuse."""
+    dotted = PhaseNetwork.of("allowlist", ["10.0.0.7."])
+    assert dotted == PhaseNetwork.of("allowlist", ["10.0.0.7"]) and hash(dotted) == hash(
+        PhaseNetwork.of("allowlist", ["10.0.0.7"])
+    )
+    assert dotted.allowed_hosts == ("10.0.0.7",)
+    assert PhaseNetwork.of("allowlist", ["10.0.0.7.", "10.0.0.7"]).allowed_hosts == ("10.0.0.7",)
+    assert PhaseNetwork.of("allowlist", ["10.0.0.7.."]).allowed_hosts == ("10.0.0.7..",)
+    assert PhaseNetwork.of("allowlist", ["2001:db8::1."]) != PhaseNetwork.of("allowlist", ["2001:db8::1"])
+
+    allowlist = 'network_mode = "allowlist"\nallowed_hosts = [{}]\n'
+    for name, agent, verifier in (("a", '"10.0.0.7."', '"10.0.0.7"'), ("b", '"10.0.0.7"', '"10.0.0.7."')):
+        toml = HELLO_TOML.replace("[agent]\n", "[agent]\n" + allowlist.format(agent)).replace(
+            "[verifier]\n", "[verifier]\n" + allowlist.format(verifier)
+        )
+        task = load_task(write_task(tmp_path / name, toml=toml))
+        assert task.config.is_shared_verifier
+        assert task.config.agent_network() == task.config.verifier_network(separate=False)
+        assert task.config.agent_network().allowed_hosts == ("10.0.0.7",)
+
+    root = write_multi_step_task(tmp_path / "steps")
+    separate = (
+        (root / "task.toml")
+        .read_text()
+        .replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        .replace("[agent]\n", '[verifier.environment]\ndocker_image = "org/verifier:1"\n\n[agent]\n')
+    )
+    # 01_plan's agent writes the address with its dot; 02_implement's takes the task's [agent] spelling.
+    (root / "task.toml").write_text(
+        separate.replace("[agent]\n", "[agent]\n" + allowlist.format('"10.0.0.7"')).replace(
+            "[steps.agent]\n", "[steps.agent]\n" + allowlist.format('"10.0.0.7."')
+        )
+    )
+    task = load_task(root)
+    assert {task.config.agent_network(step) for step in task.config.steps} == {
+        PhaseNetwork("allowlist", ("10.0.0.7",))
+    }
+
+
 def test_an_empty_allowlist_is_the_same_network_as_no_network(tmp_path):
     """An allowlist without hosts makes ``no-network``'s deny-all policy, so the phases that must agree on a network
     agree on the two (a shared verifier and the agent, every step's agent), and each keeps the mode it declares for

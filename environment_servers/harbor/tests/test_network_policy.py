@@ -25,7 +25,9 @@ class TestPhaseNetworkPolicy:
 
     def test_allowlist_hosts_become_ordered_allow_rules(self):
         policy = phase_network_policy(
-            "opensandbox", "allowlist", ["PyPI.org", "*.nvidia.com", "pypi.org.", "10.0.0.7", "2001:DB8:0::1"]
+            "opensandbox",
+            "allowlist",
+            ["PyPI.org", "*.nvidia.com", "pypi.org.", "10.0.0.7", "10.0.0.7.", "2001:DB8:0::1"],
         )
         assert policy == {
             "defaultAction": "deny",

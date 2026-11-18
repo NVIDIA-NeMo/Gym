@@ -99,8 +99,10 @@ NetworkMode = Literal["public", "no-network", "allowlist"]
 def _rule_spelling(host: str) -> str:
     """``host`` as its egress rule names it, where respelling it cannot change what the Environment Server's policy
     builder makes of it: an IP literal in its canonical spelling, an ASCII host name lower-cased and without its one
-    trailing dot. Any other entry is kept as written, so the builder refuses the spelling the task used, not a repaired
-    one (``example.com..``, ``2001:db8::1.``, a Kelvin sign that lower-cases to an ASCII ``k``)."""
+    trailing dot, and an IPv4 address written with one trailing dot as that address (the builder reads it as a host
+    name and drops the dot). Respelling never turns an entry the builder refuses into one it accepts: an entry it could
+    repair is kept as written (``example.com..``, ``2001:db8::1.``, a Kelvin sign that lower-cases to an ASCII ``k``),
+    so the builder still refuses it."""
     target = str(host).strip()
     try:
         return str(ipaddress.ip_address(target))
@@ -111,13 +113,17 @@ def _rule_spelling(host: str) -> str:
     name = target.removesuffix(".")
     if name == target:
         return target.lower()
-    # One trailing dot goes only from what the builder reads as the same host name without it: not from a second
-    # dot, an empty name, whitespace the builder would strip, or an IP literal, which takes no trailing dot.
+    # One trailing dot goes only from what the builder reads as the same target without it: not from a second dot,
+    # an empty name or whitespace the builder would strip. A dotted IPv4 address passes the builder's host-name
+    # grammar, which makes it that address; a dotted IPv6 address does not, so it stays as written.
     try:
-        ipaddress.ip_address(name)
+        address = ipaddress.ip_address(name)
     except ValueError:
         if name and not name.endswith(".") and name == name.strip():
             return name.lower()
+    else:
+        if address.version == 4:
+            return str(address)
     return target
 
 
