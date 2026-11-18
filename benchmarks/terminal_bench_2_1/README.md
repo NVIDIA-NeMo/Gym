@@ -84,8 +84,8 @@ server. Scores on the two paths are not interchangeable:
   shows the overlay that gives the Harbor path the resources server's sandbox size.
 - **OpenCode harness.** `opencode` runs `opencode_agent` in place of `opencode_sandboxed_agent`; the two adapters ship
   different defaults, so treat their scores as separate measurements. Both deny `webfetch`, `websearch` and `skill`
-  and keep OpenCode subagents (`task`) enabled. Both bound the whole run at 10,800 seconds; `opencode_sandboxed_agent`
-  also caps each model call at one hour, and `opencode_agent`'s context window is metadata, not an output cap.
+  and keep OpenCode subagents (`task`) enabled. Both bound the whole run at 10,800 seconds, and `opencode_agent`'s
+  context window is metadata, not an output cap.
   `opencode_sandboxed_agent` captures token IDs and requests `max_tokens` equal to its 262,144-token
   window on every call, so an endpoint that serves exactly that window refuses every first call
   (`context_length_exceeded`) and every rollout scores 0 without a recorded failure. Drop the per-call caps, as
