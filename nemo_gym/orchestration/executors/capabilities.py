@@ -43,7 +43,11 @@ from nemo_gym.orchestration.jobs import (
 
 
 class Resubmittable(ABC):
-    """An executor that can queue a benchmark of an existing submission again."""
+    """An executor that can queue a benchmark of an existing submission again.
+
+    Recovery also passes keyword options beyond `resubmit`'s two arguments (retry budget, walltime, repin and others) that
+    only the Slurm executor accepts today; they are not part of this contract.
+    """
 
     @abstractmethod
     def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
