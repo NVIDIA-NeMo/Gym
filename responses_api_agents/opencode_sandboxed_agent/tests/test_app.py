@@ -2451,6 +2451,75 @@ async def test_export_failure_prevents_verification_and_stops_sandbox(tmp_path):
     assert server._sandbox_id_to_sandbox == {}
 
 
+@mark.parametrize("keep", [False, True])
+@mark.parametrize("outcome", ["completed", "invalid_export", "cancelled"])
+async def test_export_is_removed_when_the_rollout_ends_unless_kept(
+    tmp_path: Path, monkeypatch: MonkeyPatch, outcome: str, keep: bool
+) -> None:
+    """Each rollout's export is removed however the rollout ends, and kept only when artifacts_dir is set."""
+    artifacts_dir = tmp_path / "artifacts"
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(artifacts_dir) if keep else None
+    # Older code fell back to a results/ folder next to app.py; point that at this test's folder.
+    monkeypatch.setattr(app_module, "__file__", str(tmp_path / "app.py"))
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    server._create_opencode_config = AsyncMock(return_value={})
+
+    async def execute(command, **kwargs):
+        stdout = '[{"id":"session"}]' if "session list" in command else "Shell: bash\nOpenCode run finished"
+        return SimpleNamespace(stdout=stdout, stderr="", return_code=0, error_type=None)
+
+    export = Path(__file__).with_name("opencode_export_test_data.json").read_text()
+    downloaded: list[Path] = []
+    export_written = anyio.Event()
+
+    async def download(remote, local):
+        if remote != "/tmp/opencode_export.json":
+            raise OSError("no snapshot in this test")
+        downloaded.append(local)
+        local.write_text("{}" if outcome == "invalid_export" else export)
+        if outcome == "cancelled":
+            export_written.set()
+            await anyio.sleep_forever()
+
+    sandbox = MagicMock(
+        upload=AsyncMock(), exec=AsyncMock(side_effect=execute), download=AsyncMock(side_effect=download)
+    )
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+
+    if outcome == "completed":
+        response = await server.responses(request, body)
+        assert response.output
+    elif outcome == "invalid_export":
+        with raises(NgFailureEvent, match="had no assistant messages or was invalid"):
+            await server.responses(request, body)
+    else:
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(server.responses, request, body)
+            await export_written.wait()
+            task_group.cancel_scope.cancel()
+
+    [local] = downloaded
+    run_result = server._sandbox_id_to_run_result.get("session", {})
+    if keep:
+        assert local == artifacts_dir / "session" / "export.json"
+        assert local.is_file()
+        if outcome == "completed":
+            assert run_result["opencode_results_fpath"] == str(local)
+    else:
+        assert not local.is_relative_to(tmp_path)
+        # After a cancellation the removal may still be finishing in a worker thread.
+        with anyio.fail_after(30):
+            while local.parent.exists():
+                await anyio.sleep(0.01)
+        if outcome == "completed":
+            assert run_result["opencode_results_fpath"] == ""
+
+
 async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]

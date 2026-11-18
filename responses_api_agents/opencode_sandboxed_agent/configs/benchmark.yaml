@@ -22,7 +22,9 @@ opencode_benchmark_agent:
       sandbox_provider: sandbox
       network_access: model_only
       token_id_capture: false
-      artifacts_dir: ${oc.env:OPENCODE_ARTIFACTS_DIR,results/opencode}
+      # Set OPENCODE_ARTIFACTS_DIR to an absolute path to keep each rollout's OpenCode export.
+      # Unset, each export is removed once it is parsed.
+      artifacts_dir: ${oc.env:OPENCODE_ARTIFACTS_DIR,null}
       opencode_config:
         instructions:
         - /tmp/nemo-gym-environment.txt
