@@ -16,7 +16,8 @@
 
 The policy is asked for ``{"smiles": "<SMILES>", "confidence": <0-1>}``. The answer is read
 from the last such JSON object; if there is none, from the last RDKit-valid SMILES in a
-backtick span or a loose ``"smiles"`` field (``salvaged``). Reasoning blocks are removed first.
+backtick span or a loose ``"smiles"`` field, or from the whole answer when it is one RDKit-valid
+SMILES string (``salvaged``). Reasoning blocks are removed first.
 
 Reward is ``exact``: RDKit canonical isomeric SMILES of prediction and gold are equal.
 Diagnostics returned with every row: ``graph`` (equal without stereo), ``inchikey``

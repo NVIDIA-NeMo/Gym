@@ -67,6 +67,13 @@ def test_extraction_rules() -> None:
     assert extract_answer("answer: `CCO` and `not a smiles((`") == ("CCO", "salvage")
     assert extract_answer('<think>{"smiles": "CC"}</think>no answer') == (None, None)
     assert extract_answer("") == (None, None)
+    # the whole answer is one SMILES string: used only when there is no JSON object and no backtick span
+    assert extract_answer("CCO\n") == ("CCO", "salvage")
+    assert extract_answer("<think>ethanol</think>CCO") == ("CCO", "salvage")
+    assert extract_answer("```\nCCO\n```") == ("CCO", "salvage")
+    assert extract_answer("```smiles\nCCO\n```") == ("CCO", "salvage")
+    assert extract_answer("C1CC(") == (None, None)
+    assert extract_answer("CCO is ethanol") == (None, None)
     assert strip_reasoning('reasoning only closed</think>{"smiles": "C"}') == '{"smiles": "C"}'
 
 

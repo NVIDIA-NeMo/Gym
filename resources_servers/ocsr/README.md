@@ -7,7 +7,7 @@ image-to-SMILES set whose rows carry `verifier_metadata.gold_smiles`.
 - **Input row**: `responses_create_params.input` with the image as an `input_image` data URL;
   `verifier_metadata = {"id", "gold_smiles", "source_of_label"?}`.
 - **Answer**: last `{"smiles": ...}` JSON object in the final message, reasoning removed; else the last
-  RDKit-valid SMILES in backticks.
+  RDKit-valid SMILES in backticks; else the whole message when it is one RDKit-valid SMILES string.
 - **Reward**: `exact`, RDKit canonical isomeric SMILES equality (0/1).
 - **Diagnostics**: `graph` (no stereo), `inchikey`, `tanimoto` (Morgan r=2, 2048), `valid`, `format_ok`,
   `extracted_smiles`.

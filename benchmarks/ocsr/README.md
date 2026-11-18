@@ -36,7 +36,8 @@ OCSRGlyph ([`EdisonScientific/glyph-datasets`](https://huggingface.co/datasets/E
 ## Scoring (`resources_servers/ocsr`)
 
 - Answer = the last `{"smiles": ...}` object in the final message (reasoning removed); otherwise the last
-  RDKit-valid SMILES in backticks (`format_ok` = 0 then).
+  RDKit-valid SMILES in backticks, or the whole message when it is one RDKit-valid SMILES string
+  (`format_ok` = 0 in both cases).
 - **Reward = `exact`**: RDKit canonical isomeric SMILES of prediction and gold are equal (stereo must be right).
 - Diagnostics: `graph` (equal without stereo), `inchikey` (standard InChIKey equal), `tanimoto`
   (Morgan r=2, 2048 bits), `valid`, `format_ok`.

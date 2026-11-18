@@ -15,7 +15,8 @@
 """SMILES extraction and OCSR scoring.
 
 Answer extraction: the requested {"smiles": ...} JSON object first, else the last RDKit-valid SMILES
-in a backtick span. Scores: exact (canonical isomeric SMILES), graph (no stereo), InChIKey, Tanimoto.
+in a backtick span, else the whole answer when it is one RDKit-valid SMILES string. Scores: exact
+(canonical isomeric SMILES), graph (no stereo), InChIKey, Tanimoto.
 """
 
 import json
@@ -33,6 +34,7 @@ _THINK = re.compile(r"<(think|thinking)\b[^>]*>.*?(?:</\1\s*>|$)", re.I | re.S)
 _JSON_OBJ = re.compile(r'\{[^{}]*"smiles"[^{}]*\}', re.S)
 _SMILES_FIELD = re.compile(r'"smiles"\s*:\s*"([^"]+)"')
 _BACKTICK = re.compile(r"`([^`\n]{2,150})`")
+_FENCE = re.compile(r"^```[a-zA-Z]*[ \t]*\n(.*?)\n?```$", re.S)
 _MORGAN = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
 
 
@@ -80,6 +82,16 @@ def strip_reasoning(text: str) -> str:
     return text
 
 
+def _bare_smiles(text: str) -> Optional[str]:
+    """The whole answer when it is a single RDKit-valid SMILES string, a code fence or backticks removed."""
+    text = text.strip()
+    fenced = _FENCE.match(text)
+    text = (fenced.group(1) if fenced else text).strip("`").strip()
+    if not text or re.search(r"\s", text):
+        return None
+    return text if _mol(text) is not None else None
+
+
 def extract_answer(text: str) -> tuple[Optional[str], Optional[str]]:
     """(smiles, how): how is "json" for the requested JSON object, "salvage" otherwise, None if nothing."""
     text = strip_reasoning(text)
@@ -95,7 +107,10 @@ def extract_answer(text: str) -> tuple[Optional[str], Optional[str]]:
         return fields[-1].strip(), "json"
     cands = _BACKTICK.findall(text) + fields
     valid = [c.strip() for c in cands if _mol(c.strip()) is not None]
-    return (valid[-1], "salvage") if valid else (None, None)
+    if valid:
+        return valid[-1], "salvage"
+    bare = _bare_smiles(text)
+    return (bare, "salvage") if bare else (None, None)
 
 
 def score(pred: Optional[str], gold: str) -> dict[str, float]:
