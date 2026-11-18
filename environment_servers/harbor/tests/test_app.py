@@ -1807,6 +1807,31 @@ class TestVerify:
         assert result.failure_kind == "harbor:invalid_reward"
         assert "no 'overall' key" in result.failure_reason and "['accuracy', 'speed']" in result.failure_reason
 
+    @pytest.mark.parametrize(
+        ("reward_key", "reward_json"), [("overall", {"written": 1.0}), ("written", {"accuracy": 1.0})]
+    )
+    async def test_a_key_named_like_the_missing_file_problem_is_still_an_invalid_reward(
+        self, tmp_path, monkeypatch, reward_key, reward_json
+    ):
+        """Only an absent file is `harbor:missing_reward`; a key name the problem quotes does not decide the kind."""
+        folder = tmp_path / "datasets" / "ds"
+        folder.mkdir(parents=True)
+        (folder / "dataset.toml").write_text(f'[gym.defaults]\nreward_key = "{reward_key}"\n')
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps(reward_json)})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is False
+        assert result.failure_kind == "harbor:invalid_reward"
+
+    async def test_a_key_named_written_is_a_valid_score(self, tmp_path, monkeypatch):
+        folder = tmp_path / "datasets" / "ds"
+        folder.mkdir(parents=True)
+        (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "written"\n')
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"written": 0.5})})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.5 and result.failure_kind is None and result.reward_components is None
+
     async def test_a_details_block_beside_the_dataset_reward_key_keeps_the_score(self, tmp_path, monkeypatch):
         """A non-numeric field beside the `reward_key` score is a metric, as it is beside a `reward` key; it used to
         refuse the whole file (a measured 0 with `harbor:invalid_reward`), since the parser looked for `reward`."""

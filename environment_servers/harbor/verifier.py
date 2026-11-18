@@ -4,8 +4,9 @@
 """Grade an episode: the test.sh wrapper protocol, the reward files and the verifier sandbox.
 
 The verifier runs Harbor's tests/test.sh under a timeout wrapper that writes an exit record,
-reads reward.json or reward.txt, applies the reward rule (``reward`` key, else the keys summed as
-``reward_components``) and turns the exit into a measured or masked sample. Module level are the
+reads reward.json or reward.txt, applies the reward rule (the dataset's ``reward_key`` when set,
+else the ``reward`` key, else the keys summed as ``reward_components``) and turns the exit into a
+measured or masked sample. Module level are the
 in-sandbox paths the protocol uses, the failure kinds, the wrapper command, the reward and exit
 record parsers, the timeout rule, and the choice of image and user the verifier runs as in shared
 and separate mode. The mixin holds the shared and separate verification choreography unchanged,
@@ -101,17 +102,21 @@ VERIFIER_UNAVAILABLE_EXIT_CODE = 75
 VERIFIER_UNAVAILABLE_KIND = "harbor:verifier_unavailable"
 
 
+# The problem `parse_reward_file` names when the verifier wrote neither reward file.
+NO_REWARD_FILE = "no reward.json or reward.txt was written"
+
+
 def parse_reward_file(directory: Path, *, score_key: str | None = None) -> tuple[dict[str, float] | None, str | None]:
     """Read reward.json when present; only a missing JSON file falls back to reward.txt.
 
-    ``score_key`` is the dataset's ``reward_key``, the key that is the score (``reward`` when unset). A file without
-    it holds no valid reward, so it reads as ``None`` with the problem named, like any other invalid file; reward.txt
-    reads as a ``reward`` key and lands there too.
+    ``score_key`` is the dataset's ``reward_key``. When set, a file without that key holds no valid reward and reads
+    as ``None`` with the problem named, like any other invalid file; reward.txt names ``reward``. When unset, a
+    ``reward`` key is the score and otherwise every key is a component whose values are summed.
     """
     for path in (directory / "reward.json", directory / "reward.txt"):
         if path.is_file():
             return _parse_one_reward_file(path, score_key)
-    return None, "no reward.json or reward.txt was written"
+    return None, NO_REWARD_FILE
 
 
 def _parse_one_reward_file(path: Path, score_key: str | None) -> tuple[dict[str, float] | None, str | None]:
@@ -1273,7 +1278,8 @@ class HarborVerificationMixin:
                     )
                     | extras
                 )
-            kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND
+            # Only an absent file is a missing reward: a key name in the problem must not decide the kind.
+            kind = MISSING_REWARD_KIND if problem == NO_REWARD_FILE else INVALID_REWARD_KIND
             ignored = (
                 f" (test.sh exited {VERIFIER_UNAVAILABLE_EXIT_CODE} in the agent's sandbox, where the code is not "
                 "trusted; measured as on any other exit)"
