@@ -322,6 +322,67 @@ async def test_run_job_retries_the_harbor_failures_that_are_not_agent_timeouts(
     assert not result_path.exists(), "Gym retries must not reuse the failed trial's result"
 
 
+def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(tmp_path, monkeypatch) -> None:
+    """The row is scored 0.0 and completed, unmasked, named agent_timeout: no resume runs it again."""
+    from responses_api_agents.harbor_agent_general import app
+
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    agent = HarborAgent.model_construct()
+    agent.config = app.HarborAgentConfig.model_validate(
+        {
+            "name": "harbor_agent_general",
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "app.py",
+            "job": {
+                "jobs_dir": tmp_path / "jobs",
+                "datasets": [{"path": tmp_path / "tasks"}],
+                "agents": [{"name": "opencode", "model_name": "native-model"}],
+            },
+        }
+    )
+    task_dir = tmp_path / "tasks" / "task"
+    task_dir.mkdir(parents=True)
+    app.TaskPaths(task_dir).instruction_path.write_text("Do the task.")
+    trial_dir = tmp_path / "jobs" / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    app.TrialPaths(trial_dir).result_path.write_text("{}")
+    timeout = SimpleNamespace(exception_type="AgentTimeoutError", exception_message="timed out after 900.0 seconds")
+    trial = SimpleNamespace(
+        id="trial-1",
+        task_name="task",
+        config=SimpleNamespace(
+            task=SimpleNamespace(get_local_path=lambda: task_dir),
+            agent=SimpleNamespace(name="opencode", import_path=None),
+        ),
+        exception_info=timeout,
+        verifier_result=None,
+        step_results=[],
+        finished_at=None,
+        compute_token_cost_totals=lambda: (0, 0, 0, 0),
+    )
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    body = app.HarborRunRequest.model_validate(
+        {
+            "task_name": "task",
+            app.TASK_INDEX_KEY_NAME: 0,
+            app.ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+    )
+
+    row = agent.success_response(body, trial_dir).model_dump()
+    assert (row["reward"], row["failure_kind"], row["evaluation_completed"], row["mask_sample"]) == (
+        0.0,
+        "agent_timeout",
+        True,
+        False,
+    )
+    assert row["response"]["output"] == []
+    assert row["atif_conversion"]["warnings"] == ["the agent timed out before it wrote its trajectory"]
+    assert "_ng_failure_class" not in row
+
+
 def _configure_server(agent: HarborAgent, tmp_path: Path, server_agent: dict) -> None:
     """Configure the server to run `server_agent` (Harbor's agent config) on the task folders under tmp_path/tasks."""
     agent.config = app.HarborAgentConfig.model_validate(
@@ -345,7 +406,6 @@ def _completed_trial(
     *,
     rewards: dict[str, float] | None,
     import_path: str | None = None,
-    exception_info: dict[str, str] | None = None,
 ) -> Path:
     """Write a task instruction and a finished trial's Harbor result, without a trajectory; return the trial dir."""
     task_dir = tmp_path / "tasks" / "task"
@@ -363,7 +423,6 @@ def _completed_trial(
             "config": {"task": {"path": str(task_dir)}, "agent": {"name": agent_name, "import_path": import_path}},
             "agent_info": {"name": agent_name, "version": "1.0"},
             "verifier_result": None if rewards is None else {"rewards": rewards},
-            "exception_info": exception_info,
         }
     )
     app.TrialPaths(trial_dir).result_path.write_text(trial.model_dump_json())
@@ -379,29 +438,6 @@ def _run_request() -> app.HarborRunRequest:
             "responses_create_params": {"input": []},
         }
     )
-
-
-def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(agent: HarborAgent, tmp_path: Path) -> None:
-    """The row is scored 0.0 and completed, unmasked, named agent_timeout: no resume runs it again."""
-    _configure_server(agent, tmp_path, {"name": "opencode", "model_name": "native-model"})
-    timeout = {
-        "exception_type": "AgentTimeoutError",
-        "exception_message": "timed out after 900.0 seconds",
-        "exception_traceback": "",
-        "occurred_at": "2026-11-16T00:00:00Z",
-    }
-    trial_dir = _completed_trial(tmp_path, "opencode", rewards=None, exception_info=timeout)
-
-    row = agent.success_response(_run_request(), trial_dir).model_dump()
-    assert (row["reward"], row["failure_kind"], row["evaluation_completed"], row["mask_sample"]) == (
-        0.0,
-        "agent_timeout",
-        True,
-        False,
-    )
-    assert row["response"]["output"] == []
-    assert row["atif_conversion"]["warnings"] == ["the agent timed out before it wrote its trajectory"]
-    assert "_ng_failure_class" not in row
 
 
 @pytest.mark.parametrize("agent_name,reward", [("oracle", 1.0), ("nop", 0.0)])
