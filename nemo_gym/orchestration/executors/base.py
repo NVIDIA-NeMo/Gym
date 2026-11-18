@@ -80,9 +80,11 @@ class BaseExecutor(ABC):
         from nemo_gym.utils.gym_commit import installed_gym_commit
 
         return installed_gym_commit()
+
     def gym_pin(self, record: SubmissionRecord) -> str | None:
         """The full Gym commit the run's saved config pins its driver to; None when there is none or it is unknown."""
         return None
+
     def recovery_evidence(
         self,
         record: SubmissionRecord,
@@ -106,6 +108,7 @@ class BaseExecutor(ABC):
         Takes every control a recovery passes, so an executor without a collector reports that it cannot decide.
         """
         return self.recovery_decision(record, benchmark), None
+
     def recovery_decision(self, record: SubmissionRecord, benchmark: str) -> RecoveryDecision:
         """Decide from the run's persisted evidence whether ``resubmit`` may queue it; without a collector, stop."""
         return RecoveryDecision(
@@ -116,6 +119,7 @@ class BaseExecutor(ABC):
             identities={},
             evidence=[],
         )
+
     def reverify_judge_failures(
         self,
         record: SubmissionRecord,
@@ -144,6 +148,7 @@ class BaseExecutor(ABC):
             unsupported=f"{type(self).__name__} has no saved-answer re-judgment; run `gym eval reverify "
             "--judge-failed-only` on the run's artifacts. The policy is not queued.",
         )
+
     def export_tracking(
         self, record: SubmissionRecord, benchmark: str, evidence: CollectedEvidence | None
     ) -> dict[str, Any]:
@@ -156,10 +161,12 @@ class BaseExecutor(ABC):
             "error": f"{type(self).__name__} cannot export a saved run; run `gym eval export mlflow "
             "+rollouts_jsonl_fpath=<job dir>/artifacts/rollouts.jsonl` with the run's MLflow settings",
         }
+
     def walltime_plan(self, record: SubmissionRecord, benchmark: str, max_walltime: str) -> dict[str, Any] | None:
         """How a ``--max-walltime`` raise fits the scheduler's limits, checked before any evidence is read; None
         when the executor has no such limit to check."""
         return None
+
     @staticmethod
     def submission_environment(
         config: SubmitConfig, *, required_env: list[str], forwarded_env: list[str]
