@@ -1,0 +1,52 @@
+[
+  {
+    "id": "run-recover-after-timeout",
+    "question": "User prompt: My Gym Slurm evaluation chain stopped after a TIMEOUT. The Gym job id is in $GYM_JOB_ID and the benchmark is gpqa. What should I do?",
+    "expected_skill": "run-and-babysit-eval",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Inspects first with the read-only recover command, reads decision.action and gate_task.status, then runs the one action the decision table names.",
+    "expected_behavior": [
+      "Starts with `gym eval resubmit \"$GYM_JOB_ID\" gpqa --recover --inspect` and reads its output.",
+      "Does not use plain `gym eval resubmit` and does not edit the run's files.",
+      "Uses `--max-walltime` only together with `--walltime-reason` and only when the skill's decision table names it."
+    ]
+  },
+  {
+    "id": "run-new-checkpoint-no-config",
+    "question": "User prompt: Run GPQA on my checkpoint on our Slurm cluster. I have the checkpoint path, the account and the partition. There is no Gym config yet.",
+    "expected_skill": "run-and-babysit-eval",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Composes the config in the same task by following add-model-eval-config, asks only for what that skill says to ask for, smokes first, then submits pinned and resumable.",
+    "expected_behavior": [
+      "Reads add-model-eval-config and writes the config instead of asking the user to run a second skill.",
+      "Asks only for cluster details such as the login host, account, partition, images, checkpoint path and output directory.",
+      "Runs a small smoke before the full run."
+    ]
+  },
+  {
+    "id": "run-is-it-done",
+    "question": "User prompt: The job finished and the score is 0.71. Is the run done?",
+    "expected_skill": "run-and-babysit-eval",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "A finished job or a full score is not acceptance. The run is done only when the recover inspect shows SUCCESS with complete results and every gate.",
+    "expected_behavior": [
+      "Runs or asks for the `--recover --inspect` output.",
+      "States that a NOOP, a finished job or a full score is not acceptance.",
+      "Reports a limited or short-repeat score as a smoke, not as the benchmark's score."
+    ]
+  },
+  {
+    "id": "run-negative-add-benchmark",
+    "question": "User prompt: I want to add a new benchmark to Gym and write its resources server.",
+    "expected_skill": "add-benchmark",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "This is not a run request. The right skill is add-benchmark.",
+    "expected_behavior": [
+      "Does not load run-and-babysit-eval for this request."
+    ]
+  }
+]

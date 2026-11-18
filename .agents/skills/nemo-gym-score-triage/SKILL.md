@@ -1,5 +1,6 @@
 ---
 name: nemo-gym-score-triage
+license: Apache-2.0
 description: >-
   Use when a NeMo Gym score does not match a reference number (tech report, model card, Artificial
   Analysis, a leaderboard, an earlier run), when two runs or two harnesses disagree, when repeat-to-repeat
@@ -18,6 +19,7 @@ Use this skill when the question is "why is this number different?" rather than 
 - If the run crashed, produced no rollouts, or the metrics file is missing, use the `nemo-gym-debugging` skill first.
 - If both runs are comparable and the question becomes which tasks fail and why, hand off to the `nemo-gym-blade-analysis` skill.
 - For the meaning of profiling files and keys, see the `nemo-gym-reward-profiling` skill.
+- To run the missing side of a comparison, use the `run-and-babysit-eval` skill (and `add-model-eval-config` for a model that has no config yet).
 
 ## Collect First
 

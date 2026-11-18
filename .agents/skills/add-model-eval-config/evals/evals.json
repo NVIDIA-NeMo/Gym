@@ -1,0 +1,52 @@
+[
+  {
+    "id": "model-new-checkpoint",
+    "question": "User prompt: I have a new checkpoint to evaluate in Gym on IFEval. Write the model config.",
+    "expected_skill": "add-model-eval-config",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Reads the model card first, writes the vLLM policy service and the driver block, points the benchmark at its own config under benchmarks/ifeval/ instead of copying it, validates without GPUs and smokes it.",
+    "expected_behavior": [
+      "Reads the model card for the reasoning parser, tool-call parser and chat template before writing values.",
+      "References `benchmarks/ifeval/config.yaml` and does not copy its content.",
+      "Writes site values as `${oc.env:VAR}` placeholders and asks for the ones it does not know."
+    ]
+  },
+  {
+    "id": "model-nvfp4-vs-bf16",
+    "question": "User prompt: Compare my BF16 model and its NVFP4 export on the same benchmark fairly in Gym.",
+    "expected_skill": "add-model-eval-config",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Copies the BF16 config and changes only the fields quantization requires, keeps everything else identical, resolves and diffs both, and tags both runs so they pair.",
+    "expected_behavior": [
+      "Does not add a `--quantization` flag.",
+      "Changes only the model, the served name and the cache dtypes the export's serving recipe sets.",
+      "Resolves both configs with `--resolve-only` and diffs them."
+    ]
+  },
+  {
+    "id": "model-fair-comparison",
+    "question": "User prompt: Two models on the same benchmark look 4 points apart in my Gym runs. What must stay the same between them?",
+    "expected_skill": "add-model-eval-config",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Lists what stays identical and what may differ with the deployment.",
+    "expected_behavior": [
+      "Keeps the benchmark config, sampling, repeats, judge and token budgets identical.",
+      "Says tensor parallelism, concurrency and container image may change.",
+      "Does not raise the benchmark's limits to compensate for a slow deployment."
+    ]
+  },
+  {
+    "id": "model-negative-recover",
+    "question": "User prompt: My Gym chain stopped and I want to recover it.",
+    "expected_skill": "run-and-babysit-eval",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "This is a run and recovery request. The right skill is run-and-babysit-eval.",
+    "expected_behavior": [
+      "Does not load add-model-eval-config for this request."
+    ]
+  }
+]
