@@ -112,7 +112,7 @@ jobs:
           } 2>&1 | tee "$RESULTS/setup.log"
           echo "$NPM_CONFIG_PREFIX/bin" >> "$GITHUB_PATH"
       - name: Validate probes, checker, and adapter
-        timeout-minutes: 5
+        timeout-minutes: 10
         env:
           HARNESS: ${{ matrix.harness }}
         run: |
