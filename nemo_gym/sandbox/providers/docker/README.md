@@ -56,7 +56,8 @@ to keep **before** the sandbox stops — stopping force-removes the container.
 ## Selecting and configuring the provider
 
 The provider config is a single-key mapping `{"docker": {<kwargs>}}`, grouped into three
-optional sections (each accepts a plain mapping from Hydra YAML or the dataclass):
+optional sections (each accepts a plain mapping from Hydra YAML or the dataclass), plus the
+`allow_privileged` switch (default `false`; see [Isolation & security](#isolation--security)):
 
 ```yaml
 docker:
@@ -80,6 +81,13 @@ docker:
     deadline_s: 60
 ```
 
+### `allow_privileged`
+
+`false` by default. `true` lets the provider start a sandbox privileged (`docker run --privileged`) when that
+sandbox asks for it: a Compose service that declares `privileged: true`. No other sandbox becomes privileged, and a
+task that declares it on a provider without this switch is left out at prepare, naming the setting. Read the
+security note below before you turn it on.
+
 ### `create` — `DockerCreateConfig`
 
 | Field | Default | Meaning |
@@ -96,6 +104,7 @@ docker:
 | `extra_run_args` | `[]` | Extra raw flags appended to `docker run`. |
 | `apply_resource_limits` | `true` | Apply CPU/memory flags from `SandboxSpec.resources`. |
 | `publish_host` | `127.0.0.1` | Host address used for dynamic mappings declared by `SandboxSpec.ports`. |
+| `shared_volume` | `nemo-gym-shared-storage` | Named volume that holds shared storage (Compose volumes); created on first use. See [Compose services](#compose-services). |
 
 ### `exec` — `DockerExecConfig`
 
@@ -121,10 +130,11 @@ to skip. Same fields as the other providers: `command`, `expected_stdout`, `time
 | `env` | `--env KEY=VALUE` at `docker run` and re-applied on every `exec`. |
 | `workdir` | `-w` at `docker run` (created if absent) and default `exec` cwd. |
 | `files` | Seed files written in at `start()` (via the sandbox API's `upload`). |
+| `metadata` | Container labels (`--label key=value`) beside `nemo-gym.sandbox=1`, which metadata cannot replace. A key that is empty or holds `=` or whitespace is logged and skipped. |
 | `resources` | `cpu`→`--cpus`, `memory_mib`→`--memory` (+`--memory-swap`, hard cap), `gpu`→`--gpus <n>`. `disk_gib`/`gpu_type` ignored. |
 | `entrypoint` | Overrides the keep-alive: the container runs this as its main process instead. |
 | `ports` | Container TCP ports published on dynamic host ports and resolved with `sandbox.endpoint(port)`. |
-| `provider_options` | `volumes` (a `src:dst[:opts]` string or list → `-v` mounts) and `run_args` (extra `docker run` flags), applied per-sandbox. |
+| `provider_options` | `volumes` (a `src:dst[:opts]` string or list → `-v` mounts; a `DockerVolumeMount` from `shared_volume_options` → `--mount`) and `run_args` (extra `docker run` flags), applied per-sandbox. |
 | `ttl_s` | Max lifetime: the keep-alive `sleep`s for `ttl_s` and the container self-removes (`--rm`) on exit. Not enforced with a custom `entrypoint`. |
 
 ## How it works
@@ -192,6 +202,35 @@ to skip. Same fields as the other providers: `command`, `expected_stdout`, `time
   detected via stderr markers) returns `return_code=125` with `error_type` `"timeout"` /
   `"sandbox"`.
 
+## Compose services
+
+The provider implements `SupportsSandboxNetwork` and `SupportsSandboxSharedStorage`, so `AsyncSandboxCompose` and
+Compose task folders (the `harbor` Environment Server) run on it with no extra configuration. It needs **Docker
+26.0 or newer**: an Engine with API 1.45, which the provider checks, and a `docker` CLI that knows
+`--mount volume-subpath` (an older CLI fails `docker run` with `unexpected key 'volume-subpath'`).
+
+- **Networking.** Each service is a container on `create.network` (the default bridge unless set). `network_address`
+  reads the container's IP with `docker inspect`; `set_hosts` appends `<ip> <name>` lines to its `/etc/hosts` as root,
+  so services reach each other by name. `validate_networking` refuses `network: none`, `host` and `container:<name>`,
+  on which a container has no address of its own. Collections share the network with each other and every other
+  sandbox on it; `read_only: true` also makes `/etc/hosts` read-only, so Compose services cannot start under it.
+- **Shared storage.** `shared_volume_options(source, target, read_only=...)` mounts folder `source` of the named
+  volume `create.shared_volume` at `target` with
+  `--mount type=volume,source=<volume>,target=<target>,volume-subpath=<source>[,readonly],volume-nocopy`
+  (Gym's copy-up replaces Docker's own); `source=None` mounts the whole volume, as the Compose adapter's
+  helper does to create and remove each collection's `compose-<id>/<volume>` folders. Before the first such mount the
+  provider checks the daemon's API version (an Engine older than 26.0 would ignore `volume-subpath` and mount the whole
+  volume) and creates the volume if it is missing, labeled `nemo-gym.shared-storage=1`. The volume is never removed by
+  Gym; a collection's folders are, when it stops. Nothing is bind-mounted from the host, so a remote daemon works.
+- **Cleanup after a crash.** Compose containers run their own keep-alive, so `ttl_s` does not expire them. Each carries
+  the `nemo.nvidia.com/placement-group=<group>` label, where the group is the collection's id `compose-<id>` (also the
+  name of its folder) unless the caller passed its own `placement_group`: remove them with
+  `docker rm -f $(docker ps -aq --filter label=nemo.nvidia.com/placement-group=compose-<id>)` and their folder with
+  `docker run --rm -v nemo-gym-shared-storage:/v alpine rm -rf /v/compose-<id>`, or the whole volume with
+  `docker volume rm nemo-gym-shared-storage` once no run uses it.
+- **Not supported:** `cap_add` and `shm_size` (`SupportsSandboxRuntimeRequirements`) and
+  `network_mode: service:<name>` (`SupportsSandboxPortForwarding`).
+
 ## Isolation & security
 
 **Docker containers share the host kernel — this is process/namespace isolation, not a VM.
@@ -199,8 +238,16 @@ It is not a hard boundary for hostile code.** For adversarial or untrusted workl
 Docker on a disposable VM or use a stronger runtime (gVisor `runsc`, Kata Containers, or a
 microVM). For that reason:
 
-- **Never** run with `--privileged` and don't mount the Docker socket into the sandbox
-  (either would grant host root).
+- **Never** add `--privileged` through `extra_run_args` or a deployment's `run_args` (that makes
+  every sandbox of the run privileged), and never mount the Docker socket into the sandbox. Either
+  grants host root.
+- **Privileged Compose services** (`privileged: true`, for a task that runs its own Docker
+  daemon, such as one that installs a tool through a container) start only when the operator
+  sets `allow_privileged: true` in the provider config. Only that service's container gets
+  `--privileged`; its other services, the volume helper and the copy-up seed do not. A
+  privileged container has every capability and the host's devices, so code in it can take
+  over the host: turn the switch on only on a disposable VM or a host you would rebuild,
+  and only for task folders you trust.
 - **Networking** is on by default (the bridge network) because most tasks need egress
   (pip/git). For untrusted code set `network: none` to cut it entirely (or attach a locked
   internal network via `network: <name>`).
@@ -249,7 +296,9 @@ Source: [`provider.py`](./provider.py) and [`pty.py`](./pty.py). It implements t
 `docker` in [`../registry.py`](../registry.py).
 
 Unit tests live in
-[`tests/unit_tests/sandbox/test_docker_provider.py`](../../../../tests/unit_tests/sandbox/test_docker_provider.py) and
+[`tests/unit_tests/sandbox/test_docker_provider.py`](../../../../tests/unit_tests/sandbox/test_docker_provider.py),
+[`tests/unit_tests/sandbox/test_docker_provider_compose.py`](../../../../tests/unit_tests/sandbox/test_docker_provider_compose.py)
+(shared storage, networking, and the Compose adapter against a fake daemon) and
 [`tests/unit_tests/sandbox/test_docker_pty.py`](../../../../tests/unit_tests/sandbox/test_docker_pty.py)
 and run as part of the core suite — **no Docker required**:
 

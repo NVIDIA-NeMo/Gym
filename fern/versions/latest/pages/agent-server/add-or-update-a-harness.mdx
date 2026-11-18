@@ -190,6 +190,8 @@ The base class in [`nemo_gym/agents/base_responses_api_agent.py`](https://github
 
 Close must return `agent_observations` even when activation failed, and the `trajectory` of the turns taken before the failure when the harness keeps one. When no observations were captured, return a bundle with an `ObservationGap` such as `observation_capture_failed`. Return `resources_cookies` only if the harness changed the Resources Server's cookie jar through tool calls. `None` or an empty jar keeps the cookies from the Resources Server's seed.
 
+The `harbor` Environment Server writes each turn's transcript to `/logs/agent/trajectory.json` for the task's verifier, for every harness but `harbor_oracle_agent`, which, as under Harbor, gets none. It exports the response output, unless the adapter's `reports_model_conversation()` returns True: the seed reply then declares `reports_model_conversation`, and the server exports the root invocation's `conversation` from the close's observations instead (a continued session's turns, verified before it closes, keep their response output). Return True only when that conversation is what the model received, each tool result as it read it, while the response output renders the run differently. Codex does, because its response output comes from `exec --json` events and its conversation from its session records, which Harbor's Codex agent also writes `trajectory.json` from.
+
 ### Agent Server and task sandbox
 
 The Resources Server returns a `SandboxAccess` from its seed, and the Environment Server forwards it unchanged in `AgentSeedSessionRequest.sandbox_access`:

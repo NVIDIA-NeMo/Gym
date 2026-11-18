@@ -30,3 +30,4 @@ codex_agent:
       features:  # config.toml [features]; null leaves a feature at the CLI default
         multi_agent: false
         code_mode: false
+      web_search: disabled  # disabled | cached | indexed | live; non-disabled needs a model server that runs web search (see README)

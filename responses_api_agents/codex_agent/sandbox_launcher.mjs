@@ -21,7 +21,7 @@ const MAX_RATE_LIMIT_RETRIES = 2;
 // Adapter-chosen memory cap for helper evidence, not a Codex protocol limit.
 // Larger responses still forward in full; only the buffered evidence is dropped.
 const MAX_COMPACTION_RESPONSE_BYTES = 8 * 1024 * 1024;
-// Codex gets only these inherited variables, plus the adapter's own.
+// Without inherit_env, Codex gets only these inherited variables, plus the task environment and the adapter's own.
 const INHERITED = [
     "PATH",
     "LANG",
@@ -34,6 +34,8 @@ const INHERITED = [
     // Lets the supervisor find Codex's tools after they leave its process tree.
     "NEMO_GYM_SUPERVISOR",
 ];
+// Codex reaches the forwarder on these names, which no proxy can serve.
+const LOOPBACK = ["127.0.0.1", "localhost"];
 const DROPPED_REQUEST_HEADERS = new Set(["host", "content-length", "transfer-encoding", "connection", "x-session-id"]);
 const DROPPED_RESPONSE_HEADERS = new Set(["content-length", "transfer-encoding", "connection"]);
 
@@ -260,16 +262,27 @@ async function run(inputPath) {
         command.splice(2, 0, "-c", `model_providers.gym.base_url=${JSON.stringify(baseUrl)}`);
     }
     // By default Codex gets the sandbox's PATH, locale, HOME and XDG directories; inherit_env passes the task's
-    // whole environment, as a harness started in the container sees it.
+    // whole environment, as a harness started in the container sees it. The task environment its owner handed
+    // over goes over either, and the adapter's own variables over that.
     const env = params.inherit_env ? { ...process.env } : {};
     if (!params.inherit_env) {
         for (const key of INHERITED) {
             if (process.env[key] !== undefined) env[key] = process.env[key];
         }
     }
+    const childEnv = { ...env, ...params.task_env, ...params.env };
+    if (params.model_base_url) {
+        // An HTTP_PROXY or ALL_PROXY from the task or the sandbox would otherwise carry Codex's calls to the
+        // loopback forwarder, which the proxy cannot reach. Both spellings name loopback before the entries
+        // already set in either one, so tools that read only one of them still see those entries.
+        const upper = childEnv.NO_PROXY ?? childEnv.no_proxy;
+        const lower = childEnv.no_proxy ?? childEnv.NO_PROXY;
+        childEnv.NO_PROXY = [...LOOPBACK, upper].filter(Boolean).join(",");
+        childEnv.no_proxy = [...LOOPBACK, lower].filter(Boolean).join(",");
+    }
     const child = spawn(command[0], command.slice(1), {
         cwd: params.cwd,
-        env: { ...env, ...params.env },
+        env: childEnv,
         stdio: "inherit",
     });
     process.on("SIGTERM", () => child.kill("SIGTERM"));

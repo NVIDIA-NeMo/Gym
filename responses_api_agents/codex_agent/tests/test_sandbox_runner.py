@@ -215,6 +215,37 @@ def test_inherited_environment_is_opt_in_and_keeps_explicit_values(tmp_path, mon
     }
 
 
+@pytest.mark.parametrize("inherit", [False, True])
+def test_task_environment_goes_over_the_sandbox_and_under_the_adapter(tmp_path, monkeypatch, inherit):
+    # The sandbox's own environment, as the exec that starts the runner gives it.
+    monkeypatch.setenv("SANDBOX_ONLY", "from-sandbox")
+    monkeypatch.setenv("HOME", "/root")
+    monkeypatch.setenv("OPENAI_API_KEY", "from-sandbox")  # pragma: allowlist secret
+    task_env = {
+        "HOME": "/home/task",
+        "OPENAI_API_KEY": "task-key",  # pragma: allowlist secret
+        "OPENAI_BASE_URL": "https://task-endpoint.example/v1",
+        "CODEX_HOME": "/task/codex-home",
+    }
+    adapter_env = {"CODEX_HOME": "/tmp/session/.codex", "NEMO_GYM_CODEX_API_KEY": "gym"}
+    names = "SANDBOX_ONLY HOME OPENAI_API_KEY OPENAI_BASE_URL CODEX_HOME NEMO_GYM_CODEX_API_KEY"
+    script = f'for name in {names}; do printf "%s=%s\\n" "$name" "${{!name-unset}}"; done >seen.env'
+    process = launch(tmp_path, ["bash", "-c", script], inherit_env=inherit, task_env=task_env, env=adapter_env)
+    assert result(tmp_path, process)["return_code"] == 0, (tmp_path / "stderr.log").read_text()
+    seen = dict(line.split("=", 1) for line in (tmp_path / "seen.env").read_text().splitlines())
+    assert seen == {
+        # Only inherit_env passes variables outside the allowlist.
+        "SANDBOX_ONLY": "from-sandbox" if inherit else "unset",
+        # The task environment replaces the sandbox's own values,
+        "HOME": "/home/task",
+        "OPENAI_API_KEY": "task-key",  # pragma: allowlist secret
+        "OPENAI_BASE_URL": "https://task-endpoint.example/v1",
+        # and the adapter's variables replace the task's.
+        "CODEX_HOME": "/tmp/session/.codex",
+        "NEMO_GYM_CODEX_API_KEY": "gym",
+    }
+
+
 @pytest.mark.parametrize(("start", "expected"), [("0", "1000"), ("500", "1000"), ("-997", "0"), ("-1000", "0")])
 def test_oom_score_setup_raises_the_score_and_never_lowers_it(tmp_path, start, expected):
     path = tmp_path / "oom_score_adj"

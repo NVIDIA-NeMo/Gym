@@ -319,6 +319,16 @@ CustomToolStrategy = Literal["passthrough", "function_bridge"]
 _BRIDGE_GRAMMAR_DROP_WARNED: set = set()
 
 
+class UnsupportedToolTypeError(NotImplementedError):
+    """A Responses tool type that the Chat Completions conversion cannot express.
+
+    Chat Completions carries function and custom tools only. A provider-hosted tool such as ``web_search`` runs
+    on the provider that serves the Responses API, so no backend reached through this conversion can execute it.
+    The request, not the server, is at fault, so model servers answer it with 422 instead of a server error that
+    a client would retry.
+    """
+
+
 class ChatCompletionsConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
@@ -591,8 +601,13 @@ class ChatCompletionsConverter(BaseModel):
                 if tool_dict.get("output_schema") is not None:
                     raise NotImplementedError("Responses tool output schema has no Chat Completions representation.")
                 if tool_type not in {"function", "custom"}:
-                    raise NotImplementedError(
-                        f"Responses tool type {tool_type!r} has no implemented Chat Completions conversion."
+                    raise UnsupportedToolTypeError(
+                        f"Responses tool type {tool_type!r} has no Chat Completions conversion: this model server "
+                        "converts requests to Chat Completions, whose backend runs only function and custom tools, "
+                        "and a hosted tool such as web_search runs on the provider that serves the Responses API. "
+                        "Send the request to a model server that relays it to such a provider (openai_model), turn "
+                        "the tool off in the client, or set drop_hosted_tools: true to drop it from streaming "
+                        "requests."
                     )
                 if tool_dict.get("defer_loading"):
                     raise NotImplementedError(

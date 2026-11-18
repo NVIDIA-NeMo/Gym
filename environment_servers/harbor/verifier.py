@@ -72,7 +72,13 @@ from nemo_gym.sandbox import (
     upload_dir,
     upload_path,
 )
-from nemo_gym.trajectory import encode_atif_trajectory, transcript_to_atif
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    AtifExportError,
+    encode_atif_trajectory,
+    transcript_to_atif,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -99,6 +105,44 @@ INVALID_REWARD_KIND = "harbor:invalid_reward"
 # turn is measured as on any other exit, with the ignored code named in the reason.
 VERIFIER_UNAVAILABLE_EXIT_CODE = 75
 VERIFIER_UNAVAILABLE_KIND = "harbor:verifier_unavailable"
+
+
+def _reported_transcript(observations: AgentObservationBundle | None) -> list[dict[str, Any]] | None:
+    """The conversation of the one root invocation in ``observations``, as items for the transcript converter; None
+    when there is not exactly one root invocation or its conversation is empty.
+
+    ATIF has one tool-call shape, so a freeform custom tool call (Codex's ``apply_patch``) and its output are given
+    as a function call and its output. Its arguments are what Harbor's Codex agent exports: the input when it is a
+    JSON object, ``{"input": ...}`` when it is no JSON, ``{"value": ...}`` for other JSON, and ``{}`` for none or
+    an empty value.
+    """
+    if observations is None:
+        return None
+    roots = [
+        record
+        for record in observations.records
+        if isinstance(record, AgentInvocation) and record.parent_invocation_id is None
+    ]
+    if len(roots) != 1 or not roots[0].conversation:
+        return None
+    items = []
+    for item in roots[0].conversation:
+        raw = item.model_dump(mode="json")
+        if raw.get("type") == "custom_tool_call":
+            text = raw.get("input")
+            try:
+                arguments = json.loads(text)
+            except (TypeError, ValueError):
+                arguments = {"input": text} if isinstance(text, str) else None
+            if not isinstance(arguments, dict):
+                arguments = {"value": arguments} if arguments else {}
+            call = {"type": "function_call", "call_id": raw.get("call_id"), "name": raw.get("name")}
+            call["arguments"] = json.dumps(arguments)
+            raw = call | ({"id": raw["id"]} if raw.get("id") else {})
+        elif raw.get("type") == "custom_tool_call_output":
+            raw = {"type": "function_call_output", "call_id": raw.get("call_id"), "output": raw.get("output")}
+        items.append(raw)
+    return items
 
 
 def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | None]:
@@ -409,7 +453,8 @@ def _separate_mode(task: HarborTask, separate: bool | None) -> bool:
     return (not task.config.is_shared_verifier) if separate is None else separate
 
 
-# The agent transcript in ATIF v1.7, written under AGENT_LOGS_DIR before every verify; Harbor verifiers may read it.
+# The agent transcript in ATIF v1.7, written under AGENT_LOGS_DIR before every verify of a harness other than the
+# Harbor oracle (which, as under Harbor, leaves none); Harbor verifiers may read it.
 TRAJECTORY_FILE_NAME = "trajectory.json"
 
 # Top-level names in a verification's host logs folder that this server writes itself, beside what it downloads from
@@ -473,7 +518,8 @@ class HarborVerificationMixin:
         """Run ``tests/test.sh`` and read the reward it wrote, in the agent's sandbox or a separate one.
 
         ``trajectory`` is the exported ATIF transcript, written to ``/logs/agent/trajectory.json`` in the
-        sandbox that runs ``test.sh`` before it starts. ``response`` is the agent's final response, handed to a
+        sandbox that runs ``test.sh`` before it starts, unless the harness is the Harbor oracle
+        (:meth:`_upload_trajectory`). ``response`` is the agent's final response, handed to a
         Python verifier that declares it (:meth:`_verifier_shim`).
         """
         if self._separate_verifier(session.task):
@@ -795,7 +841,13 @@ class HarborVerificationMixin:
                 archive.unlink(missing_ok=True)
             # An artifact that covers /logs/agent brought the agent's tree, planted entries included, into
             # this fresh sandbox: the transcript's destination is cleared again before it is written.
-            await self._upload_trajectory(verifier, trajectory, logs_dir, restored=[source for *_, source in restored])
+            await self._upload_trajectory(
+                verifier,
+                trajectory,
+                logs_dir,
+                restored=[source for *_, source in restored],
+                place_in_sandbox=not session.solution_for_oracle,
+            )
             if verifier_entrypoint is not None:
                 # The last look before test.sh, in a fresh sandbox the agent never had: its exit status is trusted.
                 await self._check_entrypoint(verifier, start, verifier_entrypoint)
@@ -916,6 +968,31 @@ class HarborVerificationMixin:
             raise RuntimeError(
                 f"Could not clear /tests, /logs/verifier and the transcript in the agent's sandbox: "
                 f"{result.stderr or result.stdout}"
+            )
+
+    async def _reset_agent_logs(self, sandbox: AsyncSandbox) -> None:
+        """Empty ``/logs/agent`` in the agent's own sandbox, as root. Raises :class:`RuntimeError` when the
+        sandbox could not.
+
+        A multi-step episode does this before every turn after the first that opens a fresh agent session, as
+        Harbor 0.22.0's ``_reset_agent_logs_for_step`` empties it before each step that does not resume (or, for a
+        bind-mounted folder, moves the previous step's files away): the previous turn's harness logs (Codex's
+        ``codex.txt`` and ``sessions/``, the oracle's output) and the server's transcript hold that turn's
+        conversation, which the fresh agent must not read and the next turn's verifier must not mistake for its
+        own. A link at /logs or /logs/agent, or anything else in /logs/agent's place, is removed without touching
+        its target, as in :meth:`_reset_shared_verifier_dirs`.
+        """
+        logs, agent = shlex.quote(str(Path(AGENT_LOGS_DIR).parent)), shlex.quote(AGENT_LOGS_DIR)
+        result = await exec_as_root(
+            sandbox,
+            f"if test -L {logs}; then rm -- {logs}; fi && "
+            f"if test -L {agent} || {{ test -e {agent} && ! test -d {agent}; }}; then rm -rf -- {agent}; fi && "
+            f"mkdir -p {agent} && find {agent} -mindepth 1 -delete && chmod 777 {agent}",
+            timeout_s=60,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"Could not empty {AGENT_LOGS_DIR} in the agent's sandbox: {result.stderr or result.stdout}"
             )
 
     async def _run_collect_hooks(self, session: HarborSession, hooks: list[Any]) -> None:
@@ -1095,7 +1172,8 @@ class HarborVerificationMixin:
         ``[[verifier.collect]]`` hooks run first, as in Harbor: what they produce under ``/logs/artifacts``
         is there for ``test.sh``, and for the run's logs. ``/logs/agent`` is left as the agent wrote it,
         except for ``trajectory.json``: whatever the agent left at that reserved path (a link, a directory)
-        is removed and the server writes the transcript there, so verifiers that read it find it.
+        is removed and the server writes the transcript there, so verifiers that read it find it, for every
+        harness but the Harbor oracle, which gets none (:meth:`_upload_trajectory`).
 
         ``test_dirs`` are uploaded to ``/tests`` in order, each over the last (a step's ``tests/`` over the
         task's); missing folders are skipped. By default the task's ``tests/`` and ``[verifier]`` apply.
@@ -1144,7 +1222,9 @@ class HarborVerificationMixin:
                 await upload_dir(sandbox, tests, TESTS_DIR, ignore=is_ignored)
             await self._upload_verifier_shim(sandbox, session, response)
             await _make_test_script_executable(sandbox)
-            await self._upload_trajectory(sandbox, trajectory, logs_dir)
+            await self._upload_trajectory(
+                sandbox, trajectory, logs_dir, place_in_sandbox=not session.solution_for_oracle
+            )
             # One plain exec for the whole run. The provider keeps it alive for as long as
             # `timeout_s` says (OpenSandbox polls a background command, Docker streams), and
             # `timeout` inside the container is the cap that stops the tests themselves.
@@ -1376,7 +1456,13 @@ class HarborVerificationMixin:
         return resolve_env_templates(settings.env, self.config.secrets)
 
     async def _upload_trajectory(
-        self, sandbox: AsyncSandbox, trajectory: bytes, logs_dir: Path, *, restored: Sequence[str] = ()
+        self,
+        sandbox: AsyncSandbox,
+        trajectory: bytes,
+        logs_dir: Path,
+        *,
+        restored: Sequence[str] = (),
+        place_in_sandbox: bool = True,
     ) -> None:
         """Keep a host copy of the transcript beside the verifier logs and place it where the verifier reads it.
 
@@ -1385,6 +1471,12 @@ class HarborVerificationMixin:
         the agent's tree came back with it, so whatever the agent planted there (a link the upload would follow,
         a directory it would fail on) is removed first, as the shared-mode prepare does. Otherwise the sandbox is
         fresh at that path, or it was already cleared, and the upload needs no extra round trip.
+
+        ``place_in_sandbox=False`` keeps the host copy only, for the Harbor oracle: Harbor's oracle writes no ATIF
+        trajectory (0.22.0 ``BaseAgent.SUPPORTS_ATIF`` is false for it), so its verifier finds ``oracle.txt`` and,
+        after a failed ``solve.sh``, ``exit-code.txt`` under ``/logs/agent`` and no ``trajectory.json``. A verifier
+        that tells an oracle run from a coding agent's by that file then reads both the same way here. The reserved
+        path is still cleared after a covering restore, so nothing but the server's transcript is ever found there.
         """
         host = logs_dir / TRAJECTORY_FILE_NAME
         host.write_bytes(trajectory)
@@ -1398,6 +1490,8 @@ class HarborVerificationMixin:
             )
             if clear.return_code != 0:
                 raise RuntimeError(f"Could not clear the restored {target}: {clear.stderr or clear.stdout}")
+        if not place_in_sandbox:
+            return
         await upload_path(sandbox, host, target)
         # The host copy is created under the server's umask and the archive carries that mode, which root `tar`
         # keeps: under umask 077 the transcript would land root-owned 0600, unreadable by a non-root `[verifier].user`
@@ -1408,7 +1502,12 @@ class HarborVerificationMixin:
             raise RuntimeError(f"Could not make {target} readable: {readable.stderr or readable.stdout}")
 
     def _export_trajectory(
-        self, request: BaseEpisodeRequest[Any], agent_response: NeMoGymResponse, responses_create_params: Any = None
+        self,
+        request: BaseEpisodeRequest[Any],
+        agent_response: NeMoGymResponse,
+        responses_create_params: Any = None,
+        *,
+        observations: AgentObservationBundle | None = None,
     ) -> bytes:
         """The agent's transcript as ATIF v1.7 JSON, for ``/logs/agent/trajectory.json``.
 
@@ -1416,20 +1515,39 @@ class HarborVerificationMixin:
         :class:`AtifExportError` for anything the converter cannot represent, which masks the turn.
         ``responses_create_params`` is the request the turn was sent when it is not the row's own (a
         multi-step task's turn); by default the row's ``responses_create_params`` is the input.
+
+        ``observations`` are the session close's observations of a harness that reports the conversation the
+        model received (``reports_model_conversation`` in its seed). Their one root invocation's conversation is
+        exported instead, as Harbor's installed agents write the file from their own session records, so each tool
+        result reads as the model read it. Without such a conversation, or one the converter cannot represent, the
+        Gym transcript is exported as above.
         """
+        usage = agent_response.usage.model_dump(mode="json") if agent_response.usage is not None else None
+        identity = {
+            "session_id": request.episode_id.capture_key,
+            "agent_name": self.config.agent_server.name,
+            "agent_version": __version__,
+            "model_name": agent_response.model,
+            "usage": usage,
+        }
+        reported = _reported_transcript(observations)
+        if reported is not None:
+            try:
+                trajectory = transcript_to_atif(None, reported, **identity)
+            except AtifExportError as error:
+                LOGGER.warning(
+                    f"{request.task.task_id}: the agent's reported conversation is not representable in ATIF "
+                    f"({error}); exporting its response output instead"
+                )
+            else:
+                trajectory.extra["nemo_gym"]["source"] = {"format": "agent_observations"}
+                return encode_atif_trajectory(trajectory)
         params: Any = request.task.task_input.responses_create_params
         if responses_create_params is not None:
             params = responses_create_params
         input_items = params.get("input") if isinstance(params, Mapping) else getattr(params, "input", None)
-        usage = agent_response.usage.model_dump(mode="json") if agent_response.usage is not None else None
         trajectory = transcript_to_atif(
-            input_items,
-            [item.model_dump(mode="json") for item in agent_response.output],
-            session_id=request.episode_id.capture_key,
-            agent_name=self.config.agent_server.name,
-            agent_version=__version__,
-            model_name=agent_response.model,
-            usage=usage,
+            input_items, [item.model_dump(mode="json") for item in agent_response.output], **identity
         )
         return encode_atif_trajectory(trajectory)
 

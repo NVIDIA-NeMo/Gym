@@ -99,13 +99,20 @@ from responses_api_agents.codex_agent.observability import (
     parse_codex_usage,
     read_codex_observations,
 )
-from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
+from responses_api_agents.codex_agent.sandbox import HARBOR_AGENT_LOGS_DIR, LAUNCHER_FILE, CodexSandboxSession
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
 from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
 
 LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
+# The variable the Gym provider reads its key from in sandbox sessions. A Gym name, unlike OPENAI_API_KEY, so a task's
+# own OPENAI_API_KEY reaches Codex's commands unchanged.
+SANDBOX_PROVIDER_KEY_ENV = "NEMO_GYM_CODEX_API_KEY"
+# SandboxAccess.env cannot set variables with these prefixes. NEMO_GYM_* holds the provider key and the supervisor's
+# marker. CODEX_* configures Codex itself (its home, credentials such as CODEX_ACCESS_TOKEN, and
+# CODEX_EXEC_SERVER_URL, which moves tool execution out of the sandbox), as goose_agent drops GOOSE_*.
+_PRIVATE_ENV_PREFIXES = ("NEMO_GYM_", "CODEX_")
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
 _PROVIDER_ERROR = "provider_error"
 _OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
@@ -626,10 +633,11 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # confirm it in captured model calls.
     model_server_forwards_reasoning_effort: bool = False
     # Sandbox sessions start Codex with only PATH, LANG, LC_ALL, HOME and the XDG directories
-    # from the sandbox. Set true to give Codex (and so its shell tools) the sandbox's full
-    # environment, as a harness launched directly in the task container sees it, keeping only
-    # CODEX_HOME private. Use only when the sandbox environment is the task's own (remote
-    # providers), not a local provider that inherits the agent host's environment.
+    # from the sandbox, then the environment its owner hands over in SandboxAccess.env. Set true
+    # to start from the sandbox's full environment instead, as a harness launched directly in the
+    # task container sees it. Either way Codex's shell tools inherit it, and CODEX_HOME and the
+    # Gym provider key stay private. Use only when the sandbox environment is the task's own
+    # (remote providers), not a local provider that inherits the agent host's environment.
     inherit_sandbox_environment: bool = False
     # Sandbox sessions: return a failed run (nonzero or signalled exit, failed turn, missing
     # turn.completed) as a `failed` response so Resources still grades it, as Harbor grades after
@@ -665,10 +673,17 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # applies its own default; that is how a launch with no Gym config (such as Harbor's) runs. Unlike
     # extra_config, this also applies to sandbox sessions.
     features: dict[str, Optional[bool]] = Field(default_factory=lambda: {"multi_agent": False, "code_mode": False})
-    # Sandbox sessions, which run without --ephemeral: copy Codex's session rollouts (CODEX_HOME/sessions, with
-    # per-call token counts and timestamps) into <sandbox_logs_dir>/sessions after Codex stops, before the session
-    # directory is removed. Point it at a directory the resources server collects, such as /logs/agent for
-    # Harbor-format tasks.
+    # Codex's `web_search` setting. "disabled" offers the model no search tool. The other modes offer Codex's
+    # hosted web_search tool, which the model provider runs, so the model server must relay requests to a
+    # Responses API that executes it; a server that converts to Chat Completions refuses them with 422. Under
+    # danger-full-access the pinned CLIs serve "cached" as "live". Unlike extra_config, this also applies to
+    # sandbox sessions.
+    web_search: Literal["disabled", "cached", "indexed", "live"] = "disabled"
+    # Sandbox sessions, which run without --ephemeral: after Codex stops, before the session directory is removed,
+    # copy its `exec --json` output to <sandbox_logs_dir>/codex.txt and its session rollouts (CODEX_HOME/sessions,
+    # with per-call token counts and timestamps) to <sandbox_logs_dir>/sessions, replacing both, as Harbor's Codex
+    # agent leaves them in /logs/agent. None: a borrowed task sandbox that has Harbor's /logs/agent gets them there
+    # (a Harbor task environment, whose verifier may read them); any other sandbox gets no copy.
     sandbox_logs_dir: Optional[str] = None
     # Per-call timeout Codex applies to Gym MCP tools (`tool_timeout_sec`); None leaves the CLI default.
     mcp_tool_timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
@@ -794,6 +809,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
     def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
         return state.session if isinstance(state, CodexSandboxSession) else None
 
+    def reports_model_conversation(self) -> bool:
+        """The close's invocation conversation comes from Codex's session records, with each tool result as the
+        model read it (``Process exited with code 0\\nOutput:\\n...``); the response output comes from the
+        ``exec --json`` events, which carry only a command's aggregated output."""
+        return True
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CodexSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
@@ -898,13 +919,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 raise
         directory = f"/tmp/nemo-gym-codex-sessions/{uuid4().hex}"
         runtime = self.config.sandbox_runtime_dir or f"/tmp/nemo-gym-codex-node-22.19.0-{self.config.codex_version}"
+        # Without a configured directory, a borrowed task sandbox gets Harbor's layout when it has Harbor's directory.
+        harbor_logs = self.config.sandbox_logs_dir is None and not owns_sandbox
         state = CodexSandboxSession(
             request=body,
             session=SandboxSession(
                 sandbox=sandbox, session_dir=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Codex"
             ),
             runtime=runtime,
-            logs_dir=self.config.sandbox_logs_dir,
+            logs_dir=HARBOR_AGENT_LOGS_DIR if harbor_logs else self.config.sandbox_logs_dir,
+            create_logs_dir=not harbor_logs,
         )
         try:
             if owns_sandbox:
@@ -1084,6 +1108,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         base_url = self._resolve_call_base_url(invocation_id)
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
+        config["model_providers"]["gym"]["env_key"] = SANDBOX_PROVIDER_KEY_ENV
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         # Codex's forced stdin prompt rejects empty text; an explicit empty argument accepts image-only input.
         command = self._build_command("" if media and not prompt.strip() else "-", state.session.workdir)
@@ -1094,6 +1119,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
         ]
+        # Empty for a sandbox Codex creates itself.
+        task_env = state.request.sandbox_access.env if state.request.sandbox_access else {}
         payload = {
             "directory": state.session.session_dir,
             "command": command,
@@ -1102,10 +1129,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "timeout": timeout,
             "prompt": prompt,
             "cwd": state.session.workdir,
+            # The environment the sandbox's owner resolved for the harness's commands, over the sandbox's own, as
+            # the other harnesses apply it. OPENAI_API_KEY and OPENAI_BASE_URL in it reach Codex's commands
+            # unchanged: the Gym provider's base_url is fixed in config.toml, its key comes from `env`, and the
+            # launcher keeps proxy variables off its loopback forwarder.
+            "task_env": {key: value for key, value in task_env.items() if not key.startswith(_PRIVATE_ENV_PREFIXES)},
+            # Applied last, so a task cannot replace them.
             "env": {
                 "CODEX_HOME": f"{state.session.session_dir}/home/.codex",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
-                "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+                SANDBOX_PROVIDER_KEY_ENV: "gym",  # pragma: allowlist secret
             },
             "inherit_env": self.config.inherit_sandbox_environment,
             "raise_oom_score_adj": self.config.raise_oom_score_adj,
@@ -1547,8 +1580,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         The base config pins a Gym-owned model provider (bypassing Codex's login flow), disables
         everything that would make a rollout depend on ambient host state or phone home (analytics,
-        update checks, on-disk history), and turns off the tools a Gym-served model cannot execute
-        (server-side web search, multi-agent). ``extra_config`` is deep-merged on top; the
+        update checks, on-disk history), and by default turns off the tools a Gym-served model cannot
+        execute (server-side web search, multi-agent). ``extra_config`` is deep-merged on top; the
         per-rollout Gym MCP entries are applied last so they win name collisions.
         """
         # By default multi_agent and code_mode are off: they add tool shapes (namespace fan-out,
@@ -1559,7 +1592,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "model_provider": "gym",
             "approval_policy": "never",
             "sandbox_mode": self.config.sandbox_mode,
-            "web_search": "disabled",
+            "web_search": self.config.web_search,
             "check_for_update_on_startup": False,
             "analytics": {"enabled": False},
             "history": {"persistence": "none"},
@@ -1570,7 +1603,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     "base_url": base_url,
                     # A custom provider reads its API key only from the env var named here; the
                     # agent sets it on the codex subprocess from `openai_api_key` (see _run_codex),
-                    # so no `codex login` is ever needed.
+                    # so no `codex login` is ever needed. Sandbox sessions name SANDBOX_PROVIDER_KEY_ENV.
                     "env_key": "OPENAI_API_KEY",
                     "wire_api": "responses",
                     "stream_idle_timeout_ms": self.config.stream_idle_timeout_ms or self.config.timeout * 1000,

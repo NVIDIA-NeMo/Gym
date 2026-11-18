@@ -434,8 +434,8 @@ as for mini-SWE. Defaults:
   OOM kill inside the sandbox picks agent work, not the exec daemon
   (`++tbsci_raise_oom_score_adj=false` turns it off).
 - Codex's session rollouts, with per-call token counts and timestamps, are copied to
-  `/logs/agent/sessions` (`++tbsci_codex_sandbox_logs_dir`). The resources server keeps them in the trial directory
-  (`agent/sessions/`), as Harbor keeps them under `/logs/agent`.
+  `/logs/agent/sessions`, and its `exec --json` output to `/logs/agent/codex.txt` (`++tbsci_codex_sandbox_logs_dir`).
+  The resources server keeps them in the trial directory (`agent/`), as Harbor keeps them under `/logs/agent`.
 
 Rows carry the official instruction as their prompt. `prepare_codex.py` reads it from the
 pinned packages and checks every selected task's 8-hour budget. Verifying the package hashes

@@ -68,7 +68,9 @@ but not their collect hooks or health checks. See
 
 1. **Clean up.** After a turn verified in the agent's sandbox, `/tests` and `/logs/verifier` are emptied and
    `/logs/agent/trajectory.json` is removed, keeping only declared
-   [sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs). Everything else the agent left stays.
+   [sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs). Before a fresh session,
+   `/logs/agent` is emptied too, as Harbor does before a step that does not resume, so the previous harness's logs
+   there, such as `codex_agent`'s `codex.txt` and `sessions/`, are gone. Everything else the agent left stays.
 2. **Prepare.** Switch to the step's agent user, merge `workdir/`, run `setup.sh`, poll `[steps.healthcheck]`.
 3. **Run the agent.** A fresh session receives `steps/<name>/instruction.md` as its only input, under the step's
    agent budget, or the harness's own cap if lower, such as `opencode_agent`'s `timeout`. It keeps no conversation
@@ -106,8 +108,8 @@ only at seed.
 | `[steps.healthcheck]` never passes | `harbor:step_healthcheck_failed` |
 
 The failed turn runs no agent or verifier, and the episode stops. A sandbox that cannot run the command, clear the
-previous turn's grading files, switch the user or place the oracle's solution is an outage, which Gym retries, even
-when an earlier agent caused it.
+previous turn's grading files or agent logs, switch the user or place the oracle's solution is an outage, which Gym
+retries, even when an earlier agent caused it.
 
 ## Artifacts per step
 
@@ -224,7 +226,8 @@ gym eval run <dataset> --agent opencode_agent ... \
 when the task's steps switch agent users, each multi-step episode fails at seed, unretried, before its sandbox starts.
 
 Each step keeps its own instruction, budget, verification and early stop. Between steps the harness process exits and
-its conversation state stays on disk in the sandbox, until the session closes before the last step's verifier.
+its conversation state stays on disk in the sandbox, `/logs/agent` included, until the session closes before the last
+step's verifier.
 
 | Mode | Episode `ng_trajectory`, `ng_agent_observations` | Per-turn records |
 | --- | --- | --- |

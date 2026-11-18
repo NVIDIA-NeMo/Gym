@@ -33,6 +33,7 @@ from environment_servers.harbor.app import (
 )
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S, _is_image_pull_failure
 from environment_servers.harbor.tests.conftest import (
+    CODEX_TOOL_RESULT,
     COMPOSE_YAML,
     IMAGE_CONFIGS,
     IMAGE_PATH,
@@ -54,6 +55,7 @@ from environment_servers.harbor.tests.conftest import (
     episode,
     make_server,
     record_verifier_build,
+    reported_conversation,
     run_episode,
     write_image_config,
     write_task,
@@ -3997,6 +3999,32 @@ GREETING = "hi"
         seed = server.server_client.seed_bodies()[0]
         assert "env" not in seed["sandbox_access"]
 
+    @pytest.mark.parametrize(("implementation", "placed"), [("harbor_oracle_agent", False), ("hermes_agent", True)])
+    async def test_only_the_oracles_verifier_gets_no_transcript_in_the_sandbox(
+        self, tmp_path, monkeypatch, implementation, placed
+    ):
+        """Harbor's oracle writes no /logs/agent/trajectory.json (``SUPPORTS_ATIF`` is false), so its verifier finds
+        only oracle.txt and exit-code.txt there; every other harness's verifier reads the server's ATIF transcript.
+        The reserved path is cleared before test.sh either way, and Gym keeps the transcript with the verifier logs."""
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=self.SOLUTION_TOML, agent_implementation=implementation, solution=True
+        )
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        result = response.result
+        assert result.reward == 1.0 and result.verifier_mode == "shared"
+        commands = [c["command"] for c in sandbox.execs]
+        test_sh = next(i for i, c in enumerate(commands) if "test.sh" in c and "timeout" in c)
+        cleared = next(i for i, c in enumerate(commands) if "rm -rf -- /logs/agent/trajectory.json" in c)
+        assert cleared < test_sh
+        uploads = [i for i, c in enumerate(commands) if "tar -xzf" in c and "-C /logs/agent;" in c]
+        assert len(uploaded_file(sandbox, "trajectory.json")) == len(uploads) == int(placed)
+        assert all(i < test_sh for i in uploads)
+        transcript = json.loads((Path(result.verifier_logs_dir) / "trajectory.json").read_bytes())
+        assert transcript["steps"][0]["message"] == "Create hello.txt"
+
     async def test_a_task_without_a_solution_uploads_nothing_for_the_oracle(self, tmp_path, monkeypatch):
         """The oracle finds no /solution/solve.sh and reports the task unvalidated; the seed is not at fault."""
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, agent_implementation="harbor_oracle_agent")
@@ -4670,6 +4698,9 @@ MODE = "strict"
 """
 )
 
+# Codex's apply_patch input, a freeform patch rather than JSON.
+PATCH_TEXT = "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"
+
 
 class TestGeneralization:
     """M27: secrets, the ATIF transcript, pull retries, task deadlines, forced separate mode, nested tasks."""
@@ -4742,7 +4773,7 @@ class TestGeneralization:
 
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
 
-        def broken_export(request, agent_response):
+        def broken_export(request, agent_response, *, observations=None):
             raise AtifExportError("transcript[3]: unsupported transcript item")
 
         monkeypatch.setattr(server, "_export_trajectory", broken_export)
@@ -4782,6 +4813,125 @@ class TestGeneralization:
         assert steps[1]["observation"]["results"][0]["content"] == "(terminal unchanged)"
         assert steps[2]["message"] == "echo hello > hello.txt"
         assert trajectory["extra"]["nemo_gym"]["conversion"]["reasons"] == ["refusal"]
+
+    async def test_a_reported_model_conversation_gives_the_verifier_each_tool_result_as_the_model_read_it(
+        self, tmp_path, monkeypatch
+    ):
+        """Harbor's Codex agent writes trajectory.json from its session records, so a command's observation is the
+        text the model read, exit header included, which Harbor verifiers parse (a verifier can read the exit code from
+        it). A harness that reports that conversation gets the same file; its response output stays the record."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.reports_model_conversation = True
+        server.server_client.observations = reported_conversation()
+
+        response = await run_episode(server, task)
+
+        result = response.result
+        assert result is not None and result.mask_sample is False, response.failure
+        (trajectory_bytes,) = uploaded_file(sandbox, "trajectory.json")
+        assert (Path(result.verifier_logs_dir) / "trajectory.json").read_bytes() == trajectory_bytes
+        trajectory = json.loads(trajectory_bytes)
+        steps = trajectory["steps"]
+        assert [step["source"] for step in steps] == ["system", "user", "agent", "agent"]
+        assert steps[1]["message"] == "Create hello.txt"
+        (call,) = steps[2]["tool_calls"]
+        assert (call["tool_call_id"], call["function_name"], call["arguments"]) == (
+            "call_1",
+            "exec_command",
+            {"cmd": "gym --version"},
+        )
+        (observed,) = steps[2]["observation"]["results"]
+        assert (observed["source_call_id"], observed["content"]) == ("call_1", CODEX_TOOL_RESULT)
+        assert steps[3]["message"] == "Done."
+        assert trajectory["extra"]["nemo_gym"]["source"] == {"format": "agent_observations"}
+        assert result.response.id == "response" and result.ng_agent_observations.source == "codex"
+
+    @pytest.mark.parametrize(
+        ("patch_text", "arguments"),
+        [
+            (PATCH_TEXT, {"input": PATCH_TEXT}),
+            ('{"path": "hello.txt"}', {"path": "hello.txt"}),
+            ("[1, 2]", {"value": [1, 2]}),
+            ("[]", {}),
+        ],
+    )
+    async def test_a_reported_freeform_tool_call_exports_as_a_tool_call_with_its_result(
+        self, tmp_path, monkeypatch, patch_text, arguments
+    ):
+        """Codex's apply_patch is a freeform custom tool. ATIF has one tool-call shape: the input becomes the
+        call's arguments as Harbor's Codex agent exports them (``{"input": ...}`` when it is no JSON, a JSON object
+        as it is, ``{"value": ...}`` for other JSON, ``{}`` when empty), and the result stays verbatim."""
+        applied = "Success. Updated the following files:\nA hello.txt\n"
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.reports_model_conversation = True
+        observations = reported_conversation()
+        observations["records"][0]["conversation"][2:4] = [
+            {"type": "custom_tool_call", "call_id": "call_2", "name": "apply_patch", "input": patch_text},
+            {"type": "custom_tool_call_output", "call_id": "call_2", "output": applied},
+        ]
+        server.server_client.observations = observations
+
+        response = await run_episode(server, task)
+
+        result = response.result
+        assert result is not None and result.mask_sample is False, response.failure
+        steps = json.loads((Path(result.verifier_logs_dir) / "trajectory.json").read_text())["steps"]
+        (call,) = steps[2]["tool_calls"]
+        assert (call["tool_call_id"], call["function_name"], call["arguments"]) == (
+            "call_2",
+            "apply_patch",
+            arguments,
+        )
+        assert steps[2]["observation"]["results"][0]["content"] == applied
+
+    async def test_reported_observations_without_the_declaration_leave_the_response_transcript(
+        self, tmp_path, monkeypatch
+    ):
+        """Most harnesses report observations without declaring them the model's conversation: their transcript is
+        still the response output, so their trajectory.json does not change."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.observations = reported_conversation()
+
+        response = await run_episode(server, task)
+
+        result = response.result
+        assert result is not None and result.mask_sample is False, response.failure
+        trajectory = json.loads((Path(result.verifier_logs_dir) / "trajectory.json").read_text())
+        assert [step["source"] for step in trajectory["steps"]] == ["user", "agent"]
+        assert trajectory["steps"][1]["message"] == "echo hello > hello.txt"
+        assert trajectory["extra"]["nemo_gym"]["source"] == {"format": "responses_transcript"}
+
+    @pytest.mark.parametrize(
+        "observations",
+        [
+            # ATIF has no place for a developer turn after the agent's output.
+            reported_conversation(
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "late"}]}
+            ),
+            # The close reported nothing (it timed out, say).
+            None,
+        ],
+        ids=["unrepresentable", "absent"],
+    )
+    async def test_a_reported_conversation_that_cannot_be_exported_falls_back_to_the_response_transcript(
+        self, tmp_path, monkeypatch, caplog, observations
+    ):
+        """The reported conversation only improves the transcript: without a usable one the turn is graded on its
+        response output, as before, never masked for it."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.reports_model_conversation = True
+        server.server_client.observations = observations
+
+        with caplog.at_level("WARNING"):
+            response = await run_episode(server, task)
+
+        result = response.result
+        assert result is not None and result.mask_sample is False and result.reward == 1.0, response.failure
+        trajectory = json.loads((Path(result.verifier_logs_dir) / "trajectory.json").read_text())
+        assert [step["source"] for step in trajectory["steps"]] == ["user", "agent"]
+        assert trajectory["extra"]["nemo_gym"]["source"] == {"format": "responses_transcript"}
+        unrepresentable = "not representable in ATIF" in caplog.text
+        assert unrepresentable is (observations is not None)
 
     async def test_terminus_shaped_transcript_exports_user_turns_as_observations(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)

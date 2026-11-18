@@ -62,7 +62,7 @@ from nemo_gym.models._checkpoint_workers import (
     coordinator_socket_path,
 )
 from nemo_gym.models.anthropic_converter import AnthropicConverter
-from nemo_gym.models.chat_completions_converter import CustomToolStrategy
+from nemo_gym.models.chat_completions_converter import CustomToolStrategy, UnsupportedToolTypeError
 from nemo_gym.models.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.models.model_call_capture import (
     _SSE_KEEPALIVE,
@@ -958,10 +958,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 raise HTTPException(status_code=422, detail=str(error)) from error
         else:
             request_messages = None
-        if "request" in inspect.signature(self.responses).parameters:
-            response = await self.responses(request=request, body=params)
-        else:
-            response = await self.responses(body=params)
+        try:
+            if "request" in inspect.signature(self.responses).parameters:
+                response = await self.responses(request=request, body=params)
+            else:
+                response = await self.responses(body=params)
+        except UnsupportedToolTypeError as error:
+            # No retry can succeed, so answer 422 rather than a server error (or response.failed) a client retries.
+            raise HTTPException(status_code=422, detail=str(error)) from error
         if response_id is not None:
             # A keepalive stream announced this id; capture records it and the client keeps it.
             response = (

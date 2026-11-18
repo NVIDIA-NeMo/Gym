@@ -105,11 +105,6 @@ Older Alpine images use a checksum-verified private C++ library for Node. Runtim
 under `/tmp/nemo-gym-codex-node-*`, and private `CODEX_HOME` configuration lives under
 `/tmp/nemo-gym-codex-sessions/*`. Task HOME, XDG directories, Python, Node, libraries,
 and PATH are preserved.
-By default Codex gets only `PATH`, `LANG`, `LC_ALL`, `HOME` and the XDG directories from the
-sandbox. `inherit_sandbox_environment: true` instead passes the sandbox's whole environment,
-as a harness started in the task container sees it (task variables such as `VIRTUAL_ENV` or
-`OMP_NUM_THREADS`), keeping only `CODEX_HOME` private. Use it only with remote providers,
-where that environment is the task's own.
 Installation errors retain the command, exit status, stdout, and stderr. Runtime compatibility
 must still be checked on actual task images; a mocked installer test is not image validation.
 
@@ -124,6 +119,47 @@ For custom models, set `model_context_window` to the served limit and optionally
 compaction threshold must not exceed 90% of the explicit window. The pinned CLI also clamps
 unknown-model metadata to a 272,000-token context and 90% compaction threshold. These are
 context-management controls, not generation budgets.
+
+### Sandbox session environment
+
+Codex and its shell tools run with this environment, each layer replacing the variables of the one before it:
+
+1. From the sandbox: by default only `PATH`, `LANG`, `LC_ALL`, `HOME` and the XDG directories.
+   `inherit_sandbox_environment: true` instead passes the sandbox's whole environment, as a harness started in the
+   task container sees it (task variables such as `VIRTUAL_ENV` or `OMP_NUM_THREADS`). Use it only with remote
+   providers, where that environment is the task's own: a local provider's sandbox environment is the agent host's,
+   including its `OPENAI_API_KEY`.
+2. The environment the sandbox's owner hands over in `SandboxAccess.env` for the harness's commands, as the other
+   harnesses apply it (for example the task user's `HOME` and `SHELL`). Variables named `NEMO_GYM_*` (Gym's own) or
+   `CODEX_*` are left out. `CODEX_*` variables configure Codex itself, for example `CODEX_ACCESS_TOKEN`, or
+   `CODEX_EXEC_SERVER_URL`, which moves tool execution out of the sandbox. Other harnesses leave out their own prefix
+   the same way, as Goose leaves out `GOOSE_*`.
+3. Gym's own: `CODEX_HOME` (a private directory under `/tmp/nemo-gym-codex-sessions/`) and
+   `NEMO_GYM_CODEX_API_KEY`, the key the Gym model provider reads. A task value for either is replaced.
+
+Gym sets neither `OPENAI_API_KEY` nor `OPENAI_BASE_URL`, so a task's own values reach Codex's commands unchanged, for
+example for a task that runs its own OpenAI-compatible client. Harbor's Codex agent instead sets both to its own model
+connection, so a Harbor task that tells the agent to use them must supply them in its own environment under Gym.
+Neither redirects Codex's model calls: the Gym provider's `base_url` is fixed in its `config.toml` and its key comes
+only from `NEMO_GYM_CODEX_API_KEY`. Codex 0.144.4 never reads `OPENAI_BASE_URL`; 0.154.0 and 0.155.1 read it, and
+all three read `OPENAI_API_KEY`, only for the built-in `openai` provider or for the network-proxy credential broker of
+shell-tool traffic, which a `danger-full-access` session does not start.
+
+Proxy variables do not redirect Codex's model calls either. Codex sends them to the launcher's forwarder on
+`127.0.0.1`, which relays them to Gym's model server. Without a guard, an `HTTP_PROXY`, `http_proxy` or `ALL_PROXY`
+from the task or the sandbox would send those calls to the proxy instead, which cannot reach the sandbox's loopback.
+The launcher therefore starts both `NO_PROXY` and `no_proxy` with `127.0.0.1,localhost`, followed by any entries
+already set in either spelling. Codex's commands see these values too.
+
+Codex's default `shell_environment_policy` gives every shell tool Codex's whole environment, including names that
+contain `KEY`, `SECRET` or `TOKEN` (its default excludes are off), plus a few of Codex's own such as
+`CODEX_THREAD_ID` and `CODEX_CI`. Codex 0.154.0 and later also remove some variables of their own launch context
+(`OPENAI_IDENTITY_TOKEN_FILE`, `OPENAI_FEDERATION_RULE_ID`, `OPENAI_WORKLOAD_IDENTITY_CONTEXT`,
+`CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN` and `NODE_REPL_AUTH_TOKEN`). Harbor's Codex agent leaves the same default.
+
+A Harbor task's `[environment.env]` is part of the sandbox's own environment: the `harbor` Environment Server hands
+over `SandboxAccess.env` only to its oracle. Codex sees those variables only with
+`inherit_sandbox_environment: true`.
 
 ## Requests, results, and lifecycle
 
@@ -232,7 +268,7 @@ when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent 
 than the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
 container's memory cgroup. The runner records the change in the supervisor's `output.log`.
 
-Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+Native session transcripts supply tool-call IDs and outcomes. The close's invocation conversation comes from them, with each tool result as the model read it (`Process exited with code 0\nOutput:\n...` for a command), while the response output comes from the `exec --json` events, which give a command its aggregated output and a nonzero exit code only. The seed reply declares `reports_model_conversation`, so the `harbor` Environment Server writes `/logs/agent/trajectory.json` from that conversation, as Harbor's Codex agent writes it from the session records. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 
@@ -324,7 +360,7 @@ The agent runs `codex exec --json` as an async subprocess for each request. Code
 
 Codex talks to the model via the OpenAI Responses API over SSE (`wire_api = "chat"` was removed from Codex). This means it can connect to OpenAI directly, to any endpoint implementing the streaming Responses API, or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server serves the streaming Responses dialect by sanitizing the request (extra bookkeeping fields, `namespace` tool specs are flattened to plain functions) and re-emitting its complete response as a synthesized SSE stream (see `nemo_gym/models/responses_streaming.py`).
 
-Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — the `openai_api_key` config value is handed to the subprocess as `OPENAI_API_KEY`, the provider's `env_key`), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search, and the multi-agent tool (`features`). Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
+Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — the `openai_api_key` config value is handed to the subprocess as `OPENAI_API_KEY`, the provider's `env_key`), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search (unless `web_search` turns it on), and the multi-agent tool (`features`). Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
 
 For legacy callers, Codex is auto-installed lazily on the first local invocation via npm or a local Node.js binary if not already on PATH.
 
@@ -355,6 +391,7 @@ codex_agent:
       features:
         multi_agent: false
         code_mode: false
+      web_search: disabled
 ```
 
 - `concurrency`: max simultaneous `run()` calls
@@ -373,10 +410,29 @@ codex_agent:
 - `request_max_retries`, `stream_max_retries`: the provider's resends of a request that fails before its stream starts, and reconnects after a stream drops. `null` (the default) leaves Codex's own defaults. Unlike `extra_config`, they also apply to sandbox sessions
 - `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
 - `features`: the generated `[features]` table. The defaults turn off `multi_agent` and `code_mode`, whose tool shapes Gym's typed Responses path cannot express. A `null` entry is left out, so the CLI uses its own default, as a launch without a Gym config does; set that only when the model server relays Codex's requests unchanged. Unlike `extra_config`, it also applies to sandbox sessions
-- `sandbox_logs_dir`: sandbox sessions only. After Codex stops, copy its session rollouts (`CODEX_HOME/sessions/**/rollout-*.jsonl`, with per-call token counts and timestamps, also for a run stopped at its time limit) to `<sandbox_logs_dir>/sessions` before the session directory is removed, as Harbor does with `/logs/agent`. Default `null` (not copied)
+- `web_search`: Codex's `web_search` setting: `disabled` (the default), `cached`, `indexed` or `live`; Harbor's Codex agent exposes the same setting as `web_search` (`disabled`, `cached` or `live`). Any mode but `disabled` needs a model server that relays to a provider that runs web search; see [Web search](#web-search). Unlike `extra_config`, it also applies to sandbox sessions
+- `sandbox_logs_dir`: sandbox sessions only. After Codex stops, before the session directory is removed, copy its `codex exec --json` output to `<sandbox_logs_dir>/codex.txt` and its session rollouts (`CODEX_HOME/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl`, with per-call token counts and timestamps, also for a run stopped at its time limit) to `<sandbox_logs_dir>/sessions`, the layout Harbor's Codex agent leaves in `/logs/agent`. Both replace what the folder held under those names, as Harbor replaces `sessions/`, so a rollout the agent wrote there itself does not survive. Codex's stderr is not added to `codex.txt`. Default `null`: a borrowed task sandbox that has `/logs/agent` (a Harbor task environment, such as the `harbor` Environment Server's) gets the copies there, so a Harbor verifier finds them without any setting; a sandbox without it, or one Codex creates, gets none
 - `mcp_tool_timeout_seconds`: per-call timeout for Gym MCP tools, written as `tool_timeout_sec`; a call that runs longer returns an error to the model. At most `timeout`. `null` leaves the pinned CLI's default of 300 seconds
 
 For the full set of Codex config options see the [Codex configuration reference](https://developers.openai.com/codex/config).
+
+### Web search
+
+With `web_search` set to `cached`, `indexed` or `live`, Codex offers the model its hosted `web_search` tool. The model
+provider runs the search, not Codex, so live search needs a model server that relays Codex's requests to a Responses
+API that executes the tool, such as `openai_model` pointed at OpenAI. Such a server forwards the tool's options
+(`external_web_access`, `indexed_web_access`, `search_content_types` and the rest) and returns the provider's
+`web_search_call` items unchanged. A model server that converts requests to Chat Completions, such as `vllm_model`,
+cannot run the tool and refuses the request with a 422 that names it; set `drop_hosted_tools: true` on that server to
+drop the tool instead, which leaves the model without search.
+
+- Codex 0.144.4 to 0.155.1 serve `cached` as `live` under `danger-full-access`, which sandbox sessions require. `indexed`
+  limits live fetches to indexed pages.
+- The search runs at the provider, so `network_access` and the sandbox's network policy do not limit it.
+- The response records each search as a `web_search` function call whose argument is the query (the URL when the model
+  opens a page), followed by an empty output. Session observations record a `web_search` tool call, and the Harbor
+  Environment Server's `trajectory.json` has a `web_search` tool call step. Harbor's own Codex transcript names that
+  step `web_search_call`.
 
 ## Gym MCP tools
 
