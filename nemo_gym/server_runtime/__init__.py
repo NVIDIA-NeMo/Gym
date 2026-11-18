@@ -121,6 +121,7 @@ if TYPE_CHECKING:
         install_auto_exposure,
         maybe_auto_expose,
     )
+    from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes
     from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
     from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
     from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
@@ -195,6 +196,7 @@ _PUBLIC_API = {
     "MCPTool": "mcp_auto_exposure",
     "LentSandboxes": "sandbox_lending",
     "MCPToolAccess": "tool_access",
+    "OwnedSandboxes": "owned_sandboxes",
     "ModelSamplingMiddleware": "request_handling.model_sampling",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",
