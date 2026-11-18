@@ -19,7 +19,12 @@ In the default shared mode, the server does this in the agent's sandbox:
    image's `/tests`.
 3. Uploads `tests/` to `/tests` and makes `test.sh` executable.
 4. Writes the agent's transcript to `/logs/agent/trajectory.json` in
-   [ATIF v1.7](/main/reference/atif-export), the format Harbor's verifiers read.
+   [ATIF v1.7](/main/reference/atif-export), the format Harbor's verifiers read. A harness that reports the
+   conversation its model received, such as `codex_agent`, gets the file from that conversation, as Harbor's own
+   agents write it from their session records: each tool result is the text the model read (for Codex, with its
+   `Process exited with code N` header). Other harnesses get it from their response output. The rest of
+   `/logs/agent` is the harness's: `codex_agent` leaves `codex.txt` and `sessions/` there, as Harbor's Codex agent
+   does.
 5. Runs `bash /tests/test.sh` from the working directory under `timeout`, with its output in
    `/logs/verifier/test-stdout.txt`.
 
