@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[3]
 CATALOG = "benchmarks/opencode_multimodal_benchmarks"
 
 
-@pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench"])
+@pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench", "agentx"])
 @pytest.mark.parametrize("mode", ["default", "openai", "vllm", "training"])
 def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypatch):
     monkeypatch.setenv("GYM_JUDGE_API_KEY", "test-only")
@@ -64,6 +64,7 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
     assert env.agent_server.name == "visual_agent"
     assert env.resources_server.name == "opencode_multimodal_benchmarks"
     agent = config.visual_agent.responses_api_agents
+    assert set(agent) == {"opencode_agent"}
     assert next(iter(agent.values())).model_server.name == "policy_model"
     resources = config.opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks
     assert resources.datasets[0].num_repeats == (5 if benchmark == "zerobench" else 1)
