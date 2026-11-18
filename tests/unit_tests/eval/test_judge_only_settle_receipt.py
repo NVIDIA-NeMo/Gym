@@ -251,3 +251,42 @@ def test_the_quality_summary_alone_can_be_rewritten_from_the_saved_rows(tmp_path
     digests = summary["run"]["provenance"]["rollout_artifact_digests"][0]
     assert digests["rollouts_jsonl_fpath"] == hashlib.sha256(output.read_bytes()).hexdigest()
     assert summary["run"]["artifacts"]["expected"] == 2
+
+
+def test_an_incomplete_strict_pass_rewrites_the_quality_summary_from_the_rows_it_settled(
+    tmp_path, monkeypatch, verifier, aggregation
+) -> None:  # noqa: F811
+    """The summary written before the pass counts the masked row as unscored. The pass settles it and then loses its
+    connection, so it returns no count: the summary reports the Store's settled counts and the digest of the rows as
+    saved, and no aggregate metrics are computed."""
+    from types import SimpleNamespace
+
+    from aiohttp import ServerDisconnectedError
+
+    output = _run(tmp_path, [verify_transport_masked(0), ungraded(1, judge_response="A")])
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    run_config = {"config_paths": ["fixture.yaml"], "health_check_workers": 1}
+    eval_cli._refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
+    summary_path = output.parent / "quality_summary.json"
+    assert json.loads(summary_path.read_text())["run"]["artifacts"]["scored"] == 1
+
+    async def settle_for_real(config, source):
+        helper = RolloutReverificationHelper()
+        await helper.run_from_config(_job_config(source))
+        raise ServerDisconnectedError()
+
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.rejudge_saved_judge_failures", settle_for_real)
+    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda path: False)  # the strict run stays incomplete
+
+    eval_cli._rejudge_saved_judge_failures(
+        run_config, output, SimpleNamespace(disable_aggregation=False), complete_only=True
+    )
+
+    coverage = RolloutStore.read(output, import_legacy=False).coverage()
+    summary = json.loads(summary_path.read_text())
+    artifacts = summary["run"]["artifacts"]
+    assert coverage["successful"] == 2 and coverage["masked"] == 0
+    assert (artifacts["scored"], artifacts["failed"]["total"], artifacts["expected"]) == (2, 0, coverage["expected"])
+    digests = summary["run"]["provenance"]["rollout_artifact_digests"][0]
+    assert digests["rollouts_jsonl_fpath"] == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert aggregation == []  # an incomplete strict run publishes no score

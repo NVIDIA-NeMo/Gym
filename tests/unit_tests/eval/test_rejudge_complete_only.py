@@ -158,3 +158,45 @@ def test_a_pass_that_settled_rows_and_then_disconnected_refreshes_the_quality_su
     assert all(call["metrics"] is False and call["workdir"] == tmp_path for call in calls)
     # An incomplete strict run still publishes no score.
     assert len(pass_settles_one_row) == (1 if run_is_complete else 0)
+
+
+@pytest.mark.parametrize(
+    "appended, refreshed",
+    [
+        pytest.param(True, 1, id="a-pass-that-saved-new-judge-failures-refreshes-the-summary"),
+        pytest.param(False, 0, id="a-pass-that-saved-nothing-leaves-it"),
+    ],
+)
+def test_a_pass_that_returns_zero_but_saved_evidence_refreshes_the_quality_summary(
+    tmp_path, monkeypatch, appended, refreshed
+) -> None:
+    output = tmp_path / "rollouts.jsonl"
+    output.write_text('{"_ng_task_index": 0}\n')
+    failures = tmp_path / "rollouts_failures.jsonl"
+    failures.write_text('{"_ng_failure_class": "judge_failed"}\n')
+
+    async def rejudge(run_config, output_fpath):
+        if appended:  # every re-grade failed again: the failure is saved, no result was settled
+            with failures.open("a") as handle:
+                handle.write('{"_ng_failure_class": "judge_failed"}\n')
+        return 0
+
+    calls = []
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.rejudge_saved_judge_failures", rejudge)
+    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda path: False)
+    monkeypatch.setattr(eval_cli, "_refresh_settled_source", lambda *args, **kwargs: calls.append(kwargs) or {})
+
+    eval_cli._rejudge_saved_judge_failures({}, output, SimpleNamespace(disable_aggregation=False), complete_only=True)
+
+    assert len(calls) == refreshed
+    assert all(call["metrics"] is False for call in calls)
+
+
+@pytest.mark.parametrize("form", ["model_call_failed", ["model_call_failed"], "model_call_failed,model_call_failed"])
+def test_the_settled_health_settings_accept_every_form_of_the_ignored_checks(form) -> None:
+    from nemo_gym.rollouts.rollout_health import normalize_ignored_checks
+
+    settings = eval_cli._SettledHealthSettings.model_validate({"health_check_ignored_checks": form})
+
+    assert settings.health_check_ignored_checks == list(normalize_ignored_checks(["model_call_failed"]))
+    assert settings.health_check_ignored_checks, "the check name is kept, not dropped"
