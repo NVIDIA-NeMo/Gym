@@ -1014,8 +1014,9 @@ def test_a_plugin_log_far_over_the_byte_cap_is_read_only_up_to_it(workdir, tmp_p
 @pytest.mark.parametrize("limit", [2, 0], ids=["two", "off"])
 def test_episodes_scored_0_for_their_plugin_log_trip_the_plugin_log_breaker(workdir, tmp_path, limit) -> None:
     """A plugin bundle that does not load would score every episode 0 as the model's: verify answers 500 once
-    plugin_log_max_consecutive_failures episodes in a row were scored 0 for their plugin log. An identical retry is not
-    counted again, and a log that passes starts the count again. 0 turns the breaker off."""
+    plugin_log_max_consecutive_failures episodes in a row fail the plugin log check, for the last of them too, so one
+    fewer is scored 0. An identical retry is not counted again, and a log that passes starts the count again. 0 turns
+    the breaker off."""
     log = tmp_path / "plugins.log"
     server = _server(workdir, plugin_log_path=str(log), plugin_log_max_consecutive_failures=limit)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
@@ -1034,6 +1035,7 @@ def test_episodes_scored_0_for_their_plugin_log_trip_the_plugin_log_breaker(work
     assert client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY).json() == first.json()
     assert _graded(episode("passes", SENTINEL)) == (1.0, False, None, True)
     assert _graded(episode("second", "")) == (0.0, False, PLUGIN_LOG_INCOMPLETE, False)
+    # The second failing log in a row since the pass: a limit of 2 answers 500 for it, so only one was scored 0.
     tripped = episode("third", "")
 
     if limit:

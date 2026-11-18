@@ -184,8 +184,9 @@ a crash an episode starts over from its input.
   complete still can, and never judges it again; training trains on it as a 0. An identical retry of the
   verify replays it. A plugin that did not load, or `required_plugin_markers` that do not match the run's
   plugins, fail the check on every episode, so verify answers 500 once
-  `plugin_log_max_consecutive_failures` (25 by default) episodes in a row were scored 0 for their log, and
-  for each later one that fails until a log that passes resets the count. A model whose tools break its
+  `plugin_log_max_consecutive_failures` (25 by default) episodes in a row failed it, for the last of them
+  too, and for each later one that fails until a log that passes resets the count: one fewer in a row is
+  scored 0. A model whose tools break its
   log in every episode trips this breaker too: the server cannot tell that from a bundle that does not
   load. Set to 0, the breaker is off, and every such episode scores 0. After a trip, find the cause and
   start a fresh run rather than `gym eval resubmit --recover`: the zeros scored before the trip are
@@ -344,10 +345,11 @@ startup refuses a setting that cannot work:
   the way, not out of reach: `/tmp` is writable to the agent in the same sandbox, so verify scores an
   episode 0 when its log is missing, unsafe to read or lacks a line it must hold (see Plugin log under
   Sessions). `required_plugin_markers` lists the lines the log must hold besides the sentinel's.
-  `plugin_log_max_consecutive_failures` (25) is how many episodes in a row may be scored 0 for their log
-  before verify answers 500; a model that breaks its log in every episode trips it too. 0 turns it off,
-  and every such episode scores 0. After a trip, start a fresh run rather than
-  `gym eval resubmit --recover`, which keeps the zeros scored before it (see Plugin log under Sessions).
+  `plugin_log_max_consecutive_failures` (25) is how many episodes in a row must fail the check for verify
+  to answer 500, for the last of them too, so one fewer is scored 0; a model that breaks its log in every
+  episode trips it too. 0 turns it off, and every such episode scores 0. After a trip, start a fresh run
+  rather than `gym eval resubmit --recover`, which keeps the zeros scored before it (see Plugin log under
+  Sessions).
 * `episode_export_dir` is the sandbox directory the harness writes its session exports to. It follows
   `opencode_agent`'s rules for `export_dir`: absolute, not `/`, outside `/tmp/nemo-gym-opencode*`, and
   neither `sandbox_workdir`, inside it nor above it. `episode_export_copy_dir` turns on the export copy at
