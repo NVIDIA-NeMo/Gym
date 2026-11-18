@@ -1231,7 +1231,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             cookies = seed_resp.cookies
 
             rollout_id = self.rollout_id_from_run(body)
-            # Legacy pairings own their lifecycle here, outside single_agent_turn.
+            # /run pairings (relayed by legacy_agent) own their lifecycle here, outside single_agent_turn.
             usage_capture = (
                 await ModelUsageCapture.start(self.server_client.global_config_dict, rollout_id=rollout_id)
                 if rollout_id is not None

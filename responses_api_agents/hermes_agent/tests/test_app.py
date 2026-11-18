@@ -917,7 +917,7 @@ class TestResultUsage:
         assert response.usage is None
 
     @pytest.mark.parametrize(("prompt_tokens", "completion_tokens"), [(10, 20), (0, 0)])
-    def test_native_totals_preserve_zero_and_unknown_details(self, prompt_tokens: int, completion_tokens: int) -> None:
+    def test_hermes_totals_preserve_zero_and_unknown_details(self, prompt_tokens: int, completion_tokens: int) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         response = hermes._response_from_result(
             body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
@@ -1283,12 +1283,12 @@ class TestMaxTokens:
 
 
 class TestRunUsage:
-    @pytest.mark.parametrize("native_usage_available", [False, True])
+    @pytest.mark.parametrize("hermes_usage_available", [False, True])
     @pytest.mark.parametrize(
         "capture_mode", ["complete", "missing_usage", "missing_capture", "incomplete", "disabled", "no_identity"]
     )
-    def test_legacy_run_reports_agent_usage_before_verification(
-        self, tmp_path: Path, capture_mode: str, native_usage_available: bool
+    def test_run_route_reports_agent_usage_before_verification(
+        self, tmp_path: Path, capture_mode: str, hermes_usage_available: bool
     ) -> None:
         client = MagicMock(spec=ServerClient)
         client.global_config_dict = {
@@ -1306,19 +1306,19 @@ class TestRunUsage:
             body=run_body.responses_create_params,
             model_name="model",
             result={"messages": [{"role": "assistant", "content": "answer", "prompt_token_ids": [1, 2]}]}
-            | ({"prompt_tokens": 600, "completion_tokens": 80} if native_usage_available else {}),
+            | ({"prompt_tokens": 600, "completion_tokens": 80} if hermes_usage_available else {}),
         ).model_dump(mode="json")
         expected_counts = None
         if capture_mode == "complete":
             expected_counts = (30, 10)
-        elif native_usage_available and capture_mode in {"disabled", "no_identity"}:
+        elif hermes_usage_available and capture_mode in {"disabled", "no_identity"}:
             expected_counts = (600, 80)
         expected_usage = (
             {
                 "input_tokens": expected_counts[0],
                 "output_tokens": expected_counts[1],
                 "total_tokens": sum(expected_counts),
-                "input_tokens_details": {"cached_tokens": None},
+                "input_tokens_details": {"cached_tokens": None, "cache_write_tokens": None},
                 "output_tokens_details": {"reasoning_tokens": None},
             }
             if expected_counts is not None

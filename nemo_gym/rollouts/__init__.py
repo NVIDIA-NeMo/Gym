@@ -22,7 +22,7 @@ if TYPE_CHECKING:
         read_available_model_call_records,
         read_model_call_records,
     )
-    from nemo_gym.rollouts.model_usage import ModelUsageCapture, aggregate_model_usage
+    from nemo_gym.rollouts.model_usage import ModelUsageCapture
     from nemo_gym.rollouts.rollout_collection import (
         AGENT_REQUEST_FAILED_FAILURE_CLASS,
         ENVIRONMENT_SERVER_FAILURE_CLASS,
@@ -77,7 +77,6 @@ _PUBLIC_API = {
     "SharedRolloutCollectionConfig": "rollout_collection",
     "Verdict": "health.types",
     "aggregate_model_call_metrics": "model_calls",
-    "aggregate_model_usage": "model_usage",
     "await_model_call_capture_quiescence": "model_calls",
     "clear_model_call_captures_for_rollouts": "model_calls",
     "coverage_path_for": "rollout_records",

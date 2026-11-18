@@ -300,10 +300,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             async with self.checkpoint_step(request, "replay"):
                 await self.reseed_after_restore(request, handles)
 
+        if usage_capture is None and stage in ("invoke_agent", "close_agent"):
+            # A continuation resumes an agent that may have made model calls under the replaced attempt's
+            # capture key, so enabled capture reports unknown usage instead of a partial total.
+            started = await self._start_usage_capture(request)
+            usage_capture = dataclasses.replace(started, store=None) if started is not None else None
+
         if stage == "invoke_agent":
-            if usage_capture is None:
-                # A continuation resumes here before the agent made any call.
-                usage_capture = await self._start_usage_capture(request)
             await self.checkpoint_boundary(request, {"next": "invoke_agent", "handles": handles.model_dump()})
             # The agent parks at its own boundaries and continues from them after a restore.
             try:
@@ -336,11 +339,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "response": agent_response.model_dump(mode="json"),
                 },
             )
-            if usage_capture is None:
-                # A continuation resumes after the agent ran: this process cannot tell which model calls were
-                # the agent's, so enabled capture reports unknown usage instead of a partial total.
-                started = await self._start_usage_capture(request)
-                usage_capture = dataclasses.replace(started, store=None) if started is not None else None
             # Closing returns the agent's observations and final resources cookies exactly once,
             # so a checkpoint waits for it and records them.
             async with self.checkpoint_step(request, "wait"):

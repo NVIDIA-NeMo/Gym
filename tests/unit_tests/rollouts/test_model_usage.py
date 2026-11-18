@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 
 from nemo_gym.models.model_call_capture import CaptureStore, ModelCallCaptureConfig, install_model_call_capture
+from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
 from nemo_gym.rollouts.model_usage import ModelUsageCapture, aggregate_model_usage
 from nemo_gym.trajectory.model_call_record import ModelCallRecord
 
@@ -38,7 +41,7 @@ async def _capture(tmp_path: Path, rollout_id: str = "rollout") -> ModelUsageCap
         ("messages", True),
     ],
 )
-async def test_counts_model_server_json_and_sse_without_native_harness_usage(tmp_path, dialect, streaming):
+async def test_counts_model_server_json_and_sse_without_harness_reported_usage(tmp_path, dialect, streaming):
     from nemo_gym.models.anthropic_converter import AnthropicConverter
     from nemo_gym.models.chat_streaming import synthesize_chat_completion_sse
     from nemo_gym.models.responses_streaming import synthesize_responses_sse
@@ -169,3 +172,81 @@ def test_zero_is_measured_but_unknown_details_and_truncated_streams_are_not():
     assert total.output_tokens_details.reasoning_tokens is None
     assert aggregate_model_usage([first, second.model_copy(update={"error_category": "stream_truncated"})]) is None
     assert aggregate_model_usage([]) is None
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 400])
+async def test_a_failed_call_without_a_response_contributes_nothing(tmp_path, status_code):
+    store = CaptureStore(tmp_path)
+    capture = await _capture(tmp_path)
+    store.record("rollout", {"status_code": status_code, "response": {"error": {"message": "rejected"}}})
+    assert (await capture.usage()).total_tokens == 0  # Every call was rejected: zero, not unknown.
+    store.record("rollout", _exchange())  # The agent's retry finished.
+    result = await capture.usage()
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (10, 3, 13)
+
+
+async def test_verifier_calls_under_the_rollout_are_not_agent_usage(tmp_path):
+    store = CaptureStore(tmp_path)
+    capture = await _capture(tmp_path)
+    store.record("rollout", _exchange())
+    store.record("rollout", _exchange(500, 50) | {"verifier_invocation_id": "verify-1"})
+    assert (await capture.usage()).total_tokens == 13
+
+
+async def test_cache_write_tokens_are_summed(tmp_path):
+    store = CaptureStore(tmp_path)
+    capture = await _capture(tmp_path)
+    usage = {"input_tokens": 10, "output_tokens": 3, "input_tokens_details": {"cached_tokens": 4}}
+    store.record("rollout", {"response": {"usage": usage}})
+    store.record("rollout", {"response": {"usage": usage}})
+    assert (await capture.usage()).input_tokens_details.cache_write_tokens is None
+    anthropic = {"input_tokens": 6, "output_tokens": 3, "cache_read_input_tokens": 4, "cache_creation_input_tokens": 2}
+    capture = await _capture(tmp_path)
+    store.record("rollout", {"dialect": "messages", "response": {"usage": anthropic}})
+    result = await capture.usage()
+    assert (result.input_tokens, result.input_tokens_details.cached_tokens) == (12, 4)
+    assert result.input_tokens_details.cache_write_tokens == 2
+
+
+async def test_a_capture_write_still_pending_waits_then_counts(tmp_path):
+    store = CaptureStore(tmp_path)
+    capture = await _capture(tmp_path)
+    store.record("rollout", _exchange())
+    store.mark_pending("rollout", "call-2")  # A cancelled call finishes its capture write detached.
+
+    async def land_write() -> None:
+        await asyncio.sleep(0.2)
+        store.record("rollout", _exchange(20, 7))
+        store.clear_pending("rollout", "call-2")
+
+    writer = asyncio.create_task(land_write())
+    result = await capture.usage()
+    await writer
+    assert result.total_tokens == 40
+
+
+async def test_a_capture_write_never_landing_makes_usage_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "nemo_gym.rollouts.model_usage.await_model_call_capture_quiescence",
+        partial(await_model_call_capture_quiescence, timeout_s=0.1),
+    )
+    store = CaptureStore(tmp_path)
+    capture = await _capture(tmp_path)
+    store.record("rollout", _exchange())
+    store.mark_pending("rollout", "call-2")
+    assert await capture.usage() is None
+
+
+def test_offset_reads_from_an_append_boundary(tmp_path):
+    store = CaptureStore(tmp_path)
+    assert store.offset("rollout") == 0
+    store.record("rollout", _exchange(1000))
+    end = store.offset("rollout")
+    assert store.read_available("rollout", start_offset=end) == ([], 0)
+    store.record("rollout", _exchange())
+    assert store.read_available("rollout", start_offset=end) == ([(0, _exchange())], 0)
+    with pytest.raises(OSError, match="truncated"):
+        store.read_available("rollout", start_offset=store.offset("rollout") + 1)
+    store.path_for("rollout").unlink()
+    with pytest.raises(FileNotFoundError):
+        store.read_available("rollout", start_offset=end)

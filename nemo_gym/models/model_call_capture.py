@@ -251,7 +251,11 @@ class CaptureStore:
     def read_available(
         self, rollout_id: str, *, start_offset: int = 0
     ) -> tuple[list[tuple[int, dict[str, Any]]], int]:
-        """Read valid exchanges without letting one damaged line hide the rest."""
+        """Read valid exchanges without letting one damaged line hide the rest.
+
+        ``start_offset`` must come from ``offset()``; reading starts there and the returned capture indices count
+        from it. Raises ``OSError`` if the file shrank below the offset, or ``FileNotFoundError`` if it vanished.
+        """
         path = self.path_for(rollout_id)
         if not path.exists() and start_offset == 0:
             return [], 0
