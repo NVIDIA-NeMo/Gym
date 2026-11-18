@@ -121,8 +121,9 @@ video_qa_rubric_agentic_opencode:
           # /testbed/videos. `opencode run` rejects every request that would ask, and a rejection ends the run with
           # no answer. The sandbox holds only this task, so allow every path.
           external_directory: allow
-          # OpenCode also asks when the model repeats an identical tool call, and that rejection ends the run too.
-          doom_loop: allow
+          # OpenCode also asks when one model response calls a tool a third time in a row with identical input
+          # (doom_loop), and that rejection ends the run too, as in the rollouts of our agentic video training data.
+          doom_loop: ask
         compaction:
           # Automatic compaction continues from a summary, in model calls that training cannot join to the scored
           # call. With it off, a run that fills the context ends with a context-limit error, scored 0.
