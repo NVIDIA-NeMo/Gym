@@ -29,6 +29,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     TaskId,
 )
+from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, current_model_sampling_segment
 from nemo_gym.server_runtime import (
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
@@ -282,6 +283,33 @@ class TestEpisode:
         # The episode's tools stop with it.
         assert server._open_episodes == {}
 
+    @pytest.mark.parametrize("training", [False, True])
+    async def test_its_own_model_calls_keep_their_sampling_in_a_training_run(self, training: bool) -> None:
+        # As a resources server's: `null` in a run that sets model_call_sampling, so a trained agent's Model Server,
+        # which refuses a call without a segment, takes them. The agent's calls are not this server's to mark.
+        server = _server()
+        world = _world(server)
+        if training:
+            server.server_client.global_config_dict = OmegaConf.merge(
+                server.server_client.global_config_dict,
+                {
+                    "policy_model": {"responses_api_models": {"vllm_model": {"entrypoint": "app.py"}}},
+                    "model_call_sampling": {"required_model_servers": ["policy_model"]},
+                },
+            )
+        seen: list[tuple[str, str | None]] = []
+
+        async def post(**kwargs: Any) -> Any:
+            seen.append((kwargs["server_name"], current_model_sampling_segment()))
+            return await world.post(**kwargs)
+
+        server.server_client.post = AsyncMock(side_effect=post)
+        response = await server.run_request(_request())
+
+        assert response.failure is None, response.failure
+        own = MODEL_SAMPLING_NULL if training else None
+        assert seen == [(AGENT, None), (AGENT, None), ("simulator", own), (AGENT, None), ("judge_0", own)]
+
     async def test_the_simulator_sees_the_earlier_calls_of_the_episode(self) -> None:
         server = _server()
         world = _world(server)
@@ -437,6 +465,35 @@ class TestToolset:
         assert turn[0]["call_id"] == turn[1]["call_id"] == "p1" and json.loads(turn[2]["arguments"]) == {
             "command": "ls"
         }
+
+    async def test_the_simulator_sees_only_the_results_the_policy_saw(self) -> None:
+        def record(name: str, call_id: str, output: Any, is_error: bool = False) -> ToolCallRecord:
+            return ToolCallRecord(
+                name=name, arguments={}, output=output, is_error=is_error, duration_seconds=0, call_id=call_id
+            )
+
+        toolset = self._toolset(ROW)
+        toolset.bind(
+            [
+                # A failed attempt the agent retried under the same call id, then its answer.
+                record("read_file", "p1", {"detail": "Tool 'read_file' failed: RuntimeError"}, is_error=True),
+                record("read_file", "p1", "A"),
+                # A tool the row lacks: the agent answered it with its own refusal.
+                record("browse", "p2", {"detail": "Episode 0-0 has no tool 'browse'"}, is_error=True),
+                # A failed simulation is an answer the policy saw.
+                record("bash", "p3", "[tool simulator failed] HTTP 503", is_error=True),
+                # This call's own failed first attempt.
+                record("bash", "p4", {"detail": "Tool 'bash' did not finish within 60 seconds"}, is_error=True),
+            ]
+        )
+        turn = toolset.turn_so_far("bash", {"command": "ls"})
+        assert [(item["call_id"], item.get("output")) for item in turn] == [
+            ("p1", None),
+            ("p1", "A"),
+            ("p3", None),
+            ("p3", "[tool simulator failed] HTTP 503"),
+            ("ng_current_call", None),
+        ]
 
 
 class TestScoringParity:

@@ -29,6 +29,7 @@ crash the row starts over from its input. With several workers, a tool call reac
 
 import asyncio
 import json
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -81,6 +82,7 @@ from nemo_gym.core import (
     model_sampling_path_segment,
     skips_token_capture,
 )
+from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, model_call_sampling_config, model_sampling_context
 from nemo_gym.data import materialize_task
 from nemo_gym.metrics import add_perf_metrics, compute_aggregate_metrics
 from nemo_gym.server_runtime import (
@@ -145,6 +147,18 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
         super().model_post_init(context)
         self._turns = TurnSimulation(self._settings(), self.server_client)
 
+    def _caller_sampling(self) -> AbstractContextManager[None]:
+        """The sampling of this server's own model calls (the tool simulator and the judges) in a training run.
+
+        In a run that sets ``model_call_sampling`` they send ``null``, as a resources server's calls do
+        (``CallerSamplingMiddleware``): they keep their own sampling, and a trained agent's Model Server, which refuses
+        a generation call without a segment, takes them when the simulator or a judge shares it. Only the agent's
+        calls carry the training framework's values.
+        """
+        if model_call_sampling_config(self.server_client.global_config_dict) is None:
+            return nullcontext()
+        return model_sampling_context(MODEL_SAMPLING_NULL)
+
     def _settings(self) -> AgenticTurnSimulationSettings:
         """The settings of the resources server the config names, without that server's own fields."""
         raw = get_first_server_config_dict(self.server_client.global_config_dict, self.config.resources_server.name)
@@ -170,7 +184,7 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
             task_input.task_data | {"responses_create_params": task_input.responses_create_params}
         )
         session = self._turns.new_session(row)
-        toolset = TurnToolset(self._turns, session, row)
+        toolset = TurnToolset(self._turns, session, row, call_context=self._caller_sampling)
         # Registered first, so it runs last: the agent session closes before its tools go away.
         served = await self.serve_tools(request, toolset, cleanup)
         toolset.bind(served.calls)
@@ -220,7 +234,8 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
             self._verify_body(request, response) | verification_failure_fields(response)
         )
         try:
-            verified = await self._turns.verify(body, session)
+            with self._caller_sampling():
+                verified = await self._turns.verify(body, session)
         except Exception as error:
             # A judge that could not be reached fails the row as the resources server's failed /verify does: another
             # attempt may reach it. A judge that refused the call (a 4xx, such as a conversation too long for it) would
