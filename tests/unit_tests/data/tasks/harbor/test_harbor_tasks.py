@@ -2729,22 +2729,19 @@ def test_reward_key_is_refused_for_a_dataset_python_verifier(tmp_path):
 
 
 def test_an_unset_reward_key_leaves_the_digest_of_a_shaping_dataset_unchanged(tmp_path):
-    """Adding `reward_key` to `[gym.defaults]` must not move the digest of a dataset that does not set it: the slice
-    folded into the digest is the defaults as they were before the key existed."""
-    import hashlib
-
+    """Adding `reward_key` to `[gym.defaults]` must not move the digest of a dataset that does not set it. The value
+    is what main computed for this dataset before the key existed, pinned rather than recomputed here, so a change to
+    the digest's inputs fails this test instead of moving its expectation along."""
     from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
     from nemo_gym.data.tasks.harbor.task import task_digest
 
     folder = tmp_path / "ds"
     write_task(folder / "a")
     (folder / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
-    applied = {
-        "defaults": {"timeout_multiplier": 2.0, "resource_multiplier": 1.0},
-        "task": {"environment": {}, "verifier": {}, "artifacts": []},
-    }
-    before = hashlib.sha256(f"folder\n{json.dumps(applied, sort_keys=True)}".encode()).hexdigest()
-    assert task_digest("folder", read_dataset_config(folder), "a") == before
+    assert (
+        task_digest("folder", read_dataset_config(folder), "a")
+        == "6895b51f6c7fbe56884e57c8d71f15168af9f7341fbd94ad56118c1ae6c64713"
+    )
 
 
 def _with_steps(root: Path, names: list[str]) -> Path:
