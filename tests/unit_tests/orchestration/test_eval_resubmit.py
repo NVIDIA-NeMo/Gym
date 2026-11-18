@@ -32,9 +32,9 @@ from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOpera
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.otel import render_collector_config
-from nemo_gym.orchestration.executors.resume_script import RETRY_FILE_NAME, render_resume_prologue
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.resume_script import RETRY_FILE_NAME, render_resume_prologue
+from nemo_gym.orchestration.executors.slurm.script import COLLECTOR_LOCAL_DIR_MARKER, build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     INDEX_RESTORE_JOURNAL_NAME,
     MANIFEST_NAME,
@@ -46,6 +46,7 @@ from nemo_gym.orchestration.jobs import (
     restore_index_entry,
 )
 from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, resubmit
+from tests.helpers.recovery_store_runs import provider_failures_jsonl
 
 
 # Rendered by this Gym, so it carries the line a resubmitted job uses to resume.
@@ -206,7 +207,7 @@ def test_which_executors_support_resubmit(tmp_path: Path, slurm_bin: Path, execu
 def test_recover_on_an_executor_without_a_collector_stops_with_every_recovery_control(
     tmp_path: Path, slurm_bin: Path
 ) -> None:
-    from nemo_gym.orchestration.recovery import RecoveryAction
+    from nemo_gym.eval.recovery.decision import RecoveryAction
     from nemo_gym.orchestration.submit import recover
 
     job_dir = _staged_run(tmp_path, executor=KubernetesExecutor.name)
@@ -896,6 +897,25 @@ def test_a_hand_written_command_with_run_is_still_refused(tmp_path: Path) -> Non
         SubmitConfig.model_validate(_command_policy_config(tmp_path, dict(_DERIVED_POLICY_RUN)))
 
 
+def test_resubmit_points_the_collector_files_where_the_queued_job_sh_expects_them(
+    tmp_path: Path, slurm_bin: Path, ssh_like_shell: None
+) -> None:
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel={"remote_export": False}))
+    collector_path = job_dir / "otel" / "collector.yaml"
+
+    def file_paths() -> set[str]:
+        exporters = yaml.safe_load(collector_path.read_text())["exporters"]
+        return {exporter["path"] for name, exporter in exporters.items() if name.startswith("file/")}
+
+    # A job.sh from before the node-local copy never moves files into the job dir, so its collector writes there.
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+    assert file_paths() == {str(job_dir / "otel" / f"{signal}.jsonl") for signal in ("metrics", "traces", "logs")}
+
+    (job_dir / "job.sh").write_text(_JOB_SH + f"sh -c '{COLLECTOR_LOCAL_DIR_MARKER}\"$dir\"' &\n")
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+    assert file_paths() == {f"${{env:GYM_OTEL_LOCAL_DIR}}/{signal}.jsonl" for signal in ("metrics", "traces", "logs")}
+
+
 def test_resubmit_without_auth_updates_the_collector_and_can_restore_remote_export(
     tmp_path: Path, slurm_bin: Path, ssh_like_shell: None, monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:
@@ -1021,34 +1041,6 @@ def test_recover_refuses_a_job_sh_that_would_reset_the_budget(tmp_path: Path, sl
     assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
 
 
-def _provider_failures(task: int, attempts: int, cap: int) -> str:
-    rows = [
-        {
-            "_ng_task_index": task,
-            "_ng_rollout_index": 0,
-            "_ng_attempt_index": attempt,
-            "failure_kind": "provider_unavailable",
-            "_ng_failure_class": "provider_unavailable",
-            "_ng_failure_terminal": False,
-            "_ng_failure_max_attempts": cap,
-            "_ng_failure_id": f"f{task}-{attempt}",
-            "_ng_failure_events": {
-                f"f{task}-{attempt}": {
-                    "event_id": f"f{task}-{attempt}",
-                    "boundary": "model",
-                    "failure_kind": "provider_unavailable",
-                    "operation": "model_request",
-                    "operation_id": f"op{task}",
-                    "attempt_id": f"a{task}-{attempt}",
-                    "cause_id": None,
-                }
-            },
-        }
-        for attempt in range(attempts)
-    ]
-    return "".join(json.dumps(row) + "\n" for row in rows)
-
-
 def _core_pending(job_dir: Path, monkeypatch: pytest.MonkeyPatch, cap: int) -> list[tuple[int, int]]:
     """The inputs rollout collection's resume would run (`_load_from_cache`), as a resume without resubmit loads it."""
     from types import SimpleNamespace
@@ -1073,7 +1065,7 @@ def test_recover_queues_nothing_when_every_unscored_identity_used_its_attempts(
     from nemo_gym.orchestration.submit import recover
 
     job_dir, _, _ = _resumable_run(tmp_path)
-    (job_dir / "artifacts" / "rollouts_failures.jsonl").write_text(_provider_failures(1, attempts=2, cap=2))
+    (job_dir / "artifacts" / "rollouts_failures.jsonl").write_text(provider_failures_jsonl(1, attempts=2, cap=2))
 
     out = recover(*_handle(job_dir))
 
@@ -1091,7 +1083,7 @@ def test_recover_queues_a_mixed_run_and_the_resume_runs_only_the_eligible_identi
     artifacts = job_dir / "artifacts"
     rows = [{"_ng_task_index": t, "_ng_rollout_index": 0} for t in range(3)]
     (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-    (artifacts / "rollouts_failures.jsonl").write_text(_provider_failures(1, attempts=2, cap=2))
+    (artifacts / "rollouts_failures.jsonl").write_text(provider_failures_jsonl(1, attempts=2, cap=2))
 
     out = recover(*_handle(job_dir))
 
@@ -1145,7 +1137,7 @@ def test_recovery_does_not_reconstruct_an_unknown_manual_budget_epoch(tmp_path, 
 
 
 def test_recover_refuses_unbounded_saved_prologue_before_dispatch(tmp_path, slurm_bin):
-    from nemo_gym.orchestration.executors.resume_script import BOUNDED_BUDGET_MARKER
+    from nemo_gym.orchestration.executors.slurm.resume_script import BOUNDED_BUDGET_MARKER
     from nemo_gym.orchestration.submit import recover
 
     job_dir, script, _ = _resumable_run(tmp_path)
@@ -1161,7 +1153,7 @@ def test_resubmit_refuses_a_chain_without_scheduler_cause_admission_before_dispa
     tmp_path: Path, slurm_bin: Path, recover_budget: bool
 ) -> None:
     # A job.sh rendered before scheduler-cause admission retries FAILED, OUT_OF_MEMORY and DEADLINE jobs.
-    from nemo_gym.orchestration.executors.resume_script import SCHEDULER_CAUSE_MARKER
+    from nemo_gym.orchestration.executors.slurm.resume_script import SCHEDULER_CAUSE_MARKER
     from nemo_gym.orchestration.submit import recover
 
     job_dir, script, _ = _resumable_run(tmp_path)
@@ -1188,7 +1180,7 @@ def test_recover_keeps_an_eligible_infrastructure_retry_and_spent_budgets(tmp_pa
 
 @pytest.mark.parametrize("recover_budget", [True, False])
 def test_resubmit_refuses_old_allocation_accounting_capability(tmp_path, slurm_bin, recover_budget):
-    from nemo_gym.orchestration.executors.resume_script import ALLOCATION_ACCOUNTING_MARKER
+    from nemo_gym.orchestration.executors.slurm.resume_script import ALLOCATION_ACCOUNTING_MARKER
     from nemo_gym.orchestration.submit import recover
 
     job_dir, script, _ = _resumable_run(tmp_path)

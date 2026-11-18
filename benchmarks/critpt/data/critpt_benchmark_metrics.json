@@ -4,8 +4,10 @@
     "jsonl_fpath": "benchmarks/critpt/data/critpt_benchmark.jsonl",
     "prepare_script": "benchmarks/critpt/prepare.py",
     "prompt_config": "benchmarks/critpt/prompts/turn1.yaml",
-    "num_repeats": 1,
-    "Number of examples": 0,
+    "num_repeats": 5,
+    "prepare_project": null,
+    "prepare_dependencies": [],
+    "Number of examples": 350,
     "Number of tools": {
         "Total # non-null values": 0,
         "Average": 0.0,
@@ -33,5 +35,21 @@
         "Min": 0.0,
         "Max": 0.0,
         "Standard deviation": 0.0
+    },
+    "problem_id": {
+        "unique_count": 70,
+        "total_count": 350
+    },
+    "problem": {
+        "unique_count": 70,
+        "total_count": 350
+    },
+    "code_template": {
+        "unique_count": 70,
+        "total_count": 350
+    },
+    "uuid": {
+        "unique_count": 70,
+        "total_count": 350
     }
 }

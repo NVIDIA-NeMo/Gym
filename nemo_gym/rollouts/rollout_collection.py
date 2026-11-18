@@ -54,7 +54,10 @@ from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.artifacts.rollout_rows import (
     NG_DISPATCH_DRAINED_KEY,
     NG_FAILURE_CLASS_KEY,
+    NG_FAILURE_COUNTS_AS_ZERO_KEY,
+    NG_FAILURE_MAX_ATTEMPTS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
     _rollout_for_export,
 )
 from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
@@ -164,6 +167,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     observed_elapsed,
     resume_drift_path_for,
     run_lock,
+    unsettled_masked_note,
 )
 from nemo_gym.rollouts.rollout_recovery import (
     _get_max_rollout_attempts as _get_max_rollout_attempts,
@@ -172,6 +176,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     record_resubmit_offset as record_resubmit_offset,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.rollouts.tool_telemetry import record_tool_telemetry
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
@@ -350,13 +355,6 @@ def is_non_superseding_rollout_row(row: Mapping[str, Any]) -> bool:
     )
 
 
-NG_TERMINAL_KEY = "_ng_failure_terminal"
-# Set by the producer of a final failure row that must be counted as a zero in the metrics, whatever
-# count_failure_classes_as_zero names (a rollout the evaluated model failed, for example).
-NG_FAILURE_COUNTS_AS_ZERO_KEY = "_ng_failure_counts_as_zero"
-# The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
-# instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
-NG_FAILURE_MAX_ATTEMPTS_KEY = "_ng_failure_max_attempts"
 NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
@@ -1711,6 +1709,7 @@ class SharedRolloutCollectionConfig(
         retryable: bool,
         made_progress: bool,
         final_zero_rows: Sequence[Mapping[str, Any]] = (),
+        unsettled_note: str = "",
     ) -> IncompleteEvaluationError | None:
         """The error that rejects unfinished work, or None; omissions alongside completed tasks are allowed.
 
@@ -1721,7 +1720,8 @@ class SharedRolloutCollectionConfig(
 
         ``final_zero_rows`` are failure rows that settle their rollout as a scored zero (see
         ``_final_zero_failure_rows``): resume does not run them again, so they are completed samples. A caller that
-        passes ``completed`` has already counted them.
+        passes ``completed`` has already counted them. ``unsettled_note`` names masked results that are not settled
+        (``unsettled_masked_note``) and is added to the message.
         """
         if not self.require_complete and not intentionally_omitted:
             return None
@@ -1755,7 +1755,8 @@ class SharedRolloutCollectionConfig(
             return IncompleteEvaluationError(
                 f"EVAL FAILED: {completed}/{expected} samples completed. "
                 f"Partial artifacts retained at {self.output_jsonl_fpath}."
-                + (" No tasks are eligible for retry." if not retryable else ""),
+                + (" No tasks are eligible for retry." if not retryable else "")
+                + (f" {unsettled_note}" if unsettled_note else ""),
                 retryable=retryable,
                 made_progress=made_progress,
             )
@@ -4817,6 +4818,8 @@ executions → not run again (left to recovery)
                         health_ignored_checks,
                         health_span_context,
                     )
+                if health_metrics_enabled or health_span_context is not None:
+                    await asyncio.to_thread(record_tool_telemetry, result, health_span_context)
 
             collection_succeeded = True
 
@@ -4918,10 +4921,11 @@ executions → not run again (left to recovery)
             rejection = config.completion_rejection(
                 expected=completion["expected"],
                 results=persisted_results,
-                completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
+                completed=completion["settled"],
                 intentionally_omitted=completion["intentionally_omitted"],
                 retryable=completion["retryable"] > 0,
                 made_progress=store.progress_outcomes_recorded > 0,
+                unsettled_note=unsettled_masked_note(completion),
             )
         if config.disable_aggregation:
             print(
@@ -5835,6 +5839,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         record_output_dir: Optional[Path | str] = None,
         record_shard: Optional[str] = None,
         record_omitted_rollouts: bool = False,
+        scope_rollout_ids: bool = True,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -5922,7 +5927,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         shard's run, and the Store, the run health check and ``gym eval aggregate`` read the shard like an eval run.
         Each copy's rollout id is the row's own id (its ``_ng_rollout_id``, or ``<task>-<rollout>``) prefixed with the
         shard's run id, so the shard's model calls are captured under keys of its own; a caller that looks a capture up
-        reads its key from the returned row (``maybe_rollout_id_from_run_body``). ``gym eval run`` with
+        reads its key from the returned row (``maybe_rollout_id_from_run_body``).
+
+        ``scope_rollout_ids=False`` keeps each row's own id instead, for a caller whose ids are already unique across
+        calls (a trainer that tracks rollouts and token capture by the id it dispatched). Rows that would share an id
+        in one call are still refused, but nothing checks across calls: a row dispatched again under an id an earlier
+        call used (a step replayed under the same shard label, or a returned row fed back with its id) shares that
+        call's capture file, and the later shard's records silently carry the earlier shard's model calls. It only
+        applies with ``record_output_dir``: a call that records no shard already dispatches each row under its own id.
+
+        ``gym eval run`` with
         ``+input_jsonl_fpath=<dir>/rollouts-<shard>_materialized_inputs.jsonl +output_jsonl_fpath=<dir>/rollouts-<shard>.jsonl
         +resume_from_cache=true`` resumes a shard and runs only what it still lacks.
         """
@@ -6023,12 +6037,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 for row in examples
             ]
             if record_output_dir is not None:
-                # A recorded shard names its rollouts within its run, so its capture keys are its own. Two rows that
-                # come to the same id (a row fed back as `<earlier run>.0` beside a new `0`) would share capture files
-                # and one manifest identity: refused before dispatch and before the shard is replaced.
+                # A scoped shard names its rollouts within its run, so its capture keys are its own; unscoped, the
+                # caller's ids are used as they are. Either way, two rows in this call that come to the same id (a row
+                # fed back as `<earlier run>.0` beside a new `0`) would share capture files and one manifest identity:
+                # refused before dispatch and before the shard is replaced.
                 sources: Dict[str, Tuple[int, str]] = {}
                 for index, (row, copy) in enumerate(zip(examples, dispatched)):
-                    scoped = copy[ROLLOUT_ID_KEY_NAME] = _shard_rollout_id(row, run_id)
+                    scoped = copy[ROLLOUT_ID_KEY_NAME] = (
+                        _shard_rollout_id(row, run_id) if scope_rollout_ids else logical_rollout_id(dict(row))
+                    )
                     check_rollout_id_length(scoped)  # the run-id prefix makes a long id longer
                     if scoped in sources:
                         first, source = sources[scoped]
@@ -6567,6 +6584,7 @@ class RolloutAggregationHelper(BaseModel):
             "failure_budget_exhausted": sum(c["failure_budget_exhausted"] for c in components)
             if inventory_known
             else None,
+            "masked_exhausted": sum(c.get("masked_exhausted", 0) for c in components) if inventory_known else None,
             "max_rollout_attempts": components[0]["max_rollout_attempts"]
             if components and len({c["max_rollout_attempts"] for c in components}) == 1
             else None,

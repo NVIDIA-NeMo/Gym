@@ -62,6 +62,9 @@ LOGGER = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+# Non-process exec sentinel, shared with the other providers.
+SANDBOX_RUNTIME_RETURN_CODE = 125
+
 # Conservative direct-template shortcut. E2B also supports tagged names such
 # as ``name:v1`` and template IDs, but those must be explicit because ``:`` and
 # other punctuation overlap with OCI image syntax in ``SandboxSpec.image``.
@@ -338,9 +341,14 @@ class E2BProvider:
         options = spec.provider_options or {}
         if not isinstance(options, Mapping):
             raise TypeError("E2B provider_options must be a mapping")
-        unknown = set(options) - {"template"}
+        unknown = set(options) - {"template", "resource_requests"}
         if unknown:
-            raise ValueError(f"Unknown E2B provider option(s): {', '.join(sorted(unknown))}. Supported: template")
+            raise ValueError(
+                f"Unknown E2B provider option(s): {', '.join(sorted(unknown))}. Supported: template, resource_requests"
+            )
+        requests = options.get("resource_requests")
+        if requests is not None and requests != "limits" and not isinstance(requests, Mapping):
+            raise TypeError("E2B provider option 'resource_requests' must be a mapping or 'limits'")
         option = options.get("template")
         if option is not None:
             if not isinstance(option, str) or not option:
@@ -376,6 +384,11 @@ class E2BProvider:
             for name in ("cpu", "memory_mib", "disk_gib", "gpu", "gpu_type")
             if getattr(resources, name, None) is not None
         }
+        # Scheduling hints for other providers (OpenSandbox) are also fixed by the template here.
+        # "limits" means requests equal to SandboxSpec.resources, which are already reported above.
+        scheduling = (spec.provider_options or {}).get("resource_requests")
+        if isinstance(scheduling, Mapping):
+            requested.update({f"resource_requests.{name}": value for name, value in scheduling.items()})
         if not requested:
             return
         detail = ", ".join(f"{key}={value}" for key, value in sorted(requested.items()))
@@ -807,6 +820,8 @@ class E2BProvider:
         kwargs["request_timeout"] = self._exec_request_timeout()
 
         timeout_exc = getattr(e2b, "TimeoutException", None)
+        # E2B 2.62+; a TimeoutException subclass, so check it first.
+        not_running_exc = getattr(e2b, "SandboxNotRunningException", None)
         exit_exc = getattr(e2b, "CommandExitException", None)
         try:
             if self._exec.background:
@@ -820,6 +835,15 @@ class E2BProvider:
                     stdout=getattr(exc, "stdout", None),
                     stderr=getattr(exc, "stderr", None),
                     return_code=int(getattr(exc, "exit_code", 1) or 1),
+                )
+            # The sandbox was killed, paused or reached its lifetime (ttl_s): the
+            # command has no exit code and retrying on this sandbox cannot help.
+            if isinstance(not_running_exc, type) and isinstance(exc, not_running_exc):
+                return SandboxExecResult(
+                    stdout=None,
+                    stderr=f"e2b sandbox is not running: {exc}",
+                    return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                    error_type="sandbox",
                 )
             # E2B uses one TimeoutException for stream-open timeouts, the
             # running stream deadline, sandbox expiry and server cancellation.

@@ -204,6 +204,7 @@ def _bare_agent(**config):
         replay_through_target=False,
         debug=False,
         model_server=SimpleNamespace(name="policy_model"),
+        outcome_policy=AGENT._default_commit_outcome_policy(),
     )
     agent = AGENT.PrefixPassKAgent.__new__(AGENT.PrefixPassKAgent)
     object.__setattr__(agent, "config", SimpleNamespace(**(defaults | config)))
@@ -497,7 +498,7 @@ class RepoSandbox:
 
     async def exec(self, command, timeout_s=None):
         done = self.run(command)
-        return SimpleNamespace(stdout=done.stdout, stderr=done.stderr, return_code=done.returncode)
+        return SimpleNamespace(stdout=done.stdout, stderr=done.stderr, return_code=done.returncode, error_type=None)
 
 
 @pytest.mark.skipif(shutil.which("git") is None or shutil.which("bash") is None, reason="needs git and bash")
@@ -895,3 +896,499 @@ class TestSandboxIsReleasedOnEveryExit:
         result = asyncio.run(agent.run(request, body))
         assert result.reward == 1.0
         self._assert_released(agent, stops)
+
+
+@pytest.mark.parametrize(
+    "failure,kind",
+    [
+        (_result(stderr="provider error", error_type="sandbox"), "provider_request_failed"),
+        (_result(stderr="empty provider error marker", error_type=""), "provider_request_failed"),
+        (_result(stderr="timed out", error_type="timeout"), "provider_io_timeout"),
+        (ConnectionResetError("peer reset"), "transport_peer_drop"),
+        (RuntimeError("provider error"), "provider_request_failed"),
+        (TimeoutError("commit timed out"), "provider_io_timeout"),
+    ],
+)
+def test_failed_required_commit_masks_attempt_and_releases_sandbox(monkeypatch, failure, kind):
+    """A failed commit never produces an ordinary score, including a lucky pass."""
+    helper = TestSandboxIsReleasedOnEveryExit()
+
+    async def responses(request, params):
+        """Complete generation before the required commit is attempted."""
+        return helper._response()
+
+    agent, stops, request, body = helper._agent(monkeypatch, responses, lambda req: req | {"reward": 1.0})
+    agent.config.commit_worktree = True
+    agent.config.uncommit_worktree = True
+    connect = agent._connect_sandbox
+
+    async def exec_command(command, timeout_s=None):
+        """Inject a provider failure into the required commit command."""
+        assert "git add -A" in command
+        assert timeout_s == 300
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    async def connect_with_exec(seed):
+        """Attach the failing command transport to the tracked sandbox."""
+        sandbox = await connect(seed)
+        sandbox.exec = exec_command
+        return sandbox
+
+    async def must_not_uncommit(*args):
+        """Reject further Git mutations after a required commit fails."""
+        raise AssertionError("uncommit ran after a failed required commit")
+
+    object.__setattr__(agent, "_connect_sandbox", connect_with_exec)
+    object.__setattr__(agent, "_uncommit_worktree", must_not_uncommit)
+    result = asyncio.run(agent.run(request, body))
+    assert (result.reward, result.mask_sample, result.exec_errors, result.failure_kind) == (0.0, True, 1, kind)
+    assert "worktree commit failed" in result.failure_reason
+    helper._assert_released(agent, stops)
+
+
+def test_successful_required_commit_completes():
+    """A successful commit remains available to committed-only collectors."""
+    sandbox = FakeSandbox(_result())
+    asyncio.run(_bare_agent()._commit_worktree(sandbox))
+    assert len(sandbox.commands) == 1
+    assert "git add -A" in sandbox.commands[0]
+
+
+def _write_decisive_capture(root, batch, bisect, traces):
+    """Write a synthetic on-disk bisect and its captured requests and responses."""
+    result_dir = root / "results" / f"{batch}.bisect"
+    result_dir.mkdir(parents=True)
+    (result_dir / "earliest_passing.json").write_text(json.dumps(bisect))
+    for instance, turns in traces.items():
+        trace_dir = root / "traces_decisive" / batch / instance
+        trace_dir.mkdir(parents=True)
+        for index, turn in reversed(list(enumerate(turns, start=1))):
+            (trace_dir / f"turn_{index:02}.json").write_text(json.dumps(turn))
+
+
+def _captured_turn(messages, content="", calls=None, status=200):
+    """Construct one captured backend exchange without contacting a model."""
+    return {
+        "request": {"messages": messages},
+        "response_status": status,
+        "response": {"choices": [{"message": {"content": content, "tool_calls": calls}}]},
+    }
+
+
+@pytest.mark.parametrize("benchmark", ["verified", "pro"])
+def test_backticks_builders_join_tasks_and_exclude_decisive_turn(tmp_path, monkeypatch, benchmark):
+    """Build complete rows with transport retries and a captured format-error observation."""
+    from benchmarks.prefix_pass_k import prepare, prepare_pro
+
+    batch = "synthetic"
+    tasks, bisect, traces = [], {}, {}
+    for label in ("b", "a"):
+        bare_id = f"repo__{label}"
+        instance_id = f"instance_{bare_id}" if benchmark == "pro" else bare_id
+        bisect[f"instance_{bare_id}"] = {"full_patch_resolved": True, "earliest_turn": 4}
+        opening = [{"role": "system", "content": "sys"}, {"role": "user", "content": f"task {label}"}]
+        retry_messages = opening + [{"role": "user", "content": f"command output {label}"}]
+        traces[instance_id] = [
+            _captured_turn(opening, "```mswea_bash_command\nls\n```"),
+            _captured_turn(retry_messages, status=504),
+            _captured_turn(retry_messages, "not an action"),
+            _captured_turn(
+                opening + [{"role": "user", "content": f"format error {label}"}],
+                "```mswea_bash_command\nDECISIVE\n```",
+            ),
+        ]
+        tasks.append({"instance_id": instance_id, "repo": f"repo/{label}", "base_commit": f"base-{label}"})
+    _write_decisive_capture(tmp_path, batch, bisect, traces)
+    output = tmp_path / "output.jsonl"
+    if benchmark == "verified":
+        monkeypatch.setattr(prepare, "load_dataset", lambda *args, **kwargs: tasks)
+        monkeypatch.setattr(prepare, "get_hf_token", lambda: None)
+        prepare.build(tmp_path, batch, None, output)
+    else:
+        task_file = tmp_path / "tasks.jsonl"
+        task_file.write_text("".join(json.dumps(task) + "\n" for task in tasks))
+        prepare_pro.build(tmp_path, batch, None, output, task_file)
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(rows) == 2
+    for row, label in zip(rows, ("a", "b"), strict=True):
+        assert (row["repo"], row["base_commit"]) == (f"repo/{label}", f"base-{label}")
+        assert row["responses_create_params"]["input"][-1]["content"] == f"task {label}"
+        block = row["prefix_pass_k"]
+        assert (block["target_turn"], block["n_prefix_turns"], block["n_prefix_actions"]) == (4, 2, 1)
+        assert [step["turn"] for step in block["prefix"]] == [1, 3]
+        assert block["prefix"][0]["action"] == "ls"
+        assert block["prefix"][1]["observation"] == f"format error {label}"
+        assert block["target"]["action"] == "DECISIVE"
+
+
+def test_deepswe_builder_joins_full_task_names_and_preserves_multicall_observations(tmp_path):
+    """Trials with the same truncated name retain their own tasks, calls and observations."""
+    from benchmarks.prefix_pass_k import prepare_deepswe
+
+    batch = "synthetic"
+    common = "shared-task-name-" + "x" * 16
+    tasks, bisect, traces, trials = [], {}, {}, []
+    calls = [_call("first", "bash", '{"command": "ls"}'), _call("second", "bash", '{"command": "pwd"}')]
+    for label in ("b", "a"):
+        task_id, trial = f"{common}-{label}", f"{common}__{label}"
+        trials.append(trial)
+        tasks.append({"task_id": task_id, "image": f"image-{label}", "verifier_metadata": {"label": label}})
+        bisect[trial] = {"task_name": task_id, "earliest_turn": 4}
+        opening = [{"role": "user", "content": f"task {label}"}]
+        observations = opening + [
+            {"role": "tool", "tool_call_id": "second", "content": f"pwd {label}"},
+            {"role": "tool", "tool_call_id": "first", "content": f"ls {label}"},
+        ]
+        traces[trial] = [
+            _captured_turn(opening, calls=calls),
+            _captured_turn(observations, status=504),
+            _captured_turn(observations, "retry without calls"),
+            _captured_turn(
+                opening + [{"role": "user", "content": f"format error {label}"}],
+                calls=[_call("target", "bash", '{"command": "DECISIVE"}')],
+            ),
+        ]
+    _write_decisive_capture(tmp_path, batch, bisect, traces)
+    task_file, pool, output = (tmp_path / name for name in ("tasks.jsonl", "pool.txt", "output.jsonl"))
+    task_file.write_text("".join(json.dumps(task) + "\n" for task in reversed(tasks)))
+    pool.write_text("\n".join(trials))
+    prepare_deepswe.build(tmp_path, batch, pool, output, task_file)
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(rows) == 2
+    for row, label in zip(rows, ("b", "a"), strict=True):
+        assert (row["task_id"], row["image"], row["verifier_metadata"]) == (
+            f"{common}-{label}",
+            f"image-{label}",
+            {"label": label},
+        )
+        assert row["responses_create_params"]["input"] == [{"role": "user", "content": f"task {label}"}]
+        block = row["prefix_pass_k"]
+        assert (block["target_turn"], block["n_prefix_turns"], block["n_prefix_actions"]) == (4, 2, 2)
+        assert [step["turn"] for step in block["prefix"]] == [1, 3]
+        assert block["prefix"][0]["tool_calls"] == calls
+        assert block["prefix"][0]["captured_observations"] == [f"ls {label}", f"pwd {label}"]
+        assert block["prefix"][1]["observation"] == f"format error {label}"
+        assert block["target"]["action"] == "DECISIVE"
+
+
+@pytest.mark.skipif(shutil.which("git") is None or shutil.which("bash") is None, reason="needs git and bash")
+@pytest.mark.parametrize("reject_commit", [False, True])
+@pytest.mark.parametrize("verify_fails", [False, True])
+def test_required_commit_with_real_git(tmp_path, monkeypatch, reject_commit, verify_fails):
+    """Score Git rejection as an unmasked zero and successful commits with the verifier reward."""
+    repo = RepoSandbox(tmp_path)
+    initialized = repo.run("git init -q && printf base > tracked && git add tracked && git commit -qm base")
+    assert initialized.returncode == 0, initialized.stderr
+    assert repo.run("git config user.name seed && git config user.email seed@example.com").returncode == 0
+    repo.ENV = {"PATH": os.environ["PATH"]}
+    helper = TestSandboxIsReleasedOnEveryExit()
+    verified = []
+
+    async def responses(request, params):
+        """Apply candidate edits and optionally invalidate the repository's Git identity."""
+        (tmp_path / "tracked").write_text("candidate change")
+        (tmp_path / "new-file").write_text("untracked change")
+        staged = repo.run("git add tracked")
+        assert staged.returncode == 0
+        if reject_commit:
+            assert repo.run("git config --local user.name ''").returncode == 0
+        return helper._response()
+
+    def verify(params):
+        """Read committed files as a committed-only collector would."""
+        verified.append(repo.run("git show HEAD:tracked").stdout)
+        if verify_fails:
+            raise RuntimeError("verifier failed after commit rejection")
+        return params | {"reward": 1.0}
+
+    agent, stops, request, body = helper._agent(monkeypatch, responses, verify)
+    agent.config.commit_worktree = True
+    agent.config.uncommit_worktree = True
+    connect = agent._connect_sandbox
+    commands = []
+
+    async def exec_command(command, timeout_s=None):
+        """Execute the required commit in a real Git repository."""
+        commands.append(command)
+        return await repo.exec(command, timeout_s=timeout_s)
+
+    async def connect_with_exec(seed):
+        """Attach real Git execution while retaining the sandbox cleanup recorder."""
+        sandbox = await connect(seed)
+        sandbox.exec = exec_command
+        return sandbox
+
+    async def uncommit(sandbox, base):
+        """Ensure only successful commits permit later Git mutations."""
+        assert not reject_commit
+
+    object.__setattr__(agent, "_connect_sandbox", connect_with_exec)
+    object.__setattr__(agent, "_uncommit_worktree", uncommit)
+    if verify_fails and not reject_commit:
+        with pytest.raises(RuntimeError, match="verifier failed"):
+            asyncio.run(agent.run(request, body))
+    else:
+        result = asyncio.run(agent.run(request, body))
+        assert (result.reward, result.mask_sample) == (0.0 if reject_commit else 1.0, False)
+        if reject_commit:
+            assert result.failure_kind == "git_worktree_commit_rejected"
+            assert "worktree commit rejected" in result.failure_reason
+        else:
+            assert repo.run("git show HEAD:new-file").stdout == "untracked change"
+    assert verified == ["base" if reject_commit else "candidate change"]
+    assert len(commands) == 1
+    helper._assert_released(agent, stops)
+
+
+@pytest.mark.parametrize("return_code", [1, 128])
+def test_plain_git_exit_is_not_evidence_of_infrastructure_failure(return_code):
+    """Ambiguous nonzero process exits follow the unmasked task-failure policy."""
+    with pytest.raises(AGENT.NgFailureEvent, match=f"exit={return_code}") as caught:
+        asyncio.run(_bare_agent()._commit_worktree(FakeSandbox(_result(return_code=return_code))))
+    assert caught.value.failure_kind == "git_worktree_commit_rejected"
+    assert caught.value.stage == "verification"
+
+
+def _commit_policy_config(**overrides):
+    """Validate a real prefix-agent configuration with optional policy overrides."""
+    return AGENT.PrefixPassKAgentConfig(
+        name="agent",
+        host="127.0.0.1",
+        port=0,
+        entrypoint="app.py",
+        sandbox_provider="sandbox",
+        resources_server={"type": "resources_servers", "name": "resources"},
+        model_server={"type": "responses_api_models", "name": "model"},
+        **overrides,
+    )
+
+
+def _run_commit_attempt(monkeypatch, failure, *, policy=None, verify_report=None):
+    """Run generation, a failed required commit and verifier cleanup through the real agent method."""
+    from nemo_gym.core import FailureReportRow, RequestFailureLog
+
+    helper = TestSandboxIsReleasedOnEveryExit()
+    verified = []
+
+    async def responses(request, params):
+        """Return a completed candidate turn before commit preparation."""
+        return helper._response()
+
+    def verify(params):
+        """Offer a stale passing score and retain independent verifier evidence."""
+        verified.append(params)
+        return params | {"reward": 1.0} | (FailureReportRow.fields(verify_report) if verify_report else {})
+
+    agent, stops, request, body = helper._agent(monkeypatch, responses, verify)
+    agent.config.commit_worktree = True
+    agent.config.uncommit_worktree = True
+    agent.config.outcome_policy = policy or _commit_policy_config().outcome_policy
+    connect = agent._connect_sandbox
+    commands = []
+
+    async def exec_command(command, timeout_s=None):
+        """Return or raise the supplied commit failure without fabricating a verifier result."""
+        commands.append(command)
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    async def connect_with_exec(seed):
+        """Attach command execution to the sandbox whose release the fixture records."""
+        sandbox = await connect(seed)
+        sandbox.exec = exec_command
+        return sandbox
+
+    async def uncommit(*args):
+        """Reject mutations following any failed commit, independent of the selected outcome."""
+        raise AssertionError("uncommit after a failed required commit")
+
+    object.__setattr__(agent, "_connect_sandbox", connect_with_exec)
+    object.__setattr__(agent, "_uncommit_worktree", uncommit)
+    with RequestFailureLog.capture() as log:
+        result = asyncio.run(agent.run(request, body))
+    helper._assert_released(agent, stops)
+    assert len(verified) == len(commands) == 1
+    saved = AGENT.PrefixPassKVerifyResponse.model_validate_json(result.model_dump_json())
+    return saved, log.report
+
+
+@pytest.mark.parametrize("action,masked", [("count_as_zero", False), ("fail", True)])
+def test_commit_rejection_policy_is_saved_with_failure_report(monkeypatch, action, masked):
+    """A configured rejection decision survives JSON persistence and never accepts the stale pass."""
+    from nemo_gym.core import FailureReportRow
+
+    policy = _commit_policy_config(
+        outcome_policy={
+            "by_stage": {"verification": {"by_failure_kind": {"git_worktree_commit_rejected": action}}},
+        }
+    ).outcome_policy
+    result, observed = _run_commit_attempt(
+        monkeypatch, _result(return_code=128, stderr="identity rejected"), policy=policy
+    )
+    assert (result.reward, result.mask_sample, result.failure_outcome_action) == (0.0, masked, action)
+    assert result.failure_outcome_attribution == "model"
+    row = result.model_dump(mode="json")
+    report = FailureReportRow.report(row)
+    event = report.events[report.failure_id]
+    assert (event.boundary, event.failure_kind, event.stage, event.operation) == (
+        "agent",
+        "git_worktree_commit_rejected",
+        "verification",
+        "agent.git_worktree_commit",
+    )
+    assert event.failure_reason.endswith("identity rejected")
+    assert observed.events[event.event_id] == event
+
+
+def test_rejection_attribution_is_independent_of_action(monkeypatch):
+    """A benchmark may keep the counted zero while explicitly declining responsibility attribution."""
+    policy = _commit_policy_config(
+        outcome_policy={
+            "classification": {
+                "by_stage": {"verification": {"by_failure_kind": {"git_worktree_commit_rejected": "unknown"}}}
+            },
+        }
+    ).outcome_policy
+    result, _ = _run_commit_attempt(monkeypatch, _result(return_code=1), policy=policy)
+    assert (result.reward, result.mask_sample) == (0.0, False)
+    assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("count_as_zero", "unknown")
+
+
+@pytest.mark.parametrize("stage", [None, "agent", "seed", "verification"])
+def test_provider_commit_failure_preserves_identity_stage_and_explicit_causes(monkeypatch, stage):
+    """Forwarded provider events keep their identity and causes in successful HTTP result bodies."""
+    from nemo_gym.core import (
+        FailureBoundary,
+        FailureReportRow,
+        NgFailureEvent,
+        SandboxFailureDetails,
+        failure_report_for,
+    )
+
+    cause = NgFailureEvent(
+        boundary=FailureBoundary.SANDBOX,
+        failure_kind="provider_io_timeout",
+        failure_reason="status read timed out",
+        operation="status",
+        stage=stage,
+    )
+    provider = NgFailureEvent(
+        boundary=FailureBoundary.SANDBOX,
+        failure_kind="provider_unavailable",
+        http_status=503,
+        failure_reason="backend unavailable",
+        operation="exec",
+        stage=stage,
+        details=SandboxFailureDetails(provider="docker", sandbox_id="sandbox-id", provider_status_reason="missing"),
+    )
+    provider.__cause__ = cause
+    verifier = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="verifier_error",
+        failure_reason="verifier observed the lost sandbox",
+        stage="verification",
+    )
+    original = failure_report_for(provider)
+    result, observed = _run_commit_attempt(monkeypatch, provider, verify_report=failure_report_for(verifier))
+    assert (result.reward, result.mask_sample, result.failure_outcome_action) == (0.0, True, "fail")
+    assert result.failure_kind == "provider_unavailable"
+    assert result.failure_outcome_attribution == "evaluation"
+    report = FailureReportRow.report(result.model_dump(mode="json"))
+    root = report.events[report.failure_id]
+    assert (root.boundary, root.operation, root.stage, root.cause_id) == (
+        "agent",
+        "agent.git_worktree_commit",
+        stage or "verification",
+        provider.event_id,
+    )
+    for event_id, event in original.events.items():
+        assert report.events[event_id] == observed.events[event_id] == event
+    assert verifier.event_id in report.events
+    assert provider.__cause__ is cause and provider.stage == stage
+
+
+def test_known_origin_selects_agent_policy_instead_of_verification_policy(monkeypatch):
+    """An agent-stage event caught during commit preparation still uses its originating policy."""
+    from nemo_gym.core import NgFailureEvent
+
+    policy = _commit_policy_config(
+        outcome_policy={
+            "by_stage": {"agent": {"by_failure_kind": {"provider_unavailable": "count_as_zero"}}},
+        }
+    ).outcome_policy
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_unavailable",
+        failure_reason="agent operation failed",
+        stage="agent",
+    )
+    result, _ = _run_commit_attempt(monkeypatch, failure, policy=policy)
+    assert (result.reward, result.mask_sample, result.failure_outcome_action) == (0.0, False, "count_as_zero")
+    assert result.failure_outcome_attribution == "evaluation"
+
+
+@pytest.mark.parametrize("stage", ["agent", "seed", "verification", "cleanup"])
+@pytest.mark.parametrize("action", ["retry", "verify"])
+def test_commit_policy_rejects_unsupported_actions(stage, action):
+    """The commit boundary cannot retry uncertain commands or select an unimplemented action."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="supports only fail and count_as_zero"):
+        _commit_policy_config(outcome_policy={"by_stage": {stage: {"default_action": action}}})
+
+
+def test_default_commit_policy_does_not_inherit_verifier_or_oom_retry_rules(monkeypatch):
+    """An empty or partial override retains commit defaults instead of shared verifier retries."""
+    from nemo_gym.core import NgFailureEvent
+
+    policy = _commit_policy_config(
+        outcome_policy={"classification": {"by_status_code": {429: "unknown"}}}
+    ).outcome_policy
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_oom_killed",
+        failure_reason="OOM during preparation",
+        stage="verification",
+    )
+    result, _ = _run_commit_attempt(monkeypatch, failure, policy=policy)
+    assert (result.failure_outcome_action, result.mask_sample) == ("fail", True)
+    rejection, _ = _run_commit_attempt(monkeypatch, _result(return_code=128), policy=policy)
+    assert (rejection.failure_outcome_action, rejection.failure_outcome_attribution) == ("count_as_zero", "model")
+
+
+def test_typed_commit_failure_is_not_replaced_or_mutated():
+    """The provider's typed exception remains the exact explicit cause the boundary receives."""
+    from nemo_gym.core import NgFailureEvent
+
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_request_failed",
+        failure_reason="provider failed",
+        stage="seed",
+    )
+    cause = RuntimeError("SDK failure")
+    failure.__cause__ = cause
+
+    class BrokenSandbox:
+        """Raise an already classified provider event from exec."""
+
+        async def exec(self, command, timeout_s=None):
+            """Preserve a provider failure with an explicit SDK cause."""
+            raise failure
+
+    with pytest.raises(NgFailureEvent) as caught:
+        asyncio.run(_bare_agent()._commit_worktree(BrokenSandbox()))
+    assert caught.value is failure
+    assert failure.__cause__ is cause and failure.stage == "seed"
+
+
+def test_commit_rejection_diagnostics_are_bounded():
+    """Persist bounded rejection diagnostics even when Git returns a large error body."""
+    from nemo_gym.core import NgFailureEvent
+
+    with pytest.raises(NgFailureEvent) as caught:
+        asyncio.run(_bare_agent()._commit_worktree(FakeSandbox(_result(return_code=1, stderr="x" * 10000))))
+    assert len(caught.value.failure_reason) <= 500
