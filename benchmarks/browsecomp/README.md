@@ -147,8 +147,11 @@ failure row: it carries its kind in `failure_kind` and the reason in `failure_re
 The plugin-log breaker (`plugin_log_max_consecutive_failures`, 25 by default) keeps a run whose plugins do not load
 from scoring every remaining episode 0 as the model's. The Resources Server cannot tell that from a model whose tools
 break the log in every episode, which trips the breaker too. Set to 0, the breaker is off, and every such episode
-scores 0. After a trip, find the cause and start a fresh run rather than `gym eval resubmit --recover`: the zeros
-scored before the trip are settled, and recovery does not run them again.
+scores 0. After a trip, stop the run, find the cause and start a fresh run rather than `gym eval resubmit --recover`:
+the zeros scored before the trip are settled, and recovery does not run them again. A resumable run carries on by
+itself: when its job ends, the next job in its chain resumes the run as `--recover` would, with a new Resources Server
+whose count starts at 0, so each later job can score as many episodes 0 again before the breaker trips. To stop the
+run, cancel its running job and the follow-up and sentinel jobs queued in its chain.
 
 ### Training
 

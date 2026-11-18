@@ -393,7 +393,9 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # required_plugin_markers that do not match the run's plugins, fails every episode. A model whose tools break the
     # log in every episode trips it too: the server cannot tell that from a broken bundle. 0 disables it, and every
     # such episode then scores 0. The zeros scored before a trip are settled, and gym eval resubmit --recover does not
-    # run them again: after a trip, find the cause and start a fresh run.
+    # run them again. A resumable run's next job resumes the run on its own, as --recover would, with a new server
+    # whose count starts at 0, so it can score as many again before it trips: after a trip, cancel the run's running
+    # and queued jobs, find the cause and start a fresh run.
     plugin_log_max_consecutive_failures: int = Field(default=25, ge=0)
     # Where the harness writes its session exports in the lent sandbox: opencode_agent's export_dir. opencode_agent's
     # rules apply: an absolute directory other than /, outside its storage, and neither sandbox_workdir, inside it nor

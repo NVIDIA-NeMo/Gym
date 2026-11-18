@@ -186,11 +186,14 @@ a crash an episode starts over from its input.
   plugins, fail the check on every episode, so verify answers 500 once
   `plugin_log_max_consecutive_failures` (25 by default) episodes in a row failed it, for the last of them
   too, and for each later one that fails until a log that passes resets the count: one fewer in a row is
-  scored 0. A model whose tools break its
-  log in every episode trips this breaker too: the server cannot tell that from a bundle that does not
-  load. Set to 0, the breaker is off, and every such episode scores 0. After a trip, find the cause and
-  start a fresh run rather than `gym eval resubmit --recover`: the zeros scored before the trip are
-  settled, and recovery does not run them again. No other line is checked: a forged line, such as an
+  scored 0. A model whose tools break its log in every episode trips this breaker too: the server cannot
+  tell that from a bundle that does not load. Set to 0, the breaker is off, and every such episode
+  scores 0. After a trip, stop the run, find the cause and start a fresh run rather than
+  `gym eval resubmit --recover`: the zeros scored before the trip are settled, and recovery does not run
+  them again. A resumable run carries on by itself: when its job ends, the next job in its chain resumes
+  the run as `--recover` would, in a new server whose count starts at 0, so each later job can score as
+  many episodes 0 again before the breaker trips. To stop the run, cancel its running job and the
+  follow-up and sentinel jobs queued in its chain. No other line is checked: a forged line, such as an
   appended `context_overflow` that masks a wrong answer, is not detected, as on the relay. A verify that
   grades a saved answer again cannot reproduce such a 0 (see Grading semantics).
 
@@ -347,9 +350,10 @@ startup refuses a setting that cannot work:
   Sessions). `required_plugin_markers` lists the lines the log must hold besides the sentinel's.
   `plugin_log_max_consecutive_failures` (25) is how many episodes in a row must fail the check for verify
   to answer 500, for the last of them too, so one fewer is scored 0; a model that breaks its log in every
-  episode trips it too. 0 turns it off, and every such episode scores 0. After a trip, start a fresh run
-  rather than `gym eval resubmit --recover`, which keeps the zeros scored before it (see Plugin log under
-  Sessions).
+  episode trips it too. 0 turns it off, and every such episode scores 0. After a trip, stop the run and
+  start a fresh one rather than `gym eval resubmit --recover`, which keeps the zeros scored before it. A
+  resumable run's next job resumes it as `--recover` would, with the count at 0 again, unless you cancel
+  that job (see Plugin log under Sessions).
 * `episode_export_dir` is the sandbox directory the harness writes its session exports to. It follows
   `opencode_agent`'s rules for `export_dir`: absolute, not `/`, outside `/tmp/nemo-gym-opencode*`, and
   neither `sandbox_workdir`, inside it nor above it. `episode_export_copy_dir` turns on the export copy at
