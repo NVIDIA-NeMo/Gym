@@ -1044,6 +1044,17 @@ class _UnknownUsageModel(_EchoModel):
         return response
 
 
+class _ChatConvertingModel(_EchoModel):
+    """Converts each request to Chat Completions before its backend call, as vllm_model does."""
+
+    backend_called: bool = False
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        ChatCompletionsConverter(return_token_id_information=False).responses_to_chat_completion_create_params(body)
+        object.__setattr__(self, "backend_called", True)
+        return await super().responses(body)
+
+
 def _client(model_cls, *, global_config_dict: dict | None = None) -> tuple[TestClient, SimpleResponsesAPIModel]:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
@@ -1336,6 +1347,20 @@ class TestResponsesDispatchRoute:
         resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
         assert resp.status_code == 400
         assert resp.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
+
+    @pytest.mark.parametrize("keepalive", [False, True], ids=["buffered", "keepalive"])
+    @pytest.mark.parametrize("stream", [False, True], ids=["json", "stream"])
+    def test_hosted_tool_on_a_chat_converting_server_is_refused_with_422(self, stream, keepalive) -> None:
+        # What the Codex CLI sends with web_search = "live". The refusal used to be a 500, or on a stream a
+        # response.failed server_error, which Codex retries as transient.
+        client, server = (_keepalive_client if keepalive else _client)(_ChatConvertingModel)
+        tool = {"type": "web_search", "external_web_access": True}
+        response = client.post("/v1/responses", json={"input": "find the docs", "stream": stream, "tools": [tool]})
+        assert response.status_code == 422
+        assert response.json()["detail"].startswith(
+            "Responses tool type 'web_search' has no Chat Completions conversion"
+        )
+        assert not server.backend_called
 
     def test_non_streaming_backend_error_still_raises(self) -> None:
         # Without the streaming contract, a backend failure is a normal exception (HTTP 500), not a

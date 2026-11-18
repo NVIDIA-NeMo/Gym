@@ -34,7 +34,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.trajectory import AgentObservationBundle
+from nemo_gym.trajectory import AgentObservationBundle, transcript_to_atif
 from responses_api_agents.codex_agent.app import (
     CodexAgent,
     CodexAgentConfig,
@@ -201,6 +201,16 @@ class TestBuildConfig:
         assert provider["stream_idle_timeout_ms"] == 30_000
         assert "model" not in config
         assert "developer_instructions" not in config
+
+    @pytest.mark.parametrize("mode", ["disabled", "cached", "indexed", "live"])
+    def test_web_search_mode_written_to_config(self, mode: str) -> None:
+        config = _make_agent(web_search=mode)._build_config("http://x/v1")
+        assert tomllib.loads(toml_dumps(config))["web_search"] == mode
+
+    def test_web_search_rejects_modes_codex_does_not_have(self) -> None:
+        # Codex 0.144.4 to 0.155.1 know only the disabled, cached, indexed and live modes.
+        with pytest.raises(ValidationError, match="web_search"):
+            _make_agent(web_search="on")
 
     def test_optional_knobs_threaded_through(self) -> None:
         agent = _make_agent(model="gpt-5-codex", reasoning_effort="high", stream_idle_timeout_ms=42)
@@ -906,6 +916,53 @@ class TestParseExecJsonl:
         assert items[0].name == "get_weather"
         assert json.loads(items[0].arguments) == {"city": "Paris"}
         assert items[1].output == "sunny, 72F"
+
+    def test_web_search_recorded_as_call_and_exported_to_atif(self) -> None:
+        # Codex 0.144.4's exec event for a hosted search: `query` is its readable detail (the URL for open_page).
+        lines = "\n".join(
+            [
+                _item_completed(
+                    {
+                        "id": "item_1",
+                        "type": "web_search",
+                        "query": "nemo gym install",
+                        "action": {"type": "search", "query": "nemo gym install", "queries": ["nemo gym install"]},
+                    }
+                ),
+                _item_completed(
+                    {
+                        "id": "item_2",
+                        "type": "web_search",
+                        "query": "https://docs.nvidia.com/nemo/gym",
+                        "action": {"type": "open_page", "url": "https://docs.nvidia.com/nemo/gym"},
+                    }
+                ),
+                _item_completed({"id": "item_3", "type": "agent_message", "text": "Install with pip."}),
+            ]
+        )
+        items, _ = parse_exec_jsonl(lines)
+        assert [(item.type, getattr(item, "name", None), getattr(item, "call_id", None)) for item in items] == [
+            ("function_call", "web_search", "item_1"),
+            ("function_call_output", None, "item_1"),
+            ("function_call", "web_search", "item_2"),
+            ("function_call_output", None, "item_2"),
+            ("message", None, None),
+        ]
+        assert json.loads(items[0].arguments) == {"query": "nemo gym install"}
+        assert json.loads(items[2].arguments) == {"query": "https://docs.nvidia.com/nemo/gym"}
+
+        trajectory = transcript_to_atif(
+            "Install NeMo Gym.",
+            [item.model_dump(mode="json") for item in items],
+            session_id="episode-1",
+            agent_name="codex_agent",
+            agent_version="0.144.4",
+        )
+        calls = [(call.function_name, call.arguments) for step in trajectory.steps for call in step.tool_calls or []]
+        assert calls == [
+            ("web_search", {"query": "nemo gym install"}),
+            ("web_search", {"query": "https://docs.nvidia.com/nemo/gym"}),
+        ]
 
     def test_mcp_tool_call_error_surfaced(self) -> None:
         line = _item_completed(

@@ -412,6 +412,22 @@ def test_codex_provider_retries_and_idle_timeout_reach_sandbox_config(setup) -> 
     assert provider["stream_idle_timeout_ms"] == 90_000_000
 
 
+@pytest.mark.parametrize("mode", ["disabled", "live"])
+def test_web_search_mode_reaches_sandbox_config(setup, mode) -> None:
+    # extra_config is refused in sandbox sessions, so web search has a field of its own.
+    agent, sandbox = setup
+    agent.config = CodexAgentConfig(**(agent.config.model_dump() | {"web_search": mode}))
+    with TestClient(agent.setup_webserver()) as client:
+        seeded = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert seeded.status_code == 200, seeded.text
+        session_id = seeded.json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    assert config["web_search"] == mode
+
+
 def test_codex_cli_default_features_and_session_state_reach_the_sandbox_launch(setup) -> None:
     # A passthrough model server can relay every tool shape, so a sandbox launch can match a plain
     # `codex exec`: no [features] overrides and, as in every sandbox session, no --ephemeral.
