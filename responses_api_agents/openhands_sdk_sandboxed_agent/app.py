@@ -28,6 +28,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import AGENT_ROUTE_FAILED, NgFailureEvent
 from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -275,6 +276,8 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         install_s = run_s = 0.0
         finished_marker = False
         poll_error: Optional[str] = None
+        # Setup: a harness that never got installed has not attempted the task, so a failure here is reported as a
+        # failed setup and the row is never sent to /verify, where an untouched workspace would score as a 0.
         try:
             started = monotonic()
             await sandbox.exec(f"mkdir -p {remote_dir}", cwd="/", timeout_s=60)
@@ -297,9 +300,20 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError(
                     f"OpenHands SDK install failed (rc={install.return_code}): {(install.stderr or '')[-1500:]}"
                 )
-
             await sandbox.upload(local_request, remote_request)
             await sandbox.upload(RUNNER_V2_PATH if cfg.background_exec else RUNNER_PATH, remote_runner)
+        except NgFailureEvent:
+            raise
+        except Exception as exc:
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="openhands.setup",
+                stage="seed",
+                failure_reason=f"OpenHands setup failed before the agent ran: {type(exc).__name__}: {exc}",
+            ) from exc
+
+        try:
             started = monotonic()
             # cwd=/workspace so the SDK's terminal starts where start.md was written.
             python_bin = (
@@ -432,6 +446,13 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
             usage=usage,
         )
 
+    @staticmethod
+    async def _stop_sandbox(sandbox: AsyncSandbox) -> None:
+        try:
+            await sandbox.stop()
+        except Exception:
+            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+
     async def run(
         self, request: Request, body: OpenHandsSDKSandboxedAgentRunRequest
     ) -> OpenHandsSDKSandboxedAgentVerifyResponse:
@@ -456,24 +477,27 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
 
         cookies["sandbox_id"] = session_key
         request._cookies = cookies
-        response = await self.responses(request, body.responses_create_params)
-
-        verify_request = OpenHandsSDKSandboxedAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": response}
-        )
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-
         try:
-            await sandbox.stop()
-        except Exception:
-            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
-        self._sandbox_id_to_sandbox.pop(session_key, None)
+            response = await self.responses(request, body.responses_create_params)
+
+            verify_request = OpenHandsSDKSandboxedAgentVerifyRequest.model_validate(
+                body.model_dump() | {"response": response}
+            )
+            verify_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request.model_dump(),
+                cookies=cookies,
+            )
+            await raise_for_status(verify_response)
+        except BaseException:
+            self._sandbox_id_to_run_result.pop(session_key, None)
+            raise
+        finally:
+            # Whatever ended the run (a setup failure, a verify error, a cancelled request), the sandbox must not be
+            # left to its TTL: stop it shielded, so a cancellation cannot interrupt the stop itself.
+            await asyncio.shield(self._stop_sandbox(sandbox))
+            self._sandbox_id_to_sandbox.pop(session_key, None)
 
         response_dict = await get_response_json(verify_response)
         run_result = self._sandbox_id_to_run_result.pop(session_key)
