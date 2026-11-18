@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
-from nemo_gym.orchestration.executors.resume_script import (
+from nemo_gym.orchestration.executors.slurm.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     INCOMPLETE_MARKER_NAME,
     REQUEUE_RECONCILED_NOTE,
@@ -32,7 +32,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     RESUBMIT_LOCK_NAME,
     render_resume_prologue,
 )
-from tests.unit_tests.orchestration.test_allocation_cut_recovery import _cut_run, _digests
+from tests.helpers.recovery_cut_runs import _cut_run, _digests
 from tests.unit_tests.orchestration.test_resume_script import _run_prologue, _sbatch_calls
 
 
@@ -138,6 +138,36 @@ def test_a_single_requeue_continues_once_its_records_settle(tmp_path):
     assert queued.returncode == 0 and "REACHED_WORK" in queued.stdout, queued.stdout + queued.stderr
     assert (tmp_path / ".gym_infra_retries").read_text() == "1\n"
     assert (tmp_path / ".gym_job_chain").read_text() == "100\n777\n999\n"
+
+
+def test_a_requeued_follow_up_settles_on_its_requeued_record(tmp_path):
+    # Slurm keeps the earlier incarnation of a requeued job as a REQUEUED row for good, not a PREEMPTED one: the
+    # follow-up 777 was requeued once and stopped on the marker in its second incarnation.
+    _requeued_chain(
+        tmp_path,
+        "100|FAILED|15000|0\n777|REQUEUED|36|0\n777|FAILED|14|1\n",
+        stored_walltime=15000,
+    )
+
+    result = _sentinel(tmp_path)
+
+    assert result.returncode == 0 and "did not settle" not in result.stdout, result.stdout + result.stderr
+    assert _chain_polls(tmp_path) == 1
+    assert len(_sbatch_calls(tmp_path)) == 1 and _queued_env(tmp_path) == ["1|1"]
+    # 15000 + 36 + 14 seconds.
+    assert (tmp_path / ".gym_accumulated_walltime").read_text() == "15050\n"
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == REQUEUE_RECONCILED_NOTE + "\n"
+
+
+def test_a_last_incarnation_still_requeued_does_not_settle(tmp_path):
+    # No later incarnation has run yet, so the REQUEUED row is not an ended allocation.
+    _requeued_chain(tmp_path, "100|FAILED|15000|0\n777|REQUEUED|36|0\n777|REQUEUED|0|1\n")
+    before = _budget_files(tmp_path)
+
+    result = _sentinel(tmp_path)
+
+    assert result.returncode == 0 and "did not settle" in result.stdout
+    _assert_stopped_as_before(tmp_path, before)
 
 
 def test_a_second_requeue_is_reconciled_from_every_allocation(tmp_path):

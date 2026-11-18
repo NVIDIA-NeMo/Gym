@@ -353,12 +353,13 @@ async def test_model_request_error_is_classified_for_the_environment(monkeypatch
     assert session.observations.records[0].error_type == "agent_error"
 
 
-# Droid 1.1.0's error events for a refused or reset connection, a context overflow, and rejected model requests,
-# captured from runs against a scripted model server.
+# Droid 1.1.0 and 1.12.1's model-error events, captured against a scripted model server.
+# Droid 1.1.0's repetition stop was also seen in real model runs.
 CONTEXT_LIMIT_ERROR = (
     "The existing summary and compaction instructions do not fit the selected model input window. "
     "Choose a compaction model with a larger context window."
 )
+REPETITION_CYCLE_ERROR = "LLM output entered an exact repetition cycle"
 
 
 @pytest.mark.parametrize(
@@ -373,17 +374,27 @@ CONTEXT_LIMIT_ERROR = (
         # Only Droid's exact messages count: a tool's own wording or a number that is not a status does not.
         ("Command timed out after 60s", ("unknown", None)),
         ("Connection error. Retrying with the fallback tool", ("unknown", None)),
+        (REPETITION_CYCLE_ERROR + "; retrying", ("unknown", None)),
         ("4000 tokens left", ("unknown", None)),
         ("Error: The request was too large for the model service to accept.", ("unknown", None)),
     ],
 )
-def test_classifier_reads_droid_error_messages(monkeypatch, message, kind):
-    outcome = agent(monkeypatch).classify_outcome({"error": message})
+@pytest.mark.parametrize("version", ["1.1.0", "1.12.1"])
+def test_classifier_reads_droid_error_messages(monkeypatch, message, kind, version):
+    outcome = agent(monkeypatch, droid_version=version).classify_outcome({"error": message})
     assert (outcome.failure_kind, outcome.status_code) == kind
 
 
+@pytest.mark.parametrize("version,kind", [("1.1.0", "agent_invalid_output"), ("1.12.1", "unknown")])
+def test_repetition_stop_is_classified_only_for_the_verified_release(monkeypatch, version, kind):
+    outcome = agent(monkeypatch, droid_version=version).classify_outcome({"error": REPETITION_CYCLE_ERROR})
+    assert (outcome.failure_kind, outcome.status_code) == (kind, None)
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR])
+@pytest.mark.parametrize(
+    "message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR, REPETITION_CYCLE_ERROR]
+)
 async def test_terminal_error_reports_unknown_for_an_untested_release(monkeypatch, message):
     events = [*EVENTS[:4], {"type": "error", "source": "agent_loop", "message": message}]
     monkeypatch.setattr(
@@ -399,7 +410,9 @@ async def test_terminal_error_reports_unknown_for_an_untested_release(monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR])
+@pytest.mark.parametrize(
+    "message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR, REPETITION_CYCLE_ERROR]
+)
 @pytest.mark.parametrize("source", ["tool_result", "assistant", "stderr"])
 @pytest.mark.parametrize("return_code", [0, 1])
 async def test_error_lookalikes_outside_terminal_events_do_not_classify_the_run(
@@ -440,6 +453,24 @@ async def test_error_lookalikes_outside_terminal_events_do_not_classify_the_run(
         assert session.observations.records[1].status == "failed"
     elif source == "assistant":
         assert response.output[2].content[0].text == message
+
+
+@pytest.mark.asyncio
+async def test_repetition_cycle_keeps_partial_work_verifiable(monkeypatch):
+    instance = agent(monkeypatch)
+    session = state(cleanup={"timed_out": False, "return_code": 1, "cleanup_confirmed": True})
+    events = [*EVENTS[:4], {"type": "error", "source": "agent_loop", "message": REPETITION_CYCLE_ERROR}]
+    monkeypatch.setattr(
+        adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
+    )
+    response = await instance._sandbox_response(session, body())
+    assert response.status == "failed" and response.error.message == REPETITION_CYCLE_ERROR
+    assert response.output[0].name == "Execute" and response.output[1].output == EVENTS[3]["value"]
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_invalid_output"}
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    invocation = session.observations.records[0]
+    assert (invocation.status, invocation.error_type) == ("failed", "agent_error")
+    assert session.observations.records[-1].outcome == "failed"
 
 
 @pytest.mark.asyncio
@@ -605,6 +636,8 @@ async def test_stage_and_collect_use_session_files(monkeypatch):
     assert command.argv == ["bash", "/s/harness_runner.sh", "/s/params.sh"]
     assert set(uploads) == {"/s/settings.json", "/s/prompt.txt", "/s/params.sh"}
     assert "/s/events.jsonl" in uploads["/s/params.sh"]
+    # The runtime's fallback ps goes last on Droid's PATH, behind any ps the image has.
+    assert "setup='export PATH=\"${PATH:+$PATH:}\"/r/fallback-bin'\n" in uploads["/s/params.sh"]
     artifacts = await session.collect_artifacts()
     assert artifacts.events == files["/s/events.jsonl"] and len(artifacts.stderr) == 16000
     assert session.runtime_info.pid == 7
@@ -618,13 +651,15 @@ def test_droid_keeps_the_task_home_while_its_state_moves_to_the_session(tmp_path
     (runtime / "droid").write_text(
         "#!/usr/bin/env bash\n"
         'mkdir -p "$FACTORY_HOME_OVERRIDE/.factory/sessions"\n'
-        'printf \'{"type":"tool_result","id":"c1","value":"%s %s %s %s"}\\n\' "$HOME" "$PWD" "$FACTORY_AIRGAP_ENABLED" "$*"\n'
+        'printf \'{"type":"tool_result","id":"c1","value":"%s %s %s %s %s"}\\n\' '
+        '"$HOME" "$PWD" "$FACTORY_AIRGAP_ENABLED" "$*" "$PATH"\n'
     )
     (runtime / "droid").chmod(0o755)
     session_dir, workdir, home = tmp_path / "session", tmp_path / "app", tmp_path / "task-home"
     for directory in (session_dir, workdir, home):
         directory.mkdir()
     params = {
+        "setup": f'export PATH="${{PATH:+$PATH:}}"{runtime}/fallback-bin',
         "cwd": str(workdir),
         "command": [str(runtime / "droid"), "exec", "--file", f"{session_dir}/prompt.txt"],
         "env": {"FACTORY_HOME_OVERRIDE": f"{session_dir}/home", "FACTORY_AIRGAP_ENABLED": "1"},
@@ -640,7 +675,8 @@ def test_droid_keeps_the_task_home_while_its_state_moves_to_the_session(tmp_path
     )
     assert finished.returncode == 0
     [event] = map(json.loads, Path(session_dir, "events.jsonl").read_text().splitlines())
-    assert event["value"] == f"{home} {workdir} 1 exec --file {session_dir}/prompt.txt"
+    path = f"{os.environ['PATH']}:{runtime}/fallback-bin"
+    assert event["value"] == f"{home} {workdir} 1 exec --file {session_dir}/prompt.txt {path}"
     assert not list(home.iterdir()) and not list(workdir.iterdir())
     assert (session_dir / "home" / ".factory" / "sessions").is_dir()
 
