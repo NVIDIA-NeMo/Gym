@@ -398,7 +398,7 @@ def test_status_collapses_a_repeated_id(tmp_path, cluster, monkeypatch, capsys):
     assert len(json.loads(out)) == 1
 
 
-def test_an_executor_without_the_capability_says_so(tmp_path, cluster, monkeypatch, capsys):
+def test_status_on_an_executor_without_the_capability_says_so(tmp_path, cluster, monkeypatch, capsys):
     _submitted(tmp_path, "gym-job-k8s", {"gpqa": "name"}, submitted_at="2026-10-29T00:00:00Z", executor="kubernetes")
 
     _, err = _gym(monkeypatch, capsys, "status", "gym-job-k8s", ok=False)
