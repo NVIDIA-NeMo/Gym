@@ -471,8 +471,9 @@ class HarborVerificationMixin:
     """Grade an episode: the test.sh wrapper protocol, the reward files and the verifier sandbox.
 
     The verifier runs Harbor's tests/test.sh under a timeout wrapper that writes an exit record,
-    reads reward.json or reward.txt, applies the reward rule (``reward`` key, else the keys summed as
-    ``reward_components``) and turns the exit into a measured or masked sample. Module level are the
+    reads reward.json or reward.txt, applies the reward rule (the dataset's ``reward_key`` when set, else
+    the ``reward`` key, else the keys summed as ``reward_components``) and turns the exit into a measured
+    or masked sample. Module level are the
     in-sandbox paths the protocol uses, the failure kinds, the wrapper command, the reward and exit
     record parsers, the timeout rule, and the choice of image and user the verifier runs as in shared
     and separate mode. The mixin holds the shared and separate verification choreography unchanged,

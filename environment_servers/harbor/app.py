@@ -31,10 +31,11 @@ rows were materialized (see ``nemo_gym.data.tasks.harbor``).
 Every episode runs under its task's own time budget unless ``enforce_task_timeouts`` is off, and
 the sandbox lives for that budget. Operator secrets reach the ``test.sh`` process only.
 
-Reward rule: when ``test.sh`` ran, the sample is measured. In ``reward.json`` a ``reward``
-key is the score and the other keys are metrics; without one every key is a component of the
-score, which is their sum, and the result names them as ``reward_components`` (keys that sum to
-``reward``, the contract a trainer asserts). A missing or invalid reward file scores 0 with a
+Reward rule: when ``test.sh`` ran, the sample is measured. The dataset's ``reward_key``, when
+set, names the score in ``reward.json`` and the other keys are metrics. Unset, a ``reward`` key is
+the score and the other keys are metrics; without one every key is a component of the score,
+which is their sum, and only then does the result name them as ``reward_components`` (keys that
+sum to ``reward``, the contract a trainer asserts). A missing or invalid reward file scores 0 with a
 ``failure_kind``. Only a Gym-side failure (sandbox lost, transfer failed) masks the sample. A
 failed agent response whose harness classified the cause (``ng_agent_outcome``) goes through
 ``agent_outcome_policy`` before verification, as on ``single_agent_turn``: by default a
