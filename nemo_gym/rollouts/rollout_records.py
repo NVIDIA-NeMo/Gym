@@ -1022,7 +1022,16 @@ class RolloutRecords:
             for identity in self.expected
             if self.disposition(identity) == "success"
         )
-        settled = counts["success"] - masked_retryable + final_zeros
+        # Masked by infrastructure at its attempt cap: a final failure, never measured, so the run is not complete
+        # until a recovery (``--extend-attempts``) measures it.
+        masked_exhausted = sum(
+            self.payloads[(identity, self.latest[identity])].masked_infrastructure
+            and self._retryable(identity)
+            and self.failure_count(identity) >= max_attempts
+            for identity in self.expected
+            if self.disposition(identity) == "success"
+        )
+        settled = counts["success"] - masked_retryable - masked_exhausted + final_zeros
         # Rollouts with no final result: a resume still runs them, or nothing has run for them yet. Final failures
         # (terminal, at their attempt cap, or ``stopped_not_retried``, which resume does not run again) are not open,
         # even when they are not settled.
@@ -1036,6 +1045,7 @@ class RolloutRecords:
             "measured": counts["success"] - masked - unscored,
             "masked": masked,
             "masked_retryable": masked_retryable,
+            "masked_exhausted": masked_exhausted,
             "unscored": unscored,
             "failed": counts["failure"],
             "failed_final": failed_final,
@@ -1063,6 +1073,7 @@ class RolloutRecords:
             "max_rollout_attempts": max_attempts,
             "attempt_extension": self.attempt_extension,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,
+            "settled": settled,
             "completion_fraction": settled / expected if expected else 1.0,
             "complete": settled == expected,
             "reconciled": missing == 0,

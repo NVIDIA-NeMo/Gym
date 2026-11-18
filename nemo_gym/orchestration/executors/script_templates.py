@@ -19,12 +19,9 @@ import shlex
 from pathlib import Path
 
 from nemo_gym.core.failure_kinds import DRIVER_INSTALL_FAILED
+from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
 from nemo_gym.orchestration.jobs import EVAL_EXIT_FILENAME, EXPORTS_DIRNAME
 
-
-# The driver step's environment names the file, <job dir>/.gym_driver_failure.<allocation>, where a driver failure
-# that the next segment would repeat leaves its registered kind (see the guard in resume_script.py).
-DRIVER_FAILURE_ENV = "GYM_DRIVER_FAILURE_FILE"
 
 _RAY_PRELUDE = """\
 # Resolve the head node IP for multi-node vLLM services (spanning nodes via Ray).
@@ -118,6 +115,50 @@ if [ ${name_upper}_READY -eq 0 ]; then
     exit 1
 fi
 """
+
+
+# Bound on one snapshot of `lustre_md_stats`, so a hung read or a step that cannot start never holds the job.
+LUSTRE_MD_STATS_TIMEOUT_S = 30
+
+# What each node runs: its MDC request counters as TSV rows. lctl omits an op whose count is 0, and lives in /usr/sbin,
+# which is not on every user's PATH.
+_LUSTRE_MD_STATS_NODE = r"""set -o pipefail
+PATH="$PATH:/usr/sbin:/sbin"
+lctl get_param 'mdc.*.md_stats' 2>/dev/null | awk -v OFS='\t' -v phase="$1" -v epoch="$(date +%s)" \
+    -v node="${SLURMD_NODENAME:-$(hostname)}" '
+    /^mdc\..*\.md_stats=/ { mdt = match($0, /-MDT[0-9a-fA-F]+-mdc-/) ? substr($0, RSTART + 1, RLENGTH - 6) : ""; next }
+    mdt != "" && $3 == "samples" && $2 ~ /^[0-9]+$/ { print phase, epoch, node, mdt, $1, $2 }'"""
+
+_LUSTRE_MD_STATS_PRELUDE = """\
+# --- Lustre metadata stats (lustre_md_stats) ---
+# Rows: phase, epoch, node, MDT, op, cumulative count. A snapshot keeps the status it was called with.
+_gym_md_stats_file={stats_file}
+_gym_md_stats_node=$(cat <<'GYM_MD_STATS_NODE'
+{node_script}
+GYM_MD_STATS_NODE
+)
+_gym_md_stats() {{
+    local _gym_md_rc=$? _gym_md_out _gym_md_ok=1
+    _gym_md_out=$(timeout -k 5 {timeout} {step}bash -c "$_gym_md_stats_node" _gym_md_stats "$1" 2>/dev/null) || _gym_md_ok=0
+    if [ -n "$_gym_md_out" ]; then
+        printf '%s\\n' "$_gym_md_out" >> "$_gym_md_stats_file" || _gym_md_ok=0
+    else
+        _gym_md_ok=0
+    fi
+    [ "$_gym_md_ok" = 1 ] || echo "WARNING: lustre_md_stats: phase $1 not fully recorded in $_gym_md_stats_file (lctl get_param mdc.*.md_stats failed, timed out or printed nothing); the job goes on."
+    return "$_gym_md_rc"
+}}"""
+
+
+def render_lustre_md_stats_prelude(stats_file: str, step: str = "") -> str:
+    """Define `_gym_md_stats <phase>`, which appends every node's counters to `stats_file` (a shell word).
+
+    `step` prefixes the per-node command: empty runs it in the batch shell, an `srun ... ` once on every node.
+    A missing `lctl` or a failed read prints one warning line; the call returns the status it was called with.
+    """
+    return _LUSTRE_MD_STATS_PRELUDE.format(
+        stats_file=stats_file, node_script=_LUSTRE_MD_STATS_NODE, timeout=LUSTRE_MD_STATS_TIMEOUT_S, step=step
+    )
 
 
 def bash_var(name: str) -> str:
@@ -261,6 +302,26 @@ _DECLARED_EXTRAS_FILTER = (
 )
 
 
+# A uv older than the checkout's `required-version` (a `>=X` lower bound in its pyproject.toml) is refused by `uv venv`
+# and `uv sync`, with an error that never reaches the reader's report. The requirement is only known after the
+# checkout, so a private copy of the caller's uv is checked then: one that is too old is replaced by a fresh private
+# install (the one used when no uv runs at all), and the read fails with both versions named only when that install
+# cannot meet the requirement either. Run inside the checkout, with the private uv first on PATH.
+_UV_VERSION_CHECK = (
+    "_gym_uv_old() { "
+    "_gym_uv_req=\"$(sed -n 's/^required-version *= *\"\\(>=\\)\\{0,1\\} *\\([0-9][0-9.]*\\).*/\\2/p' "
+    'pyproject.toml 2>/dev/null | head -n 1 || true)"; '
+    "_gym_uv_have=\"$(uv --version | awk '{print $2}')\"; "
+    '[ -n "$_gym_uv_req" ] && '
+    '[ "$(printf \'%s\\n%s\\n\' "$_gym_uv_req" "$_gym_uv_have" | sort -V | head -n 1)" != "$_gym_uv_req" ]; }; '
+    "if _gym_uv_old; then "
+    'curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="$GYM_SRC/uv-bin" sh || true; hash -r; '
+    "if _gym_uv_old; then "
+    'echo "gym: uv $_gym_uv_have is older than the $_gym_uv_req this Gym checkout requires '
+    "(required-version in pyproject.toml); update it with 'uv self update'\" >&2; exit 1; fi; fi"
+)
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
@@ -365,6 +426,7 @@ def render_driver_entrypoint(
             # venv` instead reads requires-python from pyproject.toml and auto-downloads a
             # satisfying interpreter if the container's own Python doesn't qualify. Also never
             # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
+            *([_UV_VERSION_CHECK] if private_uv else []),
             "uv venv --seed .venv",
             "source .venv/bin/activate",
             f'_gym_declared_extras() {{ python -c {shlex.quote(_DECLARED_EXTRAS_FILTER)} "$@"; }}',

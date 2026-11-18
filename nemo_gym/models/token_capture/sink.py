@@ -34,7 +34,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
+from nemo_gym.models.token_capture.fingerprint import _tools_of, assistant_fingerprint, trailing_assistant_turn
 from nemo_gym.models.token_capture.lineage import stamp_continuation
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
@@ -50,6 +50,8 @@ from nemo_gym.models.token_capture.protocols import (
 from nemo_gym.models.token_capture.records import (
     ENGINE_REFUSED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
+    CallIdentity,
+    ModelRef,
     ParentResolutionStatus,
     TokenEntry,
     extract_token_fields,
@@ -61,6 +63,20 @@ from nemo_gym.models.token_capture.records import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _trailing_tool_names(items: list[dict] | None) -> list[str]:
+    """Return the tool names in a request's last model turn, for the poison log.
+
+    Names only: no arguments, IDs or content, so the log shows which call broke the match without the task data.
+    """
+    try:
+        return [
+            name for item in trailing_assistant_turn(items or []) for _call_id, name, _arguments in _tools_of(item)
+        ]
+    except Exception:  # A log line must never fail the model call.
+        return []
+
 
 if TYPE_CHECKING:
     from nemo_gym.models.token_capture.staging.records import CaptureAdmission, CaptureLedgerCommit
@@ -110,6 +126,7 @@ class CaptureContext:
     # strict tri-state of the lineage result.
     external_staging: bool = False
     parent_resolution_mode: ParentResolutionMode = "fingerprint"
+    allow_system_suffix: bool = False
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.
@@ -141,6 +158,19 @@ class CaptureContext:
     # ``capture_engine_refusal`` recorded that the engine refused this call. The call has no
     # entry, and the worker-custody sweep must not record it a second time as uncommitted.
     engine_refusal_recorded: bool = False
+    # The agent instance the request URL named; ``None`` for an unnamed agent.
+    agent_instance: str | None = None
+    # The serving model server, from its own configuration, never from the request.
+    model_ref: ModelRef | None = None
+
+    @property
+    def identity(self) -> CallIdentity:
+        """The agent instance and model server every record of this call carries."""
+        return CallIdentity(agent_instance=self.agent_instance, model_ref=self.model_ref)
+
+    @property
+    def agent_kind(self) -> str | None:
+        return self.identity.agent_kind
 
     @property
     def parent_call_id(self) -> str | None:
@@ -312,6 +342,7 @@ async def resolve_parent(request_messages: list | None) -> None:
                 context.capture_key,
                 context.model_call_id,
                 UNRESOLVED_PARENT_REASON,
+                identity=context.identity,
             )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
@@ -334,16 +365,19 @@ async def resolve_parent(request_messages: list | None) -> None:
         )
         return
     logger.warning(
-        "Unresolved parent for model call %s of rollout %s (reason=%s, %d request items); poisoning the call.",
+        "Unresolved parent for model call %s of rollout %s (reason=%s, %d request items); poisoning the call. "
+        "Tool names in the last model turn: %s.",
         context.model_call_id,
         context.capture_key,
         context.parent_resolution.reason if context.parent_resolution is not None else None,
         len(context.request_items),
+        _trailing_tool_names(context.request_items),
     )
     await ledger.record_failure(
         context.capture_key,
         context.model_call_id,
         UNRESOLVED_PARENT_REASON,
+        identity=context.identity,
     )
 
 
@@ -385,7 +419,10 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
             # proof before using an empty-content-equivalent prefix.
             same_replay_source(prefixes[replay.item_count], replay, allow_empty_tool_content=True) and suffix
         ):
-            if all(item.role in ("user", "tool") for item in suffix):
+            if all(
+                item.role in ("user", "tool") or (context.allow_system_suffix and item.role == "system")
+                for item in suffix
+            ):
                 matches.append(record)
             else:
                 root_reason = "non_user_suffix"
@@ -461,7 +498,7 @@ async def register_call_intent() -> None:
         if begin is None or context.capture_admission is None:
             raise ValueError("Framework-owned capture requires durable call intents")
         try:
-            await begin(context.capture_key, context.model_call_id)
+            await begin(context.capture_key, context.model_call_id, identity=context.identity)
         except RolloutRetiredError as error:
             raise CaptureAdmissionError(str(error)) from error
         context.intent_registered = True
@@ -471,7 +508,7 @@ async def register_call_intent() -> None:
     begin = getattr(context.token_sink, "begin_call", None)
     if begin is None:
         return
-    await begin(context.capture_key, context.model_call_id)
+    await begin(context.capture_key, context.model_call_id, identity=context.identity)
     context.intent_registered = True
 
 
@@ -551,7 +588,9 @@ async def _record_external_refusal(context: CaptureContext) -> None:
     ledger = context.lineage_store
     if context.capture_admission is None or context.committed or not isinstance(ledger, CaptureLedger):
         return
-    await ledger.record_failure(context.capture_key, context.model_call_id, ENGINE_REFUSED_CALL_REASON)
+    await ledger.record_failure(
+        context.capture_key, context.model_call_id, ENGINE_REFUSED_CALL_REASON, identity=context.identity
+    )
     context.engine_refusal_recorded = True
 
 
@@ -674,6 +713,11 @@ async def commit_entry(
     if context.token_sink is None:
         context.committed = True
         return
+    # The identity comes from the capture context, which the model server built from its own configuration
+    # and the request URL; an engine-side caller does not supply it.
+    entry.agent_instance = context.agent_instance
+    entry.agent_kind = context.agent_kind
+    entry.model_ref = context.model_ref
     try:
         # Use the resolution decided before dispatch.
         # Engine-side callers may pass their own resolution.
@@ -792,7 +836,7 @@ async def _mark_incomplete(context: CaptureContext) -> bool:
         )
         return True
     try:
-        await mark(context.capture_key, context.model_call_id)
+        await mark(context.capture_key, context.model_call_id, identity=context.identity)
     except TokenCaptureFrozenError:
         # The rollout was frozen or retired while this call was in flight, for example an abandoned attempt's
         # late call. Its verdict is sealed, or nobody will read it, so there is nothing to mark.

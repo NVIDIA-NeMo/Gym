@@ -35,6 +35,7 @@ import time
 from enum import Enum
 from typing import Any, List, Literal, Optional, Tuple
 
+from aiohttp import ClientError
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field
 
@@ -43,6 +44,7 @@ from nemo_gym.agents import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
@@ -52,9 +54,11 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NgFailureEvent,
     accumulate_response_usage,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -97,6 +101,9 @@ def _decoded_object(raw: str) -> Optional[dict]:
     return value if isinstance(value, dict) else None
 
 
+_RETRYABLE_RESOURCES_STATUSES = frozenset({502, 503, 504})
+
+
 class StopReason(str, Enum):
     """Why the loop ended.
 
@@ -111,6 +118,14 @@ class StopReason(str, Enum):
     MAX_OUTPUT_TOKENS = "max_output_tokens"
     TEXT_ONLY = "text_only"
     ERROR = "error"
+
+
+class ErrorCause(str, Enum):
+    """Why a loop that ended with ``StopReason.ERROR`` failed, recorded as ``error_cause``."""
+
+    MODEL_CALL_FAILED = "model_call_failed"
+    CONTEXT_OVERFLOW = "context_overflow"
+    TOOL_ABORTED = "tool_aborted"
 
 
 class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
@@ -166,6 +181,21 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
     max_steps: Optional[int] = Field(
         default=None,
         description="Maximum model turns, or null for no turn cap.",
+    )
+    resources_server_retries: int = Field(
+        default=0,
+        ge=0,
+        description="Extra attempts at seed_session and verify when the resources server answers "
+        "502, 503 or 504, as a multi-worker server's session routing does when it cannot reach the "
+        "worker holding the session. Both calls must be safe to repeat on that server. "
+        "0 fails the rollout on the first such answer.",
+    )
+    keep_response_on_verify_failure: bool = Field(
+        default=False,
+        description="When verify fails after its retries, or its reply cannot be read or parsed, return "
+        "the generated rollout as a masked zero (masked_verify_failure), instead of failing the run, "
+        "whose empty error response a trainer cannot use. Also retries a reply lost in transport "
+        "against a STATELESS verifier (verify_with_transport_retry).",
     )
     done_tools: List[str] = Field(
         default_factory=lambda: ["submit_final_result"],
@@ -387,6 +417,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         max_time_seconds = self.config.max_time_seconds
         started_at = time.monotonic()
         stop_reason = StopReason.ERROR
+        error_cause: Optional[ErrorCause] = None
 
         # Check max_steps at the TOP so we never start a turn past the limit.
         while max_steps is None or step < max_steps:
@@ -410,7 +441,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             try:
                 coro = self.server_client.post(
                     server_name=self.config.model_server.name,
-                    url_path="/v1/responses",
+                    url_path=self.url_path_for_request("/v1/responses", request),
                     json=new_body,
                     cookies=model_server_cookies,
                 )
@@ -427,6 +458,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                     step,
                 )
                 stop_reason = StopReason.ERROR
+                error_cause = ErrorCause.MODEL_CALL_FAILED
                 break
             except Exception as e:
                 if self.config.truncate_on_overflow and self._is_context_overflow_error(e):
@@ -442,6 +474,9 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                         continue
                 logger.error("Model call failed on step %d: %s: %s", step, type(e).__name__, e)
                 stop_reason = StopReason.ERROR
+                error_cause = (
+                    ErrorCause.CONTEXT_OVERFLOW if self._is_context_overflow_error(e) else ErrorCause.MODEL_CALL_FAILED
+                )
                 break
 
             output = model_response.output
@@ -519,6 +554,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                     )
                     if aborted:
                         stop_reason = StopReason.ERROR
+                        error_cause = ErrorCause.TOOL_ABORTED
 
                 if done or aborted:
                     break
@@ -561,6 +597,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                     )
                     aborted = True
                     stop_reason = StopReason.ERROR
+                    error_cause = ErrorCause.TOOL_ABORTED
                     break
 
             if done or aborted:
@@ -605,6 +642,8 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             "stop_reason": stop_reason.value,
             "steps": str(step),
         }
+        if error_cause is not None:
+            last_model_response.metadata["error_cause"] = error_cause.value
         if tool_call_error_status:
             # Keep explicit provenance for stateless reverification without
             # adding fields to the shared Responses API tool-output type.
@@ -635,21 +674,44 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 reward=0.0,
             )
 
+    async def _post_resources_server(self, url_path: str, json: Any, cookies: Any) -> Any:
+        """POST to the resources server, retrying the gateway statuses up to resources_server_retries times."""
+        attempts = self.config.resources_server_retries + 1
+        for attempt in range(1, attempts + 1):
+            response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path=url_path,
+                json=json,
+                cookies=cookies,
+            )
+            if response.ok or response.status not in _RETRYABLE_RESOURCES_STATUSES or attempt == attempts:
+                await raise_for_status(response)
+                return response
+            try:
+                content = await response.content.read()
+            except (ClientError, TimeoutError) as error:
+                content = f"<error body unavailable: {type(error).__name__}: {error}>".encode()
+            delay = min(2.0 ** (attempt - 1), 10.0)
+            logger.warning(
+                "%s returned %s (attempt %d/%d), retrying in %.0fs: %s",
+                url_path,
+                response.status,
+                attempt,
+                attempts,
+                delay,
+                content[:1000].decode(errors="replace"),
+            )
+            await asyncio.sleep(delay)
+
     async def _run_inner(self, request: Request, body: FinanceAgentRunRequest) -> FinanceAgentVerifyResponse:
         cookies = request.cookies
 
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
+        seed_session_response = await self._post_resources_server("/seed_session", body.model_dump(), cookies)
         cookies = seed_session_response.cookies
 
         response = await self.server_client.post(
             server_name=self.config.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_run("/v1/responses", body),
             json=body.responses_create_params,
             cookies=cookies,
         )
@@ -660,14 +722,25 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             body.model_dump() | {"response": await get_response_json(response)}
         )
 
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        return FinanceAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        verify_request_data = verify_request.model_dump()
+
+        async def verify() -> FinanceAgentVerifyResponse:
+            verify_response = await self._post_resources_server("/verify", verify_request_data, cookies)
+            return FinanceAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+
+        if not self.config.keep_response_on_verify_failure:
+            return await verify()
+        try:
+            return await verify_with_transport_retry(
+                verify, server_client=self.server_client, server_name=self.config.resources_server.name
+            )
+        except NgFailureEvent as failure:
+            cause = failure.__cause__
+            logger.error("verify failed — keeping the rollout masked: %s: %s", type(cause).__name__, cause)
+            result = masked_verify_failure(verify_request_data, failure)
+            # NeMo RL versions that predate the top-level field read instance_config.
+            result["instance_config"] = {**(result.get("instance_config") or {}), "mask_sample": True}
+            return FinanceAgentVerifyResponse.model_validate(result)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
@@ -682,3 +755,6 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     FinanceAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = FinanceAgent.run_webserver()  # noqa: F401
