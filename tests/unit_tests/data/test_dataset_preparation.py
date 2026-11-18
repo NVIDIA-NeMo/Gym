@@ -1132,6 +1132,117 @@ class TestValidateSamplesAndAggregateMetrics:
             monkeypatch.undo()
 
 
+_GOOD_ROW = {"responses_create_params": {"input": "What is 2+2?"}}
+# A Chat Completions tool: name, description and parameters sit under "function" instead of on the tool itself.
+_CHAT_COMPLETIONS_TOOL_ROW = {
+    "responses_create_params": {
+        "input": "What is 2+2?",
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "add", "description": "Add", "parameters": {"type": "object", "properties": {}}},
+            }
+        ],
+    }
+}
+
+
+def _agent_config_for(data_fpath: Path, *, num_repeats: int = 1) -> ResponsesAPIAgentServerInstanceConfig:
+    server_type_config_dict = {
+        "responses_api_agents": {
+            "simple_agent": {
+                "host": "127.0.0.1",
+                "port": 12345,
+                "entrypoint": "app.py",
+                "datasets": [
+                    {
+                        "name": "train",
+                        "type": "train",
+                        "jsonl_fpath": str(data_fpath),
+                        "num_repeats": num_repeats,
+                        "gitlab_identifier": None,
+                        "license": "Apache 2.0",
+                    }
+                ],
+                "resources_server": {"type": "resources_servers", "name": "test_resources_server"},
+                "model_server": {"type": "responses_api_models", "name": "policy_model"},
+            }
+        }
+    }
+    return ResponsesAPIAgentServerInstanceConfig(
+        name="test_agent",
+        server_type_config_dict=DictConfig(server_type_config_dict),
+        responses_api_agents=server_type_config_dict["responses_api_agents"],
+    )
+
+
+class TestRequestValidationReport:
+    """Rows that fail request validation are reported per collation mode, with bounded detail."""
+
+    def _write(self, tmp_path: Path, rows: list) -> Path:
+        data_fpath = tmp_path / "train.jsonl"
+        data_fpath.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        return data_fpath
+
+    def test_error_mode_raises_with_counts_and_first_location(self, tmp_path: Path) -> None:
+        data_fpath = self._write(tmp_path, [_CHAT_COMPLETIONS_TOOL_ROW, _GOOD_ROW, _CHAT_COMPLETIONS_TOOL_ROW])
+
+        with raises(ValueError) as error:
+            TrainDataProcessor().validate_samples_and_aggregate_metrics(
+                [_agent_config_for(data_fpath)], overwrite_metrics_conflicts=False, task_data_validation="error"
+            )
+
+        message = str(error.value)
+        assert f"{data_fpath}: 2/3 rows failed request validation" in message
+        assert "  row 0: responses_create_params.tools.0." in message
+        assert "  row 2: responses_create_params.tools.0." in message
+        assert "  row 1:" not in message
+
+    def test_warn_mode_prints_and_keeps_going(self, tmp_path: Path, capsys) -> None:
+        data_fpath = self._write(tmp_path, [_CHAT_COMPLETIONS_TOOL_ROW, _GOOD_ROW])
+
+        metrics = TrainDataProcessor().validate_samples_and_aggregate_metrics(
+            [_agent_config_for(data_fpath)], overwrite_metrics_conflicts=False, task_data_validation="warn"
+        )
+
+        assert "[request validation]" in capsys.readouterr().out
+        assert metrics["train"].number_of_examples == 1
+
+    def test_off_mode_does_not_report(self, tmp_path: Path, capsys) -> None:
+        data_fpath = self._write(tmp_path, [_CHAT_COMPLETIONS_TOOL_ROW, _GOOD_ROW])
+
+        TrainDataProcessor().validate_samples_and_aggregate_metrics(
+            [_agent_config_for(data_fpath)], overwrite_metrics_conflicts=False, task_data_validation="off"
+        )
+
+        assert "request validation" not in capsys.readouterr().out
+
+    def test_detail_is_capped_and_repeats_count_once(self, tmp_path: Path) -> None:
+        data_fpath = self._write(tmp_path, [_CHAT_COMPLETIONS_TOOL_ROW] * 8 + [_GOOD_ROW, "not a row"])
+
+        state = TrainDataProcessor()._validate_samples_and_aggregate_metrics_single_dataset(
+            _agent_config_for(data_fpath, num_repeats=3).datasets[0]
+        )
+
+        assert state.number_of_source_rows == 10
+        assert state.number_of_rejected_source_rows == 9
+        assert len(state.rejected_source_row_reasons) == DatasetValidatorState.MAX_RECORDED_REJECTIONS
+        assert [reason.split(":")[0] for reason in state.rejected_source_row_reasons] == ["0", "1", "2", "3", "4"]
+        assert state.rejection_summary("train.jsonl").endswith("  ... and 4 more rows")
+        # Every repeated copy is still left out of the metrics.
+        assert len(state.offending_example_idxs) == 27
+
+    def test_not_json_is_described(self, tmp_path: Path) -> None:
+        data_fpath = tmp_path / "train.jsonl"
+        data_fpath.write_text("{not json\n")
+
+        state = TrainDataProcessor()._validate_samples_and_aggregate_metrics_single_dataset(
+            _agent_config_for(data_fpath).datasets[0]
+        )
+
+        assert state.rejected_source_row_reasons[0].startswith("0: not valid JSON:")
+
+
 class TestIterDatasetLines:
     def test_iter_dataset_lines_num_repeats(self, tmp_path):
         """Test _iter_dataset_lines with different num_repeats values"""
