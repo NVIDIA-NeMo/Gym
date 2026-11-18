@@ -323,19 +323,6 @@ def declared_manifests(tree_dir: Path) -> Iterator[tuple[Path, EnvironmentManife
             continue
 
 
-def find_named_manifest(name: str, *, subdir: str, roots: Iterable[Path]) -> Optional[Path]:
-    """The manifest that declares ``name`` under ``subdir`` of the first root that has one.
-
-    ``subdir`` is ``benchmarks`` or ``environments``. Roots are searched in order, so an earlier root shadows a
-    later one, as in catalog discovery.
-    """
-    for root in roots:
-        for manifest_path, manifest in declared_manifests(root / subdir):
-            if manifest.name == name:
-                return manifest_path
-    return None
-
-
 def _discover_registry_tree(
     tree_dir: Path,
     kind: CatalogKind,

@@ -7,8 +7,6 @@ import logging
 from pathlib import Path
 
 from nemo_gym import component_search_roots
-from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
-from nemo_gym.environment.registry import find_named_manifest
 from nemo_gym.utils.text import did_you_mean
 
 
@@ -24,6 +22,50 @@ ASSETS = {
     "model-type": ("responses_api_models", "configs", None),
     "agent-type": ("responses_api_agents", "configs", None),
 }
+# Benchmarks and environments are catalog entries: their selectors resolve a name the way the catalog does.
+_CATALOG_FLAGS = frozenset({"benchmark", "environment"})
+
+
+def _path_candidates(tree: Path, value: str) -> list[Path]:
+    """The configs a benchmark or environment name points to as a path under one catalog tree, in lookup order."""
+    server_name, _, config_flavor = value.partition("/")
+    nested = [tree / value / "config.yaml"] if "/" in value else []
+    return [*nested, tree / server_name / f"{config_flavor or 'config'}.yaml"]
+
+
+def _catalog_configs_in_tree(tree: Path, value: str) -> tuple[Path | None, Path | None]:
+    """The config one catalog tree resolves a name to as a catalog entry, and otherwise by its old path.
+
+    The catalog entry is the manifest that declares the name, or else a config at that path that no manifest
+    claims. A config that a manifest claims under another name is listed only under that name, so its path is
+    returned separately: it is used only when no root has a catalog entry, which keeps such paths working.
+    """
+    # Imported here so that commands that never select a benchmark or environment, such as --help, stay fast.
+    from nemo_gym.environment.manifest import ManifestError, load_manifest, resolve_manifest_config_path
+    from nemo_gym.environment.registry import declared_manifests
+
+    direct = tree / value / "manifest.yaml"
+    if direct.is_file():
+        try:
+            manifest = load_manifest(direct)
+            if manifest.name == value:
+                return resolve_manifest_config_path(direct, manifest), None
+        except ManifestError:
+            pass
+    claimed: set[Path] = set()
+    for manifest_path, manifest in declared_manifests(tree):
+        try:
+            config_path = resolve_manifest_config_path(manifest_path, manifest)
+        except ManifestError:
+            continue
+        if manifest.name == value:
+            return config_path, None
+        claimed.add(config_path)
+    paths = [candidate.resolve() for candidate in _path_candidates(tree, value) if candidate.is_file()]
+    unclaimed = [path for path in paths if path not in claimed]
+    if unclaimed:
+        return unclaimed[0], None
+    return None, (paths[0] if paths else None)
 
 
 def asset_config_path(flag: str, value: str) -> str:
@@ -45,28 +87,23 @@ def asset_config_path(flag: str, value: str) -> str:
     roots = component_search_roots()
     matches: list[Path] = []
 
-    if "/" in value and flag in {"benchmark", "environment"}:
-        nested_matches: list[Path] = []
+    if flag in _CATALOG_FLAGS:
+        # The catalog's rule, root by root: the highest-priority root with a catalog entry for the name wins.
+        old_paths: list[Path] = []
         for root in roots:
-            candidate = root / parent / value / "config.yaml"
-            resolved = candidate.resolve()
-            if candidate.is_file() and resolved not in nested_matches:
-                nested_matches.append(resolved)
-        if nested_matches:
-            if len(nested_matches) > 1:
-                shadowed = ", ".join(f"`{path}`" for path in nested_matches[1:])
-                logger.warning(
-                    f"`--{flag} {value}` matches multiple configs; using `{nested_matches[0]}` from the "
-                    f"highest-priority root and ignoring {shadowed}. Pass `--config <path>` to select a different one."
-                )
-            return str(nested_matches[0])
-
-    for root in roots:
-        candidate = root / path
-        if candidate.exists():
-            resolved = candidate.resolve()
-            if resolved not in matches:
-                matches.append(resolved)
+            entry, old_path = _catalog_configs_in_tree(root / parent, value)
+            if entry is not None and entry not in matches:
+                matches.append(entry)
+            if old_path is not None and old_path not in old_paths:
+                old_paths.append(old_path)
+        matches = matches or old_paths
+    else:
+        for root in roots:
+            candidate = root / path
+            if candidate.exists():
+                resolved = candidate.resolve()
+                if resolved not in matches:
+                    matches.append(resolved)
 
     if len(matches) > 1:
         shadowed = ", ".join(f"`{m}`" for m in matches[1:])
@@ -76,13 +113,6 @@ def asset_config_path(flag: str, value: str) -> str:
         )
     if matches:
         return str(matches[0])
-
-    # A manifest's name is its ID and need not match its folder, so a benchmark or environment that moved still
-    # resolves by the name its manifest declares. A config at the path is tried first and keeps today's names working.
-    if flag in {"benchmark", "environment"}:
-        manifest_path = find_named_manifest(value, subdir=parent, roots=roots)
-        if manifest_path is not None:
-            return str(resolve_manifest_config_path(manifest_path, load_manifest(manifest_path)))
 
     # No match: build a "did you mean?" hint and the roots searched
     if flag == "benchmark":

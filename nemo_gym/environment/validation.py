@@ -1055,8 +1055,8 @@ def _validate_unique_name(manifest_path: Path, manifest: EnvironmentManifest, co
 
     The name is the environment ID and stays the same when the folder moves, so it need not match the folder path.
     No other manifest in the tree may declare it. A name that differs from its folder path also may not be the path
-    of another config, because ``--benchmark`` and ``--environment`` read a name as a path before they look for a
-    manifest that declares it.
+    of another config: the manifest's name would hide that config from the catalog and from ``--benchmark`` and
+    ``--environment``.
     """
     catalog_directory = _catalog_directory(manifest_path)
     if catalog_directory is None:
@@ -1076,8 +1076,8 @@ def _validate_unique_name(manifest_path: Path, manifest: EnvironmentManifest, co
     for path_config in path_configs:
         if path_config.is_file() and path_config.resolve() != config_path:
             raise EnvironmentValidationError(
-                f"Manifest name '{manifest.name}' is the path of another config, {path_config}, which "
-                "--benchmark and --environment would select instead. Choose another name."
+                f"Manifest name '{manifest.name}' is the path of another config, {path_config}, which this name "
+                "would hide from the catalog and from --benchmark and --environment. Choose another name."
             )
 
 
