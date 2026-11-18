@@ -142,7 +142,8 @@ does not depend on the collector being enabled.
      "gpus_observed": true}
   ],
   "gpus": [
-    {"gpu_uuid": "GPU-5b0f...", "node_index": 0, "gpu_index": 0, "services": ["gym-vllm/policy-prefill"]}
+    {"gpu_uuid": "GPU-5b0f...", "node_index": 0, "gpu_index": 0, "gpu_name": "NVIDIA H100 80GB HBM3",
+     "services": ["gym-vllm/policy-prefill"]}
   ]
 }
 ```
@@ -171,7 +172,7 @@ every job's declaration is also kept at `<job dir>/logs/service_declaration-<slu
 `nvidia-smi` errors of the GPU listing go to `<job dir>/logs/service_declaration-<slurm job id>.log`.
 
 **Joining GPU series to services.** DCGM exporter series carry the GPU's UUID in their `UUID` label
-and the NVML index in `gpu`. Match `UUID` to `gpus[].gpu_uuid` and the series' `slurm_job_id` resource
+and the NVML index in `gpu`; `gpus[].gpu_name` is the model `nvidia-smi` reports, left out when it has unusual characters. Match `UUID` to `gpus[].gpu_uuid` and the series' `slurm_job_id` resource
 attribute to the declaration's `slurm_job_id`; the row's `services` names the service, whose entry in
 `services` gives the layout. Engine series join on `service.name.override` (or `gym_service`) directly.
 GPU series are not relabelled with the service: the collector's configuration is written at submit
