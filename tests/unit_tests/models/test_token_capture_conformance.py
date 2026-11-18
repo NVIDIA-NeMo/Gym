@@ -84,7 +84,7 @@ class _MemorySink:
         backend.versions[entry.capture_key] = backend.versions.get(entry.capture_key, 0) + 1
         await backend.lineage.put(entry)
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         if rollout_id in self.backend.retired:
             raise TokenCaptureRetiredError("retired")
         self.backend.incomplete.add(rollout_id)
@@ -222,7 +222,7 @@ def test_kit_rejects_a_broken_backend(tmp_path):
 class _LateMarkSink(_MemorySink):
     """Lets a late ``mark_incomplete`` through after retire, which resurrects the rollout's capture state."""
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         self.backend.incomplete.add(rollout_id)
         self.backend.versions[rollout_id] = self.backend.versions.get(rollout_id, 0) + 1
 
@@ -317,10 +317,10 @@ class _IntentOnlySink:
     async def put(self, entry: TokenEntry) -> None:
         await self._store.put(entry)
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         await self._store.mark_incomplete(rollout_id, model_call_id)
 
-    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+    async def begin_call(self, rollout_id: str, model_call_id: str, *, identity=None) -> None:
         await self._store.begin_call(rollout_id, model_call_id)
 
     async def close(self) -> None:
@@ -342,3 +342,25 @@ def test_kit_warns_when_a_sink_registers_intents_but_cannot_record_a_refusal(tmp
     assert warning.check_name == "engine_refusal_resolution"
     assert "_IntentOnlySink implements begin_call but not record_engine_refusal" in warning.detail
     assert "the rollout is masked" in warning.detail
+
+
+def test_kit_rejects_a_sink_whose_begin_call_takes_no_identity(tmp_path):
+    class _BeginCallWithoutIdentity(TokenCaptureStore):
+        async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+            await super().begin_call(rollout_id, model_call_id)
+
+    with pytest.raises(ConformanceError) as info:
+        asyncio.run(run_conformance(lambda: _BeginCallWithoutIdentity(tmp_path), lambda: TokenCaptureStore(tmp_path)))
+    assert info.value.check_name == "unconditional_retirement"
+
+
+def test_kit_rejects_a_sink_whose_mark_incomplete_takes_no_identity(tmp_path):
+    class _MarkIncompleteWithoutIdentity(TokenCaptureStore):
+        async def mark_incomplete(self, capture_key: str, model_call_id: str = "") -> None:
+            await super().mark_incomplete(capture_key, model_call_id)
+
+    with pytest.raises(ConformanceError) as info:
+        asyncio.run(
+            run_conformance(lambda: _MarkIncompleteWithoutIdentity(tmp_path), lambda: TokenCaptureStore(tmp_path))
+        )
+    assert info.value.check_name == "mark_incomplete_durability"

@@ -305,6 +305,11 @@ for readability but stored as one JSONL line.
 }
 ```
 
+A call whose URL names an agent instance also carries `agent_instance` and `agent_kind`. The raw record and
+the training-token records (ledger rows, manifest records and failures, receipts) leave both fields out for
+an unnamed agent, so a single-agent record keeps its earlier shape. `ModelCallRecord` always has both and
+sets them to `null`. Read an absent field and `null` as the same thing: the agent is unnamed.
+
 Writes are flushed and fsynced. Capture failures are logged without failing model requests. Resume
 attempts use an `-a<n>` suffix so their data does not mix with an earlier attempt. Before dispatch,
 the collector clears any existing capture for the exact rollout-attempt id.
@@ -321,7 +326,7 @@ totals = aggregate_model_call_metrics(store, rollout_id)
 ```
 
 `ModelCallRecord` includes the server-generated `model_call_id`, protocol `response_id`, typed
-`model_ref`, UTC `started_at` and `completed_at` timestamps, durable `call_index`, API dialect, token
+`model_ref`, `agent_instance` and `agent_kind`, UTC `started_at` and `completed_at` timestamps, durable `call_index`, API dialect, token
 and cache usage, status, finish reason, latency, error details, tool calls, reasoning, and captured
 payloads. `call_index` and timestamps do not establish causal ordering between concurrent calls.
 

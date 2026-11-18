@@ -168,8 +168,11 @@ class SharedLogs:
             "def headers(info):\n"
             " info.uid, info.gid, info.uname, info.gname = uid, gid, uname, gname\n"
             " return info\n"
+            "def safe(member, path):\n"
+            " try: return tarfile.data_filter(member, path)\n"
+            " except tarfile.FilterError: return None\n"
             "with tempfile.TemporaryDirectory(dir=root) as tmp:\n"
-            " with tarfile.open(source, 'r:gz') as tar: tar.extractall(tmp, filter='data')\n"
+            " with tarfile.open(source, 'r:gz') as tar: tar.extractall(tmp, filter=safe)\n"
             " with tarfile.open(root / 'verifier' / name, 'w:gz') as tar:\n"
             "  tar.add(tmp, arcname='.', filter=headers)\n"
             "print('ready')\n",

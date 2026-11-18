@@ -104,6 +104,8 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
             assert "cwd" not in agent and "extra_config" not in agent
         if harness == "opencode":
             assert "agent" not in agent["opencode_config"]
+            # The CI host has no rg, so OpenCode downloads one if a scenario ever needs it.
+            assert agent["sandbox_ripgrep_download"] is True
     # A CI job installs only its own adapter's dependencies, so only that adapter can be imported there.
     if os.environ.get("HARNESS") == harness:
         import importlib
