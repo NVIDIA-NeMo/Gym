@@ -31,6 +31,7 @@ from responses_api_agents.claude_code_agent.observability import extract_claude_
 
 
 LOG = logging.getLogger(__name__)
+REQUIRE_MCP_SERVERS_SCRIPT = Path(__file__).with_name("require_mcp_servers.sh")
 
 
 class HarnessProcessInfo(BaseModel):
@@ -160,7 +161,11 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         return artifacts
 
     async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
-        """Stage the invocation and return the runner command."""
+        """Stage the invocation and return the runner command.
+
+        With ``required_mcp_servers``, the CLI runs under ``require_mcp_servers.sh``, which stops it once its init
+        event reports that one of those servers did not connect.
+        """
         payload = dict(payload)
         await self.upload_json("config/settings.json", payload.pop("settings"))
         mcp_config = payload.pop("mcp_config")
@@ -170,13 +175,20 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         if skills_path:
             await self.stage_skills(skills_path)
         directory = self.session.session_dir
+        events = f"{directory}/events.jsonl"
+        command = payload["command"]
+        required_mcp_servers = payload.pop("required_mcp_servers")
+        if required_mcp_servers:
+            script = f"{directory}/{REQUIRE_MCP_SERVERS_SCRIPT.name}"
+            await self.session.sandbox.upload(REQUIRE_MCP_SERVERS_SCRIPT, script)
+            command = ["bash", script, events, *required_mcp_servers, "--", *command]
         # Regular files avoid waiting for detached task services to close inherited pipes.
         params = {
             "cwd": payload["cwd"],
-            "command": payload["command"],
+            "command": command,
             "env": payload["env"],
             "stdin": "/dev/null",
-            "stdout": f"{directory}/events.jsonl",
+            "stdout": events,
             "stderr": f"{directory}/stderr.log",
         }
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))

@@ -1,6 +1,7 @@
 # Collaborative Intelligence (Zou group, arXiv 2611.02633, github.com/zou-group/collaborative-intelligence @ 3de5f7d):
 # the 157 released scenarios of the scored set x 3 test seeds. Eval only: never train on it (some scenarios reuse GPQA).
 config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
   - resources_servers/collab_intel/configs/collab_intel.yaml
 
 collab_intel_benchmark_resources_server:
@@ -12,6 +13,11 @@ collab_intel_benchmark_agent:
     collab_intel_agent:
       resources_server:
         name: collab_intel_benchmark_resources_server
+      # the policy's code runs in a sandbox that must not reach other hosts (OpenSandbox's key; checked at start)
+      sandbox_spec:
+        provider_options:
+          network_policy:
+            defaultAction: deny
       datasets:
         - name: collab_intel
           type: benchmark
