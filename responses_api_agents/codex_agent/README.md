@@ -105,11 +105,6 @@ Older Alpine images use a checksum-verified private C++ library for Node. Runtim
 under `/tmp/nemo-gym-codex-node-*`, and private `CODEX_HOME` configuration lives under
 `/tmp/nemo-gym-codex-sessions/*`. Task HOME, XDG directories, Python, Node, libraries,
 and PATH are preserved.
-By default Codex gets only `PATH`, `LANG`, `LC_ALL`, `HOME` and the XDG directories from the
-sandbox. `inherit_sandbox_environment: true` instead passes the sandbox's whole environment,
-as a harness started in the task container sees it (task variables such as `VIRTUAL_ENV` or
-`OMP_NUM_THREADS`), keeping only `CODEX_HOME` private. Use it only with remote providers,
-where that environment is the task's own.
 Installation errors retain the command, exit status, stdout, and stderr. Runtime compatibility
 must still be checked on actual task images; a mocked installer test is not image validation.
 
@@ -124,6 +119,47 @@ For custom models, set `model_context_window` to the served limit and optionally
 compaction threshold must not exceed 90% of the explicit window. The pinned CLI also clamps
 unknown-model metadata to a 272,000-token context and 90% compaction threshold. These are
 context-management controls, not generation budgets.
+
+### Sandbox session environment
+
+Codex and its shell tools run with this environment, each layer replacing the variables of the one before it:
+
+1. From the sandbox: by default only `PATH`, `LANG`, `LC_ALL`, `HOME` and the XDG directories.
+   `inherit_sandbox_environment: true` instead passes the sandbox's whole environment, as a harness started in the
+   task container sees it (task variables such as `VIRTUAL_ENV` or `OMP_NUM_THREADS`). Use it only with remote
+   providers, where that environment is the task's own: a local provider's sandbox environment is the agent host's,
+   including its `OPENAI_API_KEY`.
+2. The environment the sandbox's owner hands over in `SandboxAccess.env` for the harness's commands, as the other
+   harnesses apply it (for example the task user's `HOME` and `SHELL`). Variables named `NEMO_GYM_*` (Gym's own) or
+   `CODEX_*` are left out. `CODEX_*` variables configure Codex itself, for example `CODEX_ACCESS_TOKEN`, or
+   `CODEX_EXEC_SERVER_URL`, which moves tool execution out of the sandbox. Other harnesses leave out their own prefix
+   the same way, as Goose leaves out `GOOSE_*`.
+3. Gym's own: `CODEX_HOME` (a private directory under `/tmp/nemo-gym-codex-sessions/`) and
+   `NEMO_GYM_CODEX_API_KEY`, the key the Gym model provider reads. A task value for either is replaced.
+
+Gym sets neither `OPENAI_API_KEY` nor `OPENAI_BASE_URL`, so a task's own values reach Codex's commands unchanged, for
+example for a task that runs its own OpenAI-compatible client. Harbor's Codex agent instead sets both to its own model
+connection, so a Harbor task that tells the agent to use them must supply them in its own environment under Gym.
+Neither redirects Codex's model calls: the Gym provider's `base_url` is fixed in its `config.toml` and its key comes
+only from `NEMO_GYM_CODEX_API_KEY`. Codex 0.144.4 never reads `OPENAI_BASE_URL`; 0.154.0 and 0.155.1 read it, and
+all three read `OPENAI_API_KEY`, only for the built-in `openai` provider or for the network-proxy credential broker of
+shell-tool traffic, which a `danger-full-access` session does not start.
+
+Proxy variables do not redirect Codex's model calls either. Codex sends them to the launcher's forwarder on
+`127.0.0.1`, which relays them to Gym's model server. Without a guard, an `HTTP_PROXY`, `http_proxy` or `ALL_PROXY`
+from the task or the sandbox would send those calls to the proxy instead, which cannot reach the sandbox's loopback.
+The launcher therefore starts both `NO_PROXY` and `no_proxy` with `127.0.0.1,localhost`, followed by any entries
+already set in either spelling. Codex's commands see these values too.
+
+Codex's default `shell_environment_policy` gives every shell tool Codex's whole environment, including names that
+contain `KEY`, `SECRET` or `TOKEN` (its default excludes are off), plus a few of Codex's own such as
+`CODEX_THREAD_ID` and `CODEX_CI`. Codex 0.154.0 and later also remove some variables of their own launch context
+(`OPENAI_IDENTITY_TOKEN_FILE`, `OPENAI_FEDERATION_RULE_ID`, `OPENAI_WORKLOAD_IDENTITY_CONTEXT`,
+`CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN` and `NODE_REPL_AUTH_TOKEN`). Harbor's Codex agent leaves the same default.
+
+A Harbor task's `[environment.env]` is part of the sandbox's own environment: the `harbor` Environment Server hands
+over `SandboxAccess.env` only to its oracle. Codex sees those variables only with
+`inherit_sandbox_environment: true`.
 
 ## Requests, results, and lifecycle
 
