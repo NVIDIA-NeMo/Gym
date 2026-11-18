@@ -106,7 +106,7 @@ folder it was given, as with any non-Claude harness in the official runner.
   are the Model Server's host and PyPI (`pypi.org`, `files.pythonhosted.org`), where its setup installs mini-SWE, so
   the agent and the verifier can reach them too. `codex_agent` and `claude_code_agent` declare their hosts as well,
   but neither declares `supports_task_tool_context`, so they run `skillsbench_no_skill` only. On another provider,
-  or with a harness that declares no hosts, the episode fails at seed instead of running with open egress; add
+  or with a harness that does not declare `sandbox_egress`, the episode fails at seed instead of running with open egress; add
   `--exclude-tasks bike-rebalance` there.
 - Three tasks ship Compose files written for Docker whose services are built from the task's own Dockerfiles
   (`drone-planning-control`, `fix-visual-stability`, `react-performance-debugging`); the published images cover only
