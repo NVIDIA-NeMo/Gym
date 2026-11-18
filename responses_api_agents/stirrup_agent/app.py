@@ -471,8 +471,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             error={"code": "server_error", "message": output["model_error"]} if output.get("model_error") else None,
             usage=usage,
         )
-        answered = bool(output["observations"]["model_response_ids"])
-        return self.report_outcome(response, output, model_answered=answered)
+        return self.report_outcome(response, output)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()

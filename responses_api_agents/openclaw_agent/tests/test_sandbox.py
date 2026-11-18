@@ -24,7 +24,6 @@ from pydantic import ValidationError
 from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
-    agent_outcome_policy,
     is_harness_termination_failure,
     parse_cleanup_receipt,
     raises_agent_failure,
@@ -32,7 +31,6 @@ from nemo_gym.agents import (
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     EpisodeId,
-    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NgFailureEvent,
@@ -2412,17 +2410,12 @@ def test_terminal_model_error_retains_response_and_cause(setup, partial, message
         expected = (
             {"failure_kind": "unknown"}
             if status is None
-            # Without the earlier tool turn the model never answered, so the endpoint refused the run's own request.
-            else {"failure_kind": "model_request_rejected"}
-            if status == 400 and not partial
             else {
                 "failure_kind": "model_request_error",
                 "status_code": status,
             }
         )
         assert json.loads(body["metadata"]["ng_agent_outcome"]) == expected
-        if status == 400:
-            assert agent_outcome_policy(NeMoGymResponse.model_validate(body)) == ("verify" if partial else "fail")
         assert body["usage"]["total_tokens"] == (15 if partial else 0)
         assert any(item["type"] == "function_call_output" for item in body["output"]) == partial
         assert client.post(path, json={"input": "task"}).json() == body

@@ -585,7 +585,7 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=state.activation_request.parallel_tool_calls,
             usage=_usage(report["usage"]),
         )
-        return self.report_outcome(response, report, model_answered=report["model_calls"] > 0)
+        return self.report_outcome(response, report)
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """A crew run that raised: the model request that failed, if one did; an empty answer is the model's invalid

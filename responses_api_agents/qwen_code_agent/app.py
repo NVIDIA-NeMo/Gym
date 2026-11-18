@@ -510,8 +510,6 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
             output=output,
             usage=usage,
             status=status,
-            # Qwen's own "[API Error: <status> ...]" names the provider's cause.
-            error={"code": "server_error", "message": error_message} if status == "failed" and error_message else None,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -524,8 +522,7 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         )
         if status == "failed":
             LOG.warning("Qwen Code run failed (%s); stderr tail: %s", error_type, artifacts.stderr[-2048:])
-            outcome = {"failure_kind": failure_kind, "error_message": error_message}
-            return self.report_outcome(response, outcome, model_answered=bool(output))
+            return self.report_outcome(response, {"failure_kind": failure_kind, "error_message": error_message})
         return self.report_rollout_stop(response, state.session)
 
     async def responses(

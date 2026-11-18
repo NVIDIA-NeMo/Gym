@@ -177,8 +177,6 @@ class GymResponsesChatModel(ResponsesChatModel):
             if model_failure is not None:
                 model_failure["error"] = error
             raise
-        # The run's model answered, so a later refusal is not a request the endpoint rejected before any answer.
-        model_usage["answered"] = True
         # `model_cookies` is the same holder dict object referenced from `configurable` (not a copy), so
         # this mutation is visible to the next `_agenerate()` call for this rollout — matches
         # `simple_agent`'s pattern of chaining model-server cookies from each response into the next call.

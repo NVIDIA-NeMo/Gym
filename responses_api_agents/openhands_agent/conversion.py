@@ -149,11 +149,6 @@ def _response_ids(events: Iterable[tuple[float, dict[str, Any]]]) -> list[str]:
     return list(seen)
 
 
-def model_replied(events: Iterable[tuple[float, dict[str, Any]]], result: Optional[dict[str, Any]]) -> bool:
-    """Whether any model call of the conversation returned: an event names its response, or OpenHands kept its usage."""
-    return bool(_response_ids(events) or token_usages(result))
-
-
 def token_usages(result: Optional[dict[str, Any]], usage_id: Optional[str] = None) -> list[dict[str, Any]]:
     """Per-call usage records OpenHands kept, for one LLM (``agent`` or ``condenser``) or for all of them."""
     stats = (result or {}).get("stats") or {}
@@ -261,7 +256,7 @@ def run_outcome(
     may still have been starting, or the Model Server may not have answered.
     """
     if timed_out:
-        if rollout_stop or model_replied(events, result):
+        if rollout_stop or _response_ids(events) or token_usages(result):
             return RunOutcome("incomplete", "timeout")
         return RunOutcome("failed", "timeout", "Gym's deadline passed before any model call returned", "unknown")
     if result is None:

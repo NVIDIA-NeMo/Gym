@@ -284,44 +284,6 @@ async def test_a_turn_whose_failure_the_harness_classified_ends_the_episode_ungr
 CONTINUES = {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]}
 
 
-@pytest.mark.parametrize("turn_sessions", ["fresh", "continue"])
-@pytest.mark.parametrize("rejected_step", [0, 1], ids=["first-step", "after-a-graded-step"])
-async def test_a_request_rejected_after_a_graded_step_is_graded_as_its_http_400(
-    tmp_path, monkeypatch, rejected_step, turn_sessions
-):
-    """A step's fresh session cannot see the answers of the steps before it, so its harness can report a 400 on the
-    session's first model call as a rejected request; a continued harness may not keep its earlier activations'
-    answers either. On the first step that fails the episode ungraded; after a graded step the episode's settings were
-    already accepted, so the step is graded as the 400 it was."""
-    server, task, sandbox, _ = multi_turn_server(
-        tmp_path,
-        monkeypatch,
-        THREE_STEPS,
-        {"plan": "Agree on a plan.", "build": "Build it.", "check": "Hand off."},
-        turn_sessions=turn_sessions,
-    )
-    server.server_client.continuation_capabilities = CONTINUES
-    rewards_per_turn(server, sandbox, ["1", "1", "1"])
-    rejected = agent_response().model_dump(mode="json")
-    rejected.update(
-        status="failed",
-        error={"code": "server_error", "message": "HTTP 400: max_tokens is too large"},
-        metadata={AGENT_OUTCOME_METADATA_KEY: '{"failure_kind":"model_request_rejected"}'},
-    )
-    activations = iter([rejected if step == rejected_step else None for step in range(3)])
-    server.server_client.turn_hooks.append(lambda: setattr(server.server_client, "turn_response", next(activations)))
-
-    response = await server.run_request(request_for(task))
-
-    if rejected_step == 0:
-        assert response.result is None
-        assert (response.failure.stage, response.failure.terminal) == ("agent", True)
-    else:
-        assert response.failure is None, response.failure
-        assert [turn.response.status == "failed" for turn in response.result.turns] == [False, True, False]
-        assert [turn.reward for turn in response.result.turns] == [1.0, 1.0, 1.0]
-
-
 async def test_continue_runs_every_step_as_an_activation_of_one_session(tmp_path, monkeypatch):
     """``turn_sessions: continue`` is Harbor's ``--resume-trajectory``: step 1 opens the session, every later step
     resumes it (here: activation k of one continuation session), each step is still verified on its own, and the

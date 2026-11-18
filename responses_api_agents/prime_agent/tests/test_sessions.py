@@ -22,20 +22,13 @@ from nemo_gym.agents import (
     ROLLOUT_STOP_METADATA_KEY,
     AgentSeedSessionRequest,
     SandboxSession,
-    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.prime_agent.app import PrimeAgent, PrimeAgentConfig
-from responses_api_agents.prime_agent.sandbox import (
-    CLI,
-    PRIME_AGENT_VERSION,
-    PRIME_RELEASE_PACKAGES,
-    PrimeArtifacts,
-    PrimeSession,
-)
+from responses_api_agents.prime_agent.sandbox import CLI, PRIME_AGENT_VERSION, PRIME_RELEASE_PACKAGES, PrimeSession
 
 
 # The Prime dependencies of the 0.7.0 release manifests, written out so a stale constant in sandbox.py fails here.
@@ -341,63 +334,6 @@ async def test_model_error_reports_the_upstream_status(tmp_path):
     outcome = json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])
     assert outcome == {"failure_kind": "model_request_error", "status_code": 503}
     assert close.cleanup_confirmed
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("answered", "outcome", "action"),
-    [
-        # Before any answer the endpoint refused the run's own request, so the attempt is not graded.
-        (False, {"failure_kind": "model_request_rejected"}, "fail"),
-        # A tool turn came first; the parse drops a failed run's transcript, so only the stop reasons show it.
-        (True, {"failure_kind": "model_request_error", "status_code": 400}, "verify"),
-    ],
-)
-async def test_a_400_is_a_rejected_request_only_before_the_model_answered(
-    tmp_path, monkeypatch, answered, outcome, action
-):
-    def end(message):
-        return json.dumps({"type": "message_end", "message": message})
-
-    usage = {"input": 10, "output": 2}
-    lines = (
-        [
-            end(
-                {
-                    "role": "assistant",
-                    "content": [{"type": "toolCall", "id": "c1", "name": "bash"}],
-                    "usage": usage,
-                    "stopReason": "toolUse",
-                }
-            ),
-            end({"role": "toolResult", "toolCallId": "c1", "content": [{"type": "text", "text": "a.txt"}]}),
-        ]
-        if answered
-        else []
-    )
-    rejection = "400 max_tokens is too large: 131072. This model supports at most 32768 completion tokens"
-    lines.append(
-        end({"role": "assistant", "content": [], "usage": {}, "stopReason": "error", "errorMessage": rejection})
-    )
-    state = PrimeSession(
-        request=seed(),
-        provider_name="local",
-        sandbox_id="task",
-        session=SandboxSession(sandbox=MagicMock(), session_dir=str(tmp_path), workdir="/repo", harness="Prime Agent"),
-    )
-    state.activation_request = body()
-
-    async def execute(**kwargs):
-        state.session.cleanup = {"cleanup_confirmed": True, "error": None, "return_code": 0, "timed_out": False}
-        return PrimeArtifacts(stdout="\n".join(lines), stderr="")
-
-    monkeypatch.setattr(state.session, "execute", execute)
-    response = await agent()._activate_session(state, state.activation_request)
-    assert response.status == "failed" and response.output == []
-    # The provider's message reaches the environment as the failure reason.
-    assert response.error.message == rejection
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
-    assert agent_outcome_policy(response) == action
 
 
 @pytest.mark.asyncio

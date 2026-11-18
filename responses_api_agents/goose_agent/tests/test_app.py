@@ -22,14 +22,13 @@ from nemo_gym.agents import (
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     SandboxSession,
-    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.goose_agent.app import GooseAgent, GooseAgentConfig
-from responses_api_agents.goose_agent.sandbox import GOOSE_VERSION, GooseArtifacts, GooseSession
+from responses_api_agents.goose_agent.sandbox import GOOSE_VERSION, GooseSession
 
 
 FAKE_GOOSE = r"""
@@ -475,67 +474,6 @@ async def test_goose_stops_map_to_status_and_outcome(tmp_path, mode, status, out
     assert (json.loads(reported) if reported else None) == outcome
     assert (response.error.message if response.error else None) == error
     assert close.cleanup_confirmed
-
-
-# Goose's notice for a rejected model request, in the shape of its recorded 404 notice (provider_error.rs).
-REJECTED_NOTICE = (
-    "Ran into this error: Request failed: Bad request (400) at http://127.0.0.1:18983/v1/chat/completions: "
-    "max_tokens is too large.\n\nPlease retry if you think this is a transient or recoverable error."
-)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("history", "outcome", "action"),
-    [
-        # Before any answer the endpoint refused the run's own request, so the attempt is not graded.
-        ("none", {"failure_kind": "model_request_rejected"}, "fail"),
-        ("tool_answer", {"failure_kind": "model_request_error", "status_code": 400}, "verify"),
-        # A returned empty completion converts to no output but is still an answer.
-        ("empty_answer", {"failure_kind": "model_request_error", "status_code": 400}, "verify"),
-        # Goose's own hidden notice and a persisted error block are not answers of the model.
-        ("hidden_notice", {"failure_kind": "model_request_rejected"}, "fail"),
-        ("error_block", {"failure_kind": "model_request_rejected"}, "fail"),
-    ],
-)
-async def test_a_400_notice_is_a_rejected_request_only_before_the_model_answered(
-    tmp_path, monkeypatch, history, outcome, action
-):
-    state, _ = session(tmp_path, "normal")
-    request = body()
-    state.activation_request = request
-
-    def message(message_id, role, content, *, user_visible=True):
-        return {"role": role, "content": content, "created": 1, "message_id": message_id, "user_visible": user_visible}
-
-    messages = [message("m0", "user", [{"type": "text", "text": "Fix the bug."}])]
-    if history == "tool_answer":
-        call = {"type": "toolRequest", "id": "c1", "toolCall": {"status": "success", "value": {"name": "shell"}}}
-        result = {"type": "toolResponse", "id": "c1", "toolResult": {"status": "success", "value": {"content": []}}}
-        messages += [message("m1", "assistant", [call]), message("m2", "user", [result])]
-    elif history == "empty_answer":
-        messages.append(message("m1", "assistant", []))
-    elif history == "hidden_notice":
-        notice_text = {"type": "text", "text": "Conversation compacted."}
-        messages.append(message("m1", "assistant", [notice_text], user_visible=False))
-    elif history == "error_block":
-        messages.append(message("m1", "assistant", [{"type": "error", "message": "Invalid API key"}]))
-    root = {"id": "s1", "parent_session_id": None, "messages": messages, "usage": []}
-    notice = {
-        "type": "message",
-        "message": {"id": "notice", "role": "assistant", "content": [{"type": "text", "text": REJECTED_NOTICE}]},
-    }
-
-    async def execute(**kwargs):
-        state.session.cleanup = {"cleanup_confirmed": True, "error": None, "return_code": 0, "timed_out": False}
-        return GooseArtifacts(stdout=json.dumps(notice), stderr="", sessions=b"sessions")
-
-    monkeypatch.setattr(state.session, "execute", execute)
-    monkeypatch.setattr(GooseAgent, "_read_sessions", staticmethod(lambda archive: [root]))
-    response = await agent()._activate(state, request)
-    assert response.status == "failed" and response.error.message == REJECTED_NOTICE
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
-    assert agent_outcome_policy(response) == action
 
 
 @pytest.mark.asyncio

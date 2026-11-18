@@ -53,7 +53,7 @@ from nemo_gym.trajectory import (
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_turn_simulation import cline_xml
 from resources_servers.agentic_turn_simulation.simulator import simulator_failure
-from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentSessionState, _cookies
+from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, _cookies
 
 
 LOG = logging.getLogger(__name__)
@@ -304,7 +304,6 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
         activation: Activation | None = None,
-        session: SimpleAgentSessionState | None = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         # Only the legacy /run route is supported: every episode needs the session /seed_session opens on the resources
         # server. The agent is not in AGENT_SESSION_AGENT_TYPES, so config composition relays it through /run; an

@@ -514,12 +514,10 @@ async def test_model_http_error_reaches_environment(status_code: int, exit_code:
     assert response.status == "failed"
     assert "controlled model failure" in response.error.message
     assert "test-mcp-credential" not in response.error.message
-    # No model call answered, so a 400 is the endpoint refusing the run's own request.
-    assert json.loads(response.metadata["ng_agent_outcome"]) == (
-        {"failure_kind": "model_request_rejected"}
-        if status_code == 400
-        else {"failure_kind": "model_request_error", "status_code": status_code}
-    )
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status_code,
+    }
     assert response.metadata["harness_execution"] == "sandbox"
 
 

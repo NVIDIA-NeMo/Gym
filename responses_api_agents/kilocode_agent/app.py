@@ -882,15 +882,13 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             problem = "Kilo completed without any trajectory events"
         else:
             problem = None
-        # Read before _build_response pads the output with an empty message: a step's tokens or items are answers.
-        answered = bool(output_items) or any(usage.values())
         response = self._build_response(
             body, output_items, usage, self.config.model, incomplete=timed_out or length_stop
         )
         if isinstance(error, dict) and self.classify_outcome(error).failure_kind == MODEL_REQUEST_ERROR:
             response.status = "failed"
             response.error = ResponseError(code="server_error", message=problem[:2000])
-            response = self.report_outcome(response, error, model_answered=answered)
+            response = self.report_outcome(response, error)
         return response, problem
 
     async def _sandbox_response(

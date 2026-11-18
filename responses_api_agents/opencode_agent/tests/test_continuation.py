@@ -20,11 +20,9 @@ from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentContinuationRequirements,
-    agent_outcome_policy,
 )
 from nemo_gym.core import (
     PROVIDER_OOM_KILLED,
-    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     SandboxFailureDetails,
@@ -723,43 +721,6 @@ def test_reported_error_retains_continuation_evidence(
         assert len(payloads) == 2
         invocations = roots(close(client, request)["agent_observations"])
         assert [(r["activation_id"], r["status"]) for r in invocations] == [(1, "completed"), (2, expected_status)]
-
-
-def test_a_400_on_a_later_activations_first_call_stays_a_graded_request_error(setup, tmp_path):
-    """The failing message of activation 2 has no parts, so its output is empty; activation 1's answer still counts."""
-    agent, sandbox = setup
-    payloads = install_artifact_runner(sandbox, tmp_path)
-    launch = sandbox.launch.side_effect
-
-    async def report_error(**kwargs):
-        result = await launch(**kwargs)
-        directory = payloads[-1]["directory"]
-        export = json.loads(sandbox.files[f"{directory}/export.json"])
-        failing = export["messages"][-1]
-        failing["parts"] = []
-        failing["info"]["finish"] = None
-        failing["info"]["error"] = {
-            "name": "APIError",
-            "data": {"statusCode": 400, "message": "max_tokens is too large"},
-        }
-        sandbox.files[f"{directory}/export.json"] = json.dumps(export)
-        sandbox.files[f"{directory}/stdout.jsonl"] = json.dumps({"type": "error", "error": failing["info"]["error"]})
-        return result
-
-    with TestClient(agent.setup_webserver()) as client:
-        request = start(client)
-        assert activate(client, 1).json()["status"] == "completed"
-        sandbox.launch.side_effect = report_error
-        sandbox.result["return_code"] = 1
-        result = activate(client, 2, "Continue").json()
-        assert result["status"] == "failed"
-        assert not any(item["type"] == "message" and item["content"] for item in result["output"])
-        assert json.loads(result["metadata"]["ng_agent_outcome"]) == {
-            "failure_kind": "model_request_error",
-            "status_code": 400,
-        }
-        assert agent_outcome_policy(NeMoGymResponse.model_validate(result)) == "verify"
-        close(client, request)
 
 
 def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tmp_path):

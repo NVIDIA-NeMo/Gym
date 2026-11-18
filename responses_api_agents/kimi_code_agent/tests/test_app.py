@@ -25,7 +25,6 @@ from nemo_gym.agents import (
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     SandboxSession,
-    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.agents.base_responses_api_agent import ModelEndpoint
@@ -34,7 +33,7 @@ from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.kimi_code_agent.app import KimiCodeAgent, KimiCodeAgentConfig
 from responses_api_agents.kimi_code_agent.conversion import max_concurrency, parse_session, to_toml
-from responses_api_agents.kimi_code_agent.sandbox import INSTALLER, KIMI_VERSION, KimiArtifacts, KimiSession
+from responses_api_agents.kimi_code_agent.sandbox import INSTALLER, KIMI_VERSION, KimiSession
 
 
 FAKE_KIMI = r"""
@@ -515,46 +514,6 @@ async def test_failed_runs_report_an_outcome(tmp_path, mode, status, failure_kin
     outcome = json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])
     assert outcome["failure_kind"] == failure_kind and outcome.get("status_code") == (401 if mode == "auth" else None)
     assert close.cleanup_confirmed
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("answered", "outcome", "action"),
-    [
-        # Before any answer the endpoint refused the run's own request, so the attempt is not graded.
-        (False, {"failure_kind": "model_request_rejected"}, "fail"),
-        (True, {"failure_kind": "model_request_error", "status_code": 400}, "verify"),
-    ],
-)
-async def test_a_provider_400_is_a_rejected_request_only_before_the_model_answered(
-    tmp_path, monkeypatch, answered, outcome, action
-):
-    state = KimiSession(
-        request=seed(),
-        provider_name="local",
-        sandbox_id="task",
-        session=SandboxSession(sandbox=MagicMock(), session_dir=str(tmp_path), workdir="/repo", harness="Kimi Code"),
-    )
-    state.activation_request = body()
-    answer = {
-        "role": "assistant",
-        "tool_calls": [{"type": "function", "id": "call-1", "function": {"name": "Shell", "arguments": "{}"}}],
-    }
-    stdout = "\n".join(
-        json.dumps(line)
-        for line in ([answer, {"role": "tool", "tool_call_id": "call-1", "content": "ok"}] if answered else [])
-    )
-    stderr = "error: failed to run prompt: provider.api_error: 400 max_tokens is too large\n"
-
-    async def execute(**kwargs):
-        state.session.cleanup = {"cleanup_confirmed": True, "error": None, "return_code": 1, "timed_out": False}
-        return KimiArtifacts(stdout=stdout, stderr=stderr, sessions=None)
-
-    monkeypatch.setattr(state.session, "execute", execute)
-    response = await agent()._activate(state, body())
-    assert response.status == "failed"
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
-    assert agent_outcome_policy(response) == action
 
 
 @pytest.mark.asyncio

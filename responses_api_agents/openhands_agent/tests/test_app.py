@@ -428,29 +428,6 @@ async def test_activation_routes_every_model_call_through_the_rollout_prefixed_m
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("answered", "outcome", "action"),
-    [
-        # Before any model reply the endpoint refused the run's own request, so the attempt is not graded.
-        (False, {"failure_kind": "model_request_rejected"}, OutcomeAction.FAIL),
-        (True, {"failure_kind": "model_request_error", "status_code": 400}, OutcomeAction.VERIFY),
-    ],
-)
-async def test_a_400_is_a_rejected_request_only_before_a_model_reply(monkeypatch, answered, outcome, action):
-    error = [{"type": "ConversationRunError", "status_code": None}, {"type": "BadRequestError", "status_code": 400}]
-    failed = run_result(status="error", execution_status="error", error=error)
-    if not answered:
-        failed["stats"] = {}
-    events = FINISHED_EVENTS[:2] if answered else []
-    monkeypatch.setattr(adapter.OpenHandsSandboxSession, "execute", AsyncMock(return_value=artifacts(events, failed)))
-    body = NeMoGymResponseCreateParamsNonStreaming(input="Build it")
-    response = await agent()._activate(session_state(), body, prompt="Build it", system="")
-    assert response.status == "failed"
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
-    assert agent_outcome_policy(response) == action
-
-
-@pytest.mark.asyncio
 async def test_model_failure_is_classified_and_context_limit_stays_gradable(monkeypatch):
     instance = agent()
     error = [

@@ -463,9 +463,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 "context_length_exceeded" in error
                 or "context length" in error.lower()
                 or "maximum model length" in error.lower()
-                # OpenAI's "max_tokens is too large: N. This model supports at most M completion tokens" names an
-                # output cap, not the context, so a run that asks for more is a rejected request, not an overflow.
-                or ("max_tokens" in error and "too large" in error.lower() and "context" in error.lower())
+                or ("max_tokens" in error and "too large" in error.lower())
             )
             if context_overflow:
                 termination = HarnessOutcome(reason="nonzero_exit", detail="ContextWindowExceededError")

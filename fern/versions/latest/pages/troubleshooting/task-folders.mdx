@@ -152,8 +152,8 @@ servers stay on loopback. `+default_host` moves every server to the address, inc
 the run summary names `model_request_rejected` as each such task's `failure_kind`. When the reason is an output limit
 and the harness has one, the line after `Run summary written to` names `--max-output-tokens`.
 
-**Cause.** The endpoint refused the request as invalid before the model answered, so the run's settings are at
-fault and the episode is not graded. A common case is a harness output limit above the model's cap: OpenCode and Pi
+**Cause.** The endpoint refused the request because the run's own settings are invalid, so the episode is not
+graded. A common case is a harness output limit above the model's cap: OpenCode and Pi
 ask for up to 131,072 output tokens per model call unless their `max_output_tokens` is set. Most hosted models allow
 fewer, for example:
 
@@ -166,7 +166,7 @@ fewer, for example:
 | Claude | 64,000 or 128,000, depending on the model |
 
 A parameter the model does not accept, such as a `temperature` other than 1 on an OpenAI reasoning model, fails the
-same way. A refusal after the model answered, or one that names the model's context window, is still graded.
+same way. Any other 400, and a refusal that names the model's context window, is still graded.
 
 **Fix.** Pass `--max-output-tokens <n>` with `n` at or below the model's cap, such as `--max-output-tokens 32768`
 for gpt-4.1. Your provider's model documentation gives the cap. The `environments/hello_*` commands pass 16384,

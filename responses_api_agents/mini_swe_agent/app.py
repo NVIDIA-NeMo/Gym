@@ -228,9 +228,7 @@ def _context_overflow(exit_status: str | None, error: str) -> bool:
         "context_length_exceeded" in error
         or "context length" in lowered
         or "maximum model length" in lowered
-        # OpenAI's "max_tokens is too large: N. This model supports at most M completion tokens" names an output cap,
-        # not the context: such a run asked for more than the model allows and is a rejected request.
-        or ("max_tokens" in error and "too large" in lowered and "context" in lowered)
+        or ("max_tokens" in error and "too large" in lowered)
     )
 
 
@@ -743,7 +741,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         if projection.usage is None and (projection.responses or projection.model_calls):
             state.observations.gaps.append(ObservationGap(code="usage_unavailable"))
         response = self.report_rollout_stop(response, state.session)
-        return self.report_outcome(response, native_result, model_answered=bool(projection.responses))
+        return self.report_outcome(response, native_result)
 
     async def responses(
         self,

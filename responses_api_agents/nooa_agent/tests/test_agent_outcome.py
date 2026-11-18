@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from environment_servers.single_agent_turn.app import AgentOutcomePolicyConfig
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, agent_outcome_policy
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import (
@@ -23,7 +23,7 @@ from nemo_gym.rollout_collection import (
     _episode_record,
     failures_path_for,
 )
-from nemo_gym.trajectory import AgentInvocation, ModelCallRef
+from nemo_gym.trajectory import AgentInvocation
 from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
@@ -49,11 +49,9 @@ def rejection_agent(status: int) -> NOOAAgent:
 @pytest.mark.parametrize(
     ("status", "action", "expected_action"),
     [
-        # Every attempt was refused before the model answered, so a 400 is a rejected request, which carries no
-        # status: status rules do not reach it, and the default policy fails it.
-        (400, "default", "fail"),
+        (400, "default", "verify"),
         (400, "fail", "fail"),
-        (400, "retry", "fail"),
+        (400, "retry", "retry"),
         (413, "default", "verify"),
         (413, "fail", "fail"),
         (413, "retry", "retry"),
@@ -102,11 +100,10 @@ async def test_model_rejection_obeys_environment_policy_and_closes(
     )
     assert root.status == "failed"
     assert root.error_type == "GenerationError"
-    assert orjson.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == (
-        {"failure_kind": "model_request_rejected"}
-        if status == 400
-        else {"failure_kind": "model_request_error", "status_code": status}
-    )
+    assert orjson.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status,
+    }
     assert "diagnostic mentions HTTP 500" in response.error.message
     assert NOOATerminationReason.MODEL_REJECTED in {gap.code for gap in observations.gaps}
     receipt = next(iter(instance._fenced_session_records.values())).close_response
@@ -191,38 +188,10 @@ async def test_worker_result_and_checkpoint_preserve_model_status(
     run.return_value = restored
     request = await open_session(instance)
     response = await instance.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    # No model call returned, so a 400 is a request the endpoint rejected.
-    assert orjson.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == (
-        {"failure_kind": "model_request_rejected"}
-        if status == 400
-        else {"failure_kind": "model_request_error", "status_code": status}
-    )
-    await close(instance)
-
-
-@pytest.mark.parametrize(
-    ("model_calls", "outcome"),
-    [
-        # A rejection before any model call returned is the endpoint refusing the run's own request.
-        ([], {"failure_kind": "model_request_rejected"}),
-        ([ModelCallRef(model_call_id="call-1")], {"failure_kind": "model_request_error", "status_code": 400}),
-    ],
-)
-async def test_a_400_is_rejected_only_before_a_model_call_returned(
-    monkeypatch: pytest.MonkeyPatch, model_calls: list[ModelCallRef], outcome: dict
-) -> None:
-    instance, run = agent(monkeypatch)
-    rejected = result(reason=NOOATerminationReason.MODEL_REJECTED)
-    rejected.model_status_code = 400
-    rejected.termination_error = "400, message='Bad Request'"
-    rejected.episode.observations.records = [AgentInvocation(invocation_id="root", model_calls=model_calls)]
-    run.return_value = rejected
-    request = await open_session(instance)
-    response = await instance.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    assert orjson.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
-    assert agent_outcome_policy(response) == (
-        "fail" if outcome["failure_kind"] == "model_request_rejected" else "verify"
-    )
+    assert orjson.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status,
+    }
     await close(instance)
 
 

@@ -3,6 +3,7 @@
 
 """Agent-reported causes, independent of environment grading and retry policy."""
 
+import re
 from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from aiohttp import ClientResponseError
@@ -92,22 +93,35 @@ _CONTEXT_WINDOW_PHRASES = (
     "maximum model length",
     "prompt is too long",
 )
+# How an endpoint refuses a request that the run's own settings make invalid, the same way on every call whatever the
+# conversation holds: an output limit above the model's cap (OpenAI and LiteLLM's "max_tokens is too large: N. This
+# model supports at most M completion tokens", Anthropic's "max_tokens: N > M, which is the maximum allowed number of
+# output tokens", vLLM's "max_tokens=N cannot be greater than max_model_len=M"), or a parameter or value the model does
+# not accept (OpenAI's "Unsupported parameter: ..." and "Unsupported value: '...' does not support ...", and vLLM's
+# "Unexpected ... Supported types are ...", which vllm_model also reads as an invalid request parameter).
+_CONFIGURATION_REFUSALS = (
+    re.compile(
+        r"\bmax_(?:completion_|output_|new_)?tokens\b.{0,200}?"
+        r"(?:is too large|supports at most|maximum allowed number of output tokens|cannot be greater than max_model_len)",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(r"\bunsupported (?:parameter|value)\b", re.IGNORECASE),
+    re.compile(r"\bis not supported with this model\b", re.IGNORECASE),
+    re.compile(r"\bUnexpected [^.\n]{1,80}\. Supported (?:types|values) (?:are|is)\b"),
+)
 
 
-def reject_unanswered_request(
-    outcome: AgentOutcome, *, model_answered: bool | None, error_message: str
-) -> AgentOutcome:
-    """``model_request_rejected`` for an HTTP 400 that ended a run before its model answered, else ``outcome``.
+def reject_configuration_refusal(outcome: AgentOutcome, *, error_message: str) -> AgentOutcome:
+    """``model_request_rejected`` for an HTTP 400 whose message says the run's own settings are invalid, else ``outcome``.
 
-    Before any answer the endpoint refused the run's own request, such as an output limit above the model's cap: the
-    run's configuration is at fault, so the attempt is not graded. A 400 after an answer can come from what the model
-    wrote and stays graded, and so does a refusal whose message names the context window, the model's own limit.
-    ``model_answered=None`` (unknown) keeps ``outcome``.
+    An output limit above the model's cap, or a parameter the model does not accept, is refused on every call whatever
+    the conversation holds: the run's configuration is at fault, so the attempt is not graded. Any other 400 stays
+    ``model_request_error`` and graded, and so does a refusal that names the context window, the model's own limit.
     """
     if (
-        model_answered is False
-        and outcome.failure_kind == MODEL_REQUEST_ERROR
+        outcome.failure_kind == MODEL_REQUEST_ERROR
         and outcome.status_code == 400
+        and any(pattern.search(error_message) for pattern in _CONFIGURATION_REFUSALS)
         and not any(phrase in error_message.lower() for phrase in _CONTEXT_WINDOW_PHRASES)
     ):
         return AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED)
@@ -117,7 +131,7 @@ def reject_unanswered_request(
 def report_rejected_request(report: FailureReport) -> FailureReport:
     """``report`` selecting a ``model_request_rejected`` failure caused by the HTTP 400 it selected, else ``report``.
 
-    ``reject_unanswered_request`` changes only the outcome, and an Environment Server fails a reply whose selected
+    ``reject_configuration_refusal`` changes only the outcome, and an Environment Server fails a reply whose selected
     failure disagrees with its outcome, whatever its policy. So a report that selects that model request error gains
     an agent-boundary rejection caused by it, and selects the rejection. Every original event keeps its id; a report
     that selects nothing, or something else, is unchanged.
@@ -128,7 +142,7 @@ def report_rejected_request(report: FailureReport) -> FailureReport:
     rejection = FailureEvent(
         boundary=FailureBoundary.AGENT,
         failure_kind=MODEL_REQUEST_REJECTED,
-        failure_reason="The model endpoint refused the request before the model answered",
+        failure_reason="The model endpoint refused the run's own request settings",
         stage=selected.stage,
         cause_id=selected.event_id,
     )

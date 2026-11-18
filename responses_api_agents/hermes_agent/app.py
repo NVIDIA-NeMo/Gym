@@ -810,14 +810,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             n_input=len(params["history"]) + 1,
             retain_provider_failure=True,
         )
-        observations = self._sandbox_observations(result, output.get("observations"), runtime_info=runtime)
-        # A failed run gets an assistant message padded with its error, so read the transcript, not the output; a helper
-        # call such as a compaction summary leaves no transcript message, but the observer records its response.
-        answered = any(
-            isinstance(message, dict) and message.get("role") == "assistant"
-            for message in (result.get("messages") or [])[len(params["history"]) + 1 :]
-        ) or any(isinstance(record, AgentInvocation) and record.model_calls for record in observations.records)
-        response = self.report_outcome(response, result, model_answered=answered)
+        response = self.report_outcome(response, result)
         if self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT:
             response = response.model_copy(update={"status": "incomplete", "error": None})
         # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
@@ -838,7 +831,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 harness_pid=str(runtime.pid),
                 harness_python=runtime.python or "",
             )
-        return AgentEpisode(response=response, observations=observations)
+        return AgentEpisode(
+            response=response,
+            observations=self._sandbox_observations(result, output.get("observations"), runtime_info=runtime),
+        )
 
     def _validate_request(
         self,

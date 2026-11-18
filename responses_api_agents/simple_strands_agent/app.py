@@ -69,11 +69,9 @@ LOG = logging.getLogger(__name__)
 class SSARunError(RuntimeError):
     """The runner's own error result, with the HTTP status of the model request that ended the run, if any."""
 
-    def __init__(self, message: str, status_code: Optional[int] = None, *, model_answered: Optional[bool] = None):
+    def __init__(self, message: str, status_code: Optional[int] = None):
         super().__init__(message)
         self.status_code = status_code
-        # Whether any model call returned before the run failed; None when the runner could not say.
-        self.model_answered = model_answered
 
 
 def _saved_messages(path: Path) -> list[dict[str, Any]]:
@@ -296,11 +294,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         if result.get("error"):
             if stdout:
                 LOG.debug("SSA stdout: %s", stdout.decode(errors="replace")[-1000:])
-            raise SSARunError(
-                f"SSA failed: {result['error']}",
-                result.get("status_code"),
-                model_answered=result.get("model_answered"),
-            )
+            raise SSARunError(f"SSA failed: {result['error']}", result.get("status_code"))
         return result
 
     @staticmethod
@@ -607,11 +601,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             state.observations = self._session_observations(
                 state, status="failed", error_type=type(failure).__name__, output=[]
             )
-            return self.report_outcome(
-                response,
-                {"status_code": getattr(failure, "status_code", None)},
-                model_answered=getattr(failure, "model_answered", None),
-            )
+            return self.report_outcome(response, {"status_code": getattr(failure, "status_code", None)})
         state.observations = self._session_observations(
             state,
             status=response.status,

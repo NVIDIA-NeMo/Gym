@@ -17,7 +17,6 @@ from nemo_gym.agents import (
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
-    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
@@ -290,49 +289,6 @@ def test_runner_iteration_limit_raised_raw_ends_the_run(tmp_path, error):
                 runner._run(payload)
 
 
-@pytest.mark.parametrize("answered", [False, True])
-def test_runner_error_result_says_whether_the_model_answered(tmp_path, monkeypatch, answered):
-    runner = pytest.importorskip("responses_api_agents.simple_strands_agent.ssa_runner")
-    rejected = type("APIStatusError", (Exception,), {"status_code": 400})("max_tokens is too large")
-    messages = [{"role": "user", "content": []}]
-    if answered:
-        messages.append({"role": "assistant", "content": [{"text": "Looking."}]})
-    strands_agent = MagicMock(side_effect=rejected, messages=messages)
-    environment = MagicMock()
-    environment.__enter__.return_value = environment
-    payload = {
-        "max_turns": 3,
-        "work_dir": str(tmp_path),
-        "shell_timeout": 30,
-        "rollout_id": "rollout-1",
-        "instruction": "Fix the bug.",
-        "model": "policy",
-        "prompt_tag": "swe_generic_v2",
-        "max_output_tokens": 16,
-        "model_base_url": "http://m/v1",
-        "model_timeout": 30,
-        "tools": [],
-        "output_dir": str(tmp_path / "output"),
-        "conversation_window": 10,
-        "native_user_prompt": False,
-    }
-    request, result = tmp_path / "request.json", tmp_path / "result.json"
-    request.write_text(json.dumps(payload))
-    monkeypatch.setattr("sys.argv", ["ssa_runner.py", str(request), str(result)])
-    with (
-        patch.object(runner, "StrandsResolverAgent", return_value=strands_agent),
-        patch.object(runner, "sr_model"),
-        patch.object(runner, "MetricsCollector"),
-        patch.object(runner, "load_tools", return_value=([], {})),
-        patch.object(runner, "create_environment", return_value=environment),
-        pytest.raises(type(rejected)),
-    ):
-        runner.main()
-    failure = json.loads(result.read_text())
-    # Strands adds an assistant message only for a model call that returned.
-    assert (failure["status_code"], failure["model_answered"]) == (400, answered)
-
-
 def test_runner_error_result_carries_the_model_request_status(tmp_path, monkeypatch):
     runner = pytest.importorskip("responses_api_agents.simple_strands_agent.ssa_runner")
     upstream = type("APIStatusError", (Exception,), {"status_code": 413})("too large")
@@ -375,14 +331,7 @@ async def activate(server, state, run_ssa, body=None):
 @pytest.mark.parametrize(
     ("error", "outcome", "confirmed"),
     [
-        # Without the runner's evidence a 400 stays graded; with it, only a 400 before any answer is rejected.
         (SSARunError("SSA failed: 400", 400), {"failure_kind": "model_request_error", "status_code": 400}, True),
-        (SSARunError("SSA failed: 400", 400, model_answered=False), {"failure_kind": "model_request_rejected"}, True),
-        (
-            SSARunError("SSA failed: 400", 400, model_answered=True),
-            {"failure_kind": "model_request_error", "status_code": 400},
-            True,
-        ),
         (SSARunError("SSA failed: sandbox upload failed"), {"failure_kind": "unknown"}, True),
         (RuntimeError("SSA failed: crashed"), {"failure_kind": "unknown"}, False),
     ],
@@ -392,10 +341,6 @@ async def test_runner_failures_are_classified_failed_responses(tmp_path, error, 
     response = await activate(server, state, AsyncMock(side_effect=error))
     assert response.status == "failed"
     assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
-    if outcome.get("status_code") == 400:
-        assert agent_outcome_policy(response) == "verify"
-    elif outcome["failure_kind"] == "model_request_rejected":
-        assert agent_outcome_policy(response) == "fail"
     close = await server._close_agent_session_state(state)
     invocation, observation = close.agent_observations.records
     assert (invocation.status, invocation.error_type, observation.outcome) == (

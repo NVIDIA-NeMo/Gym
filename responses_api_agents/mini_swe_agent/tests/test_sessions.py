@@ -22,7 +22,6 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     SandboxSession,
-    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
@@ -806,45 +805,6 @@ async def test_a_reported_model_failure_is_classified_for_the_environment(
     outcome = json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])
     assert outcome == {"failure_kind": failure_kind, **({"status_code": status_code} if status_code else {})}
     assert state.observations.records[0].status == "failed"
-
-
-# OpenAI's reply to an output limit above the model's cap names no context window.
-OUTPUT_CAP_REJECTION = (
-    "litellm.BadRequestError: OpenAIException - max_tokens is too large: 131072. This model supports at most 32768 "
-    "completion tokens, whereas you provided 131072."
-)
-
-
-@pytest.mark.parametrize(
-    ("answered", "outcome", "action"),
-    [
-        # Before any answer the endpoint refused the run's own request, so the attempt is not graded.
-        (False, {"failure_kind": "model_request_rejected"}, "fail"),
-        (True, {"failure_kind": "model_request_error", "status_code": 400}, "verify"),
-    ],
-)
-async def test_a_bad_request_is_rejected_only_before_the_model_answered(agent, answered, outcome, action) -> None:
-    trajectory = native_trajectory()
-    trajectory["info"]["exit_status"] = "BadRequestError"
-    exit_message = {
-        "role": "exit",
-        "content": OUTPUT_CAP_REJECTION,
-        "extra": {"exit_status": "BadRequestError", "exception_str": OUTPUT_CAP_REJECTION},
-    }
-    # The system prompt and the task, then the model's first step only when it answered.
-    trajectory["messages"] = [*trajectory["messages"][: 4 if answered else 2], exit_message]
-    output = {
-        "runtime": {"hostname": "box", "pid": 7, "python": "/py"},
-        "error": {"type": "BadRequestError", "message": OUTPUT_CAP_REJECTION, "status_code": 400},
-    }
-    state = state_for(agent)
-    finish_run(state, trajectory=trajectory, return_code=1, output=output)
-
-    response = await agent._activate(state, body())
-
-    assert response.status == "failed"
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
-    assert agent_outcome_policy(response) == action
 
 
 @pytest.mark.parametrize(

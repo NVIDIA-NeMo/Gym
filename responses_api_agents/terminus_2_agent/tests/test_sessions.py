@@ -22,7 +22,6 @@ from nemo_gym.agents import (
     RolloutStopRequest,
     SandboxPythonRuntime,
     SandboxSession,
-    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.agents.base_responses_api_agent import _AgentSessionRecord
@@ -537,20 +536,6 @@ class TestActivation:
                 {"failure_kind": "model_request_error", "status_code": 429},
                 "failed",
             ),
-            # A 400 after the model answered stays a graded request error; before any answer, the endpoint refused
-            # the run's own request.
-            (
-                {"stop_reason": "error", "error_kind": "model_request_error", "error_status": 400},
-                "failed",
-                {"failure_kind": "model_request_error", "status_code": 400},
-                "failed",
-            ),
-            (
-                {"stop_reason": "error", "error_kind": "model_request_error", "error_status": 400, "response_ids": []},
-                "failed",
-                {"failure_kind": "model_request_rejected"},
-                "failed",
-            ),
             (
                 {"stop_reason": "error", "error_kind": "model_transport_error"},
                 "failed",
@@ -600,10 +585,6 @@ class TestActivation:
         assert response.metadata["stop_reason"] == expected_stop
         reported = response.metadata.get("ng_agent_outcome")
         assert (json.loads(reported) if reported else None) == outcome
-        if outcome and outcome.get("status_code") == 400:
-            assert agent_outcome_policy(response) == "verify"
-        elif outcome == {"failure_kind": "model_request_rejected"}:
-            assert agent_outcome_policy(response) == "fail"
         assert (response.error is not None) == (status == "failed")
         [sandbox] = [record for record in closed.agent_observations.records if isinstance(record, SandboxObservation)]
         assert sandbox.outcome == sandbox_outcome

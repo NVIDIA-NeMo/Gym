@@ -353,28 +353,6 @@ async def test_model_request_error_is_classified_for_the_environment(monkeypatch
     assert session.observations.records[0].error_type == "agent_error"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "answered,outcome,action",
-    [
-        # Before any answer the endpoint refused the run's own request, so the attempt is not graded.
-        (False, {"failure_kind": "model_request_rejected"}, OutcomeAction.FAIL),
-        (True, {"failure_kind": "model_request_error", "status_code": 400}, OutcomeAction.VERIFY),
-    ],
-)
-async def test_a_400_is_rejected_only_before_the_model_answered(monkeypatch, answered, outcome, action):
-    rejection = {"type": "error", "source": "agent_loop", "message": "400 max_tokens is too large"}
-    events = [*EVENTS[:5], rejection] if answered else [*EVENTS[:2], rejection]
-    monkeypatch.setattr(
-        adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
-    )
-    session = state(cleanup={"timed_out": False, "return_code": 1, "cleanup_confirmed": True})
-    response = await agent(monkeypatch)._sandbox_response(session, body())
-    assert response.status == "failed"
-    assert json.loads(response.metadata["ng_agent_outcome"]) == outcome
-    assert agent_outcome_policy(response) == action
-
-
 # Droid 1.1.0 and 1.12.1's model-error events, captured against a scripted model server.
 # Droid 1.1.0's repetition stop was also seen in real model runs.
 CONTEXT_LIMIT_ERROR = (

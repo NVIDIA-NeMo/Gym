@@ -53,7 +53,7 @@ from nemo_gym.agents.agent_outcome import (
     AGENT_OUTCOME_METADATA_KEY,
     AgentOutcome,
     policy_timeout_failure,
-    reject_unanswered_request,
+    reject_configuration_refusal,
     report_rejected_request,
 )
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
@@ -1641,24 +1641,20 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """Override to classify native failures; the environment decides grading and retry eligibility."""
         return AgentOutcome(failure_kind="unknown")
 
-    def report_outcome(
-        self, response: NeMoGymResponse, native_result: Mapping[str, Any], *, model_answered: bool | None = None
-    ) -> NeMoGymResponse:
+    def report_outcome(self, response: NeMoGymResponse, native_result: Mapping[str, Any]) -> NeMoGymResponse:
         """Attach validated evidence through the existing string-valued response metadata.
 
-        ``model_answered`` says whether any model call of this agent session returned before the run ended. A harness
-        whose ``classify_outcome`` can report an HTTP 400 passes it, so that a 400 before any answer is reported as
-        ``model_request_rejected`` (see ``reject_unanswered_request``); ``None`` keeps the classified outcome.
+        An HTTP 400 whose message says the run's own settings are invalid, such as an output limit above the model's
+        cap, is reported as ``model_request_rejected`` (see ``reject_configuration_refusal``). When the reply carries
+        the Model Server's ``failure_report``, the rejection is selected there too, caused by that 400.
         """
         if response.status != "failed":
             return response
         # ``model_copy(update=...)`` keeps an ``error`` given as a dict unvalidated.
         error = response.error
         message = error.get("message") if isinstance(error, Mapping) else getattr(error, "message", None)
-        outcome = reject_unanswered_request(
-            AgentOutcome.model_validate(self.classify_outcome(native_result)),
-            model_answered=model_answered,
-            error_message=message or "",
+        outcome = reject_configuration_refusal(
+            AgentOutcome.model_validate(self.classify_outcome(native_result)), error_message=message or ""
         )
         update: dict[str, Any] = {
             "metadata": {

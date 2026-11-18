@@ -103,11 +103,10 @@ MODEL_POLICY_RESPONSE_TIMEOUT = "model_policy_response_timeout"
 MODEL_SERVER_QUEUE_TIMEOUT = "model_server_queue_timeout"
 # Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
 MODEL_CONTEXT_LIMIT = "model_context_limit"
-# The model endpoint rejected the request as invalid before the model answered, such as an output limit above the
-# model's cap: the run's configuration is at fault, so the attempt is not the model's answer. An agent's
-# ``report_outcome`` reports it for an HTTP 400 that ends a run before any model call of its session returned, when
-# the harness says so (``model_answered=False``) and the refusal does not name the context window. It carries no
-# HTTP status, so status rules do not apply to it.
+# The model endpoint refused the request because the run's own settings are invalid, such as an output limit above the
+# model's cap or a parameter the model does not accept: the configuration is at fault, so the attempt is not the model's
+# answer. An agent's ``report_outcome`` reports it for an HTTP 400 whose message says so and does not name the context
+# window (``reject_configuration_refusal``). It carries no HTTP status, so status rules do not apply to it.
 MODEL_REQUEST_REJECTED = "model_request_rejected"
 
 # --- environment: one episode attempt ------------------------------------------------ #

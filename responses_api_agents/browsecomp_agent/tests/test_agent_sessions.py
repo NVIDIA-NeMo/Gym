@@ -13,10 +13,8 @@ from fastapi import Request, Response
 from fastapi.testclient import TestClient
 
 from nemo_gym.agents import (
-    AGENT_OUTCOME_METADATA_KEY,
     AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionRequest,
-    AgentOutcome,
     AgentSeedSessionRequest,
     OutcomeAction,
     SandboxSession,
@@ -35,11 +33,7 @@ from nemo_gym.core import (
     TaskId,
 )
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
-from responses_api_agents.browsecomp_agent.app import (
-    BrowsecompAgent,
-    BrowsecompAgentConfig,
-    BrowsecompAgentSessionState,
-)
+from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, BrowsecompAgentConfig
 from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession
 
 
@@ -150,14 +144,7 @@ def _agent(model_replies: list, monkeypatch: pytest.MonkeyPatch, **config) -> tu
     async def execute_loop(self, request, body, state):
         from fastapi import Response
 
-        # As the sandbox runner does, the loop runs on its own session state; its cookies come back with the reply.
-        loop_state = BrowsecompAgentSessionState(
-            request=state.request, tool_access=state.tool_access, resources_cookies=state.resources_cookies
-        )
-        try:
-            return await self._run_session_loop(request, Response(), body, loop_state)
-        finally:
-            state.resources_cookies = loop_state.resources_cookies
+        return await self._run_session_loop(request, Response(), body, state)
 
     monkeypatch.setattr(BrowsecompAgent, "_sandbox_responses", execute_loop)
     agent = BrowsecompAgent(
@@ -285,21 +272,6 @@ def test_a_model_http_error_is_a_failed_response_for_the_outcome_policy(
     assert agent_outcome_policy(response) == action
 
 
-def test_a_400_before_any_model_answer_is_a_rejected_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    client, _, _ = _agent([400], monkeypatch)
-    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
-
-    reply = client.post(ROUTE, json=QUESTION)
-
-    assert reply.status_code == 200, reply.text
-    response = NeMoGymResponse.model_validate(reply.json())
-    assert response.status == "failed"
-    # The first model call was refused, so the endpoint rejected the run's own request: not graded, not retried.
-    outcome = AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY])
-    assert outcome == AgentOutcome(failure_kind="model_request_rejected")
-    assert agent_outcome_policy(response) == OutcomeAction.FAIL
-
-
 def _agent_of(client: TestClient) -> BrowsecompAgent:
     return next(route.endpoint.__self__ for route in client.app.routes if route.path == "/v1/browsecomp/token_count")
 
@@ -310,7 +282,7 @@ def test_a_model_http_error_keeps_only_the_start_of_a_long_upstream_body(monkeyp
     error = ClientResponseError(request_info, (), status=502, message="Bad Gateway")
     error.response_content = b"<html>" + b"x" * 10_000
     body = NeMoGymResponseCreateParamsNonStreaming.model_validate(QUESTION)
-    response = _agent_of(client)._model_request_failure(body, error, model_answered=True)
+    response = _agent_of(client)._model_request_failure(body, error)
     # The rollout row carries this message, so an upstream error page cannot bloat it.
     assert response.error.message == "Model HTTP 502: <html>" + "x" * 3994
 

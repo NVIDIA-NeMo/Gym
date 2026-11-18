@@ -535,7 +535,7 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
         )
         if status == "failed":
             LOG.warning("Kimi Code run failed (exit %s); stderr tail: %s", return_code, artifacts.stderr[-2048:])
-            return self.report_outcome(response, outcome, model_answered=bool(output))
+            return self.report_outcome(response, outcome)
         return self.report_rollout_stop(response, state.session)
 
     async def responses(

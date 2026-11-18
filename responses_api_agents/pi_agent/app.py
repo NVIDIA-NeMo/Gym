@@ -1314,9 +1314,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
             if not execution_error and _reported_model_error(assistant, cleanup, will_retry=retrying):
                 # Classify a failed compaction call, not the overflow it was recovering from.
-                # Pi records every assistant message, its failed attempts too; one that did not fail is an answer.
-                answered = any(reason not in ("error", "aborted") for reason in stop_reasons)
-                return self.report_outcome(response, compaction_failure or assistant, model_answered=answered)
+                return self.report_outcome(response, compaction_failure or assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
         return response
 

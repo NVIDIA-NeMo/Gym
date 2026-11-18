@@ -575,8 +575,7 @@ class DeepAgentsAgent(SimpleAgent):
             error={"code": "server_error", "message": error} if error else None,
         )
         response = self.report_rollout_stop(NeMoGymResponse.model_validate(response), state.session)
-        # The runner keeps the usage of each model call that returned, and only of those.
-        return self.report_outcome(response, output, model_answered=bool(output.get("usages")))
+        return self.report_outcome(response, output)
 
     async def responses(
         self,
@@ -689,7 +688,7 @@ class DeepAgentsAgent(SimpleAgent):
             final_state = await self.agent.ainvoke({"messages": input_messages}, config=run_config)
         except ClientResponseError as error:
             if in_session and error is model_failure["error"] and _final_model_refusal(error):
-                return self._model_refusal_response(error, model_answered=model_usage.get("answered", False))
+                return self._model_refusal_response(error)
             raise
 
         new_messages = final_state["messages"][len(input_messages) :]
@@ -697,13 +696,12 @@ class DeepAgentsAgent(SimpleAgent):
         response_body["usage"] = model_usage["usage"]
         return NeMoGymResponse.model_validate(response_body)
 
-    def _model_refusal_response(self, error: ClientResponseError, *, model_answered: bool) -> NeMoGymResponse:
+    def _model_refusal_response(self, error: ClientResponseError) -> NeMoGymResponse:
         """The session reply for a model request the Model Server refused for good, typed as the sandbox runner types it.
 
         A context limit is `incomplete` and verified; any other refusal is `failed` with its HTTP status in
         `ng_agent_outcome`, for the Environment Server's outcome policy. ainvoke() keeps no partial graph state, so
-        the reply has no output, and its usage is unknown; ``model_answered`` (from the bridge) says whether an
-        earlier model call of the run returned.
+        the reply has no output, and its usage is unknown.
         """
         content = getattr(error, "response_content", None)
         detail = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(error.message)
@@ -730,7 +728,7 @@ class DeepAgentsAgent(SimpleAgent):
             if forwarded is not None:
                 failure_report = failure_report.merged(forwarded)
             response["failure_report"] = failure_report.model_dump(mode="json")
-        return self.report_outcome(NeMoGymResponse.model_validate(response), report, model_answered=model_answered)
+        return self.report_outcome(NeMoGymResponse.model_validate(response), report)
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         """Keep legacy /run for the search profile; sandbox episodes require an Environment Server."""

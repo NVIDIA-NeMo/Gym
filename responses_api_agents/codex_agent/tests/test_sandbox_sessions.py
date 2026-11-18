@@ -33,15 +33,13 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
-    OutcomeAction,
     RolloutStopRequest,
-    agent_outcome_policy,
     is_harness_termination_failure,
     parse_cleanup_receipt,
     raises_agent_failure,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import MEDIA_DIRECTORY, SandboxStatus, SandboxTransferError, SandboxUnavailableError
 from responses_api_agents.codex_agent.app import (
@@ -3572,9 +3570,6 @@ def test_terminal_model_error_preserves_provider_and_worker_error_boundary(
             outcome = json.loads(body["metadata"]["ng_agent_outcome"])
             if statuses and statuses[-1] is None:
                 assert outcome == {"failure_kind": "model_transport_error"}
-            elif statuses and statuses[-1] == 400 and 200 not in statuses:
-                # No upstream attempt answered, so the endpoint refused the run's own request.
-                assert outcome == {"failure_kind": "model_request_rejected"}
             elif statuses and statuses[-1] >= 400:
                 assert outcome == {"failure_kind": "model_request_error", "status_code": statuses[-1]}
             else:
@@ -3660,13 +3655,6 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
         assert body["error"] == {"code": "server_error", "message": rejection}
         assert [item["type"] for item in body["output"]] == ["function_call", "function_call_output"]
         assert body["output"][1]["output"] == "retained"
-        # The model answered before the endpoint refused a later request, so the run is graded.
-        result = NeMoGymResponse.model_validate(body)
-        assert json.loads(result.metadata["ng_agent_outcome"]) == {
-            "failure_kind": "model_request_error",
-            "status_code": 400,
-        }
-        assert agent_outcome_policy(result) == OutcomeAction.VERIFY
         if usage_source == "native":
             assert body["usage"] == {
                 "input_tokens": 20,
@@ -3915,61 +3903,42 @@ def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
 
 # Native Display strings from codex-rs/protocol/src/error.rs at rust-v0.144.4.
 @pytest.mark.parametrize(
-    "attempt,message,expected,action",
+    "attempt,message,expected",
     [
-        # The only attempt was refused, so the model never answered: the run's own request is at fault.
         (
             {"status": 400},
             '{"error":{"message":"invalid input","code":"bad_request"}}',
-            {"failure_kind": "model_request_rejected"},
-            "fail",
-        ),
-        # A provider refusal that names the context window is the model's own limit and stays graded.
-        (
-            {"status": 400},
-            '{"error":{"message":"Your input exceeds the context window of this model.","code":"context_length_exceeded"}}',
             {"failure_kind": "model_request_error", "status_code": 400},
-            "verify",
         ),
         (
             {"status": 429},
             "exceeded retry limit, last status: 429 Too Many Requests",
             {"failure_kind": "model_request_error", "status_code": 429},
-            "retry",
         ),
         (
             {"status": 500},
             "We're currently experiencing high demand, which may cause temporary errors.",
             {"failure_kind": "model_request_error", "status_code": 500},
-            "retry",
         ),
         (
             {"status": 503},
             "Selected model is at capacity. Please try a different model.",
             {"failure_kind": "model_request_error", "status_code": 503},
-            "retry",
         ),
-        (
-            {"status": None, "error": "timed out"},
-            "request timed out",
-            {"failure_kind": "model_transport_error"},
-            "retry",
-        ),
+        ({"status": None, "error": "timed out"}, "request timed out", {"failure_kind": "model_transport_error"}),
         (
             {"status": 429, "transport_error": "timed out"},
             "request timed out",
             {"failure_kind": "model_transport_error"},
-            "retry",
         ),
         (
             {"status": 200, "transport_error": "timed out"},
             "request timed out",
             {"failure_kind": "model_transport_error"},
-            "retry",
         ),
     ],
 )
-def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expected, action):
+def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expected):
     from nemo_gym.agents import OutcomeAction, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
@@ -3992,7 +3961,9 @@ def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expec
         assert result.error.message == message
         assert result.error.code == ("rate_limit_exceeded" if expected.get("status_code") == 429 else "server_error")
         assert json.loads(result.metadata["ng_agent_outcome"]) == expected
-        assert agent_outcome_policy(result) == OutcomeAction(action)
+        assert agent_outcome_policy(result) == (
+            OutcomeAction.VERIFY if attempt["status"] == 400 else OutcomeAction.RETRY
+        )
         client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
 
 

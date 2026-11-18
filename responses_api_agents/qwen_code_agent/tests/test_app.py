@@ -21,7 +21,6 @@ from nemo_gym.agents import (
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     SandboxSession,
-    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
@@ -29,7 +28,7 @@ from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.qwen_code_agent.app import QwenCodeAgent, QwenCodeAgentConfig
 from responses_api_agents.qwen_code_agent.conversion import parse_stream, summarize_subagents
-from responses_api_agents.qwen_code_agent.sandbox import CLI, QWEN_VERSION, QwenArtifacts, QwenSession
+from responses_api_agents.qwen_code_agent.sandbox import CLI, QWEN_VERSION, QwenSession
 
 
 ROOT_EVENTS = [
@@ -519,51 +518,6 @@ async def test_failed_runs_report_an_outcome(tmp_path, mode, outcome):
     assert response.status == "failed"
     assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
     assert close.cleanup_confirmed
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("answered", "message", "outcome", "action"),
-    [
-        # Before any answer the endpoint refused the run's own request, so the attempt is not graded.
-        (False, "[API Error: 400 max_tokens is too large]", {"failure_kind": "model_request_rejected"}, "fail"),
-        (
-            True,
-            "[API Error: 400 max_tokens is too large]",
-            {"failure_kind": "model_request_error", "status_code": 400},
-            "verify",
-        ),
-        # A prompt over the context window is the model's own limit and stays graded.
-        (
-            False,
-            "[API Error: 400 maximum context length exceeded]",
-            {"failure_kind": "model_request_error", "status_code": 400},
-            "verify",
-        ),
-    ],
-)
-async def test_a_400_is_a_rejected_request_only_before_the_model_answered(
-    tmp_path, monkeypatch, answered, message, outcome, action
-):
-    state = QwenSession(
-        request=seed(),
-        provider_name="local",
-        sandbox_id="task",
-        session=SandboxSession(sandbox=MagicMock(), session_dir=str(tmp_path), workdir="/repo", harness="Qwen Code"),
-    )
-    state.activation_request = body()
-    result = {"type": "result", "is_error": True, "subtype": "error_during_execution", "error": {"message": message}}
-    events = [*(ROOT_EVENTS[:-1] if answered else []), result]
-
-    async def execute(**kwargs):
-        state.session.cleanup = {"cleanup_confirmed": True, "error": None, "return_code": 1, "timed_out": False}
-        return QwenArtifacts(stdout="\n".join(json.dumps(event) for event in events), stderr="", sessions=None)
-
-    monkeypatch.setattr(state.session, "execute", execute)
-    response = await agent()._activate(state, body())
-    assert response.status == "failed" and response.error.message == message
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
-    assert agent_outcome_policy(response) == action
 
 
 @pytest.mark.asyncio

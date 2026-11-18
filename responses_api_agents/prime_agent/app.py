@@ -260,12 +260,8 @@ def parse_prime_agent_events(stdout: str, *, timed_out: bool = False) -> tuple[l
 
 
 def prime_stop(stdout: str) -> dict[str, Any]:
-    """How Prime Agent ended its run: the last assistant message's stopReason and errorMessage, and whether any
-    assistant message did not fail (``answered``). The parse drops a failed run's transcript, so only this says
-    whether its model answered before the error.
-    """
+    """The last assistant message's stopReason and errorMessage, which say how Prime Agent ended its run."""
     last: dict[str, Any] = {}
-    answered = False
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
@@ -274,8 +270,7 @@ def prime_stop(stdout: str) -> dict[str, Any]:
         message = event.get("message") if isinstance(event, dict) and event.get("type") == "message_end" else None
         if isinstance(message, dict) and message.get("role") == "assistant":
             last = message
-            answered = answered or message.get("stopReason") not in ("error", "aborted")
-    return {"stopReason": last.get("stopReason"), "errorMessage": last.get("errorMessage"), "answered": answered}
+    return {"stopReason": last.get("stopReason"), "errorMessage": last.get("errorMessage")}
 
 
 def _content_text(content: Any) -> str:
@@ -778,10 +773,6 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             ),
             status=status,
             incomplete_details=incomplete,
-            # The provider's message names the cause, such as a request the endpoint refused or a context overflow.
-            error={"code": "server_error", "message": stop["errorMessage"]}
-            if native is stop and stop["errorMessage"]
-            else None,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -793,7 +784,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         )
         if status == "failed":
             LOG.warning("Prime Agent run failed (%s); stderr tail: %s", stop, artifacts.stderr[-2048:])
-            return self.report_outcome(response, native, model_answered=stop["answered"])
+            return self.report_outcome(response, native)
         return self.report_rollout_stop(response, state.session)
 
     async def _session_response(

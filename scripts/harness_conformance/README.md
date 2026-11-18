@@ -155,9 +155,7 @@ injected error leaves that scenario incomplete. For `model_error`, the harness
 reports a failed response with the model error to EnvServer; it does not re-raise
 the model failure. The runner witnesses that response before grading. EnvServer
 owns verification and masking policy, so this scenario does not prescribe a grade
-or require verification. Retained model-call evidence is still required. The probe's
-EnvServer grades `model_request_rejected`, which a harness reports for a 400 before any
-model answer, so the episode still yields a row whose health can be checked.
+or require verification. Retained model-call evidence is still required.
 
 Every applicable individual P0 check must pass;
 TE labels group results and do not determine priority or grant exemptions.
