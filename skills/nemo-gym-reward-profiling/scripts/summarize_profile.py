@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Summarize a NeMo Gym reward profile for choosing RL training tasks.
+
+Reads the per-task file that `gym eval profile` writes (`<stem>_reward_profiling.jsonl`) and, when they sit next to
+it, the run's materialized inputs (`<stem>_materialized_inputs.jsonl`) and agent metrics (`<stem>_agent_metrics.json`).
+Prints coverage first, then sorts the tasks by whether their reward changed across repeats. Needs only Python 3.8+.
+
+    python3 summarize_profile.py results/rollouts_reward_profiling.jsonl
+    python3 summarize_profile.py results/rollouts_reward_profiling.jsonl --json
+"""
+
+import argparse
+import json
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+
+PROFILE_SUFFIX = "_reward_profiling.jsonl"
+# Rewards closer than this count as equal, so float noise does not read as spread.
+REWARD_TOLERANCE = 1e-9
+
+
+def read_jsonl(path):
+    with open(path, encoding="utf-8") as f:
+        for line_number, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{path}:{line_number}: not valid JSON ({e.msg}); is the file complete?") from None
+            if not isinstance(row, dict) or "_ng_task_index" not in row:
+                raise ValueError(
+                    f"{path}:{line_number}: no _ng_task_index; not a file written by gym eval run or profile"
+                )
+            yield row
+
+
+def agent_name(row):
+    return (row.get("agent_ref") or {}).get("name")
+
+
+def run_key(row):
+    server = row.get("_ng_environment_server")
+    return server if server is not None else agent_name(row)
+
+
+def run_labels(rows):
+    """Label each run the way `gym eval profile` labels the rows of a task run by several agents.
+
+    Mirrors nemo_gym's `rollout_run_labels` and `label_runs`: a run is keyed by its Environment Server, else its
+    agent, and labelled by its agent's name when that name identifies exactly one run, else by its key.
+    """
+    agent_by_key = {}
+    for row in rows:
+        key = run_key(row)
+        if key is not None and key not in agent_by_key:
+            agent_by_key[key] = agent_name(row)
+    keys_by_agent = defaultdict(set)
+    for key, agent in agent_by_key.items():
+        if agent is not None:
+            keys_by_agent[agent].add(key)
+    labels = {
+        key: agent if agent is not None and len(keys_by_agent[agent]) == 1 else key
+        for key, agent in agent_by_key.items()
+    }
+    while True:
+        counts = Counter(labels.values())
+        clashing = [key for key, label in labels.items() if counts[label] > 1 and label != key]
+        if not clashing:
+            return labels
+        for key in clashing:
+            labels[key] = key
+
+
+def planned_rollouts(read_rows):
+    """Planned rollouts per (task, run label), and whether every row names an agent.
+
+    `read_rows` returns a fresh iterator over the materialized inputs; the file is read twice instead of held in memory.
+    """
+    labels = run_labels(read_rows())
+    planned, every_row_names_agent = Counter(), True
+    for row in read_rows():
+        planned[(row["_ng_task_index"], labels.get(run_key(row)))] += 1
+        every_row_names_agent = every_row_names_agent and agent_name(row) is not None
+    return planned, every_row_names_agent
+
+
+def record_key(record):
+    task = record["task"]
+    return (record["agent"] or "", (0, task, "") if isinstance(task, int) else (1, 0, str(task)))
+
+
+def new_record(task, agent, measured, expected, planned, row=None):
+    row = row or {}
+    return {
+        "task": task,
+        "agent": agent,
+        "measured": measured,
+        "expected": expected,
+        "planned": planned,
+        "mean": row.get("mean/reward"),
+        "std": row.get("std/reward"),
+        "min": row.get("min/reward"),
+        "max": row.get("max/reward"),
+        "in_profile_file": bool(row),
+    }
+
+
+def summarize(profile_rows, planned_by_task_label=None, agent_metrics=None, every_input_names_agent=True):
+    """Coverage and task groups for one profile.
+
+    `planned_by_task_label` counts the materialized input rows per (task, run label), or is None when the inputs were
+    not found. `gym eval profile` leaves masked rollouts out of a row's counts and writes no row for a task whose every
+    planned rollout was saved and masked, so masked rollouts of such tasks show only in the agent metrics' total. That
+    total covers only rows that name an agent.
+    """
+    if any("num_rollouts" not in row for row in profile_rows):
+        raise ValueError(
+            "No num_rollouts field: pass the <stem>_reward_profiling.jsonl that gym eval profile writes, or profile "
+            "the run again with a current nemo-gym."
+        )
+
+    # Rows carry agent_ref only when the same task ran under several runs (fan-out); compare those per run label
+    # when the inputs know the labels, and per task otherwise.
+    labels = {agent_name(row) for row in profile_rows if "agent_ref" in row}
+    planned_labels = {label for _, label in planned_by_task_label or {}}
+    by_label = bool(labels) and labels <= planned_labels
+    # gym labels runs from the measured rows only, so a run masked everywhere can change its labels; then the rows
+    # cannot tell masked rollouts from rollouts that were never saved.
+    per_task_fallback = bool(labels) and not by_label
+
+    def group(task, label):
+        return (task, label if by_label else None)
+
+    records = []
+    members = defaultdict(list)
+    for row in profile_rows:
+        # Planned minus masked: `gym eval profile` drops masked rollouts before it counts.
+        expected = row.get("expected_num_rollouts", row["num_rollouts"])
+        record = new_record(row["_ng_task_index"], agent_name(row), row["num_rollouts"], expected, None, row)
+        records.append(record)
+        members[group(record["task"], record["agent"])].append(record)
+
+    masked_reported = None
+    if agent_metrics is not None:
+        masked_reported = sum(e.get("coverage/masked_rollouts", 0) for e in agent_metrics if isinstance(e, dict))
+    planned = None
+    masked_in_rows = 0
+    if planned_by_task_label is not None:
+        planned = Counter()
+        for (task, label), count in planned_by_task_label.items():
+            planned[group(task, label)] += count
+        for key, group_records in members.items():
+            expected = sum(r["expected"] for r in group_records)
+            if expected > planned[key]:
+                raise ValueError(
+                    f"The materialized inputs do not match this profile (task {key[0]}). Use the "
+                    "<stem>_materialized_inputs.jsonl written next to the same rollouts file."
+                )
+            masked_in_rows += planned[key] - expected
+            if len(group_records) == 1:
+                group_records[0]["planned"] = planned[key]
+        for (task, label), count in planned.items():
+            if (task, label) not in members:
+                # nemo-gym 0.7.0 writes no row for a task with no measured rollout. Main writes one with
+                # num_rollouts 0, except for a task whose every planned rollout was saved and masked.
+                records.append(new_record(task, label, 0, 0, count))
+
+    groups = {"varies": [], "one_rollout": [], "no_measured_rollout": [], "no_reward": []}
+    same_every_repeat = {}
+    for record in sorted(records, key=record_key):
+        target = record["planned"] if record["planned"] is not None else record["expected"]
+        record["partial"] = 0 < record["measured"] < target
+        if record["measured"] == 0:
+            groups["no_measured_rollout"].append(record)
+        elif record["min"] is None or record["max"] is None:
+            groups["no_reward"].append(record)
+        elif record["measured"] == 1:
+            groups["one_rollout"].append(record)
+        elif record["max"] - record["min"] > REWARD_TOLERANCE:
+            groups["varies"].append(record)
+        else:
+            same_every_repeat.setdefault(record["min"], []).append(record)
+
+    measured_total = sum(r["measured"] for r in records)
+    planned_total = sum(planned.values()) if planned is not None else None
+    absent = [r for r in records if not r["in_profile_file"]]
+    # A row's planned minus expected rollouts were masked, and masked rollouts of tasks with no row show only in the
+    # agent metrics' total. That total counts only rows that name an agent, so the split between masked and never
+    # saved is known only when the inputs are found, every input row names an agent and the run labels line up.
+    masked_total = None
+    if planned is not None and masked_reported is not None and every_input_names_agent and not per_task_fallback:
+        if masked_in_rows > masked_reported:
+            raise ValueError(
+                "The materialized inputs do not match this profile: they plan more rollouts than were saved or masked. "
+                "Use the <stem>_materialized_inputs.jsonl written next to the same rollouts file."
+            )
+        masked_total = masked_reported
+    known = masked_total is not None
+
+    means = {}
+    for record in records:
+        if record["measured"] and record["mean"] is not None:
+            label = record["agent"] or "" if labels else ""
+            total, count = means.get(label, (0.0, 0))
+            means[label] = (total + record["mean"] * record["measured"], count + record["measured"])
+
+    def ids(selected):
+        return [{"task": r["task"], "agent": r["agent"]} for r in sorted(selected, key=record_key)]
+
+    return {
+        "coverage": {
+            "planned_rollouts": planned_total,
+            "measured_rollouts": measured_total,
+            "masked_rollouts": masked_total,
+            "never_saved_rollouts": planned_total - measured_total - masked_total if known else None,
+            "measured_pct": round(100.0 * measured_total / planned_total, 2) if planned_total else None,
+            "tasks": len(records),
+            "complete_tasks": sum(1 for r in records if r["measured"] and not r["partial"]),
+            "partial_tasks": ids(r for r in records if r["partial"]),
+            "tasks_without_measured_rollout": ids(groups["no_measured_rollout"]),
+            "tasks_not_in_profile_file": ids(absent),
+            # Masked rollouts that belong to tasks with no row: 0 means those tasks were never saved, a value equal to
+            # their planned rollouts means every one of them was saved and masked, and null means unknown.
+            "masked_rollouts_of_tasks_not_in_profile_file": (masked_total - masked_in_rows)
+            if known and absent
+            else None,
+            "inputs_checked": planned is not None,
+            "masked_rollouts_in_agent_metrics": masked_reported,
+        },
+        "mean_reward_over_measured_rollouts": {
+            label: total / count for label, (total, count) in sorted(means.items())
+        },
+        "varies": groups["varies"],
+        "same_reward_every_repeat": {str(value): rs for value, rs in sorted(same_every_repeat.items())},
+        "one_rollout": groups["one_rollout"],
+        "no_measured_rollout": groups["no_measured_rollout"],
+        "no_reward": groups["no_reward"],
+    }
+
+
+def task_list(records):
+    names = [
+        (str(r["task"]) if r["agent"] is None else f"{r['task']} ({r['agent']})") + ("*" if r["partial"] else "")
+        for r in records
+    ]
+    return ", ".join(names) if names else "none"
+
+
+def print_report(summary):
+    cov = summary["coverage"]
+    pct = "n/a" if cov["measured_pct"] is None else f"{cov['measured_pct']}%"
+    if not cov["inputs_checked"]:
+        print(
+            f"Coverage: {cov['measured_rollouts']} rollouts measured. Materialized inputs not found, so the planned "
+            "total, masked rollouts and tasks with no saved rollout are unknown."
+        )
+        if cov["masked_rollouts_in_agent_metrics"]:
+            print(f"  The agent metrics count {cov['masked_rollouts_in_agent_metrics']} masked rollouts.")
+    elif cov["never_saved_rollouts"] is None:
+        print(
+            f"Coverage: {cov['measured_rollouts']} of {cov['planned_rollouts']} planned rollouts measured ({pct}); "
+            "the rest were never saved or were masked, and these files cannot tell which."
+        )
+    else:
+        print(
+            f"Coverage: {cov['measured_rollouts']} of {cov['planned_rollouts']} planned rollouts measured ({pct}): "
+            f"{cov['never_saved_rollouts']} never saved, {cov['masked_rollouts']} masked."
+        )
+    print(
+        f"Tasks: {cov['tasks']}; {cov['complete_tasks']} complete, {len(cov['partial_tasks'])} partial, "
+        f"{len(cov['tasks_without_measured_rollout'])} with no measured rollout."
+    )
+    absent = [r for r in summary["no_measured_rollout"] if not r["in_profile_file"]]
+    if absent:
+        masked = cov["masked_rollouts_of_tasks_not_in_profile_file"]
+        if masked == 0:
+            reason = "no saved rollout"
+        elif masked == sum(r["planned"] for r in absent):
+            reason = "every saved rollout was masked"
+        else:
+            reason = "never saved, or every saved rollout masked"
+        print(f"  Not in the profile file ({reason}): {task_list(absent)}")
+    for label, mean in summary["mean_reward_over_measured_rollouts"].items():
+        who = f" for {label}" if label else ""
+        print(f"Mean reward over measured rollouts{who}: {mean:.4f} (says nothing about tasks with none).")
+    print("* = partial: fewer measured rollouts than planned.")
+    print()
+    print(f"Reward varies across repeats (learning signal): {task_list(summary['varies'])}")
+    for value, records in summary["same_reward_every_repeat"].items():
+        print(f"Same reward ({value}) on every repeat (no signal): {task_list(records)}")
+    if summary["one_rollout"]:
+        print(f"Only one measured rollout (spread unknown): {task_list(summary['one_rollout'])}")
+    if summary["no_reward"]:
+        print(f"Measured rollouts without a reward: {task_list(summary['no_reward'])}")
+    print(f"No measured rollout (not measured): {task_list(summary['no_measured_rollout'])}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("profile", type=Path, help=f"<stem>{PROFILE_SUFFIX} written by `gym eval profile`")
+    parser.add_argument(
+        "--inputs", type=Path, help="materialized inputs JSONL (default: <stem>_materialized_inputs.jsonl beside it)"
+    )
+    parser.add_argument("--json", action="store_true", help="print the summary as JSON")
+    args = parser.parse_args()
+
+    if not args.profile.is_file():
+        sys.exit(f"Profile file not found: {args.profile}. Run `gym eval profile` first.")
+    stem = args.profile.name[: -len(PROFILE_SUFFIX)] if args.profile.name.endswith(PROFILE_SUFFIX) else None
+    inputs_path = args.inputs or (args.profile.with_name(stem + "_materialized_inputs.jsonl") if stem else None)
+    if args.inputs and not inputs_path.is_file():
+        sys.exit(f"Materialized inputs file not found: {inputs_path}")
+    metrics_path = args.profile.with_name(stem + "_agent_metrics.json") if stem else None
+
+    try:
+        planned, every_input_names_agent = None, True
+        if inputs_path is not None and inputs_path.is_file():
+            planned, every_input_names_agent = planned_rollouts(lambda: read_jsonl(inputs_path))
+        agent_metrics = None
+        if metrics_path is not None and metrics_path.is_file():
+            try:
+                agent_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{metrics_path}: not valid JSON ({e.msg}); is the file complete?") from None
+            if not isinstance(agent_metrics, list):
+                raise ValueError(f"{metrics_path}: expected a list of agent entries from gym eval profile")
+        summary = summarize(list(read_jsonl(args.profile)), planned, agent_metrics, every_input_names_agent)
+    except ValueError as e:
+        sys.exit(str(e))
+
+    if args.json:
+        print(json.dumps(summary, indent=2))
+    else:
+        print_report(summary)
+
+
+if __name__ == "__main__":
+    main()
