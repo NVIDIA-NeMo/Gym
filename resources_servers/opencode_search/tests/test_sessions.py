@@ -262,13 +262,23 @@ def _plugin_log_read(log_text: str, *, cut_after: Optional[int] = None) -> str:
     return f"file:{encoded}:end"
 
 
+# The side the 0 of each plugin log kind is counted against, as its row names it.
+PLUGIN_LOG_ATTRIBUTION = {
+    PLUGIN_LOG_MISSING: "evaluation",
+    PLUGIN_LOG_INCOMPLETE: "evaluation",
+    PLUGIN_LOG_UNSAFE: "model",
+}
+
+
 def _scored_0_for_its_plugin_log(verified: Any, kind: str) -> dict[str, Any]:
     """The row of a verify that scored its episode 0 for its plugin log, with kind, after checking what every such row
-    holds: an unmasked 0 the outcome policy counts as the model's, no grade, no ending, and the reason."""
+    holds: an unmasked 0 the outcome policy counts, against the evaluation for a log that is missing or incomplete and
+    against the model for one that is unsafe to read, no grade, no ending, and the reason."""
     assert verified.status_code == 200, verified.text
     row = verified.json()
     assert _graded(verified) == (0.0, False, kind, False)
-    assert (row["failure_outcome_action"], row["failure_outcome_attribution"]) == ("count_as_zero", "model")
+    applied = (row["failure_outcome_action"], row["failure_outcome_attribution"])
+    assert applied == ("count_as_zero", PLUGIN_LOG_ATTRIBUTION[kind])
     assert (row["judge_parsed"], row["judge_attempts"], row["extracted_final_answer"]) == (False, 0, "")
     # A log that fails the check never masks the row with an ending.
     assert (row["opencode_plugins_loaded"], row["opencode_terminal_reason"]) == (False, "")
@@ -885,7 +895,8 @@ def test_an_episode_whose_plugin_log_is_missing_or_lacks_a_line_scores_0_without
     workdir, tmp_path, started, stopped, log_text, markers, kind, what
 ) -> None:
     """The model's tools can reach the plugin log, so a run whose log is missing or lacks a line it must hold is scored
-    0 as the model's rather than refused: a refused run would be neither scored nor penalized."""
+    0 rather than refused: a refused run would be neither scored nor penalized. A broken image or plugin bundle leaves
+    such a log too, so its 0 counts against the evaluation."""
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log, required_plugin_markers=markers)
     if log_text is not None:
@@ -1011,9 +1022,45 @@ def test_a_plugin_log_far_over_the_byte_cap_is_read_only_up_to_it(workdir, tmp_p
     assert len(row["opencode_plugin_log"]) <= _PLUGIN_LOG_ROW_CHARS
 
 
+@pytest.mark.parametrize(
+    ("make", "kind", "attribution"),
+    [
+        (lambda log: None, PLUGIN_LOG_MISSING, "evaluation"),
+        # As from a plugin bundle that did not load: no sentinel's line.
+        (lambda log: log.write_text(""), PLUGIN_LOG_INCOMPLETE, "evaluation"),
+        # As from plugins other than the ones the run should have had: no required line.
+        (lambda log: log.write_text(SENTINEL), PLUGIN_LOG_INCOMPLETE, "evaluation"),
+        (lambda log: log.symlink_to(log.with_name("other.log")), PLUGIN_LOG_UNSAFE, "model"),
+        (
+            lambda log: (log.write_text(SENTINEL), os.truncate(log, _PLUGIN_LOG_MAX_BYTES + 1)),
+            PLUGIN_LOG_UNSAFE,
+            "model",
+        ),
+    ],
+    ids=["missing", "no_sentinel", "no_required_line", "symlink", "over_the_cap"],
+)
+def test_a_missing_or_incomplete_plugin_log_counts_against_the_evaluation_and_an_unsafe_one_against_the_model(
+    workdir, tmp_path, make, kind, attribution
+) -> None:
+    """A log that is missing or lacks a line can come from a broken image or plugin bundle as well as from the model's
+    tools, so its 0 is counted against the evaluation, and Gym's acceptance gate counts it as an evaluation-side fault.
+    A log the read does not open, or one over the cap, is taken as tampered with, and its 0 stays the model's. The row
+    is otherwise the same: an unmasked 0 without a judge call, which Gym counts in the score and settles."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log, required_plugin_markers=["tool_surface task=off"])
+    make(log)
+    judge = _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    row = _scored_0_for_its_plugin_log(verified, kind)
+    assert (row["failure_outcome_action"], row["failure_outcome_attribution"]) == ("count_as_zero", attribution)
+    assert judge.await_count == 0
+
+
 @pytest.mark.parametrize("limit", [2, 0], ids=["two", "off"])
 def test_episodes_scored_0_for_their_plugin_log_trip_the_plugin_log_breaker(workdir, tmp_path, limit) -> None:
-    """A plugin bundle that does not load would score every episode 0 as the model's: verify answers 500 once
+    """A plugin bundle that does not load would score every episode 0: verify answers 500 once
     plugin_log_max_consecutive_failures episodes in a row fail the plugin log check, for the last of them too, so one
     fewer is scored 0. An identical retry is not counted again, and a log that passes starts the count again. 0 turns
     the breaker off."""
@@ -1156,9 +1203,9 @@ def test_a_plugin_log_read_whose_head_fails_fails_the_verify_for_a_retry(
 ) -> None:
     """A head that fails, as on an I/O error or when the image lacks it, cannot say so through the pipe into base64:
     sh cannot be relied on to have pipefail (dash has none). The read checks head's own exit status, so the verify
-    answers 500 and the episode runs again, rather than an empty log scoring it 0 as the model's, or the lines read
-    before the failure grading it without the rest. The failure reason gives head's exit status, which tells a head
-    that failed from one that was killed or is missing."""
+    answers 500 and the episode runs again, rather than an empty log scoring it 0, or the lines read before the failure
+    grading it without the rest. The failure reason gives head's exit status, which tells a head that failed from one
+    that was killed or is missing."""
     named_configs = {
         "sandbox": {
             "local": {"workspace_root": str(tmp_path / "agent-runs"), "shell": shell},
@@ -2041,7 +2088,8 @@ def test_the_outcome_a_row_names_is_the_one_verify_applied_whatever_the_request_
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log)
     _mock_judge(server, CORRECT)
-    requested = {"failure_outcome_action": "fail", "failure_outcome_attribution": "evaluation"}
+    # Unlike the outcome verify applies to a missing log: count_as_zero, against the evaluation.
+    requested = {"failure_outcome_action": "fail", "failure_outcome_attribution": "model"}
 
     scored_0 = client.post("/verify", json=_verify_body(**requested), headers=EPISODE_VERIFY)
     assert client.post("/close_session", json=_close()).status_code == 200

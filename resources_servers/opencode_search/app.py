@@ -156,6 +156,15 @@ _PLUGIN_LOG_ENV = "NEMO_GYM_PLUGIN_LOG"
 PLUGIN_LOG_MISSING = "opencode_search:plugin_log_missing"
 PLUGIN_LOG_UNSAFE = "opencode_search:plugin_log_unsafe"
 PLUGIN_LOG_INCOMPLETE = "opencode_search:plugin_log_incomplete"
+# The side the 0 of each kind is counted against: the failure_outcome_attribution of its row (see _grade). A log that
+# is missing or lacks a line can come from a broken image or plugin bundle as well as from the model's tools, so its 0
+# counts against the evaluation, and Gym's acceptance gate counts it as an evaluation-side fault. A path the read does
+# not open, or a file over the cap, is taken as tampered with: its 0 stays the model's.
+_PLUGIN_LOG_ATTRIBUTION = {
+    PLUGIN_LOG_MISSING: FailureClass.EVALUATION,
+    PLUGIN_LOG_UNSAFE: FailureClass.MODEL,
+    PLUGIN_LOG_INCOMPLETE: FailureClass.EVALUATION,
+}
 # The most of the plugin log verify reads, in bytes: 4 MiB. A run within its turn budget writes a few short lines per
 # model call, far less than this. The read stops one byte past it, so a longer file is seen to be longer without its
 # size being measured.
@@ -389,7 +398,7 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     required_plugin_markers: List[str] = Field(default_factory=list)
     # Verify answers 500 once this many episodes in a row fail the plugin log check, for the last of them too, and goes
     # on answering 500 for each later episode whose log fails, until a log that passes resets the count. So one fewer
-    # in a row is scored 0 as the model's, rather than every remaining episode: a plugin bundle that does not load, or
+    # in a row is scored 0, rather than every remaining episode: a plugin bundle that does not load, or
     # required_plugin_markers that do not match the run's plugins, fails every episode. A model whose tools break the
     # log in every episode trips it too: the server cannot tell that from a broken bundle. 0 disables it, and every
     # such episode then scores 0. The zeros scored before a trip are settled, and gym eval resubmit --recover does not
@@ -1301,10 +1310,10 @@ class SearchResourcesServer(SimpleResourcesServer):
         Environment Server treats as retryable: the episode fails ungraded and runs again on resume, as a relay run
         whose output could not be captured does. The read fails when head, base64 or sh fails or is missing
         (_plugin_log_read_command), so a head that read nothing or stopped early is never taken for an empty or shorter
-        log, which would score the episode 0 as the model's or grade it without its ending. A row masked instead would
-        stay in the results with a reward that measured nothing, and lower a score that counts masked rows. What the
-        read found in place of a file it would read, and a file over the cap, are no failure of the read:
-        _plugin_log_fault scores such an episode 0.
+        log, which would score the episode 0 or grade it without its ending. A row masked instead would stay in the
+        results with a reward that measured nothing, and lower a score that counts masked rows. What the read found in
+        place of a file it would read, and a file over the cap, are no failure of the read: _plugin_log_fault scores
+        such an episode 0.
         """
         sandbox = None if self._lent_sandboxes is None else self._lent_sandboxes.get(session_id)
         if self.config.plugin_log_path is None or sandbox is None:
@@ -1371,10 +1380,12 @@ class SearchResourcesServer(SimpleResourcesServer):
         nothing, PLUGIN_LOG_UNSAFE when it holds anything else), of at most _PLUGIN_LOG_MAX_BYTES (else
         PLUGIN_LOG_UNSAFE), which holds the sentinel's line and every required marker (else PLUGIN_LOG_INCOMPLETE). The
         model's tools can cause each failure, by deleting, replacing, filling or editing the file, so _grade scores
-        such an episode 0, without a judge call, as the model's 0 rather than refuse it: a refused episode would be
-        neither scored nor penalized. A plugin that did not load, or required_plugin_markers that do not match the
-        run's plugins, fail the check too, and every episode with them: plugin_log_max_consecutive_failures stops such
-        a run. No other line is checked, so a forged line is not detected.
+        such an episode 0, without a judge call, rather than refuse it: a refused episode would be neither scored nor
+        penalized. A missing or incomplete log can also come from a broken image or plugin bundle, so its 0 counts
+        against the evaluation; an unsafe log's 0 counts against the model (_PLUGIN_LOG_ATTRIBUTION). A plugin that did
+        not load, or required_plugin_markers that do not match the run's plugins, fail the check too, and every episode
+        with them: plugin_log_max_consecutive_failures stops such a run. No other line is checked, so a forged line is
+        not detected.
 
         The reason names the failure and gives the log's size in bytes and its first and last _PLUGIN_LOG_SLICE_CHARS
         characters, with line breaks escaped, in at most 2,000 characters.
@@ -1403,7 +1414,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         plugin_log_max_consecutive_failures of them came in a row; a plugin log that passes starts the count again.
 
         As the dead-judge breaker does for the judge: without it, a plugin bundle that does not load would score every
-        remaining episode 0 as the model's, and the run would finish with a number that measured nothing.
+        remaining episode 0, and the run would finish with a number that measured nothing.
         """
         if fault is None:
             self._plugin_log_consecutive_failures = 0
@@ -1540,9 +1551,11 @@ class SearchResourcesServer(SimpleResourcesServer):
         """The grading fields of the verify response: reward, mask and failure fields, and the judge's diagnostics.
 
         An episode whose plugin log failed the check (plugin_log_fault, see _plugin_log_fault) scores 0 without a judge
-        call: unmasked, with evaluation_completed false, and with the outcome applied to it on the row, a 0 counted as
-        the model's (failure_outcome_action count_as_zero, failure_outcome_attribution model). Gym counts it in the
-        score, reports it under its failure_kind, settles it and never judges it again.
+        call: unmasked, with evaluation_completed false, and with the outcome applied to it on the row,
+        failure_outcome_action count_as_zero and the failure_outcome_attribution of its kind (_PLUGIN_LOG_ATTRIBUTION):
+        evaluation for a log that is missing or incomplete, model for one that is unsafe to read. Gym counts it in the
+        score, reports it under its failure_kind, settles it and never judges it again; its acceptance gate counts a 0
+        attributed to the evaluation as an evaluation-side fault.
 
         A rollout the judge gave no parseable verdict, unless it ended on its budget, follows
         unparseable_verdict_policy: "zero" scores it 0 as the evaluation's (count_as_zero, attribution evaluation),
@@ -1560,7 +1573,7 @@ class SearchResourcesServer(SimpleResourcesServer):
                 "failure_kind": failure_kind,
                 "failure_reason": failure_reason,
                 "failure_outcome_action": OutcomeAction.COUNT_AS_ZERO,
-                "failure_outcome_attribution": FailureClass.MODEL,
+                "failure_outcome_attribution": _PLUGIN_LOG_ATTRIBUTION[failure_kind],
             }
 
         # The turn-budget plugin's ending, which the relay agent forwards and an episode's plugin log gives; "" on a

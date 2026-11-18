@@ -20,7 +20,7 @@ Reward is 1.0 for a `correct: yes` verdict, else 0.0. Four cases are deliberatel
 | agent produced no answer | reward 0.0, no judge call spent |
 | judge answered but the verdict could not be parsed | retried; a parse that never succeeds scores 0.0, unmasked, as a 0 counted against the evaluation rather than the model (`failure_kind: judge_unparseable`), or is masked with `unparseable_verdict_policy: mask`, which training sets (see [Training](#training)); a run that ended on its budget keeps that ending's kind and mask either way |
 | judge never answered (endpoint down) | `JudgeError` → `judge_failsafe` → failures sidecar, not a fabricated zero |
-| an episode's plugin log is missing, unsafe to read or lacks a required line | reward 0.0, no judge call spent, counted as the model's 0 (see [Plugin log](#sessions)) |
+| an episode's plugin log is missing, unsafe to read or lacks a required line | reward 0.0, no judge call spent; a missing or incomplete log is counted as a 0 against the evaluation, and an unsafe one as the model's 0 (see [Plugin log](#sessions)) |
 
 The verdict parser takes the LAST `correct: yes|no` match: reasoning judges echo the rubric inside
 their think block, and a first-match parse grades the echo. A reply whose extracted answer is exactly
@@ -166,17 +166,23 @@ a crash an episode starts over from its input.
   (`opencode_terminal_reason`, `opencode_plugins_loaded`, `opencode_plugin_log`). The row carries at most
   1,048,576 characters of the log: a longer log keeps its two ends around a line that gives its length.
 
-  An episode whose log fails the check is scored 0 without a judge call, as the model's 0, rather than
-  refused: the model's tools can delete, replace, fill or edit the file, and a refused episode would be
-  neither scored nor penalized. Its row has reward 0, `mask_sample` false, `evaluation_completed` false,
-  the applied outcome `failure_outcome_action: count_as_zero` with `failure_outcome_attribution: model`,
-  `opencode_plugins_loaded` false, no ending (so the log never masks it), and the `failure_kind`:
+  An episode whose log fails the check is scored 0 without a judge call rather than refused: the model's
+  tools can delete, replace, fill or edit the file, and a refused episode would be neither scored nor
+  penalized. Its row has reward 0, `mask_sample` false, `evaluation_completed` false, the applied outcome
+  `failure_outcome_action: count_as_zero`, `opencode_plugins_loaded` false, no ending (so the log never
+  masks it), and the `failure_kind`, with the `failure_outcome_attribution` it applies:
 
-  - `opencode_search:plugin_log_missing`: no file at `plugin_log_path`;
-  - `opencode_search:plugin_log_unsafe`: a symbolic link, not a regular file, a file the read cannot
-    read, or one of more than 4 MiB;
-  - `opencode_search:plugin_log_incomplete`: a log read whole that lacks the sentinel plugin's line or a
-    line of `required_plugin_markers`, as an empty, cut, edited or garbled log does.
+  - `opencode_search:plugin_log_missing`, `evaluation`: no file at `plugin_log_path`;
+  - `opencode_search:plugin_log_unsafe`, `model`: a symbolic link, not a regular file, a file the read
+    cannot read, or one of more than 4 MiB;
+  - `opencode_search:plugin_log_incomplete`, `evaluation`: a log read whole that lacks the sentinel
+    plugin's line or a line of `required_plugin_markers`, as an empty, cut, edited or garbled log does.
+
+  A missing or incomplete log can come from a broken image or plugin bundle as well as from the model's
+  tools, so its 0 is counted against the evaluation: Gym's acceptance gate counts it as an evaluation-side
+  fault, and a run in which evaluation-side faults reach 2% of its trials fails the gate, so a broken
+  setup is noticed rather than lowering the score unseen. An unsafe log is taken as tampered with, and its
+  0 stays the model's.
 
   Its `failure_reason` names what failed, and gives the bytes read (`log_bytes`) and the first and last
   600 characters of the log with line breaks escaped (`head`, `tail`). Gym counts the row in the score as
