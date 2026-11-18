@@ -385,7 +385,9 @@ test("a stdio tool call has a deadline", async (t) => {
 });
 
 test("a started stdio server is stopped when another required server fails setup", async (t) => {
-  const pidFile = join(mkdtempSync(join(tmpdir(), "gym-mcp-pid-")), "pid");
+  const pidDir = mkdtempSync(join(tmpdir(), "gym-mcp-pid-"));
+  t.after(() => rmSync(pidDir, { recursive: true, force: true }));
+  const pidFile = join(pidDir, "pid");
   const port = await closedPort();
   const down = { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000 };
   await assert.rejects(
