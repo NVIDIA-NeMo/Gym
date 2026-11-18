@@ -117,6 +117,50 @@ fi
 """
 
 
+# Bound on one snapshot of `lustre_md_stats`, so a hung read or a step that cannot start never holds the job.
+LUSTRE_MD_STATS_TIMEOUT_S = 30
+
+# What each node runs: its MDC request counters as TSV rows. lctl omits an op whose count is 0, and lives in /usr/sbin,
+# which is not on every user's PATH.
+_LUSTRE_MD_STATS_NODE = r"""set -o pipefail
+PATH="$PATH:/usr/sbin:/sbin"
+lctl get_param 'mdc.*.md_stats' 2>/dev/null | awk -v OFS='\t' -v phase="$1" -v epoch="$(date +%s)" \
+    -v node="${SLURMD_NODENAME:-$(hostname)}" '
+    /^mdc\..*\.md_stats=/ { mdt = match($0, /-MDT[0-9a-fA-F]+-mdc-/) ? substr($0, RSTART + 1, RLENGTH - 6) : ""; next }
+    mdt != "" && $3 == "samples" && $2 ~ /^[0-9]+$/ { print phase, epoch, node, mdt, $1, $2 }'"""
+
+_LUSTRE_MD_STATS_PRELUDE = """\
+# --- Lustre metadata stats (lustre_md_stats) ---
+# Rows: phase, epoch, node, MDT, op, cumulative count. A snapshot keeps the status it was called with.
+_gym_md_stats_file={stats_file}
+_gym_md_stats_node=$(cat <<'GYM_MD_STATS_NODE'
+{node_script}
+GYM_MD_STATS_NODE
+)
+_gym_md_stats() {{
+    local _gym_md_rc=$? _gym_md_out _gym_md_ok=1
+    _gym_md_out=$(timeout -k 5 {timeout} {step}bash -c "$_gym_md_stats_node" _gym_md_stats "$1" 2>/dev/null) || _gym_md_ok=0
+    if [ -n "$_gym_md_out" ]; then
+        printf '%s\\n' "$_gym_md_out" >> "$_gym_md_stats_file" || _gym_md_ok=0
+    else
+        _gym_md_ok=0
+    fi
+    [ "$_gym_md_ok" = 1 ] || echo "WARNING: lustre_md_stats: phase $1 not fully recorded in $_gym_md_stats_file (lctl get_param mdc.*.md_stats failed, timed out or printed nothing); the job goes on."
+    return "$_gym_md_rc"
+}}"""
+
+
+def render_lustre_md_stats_prelude(stats_file: str, step: str = "") -> str:
+    """Define `_gym_md_stats <phase>`, which appends every node's counters to `stats_file` (a shell word).
+
+    `step` prefixes the per-node command: empty runs it in the batch shell, an `srun ... ` once on every node.
+    A missing `lctl` or a failed read prints one warning line; the call returns the status it was called with.
+    """
+    return _LUSTRE_MD_STATS_PRELUDE.format(
+        stats_file=stats_file, node_script=_LUSTRE_MD_STATS_NODE, timeout=LUSTRE_MD_STATS_TIMEOUT_S, step=step
+    )
+
+
 def bash_var(name: str) -> str:
     return re.sub(r"[^A-Z0-9]", "_", name.upper())
 

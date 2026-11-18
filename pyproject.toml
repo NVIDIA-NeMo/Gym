@@ -940,3 +940,17 @@ ignore_imports = [
     "nemo_gym.sandbox.compose_config -> nemo_gym.data.tasks.harbor.digest",
     "nemo_gym.telemetry.setup -> nemo_gym.sandbox.observability",
 ]
+
+# orchestration is a Gym-aware orchestrator, not a home for core functionality: only the CLI entrypoint imports it.
+# Every module directly under nemo_gym is a source (`nemo_gym.*`), so a new package is checked without being listed;
+# the exceptions below are the whole list.
+[[tool.importlinter.contracts]]
+name = "only the CLI entrypoint imports orchestration"
+type = "forbidden"
+source_modules = ["nemo_gym.*"]
+forbidden_modules = ["nemo_gym.orchestration"]
+allow_indirect_imports = true
+ignore_imports = [
+    "nemo_gym.cli.main -> nemo_gym.orchestration.**",
+    "nemo_gym.orchestration.** -> nemo_gym.orchestration.**",
+]

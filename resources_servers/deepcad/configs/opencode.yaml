@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Flat CAD rows use sessions through single_agent_turn_legacy; no legacy_agent relay or custom agent is involved.
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
+head_server:
+  host: 127.0.0.1
+
+deepcad_opencode:
+  resources_servers:
+    deepcad:
+      entrypoint: opencode_app.py
+      host: 127.0.0.1
+      domain: coding
+      verified: false
+      description: Reconstruct CAD from images with a lent workspace and final model.py grading
+      reference_root: cad-data/references
+      sandbox_provider: sandbox
+      sandbox_image: deepcad-cadquery:2.8.0
+      workspace_sandbox_provider: agent_sandbox
+      workspace_image: deepcad-opencode:1.17.11
+      # Docker bridge cannot enforce model_only; use a provider with network policies to restrict egress.
+      workspace_network_access: inherit
+      workspace_model_server: {type: responses_api_models, name: policy_model}
+      workspace_sandbox_config:
+        ttl_s: 2400
+        ready_timeout_s: 600
+        resources: {cpu: 2, memory_mib: 8192}
+        env:
+          MESA_SHADER_CACHE_DISABLE: 'true'
+      iou_backend: brep
+      alignment: rescale
+      reward_weights: {voxel_iou: 1.0}
+
+deepcad_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      host: 127.0.0.1
+      resources_server: {type: resources_servers, name: deepcad_opencode}
+      model_server: {type: responses_api_models, name: policy_model}
+      opencode_version: 1.17.11
+      token_id_capture: true
+      concurrency: 4
+      image_input: true
+      system_prompt_mode: replace
+      timeout: 1800
+      context_window: 131072
+      max_output_tokens: 32768
+      session_close_timeout_seconds: 90
+      sandbox_executable_path: /opt/opencode/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
+      sandbox_plugin_dependencies_path: /opt/opencode/opencode-1.17.11-plugin-dependencies.tar.gz
+      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret
+      opencode_config:
+        permission:
+          '*': allow
+          task: deny
+          webfetch: deny
+          websearch: deny
+          skill: deny
+        compaction: {auto: false}
+        agent:
+          build: {steps: 10}
+
+deepcad_opencode_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      host: 127.0.0.1
+      resources_server: {type: resources_servers, name: deepcad_opencode}
+      agent_server: {type: responses_api_agents, name: deepcad_opencode_agent}
+      resources_tool_transports: []
+      max_concurrent_episodes: 4
+      queue_timeout_seconds: 1800
+      default_episode_timeout_seconds: 2100
+
+sandbox:
+  docker:
+    create:
+      network: none
+      cap_drop: [ALL]
+      security_opt: [no-new-privileges]
+      pids_limit: 128
+      apply_resource_limits: true
+agent_sandbox:
+  docker:
+    create:
+      network: bridge
+      cap_drop: [ALL]
+      security_opt: [no-new-privileges]
+      pids_limit: 256
+      apply_resource_limits: true
+policy_model:
+  responses_api_models:
+    vllm_model:
+      supply_prefix_token_ids: true
+      return_token_id_information: true

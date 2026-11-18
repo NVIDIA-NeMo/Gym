@@ -189,6 +189,13 @@ class Migrator:
             moved_to = self.module_path(module)
             if moved_to != module:
                 self.names.setdefault(moved_to, {}).update(moved)
+        # A name renamed in a module that moved earlier is listed under the new path, and is served at the old one.
+        for module, moved in list(self.names.items()):
+            for old, new in self.modules.items():
+                if module == new or module.startswith(new + "."):
+                    listed = self.names.setdefault(old + module[len(new) :], {})
+                    for name, target in moved.items():
+                        listed.setdefault(name, target)
         dotted = {old: new for old, new in self.modules.items()}
         for module, moved in self.names.items():
             for name, (new_module, new_name) in moved.items():
@@ -361,7 +368,12 @@ class Migrator:
                         )
                 continue
             # `import nemo_gym.old` needs no statement rewrite: the dotted-path pass below covers it.
-            if not (isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "nemo_gym"):
+            # A module outside nemo_gym, such as a server module, is rewritten only when it lists moved names.
+            if not (
+                isinstance(node, ast.ImportFrom)
+                and node.module
+                and (node.module.split(".")[0] == "nemo_gym" or node.module in self.names)
+            ):
                 continue
             start, end = span(node)
             if any(KEEP_LINE_MARKER in lines[i] for i in range(node.lineno - 1, node.end_lineno)):

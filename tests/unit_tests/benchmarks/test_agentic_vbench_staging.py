@@ -203,6 +203,35 @@ def test_assembly_judge_guard_leaves_other_families_unstaged(tmp_path: Path) -> 
     assert not (tmp_path / "staging").exists()
 
 
+def test_assembly_judge_guard_hardens_a_generated_task_that_copied_the_upstream_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A generated training task is not pinned, so no digest is recorded for it; its judge is hardened when it
+    carries the upstream parser verbatim (the same crash on a bare list) and left alone otherwise."""
+    monkeypatch.setattr(staging, "_ASSEMBLY_JUDGE_SHA256", {})
+    task = make_task(tmp_path / "tasks/agentic_vbench_assembly", JUDGED_TASK)
+    judge = task / "steps/solve/tests/judge.py"
+    judge.write_text("# generated\n" + ASSEMBLY_JUDGE)
+    output = tmp_path / "output"
+    output.mkdir()
+
+    staged = stage_assembly_judge_guard(task, staging=tmp_path / "staging", output=output)
+
+    assert staged != task
+    namespace: dict = {}
+    exec((staged / "steps/solve/tests/judge.py").read_text(), namespace)
+    bare_list = tmp_path / "bare-list.json"
+    bare_list.write_text('[{"source": "3"}]')
+    assert namespace["score"](bare_list) == {"reward": 0.0, "reason": "solution.json: expected top-level object"}
+    provenance = json.loads((output / "assembly_judge_guard.json").read_text())
+    assert provenance["pinned"] is False
+    assert stage_assembly_judge_guard(task, staging=tmp_path / "staging", output=output) == staged
+
+    judge.write_text("def score(path):\n    return {'reward': 1.0}\n")
+    assert stage_assembly_judge_guard(task, staging=tmp_path / "staging2", output=output) == task
+    assert not (tmp_path / "staging2").exists()
+
+
 @pytest.mark.parametrize("protocol", sorted(JUDGE_PROTOCOLS))
 def test_hub_judge_is_verifier_only(tmp_path: Path, protocol: str) -> None:
     task = make_task(tmp_path / "source", JUDGED_TASK)

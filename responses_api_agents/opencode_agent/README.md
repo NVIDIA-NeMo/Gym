@@ -200,8 +200,8 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto` and
-`agent.build.steps`, preserving Gym capture. With token capture on, a session refuses
+Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto`,
+`agent.build.steps` and subagents (below), preserving Gym capture. With token capture on, a session refuses
 `agent.build.steps` (see below).
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
@@ -218,6 +218,18 @@ and compaction does not restart the count. A response whose prompt reached the l
 `metadata.harness_step_limit_reached: "true"`. Token capture recognizes this message
 (`nemo_gym.models.token_capture.harness_notes`) and joins the calls after it to the earlier calls of
 the rollout.
+
+Subagents. The default permission profile leaves OpenCode's `task` tool enabled, which starts a child session
+with its own context; with no session configuration it offers OpenCode's built-in `general` and `explore`.
+A session defines its own with `agent.<name>` entries whose `mode` is `subagent` (`description`, what the
+primary agent is told about it; `prompt`; `steps`; `permission` and `tools`, its tool access) and hides a
+built-in one with `agent.general: {disable: true}` or `agent.explore: {disable: true}`; any other agent
+field (a model, sampling, OpenCode's own agent names) is refused, so a child runs on the session's model
+with the request's sampling. A child's model calls are captured with the rollout's and the observations
+report its session as a child invocation of the primary agent's (`parent_invocation_id`,
+`spawned_by_tool_call_id`); which of them train, and how a child's context is reconstructed, is the
+training framework's (Gym's local lineage treats a child's first call as a new root). The Agentic-VBench
+training entry's `subagents.yaml` is an example.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
