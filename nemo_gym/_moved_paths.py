@@ -801,6 +801,10 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         # Renamed when Environment Servers started to build MCP results with it.
         "_to_result": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure:to_call_tool_result", since="0.8.0"),
     },
+    "nemo_gym.harness_capabilities.behavior": {
+        # No longer imported once the terminal-error check compared whole outcomes from the outcome ladder.
+        **_names("nemo_gym.core.failure_kinds", "0.8.0", "MODEL_REQUEST_ERROR"),
+    },
 }
 
 # Names renamed with the token capture package (token_id_capture -> token_capture), at each old module path that

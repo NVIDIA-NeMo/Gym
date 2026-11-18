@@ -477,3 +477,10 @@ def model_checks(
         )
     )
     return result.dump()
+
+
+# Serves the names this module had before it moved to the outcome ladder, such as MODEL_REQUEST_ERROR, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)

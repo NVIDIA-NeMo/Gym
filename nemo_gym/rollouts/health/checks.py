@@ -597,7 +597,9 @@ def _token_count(call: dict[str, Any], key: str) -> int:
 
 
 def _transcript_tokens(record: dict[str, Any]) -> tuple[int, int, bool]:
-    response = record.get("response")
+    # A failure row keeps the agent's failed response as its partial response (rollout_collection), so a rejected
+    # first request still reports its known zero usage.
+    response = record["response"] if "response" in record else record.get("_ng_failure_partial_response")
     usage = response.get("usage") if isinstance(response, dict) else None
     prompt, completion = _usage_tokens(usage)
     return prompt or 0, completion or 0, prompt is not None and completion is not None
