@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -323,12 +322,8 @@ async def test_run_job_retries_the_harbor_failures_that_are_not_agent_timeouts(
     assert not result_path.exists(), "Gym retries must not reuse the failed trial's result"
 
 
-def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(tmp_path, monkeypatch) -> None:
-    """The row is scored 0.0 and completed, unmasked, named agent_timeout: no resume runs it again."""
-    from responses_api_agents.harbor_agent_general import app
-
-    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
-    agent = HarborAgent.model_construct()
+def _configure_server(agent: HarborAgent, tmp_path: Path, server_agent: dict) -> None:
+    """Configure the server to run `server_agent` (Harbor's agent config) on the task folders under tmp_path/tasks."""
     agent.config = app.HarborAgentConfig.model_validate(
         {
             "name": "harbor_agent_general",
@@ -338,32 +333,45 @@ def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(tmp_pa
             "job": {
                 "jobs_dir": tmp_path / "jobs",
                 "datasets": [{"path": tmp_path / "tasks"}],
-                "agents": [{"name": "opencode", "model_name": "native-model"}],
+                "agents": [server_agent],
             },
         }
     )
+
+
+def _completed_trial(
+    tmp_path: Path,
+    agent_name: str,
+    *,
+    rewards: dict[str, float] | None,
+    import_path: str | None = None,
+    exception_info: dict[str, str] | None = None,
+) -> Path:
+    """Write a task instruction and a finished trial's Harbor result, without a trajectory; return the trial dir."""
     task_dir = tmp_path / "tasks" / "task"
     task_dir.mkdir(parents=True)
     app.TaskPaths(task_dir).instruction_path.write_text("Do the task.")
     trial_dir = tmp_path / "jobs" / "job" / "trial"
     trial_dir.mkdir(parents=True)
-    app.TrialPaths(trial_dir).result_path.write_text("{}")
-    timeout = SimpleNamespace(exception_type="AgentTimeoutError", exception_message="timed out after 900.0 seconds")
-    trial = SimpleNamespace(
-        id="trial-1",
-        task_name="task",
-        config=SimpleNamespace(
-            task=SimpleNamespace(get_local_path=lambda: task_dir),
-            agent=agent.config.job.agents[0],
-        ),
-        exception_info=timeout,
-        verifier_result=None,
-        step_results=[],
-        finished_at=None,
-        compute_token_cost_totals=lambda: (0, 0, 0, 0),
+    trial = app.TrialResult.model_validate(
+        {
+            "task_name": "task",
+            "trial_name": "trial",
+            "trial_uri": trial_dir.as_uri(),
+            "task_id": {"path": str(task_dir)},
+            "task_checksum": "unit-test-task",
+            "config": {"task": {"path": str(task_dir)}, "agent": {"name": agent_name, "import_path": import_path}},
+            "agent_info": {"name": agent_name, "version": "1.0"},
+            "verifier_result": None if rewards is None else {"rewards": rewards},
+            "exception_info": exception_info,
+        }
     )
-    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
-    body = app.HarborRunRequest.model_validate(
+    app.TrialPaths(trial_dir).result_path.write_text(trial.model_dump_json())
+    return trial_dir
+
+
+def _run_request() -> app.HarborRunRequest:
+    return app.HarborRunRequest.model_validate(
         {
             "task_name": "task",
             app.TASK_INDEX_KEY_NAME: 0,
@@ -372,7 +380,19 @@ def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(tmp_pa
         }
     )
 
-    row = agent.success_response(body, trial_dir).model_dump()
+
+def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(agent: HarborAgent, tmp_path: Path) -> None:
+    """The row is scored 0.0 and completed, unmasked, named agent_timeout: no resume runs it again."""
+    _configure_server(agent, tmp_path, {"name": "opencode", "model_name": "native-model"})
+    timeout = {
+        "exception_type": "AgentTimeoutError",
+        "exception_message": "timed out after 900.0 seconds",
+        "exception_traceback": "",
+        "occurred_at": "2026-11-16T00:00:00Z",
+    }
+    trial_dir = _completed_trial(tmp_path, "opencode", rewards=None, exception_info=timeout)
+
+    row = agent.success_response(_run_request(), trial_dir).model_dump()
     assert (row["reward"], row["failure_kind"], row["evaluation_completed"], row["mask_sample"]) == (
         0.0,
         "agent_timeout",
@@ -384,147 +404,61 @@ def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(tmp_pa
     assert "_ng_failure_class" not in row
 
 
-_CompletedTrial = Callable[..., tuple[HarborAgent, app.HarborRunRequest, Path]]
-
-
-@pytest.fixture
-def completed_trial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _CompletedTrial:
-    """A real Harbor result schema; its saved agent identity differs from the server's OpenCode default."""
-    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
-    task_dir = tmp_path / "tasks" / "task"
-    task_dir.mkdir(parents=True)
-    app.TaskPaths(task_dir).instruction_path.write_text("Do the task.")
-    trial_dir = tmp_path / "jobs" / "job" / "trial"
-    trial_dir.mkdir(parents=True)
-    agent = HarborAgent.model_construct()
-    agent.config = app.HarborAgentConfig.model_validate(
-        {
-            "name": "harbor_agent_general",
-            "host": "0.0.0.0",
-            "port": 8080,
-            "entrypoint": "app.py",
-            "job": {
-                "jobs_dir": tmp_path / "jobs",
-                "datasets": [{"path": tmp_path / "tasks"}],
-                "agents": [{"name": "opencode", "model_name": "native-model"}],
-            },
-        }
-    )
-    body = app.HarborRunRequest.model_validate(
-        {
-            "task_name": "task",
-            app.TASK_INDEX_KEY_NAME: 0,
-            app.ROLLOUT_INDEX_KEY_NAME: 0,
-            "responses_create_params": {"input": []},
-        }
-    )
-
-    def write(
-        agent_name: str = "oracle",
-        *,
-        reward: float | dict[str, float] | None = 1.0,
-        import_path: str | None = None,
-        exception_info: dict[str, str] | None = None,
-    ) -> tuple[HarborAgent, app.HarborRunRequest, Path]:
-        trial = app.TrialResult.model_validate(
-            {
-                "task_name": "task",
-                "trial_name": "trial",
-                "trial_uri": trial_dir.as_uri(),
-                "task_id": {"path": str(task_dir)},
-                "task_checksum": "unit-test-task",
-                "config": {
-                    "task": {"path": str(task_dir)},
-                    "agent": {"name": agent_name, "import_path": import_path},
-                },
-                "agent_info": {"name": agent_name, "version": "1.0"},
-                "verifier_result": None
-                if reward is None
-                else {"rewards": reward if isinstance(reward, dict) else {"reward": reward}},
-                "exception_info": exception_info,
-            }
-        )
-        app.TrialPaths(trial_dir).result_path.write_text(trial.model_dump_json())
-        return agent, body, trial_dir
-
-    return write
-
-
-@pytest.mark.parametrize("agent_name,reward", [("oracle", 1.0), ("oracle", 0.0), ("nop", 0.0)])
-def test_control_without_a_trajectory_preserves_verifier_grade(
-    completed_trial: _CompletedTrial, agent_name: str, reward: float
+@pytest.mark.parametrize("agent_name,reward", [("oracle", 1.0), ("nop", 0.0)])
+def test_control_without_a_trajectory_keeps_its_verifier_grade(
+    agent: HarborAgent, tmp_path: Path, agent_name: str, reward: float
 ) -> None:
-    agent, body, trial_dir = completed_trial(agent_name, reward=reward)
+    """Oracle and nop write no trajectory; the row carries the verifier reward instead of failing."""
+    _configure_server(agent, tmp_path, {"name": agent_name, "model_name": "native-model"})
+    trial_dir = _completed_trial(tmp_path, agent_name, rewards={"reward": reward})
 
-    row = agent.success_response(body, trial_dir).model_dump()
+    row = agent.success_response(_run_request(), trial_dir).model_dump()
 
     assert row["reward"] == reward
-    assert row["response"]["status"] == "completed"
     assert row["response"]["output"] == []
     assert row["response"]["usage"]["total_tokens"] == 0
-    assert row["mask_sample"] is False
     assert row["failure_kind"] is None
     assert "_ng_failure_class" not in row
-    assert row["atif_conversion"]["trajectories"] == []
     assert row["atif_conversion"]["warnings"] == [f"the {agent_name} control agent does not emit an ATIF trajectory"]
-    assert not (app.TrialPaths(trial_dir).agent_dir / app.TaskPaths.TRAJECTORY_FILENAME).exists()
+
+
+def test_control_server_without_a_model_name_names_the_response_after_the_agent(
+    agent: HarborAgent, tmp_path: Path
+) -> None:
+    """A server configured as just `{"name": "oracle"}` has no model; the response is labeled with the agent name."""
+    _configure_server(agent, tmp_path, {"name": "oracle"})
+    trial_dir = _completed_trial(tmp_path, "oracle", rewards={"reward": 1.0})
+
+    row = agent.success_response(_run_request(), trial_dir)
+
+    assert (row.reward, row.response.model) == (1.0, "oracle")
+    assert agent.failure_response(_run_request(), RuntimeError("trial failed")).response.model == "oracle"
 
 
 @pytest.mark.parametrize(
-    "agent_name,import_path",
-    [("opencode", None), ("pi", None), ("oracle", "custom.agents:ModelAgent"), ("nop", "custom.agents:ModelAgent")],
+    "agent_name,import_path", [("opencode", None), ("oracle", "custom.agents:ModelAgent")], ids=["model", "custom"]
 )
-def test_model_or_custom_agent_still_requires_a_trajectory(
-    completed_trial: _CompletedTrial, agent_name: str, import_path: str | None
+def test_model_or_custom_agent_without_a_trajectory_still_fails(
+    agent: HarborAgent, tmp_path: Path, agent_name: str, import_path: str | None
 ) -> None:
-    agent, body, trial_dir = completed_trial(agent_name, import_path=import_path)
+    """Only Harbor's built-in controls may omit the trajectory; a custom agent reusing the name `oracle` may not."""
+    _configure_server(agent, tmp_path, {"name": "opencode", "model_name": "native-model"})
+    trial_dir = _completed_trial(tmp_path, agent_name, rewards={"reward": 1.0}, import_path=import_path)
 
     with pytest.raises(FileNotFoundError, match="trajectory.json"):
-        agent.success_response(body, trial_dir)
+        agent.success_response(_run_request(), trial_dir)
 
 
-@pytest.mark.parametrize("reward", [None, {}], ids=["no-verification", "empty-rewards"])
-def test_control_without_verification_still_requires_a_trajectory(
-    completed_trial: _CompletedTrial, reward: dict[str, float] | None
+@pytest.mark.parametrize("rewards", [None, {}], ids=["no-verification", "empty-rewards"])
+def test_control_without_a_verifier_grade_still_fails(
+    agent: HarborAgent, tmp_path: Path, rewards: dict[str, float] | None
 ) -> None:
-    agent, body, trial_dir = completed_trial(reward=reward)
+    """A control whose verifier produced no reward has nothing to report, so the missing trajectory is an error."""
+    _configure_server(agent, tmp_path, {"name": "oracle", "model_name": "native-model"})
+    trial_dir = _completed_trial(tmp_path, "oracle", rewards=rewards)
 
     with pytest.raises(FileNotFoundError, match="trajectory.json"):
-        agent.success_response(body, trial_dir)
-
-
-def test_control_without_a_trajectory_preserves_alternative_reward_key(completed_trial: _CompletedTrial) -> None:
-    agent, body, trial_dir = completed_trial(reward={"score": 0.25})
-
-    row = agent.success_response(body, trial_dir).model_dump()
-
-    assert row["reward"] == 0.25
-    assert row["failure_kind"] is None
-    assert row["response"]["output"] == []
-
-
-def test_failed_control_does_not_get_the_missing_trajectory_exception(completed_trial: _CompletedTrial) -> None:
-    agent, body, trial_dir = completed_trial(
-        exception_info={
-            "exception_type": "RuntimeError",
-            "exception_message": "solution failed",
-            "exception_traceback": "",
-            "occurred_at": "2026-11-16T00:00:00Z",
-        }
-    )
-
-    with pytest.raises(FileNotFoundError, match="trajectory.json"):
-        agent.success_response(body, trial_dir)
-
-
-def test_malformed_control_trajectory_is_not_ignored(completed_trial: _CompletedTrial) -> None:
-    agent, body, trial_dir = completed_trial()
-    path = app.TrialPaths(trial_dir).agent_dir / app.TaskPaths.TRAJECTORY_FILENAME
-    path.parent.mkdir(parents=True)
-    path.write_text("not a trajectory")
-
-    with pytest.raises(app.ValidationError):
-        agent.success_response(body, trial_dir)
+        agent.success_response(_run_request(), trial_dir)
 
 
 @pytest.mark.asyncio

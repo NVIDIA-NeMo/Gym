@@ -26,6 +26,7 @@ from uuid import uuid4
 
 import ray
 from harbor.job import Job
+from harbor.models.agent.name import AgentName
 from harbor.models.job.config import JobConfig
 from harbor.models.task.paths import TaskPaths
 from harbor.models.trajectories import ContentPart, Step, Trajectory
@@ -605,13 +606,12 @@ class HarborAgent(SimpleResponsesAPIAgent):
             for result in [trial, *(trial.step_results or [])]
         )
         agent = trial.config.agent
-        # Built-in controls produce a verifier grade without an LLM trajectory. Keep missing ATIF an error
-        # for custom agents, unverified controls, and failed trials; their result must not become a valid grade.
+        # Built-in controls produce a verifier grade without an LLM trajectory. Keep missing ATIF an error for
+        # custom agents and unverified controls; run_job has already raised for every failed, non-timeout trial.
         control_without_trajectory = (
-            agent.name in {"oracle", "nop"}
+            agent.name in {AgentName.ORACLE.value, AgentName.NOP.value}
             and agent.import_path is None
             and bool(step_rewards[-1])
-            and all(result.exception_info is None for result in [trial, *(trial.step_results or [])])
         )
         # An agent ended at its deadline may not have written its trajectory; its outcome is still the graded zero.
         trajectories = [
@@ -622,9 +622,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
         conversion_warnings: list[str] = []
         if len(trajectories) < len(path_entries):
             conversion_warnings.append(
-                f"the {agent.name} control agent does not emit an ATIF trajectory"
-                if control_without_trajectory
-                else "the agent timed out before it wrote its trajectory"
+                "the agent timed out before it wrote its trajectory"
+                if timed_out
+                else f"the {agent.name} control agent does not emit an ATIF trajectory"
             )
         output = [self.convert_atif_to_gym_responses(trajectory, conversion_warnings) for trajectory in trajectories]
         output = output or [[]]
@@ -666,7 +666,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 "response": NeMoGymResponse(
                     id=f"harbor-{trial.id}",
                     created_at=(trial.finished_at.timestamp() if trial.finished_at is not None else time.time()),
-                    model=self.config.job.agents[0].model_name,
+                    model=self.config.job.agents[0].model_name or self.config.job.agents[0].name,
                     object="response",
                     output=output,
                     parallel_tool_calls=False,
@@ -716,7 +716,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
         response = NeMoGymResponse(
             id=f"harbor-error-t{body.task_index}-r{body.rollout_index}",
             created_at=time.time(),
-            model=self.config.job.agents[0].model_name,
+            model=self.config.job.agents[0].model_name or self.config.job.agents[0].name,
             object="response",
             output=[],
             parallel_tool_calls=False,
