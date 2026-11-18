@@ -554,26 +554,37 @@ def _model_endpoint_error(events: list[tuple[float, dict[str, Any]]]) -> Optiona
     still retried or waited for the network), the run's last event if it is an error event. A
     retry followed by model output was recovered, so a later unrelated failure stays gradable.
     """
-    tail = [event for _, event in events]
-    last_output = max((index for index, event in enumerate(tail) if _is_model_output(event)), default=-1)
+    found = _terminal_endpoint_error(events)
+    return found[0] if found is not None else None
+
+
+def _terminal_endpoint_error(events: list[tuple[float, dict[str, Any]]]) -> tuple[str, float] | None:
+    """``_model_endpoint_error``'s marker with the time the runner saw its event."""
+    tail = events
+    last_output = max((index for index, (_, event) in enumerate(tail) if _is_model_output(event)), default=-1)
     tail = tail[last_output + 1 :]
-    failed_at = max((index for index, event in enumerate(tail) if event.get("type") == "turn.failed"), default=None)
+    failed_at = max(
+        (index for index, (_, event) in enumerate(tail) if event.get("type") == "turn.failed"), default=None
+    )
     if failed_at is None:
         terminal = tail[-1:]
     else:
-        before = [event for event in tail[:failed_at] if _is_error_event(event)]
+        before = [item for item in tail[:failed_at] if _is_error_event(item[1])]
         terminal = [*before[-1:], tail[failed_at]]
-    for event in terminal:
+    for seen, event in terminal:
         if _is_error_event(event):
             text = json.dumps(event).lower()
             for marker in _MODEL_ENDPOINT_ERRORS:
                 if marker in text:
-                    return marker
+                    return marker, seen
     return None
 
 
 def _deadline_model_fault(
-    attempts: list[dict[str, Any]] | None, *, started: int | None, stream_failure: str | None = None
+    attempts: list[dict[str, Any]] | None,
+    *,
+    starts: list[float | None] | None,
+    stream_failure: tuple[str, float] | None = None,
 ) -> NgFailureEvent | None:
     """The model endpoint fault a timed-out run's last forwarded model attempt recorded, or ``None``.
 
@@ -582,21 +593,28 @@ def _deadline_model_fault(
     short, or answered a status Gym retries (408, 425, 429 or a 5xx), the deadline was spent on an unavailable
     endpoint rather than by the model, so the ladder retries the run. An attempt still in flight at the deadline (a
     start without a result, such as a retry after a 429) and an earlier failure that a later attempt recovered from
-    leave the deadline to the model. ``started`` is the number of recorded starts.
+    leave the deadline to the model. ``starts`` holds the recorded start times.
 
-    A reply Codex hung up on is recorded as a cancelled 200. It is the endpoint's fault only with ``stream_failure``,
-    the endpoint failure Codex reported after its last model output (a stream that went idle or broke): Codex also
-    hangs up when the deadline kills it mid-reply.
+    A reply Codex hung up on is recorded as a cancelled 200. It is the endpoint's fault only when ``stream_failure``,
+    the endpoint failure Codex reported after its last model output and the time it was seen, came after that
+    attempt started: Codex also hangs up when the deadline kills it mid-reply, and an earlier notice is about an
+    earlier attempt.
     """
-    if not attempts or (started is not None and started > len(attempts)):
+    if not attempts or (starts is not None and len(starts) > len(attempts)):
         return None
     last = attempts[-1]
-    if last.get("cancelled") and stream_failure is not None:
+    last_start = starts[-1] if starts else None
+    if (
+        last.get("cancelled")
+        and stream_failure is not None
+        and isinstance(last_start, (int, float))
+        and stream_failure[1] >= last_start
+    ):
         # Codex gave up on a reply that stalled or broke and had not started its retry when the deadline came.
         return NgFailureEvent(
             boundary=FailureBoundary.MODEL,
             failure_kind=MODEL_TRANSPORT_ERROR,
-            failure_reason=f"Codex's last model stream before the deadline failed: {stream_failure}",
+            failure_reason=f"Codex's last model stream before the deadline failed: {stream_failure[0]}",
         )
     status = last.get("status")
     if status is None or "transport_error" in last:
@@ -1294,7 +1312,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             error=self.classify_outcome(terminal) if reported_model_error else None,
             infra_fault=(
                 _deadline_model_fault(
-                    attempts, started=state.model_attempts_started, stream_failure=_model_endpoint_error(events)
+                    attempts, starts=state.model_attempt_starts, stream_failure=_terminal_endpoint_error(events)
                 )
                 if timed_out
                 else None

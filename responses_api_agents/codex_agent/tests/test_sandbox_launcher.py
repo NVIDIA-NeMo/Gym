@@ -50,9 +50,11 @@ def rate_limit_proxy(base_url, attempts_path, *, timeout):
 
 
 def attempt_results(path: Path) -> list[dict]:
-    """The forwarder's finished attempts, checking that each follows the record of its own start."""
+    """The forwarder's finished attempts, checking that each follows the timed record of its own start."""
     records = [json.loads(line) for line in path.read_text().splitlines()]
-    assert records[0::2] == [{"started": True}] * len(records[1::2]) and len(records) % 2 == 0, records
+    starts = records[0::2]
+    assert len(records) % 2 == 0 and all(start.keys() == {"started", "at"} for start in starts), records
+    assert all(type(start["at"]) is float and abs(start["at"] - time.time()) < 60 for start in starts), records
     return records[1::2]
 
 
@@ -268,11 +270,13 @@ def test_a_retry_in_flight_is_a_start_without_a_result(tmp_path):
         client.start()
         try:
             assert second_request.wait(5)
-            assert [json.loads(line) for line in attempts_path.read_text().splitlines()] == [
+            records = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+            assert [{key: value for key, value in record.items() if key != "at"} for record in records] == [
                 {"started": True},
                 {"status": 429},
                 {"started": True},
             ]
+            assert records[0]["at"] <= records[2]["at"]
         finally:
             release.set()
             client.join(10)

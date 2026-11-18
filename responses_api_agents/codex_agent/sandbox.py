@@ -72,8 +72,9 @@ class CodexSandboxSession(AgentSessionState):
     native_transcript: str | None = None
     model_attempts: list[dict[str, JsonValue]] | None = None
     """The forwarder's finished upstream attempts, in order (``model_attempts.jsonl`` without its start records)."""
-    model_attempts_started: int | None = None
-    """How many upstream attempts the forwarder started; more than ``model_attempts`` means one was still in flight."""
+    model_attempt_starts: list[float | None] | None = None
+    """When the forwarder started each upstream attempt (sandbox wall clock, as the CLI events are stamped); more
+    starts than ``model_attempts`` means one was still in flight."""
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     # The time SandboxSession allows artifact capture (its close timeout), so the optional copy fits inside it.
     capture_budget_s: float | None = None
@@ -237,7 +238,7 @@ class CodexSandboxSession(AgentSessionState):
             attempts = await self.read_text("model_attempts.jsonl")
             records = [json.loads(line) for line in attempts.splitlines()]
             self.model_attempts = [record for record in records if "started" not in record]
-            self.model_attempts_started = len(records) - len(self.model_attempts)
+            self.model_attempt_starts = [record.get("at") for record in records if "started" in record]
         except Exception:
             LOG.warning("Codex model attempt statuses unavailable", exc_info=True)
         # The optional copy goes last and ends before the capture budget does, so a slow copy cannot cost the events.

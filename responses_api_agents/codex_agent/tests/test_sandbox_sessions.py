@@ -3820,6 +3820,10 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
         await state.close(1)
 
 
+def _starts(count: int) -> list[float]:
+    return [float(index) for index in range(count)]
+
+
 @pytest.mark.parametrize(
     "attempts,started,expected",
     [
@@ -3844,27 +3848,37 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
     ],
 )
 def test_deadline_fault_is_the_last_forwarded_attempt_that_failed(attempts, started, expected):
-    fault = _deadline_model_fault(attempts, started=started)
+    fault = _deadline_model_fault(attempts, starts=None if started is None else _starts(started))
     assert (fault and (fault.failure_kind, fault.http_status)) == expected
     if fault is not None:
         assert fault.boundary == "model"
 
 
+IDLE_MARKER = "stream disconnected before completion: idle timeout waiting for sse"
+# The forwarder's record of a reply Codex hung up on before it arrived.
+CANCELLED = {"status": 200, "cancelled": True}
+
+
 @pytest.mark.parametrize(
-    "attempts,started,stream_failure,expected",
+    "attempts,starts,stream_failure,expected",
     [
         # Codex hung up on a stalled reply and reported it; the deadline came before its retry started.
-        ([{"status": 200, "cancelled": True}], 1, "idle timeout waiting for sse", ("model_transport_error", None)),
+        ([CANCELLED], [10.0], (IDLE_MARKER, 40.0), ("model_transport_error", None)),
         # The retry was in flight: the deadline is the model's.
-        ([{"status": 200, "cancelled": True}], 2, "idle timeout waiting for sse", None),
+        ([CANCELLED], [10.0, 41.0], (IDLE_MARKER, 40.0), None),
+        # The deadline killed Codex in a healthy retry; the notice is about the attempt before it.
+        ([{"status": 200}, CANCELLED], [10.0, 41.0], (IDLE_MARKER, 40.0), None),
+        ([{"status": 503}, CANCELLED], [10.0, 41.0], ("unexpected status 503", 40.0), None),
         # The deadline killed Codex mid-reply: a hang-up without a reported endpoint failure.
-        ([{"status": 200, "cancelled": True}], 1, None, None),
-        # A whole reply is no stream failure, whatever Codex reported earlier.
-        ([{"status": 200}], 1, "idle timeout waiting for sse", None),
+        ([CANCELLED], [10.0], None, None),
+        # A start without a time cannot be ordered against the notice.
+        ([CANCELLED], [None], (IDLE_MARKER, 40.0), None),
+        # A whole reply is no stream failure, whatever Codex reported.
+        ([{"status": 200}], [10.0], (IDLE_MARKER, 40.0), None),
     ],
 )
-def test_deadline_fault_of_a_reply_codex_hung_up_on(attempts, started, stream_failure, expected):
-    fault = _deadline_model_fault(attempts, started=started, stream_failure=stream_failure)
+def test_deadline_fault_of_a_reply_codex_hung_up_on(attempts, starts, stream_failure, expected):
+    fault = _deadline_model_fault(attempts, starts=starts, stream_failure=stream_failure)
     assert (fault and (fault.failure_kind, fault.http_status)) == expected
     if fault is not None:
         assert fault.boundary == "model"
@@ -3873,7 +3887,7 @@ def test_deadline_fault_of_a_reply_codex_hung_up_on(attempts, started, stream_fa
 TIMED_OUT = {"timed_out": True, "return_code": 128 + signal.SIGKILL}
 STARTED = {"type": "turn.started"}
 # The forwarder's record of an upstream attempt it started; its result follows in a separate record.
-STARTED_ATTEMPT = {"started": True}
+STARTED_ATTEMPT = {"started": True, "at": 0.5}
 
 
 # One Codex run event per row, through an agent session: the CLI events, the receipt and the forwarded model attempts
@@ -3919,14 +3933,24 @@ STARTED_ATTEMPT = {"started": True}
             OutcomeAction.VERIFY,
             id="deadline_after_reply_retry_in_flight",
         ),
+        # Events are seen at their index (0.0, 1.0, ...); the second attempt started at 2.5.
         pytest.param(
             [STARTED, MODEL_OUTPUT, retry_notice(IDLE), retry_notice(IDLE, 2)],
             TIMED_OUT,
-            [STARTED_ATTEMPT, {"status": 200}, STARTED_ATTEMPT, {"status": 200, "cancelled": True}],
+            [STARTED_ATTEMPT, {"status": 200}, {"started": True, "at": 2.5}, CANCELLED],
             "failed",
             {"failure_kind": "model_transport_error"},
             OutcomeAction.RETRY,
             id="deadline_after_stalled_stream",
+        ),
+        pytest.param(
+            [STARTED, MODEL_OUTPUT, retry_notice(IDLE)],
+            TIMED_OUT,
+            [STARTED_ATTEMPT, {"status": 200}, {"started": True, "at": 2.5}, CANCELLED],
+            "incomplete",
+            None,
+            OutcomeAction.VERIFY,
+            id="deadline_killed_a_healthy_retry",
         ),
         pytest.param(
             [STARTED],
@@ -3942,7 +3966,7 @@ STARTED_ATTEMPT = {"started": True}
         pytest.param(
             [STARTED, *codex_error(BAD_REQUEST)],
             {"return_code": 1},
-            [STARTED_ATTEMPT, {"status": 200, "cancelled": True}, STARTED_ATTEMPT, {"status": 400}],
+            [STARTED_ATTEMPT, CANCELLED, STARTED_ATTEMPT, {"status": 400}],
             "failed",
             {"failure_kind": "model_request_rejected"},
             OutcomeAction.FAIL,

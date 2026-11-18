@@ -182,8 +182,8 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
     headers["x-session-id"] = invocationId;
     for (let attempt = 0; ; attempt++) {
         // A start without a later result is an attempt still in flight, which a deadline must not blame on an
-        // earlier attempt's failure.
-        record({ started: true });
+        // earlier attempt's failure. `at` is the sandbox's wall clock, which also stamps the CLI's events.
+        record({ started: true, at: Date.now() / 1000 });
         let upstream;
         try {
             upstream = await post(url, headers, body, timeoutMs);
