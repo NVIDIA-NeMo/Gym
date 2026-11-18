@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from responses_api_agents.ngc_recorded_context.runtime_contract import RuntimeContract
+from resources_servers.partner_if.recorded_context.runtime_contract import RuntimeContract
 
 
 REPLAY_FILES = frozenset(

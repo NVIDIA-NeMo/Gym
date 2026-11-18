@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Route complete mixed-harness benchmark episodes to their existing environments."""
 
-import copy
+import hashlib
 import json
+import math
 from collections.abc import Iterable, Mapping
 
 from fastapi import Body, FastAPI, HTTPException, Request, Response
@@ -11,35 +12,10 @@ from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import (
-    ATTEMPT_INDEX_KEY_NAME,
-    TASK_SOURCE_KEY_NAME,
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    EnvironmentServerRef,
-    ResourcesServerRef,
-)
-from nemo_gym.core import (
-    ENVIRONMENT_SERVER_FAILED,
-    EpisodeId,
-    FailureReportRow,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    maybe_rollout_id_from_run_body,
-    model_sampling_from_run_body,
-    skips_token_capture,
-)
-from nemo_gym.data import materialize_task
-from nemo_gym.server_runtime import (
-    AgentContext,
-    SingleAgentTurnAgentContext,
-    SingleAgentTurnRequest,
-    SingleAgentTurnResponse,
-)
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, EnvironmentServerRef, ResourcesServerRef
+from nemo_gym.core import FailureReportRow, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
-    NG_TRAJECTORY_KEY,
-    NG_VERIFIER_INVOCATIONS_KEY,
     ToolCallObservation,
     TrajectoryRecord,
 )
@@ -98,37 +74,81 @@ def _with_reply_tool_observations(body: bytes) -> bytes:
     return json.dumps(result, ensure_ascii=False).encode()
 
 
-def _flat_episode_result(response: SingleAgentTurnResponse, *, agent_name: str) -> dict:
-    """Keep the collector's flat result and failure contract at the typed episode boundary."""
-    if response.failure is not None:
-        failed = response.failure
-        result = {
-            "_ng_failure_class": failed.failure_kind or ENVIRONMENT_SERVER_FAILED,
-            "_ng_failure_kind": failed.failure_kind,
-            "_ng_failure_terminal": failed.terminal,
-            "_ng_failure_message": failed.failure_reason,
-            "_ng_failure_stage": failed.stage,
-        }
-        for name, evidence in (
-            ("_ng_failure_partial_response", failed.partial_response),
-            (NG_AGENT_OBSERVATIONS_KEY, failed.agent_observations),
-            (NG_TRAJECTORY_KEY, failed.trajectory),
-        ):
-            if evidence is not None:
-                result[name] = evidence.model_dump(mode="json")
-        if failed.verifier_invocations is not None:
-            result[NG_VERIFIER_INVOCATIONS_KEY] = [
-                item.model_dump(mode="json") for item in failed.verifier_invocations
-            ]
-    else:
-        assert response.result is not None  # The episode response requires exactly one result or failure.
-        result = response.result.model_dump(mode="json")
-        if result.get(NG_AGENT_OBSERVATIONS_KEY) is None:
-            result.pop(NG_AGENT_OBSERVATIONS_KEY, None)
+def _recorded_context_run_binding(payload: dict) -> dict:
+    """Retain collector identity across stock BaseRunRequest's excluded transport fields."""
+    return {
+        key: payload[key]
+        for key in (
+            "_ng_rollout_id",
+            "_ng_attempt_index",
+            "task_index",
+            "rollout_index",
+            "_ng_task_index",
+            "_ng_rollout_index",
+        )
+        if key in payload
+    }
+
+
+def _recorded_context_result(body: bytes, payload: dict, *, agent_name: str) -> bytes:
+    """Lift the Resources-owned terminal report; stock Gymnasium omits terminal tool outputs.
+
+    The route is selected from host configuration. Identity and checksum checks catch stale or malformed
+    reports; the checksum is not an authentication mechanism. Policy output is never consulted for a grade.
+    """
+    from resources_servers.partner_if.app import VerifyResponse
+    from resources_servers.partner_if.recorded_context.assets import actor_identity
+    from resources_servers.partner_if.recorded_context_app import (
+        recorded_context_result_sha256,
+        recorded_context_task_data,
+    )
+
+    try:
+        envelope = json.loads(body)
+        result = envelope["info"]["partner_if_recorded_context_result"]
+        if not isinstance(result, dict):
+            raise ValueError("Missing Resources result")
+        if result["recorded_context_result_sha256"] != recorded_context_result_sha256(result):
+            raise ValueError("Resources result checksum differs")
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload["responses_create_params"])
+        expected_params = params.model_dump(mode="json", exclude_unset=True, exclude_none=True)
+        actual_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(result["responses_create_params"])
+        if actor_identity(
+            actual_params.model_dump(mode="json", exclude_unset=True, exclude_none=True)
+        ) != actor_identity(expected_params):
+            raise ValueError("Resources result actor differs")
+        task_data = recorded_context_task_data(payload)
+        task_hash = hashlib.sha256(
+            json.dumps(task_data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        ).hexdigest()
+        if result["recorded_context"]["task_data_sha256"] != task_hash:
+            raise ValueError("Resources result task differs")
+        if any(result.get(key) != value for key, value in task_data.items()):
+            raise ValueError("Resources result task data differs")
+        if not {"reward", "mask_sample", "evaluation_completed", "if_result", "response"} <= result.keys():
+            raise ValueError("Resources result omits grade fields")
+        grade = VerifyResponse.model_validate(result)
+        if not math.isfinite(grade.reward) or grade.reward not in (0.0, 1.0):
+            raise ValueError("Invalid Resources reward")
+        if type(result["mask_sample"]) is not bool or type(result["evaluation_completed"]) is not bool:
+            raise ValueError("Invalid Resources completion flags")
+        if result["evaluation_completed"] == result["mask_sample"]:
+            raise ValueError("Resources completion contradicts masking")
+        if envelope.get("reward") != result["reward"] or envelope.get("mask_sample", False) != result["mask_sample"]:
+            raise ValueError("Gymnasium result disagrees with Resources")
+        if not (envelope.get("terminated") or envelope.get("truncated")):
+            raise ValueError("Resources result is not terminal")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise HTTPException(502, "Invalid recorded-context Resources result") from None
+    # Keep transport failure evidence and cleanup warnings from the stock agent.
+    for name, value in envelope.items():
+        if name.startswith("_ng_failure") and name not in FailureReportRow.KEYS:
+            result[name] = value
+    FailureReportRow.merged_into(result, FailureReportRow.report(envelope))
+    if warning := envelope.get("info", {}).get("cleanup_warning"):
+        result["recorded_context"]["cleanup_warning"] = warning
     result["agent_ref"] = {"name": agent_name}
-    if response.failure_report is not None:
-        FailureReportRow.merged_into(result, response.failure_report)
-    return result
+    return json.dumps(result, ensure_ascii=False).encode()
 
 
 class PartnerIFDispatcherConfig(BaseResponsesAPIAgentConfig):
@@ -152,8 +172,7 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
 
     config: PartnerIFDispatcherConfig
     _execution_agents: dict[str, str] = PrivateAttr(default_factory=dict)
-    _episode_resources: dict[str, str] = PrivateAttr(default_factory=dict)
-    _replay_routes: set[str] = PrivateAttr(default_factory=set)
+    _recorded_context_routes: set[str] = PrivateAttr(default_factory=set)
 
     @model_validator(mode="after")
     def validate_destinations(self) -> "PartnerIFDispatcher":
@@ -169,44 +188,20 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
             if agent_name == self.config.name:
                 raise ValueError(f"Dispatcher cannot route back to itself through {route.name}")
             self._execution_agents[route.name] = agent_name
-            if implementation == "single_agent_turn":
-                resources_name = environment.get("resources_server", {}).get("name")
-                if not isinstance(resources_name, str) or not resources_name:
-                    raise ValueError(f"Single-agent environment must bind one resources server: {route.name}")
-                self._episode_resources[route.name] = resources_name
-                agent = self.server_client.global_config_dict.get(agent_name, {})
-                implementations = agent.get("responses_api_agents", {}) if isinstance(agent, Mapping) else {}
-                replay = implementations.get("ngc_recorded_context", {})
-                if isinstance(replay, Mapping) and replay.get("entrypoint") == "native_agent.py":
-                    self._replay_routes.add(route.name)
+            agent = self.server_client.global_config_dict.get(agent_name, {})
+            implementations = agent.get("responses_api_agents", {}) if isinstance(agent, Mapping) else {}
+            gymnasium = implementations.get("gymnasium_agent", {})
+            if implementation == "legacy_agent" and isinstance(gymnasium, Mapping):
+                resources_name = gymnasium.get("resources_server", {}).get("name")
+                resources = self.server_client.global_config_dict.get(resources_name, {}) if resources_name else {}
+                block = (
+                    resources.get("resources_servers", {}).get("partner_if", {})
+                    if isinstance(resources, Mapping)
+                    else {}
+                )
+                if block.get("entrypoint") == "recorded_context_app.py":
+                    self._recorded_context_routes.add(route.name)
         return self
-
-    def _episode_request_from_row(self, row: dict, *, route_name: str) -> SingleAgentTurnRequest:
-        """Materialize the host-routed row without changing its actor input or capture identity."""
-        attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
-        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
-            raise ValueError("Episode attempt must be a non-negative integer")
-        capture_key = maybe_rollout_id_from_run_body(row)
-        if capture_key is None:
-            raise ValueError("An episode requires a rollout ID or task and rollout indices")
-        episode = SingleAgentTurnRequest(
-            episode_id=EpisodeId.from_capture_key(capture_key),
-            task=materialize_task(row, taskset=row.get(TASK_SOURCE_KEY_NAME, self._episode_resources[route_name])),
-            model_sampling=model_sampling_from_run_body(row),
-            skip_token_capture=skips_token_capture(row),
-        )
-        if route_name in self._replay_routes:
-            task_input = episode.task.task_input
-            previous = task_input.agent_seed_context
-            values = dict(previous.values) if previous is not None else {}
-            replay_context = {"task_data": copy.deepcopy(task_input.task_data)}
-            if "partner_if_replay" in values and values["partner_if_replay"] != replay_context:
-                raise ValueError("Replay agent context conflicts with the host-selected task data")
-            values["partner_if_replay"] = replay_context
-            task_input.agent_context = SingleAgentTurnAgentContext(
-                agent=AgentContext(values=values, artifacts=dict(previous.artifacts) if previous is not None else {})
-            )
-        return episode
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -228,7 +223,7 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
         return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def run(self, request: Request) -> Response:
-        """Preserve native request/receipt fields and downstream HTTP failures."""
+        """Preserve row fields and downstream HTTP failures."""
         raw = await request.body()
         try:
             payload = json.loads(raw)
@@ -250,16 +245,11 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
             if payload["task_source"] != self.config.name:
                 raise HTTPException(422, "Unexpected collection task_source")
             payload["task_source"] = self._execution_agents[route.name]
-        episode = None
-        if route.name in self._episode_resources:
-            try:
-                episode = self._episode_request_from_row(payload, route_name=route.name)
-            except (ValueError, TypeError) as error:
-                raise HTTPException(422, str(error)) from None
-            # Preserve omitted actor defaults through nested model serialization.
-            raw = episode.model_dump_json(exclude_unset=True).encode()
-        else:
-            raw = json.dumps(payload, ensure_ascii=False).encode()
+        if route.name in self._recorded_context_routes:
+            # The stock agent excludes some collector fields when serializing /reset and /step.
+            # Keep a host-owned reporting binding in ordinary extras, outside the actor parameters.
+            payload["recorded_context_run_binding"] = _recorded_context_run_binding(payload)
+        raw = json.dumps(payload, ensure_ascii=False).encode()
         upstream = await self.server_client.post(
             server_name=route.name,
             url_path="/run",
@@ -269,16 +259,8 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
         )
         body = await upstream.read()
         if upstream.status == 200:
-            if episode is not None:
-                try:
-                    reply = SingleAgentTurnResponse.model_validate_json(body)
-                    if reply.episode_id != episode.episode_id or reply.task_id != episode.task.task_id:
-                        raise ValueError("Episode reply identity does not match its request")
-                except ValueError:
-                    raise HTTPException(502, "Invalid single-agent episode response") from None
-                body = json.dumps(
-                    _flat_episode_result(reply, agent_name=self._execution_agents[route.name]), ensure_ascii=False
-                ).encode()
+            if route.name in self._recorded_context_routes:
+                body = _recorded_context_result(body, payload, agent_name=self._execution_agents[route.name])
             else:
                 body = _with_reply_tool_observations(body)
         response = Response(content=body, status_code=upstream.status)

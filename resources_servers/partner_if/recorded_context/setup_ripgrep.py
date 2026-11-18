@@ -17,12 +17,14 @@ def ensure_ripgrep() -> str:
         if not binary.is_file():
             raise RuntimeError(
                 "The replay requires ripgrep before inference. Install its locked component dependencies with "
-                "`uv sync --locked --project responses_api_agents/ngc_recorded_context`."
+                "`uv sync --locked --project resources_servers/partner_if`."
             )
         os.environ["PATH"] = str(binary.parent) + os.pathsep + os.environ.get("PATH", "")
         executable = str(binary)
     try:
-        result = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=10, check=True)
+        result = subprocess.run(
+            [executable, "--version"], capture_output=True, text=True, errors="replace", timeout=10, check=True
+        )
         if not result.stdout.startswith("ripgrep "):
             raise ValueError("Unexpected rg executable")
     except (OSError, subprocess.SubprocessError, ValueError) as error:

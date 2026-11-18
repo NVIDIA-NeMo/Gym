@@ -95,29 +95,46 @@ The Resources Server prepares the repository and destroys the sandbox after veri
 
 The implementation calls the public SDK; it does not vendor Prime's source. See
 [the pinned SDK](https://github.com/PrimeIntellect-ai/prime-agent/blob/be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387/packages/coding-agent/src/core/sdk.ts).
-Release archives are checked against SHA-256 on the Agent Server before upload.
-Installation requires Node 22, npm, Python 3 with venv support, bash, and network
-access to npm/PyPI. The paired task image is `node:22-bookworm`; its resource setup
-requires root for system dependencies. Python and npm transitive dependencies are
-not locked yet; this entrypoint remains experimental pending reproducible runtime
-packaging and the remaining harness merge checks.
+The child reuses `PrimeAgent`'s seeded-session validation, activation joining, stop and
+close lifecycle, with `PrimeSession.install` and `PrimeSession.stage`. Resources owns
+repository preparation and borrows the sandbox through `LentSandboxes`; the agent
+releases its connection, while Resources stops the sandbox after verification.
+The SDK-specific code is limited to its recording parent, execution hooks and capture.
+
+The shared installer supplies Node, Prime and the Python kernel. The SDK entrypoint is
+`RUNTIME/lib/node_modules/prime-agent/dist/index.js`, and its AI dependency is loaded
+from that package's nested `node_modules`. Before starting the child, a no-model
+capability probe imports the installed SDK and AI, checks their versions/public APIs,
+discovers the bundled `agent-message` Python skill, and imports its actual Python
+helper with the configured kernel. The verified skill's `src` directory is on
+`PYTHONPATH`; there is no separate unpinned skill build. Failed probes fail the
+activation before a policy request. Probe evidence is retained as `runtime-check.json`.
 
 Child configuration uses `model_server`, `model`, `prime_agent_version`,
 `context_window`, `max_output_tokens` (per model call), `max_turns` (complete turns,
-including the last turn's tools), `temperature`, `timeout`, `kernel_packages`,
+including the last turn's tools), `temperature`, `timeout`,
 `sandbox_install_timeout_seconds`, and `session_close_timeout_seconds`.
-`capture_directory`, when set, exports controller receipts into the Resources Server's
-sandbox for verification; `artifact_directory` retains raw SDK captures on the Agent Server.
-Runtime files live outside the task repository and are removed at close.
-The child inherits the task's HOME and does not rewrite repository files for setup.
+`capture_directory` exports controller receipts into the Resources-owned sandbox;
+`artifact_directory` retains captures on the Agent Server. Task Python packages
+belong to Resources' `task_python_packages` and `task_python_package_hashes`: exact
+versions and SHA-256 wheel hashes, installed with no dependency resolution into a
+task-only pure-Python directory. Its path is passed through ordinary SandboxAccess
+`PYTHONPATH`. The old child `kernel_packages` setting is rejected.
 
-Only one user text prompt, optionally preceded by a system prompt, is supported.
-Request-level sampling, tools, supplied multi-turn history, sandbox user/environment
-overrides, continuation, and required external tool grants are rejected. Optional
-external grants are unused. Rollout-stop requests remain unsupported (HTTP 501).
-Host CLI options (`command`, `extra_args`, `env`,
-`workspace_root`, `kernel_venv`, `models_config`, and `thinking`) belong to `app.py`;
-the child always uses its pinned SDK, isolated runtime, and thinking off.
+The child accepts the stock PrimeAgent text-input contract and timeout controls;
+request-level sampling, tools, supplied multi-turn history, sandbox user overrides,
+continuation and required external tool grants are rejected. Task environment values
+use the shared staging filters; only Gym's generated `nemo` provider is uploaded.
+The pinned SDK uses thinking off, and supervised rollout stops follow the shared
+Prime lifecycle. Session files stay outside the task repository and are removed at
+close; the runtime cache lives until the Resources-owned sandbox is destroyed.
+
+Reusing the installer does not establish full reproducibility. Its Node, Python and primary
+Prime release archives and the configured task wheels are checksum-pinned. The
+shared bootstrap's uv archive has a fixed version URL but no checksum, and remaining
+npm/Python transitives, the setup package manager and the mutable task-image tag
+are not a fully locked environment. This entrypoint remains experimental; capability/import checks
+prove the required interfaces work, not that every future installation is identical.
 
 All model requests use Gym's rollout-prefixed model URL. Until the parent receives
 a report, the runtime forces the registered IPython tool; after delivery it allows
@@ -132,7 +149,13 @@ receipts, effective prompts/tools, model requests, and supervisor cleanup receip
 are saved. Function-calling shell probes do not apply: the only exposed tool is
 IPython. Terminal-Bench support is not claimed. The first pairing is Partner IF's
 repository/report task. A second pairing and runtime reproducibility checks remain
-required before this experimental entrypoint is ready to merge.
+required before this experimental entrypoint is ready to merge. The stock CLI's
+SWE-bench smoke described above exercises a different execution path and does not
+satisfy the SDK child's second-pairing requirement. The capability probe checks the
+installed SDK and `agent-message` interfaces, while regression tests cover provider
+credential filtering and the shared session lifecycle. These checks do not establish
+a real-model second pairing or eliminate the dependency and image drift described
+above; retain this warning until those results are recorded for the tested revision.
 
 Session close exports the native SDK conversation as Gym observations. Kernel errors remain failed tool
 observations even when the SDK's outer isError flag is false; missing model response IDs remain evidence gaps.

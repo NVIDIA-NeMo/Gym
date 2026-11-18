@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The public replay suite uses only its committed synthetic fixtures."""
 
-from responses_api_agents.ngc_recorded_context.setup_ripgrep import ensure_ripgrep
+from resources_servers.partner_if.recorded_context.setup_ripgrep import ensure_ripgrep
 
 
 def pytest_configure() -> None:

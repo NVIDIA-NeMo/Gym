@@ -74,6 +74,10 @@ def single_advertised_tool_call(context: "CheckContext") -> tuple[bool, str]:
             raise EvidenceUnavailable("The advertised function has an invalid parameter schema") from error
         except Unresolvable as error:
             raise EvidenceUnavailable("The advertised parameter schema contains an unresolved reference") from error
+        except RecursionError as error:
+            raise EvidenceUnavailable(
+                "The advertised parameter schema exceeded the validator recursion limit"
+            ) from error
         # Dataset schemas may use local references, but must never fetch remote resources while grading.
         validators[name] = validator(schema, registry=Registry())
     calls = [event for event in evidence.trajectory if event.kind == "tool_call"]
@@ -88,6 +92,8 @@ def single_advertised_tool_call(context: "CheckContext") -> tuple[bool, str]:
         valid = validators[call.tool_name].is_valid(call.arguments)
     except Unresolvable as error:
         raise EvidenceUnavailable("The advertised parameter schema contains an unresolved reference") from error
+    except RecursionError as error:
+        raise EvidenceUnavailable("The advertised parameter schema exceeded the validator recursion limit") from error
     if not valid:
         return False, "Function arguments do not satisfy the advertised JSON parameter schema"
     return True, "Exactly one new call to an advertised function with schema-valid arguments"

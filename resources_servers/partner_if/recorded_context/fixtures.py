@@ -9,26 +9,35 @@ is explicit. The capture adapter independently checks probe identity and order.
 import json
 import re
 import shlex
+import subprocess
+from pathlib import PurePosixPath
 
-from responses_api_agents.ngc_recorded_context.readonly_tools import CoverageGap, ReadonlyTools
-from responses_api_agents.ngc_recorded_context.runtime_contract import RuntimeContract
-from responses_api_agents.ngc_recorded_context.workflow_tools import temporal_show
+from resources_servers.partner_if.recorded_context.limits import (
+    MAX_FILE_BYTES,
+    CoverageGap,
+    VirtualFiles,
+    bounded_output,
+    checked_path,
+)
+from resources_servers.partner_if.recorded_context.readonly_tools import ReadonlyTools
+from resources_servers.partner_if.recorded_context.runtime_contract import RuntimeContract
+from resources_servers.partner_if.recorded_context.workflow_tools import temporal_show
 
 
-def canonical_path(path, aliases=None):
+def canonical_path(path: str, aliases: dict[str, str] | None = None) -> str:
     for source, target in (aliases or {}).items():
         path = path.replace(source, target)
     return path
 
 
-def shell_tokens(command):
+def shell_tokens(command: str) -> list[str]:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
     lexer.whitespace_split = True
     lexer.commenters = "#"
     return list(lexer)
 
 
-def canonical_command(command, aliases=None):
+def canonical_command(command: str, aliases: dict[str, str] | None = None) -> str:
     try:
         return json.dumps(shell_tokens(canonical_path(command, aliases)))
     except ValueError:
@@ -36,11 +45,11 @@ def canonical_command(command, aliases=None):
 
 
 class Fixtures:
-    def __init__(self, bundle, *, session_id=None):
+    def __init__(self, bundle: dict, *, session_id: str | None = None) -> None:
         self.bundle = bundle
         self.runtime = RuntimeContract.model_validate(bundle["runtime"])
         self.answer_paths = set(self.runtime.answer_paths)
-        self.files = dict(bundle["files"])
+        self.files = VirtualFiles(bundle["files"])
         overlay = bundle.get("expanded_coverage")
         if overlay:
             if set(overlay["files"]) & set(self.files):
@@ -76,10 +85,10 @@ class Fixtures:
                 raise ValueError("Session metadata cannot replace recorded files")
             self.files.update(generated)
 
-    def path(self, value):
-        return canonical_path(value, self.runtime.path_aliases)
+    def path(self, value: str) -> str:
+        return checked_path(canonical_path(value, self.runtime.path_aliases))
 
-    def sync_transcript(self, messages):
+    def sync_transcript(self, messages: list[dict]) -> None:
         """Expose actual replay messages, never invented native harness history."""
         if self.transcript_path is not None:
             self.files[self.transcript_path] = "".join(
@@ -91,9 +100,9 @@ class Fixtures:
                 for i, message in enumerate(messages, 1)
             )
 
-    def bash(self, command):
+    def bash(self, command: str) -> tuple[str, str]:
         """Interpret supported commands as data; never execute shell or Python."""
-        tokens = shell_tokens(self.path(command))
+        tokens = shell_tokens(canonical_path(command, self.runtime.path_aliases))
         segments, current = [], []
         for token in tokens + [";"]:
             if token in {";", "&&", "||", "|"}:
@@ -107,7 +116,7 @@ class Fixtures:
                 return temporal_show(tokens, self.files, self.bundle["temporal_world"])
             except CoverageGap as error:
                 return f"Temporal fixture unavailable: {error}", "fixture_gap"
-        probes = []
+        probes, writes = [], {}
         for segment in segments:
             i = 1
             if not segment or segment[0] not in {"python", "python3", "/usr/bin/python3"}:
@@ -125,7 +134,10 @@ class Fixtures:
             label = "sibling" if uri == self.bundle["sibling"]["input_uri"] else "primary"
             value = self.bundle[label]
             if "--output" in options:
-                self.files[self.path(options[options.index("--output") + 1])] = json.dumps(value, indent=2)
+                output = self.path(options[options.index("--output") + 1])
+                if not PurePosixPath(output).is_relative_to(self.runtime.workspace_prefix):
+                    raise CoverageGap("Probe output escapes the modeled workspace")
+                writes[output] = json.dumps(value, indent=2)
             probes.append((value, label))
         if probes and self.bundle.get("shell_control_flow") and any(t in {"&&", "||"} for t in tokens):
             return "Conditional probe execution is outside readonly coverage.", "fixture_gap"
@@ -134,6 +146,7 @@ class Fixtures:
             allowed = {"python", "python3", "/usr/bin/python3", "echo", "cat", "true"}
             if any(s[0] not in allowed for s in segments):
                 return "Unsupported compound command; no command executed.", "fixture_gap"
+            self.files.update(writes)
             return "\n".join(json.dumps(v, indent=2) for v, _ in probes), "sibling_probe" if any(
                 k == "sibling" for _, k in probes
             ) else "primary_probe"
@@ -160,11 +173,25 @@ class Fixtures:
                 return f"Fixture unavailable: {error}; no model shell command executed.", "fixture_gap"
         return "Fixture unavailable for this Bash command; no command executed.", "fixture_gap"
 
-    def dispatch(self, call, schemas):
+    def dispatch(self, call: dict, schemas: dict, *, readonly: bool = False) -> tuple[str, str]:
+        """Validate a model call and translate unsupported behavior to an explicit coverage gap."""
+        try:
+            result, kind = self._dispatch(call, schemas, readonly=readonly)
+            return bounded_output(result), kind
+        except (CoverageGap, subprocess.SubprocessError) as error:
+            return f"Fixture unavailable: {str(error)[:512]}; no command executed.", "fixture_gap"
+        except (KeyError, TypeError, ValueError, IndexError):
+            return "Invalid tool call or unsupported tool arguments.", "invalid_call"
+
+    def _dispatch(self, call: dict, schemas: dict, *, readonly: bool) -> tuple[str, str]:
         import jsonschema
 
         try:
             fn = call["function"]
+            if call.get("type", "function") != "function":
+                raise ValueError("Unknown tool call type")
+            if not isinstance(fn["arguments"], str) or len(fn["arguments"].encode()) > MAX_FILE_BYTES + 65_536:
+                raise ValueError("Tool arguments exceed the recorded-context ceiling")
             args = json.loads(fn["arguments"])
             if fn["name"] not in schemas:
                 raise ValueError("Unknown tool")
@@ -172,6 +199,8 @@ class Fixtures:
         except (KeyError, TypeError, ValueError, jsonschema.ValidationError) as error:
             return f"Invalid tool call: {type(error).__name__}", "invalid_call"
         name = fn["name"]
+        if readonly and name not in {"Read", "Bash"}:
+            return "Worker tool is not available.", "fixture_gap"
         if name == "Skill":
             skill = args["skill"]
             path = self.bundle.get("skills", {}).get(skill)
@@ -189,6 +218,16 @@ class Fixtures:
             return result, "skill_loaded"
         if name == "Bash":
             try:
+                if readonly:
+                    if self.readonly is None:
+                        raise CoverageGap("Readonly worker coverage is unavailable")
+                    tokens = shell_tokens(canonical_path(args["command"], self.runtime.path_aliases))
+                    if any(
+                        token == ">" and tokens[max(0, index - 1) : index + 2] != ["2", ">", "/dev/null"]
+                        for index, token in enumerate(tokens)
+                    ):
+                        raise CoverageGap("Readonly workers cannot write virtual files")
+                    return self.readonly.run(tokens)
                 return self.bash(args["command"])
             except (ValueError, IndexError, TypeError):
                 return "Unsupported Bash syntax; no command executed.", "fixture_gap"
@@ -210,7 +249,8 @@ class Fixtures:
             ), "file_read"
         if name in {"Write", "Edit"}:
             path = self.path(args["file_path"])
-            if not path.startswith(self.runtime.workspace_prefix):
+            workspace = PurePosixPath(self.runtime.workspace_prefix)
+            if not PurePosixPath(path).is_relative_to(workspace) or PurePosixPath(path) == workspace:
                 return "File operation outside the replay's modeled workspace.", "fixture_gap"
             if name == "Write":
                 self.files[path] = args["content"]
@@ -218,8 +258,15 @@ class Fixtures:
                 if path not in self.files:
                     return "File does not exist in replay workspace.", "invalid_call"
                 old = args["old_string"]
-                if not old or self.files[path].count(old) != 1 and not args.get("replace_all"):
+                count = self.files[path].count(old) if old else 0
+                if not count or count != 1 and not args.get("replace_all"):
                     return "Old string is absent or not unique.", "invalid_call"
+                replacements = count if args.get("replace_all") else 1
+                size = len(self.files[path].encode()) + replacements * (
+                    len(args["new_string"].encode()) - len(old.encode())
+                )
+                if size > MAX_FILE_BYTES:
+                    raise CoverageGap("Edited virtual file exceeds the recorded-context ceiling")
                 self.files[path] = self.files[path].replace(
                     old, args["new_string"], -1 if args.get("replace_all") else 1
                 )

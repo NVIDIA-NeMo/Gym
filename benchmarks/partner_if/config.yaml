@@ -5,7 +5,7 @@
 # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
 config_paths:
   - resources_servers/partner_if/configs/verifier_base.yaml
-  - benchmarks/partner_if/config_ngc_replay_runtime.yaml
+  - benchmarks/partner_if/config_recorded_context.yaml
   # opencode_agent's command deny-list, which partner_if_swe_agent inherits.
   - responses_api_agents/opencode_agent/configs/permissions/default.yaml
 
@@ -24,7 +24,6 @@ partner_if_policy_model:
 partner_if:
   resources_servers:
     partner_if:
-      accept_verification_input: true
       allow_provisional_rubrics: true
       judge_responses_create_params: {input: [], max_output_tokens: 32768, temperature: 0.0}
       judge_max_concurrency: 2
@@ -213,8 +212,15 @@ partner_if_prime:
         metadata: {environment: partner-if-prime}
       repository_url: https://github.com/django/django.git
       repository_commit: 93e892bb645b16ebaf287beb5fe7f3ffe8d10408  # pragma: allowlist secret - public Django commit
+      setup_timeout_seconds: 1800
       workdir: /workspace/django
       capture_directory: /tmp/partner-if-prime-capture
+      # Task-specific pure Python wheels; the Prime kernel itself is installed by Gym's PrimeSession.
+      task_python_packages: [setuptools==80.9.0, pytz==2026.2, sqlparse==0.5.5]
+      task_python_package_hashes:
+        setuptools==80.9.0: 062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922  # pragma: allowlist secret - public PyPI wheel SHA-256
+        pytz==2026.2: 04156e608bee23d3792fd45c94ae47fae1036688e75032eea2e3bf0323d1f126  # pragma: allowlist secret - public PyPI wheel SHA-256
+        sqlparse==0.5.5: 12a08b3bf3eec877c519589833aed092e2444e68240a3577e8e26148acc7b1ba  # pragma: allowlist secret - public PyPI wheel SHA-256
       judge_model_server: {type: responses_api_models, name: partner_if_judge}
       allow_provisional_rubrics: true
       judge_responses_create_params: {input: [], max_output_tokens: 32768, temperature: 0.0}
@@ -236,12 +242,14 @@ partner_if_prime_agent:
       model_server: {type: responses_api_models, name: partner_if_prime_model}
       model: ${policy_model_name}
       prime_agent_version: 0.7.0
+      # Admit all three benchmark repeats without an additional agent-side queue.
+      concurrency: 3
       max_turns: 48
       context_window: 131072
       max_output_tokens: 65536
       temperature: 0
       timeout: 900
-      kernel_packages: ["setuptools<81", pytz, sqlparse]
+      sandbox_install_timeout_seconds: 1800
       capture_directory: /tmp/partner-if-prime-capture
       session_close_timeout_seconds: 60
 
@@ -249,9 +257,11 @@ partner_if_prime_environment_server:
   environment_servers:
     single_agent_turn_legacy:
       entrypoint: app.py
-      default_episode_timeout_seconds: 5400
+      # Phase-specific setup, agent and cleanup limits govern the episode, as on main.
+      default_episode_timeout_seconds: null
       cleanup_timeout_seconds: 360
-      max_concurrent_episodes: 1
+      # One slot per configured repeat; further requests still have a bounded queue wait.
+      max_concurrent_episodes: 3
       queue_timeout_seconds: 600
       # The resource adapter can mask a failed model call, or retain a report
       # whose delivery was proved before a later model failure.
@@ -295,7 +305,7 @@ partner_if_dispatcher:
         pif_026: {type: environment_servers, name: partner_if_swe_environment_server}
         pif_027: {type: environment_servers, name: partner_if_prime_environment_server}
         pif_028: {type: environment_servers, name: partner_if_environment_server}
-        pif_029: {type: environment_servers, name: partner_if_ngc_replay_environment_server}
+        pif_029: {type: environment_servers, name: partner_if_recorded_context_environment_server}
       datasets:
         - name: partner_if
           type: benchmark

@@ -62,7 +62,11 @@ class RuntimeContract(BaseModel):
         ]
         if any(not p.startswith("/") or ".." in PurePosixPath(p).parts for p in paths):
             raise ValueError("Replay paths must be absolute and cannot traverse parents")
-        if not self.answer_paths or any(not p.startswith(self.workspace_prefix) for p in self.answer_paths):
+        workspace = PurePosixPath(self.workspace_prefix)
+        if not self.answer_paths or any(
+            not PurePosixPath(path).is_relative_to(workspace) or PurePosixPath(path) == workspace
+            for path in self.answer_paths
+        ):
             raise ValueError("Answer artifacts must stay inside the modeled workspace")
         if self.transcript_template.count("{session_id}") != 1:
             raise ValueError("Transcript path requires exactly one session_id placeholder")

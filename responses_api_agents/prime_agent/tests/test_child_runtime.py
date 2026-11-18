@@ -3,18 +3,29 @@
 """Exercise the real SDK shim's budget hooks against a deterministic SDK double."""
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 
 SDK_DOUBLE = """
+import {existsSync} from "node:fs";
+import {join} from "node:path";
 export const AuthStorage={inMemory:()=>({})};
 export const SettingsManager={inMemory:()=>({})};
 export const SessionManager={create:()=>({})};
-export class DefaultResourceLoader {async reload(){}}
+export class DefaultResourceLoader {
+  async reload(){}
+  getSkills(){return {skills:[{name:'agent-message',kind:'python'}]}}
+}
+export function loadSkillsFromDir({dir}){
+  return {skills:existsSync(join(dir,'SKILL.md')) ? [{name:'agent-message',kind:'python',python:{importName:'agent_message',packagePath:dir,pyprojectPath:join(dir,'pyproject.toml')}}] : []};
+}
+export function getPythonSkillRuntimeInfo(skills){return skills.map(s=>({name:s.name,...s.python}))}
 export class ModelRegistry {find(){return {contextWindow:131072}}}
 export async function createAgentSession(options){
   let listener,aborted=false;
@@ -40,6 +51,19 @@ export async function createAgentSession(options){
   return {session};
 }
 """
+
+
+def write_sdk_runtime(runtime: Path, source: str) -> Path:
+    """Mirror the shared npm global prefix rather than the removed custom installer."""
+    root = runtime / "lib/node_modules/prime-agent"
+    for directory, code in (
+        (root, source),
+        (root / "node_modules/@earendil-works/pi-ai", "export function cleanupSessionResources(){}"),
+    ):
+        (directory / "dist").mkdir(parents=True)
+        (directory / "package.json").write_text('{"type":"module","version":"0.7.0"}')
+        (directory / "dist/index.js").write_text(code)
+    return root
 
 
 def sdk_error_capture(tmp_path, *, delivered: bool, dispose_error: bool = False, provider_error: str | None = None):
@@ -74,14 +98,7 @@ def sdk_error_capture(tmp_path, *, delivered: bool, dispose_error: bool = False,
             "disposeAsync:async()=>{}", "disposeAsync:async()=>{throw new Error('SDK disposal failed')}"
         )
     runtime = tmp_path / "runtime"
-    for package, code in (
-        ("prime-agent", source),
-        ("@earendil-works/pi-ai", "export function cleanupSessionResources(){}"),
-    ):
-        directory = runtime / "node_modules" / package
-        (directory / "dist").mkdir(parents=True)
-        (directory / "package.json").write_text('{"type":"module"}')
-        (directory / "dist/index.js").write_text(code)
+    write_sdk_runtime(runtime, source)
     args = {
         "runtime": str(runtime),
         "state": str(tmp_path / "state"),
@@ -109,14 +126,7 @@ def sdk_error_capture(tmp_path, *, delivered: bool, dispose_error: bool = False,
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is required for the SDK shim unit test")
 def test_last_allowed_turn_executes_its_tools_before_stopping(tmp_path):
     runtime = tmp_path / "runtime"
-    for package, source in (
-        ("prime-agent", SDK_DOUBLE),
-        ("@earendil-works/pi-ai", "export function cleanupSessionResources(){}"),
-    ):
-        root = runtime / "node_modules" / package
-        (root / "dist").mkdir(parents=True)
-        (root / "package.json").write_text('{"type":"module"}')
-        (root / "dist/index.js").write_text(source)
+    write_sdk_runtime(runtime, SDK_DOUBLE)
     state = tmp_path / "state"
     capture = tmp_path / "export"
     args = {
@@ -146,3 +156,52 @@ def test_last_allowed_turn_executes_its_tools_before_stopping(tmp_path):
     assert all(request["originalHook"] for request in requests)
     assert all("max_completion_tokens" not in request for request in requests)
     assert all(request["tool_choice"]["function"]["name"] == "ipython" for request in requests)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is required for the SDK capability probe")
+@pytest.mark.parametrize("fault", [None, "sdk_api", "sdk_version", "ai_path", "skill", "python_import", "python_api"])
+def test_runtime_probe_checks_imports_skill_and_kernel_without_model_calls(tmp_path, fault):
+    runtime = tmp_path / "runtime"
+    source = SDK_DOUBLE.replace(
+        "export async function createAgentSession(options){",
+        "export async function createAgentSession(options){ throw new Error('Probe must not create sessions');",
+    )
+    if fault == "sdk_api":
+        source = source.replace("export async function createAgentSession", "async function createAgentSession")
+    root = write_sdk_runtime(runtime, source)
+    skill = root / "dist/skills/agent-message"
+    (skill / "src/agent_message").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("Bundled agent-message fixture")
+    (skill / "pyproject.toml").write_text('[project]\nname="agent-message"\nversion="0.1.0"\n')
+    module = skill / "src/agent_message/__init__.py"
+    module.write_text("async def send(*args, **kwargs): pass\nasync def list_agents(): pass\n")
+    (skill / "src/rlm.py").write_text("async def host_request(*args, **kwargs): pass\n")
+    if fault == "sdk_version":
+        (root / "package.json").write_text('{"type":"module","version":"0.8.0"}')
+    elif fault == "ai_path":
+        (root / "node_modules/@earendil-works/pi-ai/dist/index.js").unlink()
+    elif fault == "skill":
+        (skill / "SKILL.md").unlink()
+    elif fault == "python_import":
+        module.unlink()
+    elif fault == "python_api":
+        module.write_text("send = None\nlist_agents = None\n")
+    result = subprocess.run(
+        ["node", str(Path(__file__).parents[1] / "child_runtime.mjs"), "--check-runtime", str(runtime)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={**os.environ, "PRIME_AGENT_KERNEL_PYTHON": sys.executable, "PYTHONPATH": str(skill / "src")},
+    )
+    if fault:
+        assert result.returncode != 0
+        assert "Probe must not create sessions" not in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {
+            "sdkVersion": "0.7.0",
+            "aiVersion": "0.7.0",
+            "skill": "agent-message",
+            "pythonImport": "agent_message",
+        }
+    assert not (tmp_path / "state").exists()

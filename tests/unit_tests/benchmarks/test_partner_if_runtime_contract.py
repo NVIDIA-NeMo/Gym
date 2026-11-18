@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from responses_api_agents.ngc_recorded_context.runtime_contract import RuntimeContract, read_runtime_contract
+from resources_servers.partner_if.recorded_context.runtime_contract import RuntimeContract, read_runtime_contract
 
 
 @pytest.fixture

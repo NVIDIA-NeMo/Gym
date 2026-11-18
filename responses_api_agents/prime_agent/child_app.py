@@ -2,35 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prime SDK child sessions borrowing a Resources Server's task sandbox."""
 
-import asyncio
-import hashlib
 import json
-import logging
 import shlex
-import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from time import time
 from typing import Any, ClassVar
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
-    AgentSessionSetupError,
     AgentSessionState,
     SandboxCommand,
-    SandboxSession,
-    SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
 )
-from nemo_gym.client import request as http_request
-from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -38,27 +29,19 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.sandbox import AsyncSandbox, create_provider, read_text, resolve_provider_config, upload_text
-from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.trajectory import ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.prime_agent.app import (
     PrimeAgent,
     PrimeAgentConfig,
-    _extract_instruction,
     parse_prime_agent_events,
 )
 from responses_api_agents.prime_agent.child_observations import child_observations
+from responses_api_agents.prime_agent.sandbox import PrimeSession
 
 
-LOG = logging.getLogger(__name__)
 HERE = Path(__file__).parent
-# Release assets for https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.7.0.
-ARCHIVES = {
-    "prime-agent": "88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b",  # pragma: allowlist secret - public release SHA-256
-    "prime-agent-ai": "7cdbb3e835f48dd103325f7a351ce540b27af4d161aeb9c7b9bdcc12fe7909af",  # pragma: allowlist secret - public release SHA-256
-    "prime-agent-core": "0313373089831d9a2ce06e874fab8b9c05762c0094ff9fc202908cf7db7f99cd",  # pragma: allowlist secret - public release SHA-256
-    "prime-agent-tui": "3225f7f92e87db80fe2c9005d1f7770735ae625c32935ef2283688fc9bd33951",  # pragma: allowlist secret - public release SHA-256
-}
 
 
 class PrimeChildConfig(PrimeAgentConfig):
@@ -73,19 +56,15 @@ class PrimeChildConfig(PrimeAgentConfig):
     max_output_tokens: int = 65536
     session_close_timeout_seconds: float = 60
     sandbox_install_timeout_seconds: float = 1800
-    kernel_packages: list[str] = Field(default_factory=list)
     capture_directory: str | None = None
     artifact_directory: str = "outputs/prime_agent/child_sessions"
 
-
-@dataclass
-class ChildSession(AgentSessionState):
-    session: SandboxSession[dict]
-    runtime: str
-    task: asyncio.Task[NeMoGymResponse] | None = None
-    activation: NeMoGymResponseCreateParamsNonStreaming | None = None
-    observations: AgentObservationBundle | None = None
-    sandbox_id: str | None = None
+    @model_validator(mode="before")
+    @classmethod
+    def no_custom_kernel_installer(cls, values):
+        if isinstance(values, dict) and "kernel_packages" in values:
+            raise ValueError("Configure pinned task_python_packages on PartnerIF Resources instead of kernel_packages")
+        return values
 
 
 class PrimeChildAgent(PrimeAgent):
@@ -93,8 +72,6 @@ class PrimeChildAgent(PrimeAgent):
 
     config: PrimeChildConfig
     calls_model_from_sandbox: ClassVar[bool] = True
-    # SDK child sessions retain the base refusal; the CLI's stop hook only handles PrimeSession.
-    _rollout_sandbox_session = SimpleResponsesAPIAgent._rollout_sandbox_session
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """Leave SDK failures to the pairing's verifier, which checks retained parent-delivery evidence."""
@@ -102,7 +79,7 @@ class PrimeChildAgent(PrimeAgent):
 
     def model_post_init(self, context: object) -> None:
         # The sandbox owns the runtime; do not install an unused host CLI.
-        self.sem = asyncio.Semaphore(self.config.concurrency)
+        super().model_post_init(context)
         if self.config.prime_agent_version != "0.7.0":
             raise ValueError("Prime child sessions require version 0.7.0")
         if self.config.num_workers != 1:
@@ -110,202 +87,101 @@ class PrimeChildAgent(PrimeAgent):
         if self.config.capture_directory and not self.config.capture_directory.startswith("/"):
             raise ValueError("capture_directory must be absolute")
 
-    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> ChildSession:
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> PrimeSession:
+        # Resources owns the repository sandbox; the existing Prime lifecycle connects, installs and releases it.
         if body.sandbox_access is None:
             raise AgentSeedRejectedError("Prime child sessions require a task sandbox")
-        if any(grant.required for grant in self.effective_tool_accesses(body)):
-            raise AgentSeedRejectedError(
-                "Prime child sessions use only native IPython; required tool grants unsupported"
-            )
-        if body.sandbox_access.user is not None or body.sandbox_access.env:
-            raise AgentSeedRejectedError("Prime child sessions do not support sandbox user or environment overrides")
-        if self.config.model_server is None:
-            raise AgentSeedRejectedError("Prime child sessions require a Gym Model Server")
-        connection = body.sandbox_access.connection
-        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
-        try:
-            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
-        except BaseException:
-            await provider.aclose()
-            raise
-        directory = f"/tmp/nemo-gym-prime/{uuid4().hex}"
-        state = ChildSession(
-            request=body,
-            sandbox_id=sandbox.sandbox_id,
-            runtime=f"{directory}/runtime",
-            session=SandboxSession(
-                sandbox=sandbox, session_dir=directory, workdir=body.sandbox_access.workdir, harness="Prime child"
-            ),
-        )
-        try:
-            result = await sandbox.exec(f"mkdir -p {shlex.quote(state.runtime)}", timeout_s=30)
-            if result.return_code != 0 or result.error_type:
-                raise RuntimeError("Cannot create Prime runtime directory")
-            with tempfile.TemporaryDirectory(prefix="gym-prime-") as temporary:
-                for name, expected in ARCHIVES.items():
-                    filename = f"{name}-0.7.0.tgz"
-                    response = await http_request(
-                        "GET", f"https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.0/{filename}"
-                    )
-                    try:
-                        response.raise_for_status()
-                        content = await response.read()
-                    finally:
-                        response.release()
-                    if hashlib.sha256(content).hexdigest() != expected:
-                        raise RuntimeError(f"Prime release checksum mismatch: {filename}")
-                    local = Path(temporary) / filename
-                    local.write_bytes(content)
-                    await sandbox.upload(local, f"{state.runtime}/{filename}")
-            await sandbox.upload(HERE / "install_child.py", f"{directory}/install_child.py")
-            await sandbox.upload(HERE / "child_runtime.mjs", f"{directory}/child_runtime.mjs")
-            result = await sandbox.exec(
-                f"python3 {shlex.quote(directory + '/install_child.py')} {shlex.quote(state.runtime)} "
-                f"{shlex.quote(json.dumps(self.config.kernel_packages))}",
-                timeout_s=self.config.sandbox_install_timeout_seconds,
-            )
-            if result.return_code != 0 or result.error_type:
-                raise RuntimeError(f"Prime runtime setup failed: {(result.stderr or result.stdout or '')[-4000:]}")
-        except BaseException as error:
-            try:
-                await state.session.close(timeout=self.config.session_close_timeout_seconds)
-            except BaseException:
-                raise AgentSessionSetupError(state, error=error) from error
-            raise
-        return state
+        return await super()._seed_agent_session_state(body)
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
-        assert isinstance(state, ChildSession)
-        await state.session.close(timeout=self.config.session_close_timeout_seconds)
-        if state.task is not None and not state.task.done():
-            state.task.cancel()
-            await asyncio.wait_for(
-                asyncio.gather(state.task, return_exceptions=True), timeout=self.config.session_close_timeout_seconds
-            )
-        observations = (
-            state.observations.model_copy(update={"records": list(state.observations.records)})
-            if state.observations is not None
-            else AgentObservationBundle(
-                source="prime",
-                gaps=[
-                    ObservationGap(
-                        code="observation_capture_failed", detail="No native SDK capture was available at close"
-                    ),
-                ],
-            )
-        )
-        cleanup = state.session.cleanup
-        if (
-            isinstance(cleanup, dict)
-            and isinstance(state.sandbox_id, str)
-            and state.request.sandbox_access is not None
-        ):
-            outcome = (
-                "timeout"
-                if cleanup["timed_out"]
-                else "failed"
-                if cleanup["error"] or cleanup["return_code"] not in (0, None)
-                else "cancelled"
-                if cleanup["return_code"] is None
-                else "completed"
-            )
-            observations.records.append(
-                SandboxObservation(
-                    role="agent",
-                    provider=state.request.sandbox_access.connection.provider_config_ref,
-                    sandbox_id=state.sandbox_id,
-                    outcome=outcome,
-                    exit_code=cleanup["return_code"],
-                    error_type=cleanup["error"] or (None if outcome == "completed" else outcome),
-                )
-            )
-        return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id,
-            agent_observations=observations,
-        )
-
-    def validate_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
-        """Reject unsupported controls and supplied history instead of silently dropping them."""
-        supported = {"input", "instructions", "model"}
-        for name, field in type(body).model_fields.items():
-            if name in supported:
-                continue
-            value = getattr(body, name)
-            if value != field.get_default(call_default_factory=True):
-                raise HTTPException(422, f"Prime child mode does not support request field {name}")
-        if body.model not in (None, self.config.model):
-            raise HTTPException(422, "Prime child model must match the configured model")
-        if isinstance(body.input, str):
-            return
-        if [getattr(item, "role", None) for item in body.input] not in (["user"], ["system", "user"]):
-            raise HTTPException(422, "Prime child mode accepts one user prompt and an optional system prompt")
-        for item in body.input:
-            if not isinstance(item.content, str) and any(
-                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
-                for part in item.content
-            ):
-                raise HTTPException(422, "Prime child mode accepts text input only")
+        """Close through Prime's shared lifecycle and retain its exported observations."""
+        return await super()._close_agent_session_state(state)
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
             raise HTTPException(409, "Prime child mode requires a seeded agent session")
-        self.validate_input(body)
-        state = self._require_agent_session(session_id)
-        assert isinstance(state, ChildSession)
-        if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Prime activation rollout differs from the seeded episode")
-        if state.session.closing:
-            raise HTTPException(409, "Prime child session is closing")
-        if state.task is None:
-            state.activation = body.model_copy(deep=True)
-            state.task = asyncio.create_task(self._execute_child(state, body))
-        elif body != state.activation:
-            raise HTTPException(409, "Prime child sessions support only one activation")
-        return (await asyncio.shield(state.task)).model_copy(deep=True)
+        return await self._session_response(request, session_id, body)
 
-    async def _execute_child(
-        self, state: ChildSession, body: NeMoGymResponseCreateParamsNonStreaming
+    async def _activate_session(
+        self, state: PrimeSession, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
-        if isinstance(body.input, str):
-            prompt, system = body.input, None
-        else:
-            prompt, system = _extract_instruction(body.input)
+        prompt, system = self._session_conversation(body)
         directory = state.session.session_dir
+        # Only the Gym provider: the model-controlled sandbox must not receive host providers' keys.
+        nemo = self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]
         config = {
             "cwd": state.session.workdir,
             "runtime": state.runtime,
-            "state": f"{directory}/state",
-            "models": self._build_models_config(state.request.episode_id.capture_key),
+            "state": state.agent_dir,
+            "models": {"providers": {"nemo": nemo}},
             "model": self.config.model,
             "prompt": prompt,
-            "system": "\n\n".join(filter(None, [self.config.system_prompt, body.instructions, system])),
+            "system": system or "",
             "maxTurns": self.config.max_turns,
             "maxTokens": self.config.max_output_tokens,
             "temperature": self.config.temperature,
             "captureDirectory": self.config.capture_directory,
         }
 
+        runtime_validation = {}
+
         async def stage() -> SandboxCommand:
+            nonlocal runtime_validation
+            await state.session.sandbox.upload(HERE / "child_runtime.mjs", f"{directory}/child_runtime.mjs")
             await upload_text(state.session.sandbox, path=f"{directory}/input.json", text=json.dumps(config))
+            access = state.request.sandbox_access
             environment = {
-                "PRIME_AGENT_CODING_AGENT_DIR": config["state"],
-                "PRIME_AGENT_KERNEL_PYTHON": f"{state.runtime}/kernel/bin/python",
-                "PYTHONPATH": state.session.workdir,
+                key: value
+                for key, value in (access.env if access else {}).items()
+                if not key.startswith(("PRIME_AGENT_", "PI_", "OPENAI_"))
+            }
+            package = f"{state.runtime}/lib/node_modules/prime-agent"
+            environment |= {
+                "PRIME_AGENT_CODING_AGENT_DIR": state.agent_dir,
+                "PRIME_AGENT_KERNEL_PYTHON": f"{state.runtime}/kernel/bin/python3",
+                "PI_SKIP_VERSION_CHECK": "1",
+                # The verified release contains this dependency-free skill; no separate pip build is needed.
+                "PYTHONPATH": ":".join(
+                    filter(
+                        None,
+                        [
+                            f"{package}/dist/skills/agent-message/src",
+                            environment.get("PYTHONPATH"),
+                            state.session.workdir,
+                        ],
+                    )
+                ),
                 "PYTHONDONTWRITEBYTECODE": "1",
             }
-            return SandboxCommand(
-                argv=[
-                    "env",
-                    *(f"{key}={value}" for key, value in environment.items()),
-                    "node",
-                    f"{directory}/child_runtime.mjs",
-                    f"{directory}/input.json",
-                ]
+            checked = await state.session.sandbox.exec(
+                shlex.join(
+                    [f"{state.runtime}/bin/node", f"{directory}/child_runtime.mjs", "--check-runtime", state.runtime]
+                ),
+                cwd="/",
+                env=environment,
+                timeout_s=min(60, self.config.sandbox_install_timeout_seconds),
+            )
+            if checked.return_code != 0 or checked.error_type:
+                raise RuntimeError(
+                    f"Prime SDK capability check failed: {(checked.stderr or checked.stdout or '')[-4000:]}"
+                )
+            runtime_validation = json.loads((checked.stdout or "").strip().splitlines()[-1])
+            if not isinstance(runtime_validation, dict):
+                raise RuntimeError("Prime SDK capability check returned invalid evidence")
+            return await state.stage(
+                command=[f"{state.runtime}/bin/node", f"{directory}/child_runtime.mjs", f"{directory}/input.json"],
+                env=environment,
+                models=json.dumps(config["models"]),
             )
 
         async def collect() -> dict:
-            value = json.loads(await read_text(state.session.sandbox, path=f"{directory}/state/capture.json"))
+            if state.session.expired_before_launch:
+                state.observations = self._session_observations(
+                    state, status="incomplete", error_type="stopped", output=[]
+                )
+                return {"version": 1, "termination": "stopped", "events": [], "deliveries": [], "assistantTurns": 0}
+            value = json.loads(await read_text(state.session.sandbox, path=f"{state.agent_dir}/capture.json"))
             if (
                 not isinstance(value, dict)
                 or value.get("version") != 1
@@ -321,13 +197,14 @@ class PrimeChildAgent(PrimeAgent):
             destination.mkdir(parents=True, mode=0o700)
             (destination / "capture.json").write_text(json.dumps(value))
             (destination / "cleanup.json").write_text(json.dumps(state.session.cleanup))
+            (destination / "runtime-check.json").write_text(json.dumps(runtime_validation))
             effective, gaps = {}, []
             filenames = ["effective-session.json", "model-requests.jsonl"]
             if value["termination"] == "error":
                 filenames.append("errors.jsonl")
             for filename in filenames:
                 try:
-                    text = await read_text(state.session.sandbox, path=f"{directory}/state/{filename}")
+                    text = await read_text(state.session.sandbox, path=f"{state.agent_dir}/{filename}")
                     (destination / filename).write_text(text)
                     if filename == "effective-session.json":
                         effective = json.loads(text)
@@ -349,14 +226,45 @@ class PrimeChildAgent(PrimeAgent):
                 invocation_id=state.request.agent_session_id,
             )
             state.observations.gaps.extend(gaps)
+            cleanup = state.session.cleanup
+            if isinstance(cleanup, dict) and isinstance(state.sandbox_id, str):
+                outcome = (
+                    "timeout"
+                    if cleanup["timed_out"]
+                    else "failed"
+                    if cleanup["error"] or cleanup["return_code"] not in (0, None)
+                    else "cancelled"
+                    if cleanup["return_code"] is None
+                    else "completed"
+                )
+                state.observations.records.append(
+                    SandboxObservation(
+                        role="agent",
+                        provider=state.provider_name,
+                        sandbox_id=state.sandbox_id,
+                        outcome=outcome,
+                        exit_code=cleanup["return_code"],
+                        error_type=cleanup["error"] or (None if outcome == "completed" else outcome),
+                    )
+                )
             return value
 
-        captured = await state.session.execute(
-            stage_activation=stage,
-            collect=collect,
-            timeout=self.config.timeout,
-            close_timeout=self.config.session_close_timeout_seconds,
+        timeout = resolve_agent_timeout(
+            body.metadata, ceiling=min(self.config.timeout, state.request.agent_timeout_sec or self.config.timeout)
         )
+        try:
+            async with self.sem:
+                captured = await state.session.execute(
+                    stage_activation=stage,
+                    collect=collect,
+                    timeout=timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                )
+        except BaseException as error:
+            state.observations = self._session_observations(
+                state, status="failed", error_type=type(error).__name__, output=[]
+            )
+            raise
         events = captured["events"]
         assistants = [
             e["message"]
@@ -413,7 +321,11 @@ class PrimeChildAgent(PrimeAgent):
                 "prime_child_termination": captured["termination"],
             },
         )
-        return self.report_outcome(response, failures[-1]) if failures else response
+        return (
+            self.report_outcome(response, failures[-1])
+            if failures
+            else self.report_rollout_stop(response, state.session)
+        )
 
     async def run(self, request: Request, body: object) -> None:
         raise HTTPException(422, "Prime child mode runs through an Environment Server")

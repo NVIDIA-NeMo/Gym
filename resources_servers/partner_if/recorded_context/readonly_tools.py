@@ -10,9 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 
-
-class CoverageGap(ValueError):
-    """The frozen inputs do not determine this operation's result."""
+from resources_servers.partner_if.recorded_context.limits import MAX_OUTPUT_BYTES, CoverageGap, bounded_output
 
 
 class ReadonlyTools:
@@ -28,7 +26,7 @@ class ReadonlyTools:
         missing_runtime_reads: bool = False,
         get_wrappers: dict[str, str] | None = None,
         optional_runtime_paths: list[str] | None = None,
-    ):
+    ) -> None:
         self.get_wrappers = get_wrappers or {}
         self.optional_runtime_paths = set(optional_runtime_paths or [])
         self.files = files
@@ -59,9 +57,8 @@ class ReadonlyTools:
         """Interpret a small shell grammar; never execute model command text."""
         if not tokens or any("$(" in t or "`" in t for t in tokens):
             raise CoverageGap("Unmodeled shell expansion")
-        if self.shell_control_flow:
-            return self._controlled(tokens)
-        return self._plain(tokens)
+        result, kind = self._controlled(tokens) if self.shell_control_flow else self._plain(tokens)
+        return bounded_output(result), kind
 
     def _controlled(self, tokens: list[str]) -> tuple[str, str]:
         """Evaluate readonly and/or lists with shell exit-status short circuiting."""
@@ -81,10 +78,14 @@ class ReadonlyTools:
         elif gate != ";":
             raise CoverageGap("Conditional command has no right operand")
         pieces = []
+        size = 0
         for gate, pipeline in chains:
             if gate == "&&" and self.last_status != 0 or gate == "||" and self.last_status == 0:
                 continue
             text, _ = self._plain(pipeline)
+            size += len(text.encode())
+            if size > MAX_OUTPUT_BYTES:
+                raise CoverageGap("Tool output exceeds the recorded-context ceiling")
             pieces.append(text)
         return "".join(pieces), "readonly_tool_result"
 
@@ -98,6 +99,15 @@ class ReadonlyTools:
             else:
                 current.append(token)
         pieces = []
+        size = 0
+
+        def append(text: str) -> None:
+            nonlocal size
+            size += len(text.encode())
+            if size > MAX_OUTPUT_BYTES:
+                raise CoverageGap("Tool output exceeds the recorded-context ceiling")
+            pieces.append(text)
+
         for statement in statements:
             pipeline, current = [], []
             for token in statement + ["|"]:
@@ -137,16 +147,18 @@ class ReadonlyTools:
                         cleaned.append(segment[i])
                         i += 1
                 stdout, stderr, status = self.command(cleaned, stdin)
+                bounded_output(stdout)
+                bounded_output(stderr)
                 if discard_stderr:
                     stderr = ""
                 if destination is not None:
                     self.files[destination] = stdout
                     stdout = ""
-                stdin = stdout + (stderr if merge else "")
+                stdin = bounded_output(stdout + (stderr if merge else ""))
                 if stderr and not merge:
-                    pieces.append(stderr)
+                    append(stderr)
                 self.last_status = status
-            pieces.append(stdin)
+            append(stdin)
         return "".join(pieces), "readonly_tool_result"
 
     def command(self, tokens: list[str], stdin: str) -> tuple[str, str, int]:
@@ -334,6 +346,7 @@ class ReadonlyTools:
                 scope = subprocess.run(
                     [executable, "--no-config", "--hidden", "--no-ignore", "--files", *file_filters, *paths],
                     text=True,
+                    errors="replace",
                     capture_output=True,
                     timeout=10,
                     check=False,
@@ -355,9 +368,11 @@ class ReadonlyTools:
                 *options,
                 *paths,
             ]
-            result = subprocess.run(command, input=stdin, text=True, capture_output=True, timeout=10, check=False)
+            result = subprocess.run(
+                command, input=stdin, text=True, errors="replace", capture_output=True, timeout=10, check=False
+            )
             stdout = result.stdout.replace(str(root), "")
             stderr = result.stderr.replace(str(root), "")
-            if len(stdout) + len(stderr) > 4_000_000:
+            if len(stdout.encode()) + len(stderr.encode()) > MAX_OUTPUT_BYTES:
                 raise CoverageGap("Search output exceeds replay ceiling")
             return stdout, stderr, result.returncode

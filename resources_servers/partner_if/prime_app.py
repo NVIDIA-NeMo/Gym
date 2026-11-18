@@ -2,33 +2,36 @@
 # SPDX-License-Identifier: Apache-2.0
 """Repository lifecycle and verified Prime parent-delivery evidence for the shared IF grader."""
 
-import asyncio
 import json
 import re
 import shlex
 from contextlib import asynccontextmanager
 from typing import ClassVar
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import PrivateAttr, field_validator
+from fastapi import FastAPI, Request
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import EpisodeId
 from nemo_gym.sandbox import (
     AsyncSandbox,
-    DirectSandboxConnection,
     SandboxAccess,
     SandboxConfig,
     read_text,
-    resolve_provider_config,
+    upload_text,
 )
 from nemo_gym.server_runtime import (
+    LentSandboxes,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ResourcesSessionFences,
+    ResourcesSessionLocks,
     ReverifyMode,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -39,6 +42,11 @@ from resources_servers.partner_if.app import (
     VerifyResponse,
 )
 from resources_servers.partner_if.evidence import Artifact, EvidenceBundle, EvidenceUnavailable
+
+
+TASK_PYTHON_DIRECTORY = "/tmp/partner-if-prime-python"
+TASK_REQUIREMENTS_PATH = "/tmp/partner-if-prime-requirements.txt"
+TASK_INSTALLER_DIRECTORY = "/tmp/partner-if-prime-package-installer"
 
 
 class PrimeIFConfig(PartnerIFResourcesServerConfig):
@@ -54,6 +62,45 @@ class PrimeIFConfig(PartnerIFResourcesServerConfig):
     workdir: str = "/workspace/repo"
     capture_directory: str = "/tmp/partner-if-prime-capture"
     setup_timeout_seconds: float = 1800
+    # Task-specific pure-Python wheels, separate from PrimeSession's stock runtime and kernel.
+    task_python_packages: list[str] = Field(default_factory=list)
+    task_python_package_hashes: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("task_python_packages")
+    @classmethod
+    def exact_task_packages(cls, value: list[str]) -> list[str]:
+        names = set()
+        for text in value:
+            try:
+                requirement = Requirement(text)
+                specs = list(requirement.specifier)
+                if (
+                    "\n" in text
+                    or "\r" in text
+                    or requirement.url
+                    or requirement.marker
+                    or requirement.extras
+                    or len(specs) != 1
+                    or specs[0].operator != "=="
+                    or "*" in specs[0].version
+                ):
+                    raise ValueError("Task Python packages require an exact name==version pin")
+                Version(specs[0].version)
+            except (InvalidRequirement, InvalidVersion) as error:
+                raise ValueError("Task Python packages require an exact name==version pin") from error
+            name = canonicalize_name(requirement.name)
+            if name in names:
+                raise ValueError("Task Python packages cannot repeat a package name")
+            names.add(name)
+        return value
+
+    @model_validator(mode="after")
+    def task_package_hashes_match(self):
+        if set(self.task_python_packages) != set(self.task_python_package_hashes):
+            raise ValueError("Every task Python package requires exactly one SHA-256 wheel hash")
+        if any(not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in self.task_python_package_hashes.values()):
+            raise ValueError("Task Python wheel hashes must be lowercase SHA-256 digests")
+        return self
 
     @field_validator("repository_commit")
     @classmethod
@@ -149,16 +196,25 @@ class PrimeIFResourcesServer(PartnerIFResourcesServer):
     config: PrimeIFConfig
     checkpoint_mode = "restart_only"
     checkpoint_verify = "wait"
-    _sandboxes: dict[str, AsyncSandbox] = PrivateAttr(default_factory=dict)
+    _sandboxes: LentSandboxes = PrivateAttr()
     _seeds: dict[str, ResourcesSeedSessionRequest] = PrivateAttr(default_factory=dict)
-    _access: dict[str, SandboxAccess] = PrivateAttr(default_factory=dict)
-    _locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
-    _fences: ResourcesSessionFences[EpisodeId | None] = PrivateAttr()
+    # Repository readiness is task state; LentSandboxes owns every sandbox handle.
+    _prepared: set[str] = PrivateAttr(default_factory=set)
+    _locks: ResourcesSessionLocks = PrivateAttr()
+    _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
+    _shutting_down: bool = PrivateAttr(default=False)
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
         if self.config.num_workers != 1:
             raise ValueError("Prime resource sessions require num_workers=1")
+        self._sandboxes = LentSandboxes(
+            self.config.sandbox_provider,
+            self.config.sandbox_config,
+            image=self.config.image,
+            workdir=self.config.workdir,
+        )
+        self._locks = ResourcesSessionLocks()
         self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
@@ -167,97 +223,115 @@ class PrimeIFResourcesServer(PartnerIFResourcesServer):
 
         @asynccontextmanager
         async def lifecycle(application: FastAPI):
-            async with original(application) as state:
-                try:
+            try:
+                async with original(application) as state:
                     yield state
-                finally:
-                    await asyncio.gather(*(sandbox.stop() for sandbox in list(self._sandboxes.values())))
+            finally:
+                self._shutting_down = True
+                # Each seed records its owner before awaiting, including a setup whose cleanup is pending.
+                for identifier in list(self._seeds):
+                    async with self._locks.locked(identifier):
+                        pass
+                await self._sandboxes.release_all()
 
         app.router.lifespan_context = lifecycle
         return app
 
+    async def _prepare_repository(self, sandbox: AsyncSandbox) -> None:
+        commands = [
+            "apt-get update && apt-get install -y --no-install-recommends python3 python3-venv git ca-certificates",
+            f"git clone --no-checkout {shlex.quote(self.config.repository_url)} {shlex.quote(self.config.workdir)} && git -C {shlex.quote(self.config.workdir)} checkout --detach {shlex.quote(self.config.repository_commit)}",
+        ]
+        for command in commands:
+            result = await sandbox.exec(command, cwd="/", timeout_s=self.config.setup_timeout_seconds)
+            if result.return_code != 0 or result.error_type:
+                raise RuntimeError(f"Repository setup failed: {(result.stderr or result.stdout or '')[-4000:]}")
+        if self.config.task_python_packages:
+            requirements = "".join(
+                f"{package} --hash=sha256:{self.config.task_python_package_hashes[package]}\n"
+                for package in self.config.task_python_packages
+            )
+            await upload_text(sandbox, path=TASK_REQUIREMENTS_PATH, text=requirements)
+            command = (
+                f"python3 -m venv {shlex.quote(TASK_INSTALLER_DIRECTORY)} && "
+                f"{shlex.quote(TASK_INSTALLER_DIRECTORY + '/bin/python')} -m pip install "
+                "--disable-pip-version-check --no-input --require-hashes --no-deps --only-binary=:all: "
+                "--platform any --implementation py --abi none --python-version 3.13 "
+                f"--target {shlex.quote(TASK_PYTHON_DIRECTORY)} -r {shlex.quote(TASK_REQUIREMENTS_PATH)}"
+            )
+            result = await sandbox.exec(command, cwd="/", timeout_s=self.config.setup_timeout_seconds)
+            if result.return_code != 0 or result.error_type:
+                raise RuntimeError(f"Task Python setup failed: {(result.stderr or result.stdout or '')[-4000:]}")
+
+    def _task_access(self, access: SandboxAccess) -> SandboxAccess:
+        if not self.config.task_python_packages:
+            return access
+        return access.model_copy(update={"env": {**access.env, "PYTHONPATH": TASK_PYTHON_DIRECTORY}})
+
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         identifier = body.resources_session_id
-        async with self._locks.setdefault(identifier, asyncio.Lock()):
-            if identifier in self._fences:
-                raise HTTPException(409, "Resource session is closed")
-            if identifier in self._seeds and self._seeds[identifier] != body:
-                raise HTTPException(409, "Resource session belongs to a different task")
-            if identifier not in self._seeds:
-                # A failed setup whose stop failed still belongs to this session.
-                # Dispose of it before replacing the handle on a seed retry.
-                if previous := self._sandboxes.get(identifier):
-                    await previous.stop()
-                    self._sandboxes.pop(identifier)
-                sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()))
-                self._sandboxes[identifier] = sandbox
-                spec = self.config.sandbox_config.spec(
-                    self.config.sandbox_provider,
-                    image=self.config.image,
-                    workdir=None,
-                    named_configs=get_global_config_dict(),
-                )
-
-                async def setup(connection: AsyncSandbox) -> None:
-                    commands = [
-                        "apt-get update && apt-get install -y --no-install-recommends python3 python3-venv git ca-certificates",
-                        f"git clone --no-checkout {shlex.quote(self.config.repository_url)} {shlex.quote(self.config.workdir)} && git -C {shlex.quote(self.config.workdir)} checkout --detach {shlex.quote(self.config.repository_commit)}",
-                    ]
-                    for command in commands:
-                        result = await connection.exec(command, timeout_s=self.config.setup_timeout_seconds)
-                        if result.return_code != 0 or result.error_type:
-                            raise RuntimeError(
-                                f"Repository setup failed: {(result.stderr or result.stdout or '')[-4000:]}"
-                            )
-
+        async with self._locks.locked(identifier):
+            if self._shutting_down:
+                raise ResourcesSessionConflictError("Prime Resources is shutting down")
+            self._fences.raise_if_fenced(identifier)
+            previous = self._seeds.get(identifier)
+            if previous is not None and previous != body:
+                raise ResourcesSessionConflictError("Resource session belongs to a different task")
+            # Retain the owner during setup and failed cleanup, so close and shutdown can find it.
+            self._seeds.setdefault(identifier, body.model_copy(deep=True))
+            if identifier in self._prepared:
+                access = await self._sandboxes.lend(identifier, body.task_id)
+            else:
+                # A prior checkout whose stop failed must not be lent as a prepared task.
+                await self._sandboxes.release(identifier)
                 try:
-                    await sandbox.start_with_setup(spec, setup)
-                    access = SandboxAccess(
-                        connection=DirectSandboxConnection(
-                            provider_config_ref=self.config.sandbox_provider, descriptor=await sandbox.serialize()
-                        ),
-                        workdir=self.config.workdir,
-                    )
+                    access = await self._sandboxes.lend(identifier, body.task_id)
+                    sandbox = self._sandboxes.get(identifier)
+                    if sandbox is None:
+                        raise RuntimeError("Lent Prime sandbox is unavailable during repository setup")
+                    await self._prepare_repository(sandbox)
                 except BaseException:
-                    await sandbox.stop()
-                    self._sandboxes.pop(identifier, None)
+                    await self._sandboxes.release(identifier)
+                    self._seeds.pop(identifier, None)
                     raise
-                self._seeds[identifier] = body
-                self._access[identifier] = access
+                self._prepared.add(identifier)
             request.session[SESSION_ID_KEY] = identifier
             return ResourcesSeedSessionResponse(
-                resources_session_id=identifier, sandbox_access=self._access[identifier]
+                resources_session_id=identifier, sandbox_access=self._task_access(access)
             )
+
+    async def _release(self, identifier: str) -> None:
+        await self._sandboxes.release(identifier)
+        self._prepared.discard(identifier)
+        self._seeds.pop(identifier, None)
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         identifier = body.resources_session_id
-        async with self._locks.setdefault(identifier, asyncio.Lock()):
+        async with self._locks.locked(identifier):
             seed = self._seeds.get(identifier)
-            episode = seed.episode_id if seed else self._fences.get(identifier)
+            episode = seed.episode_id if seed is not None else self._fences.get(identifier)
             if episode is not None and episode != body.episode_id:
-                raise HTTPException(409, "Resource session belongs to another episode")
-            if sandbox := self._sandboxes.get(identifier):
-                await sandbox.stop()
-            self._sandboxes.pop(identifier, None)
-            self._seeds.pop(identifier, None)
-            self._access.pop(identifier, None)
+                raise ResourcesSessionConflictError("Resource session belongs to another episode")
+            await self._release(identifier)
             self._fences.fence(identifier, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=identifier)
 
     async def retire_session_state(self, session_id: str) -> None:
         """A retired/checkpointed attempt must not leave a task sandbox running."""
-        seed = self._seeds.get(session_id)
-        if seed is not None:
-            await self.close_resources_session(
-                ResourcesCloseSessionRequest(resources_session_id=session_id, episode_id=seed.episode_id)
-            )
+        async with self._locks.locked(session_id):
+            seed = self._seeds.get(session_id)
+            await self._release(session_id)
+            if seed is not None:
+                self._fences.fence(session_id, seed.episode_id)
 
     async def verify(self, request: Request, body: VerifyRequest) -> VerifyResponse:
         identifier = request.session[SESSION_ID_KEY]
-        async with self._locks.setdefault(identifier, asyncio.Lock()):
+        async with self._locks.locked(identifier):
             try:
-                sandbox = self._sandboxes[identifier]
+                sandbox = self._sandboxes.get(identifier)
                 seed = self._seeds[identifier]
+                if sandbox is None or identifier not in self._prepared:
+                    raise EvidenceUnavailable("Prime task sandbox is not prepared")
                 from resources_servers.partner_if.schema import VerifierMetadata
 
                 if VerifierMetadata.model_validate(seed.task_data.get("verifier_metadata")) != body.verifier_metadata:

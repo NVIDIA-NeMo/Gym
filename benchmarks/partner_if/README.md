@@ -33,9 +33,10 @@ The full-release route-coverage test stays enabled as a readiness gate.
 
 ## Task contract
 
-- **Harness:** the policy model runs in Gym's `simple_agent`, and in OpenCode (`opencode_agent`) on the SWE
-  tasks, and Prime Agent 0.7.0's depth-one child session on the repository/report task.
-  The SWE scores depend on OpenCode 1.17.11: the harness and its version are part of what they measure.
+- **Harness:** Gym's `simple_agent` runs the text and simulated-tool tasks; OpenCode (`opencode_agent`)
+  runs the SWE tasks; Prime Agent 0.7.0's depth-one child session runs the repository/report task; and
+  Gym's stock `gymnasium_agent` runs the recorded-context ordering task. The SWE scores depend on
+  OpenCode 1.17.11: the harness and its version are part of what they measure.
 - **Routing:** `partner_if_dispatcher` routes each task to its environment, so supported tasks share one
   dataset and one score. Gym aggregates metrics per environment server, so without it the six task
   families would have separate scores.
@@ -61,6 +62,11 @@ The full-release route-coverage test stays enabled as a readiness gate.
 - **Prime task:** a pinned source checkout, native IPython, and a recording parent controller.
   The actor has 48 complete assistant turns and a 900-second safety timeout. Its output
   reservation is 65,536 tokens per call, shrinking as context fills; temperature is 0.
+  Its Environment Server has no outer episode deadline (`null`); the 1,800-second
+  setup-command and agent-install limits, 900-second actor limit, 60-second agent-close
+  limit and 360-second environment-cleanup limit remain explicit. Environment admission
+  and agent concurrency are both three, matching the three dataset repeats. The
+  600-second queue timeout applies to requests beyond those three active slots.
   Compaction and retries are disabled. Only corroborated parent deliveries reach the shared
   rubric judge; unsent drafts and final chat text do not count. These limits are part of
   the task contract. The dedicated `partner_if_prime_model` preserves the runtime's cap.
@@ -77,9 +83,10 @@ The full-release route-coverage test stays enabled as a readiness gate.
   - Scale-SWE's own tests then run as a diagnostic, in up to two more sandboxes of the same image: an
     inconclusive result is retried once. Their verdict is kept in `task_outcome` and never changes the reward.
 - **Sampling:** each run sets its policy's sampling, such as temperature and top_p, on the policy model server
-  (`policy_model.responses_api_models.vllm_model.sampling_overrides`). The benchmark only removes the output
-  cap: `config.yaml` sets null caps on `partner_if_policy_model`, a copy of the run's `vllm_model` policy
-  server that every agent calls and that keeps the run's sampling.
+  (`policy_model.responses_api_models.vllm_model.sampling_overrides`). The text, simulated-tool and SWE
+  routes call `partner_if_policy_model`, a copy of the run's `vllm_model` policy server that keeps the run's
+  sampling and sets null output caps. Prime and recorded-context routes use separate model-server copies
+  that preserve their task-specific per-call limits and sampling described above and below.
   - No output cap means a null cap, which also replaces the per-call cap OpenCode sends. On a vLLM endpoint each
     reply may then use the rest of the model's context window.
   - An endpoint that applies a small default when the cap is null (some hosted OpenAI-compatible APIs default to
@@ -117,9 +124,10 @@ The full-release route-coverage test stays enabled as a readiness gate.
 - **Cross-check:** 50.67, with 0 masked rows, from regrading a different saved GLM 5.3 run (dataset 2.1.0, whose
   actor inputs match 2.1.4) with the 2.1.4 rubrics and GPT-6 Sol through a different gateway route.
 - **History:** dataset 2.1.0 scored 61.33 with GLM 5.3 as both the policy and the judge.
-- **Judge:** GPT-6 Sol (`azure/openai/gpt-6-sol`) by default, at temperature 0, with 32768 output tokens. Each
-  of the three resources servers allows 2 concurrent judge calls, so a run makes at most 6. Set
-  `judge_base_url` and `judge_api_key`. A different judge makes the scores incomparable.
+- **Judge:** GPT-6 Sol (`azure/openai/gpt-6-sol`) by default, at temperature 0, with 32768 output tokens.
+  Each of the five Resources instances (ordinary, simulated-tool, SWE, Prime and recorded-context) allows
+  2 concurrent judge calls, so their combined limit is 10. Set `judge_base_url` and `judge_api_key`.
+  A different judge makes the scores incomparable.
 - **Failures:**
   - A missing or truncated answer scores 0.
   - Infrastructure, capture and judge failures are masked, with `failure_kind` and `failure_reason`, and
@@ -135,12 +143,15 @@ The full-release route-coverage test stays enabled as a readiness gate.
   - The text and tool tasks have no episode deadline: their step caps end an episode.
   - A SWE episode has no step cap, and OpenCode's deadline is 10800 s. Its sandbox has 600 s to start and lives
     at most 14400 s, and each of Scale-SWE's test runs gets 1200 s.
-  - Each environment's cleanup times out after 180 s.
+  - Text, simulated-tool and SWE environment cleanup times out after 180 s; Prime cleanup gets 360 s.
   - A tool sandbox has 600 s to start and 300 s to install its requirements, and its runner has 60 s to load.
   - Each tool call times out after 60 s.
   - A tool sandbox lives at most 3600 s.
-- **Cost:** a run is 75 rollouts. Each of the 9 SWE rollouts uses an OpenCode sandbox and up to two test
-  sandboxes of 4 CPUs and 16 GiB, and each of the 15 tool rollouts uses one small sandbox.
+- **Cost:** a full run is 84 rollouts (28 tasks, each repeated 3 times). Each of the 9 SWE rollouts uses
+  an OpenCode sandbox and up to two test sandboxes of 4 CPUs and 16 GiB; each of the 15 simulated-tool
+  rollouts uses one small sandbox; and each of the 3 Prime rollouts uses a repository sandbox of
+  4 CPUs and 16 GiB. The 3 recorded-context rollouts use the in-process frozen simulator, with up to
+  8 policy calls per rollout including Explore.
 - **Seeds:** none are set, so runs are stochastic.
 
 ## Running
@@ -171,28 +182,36 @@ judge's calls read them there.
 
 ## Recorded-context ordering profile: pif_029
 
-The private recorded-context replay belongs to `partner_if`. Its dedicated
-`config_ngc_replay.yaml` routes `pif_029` through `partner_if_dispatcher` to the
-existing `single_agent_turn` environment and the shared `partner_if` verifier.
-The generic environment enables bounded verifier-directed activations; no separate
-replay Environment Server is added. It stops at
-the first decisive ordering event; no complete investigation is required.
-Preparation downloads the pinned JSONL and `partner_if_replay_assets.json` from the private registry.
-The data-only bundle holds the original history, tools and frozen results; registry runs do not need the source checkout.
+`config.yaml` includes `config_recorded_context.yaml` and routes `pif_029` through
+Gym's stock `legacy_agent` relay and `gymnasium_agent`. The existing PartnerIF
+Resources component implements Gymnasium `/reset`, `/step` and optional `/close`;
+it owns the frozen tool simulator, Explore, shared semantic grading and the total
+policy-call budget. There is no dataset-specific agent or Environment Server.
+
+The run stops at the first decisive semantic ordering result. Failed ordering
+scores zero. Passing requires a returned, identity-validated sibling probe;
+unknown coverage, faults and undecided cutoffs are masked. All calls in one
+assistant response precede their results, so a probe and prescription in the same
+response cannot establish correct ordering.
+
+Limits remain six parent turns and eight total policy calls including Explore,
+with temperature 0.7, top_p 0.95 and 8,192 tokens per call. The other task routes
+and their sampling are unchanged. The dispatcher lifts Resources' terminal report
+into the collector row, retaining terminal tool outputs, all fresh usage and grades.
+
+`prepare.py` still verifies the published private 2.1.7 source rows and data-only
+assets. A local release-candidate command marks the changed harness in pif_029,
+keeps every other row and all asset bytes, and records candidate digests:
 
 ```bash
-.venv/bin/python -m benchmarks.partner_if.prepare_ngc_replay
-bash benchmarks/partner_if/run_ngc_replay.sh
+.venv/bin/python -m benchmarks.partner_if.stage_recorded_context_release \
+  --output-dir benchmarks/partner_if/data/release-candidate-2.1.8
 ```
 
-See [recorded-context.md](recorded-context.md) for settings, scoring, evidence and limitations,
-and [recorded-context-provenance.md](recorded-context-provenance.md) for source provenance.
-The default configuration also routes pif_029 to this environment. The review release
-is provisional; adding it to the dataset does not grant admission. Both registry artifacts remain private.
-
-The replay runs at temperature 0.7, top_p 0.95, with 8,192 tokens per call and an eight-call total budget.
-It uses the policy Model Server directly to retain this cap. The historical 25-task reference score
-does not apply to the 28-task review release. A replay without a decisive ordering event is masked.
-
-The 27 rows in published 2.1.5 are preserved byte for byte, including pif_027.
-The existing Prime child runtime still requires the configured sandbox provider. Only the pif_029 profile is sandbox-free.
+The candidate is not published. Registry publication under a new version and
+updating `prepare.py` to its verified pin remain release steps before merging;
+2.1.7 must not be overwritten. Local development can use its pinned inputs with
+the new configuration. See [recorded-context.md](recorded-context.md) for the
+transport normalization and limitations, and
+[recorded-context-provenance.md](recorded-context-provenance.md) for provenance.
+The historical 25-task reference score does not apply to this 28-task review release.

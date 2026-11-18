@@ -3,18 +3,15 @@
 """A registry replay needs no source checkout, and corrupted assets stay unscored."""
 
 import base64
-import copy
 import hashlib
 import json
 
 import pytest
 
 from benchmarks.partner_if import prepare as registry
-from benchmarks.partner_if import prepare_ngc_replay
 from benchmarks.partner_if.replay_assets import REPLAY_FILES, materialize_bundle, prepared_bundle_matches
-from benchmarks.partner_if.tests.test_ordering_prefix import fields
-from benchmarks.partner_if.tests.test_replay import PARAMS, SOURCE, TASK, draft, probe, response
-from responses_api_agents.ngc_recorded_context import replay
+from benchmarks.partner_if.tests.fixture_data import PARAMS, SOURCE, TASK
+from resources_servers.partner_if.recorded_context import assets as replay
 
 
 @pytest.fixture
@@ -49,36 +46,17 @@ def test_invalid_asset_bundle_does_not_create_runtime_files(tmp_path, assets, fa
     assert not (tmp_path / "package").exists()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("passed", [True, False])
-async def test_registry_only_assets_keep_original_requests_and_stop_at_the_ordering_event(tmp_path, assets, passed):
+def test_registry_only_assets_keep_original_actor_input_and_validate_all_members(tmp_path, assets):
     package = tmp_path / "package"
     materialize_bundle(assets, package)
     assert prepared_bundle_matches(assets, package)
-    calls = []
-
-    async def provider(payload, timeout):
-        calls.append(copy.deepcopy(payload))
-        assert len(calls) == 1
-        return 200, response(probe() if passed else draft())
-
-    async def review(*args):
-        return fields(passed)
-
-    config = replay.ReplayConfig(
-        package_dir=package,
-        artifacts_dir=tmp_path / "captures",
-        coverage_profile="expanded-v4",
-        temporal_history=True,
-        evaluation_boundary="ordering_prefix_v1",
-    )
-    _, _, _, diagnostics = await replay.execute(
-        config, PARAMS, model="test", secret="", request_api=provider, review_prefix=review
-    )
-    assert diagnostics["termination"] == ("ordering_passed" if passed else "ordering_failed")
-    case = json.loads((package / "ngc-recorded-context/case.json").read_text())
-    assert calls[0]["messages"] == case["messages"]
-    assert calls[0]["tools"] == case["tools"]
+    config = replay.ReplayConfig(package_dir=package, coverage_profile="expanded-v4", temporal_history=True)
+    case, bundle = replay.load_inputs(config, PARAMS)
+    assert case["messages"] and case["tools"]
+    assert bundle["runtime"] and bundle["temporal_world"]
+    assert replay.actor_identity(
+        json.loads((package / "ngc-recorded-context/actor-params.json").read_text())
+    ) == replay.actor_identity(PARAMS)
     (package / "ngc-recorded-context/actor-params.json").write_text("{}")
     assert not prepared_bundle_matches(assets, package)
     with pytest.raises(ValueError, match="actor-params"):
@@ -123,7 +101,47 @@ def test_registry_prepare_verifies_assets_before_replacing_existing_data(tmp_pat
     else:
         assert registry.prepare().read_text() == raw
         assert registry.is_prepared_data_current(output)
-        assert prepare_ngc_replay.is_prepared_data_current(registry.REPLAY_FPATH)
         (registry.REPLAY_PACKAGE_DIR / "ngc-recorded-context/runtime.json").unlink()
         assert registry.REPLAY_FPATH.read_text() == raw
-        assert not prepare_ngc_replay.is_prepared_data_current(registry.REPLAY_FPATH)
+        assert not registry.is_prepared_data_current(output)
+
+
+@pytest.mark.parametrize("fault", [None, "source", "assets", "version", "existing"])
+def test_release_staging_changes_only_harness_metadata_and_never_publishes(tmp_path, assets, monkeypatch, fault):
+    from benchmarks.partner_if.stage_recorded_context_release import HARNESS, stage
+
+    # The second row's spacing and Unicode separator must survive byte for byte.
+    other = {
+        "responses_create_params": {"input": "preserve \u0085 spacing"},
+        "verifier_metadata": {"partner_if": {"task_id": "pif_028"}},
+    }
+    untouched = json.dumps(other, ensure_ascii=False, indent=None) + "\n"
+    original = json.dumps(TASK) + "\n" + untouched
+    source = tmp_path / "source.jsonl"
+    source.write_text(original)
+    monkeypatch.setattr(registry, "SHA256", hashlib.sha256(source.read_bytes()).hexdigest())
+    monkeypatch.setattr(registry, "REPLAY_ASSET_SHA256", hashlib.sha256(assets.read_bytes()).hexdigest())
+    monkeypatch.setattr(registry, "ROW_COUNT", 2)
+    output = tmp_path / "candidate"
+    if fault == "source":
+        source.write_text(original + " ")
+    elif fault == "assets":
+        assets.write_text(assets.read_text() + " ")
+    elif fault == "existing":
+        output.mkdir()
+    version = registry.VERSION if fault == "version" else "2.1.8"
+    if fault:
+        with pytest.raises((ValueError, FileExistsError)):
+            stage(source, assets, output, version=version)
+        assert not (output / registry.ARTIFACT).exists()
+        return
+    manifest = json.loads(stage(source, assets, output, version=version).read_text())
+    candidate = (output / registry.ARTIFACT).read_text()
+    assert candidate.endswith(untouched)
+    row = json.loads(candidate.split("\n")[0])
+    assert row.pop("recorded_context_harness") == HARNESS
+    assert row == TASK
+    assert (output / registry.REPLAY_ASSET_ARTIFACT).read_bytes() == assets.read_bytes()
+    assert source.read_text() == original
+    assert manifest["status"] == "local_candidate_not_published"
+    assert manifest["artifacts"][registry.ARTIFACT] == hashlib.sha256(candidate.encode()).hexdigest()

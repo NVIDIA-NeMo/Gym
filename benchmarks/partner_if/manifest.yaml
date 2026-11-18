@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 name: partner_if
-version: 0.3.0
+version: 0.4.0
 experimental: true
 kind: benchmark
 integration_profile: external-agent-loop
 domain: instruction_following
 description: Internal instruction-following tasks as text, tool, SWE and bounded recorded-context
-  ordering-prefix episodes. Shared partner_if verification; private registry rows
-  and replay assets.
+  Gymnasium episodes. Stock gymnasium_agent with PartnerIF Resources simulation and shared
+  verification; private registry rows and frozen assets.
 modality: text
 licensing: internal
 authors:

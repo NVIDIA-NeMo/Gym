@@ -6,6 +6,7 @@ from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 
 from resources_servers.partner_if.app import VerifyRequest
 from resources_servers.partner_if.checks import CheckContext, resolve
@@ -164,6 +165,39 @@ async def test_invalid_registry_is_unscorable_not_a_model_failure(tools):
     assert result.items[0].passed is None
 
 
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "#", "type": "object"},
+        {"$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}}, "$ref": "#/$defs/a"},
+    ],
+    ids=["self-reference", "mutual-local-references"],
+)
+def test_schema_recursion_limit_returns_an_unscorable_http_result(schema):
+    body = VerifyRequest.model_validate(
+        {
+            "responses_create_params": {
+                "input": [{"role": "user", "content": "Call ipython."}],
+                "tools": [tool() | {"parameters": schema}],
+            },
+            "verifier_metadata": {"partner_if": contract().model_dump()},
+            "response": response(output=[function_call()]).model_dump(),
+        }
+    )
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock) as judge:
+        with TestClient(server().setup_webserver(), raise_server_exceptions=False) as client:
+            result = client.post("/verify", json=body.model_dump(mode="json"))
+    assert result.status_code == 200
+    row = result.json()
+    assert row["mask_sample"] is True and row["evaluation_completed"] is False
+    assert row["failure_kind"] == "partner_if:unscorable"
+    assert "recursion limit" in row["failure_reason"]
+    assert row["if_result"]["status"] == row["grading_result"]["status"] == "unscorable"
+    assert row["grading_result"]["reward"] is None
+    assert row["grading_result"]["items"][0]["passed"] is None
+    judge.assert_not_called()
+
+
 def test_capture_gap_does_not_become_a_zero_call_failure():
     with pytest.raises(EvidenceUnavailable, match="capture failed"):
         run_check(EvidenceBundle(tools=[tool()], trajectory_error="capture failed"))
@@ -253,10 +287,19 @@ def test_reference_preflight_preserves_supported_dialects_and_cycles(draft):
         ],
     )
     assert run_check(evidence)
-    # A recursive definition need not be exercised by this empty object.
-    evidence.tools[0]["parameters"] = {"$schema": draft, "type": "object", "properties": {"next": {"$ref": "#"}}}
-    evidence.trajectory[0].arguments = {}
-    assert run_check(evidence)
+    evidence.trajectory[0].arguments = {"code": 123}
+    assert not run_check(evidence)
+    # Both root and local-definition recursion must validate nested instances normally.
+    for reference in ("#", "#/definitions/node"):
+        node = {"type": "object", "properties": {"next": {"$ref": reference}}}
+        evidence.tools[0]["parameters"] = {"$schema": draft} | (
+            node if reference == "#" else {"definitions": {"node": node}, "$ref": reference}
+        )
+        for arguments in ({}, {"next": {"next": {}}}):
+            evidence.trajectory[0].arguments = arguments
+            assert run_check(evidence)
+        evidence.trajectory[0].arguments = {"next": {"next": "not an object"}}
+        assert not run_check(evidence)
 
 
 async def test_frozen_calls_are_not_counted_as_new_calls_by_the_adapter():

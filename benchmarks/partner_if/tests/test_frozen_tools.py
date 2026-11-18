@@ -10,15 +10,15 @@ from uuid import uuid4
 import pytest
 
 from benchmarks.partner_if.tests.fixture_data import BUNDLE, PARAMS, RUNTIME, SOURCE
-from responses_api_agents.ngc_recorded_context.readonly_tools import CoverageGap, ReadonlyTools
-from responses_api_agents.ngc_recorded_context.replay import ReplayConfig, load_inputs, load_runtime
-from responses_api_agents.ngc_recorded_context.replay_fixtures import Fixtures
-from responses_api_agents.ngc_recorded_context.runtime_contract import RuntimeContract
+from resources_servers.partner_if.recorded_context.assets import ReplayConfig, load_inputs, load_runtime
+from resources_servers.partner_if.recorded_context.fixtures import Fixtures
+from resources_servers.partner_if.recorded_context.readonly_tools import CoverageGap, ReadonlyTools
+from resources_servers.partner_if.recorded_context.runtime_contract import RuntimeContract
 
 
 def state(**options):
     _, bundle = load_inputs(
-        ReplayConfig(package_dir=SOURCE / "assets", artifacts_dir="unused", coverage_profile="expanded-v4", **options),
+        ReplayConfig(package_dir=SOURCE / "assets", coverage_profile="expanded-v4", **options),
         PARAMS,
     )
     return Fixtures(bundle, session_id=uuid4().hex)
@@ -62,7 +62,7 @@ def test_optional_missing_runtime_paths_are_declared_not_invented():
     ],
 )
 def test_readonly_conditionals_preserve_exit_status(command, expected):
-    from responses_api_agents.ngc_recorded_context.replay_fixtures import shell_tokens
+    from resources_servers.partner_if.recorded_context.fixtures import shell_tokens
 
     assert state(shell_control_flow=True).readonly.run(shell_tokens(command))[0] == expected
 
@@ -161,7 +161,7 @@ def test_runtime_contract_rejects_ambiguous_or_unsafe_configuration(fault):
 def test_external_contract_requires_a_pin_and_checks_it_before_inputs(tmp_path):
     path = tmp_path / "runtime.json"
     path.write_text(json.dumps(RUNTIME))
-    config = ReplayConfig(package_dir=SOURCE / "assets", artifacts_dir=tmp_path, runtime_contract_path=path)
+    config = ReplayConfig(package_dir=SOURCE / "assets", runtime_contract_path=path)
     with pytest.raises(ValueError, match="requires runtime_contract_sha256"):
         load_runtime(config)
     config = config.model_copy(update={"runtime_contract_sha256": "0" * 64})
@@ -173,7 +173,7 @@ def test_external_contract_requires_a_pin_and_checks_it_before_inputs(tmp_path):
 
 def test_source_checkout_is_not_a_supported_runtime_dependency():
     with pytest.raises(ValueError):
-        ReplayConfig(package_dir=SOURCE / "assets", artifacts_dir="unused", agentic_if_root="../private")
+        ReplayConfig(package_dir=SOURCE / "assets", agentic_if_root="../private")
 
 
 @pytest.mark.parametrize("identifier", ["../outside", "", "a" * 33, "g" * 32])
@@ -184,7 +184,7 @@ def test_session_identifier_cannot_select_host_paths(identifier):
 
 @pytest.mark.parametrize("identifier", [None, "", "different_criterion"])
 def test_ordering_result_must_match_the_declared_criterion(identifier):
-    from responses_api_agents.ngc_recorded_context.prefix import ordering_outcome
+    from resources_servers.partner_if.recorded_context.prefix import ordering_outcome
 
     graded = {"reward": 1.0, "mask_sample": False, "if_result": {"items": [{"id": identifier, "passed": True}]}}
     with pytest.raises(ValueError):
@@ -192,7 +192,7 @@ def test_ordering_result_must_match_the_declared_criterion(identifier):
 
 
 def test_alternative_criterion_id_works_without_case_specific_source():
-    from responses_api_agents.ngc_recorded_context.prefix import ordering_outcome
+    from resources_servers.partner_if.recorded_context.prefix import ordering_outcome
 
     graded = {
         "reward": 1.0,

@@ -5,7 +5,7 @@
 import json
 from pathlib import PurePosixPath
 
-from responses_api_agents.ngc_recorded_context.readonly_tools import CoverageGap
+from resources_servers.partner_if.recorded_context.readonly_tools import CoverageGap
 
 
 def temporal_show(tokens: list[str], files: dict[str, str], world: dict) -> tuple[str, str]:
