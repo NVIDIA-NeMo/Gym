@@ -572,16 +572,17 @@ def _model_endpoint_error(events: list[tuple[float, dict[str, Any]]]) -> Optiona
     return None
 
 
-def _deadline_model_fault(attempts: list[dict[str, Any]] | None) -> NgFailureEvent | None:
+def _deadline_model_fault(attempts: list[dict[str, Any]] | None, *, started: int | None) -> NgFailureEvent | None:
     """The model endpoint fault a timed-out run's last forwarded model attempt recorded, or ``None``.
 
-    The sandbox forwarder records every upstream attempt of Codex's model calls. When the run's deadline arrived and
-    the last recorded attempt had failed to connect, been cut short, or answered a status Gym retries (408, 425, 429
-    or a 5xx), the deadline was spent on an unavailable endpoint rather than by the model, so the ladder retries the
-    run. An attempt still in flight at the deadline left no record, and an earlier failure that a later attempt
-    recovered from is not the last one: either way the deadline is the model's.
+    The sandbox forwarder records the start and the result of every upstream attempt of Codex's model calls. When the
+    run's deadline arrived, every started attempt had finished, and the last one had failed to connect, been cut
+    short, or answered a status Gym retries (408, 425, 429 or a 5xx), the deadline was spent on an unavailable
+    endpoint rather than by the model, so the ladder retries the run. An attempt still in flight at the deadline (a
+    start without a result, such as a retry after a 429) and an earlier failure that a later attempt recovered from
+    leave the deadline to the model. ``started`` is the number of recorded starts.
     """
-    if not attempts:
+    if not attempts or (started is not None and started > len(attempts)):
         return None
     last = attempts[-1]
     status = last.get("status")
@@ -1267,15 +1268,18 @@ class CodexAgent(SimpleResponsesAPIAgent):
             terminal = {**terminal, "upstream_attempt": attempts[-1]}
         # Any error above leaves no usable result, unless it is the provider failure Codex reported, which is the
         # run's classified error, or verify_after_agent_error grades it (below). The model replied if Codex emitted
-        # model output or the forwarder relayed a whole 200 reply.
+        # model output or the forwarder relayed a whole 200 reply (not one Codex hung up on before it arrived).
         evidence = RunEvidence(
             has_result=error is None,
             timed_out=timed_out,
             model_replied=any(_is_model_output(event) for _, event in events)
-            or any(attempt.get("status") == 200 and "transport_error" not in attempt for attempt in attempts),
+            or any(
+                attempt.get("status") == 200 and "transport_error" not in attempt and not attempt.get("cancelled")
+                for attempt in attempts
+            ),
             model_limit="output" if output_limited else None,
             error=self.classify_outcome(terminal) if reported_model_error else None,
-            infra_fault=_deadline_model_fault(attempts) if timed_out else None,
+            infra_fault=_deadline_model_fault(attempts, started=state.model_attempts_started) if timed_out else None,
         )
         status = decide_outcome(evidence).status
         # A reported provider failure keeps its classified outcome, so the Environment Server decides it. A run

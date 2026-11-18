@@ -79,6 +79,13 @@ def with_error(export: str, status: int) -> str:
     return json.dumps(rejected)
 
 
+def with_transport_error(export: str) -> str:
+    """The last model call failed without an HTTP status, which OpenCode marks retryable (a reset connection)."""
+    failed = json.loads(export)
+    failed["messages"][-1]["info"]["error"]["data"] = {"message": "ECONNRESET", "isRetryable": True}
+    return json.dumps(failed)
+
+
 def placeholder() -> str:
     """OpenCode saved the assistant message of a model call that had not answered yet."""
     export = json.loads(events())
@@ -111,6 +118,13 @@ EVENTS = {
         TIMED_OUT,
         "failed",
         {"failure_kind": "model_request_error", "status_code": 503},
+        OutcomeAction.RETRY,
+    ),
+    "deadline_after_reply_endpoint_unreachable": (
+        with_transport_error(rejected_events(after_work=True)),
+        TIMED_OUT,
+        "failed",
+        {"failure_kind": "model_transport_error"},
         OutcomeAction.RETRY,
     ),
     "deadline_after_reply_rejected_400": (

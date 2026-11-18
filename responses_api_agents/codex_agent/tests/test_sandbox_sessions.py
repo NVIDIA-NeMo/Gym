@@ -3821,24 +3821,30 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
 
 
 @pytest.mark.parametrize(
-    "attempts,expected",
+    "attempts,started,expected",
     [
-        (None, None),
-        ([], None),
-        ([{"status": 200}], None),
+        (None, None, None),
+        ([], 0, None),
+        ([{"status": 200}], 1, None),
         # Recovered: the last attempt answered.
-        ([{"status": 503}, {"status": 200}], None),
+        ([{"status": 503}, {"status": 200}], 2, None),
         # A rejection is not an unavailable endpoint.
-        ([{"status": 400}], None),
-        ([{"status": 503}], ("model_request_error", 503)),
-        ([{"status": 200}, {"status": 429}], ("model_request_error", 429)),
-        ([{"status": 408}], ("model_request_error", 408)),
-        ([{"status": None, "error": "connect ECONNREFUSED"}], ("model_transport_error", None)),
-        ([{"status": 200, "transport_error": "upstream response ended early"}], ("model_transport_error", None)),
+        ([{"status": 400}], 1, None),
+        ([{"status": 503}], 1, ("model_request_error", 503)),
+        ([{"status": 200}, {"status": 429}], 2, ("model_request_error", 429)),
+        ([{"status": 408}], 1, ("model_request_error", 408)),
+        ([{"status": None, "error": "connect ECONNREFUSED"}], 1, ("model_transport_error", None)),
+        ([{"status": 200, "transport_error": "upstream response ended early"}], 1, ("model_transport_error", None)),
+        # A retry still in flight at the deadline (after the forwarder's 429 wait, or Codex's own retry of a 503):
+        # the earlier failure is not what the deadline was spent on.
+        ([{"status": 429}], 2, None),
+        ([{"status": 200}, {"status": 503}], 3, None),
+        # No start records (an attempts file without them): the last result decides.
+        ([{"status": 503}], None, ("model_request_error", 503)),
     ],
 )
-def test_deadline_fault_is_the_last_forwarded_attempt_that_failed(attempts, expected):
-    fault = _deadline_model_fault(attempts)
+def test_deadline_fault_is_the_last_forwarded_attempt_that_failed(attempts, started, expected):
+    fault = _deadline_model_fault(attempts, started=started)
     assert (fault and (fault.failure_kind, fault.http_status)) == expected
     if fault is not None:
         assert fault.boundary == "model"
@@ -3846,6 +3852,8 @@ def test_deadline_fault_is_the_last_forwarded_attempt_that_failed(attempts, expe
 
 TIMED_OUT = {"timed_out": True, "return_code": 128 + signal.SIGKILL}
 STARTED = {"type": "turn.started"}
+# The forwarder's record of an upstream attempt it started; its result follows in a separate record.
+STARTED_ATTEMPT = {"started": True}
 
 
 # One Codex run event per row, through an agent session: the CLI events, the receipt and the forwarded model attempts
@@ -3876,11 +3884,49 @@ STARTED = {"type": "turn.started"}
         pytest.param(
             [STARTED, MODEL_OUTPUT, retry_notice(BAD_GATEWAY)],
             TIMED_OUT,
-            [{"status": 200}, {"status": 503}],
+            [STARTED_ATTEMPT, {"status": 200}, STARTED_ATTEMPT, {"status": 503}],
             "failed",
             {"failure_kind": "model_request_error", "status_code": 503},
             OutcomeAction.RETRY,
             id="deadline_after_reply_endpoint_503",
+        ),
+        pytest.param(
+            [STARTED, MODEL_OUTPUT, retry_notice(BAD_GATEWAY)],
+            TIMED_OUT,
+            [STARTED_ATTEMPT, {"status": 200}, STARTED_ATTEMPT, {"status": 503}, STARTED_ATTEMPT],
+            "incomplete",
+            None,
+            OutcomeAction.VERIFY,
+            id="deadline_after_reply_retry_in_flight",
+        ),
+        pytest.param(
+            [STARTED],
+            TIMED_OUT,
+            [STARTED_ATTEMPT, {"status": 429}, STARTED_ATTEMPT],
+            "incomplete",
+            None,
+            OutcomeAction.VERIFY,
+            id="deadline_rate_limit_retry_in_flight",
+        ),
+        # A reply Codex hung up on before it arrived is no model reply: the 400 that follows is the first request
+        # the endpoint answered, so it is rejected. A whole reply before the 400 keeps it a graded model error.
+        pytest.param(
+            [STARTED, *codex_error(BAD_REQUEST)],
+            {"return_code": 1},
+            [STARTED_ATTEMPT, {"status": 200, "cancelled": True}, STARTED_ATTEMPT, {"status": 400}],
+            "failed",
+            {"failure_kind": "model_request_rejected"},
+            OutcomeAction.FAIL,
+            id="rejected_after_cancelled_reply",
+        ),
+        pytest.param(
+            [STARTED, *codex_error(BAD_REQUEST)],
+            {"return_code": 1},
+            [STARTED_ATTEMPT, {"status": 200}, STARTED_ATTEMPT, {"status": 400}],
+            "failed",
+            {"failure_kind": "model_request_error", "status_code": 400},
+            OutcomeAction.VERIFY,
+            id="rejected_after_whole_reply",
         ),
         pytest.param(
             [STARTED, MODEL_OUTPUT, *codex_error("model error")],

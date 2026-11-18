@@ -55,7 +55,7 @@ def classify_opencode_run(
         if message["info"].get("error"):
             error = error or json.dumps(message["info"]["error"])
             recorded_error = {"error": message["info"]["error"]}
-    if continuation and timed_out and (event := _first_error_event(stdout)) is not None:
+    if continuation and timed_out and (event := _last_error_event(stdout)) is not None:
         # The event names the failing boundary, for example an APIError with the provider's status.
         error = (
             error or f"OpenCode emitted an error event: {json.dumps(event.get('error') or event)[:ERROR_EVENT_CHARS]}"
@@ -136,9 +136,12 @@ def classify_opencode_run(
     )
 
 
-def _first_error_event(stdout: str) -> dict[str, Any] | None:
-    """The first explicit OpenCode error event, which an interrupted checkpoint must not hide."""
-    for line in stdout.splitlines():
+def _last_error_event(stdout: str) -> dict[str, Any] | None:
+    """The last explicit OpenCode error event, which an interrupted checkpoint must not hide.
+
+    The last one decides whether the deadline was the endpoint's: an earlier error the run recovered from does not.
+    """
+    for line in reversed(stdout.splitlines()):
         try:
             event = json.loads(line)
         except ValueError:

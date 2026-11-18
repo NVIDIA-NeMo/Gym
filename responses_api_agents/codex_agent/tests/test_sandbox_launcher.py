@@ -49,6 +49,13 @@ def rate_limit_proxy(base_url, attempts_path, *, timeout):
         process.wait(timeout=10)
 
 
+def attempt_results(path: Path) -> list[dict]:
+    """The forwarder's finished attempts, checking that each follows the record of its own start."""
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records[0::2] == [{"started": True}] * len(records[1::2]) and len(records) % 2 == 0, records
+    return records[1::2]
+
+
 @contextmanager
 def upstream_server(handler):
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -93,7 +100,7 @@ def test_forwarder_retries_only_429_and_retains_every_attempt(tmp_path, statuses
             assert response.headers["Content-Type"] == "text/event-stream"
             assert response.read() == b"data: first\n\ndata: last\n\n"
     assert requests == [("/v1/responses", "invocation", b'{"input":"task"}')] * len(statuses)
-    assert [json.loads(line)["status"] for line in attempts_path.read_text().splitlines()] == statuses
+    assert [record["status"] for record in attempt_results(attempts_path)] == statuses
 
 
 @pytest.mark.parametrize(
@@ -148,7 +155,7 @@ def test_forwarder_retains_only_completed_compaction_identity_without_changing_s
     with upstream_server(Upstream) as upstream, rate_limit_proxy(upstream, attempts_path, timeout=10) as proxy:
         with urlopen(Request(f"{proxy}/responses", data=json.dumps(payload).encode())) as forwarded:
             assert forwarded.read() == padding + wire
-    [attempt] = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+    [attempt] = attempt_results(attempts_path)
     assert attempt["status"] == 200
     assert attempt.get("compaction_response") == (
         {"response_id": "helper-id", "summary": "Summary café"} if damage is None else None
@@ -229,6 +236,49 @@ def test_retry_after_is_bounded_and_invalid_values_back_off(retry_after, delays)
     assert json.loads(computed.stdout) == delays
 
 
+def test_a_retry_in_flight_is_a_start_without_a_result(tmp_path):
+    """While the retry after a 429 waits on the endpoint, the file shows it started: a deadline then is not the 429's."""
+    second_request, release = Event(), Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        count = 0
+
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            Upstream.count += 1
+            if Upstream.count == 1:
+                self.send_response(429)
+                self.send_header("Retry-After", "0")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            second_request.set()
+            release.wait(5)
+            self.send_response(200)
+            self.send_header("Content-Length", "4")
+            self.end_headers()
+            self.wfile.write(b"done")
+
+    attempts_path = tmp_path / "attempts.jsonl"
+    with upstream_server(Upstream) as upstream, rate_limit_proxy(upstream, attempts_path, timeout=10) as proxy:
+        client = Thread(target=lambda: urlopen(Request(f"{proxy}/responses", data=b"{}"), timeout=10).read())
+        client.start()
+        try:
+            assert second_request.wait(5)
+            assert [json.loads(line) for line in attempts_path.read_text().splitlines()] == [
+                {"started": True},
+                {"status": 429},
+                {"started": True},
+            ]
+        finally:
+            release.set()
+            client.join(10)
+    assert [record["status"] for record in attempt_results(attempts_path)] == [429, 200]
+
+
 def test_connection_error_answers_502_and_records_the_error(tmp_path):
     with socket.socket() as unused:
         unused.bind(("127.0.0.1", 0))
@@ -282,10 +332,7 @@ def test_launcher_starts_codex_behind_the_forwarder(tmp_path):
         )
     assert launched.returncode == 0, launched.stderr
     assert requests == [("launcher-invocation", b"{}")] * 2
-    assert [json.loads(line)["status"] for line in (tmp_path / "model_attempts.jsonl").read_text().splitlines()] == [
-        429,
-        200,
-    ]
+    assert [record["status"] for record in attempt_results(tmp_path / "model_attempts.jsonl")] == [429, 200]
     assert json.loads(launched.stdout) == {"type": "turn.completed", "result": "done"}
 
 
@@ -329,7 +376,7 @@ def test_broken_429_body_is_recorded_and_retried(tmp_path, fault):
                     assert (response.status, response.read()) == (200, b"done")
         finally:
             release.set()
-    records = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+    records = attempt_results(attempts_path)
     assert [record["status"] for record in records] == [429, 200]
     assert records[0]["transport_error"]
     assert "transport_error" not in records[1]
@@ -372,7 +419,7 @@ def test_body_failure_retains_http_status_and_transport_error(tmp_path, fault):
                     body = response.read()
         finally:
             release.set()
-    records = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+    records = attempt_results(attempts_path)
     assert len(records) == 1
     assert records[0]["status"] == 200
     if fault == "server_error":
@@ -414,7 +461,8 @@ def test_codex_hanging_up_before_the_response_cancels_the_upstream_stream(tmp_pa
         time.sleep(0.3)
         hung_up.set()
         assert upstream_closed.wait(3)
-    assert [json.loads(line) for line in attempts_path.read_text().splitlines()] == [{"status": 200}]
+    # Codex hung up before the reply reached it: no model reply, and no upstream transport failure either.
+    assert attempt_results(attempts_path) == [{"status": 200, "cancelled": True}]
 
 
 def test_snapshot_joins_native_sessions_in_path_order(tmp_path):

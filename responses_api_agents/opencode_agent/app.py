@@ -2116,24 +2116,29 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             continuation=state.is_continuation,
         )
         error = error or outcome.error
+        evidence = outcome.evidence
+        if reported_error:
+            evidence = replace(evidence, error=self.classify_outcome(native_result))
+        elif evidence.timed_out:
+            evidence = replace(evidence, infra_fault=self._deadline_model_fault(outcome.recorded_error))
+        if state.session.expired and not evidence.stopped:
+            # finish_response counts an expired session's run as stopped; decide the same status here.
+            evidence = replace(evidence, stopped=True)
         # Without a recorded status, work the model did cannot count: the required tools were never confirmed.
         # A run that failed for another reason, or made no model call and ended early (timeout), keeps its cause.
         # OpenCode saves the assistant message before it connects MCP; parts or a finish show a model step ran.
+        # An error the ladder still grades (a deadline after a reply) is no other cause: the check applies.
         model_called = any(
             message["info"].get("role") == "assistant" and (message.get("parts") or message["info"].get("finish"))
             for message in export.get("messages", [])
         )
         if (
             mcp_unconfirmed
-            and not (error or failure or reported_error)
-            and (model_called or outcome.evidence.has_result)
+            and not (lifecycle_error or failure or reported_error)
+            and (model_called or evidence.has_result)
+            and (outcome.error is None or decide_outcome(evidence).status != "failed")
         ):
             error = lifecycle_error = mcp_unconfirmed
-        evidence = outcome.evidence
-        if reported_error:
-            evidence = replace(evidence, error=self.classify_outcome(native_result))
-        elif evidence.timed_out:
-            evidence = replace(evidence, infra_fault=self._deadline_model_fault(outcome.recorded_error))
         status = "failed" if lifecycle_error or failure else decide_outcome(evidence).status
         # Artifact message completion records a model turn, not the entire invocation.
         for record in observations.records:

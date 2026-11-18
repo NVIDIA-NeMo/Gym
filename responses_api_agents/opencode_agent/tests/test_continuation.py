@@ -619,6 +619,22 @@ def test_single_turn_timeout_keeps_existing_opencode_error_classification():
     assert status(outcome) == "incomplete" and outcome.error_type == "timeout"
 
 
+@pytest.mark.parametrize("statuses,last", [((400, 503), 503), ((503, 400), 400)])
+def test_timed_out_continuation_records_the_last_error_event(statuses, last):
+    """The deadline's fault is the error OpenCode emitted last: an earlier error the run went past does not decide."""
+    events = [{"type": "error", "error": {"name": "APIError", "data": {"statusCode": code}}} for code in statuses]
+    outcome = classify_opencode_run(
+        {"messages": [{"info": {"role": "assistant"}, "parts": []}]},
+        cleanup={"return_code": -9, "error": None, "timed_out": True, "cleanup_confirmed": True},
+        previous_session_id="opencode-session",
+        session_id="opencode-session",
+        stdout="\n".join([json.dumps(events[0]), "not json", json.dumps(events[1])]),
+        continuation=True,
+    )
+    assert outcome.recorded_error == {"error": events[-1]["error"]}
+    assert outcome.recorded_error["error"]["data"]["statusCode"] == last
+
+
 @pytest.mark.parametrize("prior_success", [False, True])
 @pytest.mark.parametrize("error_status", [None, 400, 503])
 def test_opencode_error_during_timeout_is_graded_unless_it_names_an_unavailable_endpoint(

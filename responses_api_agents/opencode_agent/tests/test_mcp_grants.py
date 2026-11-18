@@ -17,6 +17,7 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  #
     close_body,
     failed_message,
     lifecycle_reason,
+    rejected_events,
     seed,
     setup,
 )
@@ -166,6 +167,31 @@ def test_unconfirmed_status_keeps_an_earlier_failure_cause(setup, cause):  # noq
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200, closed.text
     sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("recorded_status", [400, 503])
+def test_errored_deadline_after_a_reply_still_needs_confirmed_tools(setup, recorded_status):  # noqa: F811
+    """A deadline after a reply is graded unless the error OpenCode recorded last names an endpoint fault. A graded
+    one is model work like any other, so unconfirmed required tools fail it closed; an endpoint fault keeps its cause.
+    """
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant("task_tools", required=True)]
+    export = json.loads(rejected_events(after_work=True))
+    export["messages"][-1]["info"]["error"]["data"]["statusCode"] = recorded_status
+    sandbox.events = json.dumps(export)
+    sandbox.result["timed_out"] = True
+    sandbox.result["return_code"] = -9
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=body)
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        if recorded_status == 400:
+            assert lifecycle_reason(agent, created.json()["agent_session_id"], result).startswith(_UNCONFIRMED)
+        else:
+            assert _UNCONFIRMED not in failed_message(result, "model_request_error")
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
 
 
 def test_configured_and_request_grants_are_both_kept(setup):  # noqa: F811
