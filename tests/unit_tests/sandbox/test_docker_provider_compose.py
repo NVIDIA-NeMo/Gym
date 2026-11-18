@@ -271,7 +271,10 @@ async def test_set_hosts_appends_the_names_to_etc_hosts_as_root(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("hosts", [{"bad\nname": "10.2.3.4"}, {"db": "127.0.0.1;touch /x"}, {"-bad": "10.2.3.4"}])
+@pytest.mark.parametrize(
+    "hosts",
+    [{"bad\nname": "10.2.3.4"}, {"db": "127.0.0.1;touch /x"}, {"-bad": "10.2.3.4"}, {"two names": "10.2.3.4"}],
+)
 async def test_set_hosts_refuses_what_is_not_a_hostname_and_an_address(monkeypatch, hosts):
     provider = make_provider(monkeypatch, lambda argv: (0, "", ""))
     with pytest.raises(ValueError):
@@ -552,4 +555,25 @@ async def test_services_reach_each_other_by_name(tmp_path, monkeypatch):
             assert f"{addresses['main']} main\n" in hosts
             assert f"{addresses['api']} api\n" in hosts
             assert f"{addresses['api']} api.internal\n" in hosts
+    assert daemon.containers == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "service,options,names",
+    [
+        ("worker_", {}, ["worker_"]),
+        ("worker", {"networks": {"default": {"aliases": ["cache-"]}}}, ["worker", "cache-"]),
+    ],
+)
+async def test_every_name_the_adapter_admits_is_written_to_etc_hosts(tmp_path, monkeypatch, service, options, names):
+    """A service name or alias may end in ``_`` or ``-``: the adapter admits it, so the hosts file takes it too."""
+    daemon = FakeDockerDaemon(tmp_path, IMAGES)
+    document = {"services": {service: {"image": API_IMAGE, "command": ["true"], **options}}}
+    group = collection(daemon, monkeypatch, document)
+    async with group:
+        container = daemon.containers[group.services[service]._require_handle().sandbox_id]
+        hosts = (container.fs / "etc" / "hosts").read_text()
+        for name in names:
+            assert f"{container.address} {name}\n" in hosts
     assert daemon.containers == {}

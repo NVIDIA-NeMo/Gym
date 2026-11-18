@@ -91,7 +91,9 @@ MIN_SUBPATH_API_VERSION = (1, 45)
 _VOLUME_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+")
 # Networks on which a container has no address of its own for peers to reach.
 _NETWORKS_WITHOUT_PEERS = ("none", "host")
-_HOSTNAME_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?")
+# A name the Compose adapter admits for a service or alias: one token of an /etc/hosts line, never an option or a
+# second field.
+_HOSTS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
 class DockerCreateError(SandboxCreateError):
@@ -1146,7 +1148,7 @@ class DockerProvider:
         self.validate_networking()
         lines = []
         for hostname, address in hosts.items():
-            if len(hostname) > 253 or not all(_HOSTNAME_LABEL.fullmatch(label) for label in hostname.split(".")):
+            if not _HOSTS_NAME.fullmatch(hostname):
                 raise ValueError(f"Invalid sandbox hostname: {hostname!r}")
             lines.append(shlex.quote(f"{ipaddress.ip_address(address)} {hostname}\n"))
         if not lines:
