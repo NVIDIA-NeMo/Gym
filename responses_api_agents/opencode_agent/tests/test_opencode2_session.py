@@ -237,8 +237,12 @@ def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
             "plugin dependencies",
         ),
         ({"opencode_version": "2.9.0"}, "no pinned release digest"),
-        # OpenCode 1's name for the compaction buffer: the error names OpenCode 2's.
-        ({"opencode_config": {"compaction": {"reserved": 8000}}}, "set compaction.buffer instead"),
+        # OpenCode 1's name for the compaction buffer: the error says to set OpenCode 2's instead. The config refuses it
+        # when it loads; the seed refuses it again in a config changed after that, as here.
+        (
+            {"opencode_config": {"compaction": {"reserved": 8000}}},
+            "remove compaction.reserved and set compaction.buffer (OpenCode 2's name for the buffer)",
+        ),
         ({"opencode_config": {"compaction": {"buffer": 32000}}}, "compaction.buffer must be below context_window"),
     ],
 )

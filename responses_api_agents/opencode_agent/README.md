@@ -219,9 +219,11 @@ automatic compaction starts after a call whose tokens reach `context_window` min
 the buffer is the smaller of 20000 and `max_output_tokens`. It moves only that trigger;
 `compaction.prune`, which rewrites earlier tool output, stays refused. A session refuses a buffer of
 `context_window` or more, which would compact after every call.
-OpenCode 2 renamed the setting `compaction.buffer`, and OpenCode 1.17.11 does not read that name. A
-session refuses `compaction.reserved` on OpenCode 2 and `compaction.buffer` on OpenCode 1 with HTTP 422,
-and the error names the setting to use.
+OpenCode 2 renamed the setting `compaction.buffer`, and OpenCode 1.17.11 does not read that name. The
+agent's config refuses `compaction.reserved` on OpenCode 2 and `compaction.buffer` on OpenCode 1 when it
+loads: validating the config reports it, the agent server does not start with it, and the local path
+never runs with it. A seed refuses one set after the config loaded, with HTTP 422. The error says to
+remove the other version's name and set this version's.
 `agent.build.steps` sets the step limit of the `build` agent, which the session runs, for each
 prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
 asks for a text answer. It still offers the tools, so a model that keeps calling them runs past
@@ -549,7 +551,7 @@ handled in `opencode2/`:
 - **Configuration.** The adapter writes OpenCode 2's schema for the provider, model, plugins, MCP servers and image
   limits. The session's `opencode_config` keys keep their OpenCode 1 form, which OpenCode 2 migrates: `bash` rules
   apply to its `shell` tool and `task` rules to `subagent`; `attachment` becomes `media`. The compaction buffer is
-  the exception: set `compaction.buffer`; the seed refuses `compaction.reserved`. OpenCode 2 assumes image input for
+  the exception: set `compaction.buffer`; the config refuses `compaction.reserved`. OpenCode 2 assumes image input for
   a model it does not know, so a text-only session declares `capabilities.input: ["text"]`.
 - **Plugin.** OpenCode 2 loads plugins from directories through a new API, so `opencode2/plugin/index.js` replaces
   the three OpenCode 1 plugin files. It gives tool shells the task's HOME and XDG directories, applies request

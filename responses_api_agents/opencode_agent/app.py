@@ -382,9 +382,10 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     - ``compaction.reserved`` (OpenCode 1) or ``compaction.buffer`` (OpenCode 2), a positive integer: the token
       buffer OpenCode keeps below ``context_window``. On OpenCode 1, automatic compaction starts after a call whose
       tokens reach ``context_window`` minus this buffer; unset, the buffer is the smaller of 20000 and
-      ``max_output_tokens``. It moves only that trigger. The seed refuses the other version's name, and a buffer of
-      ``context_window`` or more, which would compact after every call. ``compaction.prune`` stays refused: it
-      rewrites earlier tool output, so later calls stop extending the earlier calls' prefix.
+      ``max_output_tokens``. It moves only that trigger. The config refuses the other version's name when it loads
+      (``_compaction_buffer_name_error``); the seed refuses it again, and a buffer of ``context_window`` or more,
+      which would compact after every call. ``compaction.prune`` stays refused: it rewrites earlier tool output, so
+      later calls stop extending the earlier calls' prefix.
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
@@ -424,6 +425,34 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
         elif (error := _subagent_definition_error(str(name), definition)) is not None:
             return error
     return None
+
+
+def _is_opencode2(opencode_version: Any) -> bool:
+    """Whether ``opencode_version`` selects OpenCode 2, whose interfaces the ``opencode2`` package covers."""
+    try:
+        return opencode_major(opencode_version) >= 2
+    except (AttributeError, ValueError):
+        return False
+
+
+def _compaction_buffer_name_error(opencode_version: Any, opencode_config: Mapping[str, Any]) -> str | None:
+    """Return why ``opencode_config`` names the compaction buffer as the other OpenCode version does, or ``None``.
+
+    OpenCode 1 names the buffer ``compaction.reserved`` and OpenCode 2 ``compaction.buffer``. Each version is given only
+    its own name: OpenCode 1.17 drops a compaction key it does not know, so a run given ``buffer`` would compact at the
+    default threshold without an error.
+    """
+    compaction = opencode_config.get("compaction")
+    if not isinstance(compaction, Mapping):
+        return None
+    major = 2 if _is_opencode2(opencode_version) else 1
+    key, other = ("buffer", "reserved") if major == 2 else ("reserved", "buffer")
+    if other not in compaction:
+        return None
+    return (
+        f"opencode_version {opencode_version} is OpenCode {major}: remove compaction.{other} and set "
+        f"compaction.{key} (OpenCode {major}'s name for the buffer)"
+    )
 
 
 def _configured_subagents(opencode_config: Mapping[str, Any]) -> list[str]:
@@ -602,6 +631,16 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_compaction_buffer_name(self) -> Self:
+        # Refused when the config loads: a config that every seed would refuse stops the server at startup, and the
+        # local path, which has no seed, does not hand OpenCode the other version's name. The seed checks again, for a
+        # config changed after it loaded.
+        error = _compaction_buffer_name_error(self.opencode_version, self.opencode_config)
+        if error is not None:
+            raise ValueError(error)
+        return self
+
     @property
     def command_parts(self) -> list[str]:
         return shlex.split(self.command)
@@ -679,10 +718,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     @property
     def _opencode2(self) -> bool:
         """Whether ``opencode_version`` selects OpenCode 2, whose interfaces the ``opencode2`` package covers."""
-        try:
-            return opencode_major(self.config.opencode_version) >= 2
-        except (AttributeError, ValueError):
-            return False
+        return _is_opencode2(self.config.opencode_version)
 
     async def _ensure_local_runtime(self) -> str | None:
         """Install the local runtime once; for OpenCode 2, return the pinned release binary to run."""
@@ -1163,17 +1199,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         config_error = _session_opencode_config_error(self.config.opencode_config)
         if config_error is not None:
             raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
+        # The config refused the other version's name for the compaction buffer when it loaded; this refuses it in a
+        # config changed after that.
+        buffer_name_error = _compaction_buffer_name_error(self.config.opencode_version, self.config.opencode_config)
+        if buffer_name_error is not None:
+            raise AgentSeedRejectedError(f"OpenCode sandbox config: {buffer_name_error}")
         compaction = self.config.opencode_config.get("compaction", {})
-        # OpenCode 1 names the compaction buffer `reserved` and OpenCode 2 `buffer`. Each version is given only its own
-        # name: OpenCode 1.17 drops a compaction key it does not know, so a run given `buffer` would compact at the
-        # default threshold without an error.
-        key, other = ("buffer", "reserved") if self._opencode2 else ("reserved", "buffer")
-        if other in compaction:
-            raise AgentSeedRejectedError(
-                f"OpenCode sandbox config: compaction.{other} is the OpenCode {1 if self._opencode2 else 2} name of "
-                f"the compaction buffer; OpenCode {self.config.opencode_version} reads compaction.{key}: set "
-                f"compaction.{key} instead"
-            )
+        key = "buffer" if self._opencode2 else "reserved"
         # The allowlist made a set buffer a positive integer. OpenCode compacts once a call comes within the buffer of
         # context_window, so a buffer of the whole window compacts after every call until the budget ends.
         if compaction.get(key, 0) >= self.config.context_window:

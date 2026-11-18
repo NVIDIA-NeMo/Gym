@@ -49,7 +49,11 @@ from responses_api_agents.opencode_agent.app import (
     _session_opencode_config_error,
 )
 from responses_api_agents.opencode_agent.legacy_app import OpenCodeLegacyAgent
-from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
+from responses_api_agents.opencode_agent.runtime import (
+    OPENCODE_V2_VERSION,
+    OPENCODE_VERSION,
+    UNRESTRICTED_IMAGE_ATTACHMENT,
+)
 
 
 def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
@@ -1289,9 +1293,16 @@ def test_either_marker_identifies_a_compaction_summary(setup, marker):
         # The whole context window (32000 here) or more: OpenCode would compact after every call.
         ({"compaction": {"reserved": 32000}}, "compaction.reserved must be below context_window"),
         ({"compaction": {"reserved": 40000}}, "compaction.reserved must be below context_window"),
-        # OpenCode 2's name for the buffer, which OpenCode 1.17.11 does not read: the error names the setting to use.
-        ({"compaction": {"buffer": 8000}}, "set compaction.reserved instead"),
-        ({"compaction": {"reserved": 8000, "buffer": 8000}}, "set compaction.reserved instead"),
+        # OpenCode 2's name for the buffer, which OpenCode 1.17.11 does not read: the error says what to set instead.
+        # The config refuses it when it loads; the seed refuses it again in a config changed after that, as here.
+        (
+            {"compaction": {"buffer": 8000}},
+            "remove compaction.buffer and set compaction.reserved (OpenCode 1's name for the buffer)",
+        ),
+        (
+            {"compaction": {"reserved": 8000, "buffer": 8000}},
+            "remove compaction.buffer and set compaction.reserved (OpenCode 1's name for the buffer)",
+        ),
         ({"agent": {"plan": {"steps": 4}}}, "agent.plan is not a subagent name"),
         ({"agent": {"build": {"prompt": "other"}}}, "agent.build supports only steps"),
         ({"agent": {"build": {"steps": 0}}}, "agent.build.steps must be a positive integer"),
@@ -1319,9 +1330,41 @@ def test_seed_rejects_opencode_config_outside_the_session_allowlist(setup, openc
 
 @pytest.mark.parametrize("name", ["reserved", "buffer"])
 def test_the_allowlist_takes_either_versions_name_for_the_compaction_buffer(name):
-    """The allowlist does not know the OpenCode version, so a preset can be checked without an agent; the seed then
-    refuses the name its version does not use."""
+    """The allowlist does not know the OpenCode version, so a preset can be checked without an agent; the config, when
+    it loads, and the seed then refuse the name its version does not use."""
     assert _session_opencode_config_error({"compaction": {"auto": True, name: 8000}}) is None
+
+
+@pytest.mark.parametrize(
+    ("opencode_version", "other", "detail"),
+    [
+        (
+            OPENCODE_V2_VERSION,
+            "reserved",
+            "remove compaction.reserved and set compaction.buffer (OpenCode 2's name for the buffer)",
+        ),
+        (
+            OPENCODE_VERSION,
+            "buffer",
+            "remove compaction.buffer and set compaction.reserved (OpenCode 1's name for the buffer)",
+        ),
+    ],
+)
+def test_the_config_refuses_the_other_versions_compaction_buffer_name_when_it_loads(
+    setup, opencode_version, other, detail
+):
+    """A config that every seed would refuse stops the agent server before it starts, and a local run, which has no
+    seed, never hands OpenCode the other version's name."""
+    agent, _ = setup
+    settings = agent.config.model_dump() | {"opencode_version": opencode_version}
+    with pytest.raises(ValidationError) as refused:
+        OpenCodeAgentConfig(**(settings | {"opencode_config": {"compaction": {"auto": True, other: 8000}}}))
+    assert f"opencode_version {opencode_version} is OpenCode" in str(refused.value)
+    assert detail in str(refused.value)
+    # The version's own name loads.
+    own = "buffer" if other == "reserved" else "reserved"
+    config = OpenCodeAgentConfig(**(settings | {"opencode_config": {"compaction": {"auto": True, own: 8000}}}))
+    assert config.opencode_config == {"compaction": {"auto": True, own: 8000}}
 
 
 def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
