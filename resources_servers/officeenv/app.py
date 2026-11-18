@@ -513,7 +513,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     def _refuse_after_task_end(self, session_id: str) -> None:
         """With ``close_tools_on_task_end``, refuse a call once one has returned with the episode's task ended."""
         if self.config.close_tools_on_task_end and self._task_ends.get(session_id, False):
-            raise HTTPException(status_code=409, detail="The task has ended: its tools are closed")
+            raise ResourcesSessionConflictError("The task has ended: its tools are closed")
 
     def _publish_task_state(self, session_id: str) -> bool:
         """Publish the task state a whole call left (``GET /task_state``), while the session holds its world: whether
