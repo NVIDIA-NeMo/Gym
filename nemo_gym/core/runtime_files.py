@@ -69,6 +69,9 @@ _T = TypeVar("_T")
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # Keeps the leaf folder name well under the 255-byte limit after the timestamp and random suffix.
 _MAX_LABEL_LENGTH = 100
+# Keeps the rollout folder's name under the 255-byte limit: percent-encoding can triple a rollout id's length.
+# The leaf's random suffix keeps two rollouts that share a cut-off name from overwriting each other.
+_MAX_ROLLOUT_LENGTH = 200
 # The rollout folder of kept files for a request that carries no rollout id.
 _NO_ROLLOUT = "no-rollout"
 # How many save_dir copies one process runs at once. They get their own threads, so queued copies never hold the
@@ -138,19 +141,12 @@ async def async_request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | No
     Under an anyio cancel scope, which cancels again at every await, the block can exit before the folder is gone;
     the removal then finishes in the background.
     """
-    loop = asyncio.get_running_loop()
-    creating = loop.run_in_executor(_temp_dir_executor, _create_temp_dir, name, temp_dir)
-    try:
-        path = await asyncio.shield(creating)
-    except asyncio.CancelledError:
-        # The thread may still create the folder after this task is cancelled; remove it once it does.
-        creating.add_done_callback(_remove_created_dir)
-        raise
+    path = await _create_temp_dir_off_loop(name, temp_dir)
     try:
         yield path
     finally:
         # Shielded, so a second cancellation while the folder is being removed does not leave it behind.
-        await asyncio.shield(loop.run_in_executor(_temp_dir_executor, remove_tree, path))
+        await asyncio.shield(asyncio.get_running_loop().run_in_executor(_temp_dir_executor, remove_tree, path))
 
 
 def session_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Path:
@@ -160,9 +156,17 @@ def session_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -
     finish, under the session's lock. Remove what remains when the server shuts down; the process exit removes
     anything left after that.
 
-    This blocks on filesystem calls; a coroutine that creates many sessions runs it in a thread.
+    This blocks on filesystem calls; use :func:`async_session_temp_dir` in a coroutine.
     """
     return _create_temp_dir(name, temp_dir, prefix=_SESSION_PREFIX)
+
+
+async def async_session_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Path:
+    """:func:`session_temp_dir` for a coroutine: the folder is created on the same threads as request folders use.
+
+    A folder created after the caller was cancelled is removed, since the caller never received it.
+    """
+    return await _create_temp_dir_off_loop(name, temp_dir, prefix=_SESSION_PREFIX)
 
 
 def remove_temp_dir(path: Path) -> bool:
@@ -207,7 +211,7 @@ def process_temp_dir(name: str, *, temp_dir: str | Path | None = None) -> Path:
     def make(folder: Path) -> Path:
         # A name has no dot, so this never collides with a request or session folder.
         path = folder / f"process.{name}"
-        path.mkdir(exist_ok=True)
+        path.mkdir(mode=0o700, exist_ok=True)
         return path
 
     return _in_process_dir(temp_dir, make)
@@ -358,7 +362,8 @@ def _process_dir(parent: Path) -> Path:
         if folder is not None:
             return folder
         folder = parent / _process_dir_name()
-        folder.mkdir()
+        # Private like the folders in it: a configured temp_dir may be a folder other users can open.
+        folder.mkdir(mode=0o700)
         if not _exit_handler_registered:
             atexit.register(_remove_own_process_dirs, os.getpid())
             _exit_handler_registered = True
@@ -428,12 +433,14 @@ def _temp_parent(temp_dir: str | Path | None) -> Path:
             ) from error
         # Checked here, on the node that writes, because the mount table differs per node.
         warn_if_unsuitable(TEMP_DIR_KEY_NAME, parent)
-        # Removing leftovers is housekeeping: it must never fail the request that triggered it.
-        try:
-            _remove_stale_process_dirs(parent)
-        except Exception:
-            logger.warning("Could not remove leftover temporary folders under %s", parent, exc_info=True)
         _checked_temp_parents.add(parent)
+    # Outside the lock: leftovers can be large trees, and other threads' first uses and session removals take the
+    # lock. It removes only folders of processes that are no longer running, so it races with nothing this process
+    # makes meanwhile. Removing leftovers is housekeeping: it must never fail the request that triggered it.
+    try:
+        _remove_stale_process_dirs(parent)
+    except Exception:
+        logger.warning("Could not remove leftover temporary folders under %s", parent, exc_info=True)
     return parent
 
 
@@ -475,6 +482,19 @@ def _create_temp_dir(name: str, temp_dir: str | Path | None, *, prefix: str = ""
     return _in_process_dir(temp_dir, lambda folder: Path(tempfile.mkdtemp(prefix=f"{prefix}{name}-", dir=folder)))
 
 
+async def _create_temp_dir_off_loop(name: str, temp_dir: str | Path | None, *, prefix: str = "") -> Path:
+    """Create a temporary folder on the temporary folder threads, removing it if the caller is cancelled first."""
+    creating = asyncio.get_running_loop().run_in_executor(
+        _temp_dir_executor, partial(_create_temp_dir, name, temp_dir, prefix=prefix)
+    )
+    try:
+        return await asyncio.shield(creating)
+    except asyncio.CancelledError:
+        # The thread may still create the folder after this task is cancelled; remove it once it does.
+        creating.add_done_callback(_remove_created_dir)
+        raise
+
+
 def _remove_created_dir(creating: asyncio.Future[Path]) -> None:
     if not creating.cancelled() and creating.exception() is None:
         # A done callback runs on the event loop, so the removal goes to a thread.
@@ -507,7 +527,7 @@ def _kept_dir(server_name: str, name: str, label: str | None, output_dir: str | 
     if label:
         leaf += "-" + quote(label, safe="")[:_MAX_LABEL_LENGTH]
     leaf += "-" + uuid4().hex[:12]
-    rollout = quote(current_rollout_id() or _NO_ROLLOUT, safe="")
+    rollout = quote(current_rollout_id() or _NO_ROLLOUT, safe="")[:_MAX_ROLLOUT_LENGTH]
     if rollout in (".", ".."):
         # quote leaves dots alone, and these would name the folder itself or its parent.
         rollout = rollout.replace(".", "%2E")

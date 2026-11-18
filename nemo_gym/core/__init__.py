@@ -173,6 +173,7 @@ if TYPE_CHECKING:
     from nemo_gym.core.runtime_files import (
         async_remove_temp_dir,
         async_request_temp_dir,
+        async_session_temp_dir,
         process_temp_dir,
         remove_temp_dir,
         request_temp_dir,
@@ -337,6 +338,7 @@ _PUBLIC_API = {
     "verifier_invocation_context": "episode_context",
     "async_remove_temp_dir": "runtime_files",
     "async_request_temp_dir": "runtime_files",
+    "async_session_temp_dir": "runtime_files",
     "process_temp_dir": "runtime_files",
     "remove_temp_dir": "runtime_files",
     "request_temp_dir": "runtime_files",
