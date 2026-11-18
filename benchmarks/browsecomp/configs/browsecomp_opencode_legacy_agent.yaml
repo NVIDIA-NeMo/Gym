@@ -254,3 +254,5 @@ opencode_sandboxed_search_environment_server:
       agent_server:
         type: responses_api_agents
         name: opencode_sandboxed_search_agent
+      # Six hours, equal to the agent's own sandbox_timeout above; a 4-hour job time limit ends a run before either.
+      default_episode_timeout_seconds: 21600

@@ -416,8 +416,11 @@ def test_the_readme_gives_each_time_limit_the_presets_value() -> None:
     assert {name: documented.get(name) for name in composed} == composed
     # Each judge attempt is one call_judge, which retries on its own.
     assert f"tries up to {JUDGE_CALL_MAX_ATTEMPTS} times" in section
-    # The section says the relay preset has no episode deadline.
-    assert settings(relay, RELAY_ENVIRONMENT).get("default_episode_timeout_seconds") is None
+    # The section gives the relay preset's episode limit, six hours, in words: as `setting: value` it would replace the
+    # session preset's value read above. The preset sets it rather than rely on legacy_agent's default.
+    relay_environment = settings(relay, RELAY_ENVIRONMENT)
+    assert "default_episode_timeout_seconds" in relay_environment
+    assert relay_environment["default_episode_timeout_seconds"] == 21600
 
 
 def test_the_readme_gives_the_judge_the_time_the_deadline_leaves() -> None:

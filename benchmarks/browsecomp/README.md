@@ -73,8 +73,10 @@ command that selects it with `--benchmark browsecomp/configs/browsecomp_opencode
 `--benchmark browsecomp/configs/browsecomp_opencode_legacy_agent`. Under the old name it gets the session preset, which
 does not compose without the OpenCode pins and the judge (see [Run the session preset](#run-the-session-preset)) and
 declares no `opencode_sandboxed_search_agent`, so a relay launch fails instead of running the other harness. A relay
-run started under the old name resumes under the new one: the preset's settings are unchanged, and the identity a run
-saves for its resume holds no config file path.
+run started under the old name resumes under the new one, since the identity a run saves for its resume holds no config
+file path. The preset's one new setting, its relay's episode limit (see [Time limits](#time-limits)), is a timeout, so
+the resume reports it as drift and goes on; a run saved with only its configuration's digest does not resume, since the
+resume cannot name what changed.
 
 The session preset repeats the relay preset's settings where `opencode_agent` has them: OpenCode 1.17.11 with its
 stock system prompt and thinking on; the same questions and user turn (`prepare_opencode.py` writes them without the
@@ -130,8 +132,8 @@ whatever export the run left, unless its `/run` fails:
 | The plugins did not load as configured | The agent's `/run` answers 500 when the sentinel's line is missing: a failure row | Scored 0 without a judge call, as below |
 | The plugin log is missing, unsafe to read or lacks a line it must hold, as when the run's tools deleted, replaced, filled or edited it | Not applicable: the agent reads its run output | Scored 0 without a judge call, unmasked (`failure_outcome_action: count_as_zero`): `opencode_search:plugin_log_missing` when it is absent and `opencode_search:plugin_log_incomplete` when it lacks the sentinel's line or a required line, both counted against the evaluation (`failure_outcome_attribution: evaluation`), since a broken image or plugin bundle can cause them too; `opencode_search:plugin_log_unsafe` for a link, a file that is not regular or cannot be read, or one over 4 MiB, counted as the model's (`failure_outcome_attribution: model`). When `plugin_log_max_consecutive_failures` (25) such episodes come in a row, `/verify` answers 500 instead of a 0 for the last of them and for each later such episode, until a log passes: a non-terminal failure row, so one fewer in a row is scored 0 (see the note below the table) |
 | `/verify` cannot read the plugin log | Not applicable: the agent reads its run output | `/verify` answers 500 when the read fails, times out or comes back cut short or malformed: a non-terminal failure row |
-| The run budget runs out | Graded, not masked | The same |
-| The episode outlives `default_episode_timeout_seconds` | No episode deadline | A non-terminal failure row ("Episode timed out") |
+| The run budget runs out | The relay's six-hour episode limit, which also counts the sandbox start, OpenCode's install and `/verify`, ends the episode first (next row) | Graded, not masked |
+| The episode outlives `default_episode_timeout_seconds` | Six hours after the relay calls the agent's `/run`: a failure row ("Episode timed out") that a resume does not run again, since the agent may still have answered | A non-terminal failure row ("Episode timed out") |
 | The judge gives no verdict in any attempt | Scored 0, unmasked, `judge_unparseable`, as a 0 counted against the evaluation (`failure_outcome_action: count_as_zero`, `failure_outcome_attribution: evaluation`); masked instead with `unparseable_verdict_policy: mask`, which training sets (see [Training](#training)). A run that ended on its budget keeps that kind and mask | The same |
 | The judge never answers | A `judge_failed` failures-sidecar row | The same |
 | `judge_max_consecutive_failures` rollouts in a row get no verdict | `/verify` answers 500 for that rollout and each later one without a verdict, until a verdict resets the count, so the agent's `/run` answers 500: a failure row | The same `/verify` 500: a non-terminal failure row |
@@ -190,8 +192,11 @@ other step once at its configured timeout, a run that used its whole budget leav
 agent's close and a sandbox stop that fails and is tried again can take longer and leave it less. A judge that needs
 more than is left, as its retries allow, times the episode out. A job time limit shorter than the run budget ends such
 runs first. `ttl_s` stays above the deadline plus two cleanup steps, since `/verify` stops the sandbox before it calls
-the judge and, after a deadline, the cleanup stops it. The relay preset has no episode deadline: its agent's
-`sandbox_timeout: 21600` bounds the run, and the judge's limits are the same.
+the judge and, after a deadline, the cleanup stops it. The relay preset's `legacy_agent` relay ends an episode still
+running six hours after it calls the agent's `/run`, the length of its agent's run budget, `sandbox_timeout: 21600`.
+That limit also counts the sandbox start, OpenCode's install and `/verify`, so a run that uses its whole budget ends at
+the limit rather than being graded; a job time limit under six hours ends such runs first. The judge's limits are the
+same.
 
 ### Row fields
 
