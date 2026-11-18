@@ -61,6 +61,35 @@ def test_a_server_that_does_not_come_up_in_time_fails_the_wait(monkeypatch: pyte
     assert connections.attempts < 50
 
 
+def test_a_server_that_comes_up_only_after_the_deadline_is_not_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One refusal, then it accepts. With a 3 s interval the next attempt used to come at 3 s, long after the 0.1 s limit,
+    # and succeed; now the sleep is capped at the time left and the deadline is checked before that attempt.
+    connections = _Connections(refusals=1)
+    monkeypatch.setattr(app_module.socket, "create_connection", connections)
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="did not accept connections within 0.1 s"):
+        _wait_for_server("judge-node:8000", interval_seconds=3, timeout_s=0.1)
+
+    assert time.monotonic() - started < 1
+    assert connections.attempts == 1
+
+
+def test_a_connection_attempt_is_capped_at_the_time_left(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+
+    def create_connection(address, timeout=None):
+        seen.append(timeout)
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(app_module.socket, "create_connection", create_connection)
+
+    with pytest.raises(TimeoutError):
+        _wait_for_server("judge-node:8000", interval_seconds=0.01, timeout_s=0.2)
+
+    assert all(0 < timeout <= 0.2 for timeout in seen)
+
+
 def test_a_server_that_comes_up_in_time_ends_the_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     connections = _Connections(refusals=2)
     monkeypatch.setattr(app_module.socket, "create_connection", connections)

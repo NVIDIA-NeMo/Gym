@@ -95,7 +95,24 @@ class TestApp:
         with pytest.raises(TimeoutError, match="was not up within 25"):
             server.setup_webserver()
 
-        assert server.server_client.poll_for_status.call_count == 4
+        assert server.server_client.poll_for_status.call_count == 3  # at 0 s, 10 s and 20 s
+
+    def test_a_model_server_that_comes_up_only_after_the_deadline_is_not_accepted(self, monkeypatch) -> None:
+        server = self._setup_server(model_server_wait_timeout_seconds=5)
+        now = [0.0]
+        monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "monotonic", lambda: now[0])
+        # The sleep is capped at the 5 s that remain, not the usual 10 s, so the next poll never happens after the limit.
+        monkeypatch.setattr(
+            responses_api_models.local_vllm_model_proxy.app,
+            "sleep",
+            lambda seconds: now.__setitem__(0, now[0] + seconds),
+        )
+        server.server_client.poll_for_status.side_effect = ["error", "success"]
+
+        with pytest.raises(TimeoutError, match="was not up within 5"):
+            server.setup_webserver()
+
+        assert server.server_client.poll_for_status.call_count == 1
 
     def test_the_config_request_carries_the_limit_and_no_limit_means_none(self, monkeypatch) -> None:
         for limit in (None, 30):

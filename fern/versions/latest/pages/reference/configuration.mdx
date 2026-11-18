@@ -265,8 +265,10 @@ opens. Each is a positive whole number, and a bad value is an error:
 - `NEMO_GYM_SSH_CONNECT_TIMEOUT_S` is `ssh -o ConnectTimeout`, the limit on the connect and the handshake.
 - `NEMO_GYM_SSH_SERVER_ALIVE_INTERVAL_S` and `NEMO_GYM_SSH_SERVER_ALIVE_COUNT_MAX` make ssh probe a quiet link and
   drop it after that many unanswered probes.
-- `NEMO_GYM_SSH_COMMAND_TIMEOUT_S` limits each ssh or rsync command from start to finish. Set it above the longest copy
-  you expect.
+- `NEMO_GYM_SSH_COMMAND_TIMEOUT_S` limits each ssh or rsync command from start to finish, including the remote reader
+  that recovery and status runs on the login host. A command still running at the limit is killed, which ends its
+  remote shell as an interruption does. Set it above the longest copy you expect and above the reader's bound (see
+  `NEMO_GYM_REMOTE_READER_TIMEOUT_S`, which can reach four hours).
 
 ### Listen Backlog
 

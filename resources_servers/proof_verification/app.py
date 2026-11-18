@@ -81,23 +81,29 @@ def _get_judge_client_config() -> tuple[str, str, int, list[str]]:
 def _wait_for_server(server_address: str, *, interval_seconds: float = 3.0, timeout_s: Optional[float] = None) -> None:
     """Wait until the external judge server starts accepting TCP connections.
 
-    With `timeout_s`, raises TimeoutError once the server has not answered for that many seconds; None waits without limit.
+    With `timeout_s`, raises TimeoutError once the server has not answered for that many seconds; None waits without
+    limit. The deadline is checked before every attempt and caps each attempt and sleep, so a server that answers only
+    after the deadline is not accepted.
     """
     host, port_str = server_address.rsplit(":", 1)
     port = int(port_str)
     LOG.info("Waiting for external judge server at %s", server_address)
     deadline = None if timeout_s is None else time.monotonic() + timeout_s
+    last_error: Optional[OSError] = None
     while True:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError(
+                f"External judge server at {server_address} did not accept connections within {timeout_s} s"
+            ) from last_error
         try:
-            with socket.create_connection((host, port), timeout=5):
+            with socket.create_connection((host, port), timeout=5 if remaining is None else min(5, remaining)):
                 pass
             break
         except OSError as error:
-            if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"External judge server at {server_address} did not accept connections within {timeout_s} s"
-                ) from error
-            time.sleep(interval_seconds)
+            last_error = error
+            remaining = None if deadline is None else deadline - time.monotonic()
+            time.sleep(interval_seconds if remaining is None else max(0.0, min(interval_seconds, remaining)))
     LOG.info("External judge server at %s is ready", server_address)
 
 

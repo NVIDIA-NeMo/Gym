@@ -21,6 +21,7 @@ from typing import ClassVar, Dict, Tuple
 import ray
 import requests
 from ray import available_resources, cluster_resources
+from ray.exceptions import GetTimeoutError
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from requests.exceptions import ConnectionError, Timeout
@@ -239,32 +240,50 @@ Total Ray cluster resources: {cluster_resources()}""")
     def await_server_ready(self) -> None:
         timeout_s = self.config.server_ready_timeout_seconds
         deadline = None if timeout_s is None else monotonic() + timeout_s
+
+        def remaining_s() -> float | None:
+            return None if deadline is None else deadline - monotonic()
+
+        def not_ready() -> TimeoutError:
+            return TimeoutError(f"{self.config.name} LocalVLLMModel server was not ready within {timeout_s} s")
+
         poll_count = 0
         while True:
-            is_alive = ray.get(self._local_vllm_model_actor.is_alive.remote())
+            # Expiry is checked before every probe, so a check that returns late cannot start another one.
+            remaining = remaining_s()
+            if remaining is not None and remaining <= 0:
+                raise not_ready()
+            alive_check = self._local_vllm_model_actor.is_alive.remote()
+            if remaining is None:
+                is_alive = ray.get(alive_check)
+            else:
+                try:
+                    is_alive = ray.get(alive_check, timeout=remaining)
+                except GetTimeoutError:
+                    raise not_ready() from None
             assert is_alive, f"{self.config.name} LocalVLLMModel server spinup failed, see the error logs above!"
 
             try:
-                if deadline is None:
+                remaining = remaining_s()
+                if remaining is None:
                     requests.get(url=f"{self.config.base_url[0]}/models")
                 else:
+                    if remaining <= 0:
+                        raise not_ready()
                     # Each poll gets a time limit too, so a server that accepts the connection and never answers
                     # cannot outlast the deadline.
-                    requests.get(
-                        url=f"{self.config.base_url[0]}/models", timeout=max(0.1, min(10.0, deadline - monotonic()))
-                    )
+                    requests.get(url=f"{self.config.base_url[0]}/models", timeout=min(10.0, remaining))
                 return
             except (ConnectionError, Timeout):
-                if deadline is not None and monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"{self.config.name} LocalVLLMModel server was not ready within {timeout_s} s"
-                    ) from None
+                remaining = remaining_s()
+                if remaining is not None and remaining <= 0:
+                    raise not_ready() from None
 
                 if poll_count % 10 == 0:  # Print every 30s
                     print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
 
                 poll_count += 1
-                sleep(3)
+                sleep(3 if remaining is None else min(3, remaining))
 
 
 if __name__ == "__main__":

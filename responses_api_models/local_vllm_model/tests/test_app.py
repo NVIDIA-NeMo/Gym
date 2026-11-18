@@ -291,15 +291,23 @@ class TestApp:
 class TestAwaitServerReady:
     """`await_server_ready` waits for the launched vLLM server, for as long as its actor is alive unless limited."""
 
-    def _server(self, monkeypatch, *, timeout_s, answers: list):
-        """A stand-in server. `answers` is what each poll of `/models` does: an exception to raise, or a reply."""
+    def _server(self, monkeypatch, *, timeout_s, answers: list, ray_get=None):
+        """A stand-in server. `answers` is what each poll of `/models` does: an exception to raise, or a reply.
+
+        `ray_get(reference, timeout, clock)` stands in for the actor's health check, which is alive by default; the
+        fake clock is a one-element list.
+        """
         import requests
 
         module = responses_api_models.local_vllm_model.app
         now = [0.0]
         monkeypatch.setattr(module, "monotonic", lambda: now[0])
         monkeypatch.setattr(module, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
-        monkeypatch.setattr(module.ray, "get", lambda _: True)  # the actor is alive
+        monkeypatch.setattr(
+            module.ray,
+            "get",
+            lambda reference, timeout=None: True if ray_get is None else ray_get(reference, timeout, now),
+        )
         calls: list = []
 
         def get(url, **kwargs):
@@ -359,6 +367,47 @@ class TestAwaitServerReady:
             LocalVLLMModel.await_server_ready(server)
 
         assert all(0 < call["timeout"] <= 10 for call in calls)
+
+    def test_a_health_check_that_returns_after_the_deadline_does_not_start_another_probe(self, monkeypatch) -> None:
+        def late_reply(reference, timeout, clock):
+            clock[0] += 5  # the check comes back after the 1 s limit
+            return True
+
+        server, calls, _ = self._server(monkeypatch, timeout_s=1, answers=[MagicMock()], ray_get=late_reply)
+
+        with pytest.raises(TimeoutError, match="was not ready within 1"):
+            LocalVLLMModel.await_server_ready(server)
+
+        assert calls == []  # the server was never probed: it would have answered, so an accepted late check starts up
+
+    def test_a_health_check_that_stalls_is_bounded_by_the_remaining_time(self, monkeypatch) -> None:
+        from ray.exceptions import GetTimeoutError
+
+        timeouts = []
+
+        def stalled(reference, timeout, clock):
+            timeouts.append(timeout)
+            raise GetTimeoutError("the actor does not answer")
+
+        server, calls, _ = self._server(monkeypatch, timeout_s=10, answers=[MagicMock()], ray_get=stalled)
+
+        with pytest.raises(TimeoutError, match="was not ready within 10"):
+            LocalVLLMModel.await_server_ready(server)
+
+        assert timeouts == [10] and calls == []
+
+    def test_without_a_limit_the_health_check_is_not_given_one(self, monkeypatch) -> None:
+        timeouts = []
+
+        def alive(reference, timeout, clock):
+            timeouts.append(timeout)
+            return True
+
+        server, _, _ = self._server(monkeypatch, timeout_s=None, answers=[MagicMock()], ray_get=alive)
+
+        LocalVLLMModel.await_server_ready(server)
+
+        assert timeouts == [None]
 
     def test_a_server_that_is_ready_in_time_ends_the_wait(self, monkeypatch) -> None:
         import requests

@@ -234,3 +234,55 @@ def test_a_command_that_outlasts_its_time_limit_raises(no_ssh_bounds):
 
 def test_a_command_without_a_time_limit_is_not_cut_short(no_ssh_bounds):
     assert connection_module._checked(["bash", "-c", "sleep 1; echo done"]) == "done\n"
+
+
+def test_the_command_time_limit_reaches_the_held_input_path_of_the_remote_reader(
+    no_ssh_bounds, monkeypatch: MonkeyPatch
+):
+    monkeypatch.setenv(SSH_COMMAND_TIMEOUT_ENV, "45")
+    seen = []
+
+    def fake_holding_input(cmd, *, input, context="", timeout_s=None):
+        seen.append(timeout_s)
+        return ""
+
+    monkeypatch.setattr(connection_module, "_checked_holding_input", fake_holding_input)
+
+    SSHConnection("login-01").run_with_input_held(["true"])
+
+    assert seen == [45]
+
+
+def test_a_held_command_that_outlasts_its_time_limit_is_killed_and_raises(no_ssh_bounds):
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=r"timed out after 1 s \(slow reader\)"):
+        # `exec` replaces the shell, so killing it ends the command and closes its pipes, as killing ssh does.
+        connection_module._checked_holding_input(
+            ["bash", "-s"], input="exec sleep 30\n", context="slow reader", timeout_s=1
+        )
+
+    assert time.monotonic() - started < 10
+
+
+def test_a_held_command_inside_its_time_limit_keeps_its_stdin_progress_and_output(
+    no_ssh_bounds, capsys: pytest.CaptureFixture
+):
+    commands = f"echo '{connection_module.READER_PROGRESS_PREFIX} halfway' >&2\necho result\nexit\n"
+
+    out = connection_module._checked_holding_input(["bash", "-s"], input=commands, timeout_s=30)
+
+    assert out == "result\n"
+    assert f"{connection_module.READER_PROGRESS_PREFIX} halfway" in capsys.readouterr().err
+
+
+def test_a_held_command_without_a_time_limit_is_not_cut_short(no_ssh_bounds):
+    out = connection_module._checked_holding_input(["bash", "-s"], input="sleep 1\necho done\nexit\n")
+
+    assert out == "done\n"
+
+
+def test_a_failed_held_command_still_reports_its_exit_code_and_stderr(no_ssh_bounds):
+    with pytest.raises(RuntimeError, match=r"(?s)exit code 3.*boom"):
+        connection_module._checked_holding_input(
+            ["bash", "-s"], input="echo boom >&2\nexit 3\n", context="failing", timeout_s=30
+        )

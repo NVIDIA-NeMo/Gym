@@ -50,11 +50,15 @@ class LocalVLLMModelProxyServer(VLLMModel):
 
         timeout_s = self.config.model_server_wait_timeout_seconds
         deadline = None if timeout_s is None else monotonic() + timeout_s
-        while self.server_client.poll_for_status(model_server_name) != "success":
-            if deadline is not None and monotonic() >= deadline:
+        while True:
+            # Expiry is checked before every poll, so a server that comes up only after the deadline is not accepted.
+            remaining = None if deadline is None else deadline - monotonic()
+            if remaining is not None and remaining <= 0:
                 raise TimeoutError(f"LocalVLLMModelServer `{model_server_name}` was not up within {timeout_s} s")
-            # Sleep for 10s by default
-            sleep(10)
+            if self.server_client.poll_for_status(model_server_name) == "success":
+                break
+            # Sleep for 10s by default, or less when that would pass the deadline
+            sleep(10 if remaining is None else min(10, remaining))
 
         model_server_config_dict = get_first_server_config_dict(
             self.server_client.global_config_dict, model_server_name

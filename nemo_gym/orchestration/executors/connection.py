@@ -99,7 +99,8 @@ class SSHConnection(Connection):
     """Single SSH master connection; copy and all commands reuse the same socket.
 
     The environment variables above bound a connection that hangs: a login host that never answers the connect, a link
-    that goes quiet, or a command that never finishes. A command that runs out of its time raises RuntimeError.
+    that goes quiet, or a command that never finishes, the remote reader included. A command that runs out of its time
+    raises RuntimeError.
     """
 
     _OPTS = ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"]
@@ -202,6 +203,7 @@ class SSHConnection(Connection):
             ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
             input="\n".join(commands) + "\n",
             context=f"ssh commands on {self._hostname}",
+            timeout_s=self._command_timeout_s,
         )
 
     def write_text(self, remote: Path, content: str, *, private: bool = False) -> None:
@@ -272,12 +274,22 @@ def _read_stderr_forwarding_progress(stream, output: dict[str, str]) -> None:
     output["stderr"] = "".join(lines)
 
 
-def _checked_holding_input(cmd: list[str], *, input: str, context: str = "") -> str:
+def _checked_holding_input(cmd: list[str], *, input: str, context: str = "", timeout_s: float | None = None) -> str:
     """Like ``_checked``, but stdin stays open until the command exits, so its EOF on the far end means that this
     process or its connection is gone. The commands must end the remote shell themselves (``exit``).
 
     Progress lines on the command's stderr (``READER_PROGRESS_PREFIX``) reach this process's stderr while it runs;
-    stdout is returned whole, as before."""
+    stdout is returned whole, as before. A command still running after `timeout_s` seconds is killed, which closes its
+    stdin and ends the remote shell as any other interruption does, and raises RuntimeError; None sets no limit."""
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
+
+    def remaining_s() -> float | None:
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+    def timed_out() -> RuntimeError:
+        label = f" ({context})" if context else ""
+        return RuntimeError(f"Command timed out after {timeout_s} s{label}:\n  {' '.join(cmd)}")
+
     with subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     ) as process:
@@ -292,8 +304,13 @@ def _checked_holding_input(cmd: list[str], *, input: str, context: str = "") -> 
             process.stdin.write(input)
             process.stdin.flush()
             for reader in readers:
-                reader.join()
-            returncode = process.wait()
+                reader.join(remaining_s())
+            if any(reader.is_alive() for reader in readers):
+                raise timed_out()
+            returncode = process.wait(timeout=remaining_s())
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            raise timed_out() from exc
         except BaseException:
             process.kill()
             raise
