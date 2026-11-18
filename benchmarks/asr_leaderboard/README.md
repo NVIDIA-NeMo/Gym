@@ -1,11 +1,18 @@
 # ASR-Leaderboard
 
-The 8-subset HuggingFace Open ASR Leaderboard test set
-(`hf-audio/esb-datasets-test-only-sorted`): librispeech-clean,
-librispeech-other, voxpopuli, tedlium, gigaspeech, spgispeech,
-earnings22, ami. Pairs with the
-[`asr_with_pc`](../../resources_servers/asr_with_pc/) resource server's
+The HuggingFace Open ASR Leaderboard test set
+(`hf-audio/open-asr-leaderboard`, formerly
+`hf-audio/esb-datasets-test-only-sorted`), 7 subsets: librispeech-clean,
+librispeech-other, voxpopuli, gigaspeech, spgispeech, earnings22, ami.
+Pairs with the
+[`asr_with_pc`](../../resources_servers/asr_with_pc/) resources server's
 `task_type=ASR` mode (Whisper-normalized WER).
+
+TED-LIUM is not included: the upstream repo removed it on 2026-05-27
+after the dataset's authors withdrew it. Corpus WER from this benchmark
+is therefore not comparable to 8-subset results that include TED-LIUM.
+`prepare.py` pins the repo to commit `de79e57a`, so upstream changes do
+not alter the benchmark.
 
 ## Audio handling
 
@@ -26,8 +33,9 @@ System + user templates live in [`prompts/default.yaml`](prompts/default.yaml).
 gym eval prepare --benchmark asr_leaderboard
 ```
 
-Downloads the 8 ESB subsets (~tens of GB of FLAC) and writes
-`benchmarks/asr_leaderboard/data/asr_leaderboard_benchmark.jsonl`.
+Downloads the 7 ESB subsets (~tens of GB of FLAC) and writes
+`benchmarks/asr_leaderboard/data/asr_leaderboard_benchmark.jsonl` once
+every subset succeeds.
 
 ## Running servers
 
