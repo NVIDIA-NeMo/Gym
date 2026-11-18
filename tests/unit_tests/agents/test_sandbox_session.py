@@ -7,7 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
-from time import monotonic
+from time import monotonic, sleep
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -240,6 +240,15 @@ async def test_rearm_uses_fresh_launch_files_and_close_removes_the_root(session)
     assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
     with pytest.raises(RuntimeError, match="closing"):
         await session.begin_activation(session_dir="/session/activation-3", timeout=1)
+
+
+async def test_root_dir_stays_at_the_starting_directory_across_activations(session):
+    assert session.root_dir == "/session"
+    await session.begin_activation(session_dir="/session/activation-1", timeout=1)
+    assert (session.session_dir, session.root_dir) == ("/session/activation-1", "/session")
+    await execute(session)
+    await session.begin_activation(session_dir="/session/activation-2", timeout=1)
+    assert (session.session_dir, session.root_dir) == ("/session/activation-2", "/session")
 
 
 async def test_rearm_rejects_unconfirmed_termination(session, receipt_reader):
@@ -770,9 +779,11 @@ async def test_failed_expire_request_can_be_retried(session):
     await session.close(timeout=1)
 
 
-async def test_expire_is_bounded_when_the_marker_cannot_be_written(session):
+@pytest.mark.parametrize("loop_pause", [0, 1.1])
+async def test_expire_is_bounded_when_the_marker_cannot_be_written(session, monkeypatch, loop_pause):
     launched = asyncio.Event()
     finish = asyncio.Event()
+    cancelled = asyncio.Event()
 
     async def exec_(command, **_):
         if "--expire-file" in command:
@@ -783,16 +794,30 @@ async def test_expire_is_bounded_when_the_marker_cannot_be_written(session):
     async def upload(source, target):
         if target == EXPIRE_MARKER and upload.stall:
             # A transport that never answers, or a provider queue the call cannot leave.
-            await asyncio.Future()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
 
     upload.stall = True
     session.sandbox.exec.side_effect = exec_
     session.sandbox.upload.side_effect = upload
     async with _launched(session, launched) as activation:
-        started = asyncio.get_running_loop().time()
+        timeout_calls = []
+        real_timeout = asyncio.timeout
+
+        def observed_timeout(delay):
+            timeout_calls.append(delay)
+            return real_timeout(delay)
+
+        monkeypatch.setattr(asyncio, "timeout", observed_timeout)
+        if loop_pause:
+            asyncio.get_running_loop().call_later(0.1, sleep, loop_pause)
         with pytest.raises(RuntimeError, match="Could not request test expiry within 0.2 s"):
-            await session.expire(timeout=0.2, reason="budget")
-        assert asyncio.get_running_loop().time() - started < 1
+            await asyncio.wait_for(session.expire(timeout=0.2, reason="budget"), 5)
+        # Check the real timeout and cancellation, without assuming how quickly
+        # a busy runner schedules the timeout callback or resumes this task.
+        assert 0.2 in timeout_calls and cancelled.is_set()
         assert session.expire_reason is None
         upload.stall = False
         assert await session.expire(timeout=1, reason="operator") is True
@@ -1174,3 +1199,45 @@ async def test_owned_session_removal_cancellation_still_stops_sandbox(session):
     await session.close(timeout=1)
     assert session.closed
     session.sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="process supervision requires Linux")
+@pytest.mark.parametrize("finished", [True, False], ids=["finished", "active"])
+async def test_borrowed_close_survives_a_task_that_moved_its_workdir(tmp_path, finished):
+    workdir, session_dir = tmp_path / "app", tmp_path / "session"
+    workdir.mkdir()
+    sandbox = await AsyncSandbox(LocalProvider()).start(SandboxSpec(workdir=str(workdir)))
+    # The local provider cannot rebuild a borrowed handle; every exec is real, only the borrower's release is stubbed.
+    sandbox.disconnect = AsyncMock()
+    session = SandboxSession(sandbox=sandbox, session_dir=str(session_dir), workdir=str(workdir), harness="test")
+    started = tmp_path / "started"
+    worker = (
+        f"import os,pathlib,time; os.rename({str(workdir)!r}, {str(workdir)!r} + '.bak'); "
+        f"pathlib.Path({str(started)!r}).touch(); time.sleep(0 if {finished} else 60)"
+    )
+    activation = asyncio.create_task(
+        session.execute(
+            stage_activation=AsyncMock(return_value=SandboxCommand(argv=[sys.executable, "-c", worker])),
+            collect=AsyncMock(return_value="partial transcript"),
+            timeout=60,
+            close_timeout=5,
+        )
+    )
+    try:
+        async with asyncio.timeout(20):
+            while not started.exists():
+                await asyncio.sleep(0.05)
+        if finished:
+            assert await asyncio.wait_for(activation, 20) == "partial transcript"
+        await asyncio.wait_for(session.close(timeout=5), 20)
+        assert session.closed and session.cleanup["cleanup_confirmed"] is True
+        assert session.artifacts == "partial transcript"
+        assert not session_dir.exists()
+        # Close neither recreates the moved workdir nor stops the borrowed sandbox.
+        assert not workdir.exists() and (tmp_path / "app.bak").is_dir()
+        sandbox.disconnect.assert_awaited_once()
+        assert not session.sandbox_stopped
+    finally:
+        activation.cancel()
+        await asyncio.gather(activation, return_exceptions=True)
+        await sandbox.stop()

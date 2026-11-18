@@ -834,8 +834,11 @@ class TestOwnershipLifetime:
             _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
     def test_a_session_started_by_another_request_keeps_its_owner_a_window_after_each_request(
-        self, socket_dir: str
+        self, socket_dir: str, monkeypatch
     ) -> None:
+        # Exercise real forwarding and sweeping without spending the lease window on runner scheduling.
+        clock = [0.0]
+        monkeypatch.setattr(session_routing, "monotonic", lambda: clock[0])
         a = Worker("a", socket_dir, close_retry_window_seconds=0.3)
         b = Worker("b", socket_dir, close_retry_window_seconds=0.3)
         with a.client, b.client:
@@ -843,9 +846,10 @@ class TestOwnershipLifetime:
             session_id = b.session(stored)[SESSION_ID_KEY]
             cookie = stored.cookies[b.cookie_name]
             for _ in range(4):
-                time.sleep(0.15)
+                clock[0] += 0.15
                 assert a.post("/store", json={"value": 2}, cookie=cookie).json() == {"worker": "b"}
             still_owned = _owner(socket_dir, session_id)
+            clock[0] += 0.31
             _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
         assert still_owned == b.routing_id

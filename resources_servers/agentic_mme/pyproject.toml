@@ -6,7 +6,10 @@ name = "gym-resources-servers-agentic-mme"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
-    "nemo-gym[dev]",
+    "nemo-gym[dev,sandbox]",
+    "pillow",
+    "numpy",
+    "opencv-python-headless",
 ]
 
 [tool.uv]
@@ -21,7 +24,7 @@ constraint-dependencies = [
 override-dependencies = [
     "spacy>=3.8.13",
     "wcwidth; sys_platform == 'never'",
-    "opencv-python-headless; sys_platform == 'never'",
+    "opencv-python-headless==5.0.0.93",
     "pynvvideocodec; sys_platform == 'never'",
     "torchcodec; sys_platform == 'never'",
     "torchvision; sys_platform == 'never'",

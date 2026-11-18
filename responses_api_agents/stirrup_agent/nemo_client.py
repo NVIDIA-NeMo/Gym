@@ -49,9 +49,11 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any, Optional
 
 import stirrup.core.agent as _stirrup_agent_mod
+from openai import APIStatusError
 from pydantic import ValidationError as _PydanticValidationError
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.clients.utils import to_openai_tools
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -69,6 +71,15 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _is_context_rejection(error: Exception) -> bool:
+    """Recognize explicit prompt overflow without treating other invalid requests as recoverable."""
+    if not isinstance(error, APIStatusError) or error.status_code not in (400, 413):
+        return False
+    # ``body`` is the error object itself: the SDK has already unwrapped OpenAI's ``{"error": {...}}`` envelope.
+    body = error.body
+    return isinstance(body, dict) and body.get("code") == "context_length_exceeded"
 
 
 # Monkey-patch stirrup.core.agent.Agent.run_tool to surface pydantic
@@ -130,6 +141,11 @@ _MIN_COMPLETION_TOKENS = 1024
 # on long-context servers can degrade output quality for reasoning models.
 _DEFAULT_MAX_COMPLETION_TOKENS_CAP = 64000
 
+# Default prompt tokens counted per image_url part: a vision model encodes an image into a bounded number of tokens,
+# not one per three base64 characters. A model that spends more than this on an image takes the difference out of
+# completion_token_buffer, so the buffer has to cover N_images * (real - estimate); both are agent config fields.
+_DEFAULT_IMAGE_TOKEN_ESTIMATE = 1536
+
 # ---------------------------------------------------------------------------
 # Thinking-overrun recovery
 #
@@ -159,6 +175,27 @@ _TRUNCATION_RECOVERY_NUDGE = (
 )
 
 
+def _without_images(
+    messages: list[NeMoGymChatCompletionMessageParam],
+) -> tuple[list[NeMoGymChatCompletionMessageParam], int]:
+    """The messages without their image_url parts, and how many parts were dropped (estimator only).
+
+    Out of scope: stirrup serializes a video block as ``{"type": "file", "file": {"file_data": "data:video/mp4;base64,..."}}``
+    (``stirrup.clients.utils.content_to_openai``), not as ``image_url``, so it is still counted by its characters
+    (one token per three base64 characters). That predates the image estimate and is left as it was.
+    """
+    counted: list[NeMoGymChatCompletionMessageParam] = []
+    images = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            kept = [part for part in content if not (isinstance(part, dict) and part.get("type") == "image_url")]
+            images += len(content) - len(kept)
+            message = {**message, "content": kept} if len(kept) < len(content) else message
+        counted.append(message)
+    return counted, images
+
+
 class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
     """ChatCompletionsClient that sizes max_completion_tokens per call and
     does not raise on a length-finish response."""
@@ -167,6 +204,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         self,
         *args: Any,
         completion_token_buffer: int = 1000,
+        image_token_estimate: int = _DEFAULT_IMAGE_TOKEN_ESTIMATE,
         temperature: float = 1.0,
         top_p: float = 0.95,
         enable_thinking: bool = True,
@@ -174,6 +212,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         min_completion_tokens: int = _MIN_COMPLETION_TOKENS,
         prompt_estimator_truncate_history_thinking: Optional[bool] = None,
         truncation_recovery: bool = False,
+        context_overflow_recovery: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -182,6 +221,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         if min_completion_tokens < 1:
             raise ValueError("min_completion_tokens must be at least 1")
         self._completion_token_buffer = completion_token_buffer
+        self._image_token_estimate = image_token_estimate
         self._temperature = temperature
         self._top_p = top_p
         self._enable_thinking = enable_thinking
@@ -189,6 +229,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         self._min_completion_tokens = min_completion_tokens
         self._prompt_estimator_truncate_history_thinking = prompt_estimator_truncate_history_thinking
         self._truncation_recovery = truncation_recovery
+        self._context_overflow_recovery = context_overflow_recovery
         # Set when the previous call exhausted its completion budget without
         # emitting a tool call; consumed by the very next generate().
         self._recover_from_truncation = False
@@ -284,8 +325,8 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         ``messages`` must already be serialized for the provider. Any residual gap is absorbed by
         ``completion_token_buffer``.
         """
-        counted_messages = self._messages_for_estimator_count(messages)
-        total = len(json.dumps(counted_messages, ensure_ascii=False)) // 3
+        counted_messages, images = _without_images(self._messages_for_estimator_count(messages))
+        total = len(json.dumps(counted_messages, ensure_ascii=False)) // 3 + images * self._image_token_estimate
         if tools:
             try:
                 total += len(json.dumps(to_openai_tools(tools))) // 3
@@ -354,6 +395,14 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         try:
             response = await self._client.chat.completions.create(**request_kwargs)
         except Exception as exc:
+            if self._context_overflow_recovery and _is_context_rejection(exc):
+                # Opt-in: Stirrup drops the latest completed turn and sends the call again, or raises at a
+                # progress boundary. The runner reads the rejection back from this exception's cause.
+                LOGGER.warning(
+                    "context overflow rejection (HTTP %d); handing the call to Stirrup's overflow recovery",
+                    exc.status_code,
+                )
+                raise ContextOverflowError("The model rejected a prompt that exceeds its context window.") from exc
             LOGGER.error("API call raised %s: %s", type(exc).__name__, exc)
             raise
         request_end_time = perf_counter()
