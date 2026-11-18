@@ -956,7 +956,7 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
             step_default,
             ""
             if step_default == HARBOR_STEP_VERIFIER_TIMEOUT_SEC
-            else f" ({HARBOR_STEP_VERIFIER_TIMEOUT_SEC:g}s times the dataset's timeout_multiplier)",
+            else f" ({HARBOR_STEP_VERIFIER_TIMEOUT_SEC:g}s times the dataset's timeout multipliers)",
             config.verifier.timeout_sec,
         )
     return tuple(turns)

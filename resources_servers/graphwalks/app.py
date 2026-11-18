@@ -46,6 +46,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class GraphWalksResourcesServerConfig(BaseResourcesServerConfig):
@@ -168,3 +169,6 @@ def _f1_score(predicted: set, expected: set, parse_failed: bool) -> float:
 
 if __name__ == "__main__":
     GraphWalksResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GraphWalksResourcesServer.run_webserver()  # noqa: F401

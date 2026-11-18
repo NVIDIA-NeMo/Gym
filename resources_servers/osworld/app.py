@@ -12,8 +12,16 @@ from fastapi.responses import JSONResponse
 from pydantic import PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import VERIFIER_ERROR
-from nemo_gym.server_runtime import SimpleResourcesServer, lost_session_verification
+from nemo_gym.core import (
+    VERIFIER_ERROR,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+    sdk_error_details,
+)
+from nemo_gym.server_runtime import ResourcesSessionConflictError, SimpleResourcesServer, lost_session_verification
+from nemo_gym.utils import bounded_text
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import (
     OSWorldCloseResponse,
@@ -83,10 +91,6 @@ class OSWorldResourcesServer(SimpleResourcesServer):
         async def session_not_found(_request, exc: SessionNotFoundError):
             return JSONResponse(status_code=404, content={"detail": f"unknown session: {exc.args[0]}"})
 
-        @app.exception_handler(SessionConflictError)
-        async def session_conflict(_request, exc: SessionConflictError):
-            return JSONResponse(status_code=409, content={"detail": str(exc)})
-
         @app.exception_handler(CapacityUnavailableError)
         async def capacity_unavailable(_request, exc: CapacityUnavailableError):
             return JSONResponse(status_code=503, content={"detail": str(exc)})
@@ -112,7 +116,10 @@ class OSWorldResourcesServer(SimpleResourcesServer):
         request: Request,
         body: OSWorldSeedSessionRequest,
     ) -> OSWorldSeedSessionResponse:
-        return await self._manager.seed_session(self._session_id(request), body)
+        try:
+            return await self._manager.seed_session(self._session_id(request), body)
+        except SessionConflictError as error:
+            raise ResourcesSessionConflictError(str(error)) from error
 
     async def session_status(
         self,
@@ -170,6 +177,23 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 }
             )
         except Exception as error:
+            # The reason names the operation and the exception type only. The evaluator's own text can hold
+            # task, request or response data, so it is not copied into the reason: the event keeps the exception
+            # as its cause and selects no message from it.
+            reason = bounded_text(f"OSWorld evaluation raised {type(error).__name__}", 2000)
+            # The masked row also goes into the run's failure record, tied to this verifier invocation.
+            failure = NgFailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=reason,
+                operation="verify",
+                operation_id=current_verifier_invocation_id(),
+                stage="verification",
+                exception_type=type(error).__name__[:256],
+                foreign_error=sdk_error_details(error, message=""),
+            )
+            failure.__cause__ = error
+            observe_failure(failure)
             return OSWorldVerifyResponse(
                 **{
                     **body.model_dump(),
@@ -177,7 +201,7 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                     "osworld_score": 0.0,
                     "mask_sample": True,
                     "failure_kind": VERIFIER_ERROR,
-                    "failure_reason": f"OSWorld evaluation raised {type(error).__name__}: {str(error)[-2000:]}",
+                    "failure_reason": reason,
                 }
             )
         finally:

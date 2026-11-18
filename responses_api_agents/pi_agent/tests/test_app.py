@@ -81,6 +81,17 @@ def test_prompt_control_defaults_and_validation() -> None:
         _config(system_prompt_mode="invalid")
 
 
+def _exited_process(stdout: bytes = b"", returncode: int = 0) -> MagicMock:
+    """A pi subprocess that already printed `stdout` and exited: _run_pi reads both streams as they arrive."""
+    process = MagicMock(returncode=returncode)
+    process.stdout, process.stderr = asyncio.StreamReader(), asyncio.StreamReader()
+    process.stdout.feed_data(stdout)
+    process.stdout.feed_eof()
+    process.stderr.feed_eof()
+    process.wait = AsyncMock(return_value=returncode)
+    return process
+
+
 def _msg_end(role, content, **extra) -> str:
     return json.dumps({"type": "message_end", "message": {"role": role, "content": content, **extra}})
 
@@ -128,6 +139,8 @@ async def test_legacy_runner_request_preserves_configured_pi_controls(with_scope
     assert result.output[0].content[0].text == "fixed"
     assert result.model == "configured-model"
     assert result.usage.total_tokens == 3
+    # Pi reported no cache reads, so the response does not claim zero.
+    assert result.usage.input_tokens_details.cached_tokens is None
     assert agent.config.max_output_tokens == 128
     assert body.model_dump() == original
 
@@ -185,11 +198,10 @@ class TestLocalRuntimeSetup:
         if collect and timed_out:
             expected_events.append({"type": "_ng_process_exit", "timed_out": True})
         assert [event for _, event in events] == expected_events
-        if timed_out:
-            assert items == [] and usage == {"input_tokens": 0, "output_tokens": 0}
-        else:
-            assert items[0].content[0].text == "partial"
-            assert usage == {"input_tokens": 2, "output_tokens": 1}
+        # a run stopped at its deadline keeps what pi printed before the kill, with or without observations (pi's
+        # stdout is read as it streams, and communicate() after the kill has nothing left to return)
+        assert items[0].content[0].text == "partial"
+        assert usage == {"input_tokens": 2, "output_tokens": 1, "cached_tokens": None}
 
     def test_startup_does_not_install_host_pi(self) -> None:
         with patch("responses_api_agents.pi_agent.app.ensure_pi") as install:
@@ -199,18 +211,17 @@ class TestLocalRuntimeSetup:
 
     async def test_local_calls_install_once_before_subprocess(self, tmp_path) -> None:
         agent = _make_agent(workspace_root=str(tmp_path), pi_version="0.80.2")
-        process = MagicMock(returncode=0)
         output = _msg_end("assistant", [{"type": "text", "text": "done"}]).encode()
-        process.communicate = AsyncMock(return_value=(output, b""))
+        processes = [_exited_process(output), _exited_process(output)]
         module = "responses_api_agents.pi_agent.app"
         with (
             patch(f"{module}.ensure_pi") as install,
-            patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
+            patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock()) as spawn,
         ):
 
             async def launch(*args, **kwargs):
                 install.assert_called_once_with("0.80.2")
-                return process
+                return processes.pop()
 
             spawn.side_effect = launch
             # These consumers construct Request without session middleware.
@@ -232,8 +243,7 @@ class TestLocalRuntimeSetup:
     async def test_failed_local_setup_can_retry(self, tmp_path) -> None:
         agent = _make_agent(workspace_root=str(tmp_path))
         module = "responses_api_agents.pi_agent.app"
-        process = MagicMock(returncode=0)
-        process.communicate = AsyncMock(return_value=(b"", b""))
+        process = _exited_process()
         with (
             patch(f"{module}.ensure_pi", side_effect=[RuntimeError("npm unavailable"), None]) as install,
             patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
@@ -255,8 +265,7 @@ class TestLocalRuntimeSetup:
             await release.wait()
 
         module = "responses_api_agents.pi_agent.app"
-        process = MagicMock(returncode=0)
-        process.communicate = AsyncMock(return_value=(b"", b""))
+        process = _exited_process()
         with (
             patch(f"{module}.asyncio.to_thread", AsyncMock(side_effect=install)) as setup,
             patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
@@ -307,12 +316,12 @@ class TestParsePiEvents:
         assert [item.type for item in items] == ["reasoning", "message"]
         assert items[0].summary[0].text == "Check the result."
         assert items[1].content[0].text == solution
-        assert usage == {"input_tokens": 100, "output_tokens": 20}
+        assert usage == {"input_tokens": 100, "output_tokens": 20, "cached_tokens": None}
 
     def test_empty(self) -> None:
         items, usage = parse_pi_events("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     def test_assistant_text_and_usage(self) -> None:
         line = _msg_end(
@@ -326,6 +335,23 @@ class TestParsePiEvents:
         assert items[0].content[0].text == "the answer is 4"
         assert usage["input_tokens"] == 105
         assert usage["output_tokens"] == 20
+        assert usage["cached_tokens"] == 5
+
+    @pytest.mark.parametrize(
+        ("cache_reads", "expected"),
+        [([5, 7], 12), ([5, 0], None), ([5, None], None), ([0], None)],
+    )
+    def test_cached_tokens_sum_only_measured_cache_reads(self, cache_reads, expected) -> None:
+        lines = "\n".join(
+            _msg_end(
+                "assistant",
+                [{"type": "text", "text": "ok"}],
+                usage={"input": 10, "output": 1, **({} if cache_read is None else {"cacheRead": cache_read})},
+            )
+            for cache_read in cache_reads
+        )
+        # Pi writes cacheRead=0 when the backend reported no cache details, so zero is not a measurement.
+        assert parse_pi_events(lines)[1]["cached_tokens"] == expected
 
     def test_user_messages_ignored(self) -> None:
         line = _msg_end("user", [{"type": "text", "text": "hi"}])
@@ -363,7 +389,7 @@ class TestParsePiEvents:
         items, usage = parse_pi_events(line)
         assert len(items) == 1
         assert items[0].content[0].text == "ok"
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
 
 class TestEnv:
@@ -846,7 +872,10 @@ async def test_mcp_setup_exit_is_request_failure_and_cleans_workspace(tmp_path, 
         communicate=AsyncMock(return_value=(b"", b"setup failed")),
         returncode=78,
     )
-    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+    with (
+        patch("responses_api_agents.pi_agent.app.ensure_pi"),
+        patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+    ):
         with pytest.raises(RuntimeError, match="Required Gym MCP"):
             await agent._run_pi("task", None, collect_observations=collect_observations)
     assert not list(tmp_path.iterdir())
@@ -877,10 +906,10 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
     body = NeMoGymResponseCreateParamsNonStreaming(
         input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
     )
-    process = MagicMock(returncode=0)
-    process.communicate = AsyncMock(return_value=(b"", b""))
+    process = _exited_process()
     module = "responses_api_agents.pi_agent.app"
     with (
+        patch(f"{module}.ensure_pi"),
         patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
         patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
     ):

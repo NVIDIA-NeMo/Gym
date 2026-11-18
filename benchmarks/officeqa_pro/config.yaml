@@ -1,0 +1,128 @@
+# OfficeQA resources own the document sandbox; stock OpenCode borrows it.
+config_paths:
+- resources_servers/officeqa/configs/officeqa.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+officeqa_pro_workspace_root: benchmarks/officeqa_pro/data/runtime
+officeqa_document_image: null
+officeqa_documents_host_root: null
+officeqa_document_prefix: null
+# SHA-256 of the pinned corpus's sorted JSON mapping of PDF filenames to byte sizes.
+officeqa_document_manifest_sha256: 23337a310d4b1a75c36126096800b0c52687b93127e6118f0756bdd5e6ac19fb  # pragma: allowlist secret
+# Supply the architecture-specific SHA-256 printed by Containerfile.opencode.
+officeqa_opencode_binary_sha256: null
+# model_only blocks external data access; inherit uses the provider's network policy.
+officeqa_network_access: model_only
+officeqa_network_settings:
+  model_only:
+    web_permission: deny
+    claude_disallowed_tools: WebSearch,WebFetch
+  inherit:
+    web_permission: allow
+    claude_disallowed_tools: null
+# Only the model API needs a sandbox-reachable address. Keep driver APIs private.
+absolute_ip_server_types:
+- responses_api_models
+sandbox:
+  opensandbox:
+    create:
+      request_timeout_s: 1860
+      timeout_s: 1920
+      connect_attempt_timeout_s: 1920
+    probe:
+      user: 65534
+      stable_count: 1
+      timeout_s: 300
+      deadline_s: 360
+      expected_stdout: ready
+      command: /opt/venv/bin/python -c 'import hashlib,json,os,pathlib; root=pathlib.Path("/workspace/docs"); files=list(root.iterdir());
+        assert files and all(p.is_file() and not p.is_symlink() and p.suffix.lower()==".pdf" for p in files);
+        assert not os.access(root,os.W_OK); sizes={p.name:p.stat().st_size for p in files};
+        assert hashlib.sha256(json.dumps(sizes,sort_keys=True).encode()).hexdigest()=="${officeqa_document_manifest_sha256}";
+        print("ready")'
+prepare_script_args:
+  output_fpath: benchmarks/officeqa_pro/data/benchmark.jsonl
+  bundle_root: ${officeqa_pro_workspace_root}
+  corpus_root: ${oc.select:officeqa_pro_corpus_root,null}
+  source_csv: ${oc.select:officeqa_pro_source_csv,null}
+officeqa_pro_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.19.4
+      sandbox_executable_path: /opt/cli/opencode
+      sandbox_executable_sha256: ${officeqa_opencode_binary_sha256}
+      context_window: 262144
+      max_output_tokens: 16384
+      timeout: 7200
+      opencode_config:
+        permission:
+          '*': allow
+          webfetch: ${officeqa_network_settings.${officeqa_network_access}.web_permission}
+          websearch: ${officeqa_network_settings.${officeqa_network_access}.web_permission}
+officeqa_pro_environment_server:
+  environment_servers:
+    single_agent_turn:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: officeqa_pro_opencode_agent
+      resources_server:
+        type: resources_servers
+        name: officeqa_pro_resources_server
+      max_concurrent_episodes: 8
+      queue_timeout_seconds: 600
+      default_episode_timeout_seconds: 9900
+      cleanup_timeout_seconds: 180
+officeqa_pro_resources_server:
+  resources_servers:
+    officeqa:
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${officeqa_document_image}
+        workdir: /workspace/task
+        ttl_s: 10200
+        ready_timeout_s: 1800
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          disk_gib: 10
+          gpu: 0
+        entrypoint:
+        - /bin/bash
+        - -c
+        - exec sleep infinity
+        env:
+          HOME: /workspace/task
+          XDG_CACHE_HOME: /workspace/task/.cache
+          OPENCODE_CONFIG: /opt/cli/opencode-model.json
+          OPENCODE_DISABLE_AUTOUPDATE: '1'
+          OPENCODE_DISABLE_MODELS_FETCH: '1'
+          OPENCODE_DISABLE_DEFAULT_PLUGINS: '1'
+          OPENCODE_DISABLE_LSP_DOWNLOAD: '1'
+        provider_options:
+          volumes:
+          - name: documents
+            host:
+              path: ${officeqa_documents_host_root}
+            subPath: ${officeqa_document_prefix}
+            mountPath: /workspace/docs
+            readOnly: true
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      network_access: ${officeqa_network_access}
+      num_workers: 1
+      datasets:
+      - name: officeqa_pro
+        type: benchmark
+        jsonl_fpath: benchmarks/officeqa_pro/data/benchmark.jsonl
+        prepare_script: benchmarks/officeqa_pro/prepare.py
+        num_repeats: 5
+        taskset: officeqa_pro
+environment_server_routes:
+  officeqa_pro: officeqa_pro_environment_server

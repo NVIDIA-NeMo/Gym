@@ -7,13 +7,14 @@ import json
 import logging
 import shlex
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agents import HARNESS_RUNNER_FILE, AgentSessionState, SandboxCommand, SandboxSession, shell_assignments
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import read_text, stage_media, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 
 
@@ -104,19 +105,47 @@ class CodexSandboxSession(AgentSessionState):
                     raise
                 # The agent base replays the activation error independently of close.
 
-    async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
-        """Run through the common lifecycle; the adapter validates terminal events."""
+    async def execute(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        timeout: float,
+        close_timeout: float,
+        files: dict[str, str] | None = None,
+        media: Sequence[MediaFile] = (),
+        deadline: float | None = None,
+    ) -> str:
+        """Run through the common lifecycle; the adapter validates terminal events.
+
+        ``files`` and prompt ``media`` are staged with the invocation; the deadline bounds both staging and execution.
+        """
         self.capture_budget_s = close_timeout
         return await self.session.execute(
-            stage_activation=lambda: self.stage_activation(payload),
+            stage_activation=lambda: self.stage_activation(payload, files=files, media=media),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
+            deadline=deadline,
         )
 
-    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
-        """Stage the invocation and return the runner command that starts the Codex launcher."""
+    async def stage_activation(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        files: dict[str, str] | None = None,
+        media: Sequence[MediaFile] = (),
+    ) -> SandboxCommand:
+        """Stage the invocation and return the runner command that starts the Codex launcher.
+
+        ``files`` maps paths under the session directory to text, kept out of ``input.json``. They are uploaded here,
+        inside the session's execute, so that close cancels and waits for the uploads before it releases the
+        sandbox.
+        """
         directory = self.session.session_dir
+        for name, text in (files or {}).items():
+            await self.upload_text(name, text)
+        if media:
+            await stage_media(self.session.sandbox, media)
         await self.upload_json("input.json", payload)
         await self.upload_text("prompt.txt", payload["prompt"])
         params = {

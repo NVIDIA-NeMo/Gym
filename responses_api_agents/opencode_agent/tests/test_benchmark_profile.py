@@ -20,11 +20,11 @@ from nemo_gym.config import get_first_server_config_dict
 from tests.session_harness_profiles import REQUIRED_SETTING_VALUES, check_hle_seed, compose_profile_on_hle
 
 
-@pytest.mark.parametrize("pairing", [True, False], ids=["with_override", "without_override"])
-async def test_hle_seed_reaches_the_agents_own_sandbox_only_with_the_pairing_override(
-    pairing: bool, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("transports", [None, ["direct_http"]], ids=["as_shipped", "direct_http_granted"])
+async def test_hle_seed_reaches_the_agents_own_sandbox_unless_a_direct_http_grant_is_required(
+    transports: list[str] | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await check_hle_seed("opencode_agent", pairing, monkeypatch)
+    await check_hle_seed("opencode_agent", transports, monkeypatch)
 
 
 def test_profile_restricts_the_sandbox_to_the_model_server(monkeypatch: pytest.MonkeyPatch) -> None:

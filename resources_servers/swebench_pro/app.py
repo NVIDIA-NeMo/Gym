@@ -75,7 +75,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.utils import explicit_causes
+from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
@@ -330,8 +330,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("SWE-bench Pro process-local sessions require num_workers=1")
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         # Untracked files the image ships, per session. Leading underscore: pydantic needs it.
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
@@ -849,3 +847,6 @@ def _lost_session_response(body: SWEBenchProVerifyRequest, reason: str) -> SWEBe
 
 if __name__ == "__main__":
     SWEBenchProResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEBenchProResourcesServer.run_webserver()  # noqa: F401

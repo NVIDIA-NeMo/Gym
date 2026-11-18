@@ -1,0 +1,43 @@
+ui_generation_resources_server:
+  resources_servers:
+    ui_generation:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Front-end UI code generation graded by an LLM judge, with the task's reference answer as a guideline
+      value: Improve single-file front-end UI generation that follows the prompt's features and stack constraints
+      judge_model_server:
+        type: responses_api_models
+        name: ui_generation_judge_model
+      # Sampling for a reasoning judge; the 65,536-token cap includes the judge's reasoning.
+      judge_chat_completions_create_params:
+        messages: []
+        temperature: 1.0
+        top_p: 1.0
+        max_tokens: 65536
+      judge_max_concurrency: 64
+      judge_max_attempts: 4
+      # quality (default) | prompt_adherence | mean | min; the chosen 0-4 score divided by 4.
+      reward_score: quality
+
+# The judge. Supply judge_base_url, judge_api_key and judge_model_name from env.yaml, like the policy_* keys
+# (oc.select keeps static validation, which loads no env.yaml, working offline). Use a judge from a different
+# model family than the policy where possible: a judge shares the preferences of its own family.
+ui_generation_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.select:judge_base_url,''}
+      api_key: ${oc.select:judge_api_key,''}
+      model: ${oc.select:judge_model_name,''}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      default_headers: {}
+      endpoint_file: null
+      endpoint_stale_grace_s: 300.0
+      endpoint_connection_retries: 8
+      endpoint_check_interval_s: 10.0
+      route_around_failing_endpoints: false
+      endpoint_failure_threshold: 3
+      endpoint_retry_after_s: 60.0

@@ -36,8 +36,8 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.failure_kinds import ENVIRONMENT_PREPARE_FAILED
 from nemo_gym.environment.benchmarks import BenchmarkConfig
 from nemo_gym.eval.eval_plan import EvalPlan, PlanBenchmark, PlanGym, build_eval_plan
-from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
+from nemo_gym.utils.gym_commit import installed_gym_commit
 
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ def _multiprocess_benchmark_prepare_fn(args):
             config=config,
         )
         return
-    from nemo_gym.cli._prepare_worker import load_preparer
+    from nemo_gym.server_runtime.supervisor._prepare_worker import load_preparer
 
     module = load_preparer(prepare_module_path)
     try:
@@ -161,7 +161,7 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
 
 def _prepare_environment(benchmark_config: "BenchmarkConfig", venv_root: Path | None = None) -> Path | None:
     """Use explicit dependency arguments as before, or sync an isolated locked project."""
-    from nemo_gym.cli._locked_env import sync_environment
+    from nemo_gym.server_runtime.supervisor._locked_env import sync_environment
 
     dataset = benchmark_config.dataset
     if dataset.prepare_dependencies:
@@ -196,8 +196,8 @@ def _run_isolated_prepare(
     """Keep preparer stdout visible and pass structured results over a separate file."""
     from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, maybe_get_global_config_dict
 
-    # The worker script is a module of `nemo_gym.cli`, which stays where it is; locate it without importing it here.
-    worker = Path(importlib.util.find_spec("nemo_gym.cli._prepare_worker").origin)
+    # The worker script is a module of `nemo_gym.server_runtime.supervisor`; locate it without importing it here.
+    worker = Path(importlib.util.find_spec("nemo_gym.server_runtime.supervisor._prepare_worker").origin)
     if module.endswith(".py"):
         root = Path(module).parent
     else:
@@ -253,6 +253,15 @@ def _prepare_json_default(value: Any) -> Any:
     if OmegaConf.is_config(value):
         return OmegaConf.to_container(value, resolve=True)
     raise TypeError(f"Cannot serialize preparation value of type {type(value).__name__}")
+
+
+def read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    """The rows of a JSONL file, one per newline-terminated line.
+
+    ``str.splitlines()`` also breaks at U+2028, U+0085, vertical tab and form feed, which a JSON string may hold
+    unescaped, so it would cut a row in the middle of a string.
+    """
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line.strip()]
 
 
 def datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig]:
@@ -361,7 +370,7 @@ def prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_conf
                 already_prepared.append(benchmark_config)
                 continue
         else:
-            from nemo_gym.cli._prepare_worker import load_preparer
+            from nemo_gym.server_runtime.supervisor._prepare_worker import load_preparer
 
             module = load_preparer(prepare_module_path)
             if not hasattr(module, "prepare"):
@@ -443,7 +452,7 @@ def plan_for_config(
     benchmark = benchmarks[0]
 
     prepare_datasets([benchmark], prepare_config)
-    rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
+    rows = read_jsonl_rows(benchmark.dataset.jsonl_fpath)
     return build_eval_plan(
         rows,
         benchmark=PlanBenchmark(
