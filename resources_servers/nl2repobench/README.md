@@ -41,29 +41,60 @@ gym env start \
 Because this benchmark has no diff/commit contract to grade against, verification uses a tar-based workspace
 snapshot instead of `git diff`:
 
-1. At `seed_session` time, one untrusted agent sandbox is created from the task's pinned base image with an empty
-   `/workspace`. The agent writes its package there directly (no git identity or commit step is required or seeded).
+1. At `seed_session` time, one untrusted agent sandbox is created with an empty `/workspace` and `start.md` written
+   into it. By default (`agent_network_mode: official`) it boots from a generic agent image with open egress, so
+   results there are an upper bound; `no_internet_preinstalled` boots from the task's pinned per-task image
+   (dependencies preinstalled, held-out tests and the reference implementation removed) with deny-all egress except
+   the model host. See [`benchmarks/nl2repobench/README.md`](../../benchmarks/nl2repobench/README.md) for every network
+   mode. The sandbox's `ttl_s` must outlive the agent's whole budget plus export and grading (25200 s for the 21600 s
+   agent budget in the shipped config).
 2. At `verify` time, the resources server runs
    `tar czf /tmp/workspace.tar.gz -C /workspace . --exclude=.git --exclude=__pycache__ --exclude=.venv
    --exclude=node_modules` in the agent sandbox, downloads the resulting tarball, hashes it (SHA-256), and enforces
    `workspace_tar_max_bytes` as a hard cap before proceeding.
-3. The agent sandbox is stopped, and a **fresh** verifier sandbox is created from the same pinned base image (trusted
-   network, no egress restriction — the base image ships the task's test dependencies pre-installed but no reference
-   solution).
-4. The tarball is uploaded into the fresh sandbox and extracted back into `/workspace`.
-5. The task's `test_commands.json` commands (e.g. `pip install -e .` followed by a `pytest` invocation) are run
-   sequentially in `/workspace`. If a non-final command (typically an install step) fails, remaining commands are
-   skipped and `verifier_error` records which command failed; the run is still `evaluation_completed=True` with
-   `tests_passed=0`.
-6. The combined stdout+stderr of all commands is regex-parsed for the last `N passed` / `N failed` / `N error`
-   pytest-summary occurrences (each defaults to 0 when absent from the summary line — that is normal, not a parse
-   failure).
-7. `reward = min(tests_passed / test_case_count, 1.0)`, clamped to `>= 0.0`. `test_case_count` is the upstream
-   `test_case_count.txt` value for the task (the total number of tests the hidden suite is expected to run), not a
-   count the agent can see or influence directly.
+3. The agent sandbox is stopped, and a **fresh** verifier sandbox is created, from the task's pinned per-task image
+   unless `verify_image_override` or `verify_image_registry_template` says otherwise (trusted network, no egress
+   restriction; the image ships the test dependencies but no reference solution). Starting it is attempted
+   `verifier_sandbox_start_attempts` times (default 3) before the row is masked.
+4. The tarball is uploaded and restored into `/workspace`. With `grading_protocol: gym_strict` (the default) it is
+   extracted as is; with `upstream` the agent's packaging files and its files at the held-out test paths are deleted
+   first, as NL2RepoBench's own post-processor does.
+5. The task's `test_commands.json` commands (e.g. `pip install -e .` followed by a `pytest` invocation) are run in
+   `/workspace`. Under `gym_strict`, if a non-final command (typically an install step) fails, the remaining commands
+   are skipped, `verifier_error` records which one failed, and the row is `evaluation_completed=True` with
+   `tests_passed=0`. Under `upstream`, every command runs.
+6. The output is parsed for pytest summaries. `gym_strict` takes the last `N passed` / `N failed` / `N error`
+   occurrences; `upstream` sums every `N passed` line, as upstream does. Each defaults to 0 when absent.
+7. `reward = min(tests_passed / test_case_count, 1.0)`, clamped to `>= 0.0`, where `test_case_count` is the upstream
+   `test_case_count.txt` value for the task. With `grading_protocol: upstream` every row also carries `clean_reward`,
+   computed from each pytest command's outer summary line only, so tests that run pytest themselves do not inflate
+   it; `reward` stays the official, leaderboard-comparable score.
 
-The untrusted agent sandbox defaults to deny-all egress (`enforce_agent_no_network`); the OpenCode benchmark config
-adds only the resolved Gym model-server host to that policy.
+### Inconclusive verification is masked, not scored
+
+A verdict that says nothing about the agent's code is returned with `mask_sample=true`, `reward=0.0` and a
+`failure_kind`, so it drops out of the scored denominator instead of counting as a 0:
+
+- no live agent session for the verify call (`session_lost`);
+- the verifier sandbox could not be started after the bounded retries, or the provider reported an error while
+  restoring the workspace or running a test command (`verifier_error`, or the provider's own failure kind).
+
+A test command that times out is a scored result: the agent's code hung. A failure to collect the workspace from the
+agent sandbox is not yet masked and still scores `reward=0.0` with `verifier_error` set.
+
+### Sandbox lifecycle
+
+A sandbox is stopped when its session ends: by `verify`, by `/close_session` or a retire (`release_session_state`),
+when seeding replaces a session, or when post-start initialization fails (the directory, guard and `start.md` setup
+runs before the sandbox is returned, and a failure there stops it). Sessions abandoned before any of these still rely
+on the provider's `ttl_s`.
+
+## Network posture
+
+`enforce_agent_no_network` and `agent_network_mode` decide the agent sandbox's egress; see the benchmark README for
+the table. In the no-internet modes the policy is deny-all except the resolved model-server host, and a
+`provider_options.network_policy` inherited from the sandbox config may not widen it: a `defaultAction` other than
+`deny` is refused at seed time.
 
 ## No oracle/golden-patch mode
 

@@ -48,6 +48,9 @@ nl2repobench_environment_server:
   environment_servers:
     legacy_agent:
       entrypoint: app.py
+      # The whole /run: the agent's 21600 s budget, then export, workspace collection, grading and cleanup. The server's
+      # 21600 s default equals the agent budget alone, so a full-length run was cut off before it could be graded.
+      default_episode_timeout_seconds: 28800
       agent_server:
         type: responses_api_agents
         name: nl2repobench_opencode_sandboxed_agent

@@ -170,8 +170,9 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
             "aiohttp.ClientTimeout(total=..., sock_read=...). Unset leaves total and read time unlimited. TCP "
             "keepalive only detects a dead socket, not a live peer that accepts a connection and never answers "
             "(e.g. a stuck proxy hop), which would hang the caller with no exception for the retry loop to act on. "
-            "Pick a value above the slowest legitimate call: under heavy load per-request generation can drop to "
-            "~11-30 tok/s, so 600s cut off healthy long NL2RepoBench generations; 7200 has worked."
+            "Pick a value above the longest single call on this client: a whole-rollout /run relayed by an "
+            "Environment Server lasts as long as the episode (hours for agentic benchmarks), and under heavy load "
+            "per-request generation can drop to ~11-30 tok/s, so a few hundred seconds cuts off healthy calls."
         ),
     )
     global_aiohttp_internal_retry_budget_seconds: float = Field(
