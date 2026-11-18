@@ -118,7 +118,13 @@ class TavilySearch:
             try:
                 resp = await client.post(
                     "https://api.tavily.com/search",
-                    json={"query": query, "max_results": 5, "include_answer": True},
+                    json={
+                        "query": query,
+                        "max_results": 5,
+                        "include_answer": True,
+                        # Tavily drops these sites before ranking, so the agent still gets five results.
+                        **({"exclude_domains": guard.domains} if guard is not None and guard.domains else {}),
+                    },
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 )
             except httpx.HTTPError as exc:

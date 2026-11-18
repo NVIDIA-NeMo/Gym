@@ -42,6 +42,12 @@ task and copy its answer (seen with Kimi K2.6 on task `11dcc268`, which found ot
 (by default the benchmark's name in any spelling and `deliverable_files`) or contain the current task id, and
 drop matching search results. Redirects are checked too.
 
+They also refuse whole sites listed in `search_exclusions.json`, which has the format of
+`benchmarks/hle/search_exclusions.json` (`domain` and `url_substring` rules): by default Hugging Face (`huggingface.co`,
+`hf.co`) and the sites that host GDPval submissions. These domains are also sent to Tavily as `exclude_domains`, so a
+search still returns its full set of results. Set `web_exclusions_fpath` to use another file. The rest of the web stays
+open, because the tasks need it for regulations, statistics and product documentation.
+
 This does not cover the sandbox: commands the agent runs there still reach the open internet, which is how
 that agent downloaded the files once it had found them. Gym's sandbox providers have no egress control, so
 block these hosts at the sandbox's network layer where the result must be trusted.

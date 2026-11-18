@@ -107,7 +107,12 @@ from resources_servers.gdpval.task_sandbox import (
     start_task_sandbox,
 )
 from resources_servers.gdpval.tavily_search import TavilySearch, fetch_web_page, web_client
-from resources_servers.gdpval.web_guard import BLOCKED_MESSAGE, DEFAULT_BLOCKED_WEB_PATTERNS, WebGuard
+from resources_servers.gdpval.web_guard import (
+    BLOCKED_MESSAGE,
+    DEFAULT_BLOCKED_WEB_PATTERNS,
+    WebGuard,
+    load_web_exclusions,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -129,6 +134,7 @@ def _is_invalid_judge_result(judge_result: Any) -> bool:
 
 
 _DEFAULT_JUDGE_PROMPT_FPATH = str(Path(__file__).parent / "prompts" / "judge_prompt.j2")
+_DEFAULT_WEB_EXCLUSIONS_FPATH = str(Path(__file__).parent / "search_exclusions.json")
 _DEFAULT_REFERENCE_ELO = 1000.0
 
 
@@ -454,6 +460,9 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # from search results, so the agent cannot look up GDPval's published answers. The current
     # task's id is always added. An empty list leaves only the task id. See web_guard.py.
     blocked_web_patterns: List[str] = Field(default_factory=lambda: list(DEFAULT_BLOCKED_WEB_PATTERNS))
+    # Sites web_search and fetch_web_page refuse outright, in the format of benchmarks/hle/search_exclusions.json.
+    # None uses search_exclusions.json beside this file (Hugging Face and the sites hosting GDPval submissions).
+    web_exclusions_fpath: Optional[str] = None
 
     # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
     persist_deliverables_dir: str
@@ -730,6 +739,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
         self._judge_telemetry = JudgeTelemetrySink(self.config.judge_telemetry_output_dir)
         self._tavily = TavilySearch(api_keys=self.config.tavily_api_key, max_sweeps=self.config.tavily_max_sweeps)
+        self._web_domains, self._web_url_substrings = load_web_exclusions(
+            self.config.web_exclusions_fpath or _DEFAULT_WEB_EXCLUSIONS_FPATH
+        )
         if self.config.num_workers not in (None, 1):
             raise ValueError("GDPVal sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _TaskSession] = {}
@@ -982,7 +994,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
     def _web_guard(self, request: Request) -> WebGuard:
         # A call outside a seeded session still gets the pattern guard, just without a task id.
         session = self._sessions.get(request.session.get(SESSION_ID_KEY))
-        return WebGuard(self.config.blocked_web_patterns, session.task_id.task_id if session else None)
+        return WebGuard(
+            self.config.blocked_web_patterns,
+            session.task_id.task_id if session else None,
+            self._web_domains,
+            self._web_url_substrings,
+        )
 
     async def web_search(self, request: Request, body: WebSearchRequest) -> str:
         guard = self._web_guard(request)
