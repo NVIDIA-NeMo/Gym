@@ -143,7 +143,10 @@ def test_generated_container_command_invokes_preinstalled_reader_before_services
     if alias is not None:
         raw = config.model_dump(mode="json")
         raw["services"] = {"ray": {"type": "ray", "container": "ray:test", "node_pools": ["gpu"]}}
-        raw["compute"]["cluster"]["node_pools"] = {"gpu": {"nodes": 1}, "judge": {"nodes": 1}}
+        raw["compute"]["cluster"]["node_pools"] = {
+            "gpu": {"partition": "gpu", "nodes": 1},
+            "judge": {"partition": "cpu", "nodes": 1},
+        }
         raw["driver"]["env"] = {
             alias: "runtime:" + ("GYM_RAY_ADDRESS_RAY" if alias == "RAY_ADDRESS" else "GYM_POOL_JUDGE_NODES")
         }

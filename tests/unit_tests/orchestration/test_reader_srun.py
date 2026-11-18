@@ -179,12 +179,12 @@ def test_reader_srun_excludes_exported_credentials_and_keeps_allocation_context(
         ]
     )
     command = slurm_reader._reader_command(
-        entrypoint, tmp_path, "{}", bound_s=300, factor=1, token=token, step=slurm.reader_step()
+        entrypoint, tmp_path, "{}", bound_s=300, factor=1, token=token, step=slurm_reader.reader_step()
     )
 
     output = LocalConnection().run(command)
 
-    assert slurm.reader_placement(output) == ("cpu:4242", None)
+    assert slurm_reader.reader_placement(output) == ("cpu:4242", None)
     parent = json.loads(receipt.read_text())
     assert "READER_API_KEY" not in parent["env"]
     assert all("reader-private-canary" not in value for value in parent["env"].values())

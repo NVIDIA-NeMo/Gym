@@ -1335,7 +1335,9 @@ def test_ray_head_and_worker_steps_use_the_selected_slurm_account(tmp_path):
     steps = [line for line in script.splitlines() if "srun --overlap" in line]
     # The task loader now quotes a multiline Python program before the Ray shell command.
     ray_block = script.split("# service: ray\n", 1)[1].split("\nRAY_PID=$!", 1)[0]
-    assert any("ray start --block --head" in token for token in shlex.split(ray_block))
+    words = shlex.split(ray_block)
+    ray_index = words.index("ray")
+    assert words[ray_index : ray_index + 4] == ["ray", "start", "--block", "--head"]
     assert any("--output=logs/ray-$SLURM_JOB_ID.log" in line for line in steps)
     assert any("--output=logs/ray_aux_workers-" in line for line in steps)
     assert all("--account=acct" in line for line in steps)
