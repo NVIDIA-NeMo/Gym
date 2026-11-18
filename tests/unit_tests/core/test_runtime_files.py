@@ -532,6 +532,29 @@ class TestSessionTempDir:
         assert await async_remove_temp_dir(tmp_path) is False
         assert tmp_path.exists()
 
+    async def test_a_cancelled_caller_still_gets_its_session_folder_removed(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+        folder = session_temp_dir("session")
+        executor = ThreadPoolExecutor(max_workers=1)
+        monkeypatch.setattr(runtime_files, "_temp_dir_executor", executor)
+        gate = threading.Event()
+        # The pool's only thread is busy, so the removal waits in its queue, as under load.
+        busy = asyncio.get_running_loop().run_in_executor(executor, gate.wait, 10)
+        try:
+            removal = asyncio.create_task(async_remove_temp_dir(folder))
+            await asyncio.sleep(0.05)
+            removal.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await removal
+        finally:
+            gate.set()
+            await busy
+            executor.shutdown(wait=True)
+
+        assert not folder.exists()
+
     def test_a_failed_removal_is_reported_and_a_later_removal_retries(
         self, set_global_config, tmp_path: Path, monkeypatch
     ) -> None:

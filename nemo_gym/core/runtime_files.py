@@ -176,11 +176,10 @@ def remove_temp_dir(path: Path) -> bool:
     """
     # Normalized first: pathlib keeps "..", so "<process folder>/.." would otherwise pass as a folder in it.
     path = Path(os.path.normpath(path))
-    if (
-        not path.is_absolute()
-        or path.parent not in _process_dirs.values()
-        or not path.name.startswith(_SESSION_PREFIX)
-    ):
+    # Under the lock: this runs on worker threads, and another thread may add or drop a process folder meanwhile.
+    with _first_use_lock:
+        owned = path.parent in _process_dirs.values()
+    if not path.is_absolute() or not owned or not path.name.startswith(_SESSION_PREFIX):
         _warn_once("refuse", "Not removing %s: it is not a session folder of this process.", path)
         return False
     return remove_tree(path)
