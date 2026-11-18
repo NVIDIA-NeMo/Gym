@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import json
 import shutil
 import tomllib
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from typing import Annotated
 
 import tomli_w
 import tyro
-from huggingface_hub import snapshot_download
+from huggingface_hub import RepoFolder, list_repo_tree, snapshot_download
 from tqdm.auto import tqdm
 
 
@@ -53,16 +53,24 @@ class HarborBOBTask:
     def id(self) -> str:
         return f"bob-task__{self.source.id}"
 
+    def environment_data(self, *, skip_data: bool) -> str:
+        """Return the task data path visible to the agent."""
+        if skip_data:
+            return f"/mnt/s3-data/nemotron-life-science/harbor-data/biomnibench_da/{self.id}/environment/data"
+        return "/app/data"
+
     @property
     def toml(self) -> str:
         task_config = self.source.toml_config
 
         task_config["task"]["name"] = f"phylo/{self.id}"
 
-        task_config["environment"] = {
-            "docker_image": self.docker_image,
-            "workdir": "/app",
-        }
+        task_config["environment"].update(
+            {
+                "docker_image": self.docker_image,
+                "workdir": "/app",
+            }
+        )
 
         task_config["verifier"]["env"] = {
             "JUDGE_MODEL": r"${JUDGE_MODEL}",
@@ -72,24 +80,47 @@ class HarborBOBTask:
 
         return tomli_w.dumps(task_config)
 
-    @property
-    def gym_input(self) -> dict:
-        return {"task_name": self.id, "responses_create_params": {"input": []}}
-
-    def write(self, output_dir: Path, force: bool = False) -> Path:
+    def _is_complete(self, output_dir: Path, *, skip_data: bool) -> bool:
         task_dir = output_dir / self.id
+        return (task_dir / ".done").is_file() and (
+            not (task_dir / "environment").exists() if skip_data else (task_dir / "environment/data").is_dir()
+        )
+
+    def write(self, output_dir: Path, force: bool = False, *, skip_data: bool = False) -> Path:
+        """Reuse completed tasks unless forced, rebuilding incomplete task directories."""
+        task_dir = output_dir / self.id
+        done_marker = task_dir / ".done"
 
         if task_dir.exists():
-            if not force:
-                raise FileExistsError(f"Harbor task output directory already exists: {task_dir}")
+            if not force and self._is_complete(output_dir, skip_data=skip_data):
+                return task_dir
             shutil.rmtree(task_dir)
 
-        shutil.copytree(self.source.task_dir, task_dir, dirs_exist_ok=True)
+        shutil.copytree(
+            self.source.task_dir,
+            task_dir,
+            dirs_exist_ok=True,
+            ignore=lambda directory, _names: (
+                ("environment",) if skip_data and Path(directory) == self.source.task_dir else ()
+            ),
+        )
         shutil.copytree(self.template_dir, task_dir, dirs_exist_ok=True)
 
         ## Do not need custom Dockerfile per task.
-        (task_dir / "environment/Dockerfile").unlink()
+        (task_dir / "environment/Dockerfile").unlink(missing_ok=True)
         (task_dir / "task.toml").write_text(self.toml + "\n")
+        if skip_data:
+            instruction_path = task_dir / "instruction.md"
+            instruction = instruction_path.read_text()
+            instruction_path.write_text(
+                instruction.replace(
+                    "## Data Files\n",
+                    f"## Data Files\n\nAll data files are available at `{self.environment_data(skip_data=skip_data)}`.\n",
+                    1,
+                )
+            )
+
+        done_marker.touch()
 
         return task_dir
 
@@ -109,7 +140,12 @@ class HarborBOB:
     """Maximum number of tasks to convert."""
 
     overwrite: bool = False
-    """Whether existing generated tasks may be replaced."""
+    """Rebuild completed tasks too; incomplete tasks are always rebuilt."""
+
+    skip_data: bool = False
+    """Skip downloading and copying environment/; supply task data separately at the path added to the instruction."""
+
+    _data_repo_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self.output_dir = Path(self.output_dir).expanduser()
@@ -117,28 +153,47 @@ class HarborBOB:
         self.data_dir = Path(self.data_dir).expanduser()
 
         if not self.data_dir.is_dir():
-            self.data_dir = Path(snapshot_download(str(self.data_dir), repo_type="dataset"))
+            self._data_repo_id = str(self.data_dir)
 
     @property
     def tasks(self) -> Iterator[HarborBOBTask]:
-        for source_task in BOBTask.from_dir(self.data_dir):
-            yield HarborBOBTask(source_task, docker_image=self.docker_image)
+        if self.limit is not None and self.limit <= 0:
+            return
+        if self._data_repo_id is None:
+            source_tasks = BOBTask.from_dir(self.data_dir)
+        else:
+            task_names = sorted(
+                entry.path
+                for entry in list_repo_tree(self._data_repo_id, repo_type="dataset")
+                if isinstance(entry, RepoFolder) and entry.path.startswith("da-")
+            )
+            source_tasks = (BOBTask(name, self.data_dir / name) for name in task_names)
 
-    def write(self):
+        for source_task in islice(source_tasks, self.limit):
+            task = HarborBOBTask(source_task, docker_image=self.docker_image)
+            if self._data_repo_id is not None and (
+                self.overwrite or not task._is_complete(self.output_dir, skip_data=self.skip_data)
+            ):
+                snapshot_dir = Path(
+                    snapshot_download(
+                        self._data_repo_id,
+                        repo_type="dataset",
+                        allow_patterns=[f"{source_task.id}/**"],
+                        ignore_patterns=[f"{source_task.id}/environment/**"] if self.skip_data else None,
+                    )
+                )
+                source_task.task_dir = snapshot_dir / source_task.id
+            yield task
+
+    def write(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        gym_rows: list[str] = []
+        task_count = 0
         for task in tqdm(self.tasks, desc="bob"):
-            if self.limit is not None and len(gym_rows) >= self.limit:
-                break
+            task.write(self.output_dir, force=self.overwrite, skip_data=self.skip_data)
+            task_count += 1
 
-            task.write(self.output_dir, force=self.overwrite)
-            gym_rows.append(json.dumps(task.gym_input) + "\n")
-
-        with (self.output_dir / "gym.jsonl").open("w") as gym_file:
-            gym_file.writelines(gym_rows)
-
-        print(f"Adapted {len(gym_rows)} tasks to {self.output_dir}")
+        print(f"Adapted {task_count} tasks to {self.output_dir}")
 
 
 def prepare(
@@ -148,17 +203,19 @@ def prepare(
     data_dir: str | Path = "phylobio/BiomniBench-DA",
     limit: int | None = None,
     overwrite: bool = False,
+    skip_data: bool = False,
 ) -> Path:
-    """Prepare Harbor tasks and return their Gym JSONL index path."""
+    """Prepare Harbor tasks and return their output directory."""
     benchmark = HarborBOB(
         docker_image=docker_image,
         output_dir=output_dir,
         data_dir=data_dir,
         limit=limit,
         overwrite=overwrite,
+        skip_data=skip_data,
     )
     benchmark.write()
-    return Path(benchmark.output_dir) / "gym.jsonl"
+    return Path(benchmark.output_dir)
 
 
 if __name__ == "__main__":
