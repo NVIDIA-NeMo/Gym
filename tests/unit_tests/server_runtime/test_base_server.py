@@ -154,6 +154,157 @@ class TestServerUtils:
         assert third == first
         assert to_yaml_mock.call_count == 2
 
+    def test_HeadServer_global_config_dict_yaml_masks_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        """Agent sandboxes that share the head server's loopback read this route: no credential in it, routing
+        intact, and a client that resolves the served config gets the mask, not the key."""
+        from fastapi.testclient import TestClient
+
+        global_config_dict = DictConfig(
+            {
+                "head_server": {"host": "127.0.0.1", "port": 11000},
+                "policy_api_key": "sk-live-sentinel",
+                "hf_token": "hf-live-sentinel",
+                "policy_model": {
+                    "responses_api_models": {
+                        "vllm_model": {"host": "127.0.0.1", "port": 1234, "api_key": "${policy_api_key}"}
+                    }
+                },
+                "max_tokens": 4096,
+                "openai_default_headers": {"x-litellm-key": "sk-litellm-sentinel"},
+                "mlflow_tracking_uri": "https://user:pw-sentinel@mlflow.example/api",  # pragma: allowlist secret
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200
+        assert "sentinel" not in response.text
+
+        served = OmegaConf.create(response.json())
+        assert served.policy_api_key == "****"
+        assert served.hf_token == "****"
+        assert served.policy_model.responses_api_models.vllm_model.api_key == "****"
+        assert served.policy_model.responses_api_models.vllm_model.port == 1234
+        assert served.max_tokens == 4096
+        assert served.openai_default_headers["x-litellm-key"] == "****"
+        assert served.mlflow_tracking_uri == "https://user:****@mlflow.example/api"
+        # The supervisor's own config (and so NEMO_GYM_CONFIG_DICT for the servers it launches) is untouched.
+        assert global_config_dict.policy_api_key == "sk-live-sentinel"
+
+    @mark.parametrize("opt_out", [None, False, "false", "true", 0, 1, "${oc.env:TEST_SERVE_CREDENTIALS}", True])
+    def test_HeadServer_serves_credentials_only_for_boolean_true(self, monkeypatch: MonkeyPatch, opt_out) -> None:
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setenv("TEST_SERVE_CREDENTIALS", "false")
+        global_config_dict = DictConfig({"policy_api_key": "sk-live-sentinel"})
+        if opt_out is not None:
+            global_config_dict.head_server_serve_credentials = opt_out
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200
+        served = OmegaConf.create(response.json())
+        assert served.policy_api_key == ("sk-live-sentinel" if opt_out is True else "****")
+        assert global_config_dict.policy_api_key == "sk-live-sentinel"
+
+    def test_HeadServer_masks_referenced_header_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        from fastapi.testclient import TestClient
+
+        global_config_dict = DictConfig(
+            {
+                "shared": {"x-litellm-key": "sk-shared-sentinel", "x-trace-id": "trace-id"},
+                "header_alias": "${shared}",
+                "policy_model": {
+                    "openai_default_headers": "${header_alias}",
+                    "port": 1234,
+                },
+                "opaque_value": "sk-scalar-sentinel",
+                "api_key": "${opaque_value}",
+                "cache_key": "cache-id",
+                "max_tokens": 4096,
+                "unrelated": "${oc.env:UNSET_UNRELATED_VARIABLE}",
+            }
+        )
+        monkeypatch.delenv("UNSET_UNRELATED_VARIABLE", raising=False)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200 and "sentinel" not in response.text
+        served = OmegaConf.create(response.json())
+        assert served.policy_model.openai_default_headers["x-litellm-key"] == "****"
+        assert served.policy_model.openai_default_headers["x-trace-id"] == "trace-id"
+        assert served.shared["x-litellm-key"] == "****"
+        assert served.opaque_value == served.api_key == "****"
+        assert served.cache_key == "cache-id" and served.max_tokens == 4096
+        assert served.policy_model.port == 1234
+        assert OmegaConf.to_container(served, resolve=False)["unrelated"] == "${oc.env:UNSET_UNRELATED_VARIABLE}"
+        assert global_config_dict.shared["x-litellm-key"] == "sk-shared-sentinel"
+        assert global_config_dict.opaque_value == "sk-scalar-sentinel"
+
+    async def test_HeadServer_global_config_dict_yaml_serves_credentials_when_asked(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        global_config_dict = DictConfig({"policy_api_key": "sk-live", "head_server_serve_credentials": True})
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        served = OmegaConf.create(await head_server.global_config_dict_yaml())
+
+        assert served.policy_api_key == "sk-live"
+
+    @mark.parametrize("model_api_key", ["sk-literal-sentinel", "${oc.env:TEST_MODEL_API_KEY_SENTINEL}"])
+    async def test_HeadServer_never_serves_the_model_api_key(
+        self, monkeypatch: MonkeyPatch, model_api_key: str
+    ) -> None:
+        """`--model-api-key` as a literal or as an env interpolation (an external-endpoint run), through the real parser
+        and a model server config: the served YAML holds neither the key nor anything resolving to it."""
+        from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+
+        monkeypatch.setenv("TEST_MODEL_API_KEY_SENTINEL", "env-sentinel")
+        initial = OmegaConf.load(nemo_gym.PARENT_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml")
+        initial.policy_api_key = model_api_key
+        initial.policy_base_url = "https://example.invalid/v1"
+        initial.policy_model_name = "test-model"
+        global_config_dict = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=initial, skip_load_from_cli=True, skip_load_from_dotenv=True, offline=True
+            )
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+
+        served_yaml = await HeadServer(config=BaseServerConfig(host="", port=0)).global_config_dict_yaml()
+
+        assert "sentinel" not in served_yaml
+        assert "TEST_MODEL_API_KEY_SENTINEL" not in served_yaml
+        served = OmegaConf.to_container(OmegaConf.create(served_yaml), resolve=True)
+        assert served["policy_api_key"] == "****"
+        assert served["policy_model"]["responses_api_models"]["vllm_model"]["api_key"] == "****"
+        assert served["policy_model"]["responses_api_models"]["vllm_model"]["base_url"] == "https://example.invalid/v1"
+
     def _mock_ray_return_value(self, monkeypatch: MonkeyPatch, return_value: bool) -> MagicMock:
         ray_mock = MagicMock()
         ray_mock.is_initialized.return_value = return_value
