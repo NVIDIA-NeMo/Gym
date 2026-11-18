@@ -36,7 +36,7 @@ from typing import Optional
 
 from tqdm.auto import tqdm
 
-from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
+from nemo_gym.client import ServerClient, get_response_json, raise_for_status
 
 
 async def _single_post(semaphore: Semaphore, server_client: ServerClient, agent_name: str, url_path: str, f) -> dict:

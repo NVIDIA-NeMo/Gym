@@ -36,20 +36,21 @@ from typing import Any, List, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import call_judge
 
 
 class AggregationMode(str, Enum):
@@ -239,7 +240,10 @@ def _extract_verdict(response_text: str, yes_label: str, no_label: str) -> str:
 class MultiChallengeServer(SimpleResourcesServer):
     """MultiChallenge evaluation server."""
 
-    ray_enabled = False
+    # Each verification grades the request's rubric with judge calls: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
 
     config: MultiChallengeConfig
 
@@ -385,3 +389,6 @@ class MultiChallengeServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     MultiChallengeServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MultiChallengeServer.run_webserver()  # noqa: F401

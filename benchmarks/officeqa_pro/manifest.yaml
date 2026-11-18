@@ -1,0 +1,28 @@
+name: officeqa_pro
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: OfficeQA Pro document retrieval and reasoning over U.S. Treasury Bulletins.
+modality: multimodal
+# Code license; the separately downloaded dataset is CC-BY-SA-4.0.
+licensing: Apache-2.0
+authors: [Jarno Seppänen]
+reward: {range: [0.0, 1.0], higher_is_better: true}
+determinism: stochastic
+config_path: config.yaml
+resources_server: officeqa
+agent_server: opencode_agent
+model_server: policy_model
+canonical_split: officeqa_pro
+prompt_source: prepared
+datasets:
+- name: officeqa_pro
+  type: benchmark
+  jsonl_fpath: benchmarks/officeqa_pro/data/benchmark.jsonl
+  prepare_script: benchmarks/officeqa_pro/prepare.py
+  num_repeats: 5
+session_model: episode
+state: per_session
+lifecycle: active

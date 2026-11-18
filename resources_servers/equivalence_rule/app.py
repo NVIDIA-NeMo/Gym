@@ -25,7 +25,7 @@ from typing import ClassVar
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -33,6 +33,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class GradingRule(str, Enum):
@@ -73,7 +74,10 @@ def _normalize(text: str) -> str:
 
 
 class EquivalenceRuleResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification compares the answers by rule: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: EquivalenceRuleResourcesServerConfig
 
     async def verify(self, body: EquivalenceRuleVerifyRequest) -> EquivalenceRuleVerifyResponse:
@@ -135,3 +139,6 @@ class EquivalenceRuleResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     EquivalenceRuleResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = EquivalenceRuleResourcesServer.run_webserver()  # noqa: F401

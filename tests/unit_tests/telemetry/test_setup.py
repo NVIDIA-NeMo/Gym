@@ -31,6 +31,7 @@ from nemo_gym.telemetry.setup import (
     is_metrics_exporter_active,
     is_telemetry_env_enabled,
     is_telemetry_metrics_enabled,
+    is_trace_exporter_active,
     shutdown_telemetry,
 )
 from tests.unit_tests.telemetry.conftest import import_without_lens, no_lens, requires_lens
@@ -131,6 +132,18 @@ def test_init_builds_an_exporting_handle(enabled_console_env):
     assert handle.is_exporting is True
     assert get_telemetry() is handle
     assert is_metrics_exporter_active() is True
+
+
+def test_trace_exporter_follows_traces_enabled(enabled_console_env):
+    assert init_telemetry(server_name="weather") is not None
+    assert is_trace_exporter_active() is True
+
+
+def test_trace_exporter_is_inactive_when_traces_are_disabled(enabled_console_env):
+    enabled_console_env.setenv("NEMO_GYM_OTEL_TRACES_ENABLED", "0")
+    handle = init_telemetry(server_name="weather")
+    assert handle is not None and handle.is_exporting is True
+    assert is_trace_exporter_active() is False
 
 
 def test_metrics_exporter_is_inactive_when_metrics_are_disabled(enabled_console_env):
@@ -285,6 +298,99 @@ def test_each_server_reports_itself_as_a_single_rank_world(enabled_console_env, 
     assert captured[NV_DL_WORLD_SIZE] == 1
 
 
+def test_each_server_names_its_own_instance(enabled_console_env, monkeypatch):
+    """The companion to the rank above: nemo-lens derives `service.instance.id` as
+    f"{run_id}-rank{rank}" when a rank is present and no identity was supplied. Rank is
+    pinned to 0 for every server and run_id is deliberately shared fleet-wide, so
+    leaving the derivation to lens gives the whole job one instance id.
+
+    The readable prefix is asserted but the suffix only has to be hex: it is a random
+    nonce, so pinning the whole string would pin a value the next run will not produce.
+    """
+    monkeypatch.setenv("NEMO_GYM_OTEL_RUN_ID", "job-1416252")
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(server_name="weather")
+
+    instance_id = captured["service.instance.id"]
+    prefix = f"job-1416252-weather-{os.getpid()}-"
+    assert instance_id.startswith(prefix), instance_id
+    nonce = instance_id.removeprefix(prefix)
+    assert nonce and all(c in "0123456789abcdef" for c in nonce), instance_id
+
+
+def test_two_processes_sharing_a_run_a_name_and_a_pid_still_differ(monkeypatch):
+    """A PID is only unique within its host and its container PID namespace.
+
+    Two servers of one run can therefore agree on every readable part of the identity,
+    which is the collision the nonce exists to break. Driven through the helper rather
+    than two `init_telemetry` lifecycles because the helper is where the uniqueness
+    comes from, and the one-shot init guard makes a second lifecycle awkward to stage.
+    """
+    monkeypatch.setattr(os, "getpid", lambda: 42)
+
+    first = telemetry_setup._service_instance_id("job-1", "weather")
+    second = telemetry_setup._service_instance_id("job-1", "weather")
+
+    assert first != second, "two processes would report the same instance id"
+    assert first.startswith("job-1-weather-42-") and second.startswith("job-1-weather-42-")
+
+
+def test_an_instance_id_stays_nonempty_without_a_run_or_a_name(monkeypatch):
+    """Absent parts are dropped, so a standalone server must not get a leading `--`."""
+    monkeypatch.setattr(os, "getpid", lambda: 42)
+
+    assert telemetry_setup._service_instance_id("", None).startswith("42-")
+
+
+def test_an_instance_id_from_the_caller_wins(enabled_console_env, monkeypatch):
+    """Only the `resource_attributes` argument keeps a caller's own identity.
+
+    nemo-lens ranks caller attributes above environment ones and Gym now always passes
+    an id, so a `service.instance.id` in `OTEL_RESOURCE_ATTRIBUTES` is replaced rather
+    than kept -- see `test_an_environment_instance_id_is_replaced` below.
+    """
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(
+        server_name="weather",
+        resource_attributes={"service.instance.id": "chosen-by-the-caller"},
+    )
+
+    assert captured["service.instance.id"] == "chosen-by-the-caller"
+
+
+def test_an_environment_instance_id_is_replaced(enabled_console_env, monkeypatch):
+    """Gym's servers are spawned into one shared environment.
+
+    An inherited `OTEL_RESOURCE_ATTRIBUTES` id would therefore name every one of them
+    identically, which is the collision this whole helper exists to break, so Gym passes
+    its own and lets lens rank it above the environment.
+    """
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.instance.id=chosen-by-launcher")
+    monkeypatch.setenv("NEMO_GYM_OTEL_RUN_ID", "job-1")
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(server_name="weather")
+
+    assert captured["service.instance.id"].startswith(f"job-1-weather-{os.getpid()}-")
+
+
 # --------------------------------------------------------------------------- #
 # Another library already initialised nemo-lens in this process (NeMo-RL)
 # --------------------------------------------------------------------------- #
@@ -353,6 +459,21 @@ def test_reused_lens_with_metrics_enables_pool_metrics(lens_initialised_elsewher
     init_telemetry(server_name="weather")
 
     assert is_metrics_exporter_active() is True
+
+
+@pytest.mark.parametrize("owner_traces", [True, False])
+def test_reused_lens_exports_traces_only_with_an_sdk_tracer_provider(
+    lens_initialised_elsewhere, monkeypatch, owner_traces
+):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.trace import NoOpTracerProvider
+
+    provider = TracerProvider(shutdown_on_exit=False) if owner_traces else NoOpTracerProvider()
+    monkeypatch.setattr("opentelemetry.trace.get_tracer_provider", lambda: provider)
+
+    init_telemetry(server_name="weather")
+
+    assert is_trace_exporter_active() is owner_traces
 
 
 def test_shutdown_leaves_providers_gym_does_not_own(lens_initialised_elsewhere, monkeypatch):
@@ -496,3 +617,33 @@ def test_a_failing_logging_bridge_does_not_break_startup(clean_otel_env, monkeyp
 
     monkeypatch.setattr("nemo.lens.logging_bridge.setup_logging_bridge", boom)
     assert init_telemetry(server_name="weather") is not None
+
+
+@pytest.mark.parametrize("traces_exporting", [True, False])
+def test_the_fastapi_instrumentor_is_installed_only_while_traces_export(monkeypatch, traces_exporting):
+    """The instrumentor costs every request tens of microseconds even when no span is exported."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    from nemo_gym.server_runtime import base_server
+    from nemo_gym.telemetry import contrib
+
+    instrumented = []
+    monkeypatch.setattr(contrib, "instrument_fastapi_app", instrumented.append)
+    monkeypatch.setattr(base_server, "is_span_group_enabled", lambda _group: True)
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", SimpleNamespace(is_exporting=True))
+    monkeypatch.setattr(telemetry_setup, "_TRACES_EXPORTING", traces_exporting)
+    app = FastAPI()
+
+    base_server.SimpleServer.instrument_app_for_telemetry(None, app)
+
+    assert instrumented == ([app] if traces_exporting else [])
+
+
+def test_init_registers_the_rollout_id_provider_for_sandbox_spans(enabled_console_env):
+    import nemo_gym.sandbox.observability as sandbox_observability
+    from nemo_gym.telemetry.setup import init_telemetry, rollout_span_attributes
+
+    init_telemetry()
+    assert sandbox_observability._span_attribute_provider is rollout_span_attributes

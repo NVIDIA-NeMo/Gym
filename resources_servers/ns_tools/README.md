@@ -27,6 +27,21 @@ gym eval run --no-serve \
     --limit 5
 ```
 
+## Sessions
+Each rollout gets its own stateful Python session in the NeMo Skills sandbox. The rollout's session cookie keys it, and
+the first `stateful_python_code_exec` call creates it.
+
+Under an Environment Server, such as `ns_tools_environment_server` (`single_agent_turn_legacy`), `/seed_session`
+binds the cookie to the `resources_session_id`. `/close_session` releases the Python session and the rollout's tool
+timings, even when `/verify` never ran. Closing an unknown or already closed session succeeds, and a seed that
+arrives after its session closed is refused with 409 for `session_close_retry_window_seconds`. A tool call for a
+closed session gets 404 with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with
+reward 0.
+
+Cancelling a Python tool request leaves its bounded backend request owned until it finishes. Close waits for that
+request before deleting the session, including when cleanup itself is cancelled and retried. Verification preserves
+the delegated verifier's mask and failure diagnostics, so a judge outage remains masked.
+
 ## Sample data format
 Each sample requires:
 - `question`: The math question being asked
@@ -61,18 +76,25 @@ Example with Python tool:
 
 The `prepare_dataset.py` script transforms source datasets into the JSONL format required by nemo-gym.
 
-### Regenerating compmath_prepared.jsonl
+### Regenerating compmath_test.jsonl
 
-The `data/compmath_prepared.jsonl` file is generated from the nemo-skills comp-math-24-25 dataset. To regenerate it:
+The `data/compmath_test.jsonl` file is generated from the nemo-skills comp-math-24-25 dataset. To regenerate it, run
+the script with this server's venv (by default `resources_servers/ns_tools/.venv`, which `gym env start` or
+`gym env test` creates for `ns_tools`):
 
 ```bash
-python prepare_dataset.py \
+resources_servers/ns_tools/.venv/bin/python resources_servers/ns_tools/prepare_dataset.py \
     --input /path/to/nemo_skills/dataset/comp-math-24-25/test.txt \
-    --output data/compmath_prepared.jsonl \
+    --output resources_servers/ns_tools/data/compmath_test.jsonl \
     --prompt_config generic/math \
     --tools nemo_skills.mcp.servers.python_tool::DirectPythonTool \
     --verifier_type math_with_judge
 ```
+
+`--prompt_config generic/math` reads `prompts/generic/math.yaml`, a copy of the NeMo Skills prompt config, because the
+pinned `nemo-skills-tools` package does not ship its prompt YAMLs. To use another prompt, pass the path to its YAML
+file; its `system` and `user` templates can use `{problem}` and `{examples}` (always empty). The script stops with an
+error, before writing any output, when the prompt config does not exist or a template cannot be filled.
 
 ### Validating example data
 

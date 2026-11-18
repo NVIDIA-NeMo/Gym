@@ -18,13 +18,14 @@ from typing import List, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class ARCAGIResourcesServerConfig(BaseResourcesServerConfig):
@@ -90,7 +91,6 @@ def _parse_grid(text: str) -> Optional[List[List[int]]]:
 
 
 class ARCAGIResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ARCAGIResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -114,3 +114,6 @@ class ARCAGIResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ARCAGIResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ARCAGIResourcesServer.run_webserver()  # noqa: F401

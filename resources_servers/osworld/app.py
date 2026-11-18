@@ -11,8 +11,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import PrivateAttr
 
-from nemo_gym.base_resources_server import SimpleResourcesServer
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import (
+    VERIFIER_ERROR,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+    sdk_error_details,
+)
+from nemo_gym.server_runtime import ResourcesSessionConflictError, SimpleResourcesServer, lost_session_verification
+from nemo_gym.utils import bounded_text
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import (
     OSWorldCloseResponse,
@@ -37,8 +46,6 @@ from resources_servers.osworld.session_manager import (
 
 class OSWorldResourcesServer(SimpleResourcesServer):
     """Own stateful OSWorld environments using Gym's signed session cookie."""
-
-    ray_enabled = False
 
     config: OSWorldResourcesServerConfig
     _manager: OSWorldSessionManager = PrivateAttr()
@@ -84,10 +91,6 @@ class OSWorldResourcesServer(SimpleResourcesServer):
         async def session_not_found(_request, exc: SessionNotFoundError):
             return JSONResponse(status_code=404, content={"detail": f"unknown session: {exc.args[0]}"})
 
-        @app.exception_handler(SessionConflictError)
-        async def session_conflict(_request, exc: SessionConflictError):
-            return JSONResponse(status_code=409, content={"detail": str(exc)})
-
         @app.exception_handler(CapacityUnavailableError)
         async def capacity_unavailable(_request, exc: CapacityUnavailableError):
             return JSONResponse(status_code=503, content={"detail": str(exc)})
@@ -113,7 +116,10 @@ class OSWorldResourcesServer(SimpleResourcesServer):
         request: Request,
         body: OSWorldSeedSessionRequest,
     ) -> OSWorldSeedSessionResponse:
-        return await self._manager.seed_session(self._session_id(request), body)
+        try:
+            return await self._manager.seed_session(self._session_id(request), body)
+        except SessionConflictError as error:
+            raise ResourcesSessionConflictError(str(error)) from error
 
     async def session_status(
         self,
@@ -161,12 +167,42 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 osworld_score=result.score,
                 mask_sample=False,
             )
-        except Exception:
+        # The request accepts extra fields, so the failure fields replace any it carries rather than repeat them.
+        except SessionNotFoundError:
             return OSWorldVerifyResponse(
-                **body.model_dump(),
-                reward=0.0,
-                osworld_score=0.0,
-                mask_sample=True,
+                **{
+                    **body.model_dump(),
+                    "osworld_score": 0.0,
+                    **lost_session_verification(f"OSWorld session {session_id} was not found at verify"),
+                }
+            )
+        except Exception as error:
+            # The reason names the operation and the exception type only. The evaluator's own text can hold
+            # task, request or response data, so it is not copied into the reason: the event keeps the exception
+            # as its cause and selects no message from it.
+            reason = bounded_text(f"OSWorld evaluation raised {type(error).__name__}", 2000)
+            # The masked row also goes into the run's failure record, tied to this verifier invocation.
+            failure = NgFailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=reason,
+                operation="verify",
+                operation_id=current_verifier_invocation_id(),
+                stage="verification",
+                exception_type=type(error).__name__[:256],
+                foreign_error=sdk_error_details(error, message=""),
+            )
+            failure.__cause__ = error
+            observe_failure(failure)
+            return OSWorldVerifyResponse(
+                **{
+                    **body.model_dump(),
+                    "reward": 0.0,
+                    "osworld_score": 0.0,
+                    "mask_sample": True,
+                    "failure_kind": VERIFIER_ERROR,
+                    "failure_reason": reason,
+                }
             )
         finally:
             await self._manager.close_session(session_id)

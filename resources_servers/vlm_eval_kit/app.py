@@ -20,7 +20,7 @@ from typing import Any, Dict, List
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -53,7 +53,6 @@ class Coordinator(BaseModel):
 
 
 class VlmEvalKitResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: VlmEvalKitResourcesServerConfig
 
     MMBench_DEV_EN_V11_sets: Dict[str, Coordinator] = Field(default_factory=lambda: defaultdict(Coordinator))

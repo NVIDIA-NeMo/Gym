@@ -21,13 +21,14 @@ from typing import Any, Optional
 
 from metrics import FINGERPRINTS, canonical_smiles, decode_safe, score_fragments, score_safe, score_smiles
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,6 @@ class MolDeToxVerifyResponse(BaseVerifyResponse):
 
 
 class MolDeToxResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: BaseResourcesServerConfig
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
@@ -269,3 +269,6 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
 
 if __name__ == "__main__":
     MolDeToxResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MolDeToxResourcesServer.run_webserver()  # noqa: F401

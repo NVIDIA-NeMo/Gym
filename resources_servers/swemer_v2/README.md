@@ -23,9 +23,11 @@ extensively documented and hardened against real captured output over several fu
 git history for that story). It has been replaced by
 `responses_api_agents.swe_agents.swe_bench_ext` -- the same output-flag injection and test-result
 parsing the swe-bench-ext harness itself uses, and the same mechanism swemer_v1 (the sibling
-dataset) is built on. `verification.SUPPORTED_FRAMEWORKS` is still just these 5: this dataset's
-raw source isn't available locally to test whether swe_bench_ext's other ~15 frameworks could be
-added the way they were for swemer_v1.
+dataset) is built on. `verification.SUPPORTED_FRAMEWORKS` started as just these 5 because no rows for
+the other frameworks were available to validate against. Since 2026-10-08 it is the same swe_bench_ext-backed
+list swemer_v1 grades (cargo, cargo-nextest, junit, maven, gtest, ctest, bun, cppunit, xctest, ... --
+`frameworks.FRAMEWORK_CONFIGS` minus bazel/jasmine), widened when a 2026-10 delivery brought cargo/junit/gtest/ctest/bun
+rows that could be golden-patch validated the same way (see "Rows beyond the original five frameworks" below).
 
 The one real wrinkle: this dataset's `FAIL_TO_PASS`/`PASS_TO_PASS` ids are a dotted convention
 (`tests.pkg.test_mod::test_name`), not swe_bench_ext's own real-node-id convention
@@ -58,7 +60,7 @@ A row whose golden patch does not resolve cannot be used for evaluation or train
 
 ```bash
 gym env start \
-  --config resources_servers/swemer_v2/configs/swemer_v2.yaml \
+  --config resources_servers/swemer_v2/configs/swemer_v2_legacy_agent.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 python resources_servers/swemer_v2/apply_golden_patch.py \
@@ -82,11 +84,33 @@ spread thinly across all 5 frameworks rather than concentrated in one -- consist
 test flakiness/environment variance, not a parser regression (see "Grading uses swe-bench-ext"
 above for the validation that established this).
 
+## Rows beyond the original five frameworks
+
+The first rows outside pytest/go/jest/mocha/vitest came from a 2026-10 delivery of 712 SWE-Pro task folders. 707 had
+a ready image and 704 used a framework swe_bench_ext can grade (2 ava + 1 uvu rows were dropped). A 3x golden-patch
+sweep kept 686 (97.4%): 7 flaky, 11 broken. Per framework: pytest 191/194, go 167/168, jest 108/108, vitest 73/75,
+cargo 63/68, mocha 50/50, ctest 9/9, gtest 9/9, bun 5/5, cppunit 3/3, cargo-nextest/telescope/lust 1/1 each, junit
+5/10 and maven 0/2. Every JVM miss was a Gradle/Maven dependency download answered with HTTP 429 by Maven Central
+during the build (those images do not cache their dependencies), not a grading fault; the 3 cargo "broken" rows do
+not compile against their own test patch. Those 686 rows are distributed offline as a separate JSONL next to
+`data/swemer_v2_training.jsonl`, with the same user-message layout (prompt statement, then `## Requirements:`,
+`## New interfaces to add:` and the rules block), and are not merged into it. The same delivery's DeepSWE/Harbor-format
+folders are served by `deepswe_external1` instead.
+
 ## Running an agent
+
+`configs/swemer_v2.yaml` is the default OpenCode session pairing for the example taskset.
+The resources-only configuration is now `configs/swemer_v2_legacy_agent.yaml`; use it for
+golden-patch validation. `configs/swemer_v2_opencode.yaml` retains the legacy relay pairing
+for the training dataset.
+
+```bash
+gym env start --config resources_servers/swemer_v2/configs/swemer_v2.yaml
+```
 
 `configs/swemer_v2_opencode.yaml` wires the opencode sandboxed agent to
 `swemer_v2_resources_server`, pointed at `data/swemer_v2_training.jsonl`. It lives in a separate
-file rather than folded into `swemer_v2.yaml` so golden-patch validation (which never touches an
+file rather than folded into `swemer_v2_legacy_agent.yaml` so golden-patch validation (which never touches an
 agent) doesn't need to pull in the agent's much larger sandbox/permission config.
 
 ```bash

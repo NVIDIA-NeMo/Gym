@@ -1,0 +1,76 @@
+{
+  "source_repository": "https://github.com/MatthewCYM/VoiceBench",
+  "source_commit": "0842845a532af34396b173f92f304aa9e2b3c4ab",
+  "license": "Apache-2.0",
+  "source_files": {
+    "src/evaluator/mcq.py": {
+      "sha256": "10b1d0287222f7a48a8277feb6d5ed643fbe7c9c8946e7d2fdc3e4c299b73559",
+      "vendored_as": "mcq.py"
+    },
+    "src/evaluator/bbh.py": {
+      "sha256": "914b92d7680d99cc7ef93cda8e78bf37bbb8ee3874edb52dea447083e166bee0",
+      "vendored_as": "bbh.py"
+    },
+    "src/evaluator/harm.py": {
+      "sha256": "0a70a527f60c3e5e3ead517a348a46ed46104c4bcb5c42febc68e056c8398031",
+      "vendored_as": "refusal.py"
+    },
+    "src/evaluator/ifeval.py": {
+      "sha256": "d43f8c7e3273523c2a88de542179c5b137d08fb8c2b0b4085b32c48a51c70924",
+      "vendored_as": "ifeval.py"
+    },
+    "src/evaluator/instruction_following_eval/instructions.py": {
+      "sha256": "ac8af03812e0b2e19431c0664812cdf27d37a702e84feda71273b5d4d99c7be0",
+      "vendored_as": "instruction_following_eval/instructions.py"
+    },
+    "src/evaluator/instruction_following_eval/instructions_registry.py": {
+      "sha256": "8c8a9810e53b0755c405d0ec76f2f2bbcc965e42c41765772c070d04dc45176d",
+      "vendored_as": "instruction_following_eval/instructions_registry.py"
+    },
+    "src/evaluator/instruction_following_eval/instructions_util.py": {
+      "sha256": "c15ce8f341cec041a687271885b223b49999b2e839962b8ee9ac2a898b87ba94",
+      "vendored_as": "instruction_following_eval/instructions_util.py"
+    }
+  },
+  "modifications": [
+    "Remove unused dataset aggregate methods and imports.",
+    "Replace global random calls with request-local ContextVar RNG.",
+    "Remove BBH fallback console prints; retain explicit wrapper diagnostics.",
+    "Ruff formatting; preserve original parser/check quirks."
+  ],
+  "nvidia_extensions": {
+    "mcq.py": {
+      "description": "Parse the last LaTeX \\boxed{} choice first, then try added Markdown-bold and plain 'Answer:' templates before the source templates and two bare bolded-choice templates after them.",
+      "added_statements": [
+        "boxed_iter"
+      ],
+      "added_templates": [
+        "answer:\n**[CHOICE]",
+        "answer:\n\n**[CHOICE]",
+        "answer:** [CHOICE]",
+        "answer: **[CHOICE]",
+        "answer:**\n\n**[CHOICE]",
+        "answer: [CHOICE]",
+        "answer:**  \n**[CHOICE]",
+        "answer**: **[CHOICE]",
+        "answer:** **[CHOICE]",
+        "answer is:  \n**[CHOICE]",
+        "answer:  \n**[CHOICE]",
+        "answer:**  \n[CHOICE]",
+        "answer**: [CHOICE]",
+        "answer is:\n[CHOICE]",
+        "choice**: **[CHOICE]",
+        "choice is **[CHOICE]",
+        "**[CHOICE]**",
+        "**[CHOICE]:"
+      ]
+    },
+    "refusal.py": {
+      "description": "Add curly-apostrophe and shorter forms of existing refusal phrases.",
+      "added_phrases": [
+        "I’m unable to",
+        "I can’t assist"
+      ]
+    }
+  }
+}

@@ -4,8 +4,6 @@ description: "Prepare SWE-bench Pro tasks and run Hermes through the Environment
 position: 4
 ---
 
-# Evaluate SWE-bench Pro with Hermes
-
 Use [hermes.yaml](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro/hermes.yaml)
 to connect Hermes to the SWE-bench Pro Resources Server through the `single_agent_turn_legacy`
 Environment Server. The Environment Server owns session setup, agent execution, verification,
@@ -67,8 +65,9 @@ gym eval run --no-serve \
 
 ## Session limits
 
-- Each session accepts one activation, which may contain multiple model/tool turns.
-- Use `num_workers: 1`.
+- Each Hermes session accepts one activation, which may contain multiple model/tool turns.
+  OpenCode separately supports [resuming harness sessions](/agent-server/integrate-existing-agents#resuming-harness-sessions).
+- With several agent workers, session routing sends each session's requests to the worker that seeded it.
 - Use a Linux sandbox that can reach the Gym Model Server.
 - This integration is evaluation-only, not suitable for producing RL training data.
 - The sandbox runner records `stop_reason=wall_time` for its deadline and

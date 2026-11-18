@@ -102,8 +102,7 @@ class TestFingerprintBenchmarkConfig:
 
     REPO_ROOT = Path(__file__).resolve().parents[3]
 
-    def _fingerprint(self, monkeypatch: pytest.MonkeyPatch, *, rerun_incomplete: str = "false", **policy) -> str:
-        monkeypatch.setenv("RERUN_INCOMPLETE", rerun_incomplete)
+    def _fingerprint(self, monkeypatch: pytest.MonkeyPatch, **policy) -> str:
         policy_values = {
             "policy_base_url": "http://10.0.0.1:8000/v1",
             "policy_api_key": "key-a",
@@ -123,7 +122,6 @@ class TestFingerprintBenchmarkConfig:
 
         assert self._fingerprint(monkeypatch, policy_base_url="http://10.0.9.9:8000/v1") == baseline
         assert self._fingerprint(monkeypatch, policy_api_key="key-b") == baseline
-        assert self._fingerprint(monkeypatch, rerun_incomplete="true") == baseline
 
     def test_policy_model_change_invalidates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         baseline = self._fingerprint(monkeypatch)

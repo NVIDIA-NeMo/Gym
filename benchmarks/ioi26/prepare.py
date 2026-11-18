@@ -44,7 +44,8 @@ import subprocess
 from pathlib import Path
 
 import requests
-from subtask_split import split as split_subtasks
+
+from benchmarks.ioi26.subtask_split import split as split_subtasks
 
 
 BENCHMARK_DIR = Path(__file__).parent

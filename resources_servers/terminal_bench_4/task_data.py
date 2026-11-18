@@ -20,3 +20,6 @@ class TaskData(BaseModel):
     task_name: str = Field(description="Namespaced task name, such as terminal-bench/ks-solver-cpp.")
     task_ref: str = Field(description="Pinned task package digest from the benchmark manifest.")
     dataset_ref: str = Field(description="Pinned dataset digest from the benchmark manifest.")
+    domain: str | None = Field(
+        default=None, description="Benchmark-defined task domain, such as life-sciences for Terminal-Bench-Science."
+    )

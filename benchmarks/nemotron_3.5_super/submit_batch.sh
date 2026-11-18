@@ -69,8 +69,8 @@ export MOUNTS="$repo_root:$repo_root,$repo_root:/opt/Gym,$MODEL:$MODEL:ro${MOUNT
 import json
 import sys
 from omegaconf import OmegaConf
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.rollout_collection import RolloutCollectionConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.rollouts import RolloutCollectionConfig
 
 paths, overrides = [], []
 args = iter(sys.argv[1:])
@@ -103,10 +103,10 @@ printf 'Batch: %s; nodes: %s+%s; walltime: %s; account: %s; partition: %s\n' \
 if (( check_only )); then exit 0; fi
 
 mkdir -p "$run_dir" slurm-logs
-# Preserve each argument through the launcher's generated shell and dependency check.
+# Serialize arguments for the dependency check; pass the original array to the launcher.
 # Only this printf-produced, shell-escaped string is decoded by batched.sh.
 printf -v GYM_BATCH_ARGS '%q ' "${gym_args[@]}"
 export GYM_BATCH_ARGS
 printf 'Experiment: %s\n' "$EXPERIMENT_NAME"
 printf 'Output: %s\n' "${ROLLOUTS_FPATH:-results/$EXPERIMENT_NAME/slurm_job_id_<job-id>/date_<timestamp>.jsonl}"
-bash benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh "$GYM_BATCH_ARGS"
+bash benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh "${gym_args[@]}"

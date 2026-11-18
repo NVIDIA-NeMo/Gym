@@ -1,6 +1,6 @@
-# Shared pieces of the ADME Tier-5 sub10 evaluation, scored by the reusable
+# Shared pieces of the Litmus-Bench ADME Tier-5 evaluation, scored by the reusable
 # litmus_agent verifier. Companion to config.yaml; data comes from
-# prepare_adme_tier5.py.
+# prepare.py.
 #
 # Chained by one config_adme_<subset>.yaml per subset. They are kept separate
 # because `gym eval run +split=benchmark` collates every benchmark dataset in the

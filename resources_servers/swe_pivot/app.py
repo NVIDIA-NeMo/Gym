@@ -35,13 +35,14 @@ from typing import Any, Optional
 from fastapi import FastAPI
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -577,7 +578,6 @@ def _extract_expected_function_call(body: SwePivotRunRequest) -> Optional[dict]:
 
 
 class SwePivotResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: SwePivotResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -781,3 +781,6 @@ class SwePivotResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SwePivotResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SwePivotResourcesServer.run_webserver()  # noqa: F401

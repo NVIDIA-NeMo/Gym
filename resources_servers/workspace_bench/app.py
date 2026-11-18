@@ -17,19 +17,27 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSessionConflictError,
     SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.judge import JudgeError
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError
 from resources_servers.workspace_bench.dataset import resolve_task_path
 
 
@@ -76,7 +84,6 @@ class WorkspaceBenchVerifyResponse(BaseVerifyResponse):
 
 
 class WorkspaceBenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: WorkspaceBenchConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -107,7 +114,7 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: WorkspaceBenchRequest) -> WorkspaceBenchSeedResponse:
         session_id = str(request.session[SESSION_ID_KEY])
         if session_id in self._sandboxes or session_id in self._reference_dirs:
-            raise HTTPException(status_code=409, detail="Workspace-Bench session is already active")
+            raise ResourcesSessionConflictError("Workspace-Bench session is already active")
         task_dir = await asyncio.to_thread(resolve_task_path, body.task_dir)
         metadata = json.loads((task_dir / "metadata.json").read_text(encoding="utf-8"))
         sandbox_config = self.config.sandbox_config

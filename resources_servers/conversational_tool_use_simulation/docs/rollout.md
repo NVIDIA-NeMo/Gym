@@ -7,7 +7,7 @@ One rollout joins a generated policy, tool set, and customer scenario with four 
 - the tool simulator produces results for generated tool schemas
 - the judge model scores completed trajectories
 
-The policy loop runs in `responses_api_agents/conversational_tool_use/simulation`. Session state, simulation, validation, and
+The policy loop runs in `responses_api_agents/conversational_tool_use_simulation`. Session state, simulation, validation, and
 verification run in `resources_servers/conversational_tool_use_simulation`.
 
 ## Session Setup
@@ -38,6 +38,13 @@ the scored rollout row is returned, `/run` appends leading input-side items to `
 removes them from `response.output`. The stored policy continuation therefore begins with the first assistant
 reasoning, message, or function call. If the conversation terminates before a policy-model call, the generated user
 message is stored in the input and `response.output` is empty.
+
+With `fallback_first_user_message: true` (the default), a failed first customer message does not end the rollout. If
+the user simulator raises while generating it, or, when nothing precedes it in the conversation, every
+`generation_attempts` attempt returns a message containing `###STOP###` or `###TRANSFER###`, the resource server uses
+`customer_scenario.reason_for_contact` instead, or a generic request when that field is empty or contains either
+marker. Each fallback is appended to `result.source_artifacts.first_user_message_fallbacks`. With the flag set to
+`false`, the trajectory ends as invalid instead.
 
 `result.trajectory` retains the simulator-native ordering. `prefill_message_count` and `continuation_start_index` count
 only simulator-visible messages supplied before generation. A caller-prefilled user message contributes to that count;

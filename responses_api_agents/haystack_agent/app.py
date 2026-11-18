@@ -31,28 +31,32 @@ from haystack import Pipeline, logging
 from haystack.tools import Toolset, flatten_tools_or_toolsets, warm_up_tools
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    NEMO_GYM_MCP_METADATA_KEY,
-    NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+    get_first_server_config_dict,
+)
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import (
+    NEMO_GYM_MCP_METADATA_KEY,
+    NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.haystack_agent import chat_generator
 from responses_api_agents.haystack_agent.chat_generator import (
     NeMoGymResponsesChatGenerator,
@@ -105,7 +109,6 @@ class HaystackAgentVerifyResponse(BaseVerifyResponse):
 
 
 class HaystackAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: HaystackAgentConfig
 
     # Deserialized once at startup and shared (safely) across all requests.
@@ -283,7 +286,7 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         model_response.output = output_items
         model_response.usage = chat_messages_usage(generated)
 
-        # Forward the Resources Server session so ``run()`` can verify against the same state after
+        # Forward the resources session so ``run()`` can verify against the same state after
         # this internal ``/v1/responses`` call. Preserve model-server cookies separately as well,
         # allowing a model server that uses sessions to continue them on a later request.
         for k, v in request.cookies.items():
@@ -353,3 +356,6 @@ class HaystackAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HaystackAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HaystackAgent.run_webserver()  # noqa: F401

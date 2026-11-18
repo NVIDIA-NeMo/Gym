@@ -31,7 +31,6 @@ ENV NEMO_GYM_CONTAINER=1
 USER root
 
 ARG ENROOT_VERSION=3.5.0
-ARG NSYS_VERSION=2026.5.1.161-265138896106v0
 RUN <<"EOF" bash -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
 export TZ=America/Los_Angeles
@@ -59,6 +58,9 @@ apt-get purge -y \
     libfdk-aac* \
     libmp3lame* \
     2>/dev/null || true
+
+# Gym never imports dbus or GObject; drop the base image's Python bindings.
+apt-get purge -y python3-dbus python3-gi
 
 apt-get autoremove -y
 
@@ -92,32 +94,17 @@ apt-get update
 apt-get install -y nvidia-container-toolkit
 rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 
-# Replace the CUDA base image's bundled Nsight Systems, which is built
-# against an outdated Go toolchain flagged by CVE scans, with a current
-# release from NVIDIA's devtools apt repo.
+# Remove the CUDA base image's bundled Nsight Systems. Gym does not profile
+# with nsys, and the bundled copy ships prebuilt Go binaries flagged by scans.
 rm -rf /usr/local/cuda*/NsightSystems-cli-* /opt/nvidia/nsight-systems*
 apt-get remove --purge -y --allow-change-held-packages 'nsight-systems*' || true
-
-nsys_release=$(echo "${NSYS_VERSION}" | cut -d. -f1-3)
-nsys_repo="https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${arch}"
-curl -fsSL "${nsys_repo}/nvidia.pub" -o /usr/share/keyrings/nvidia-devtools.asc
-echo "deb [signed-by=/usr/share/keyrings/nvidia-devtools.asc] ${nsys_repo}/ /" \
-    > /etc/apt/sources.list.d/nvidia-devtools.list
-apt-get update
-apt-get install -y --no-install-recommends "nsight-systems-cli-${nsys_release}=${NSYS_VERSION}"
-rm -f /etc/apt/sources.list.d/nvidia-devtools.list /usr/share/keyrings/nvidia-devtools.asc
-
-# The base image's cuda/bin dir can precede /usr/local/bin on PATH; if it
-# already symlinks nsys (pointing at the old bundled copy), repoint it.
-if [ -L /usr/local/cuda/bin/nsys ]; then
-    ln -sf /usr/local/bin/nsys /usr/local/cuda/bin/nsys
-fi
+rm -f /usr/local/cuda/bin/nsys /usr/local/bin/nsys
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
 
-ARG UV_VERSION=0.11.29
+ARG UV_VERSION=0.13.4
 ARG PYTHON_VERSION=3.13.14
 ARG TARGETARCH
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
@@ -126,12 +113,12 @@ RUN case "${TARGETARCH}" in \
         amd64) \
             uv_arch="x86_64"; \
 # pragma: allowlist nextline secret
-            uv_sha256="04f8b82f5d47f0512dcd32c67a4a6f16a0ea27c81537c338fd0ad6b23cebe829"; \
+            uv_sha256="2b428396f12572d4429cf210ca234dd599a33b3af0958a4d5ed569d63e3f344f"; \
             ;; \
         arm64) \
             uv_arch="aarch64"; \
 # pragma: allowlist nextline secret
-            uv_sha256="94500fb064ae3c971a873cba64d94694c50677e0a4dbf78735c80509e7429919"; \
+            uv_sha256="1ae72b4718729e2ccc4f1ae2c6d1e531ca8467800e0546e9130b3886023a60ab"; \
             ;; \
         *) \
             echo "Unsupported TARGETARCH for uv: ${TARGETARCH}" >&2; \
@@ -190,7 +177,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # an environment variable — they would have to rebuild. Off remains the default: the code
 # is inert until NEMO_LENS_ENABLED=1.
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --extra ray --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -220,13 +207,13 @@ LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 # files, and the later chown pass only covers directories, so `gym --help`
 # fails with PermissionError on nemo_gym/__init__.py once USER is switched.
 COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
-    --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
+    --exclude=/pyproject.toml --exclude=/uv.lock . /opt/nemo-gym
 
 # Install the nemo-gym project itself along with the vllm and telemetry extras. The
 # worktree was created for the runtime UID in the base stage, so restore build ownership
 # before setuptools invokes Git.
 RUN chown root:root /opt/nemo-gym && \
-    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev --extra ray
 
 # Seed the runtime uv cache with the full dependency set (including the dev
 # extra and the project itself) so that CI scripts can run offline: setup_dev.sh
@@ -236,19 +223,19 @@ RUN chown root:root /opt/nemo-gym && \
 ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv
 RUN uv venv /opt/nemo-gym/cache/seed-venv && \
     UV_PROJECT_ENVIRONMENT=/opt/nemo-gym/cache/seed-venv \
-        uv sync --locked --extra vllm --extra telemetry --extra dev && \
+        uv sync --locked --extra vllm --extra telemetry --extra dev --extra ray && \
     rm -rf /opt/nemo-gym/cache/seed-venv && \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
 
 # Optional: seed the same cache with every server module's venv so that
 # scripts/ci/server_tests.sh can run offline too. Pass
 # --build-arg NEMO_GYM_SEED_SERVER_ENVS=1 for an image that runs the server
-# suite without a package index. Each server installs its own unlocked
-# requirements.txt or pyproject.toml (including git sources) outside the root
+# suite without a package index. Each server syncs its own committed
+# pyproject.toml and uv.lock (including Git sources) outside the root
 # lock, so the seed above does not cover them, and together they are large
 # (about 25 GB more cache for all 212 servers in October 2026), hence opt-in.
 # `ng_test_all +setup_only=true` installs each venv exactly as the server suite
-# does (same discovery, requirements, and head-server pins), outside the source
+# does (same discovery, component locks, and head-server checks), outside the source
 # tree, and deletes it; only the downloaded and built distributions stay.
 ARG NEMO_GYM_SEED_SERVER_ENVS=""
 RUN <<"EOF" bash -exu

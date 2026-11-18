@@ -24,7 +24,7 @@ fallback, but on a symbolic miss the judge is asked
 Three overrides versus the parent:
 
   1. Judge prompt is loaded via Gym's prompt system
-     (``nemo_gym.prompt.load_prompt_config``) from a YAML file with a
+     (``nemo_gym.data.prompt.load_prompt_config``) from a YAML file with a
      required ``user`` key and optional ``system`` key. Skills-style
      placeholders (``{problem}`` / ``{predicted_answer}`` /
      ``{expected_answer}``) are filled at judge-call time. The default
@@ -50,9 +50,10 @@ from typing import Any, ClassVar, Optional
 
 from pydantic import Field
 
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
-from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse
+from nemo_gym.data import PromptConfig, fill_prompt, load_prompt_config
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import call_judge
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -81,8 +82,6 @@ class MathWithAutograderResourcesServerConfig(LibraryJudgeMathResourcesServerCon
 
 class MathWithAutograderResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge subclass with a Skills-style autograder judge."""
-
-    ray_enabled = False
 
     config: MathWithAutograderResourcesServerConfig
 
@@ -212,3 +211,6 @@ class MathWithAutograderResourcesServer(LibraryJudgeMathResourcesServer):
 
 if __name__ == "__main__":
     MathWithAutograderResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MathWithAutograderResourcesServer.run_webserver()  # noqa: F401

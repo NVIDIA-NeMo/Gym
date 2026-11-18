@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Chemical equation balancing. The instruction keeps upstream's "maintain the order of reactants
+# and products as given" - that constraint is load-bearing, since the answer is compared against
+# one specific ordering - and drops "without any explanation".
+
+system: |-
+  {instruction}
+
+user: |-
+  {problem}
+
+  The last line of your response should be in the following format: 'Answer: <balanced equation>', with the equation on one line and nothing else after it.

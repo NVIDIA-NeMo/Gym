@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import os
 import re
 import shutil
 from types import SimpleNamespace
@@ -10,14 +11,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.sandbox import SandboxExecResult
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.verifier import (
     RewardFileEmptyError,
     RewardFileNotFoundError,
     VerifierOutputParseError,
-    VerifierTimeoutError,
+    VerifierStatusUnknownError,
     parse_reward,
+    parse_test_counts,
     restore,
     run_verifier,
 )
@@ -62,7 +65,13 @@ class FilesystemSandbox:
 def environment(tmp_path, cfg):
     main = FilesystemSandbox(tmp_path / "main")
     sidecar = FilesystemSandbox(tmp_path / "sidecar")
-    env = SimpleNamespace(main=main, task=SimpleNamespace(config=cfg), stopped=False, stop_main=None)
+    env = SimpleNamespace(
+        main=main,
+        config=SimpleNamespace(default_exec_timeout_s=64800),
+        task=SimpleNamespace(config=cfg),
+        stopped=False,
+        stop_main=None,
+    )
 
     def sandbox(service=None):
         return main if service in (None, "main") else sidecar
@@ -236,6 +245,120 @@ async def test_verifier_nonzero_exit_with_official_zero_is_completed(tmp_path):
     assert diagnostics[0]["return_code"] == 4
 
 
+async def test_verifier_without_reward_still_keeps_its_logs(tmp_path):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"environment": {"docker_image": "v"}}}
+    )
+    env, main, _ = environment(tmp_path / "verifier", cfg)
+    logs = main.path("/logs/verifier")
+    main.path("/tests/test.sh").write_text(f"#!/bin/sh\necho 'worker setup failed' > {logs}/why.txt\nexit 70\n")
+    diagnostics = []
+    with pytest.raises(RewardFileNotFoundError):
+        await run_verifier(env, tmp_path / "result", diagnostics)
+    assert (tmp_path / "result/verifier/why.txt").read_text() == "worker setup failed\n"
+    assert diagnostics[0]["return_code"] == 70
+
+
+async def test_missing_reward_log_recovery_stops_at_the_verifier_deadline(tmp_path):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"environment": {"docker_image": "v"}}}
+    )
+    env, main, _ = environment(tmp_path / "verifier", cfg)
+    main.path("/tests/test.sh").write_text("#!/bin/sh\nexit 70\n")
+
+    async def stalled(source, target):
+        await asyncio.Event().wait()
+
+    main.download = stalled
+    diagnostics = []
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(RewardFileNotFoundError):
+        # The outer bound only keeps a regression from hanging the suite.
+        await asyncio.wait_for(run_verifier(env, tmp_path / "result", diagnostics, timeout_sec=0.5), 10)
+    assert asyncio.get_running_loop().time() - started < 5
+    transfer = [entry for entry in diagnostics if entry.get("operation") == "verifier_artifact_transfer"]
+    assert transfer and transfer[0]["exception_type"] == "TimeoutError"
+
+
+@pytest.mark.parametrize(
+    "report,expected",
+    [
+        ({"results": {"summary": {"tests": 96, "passed": 95, "failed": 1}}}, (95, 96, 1, 0)),
+        ({"results": {"summary": {"tests": 96, "passed": 3, "failed": 93}}}, (3, 96, 93, 0)),
+        ({"results": {"summary": {"tests": 0, "passed": 0, "failed": 0}}}, (0, 0, 0, 0)),
+        (
+            {"results": {"summary": {"tests": 6, "passed": 1, "failed": 1, "skipped": 2, "pending": 1, "other": 1}}},
+            (1, 6, 1, 2),
+        ),
+    ],
+)
+def test_ctrf_counts_use_canonical_summary_without_adding_repeated_runs(tmp_path, report, expected):
+    (tmp_path / "ctrf.json").write_text(json.dumps(report))
+    (tmp_path / "ctrf_1.json").write_text(json.dumps(report))
+    (tmp_path / "trace_results.json").write_text(json.dumps({"total_cases": 20, "passed_cases": 0}))
+    counts = parse_test_counts(tmp_path, []).model_dump()
+    assert counts == dict(
+        zip(("num_tests_passed", "num_tests_total", "num_tests_failed", "num_tests_skipped"), expected)
+    )
+
+
+@pytest.mark.parametrize("total,passed", [(96, 95), (96, 3), (0, 0)])
+def test_trace_case_counts(tmp_path, total, passed):
+    (tmp_path / "trace_results.json").write_text(json.dumps({"total_cases": total, "passed_cases": passed}))
+    counts = parse_test_counts(tmp_path, [])
+    assert counts.num_tests_total == total
+    assert counts.num_tests_passed == passed
+    assert counts.num_tests_failed == total - passed
+    assert counts.num_tests_skipped == 0
+
+
+@pytest.mark.parametrize(
+    "filename,report",
+    [
+        ("ctrf.json", "{broken"),
+        ("ctrf.json", "[]"),
+        ("ctrf.json", '{"results":{"summary":null}}'),
+        ("ctrf.json", '{"results":{"summary":{"tests":96,"passed":95,"failed":2}}}'),
+        ("ctrf.json", '{"results":{"summary":{"tests":1,"passed":true,"failed":0}}}'),
+        ("ctrf.json", '{"results":{"summary":{"tests":1,"passed":1.0,"failed":0}}}'),
+        ("ctrf.json", '{"results":{"summary":{"tests":1,"passed":1,"failed":-1}}}'),
+        ("trace_results.json", '{"total_cases":1,"passed_cases":2}'),
+        ("trace_results.json", '{"total_cases":"96","passed_cases":95}'),
+        ("trace_results.json", "{}"),
+    ],
+)
+async def test_invalid_test_report_preserves_official_reward(tmp_path, filename, report):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"environment": {"docker_image": "v"}}}
+    )
+    env, main, _ = environment(tmp_path / "verifier", cfg)
+    main.path(f"/logs/verifier/{filename}").write_text(report)
+    main.path("/tests/test.sh").write_text(f"#!/bin/sh\necho 1 > {main.path('/logs/verifier/reward.txt')}\n")
+    diagnostics = []
+    result = await run_verifier(env, tmp_path / "result", diagnostics)
+    assert result == {"rewards": {"reward": 1.0}}
+    assert any(item.get("source") == filename and "error" in item for item in diagnostics)
+
+
+async def test_verifier_downloads_counts_even_when_official_reward_is_zero(tmp_path):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"environment": {"docker_image": "v"}}}
+    )
+    env, main, _ = environment(tmp_path / "verifier", cfg)
+    report = {"results": {"summary": {"tests": 96, "passed": 95, "failed": 1, "skipped": 0}}}
+    main.path("/logs/verifier/ctrf.json").write_text(json.dumps(report))
+    main.path("/tests/test.sh").write_text(f"#!/bin/sh\necho 0 > {main.path('/logs/verifier/reward.txt')}\nexit 1\n")
+    result = await run_verifier(env, tmp_path / "result", [])
+    assert result == {
+        "rewards": {"reward": 0.0},
+        "num_tests_passed": 95,
+        "num_tests_total": 96,
+        "num_tests_failed": 1,
+        "num_tests_skipped": 0,
+    }
+    assert json.loads((tmp_path / "result/verifier/ctrf.json").read_text()) == report
+
+
 async def test_verifier_timeout_does_not_promote_partial_reward(tmp_path, monkeypatch):
     cfg = TaskSettings.model_validate(
         {"environment": {"docker_image": "a"}, "verifier": {"timeout_sec": 0.01, "environment": {"docker_image": "v"}}}
@@ -244,14 +367,80 @@ async def test_verifier_timeout_does_not_promote_partial_reward(tmp_path, monkey
     async def execute(*args, **kwargs):
         await asyncio.Event().wait()
 
-    env = SimpleNamespace(task=SimpleNamespace(config=cfg), exec=execute, main=None)
+    env = SimpleNamespace(
+        config=SimpleNamespace(default_exec_timeout_s=64800), task=SimpleNamespace(config=cfg), exec=execute, main=None
+    )
     from resources_servers.terminal_bench_4 import verifier
 
     download = AsyncMock()
     monkeypatch.setattr(verifier, "download_dir", download)
-    with pytest.raises(VerifierTimeoutError):
+    # The verifier ran past its own deadline: Terminal-Bench scores that 0.
+    with pytest.raises(verifier.VerifierTimeoutError, match="preparation"):
         await run_verifier(env, tmp_path, [])
-    download.assert_awaited_once()
+    download.assert_not_awaited()
+
+
+async def test_verifier_timeout_override_replaces_the_package_timeout(tmp_path, monkeypatch):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"timeout_sec": 3600, "environment": {"docker_image": "v"}}}
+    )
+
+    async def execute(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    env = SimpleNamespace(
+        config=SimpleNamespace(default_exec_timeout_s=64800), task=SimpleNamespace(config=cfg), exec=execute, main=None
+    )
+    from resources_servers.terminal_bench_4 import verifier
+
+    monkeypatch.setattr(verifier, "download_dir", AsyncMock())
+    with pytest.raises(verifier.VerifierTimeoutError, match="preparation"):
+        await run_verifier(env, tmp_path, [], timeout_sec=0.01)
+
+
+async def test_a_provider_timeout_within_the_budget_is_not_a_verifier_timeout(tmp_path, monkeypatch):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"timeout_sec": 3600, "environment": {"docker_image": "v"}}}
+    )
+
+    async def execute(*args, **kwargs):
+        raise TimeoutError("provider RPC timed out")
+
+    env = SimpleNamespace(
+        config=SimpleNamespace(default_exec_timeout_s=64800), task=SimpleNamespace(config=cfg), exec=execute, main=None
+    )
+    from resources_servers.terminal_bench_4 import verifier
+
+    download = AsyncMock()
+    monkeypatch.setattr(verifier, "download_dir", download)
+    with pytest.raises(VerifierStatusUnknownError) as raised:
+        await run_verifier(env, tmp_path, [])
+    assert isinstance(raised.value.__cause__, TimeoutError)
+    assert str(raised.value.__cause__) == "provider RPC timed out"
+    download.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failing", ["chmod", "/tests/test.sh"])
+async def test_a_sandbox_without_a_command_outcome_is_not_a_missing_reward(tmp_path, monkeypatch, failing):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"environment": {"docker_image": "v"}}}
+    )
+
+    async def execute(command, **kwargs):
+        if command.startswith(failing):
+            return SandboxExecResult(stdout=None, stderr="no command outcome", return_code=125, error_type="sandbox")
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    env = SimpleNamespace(
+        config=SimpleNamespace(default_exec_timeout_s=64800), task=SimpleNamespace(config=cfg), exec=execute, main=None
+    )
+    from resources_servers.terminal_bench_4 import verifier
+
+    download = AsyncMock()
+    monkeypatch.setattr(verifier, "download_dir", download)
+    with pytest.raises(RuntimeError, match="no confirmed command outcome.*sandbox.*no command outcome"):
+        await run_verifier(env, tmp_path, [])
+    download.assert_not_awaited()
 
 
 async def test_transfer_fallbacks_preserve_file_bytes_and_empty_directories(tmp_path):
@@ -281,6 +470,40 @@ async def test_transfer_fallbacks_preserve_file_bytes_and_empty_directories(tmp_
         await download_dir(box, "/app/output", tmp_path / "excluded", exclude=["*.tmp"])
     with pytest.raises(RuntimeError, match="list"):
         await download_dir(box, "/app/missing", tmp_path / "missing")
+
+
+async def test_collection_skips_only_unsafe_entries_and_keeps_the_rest(tmp_path):
+    cfg = TaskSettings.model_validate(
+        {
+            "environment": {"docker_image": "a"},
+            "verifier": {"environment": {"docker_image": "v"}},
+            "artifacts": ["/app/output"],
+        }
+    )
+    env, main, _ = environment(tmp_path / "agent", cfg)
+    output = main.path("/app/output")
+    (output / "sub").mkdir(parents=True)
+    (output / "sub/result.txt").write_text("answer")
+    (output / "inside").symlink_to("sub/result.txt")
+    (output / "solution").symlink_to("/etc/passwd")
+    (output / "escape").symlink_to("../../tests")
+    # A hard link to a refused symlink must not bring the outside link back.
+    os.link(output / "solution", output / "solution-hardlink", follow_symlinks=False)
+    os.mkfifo(output / "pipe")
+    (output / "tool").write_text("#!/bin/sh\n")
+    (output / "tool").chmod(0o6755)
+
+    records = await collect(env, tmp_path / "artifacts", [])
+
+    copied = tmp_path / "artifacts/app/output"
+    assert (copied / "sub/result.txt").read_text() == "answer"
+    assert (copied / "inside").is_symlink() and (copied / "inside").read_text() == "answer"
+    for name in ("solution", "solution-hardlink", "escape", "pipe"):
+        assert not (copied / name).exists() and not (copied / name).is_symlink()
+    assert (copied / "tool").stat().st_mode & 0o7777 == 0o755
+    record = next(record for record in records if record["source"] == "/app/output")
+    assert record["status"] == "ok"
+    assert len(record["refused"]) >= 3
 
 
 async def test_restore_file_and_best_effort_collection_errors(tmp_path):

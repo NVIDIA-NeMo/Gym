@@ -17,13 +17,14 @@ from typing import Any, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 POINT_PATTERN = re.compile(r"<point>\s*\[?\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*\]?\s*</point>")
@@ -48,6 +49,7 @@ class GuiCoordinateVerifyResponse(BaseVerifyResponse):
     extracted_x: Optional[float]
     extracted_y: Optional[float]
     distance: Optional[float]
+    metadata: Optional[dict[str, Any]] = None
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
@@ -95,7 +97,6 @@ def _compute_reward(
 
 
 class GuiCoordinateResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: GuiCoordinateResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -135,3 +136,6 @@ class GuiCoordinateResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     GuiCoordinateResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GuiCoordinateResourcesServer.run_webserver()  # noqa: F401

@@ -1,0 +1,135 @@
+---
+title: "Apptainer Provider"
+description: "Configure NeMo Gym sandboxes backed by local Apptainer instances."
+position: 2
+---
+
+The `apptainer` provider runs each sandbox as a persistent local Apptainer instance. It shells out to the `apptainer` binary, so it does not require a daemon, Kubernetes, or a network sandbox service.
+
+## Setup
+
+Install Apptainer on the host and make sure the `apptainer` binary is on `PATH`. The provider does not auto-install it; constructing the provider raises an error if the binary is missing.
+
+Images can be local `.sif` files, Apptainer-compatible URIs such as `docker://ubuntu:22.04`, or bare Docker image names such as `ubuntu:22.04`. Bare names are resolved to `docker://...` before instance start.
+
+## Provider Config
+
+Define a named provider block in a YAML config file that you own, such as `configs/apptainer-sandbox.yaml` in your checkout or application repo. Put the `sandbox:` block at the top level of that file, then reference it from an agent with `sandbox_provider: sandbox`.
+
+<Note>
+NeMo Gym does not ship a default Apptainer provider config file. Create this file next to the other configs you pass to `gym env start`.
+</Note>
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: apptainer-cli
+  apptainer:
+    exec:
+      fakeroot_for_root: true
+      default_binds: ["/tmp"]
+      extra_exec_args: ["--writable-tmpfs"]
+      default_timeout_s: 180
+      concurrency: 32
+    create:
+      mount_point: /sandbox
+      start_timeout_s: 600
+      extra_start_args: []
+      apply_resource_limits: true
+    probe:
+      command: printf apptainer-sandbox-ready
+      expected_stdout: apptainer-sandbox-ready
+      timeout_s: 30
+      deadline_s: 120
+```
+
+The provider constructor accepts three optional config sections:
+
+| Section | Purpose |
+| --- | --- |
+| `exec` | Per-command timeout, fakeroot behavior, default bind mounts, extra `apptainer exec` flags, and subprocess concurrency. |
+| `create` | Instance mount point, start timeout, extra `apptainer instance start` flags, and CPU/memory limit behavior. |
+| `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
+
+Pass that config file alongside the agent and model configs:
+
+```bash
+gym env start \
+  --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+  --config configs/apptainer-sandbox.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```
+
+## SandboxSpec Provider Options
+
+Use `provider_options.binds` for per-sandbox bind mounts. It accepts either a single bind string or a list of bind strings, using the Apptainer `host:container[:opts]` format.
+
+```yaml
+sandbox_spec:
+  provider_options:
+    binds:
+      - /datasets/swebench:/datasets/swebench:ro
+```
+
+These binds are added on top of the provider's staging mount and `exec.default_binds`.
+
+## Relevant SandboxSpec Fields
+
+| Field | Apptainer behavior |
+| --- | --- |
+| `image` | Required. Local `.sif`, Apptainer URI, or Docker image name. |
+| `env` | Passed as `--env KEY=VALUE` at instance start and on each `exec()`. |
+| `workdir` | Used as the default command working directory through `--pwd`. |
+| `files` | Seed files uploaded before the first command. |
+| `resources` | Mapped to cgroup and GPU flags when supported by the host. |
+| `provider_options.binds` | Extra per-sandbox bind mounts. |
+| `ttl_s` | Not supported by Apptainer; the provider logs a warning and ignores it. |
+
+## Resource Mapping
+
+`SandboxResources` is translated into Apptainer CLI flags:
+
+| SandboxResources field | Apptainer flag |
+| --- | --- |
+| `cpu` | `--cpus <value>` |
+| `memory_mib` | `--memory <value>m` |
+| `gpu` | `--nv` when truthy |
+| `disk_gib` | No direct flag; ignored. |
+| `gpu_type` | No direct flag; ignored. |
+
+CPU and memory enforcement requires cgroups support from the host. Set `create.apply_resource_limits: false` if the cluster does not delegate those controls.
+
+## Lifecycle
+
+The provider creates one persistent Apptainer instance per sandbox:
+
+| Operation | Apptainer command |
+| --- | --- |
+| Create | `apptainer instance start --bind <staging>:<mount_point> ... <image> <name>` |
+| Exec | `apptainer exec ... instance://<name> sh -c <command>` |
+| Status | `apptainer instance list --json` |
+| Close | `apptainer instance stop <name>` |
+
+Instances are named `nemo-gym-<uuid>`. State written by one command is visible to later commands in the same sandbox.
+
+## File Transfer
+
+On create, the provider makes a temporary host staging directory and bind-mounts it into the container at `create.mount_point`, which defaults to `/sandbox`.
+
+If a transfer path is under that mount point, uploads and downloads use the host-side staging directory directly. For paths outside the mount point, the provider stages bytes in the shared directory and runs an in-container copy command as root.
+
+Download any files you need before stopping the sandbox. Stopping an Apptainer sandbox stops the instance and deletes the host staging directory.
+
+## User and Runtime Notes
+
+The neutral `user` argument to `exec()` maps onto Apptainer behavior:
+
+| `user` value | Behavior |
+| --- | --- |
+| `None` | Run as the launching user. |
+| `"root"` or `0` | Add `--fakeroot` when `exec.fakeroot_for_root` is enabled. |
+| Other user or uid | Add `--fakeroot` and wrap the command with `su`. |
+
+Running as root or another user depends on host fakeroot support. Numeric UIDs may not resolve inside the container; prefer named users when switching users.
+
+Command failures return `SandboxExecResult` with the command's exit code. Provider runtime failures such as a missing instance return code `125` with `error_type="sandbox"`, and timeouts return code `125` with `error_type="timeout"`.

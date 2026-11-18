@@ -143,7 +143,7 @@ class TestDropTestPatchFiles:
 
 class _FakeSandbox:
     def __init__(self, stdout: str) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=0)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=0)
 
     async def exec(self, command: str, timeout_s=None):
         return self._result
@@ -214,8 +214,14 @@ class TestGrade:
 
 
 class TestSupportedFrameworks:
-    def test_covers_exactly_phase_one(self) -> None:
-        assert SUPPORTED_FRAMEWORKS == frozenset({"pytest", "go", "jest", "mocha", "vitest"})
+    def test_covers_the_swe_bench_ext_backed_list(self) -> None:
+        # The original 5 must stay (every existing training row is one of them) ...
+        assert {"pytest", "go", "jest", "mocha", "vitest"} <= SUPPORTED_FRAMEWORKS
+        # ... and the widened set is exactly what swemer_v1 grades through the same swe_bench_ext parsers.
+        from resources_servers.swemer_v1.verification import SUPPORTED_FRAMEWORKS as V1_FRAMEWORKS
+
+        assert SUPPORTED_FRAMEWORKS == V1_FRAMEWORKS
+        assert "bazel" not in SUPPORTED_FRAMEWORKS and "jasmine" not in SUPPORTED_FRAMEWORKS
 
 
 class TestVerifyResponseShape:
@@ -325,7 +331,9 @@ class TestAntiCheating:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swemer_v2.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swemer_v2_legacy_agent.yaml").read_text()
+        )
         assert config["swemer_v2_resources_server"]["resources_servers"]["swemer_v2"]["apply_anti_cheating"] is True
 
 
@@ -352,7 +360,9 @@ class TestMultiWorkerEntrypoint:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swemer_v2.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swemer_v2_legacy_agent.yaml").read_text()
+        )
         for name, block in config.items():
             workers = block["resources_servers"]["swemer_v2"].get("num_workers")
             if workers and workers > 1:

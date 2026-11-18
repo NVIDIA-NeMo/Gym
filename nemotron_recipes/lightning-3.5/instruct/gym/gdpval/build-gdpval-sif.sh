@@ -33,7 +33,7 @@ set -euo pipefail
 GYM_ROOT="${GYM_ROOT:-$PWD}"
 OUT="${1:-$PWD/gdpval.sif}"
 case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
-DEF="${GDPVAL_DEF:-$GYM_ROOT/responses_api_agents/stirrup_agent/containers/gdpval.def}"
+DEF="${GDPVAL_DEF:-$GYM_ROOT/nemotron_recipes/lightning-3.5/instruct/gym/gdpval/sandbox/gdpval.def}"
 
 command -v apptainer >/dev/null || { echo "apptainer not installed (https://apptainer.org/docs/admin/main/installation.html)" >&2; exit 1; }
 [ -r "$DEF" ] || { echo "gdpval.def not readable at $DEF — set GYM_ROOT to your Gym checkout (or GDPVAL_DEF to the .def)" >&2; exit 1; }

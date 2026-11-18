@@ -53,19 +53,20 @@ from util import (
     extract_safe_prompt,
 )
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class OverRefusalDetectionConfig(BaseResourcesServerConfig):
@@ -165,8 +166,6 @@ class OverRefusalDetectionResourcesServer(SimpleResourcesServer):
 
     Goal: Train models to be helpful on safe prompts, reducing false refusals.
     """
-
-    ray_enabled = False
 
     config: OverRefusalDetectionConfig
 
@@ -406,3 +405,6 @@ Output your answer in this format:
 
 if __name__ == "__main__":
     OverRefusalDetectionResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OverRefusalDetectionResourcesServer.run_webserver()  # noqa: F401

@@ -18,13 +18,14 @@ from typing import Any, Literal, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class StringMatchResourcesServerConfig(BaseResourcesServerConfig):
@@ -350,7 +351,10 @@ def _soft_numeric_grade(gt_answer: str, pred_answer: str) -> float:
 
 
 class StringMatchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification compares the extracted answer with the expected one: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: StringMatchResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -375,3 +379,6 @@ class StringMatchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     StringMatchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StringMatchResourcesServer.run_webserver()  # noqa: F401

@@ -44,9 +44,9 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JSONSchemaValidationError
 from pydantic import Field, PrivateAttr, ValidationInfo, field_validator
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseFunctionToolCall
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseFunctionToolCall
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 from resources_servers.gymnasium import GymnasiumServer
 
 # Load the backend layer before the colocated domain imports so an incomplete
@@ -58,6 +58,8 @@ from resources_servers.openair_congestion.backends import Backend, select_backen
 from openair_congestion.render import to_policy_text
 from openair_congestion.schemas import AgentAux, LastActionEcho, ToolCall
 from openair_congestion.tools import TOOL_SCHEMA_BY_NAME
+
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 _GUARDRAIL_VALIDATION_KEYWORDS = {
@@ -190,8 +192,6 @@ def _strict_json_object(raw: str) -> dict[str, Any]:
 
 class OpenAirCongestionEnv(GymnasiumServer):
     """GymnasiumServer subclass: /reset + /step, driven by gymnasium_agent."""
-
-    ray_enabled = False
 
     config: OpenAirCongestionResourcesServerConfig
 
@@ -580,7 +580,9 @@ class OpenAirCongestionEnv(GymnasiumServer):
     async def _close_endpoint(self, request: Request) -> dict[str, Any]:
         """Release the cookie-scoped OpenAir episode without resetting it."""
 
-        return await self.explicit_close(request.session.get(SESSION_ID_KEY))
+        result = await self.explicit_close(request.session.get(SESSION_ID_KEY))
+        self.checkpoint_session_ended(request)
+        return result
 
     def setup_webserver(self):
         """Add the OpenAir-only cleanup route to the shared Gymnasium API."""
@@ -592,3 +594,6 @@ class OpenAirCongestionEnv(GymnasiumServer):
 
 if __name__ == "__main__":
     OpenAirCongestionEnv.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OpenAirCongestionEnv.run_webserver()  # noqa: F401

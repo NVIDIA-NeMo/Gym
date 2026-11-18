@@ -17,6 +17,8 @@ BENCHMARK = REPO / "benchmarks/gdpval/config.yaml"
 KIMI_OVERLAY = REPO / "resources_servers/gdpval/configs/gdpval_kimi_local_judge.yaml"
 KIMI_SERVING = REPO / "responses_api_models/local_vllm_model/configs/moonshotai/Kimi-K2.6.yaml"
 MINIMAX_OVERLAY = REPO / "resources_servers/gdpval/configs/gdpval_minimax_selfhosted_judge.yaml"
+MULTISTAGE_OVERLAY = REPO / "resources_servers/gdpval/configs/gdpval_minimax_multistage_judge.yaml"
+STANDALONE = REPO / "resources_servers/gdpval/configs/gdpval.yaml"
 
 
 def _resolved(*paths: Path) -> dict:
@@ -87,6 +89,44 @@ def test_minimax_overlay_repoints_the_default_judge_proxy(judge_env, monkeypatch
     assert proxy.openai_model == gdpval.judge_responses_create_params_overrides["model"] == "minimax-m3"
 
 
+@pytest.mark.parametrize("config_path", [STANDALONE, BENCHMARK], ids=["standalone", "benchmark"])
+@pytest.mark.parametrize("variable", ["PERSIST_DELIVERABLES_DIR", "TAVILY_API_KEY"])
+def test_the_configs_do_not_resolve_without_their_required_environment(judge_env, monkeypatch, config_path, variable):
+    monkeypatch.delenv(variable)
+
+    with pytest.raises(Exception, match=variable):
+        _resolved(config_path)
+
+
+def test_standalone_config_resolves_to_a_rubric_server_with_the_default_judge(judge_env, monkeypatch):
+    config = _resolved(STANDALONE)
+    gdpval = _gdpval_config(config)
+
+    assert (gdpval.reward_mode, gdpval.judge_panel) == ("rubric", None)
+    assert gdpval.tavily_api_key == "tvly-test"
+    assert gdpval.judge_model_server.name == "gdpval_judge_model"
+    assert gdpval.persist_deliverables_dir == "/tmp/gdpval-test-deliverables"
+
+
+def test_multistage_overlay_switches_to_comparison_against_the_anchored_references(judge_env, monkeypatch):
+    monkeypatch.setenv("MINIMAX_BASE_URL", "http://judge.invalid:5000/v1")
+    monkeypatch.setenv("MINIMAX_MODEL", "minimax-m3")
+    monkeypatch.setenv("GDPVAL_REFS_ROOT", "/refs")
+    config = _resolved(BENCHMARK, MULTISTAGE_OVERLAY)
+    gdpval = _gdpval_config(config)
+
+    assert gdpval.reward_mode == "comparison"
+    assert gdpval.judge_panel is None
+    assert gdpval.judge_responses_create_params_overrides["model"] == "minimax-m3"
+    assert (gdpval.judge_handles_audio, gdpval.judge_handles_video) == (False, True)
+    assert gdpval.reference_models, "comparison mode without anchors cannot fit an ELO"
+    for name, reference in gdpval.reference_models.items():
+        assert reference.deliverables_dir == f"/refs/{name}"
+        assert reference.elo > 0
+    proxy = config[gdpval.judge_model_server.name]["responses_api_models"]["openai_model"]
+    assert proxy["openai_base_url"] == "http://judge.invalid:5000/v1"
+
+
 @pytest.mark.parametrize("legacy", [True, False])
 def test_removed_handles_audio_video_flag_is_migrated(legacy, caplog):
     with caplog.at_level(logging.WARNING, logger="resources_servers.gdpval.app"):
@@ -104,6 +144,10 @@ def test_removed_handles_audio_video_flag_is_migrated_inside_the_server_config()
         entrypoint="app.py",
         judge_model_server={"type": "responses_api_models", "name": "gdpval_judge_model"},
         judge_panel=[{"name": "gemini", "handles_audio_video": True}, {"name": "gpt"}],
+        tavily_api_key="test-key",
+        sandbox_provider="test",
+        sandbox_config={},
+        persist_deliverables_dir="unused",
     )
 
     assert [(m.handles_audio, m.handles_video) for m in config.judge_panel] == [(True, True), (False, False)]

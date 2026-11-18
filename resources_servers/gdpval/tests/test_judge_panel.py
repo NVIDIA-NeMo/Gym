@@ -22,7 +22,9 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from openai import OpenAI
 
-from nemo_gym import server_utils
+import nemo_gym.client.http_client
+import nemo_gym.client.server_client
+from nemo_gym.server_runtime import base_server
 from resources_servers.gdpval import app as gdpval_app
 from resources_servers.gdpval import setup_libreoffice
 from resources_servers.gdpval.comparison import (
@@ -107,10 +109,11 @@ def test_benchmark_panel_reaches_intended_upstream_models_and_credentials(monkey
         fields.update(host="127.0.0.1", port=12000 + len(proxies), name=name)
         proxy = proxy_app.SimpleModelServer(
             config=proxy_app.SimpleModelServerConfig(**fields),
-            server_client=MagicMock(spec=server_utils.ServerClient, global_config_dict=config),
+            server_client=MagicMock(spec=base_server.ServerClient, global_config_dict=config),
         )
         proxies[f"http://{fields['host']}:{fields['port']}/v1"] = proxy
-    monkeypatch.setattr(server_utils, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", lambda: config)
     resource = gdpval_app.GDPValResourcesServer.model_construct(
         config=gdpval_app.GDPValResourcesServerConfig(
             host="127.0.0.1",
@@ -154,7 +157,9 @@ def test_benchmark_panel_reaches_intended_upstream_models_and_credentials(monkey
         expected_key = (gemini_key or shared_key) if judge.name == "gemini-3.1-pro" else shared_key
         assert proxy._client.connection["api_key"] == expected_key
         # main bounds client retries at 3; judges must ride out throttling bursts.
-        assert proxy._client.connection["max_http_attempts"] == 1800
+        assert proxy._client.connection["max_http_attempts"] == 36
+        # A zero wait budget keeps 429 and 503 on those 36 attempts.
+        assert proxy._client.connection["max_rate_limit_wait_seconds"] == 0
         if judge.name == "gpt-5.5":
             assert body["reasoning_effort"] == "medium"
         elif judge.name == "gemini-3.1-pro":
@@ -199,13 +204,13 @@ class TestMediaExtensionSetsAgree:
         assert media_keys == expected
 
     def test_rubric_emitter_covers_every_media_ext(self) -> None:
-        from responses_api_agents.stirrup_agent.file_reader import MIME_TYPES
+        from resources_servers.gdpval.file_reader import MIME_TYPES
 
         missing = (AUDIO_EXTS | VIDEO_EXTS) - set(MIME_TYPES)
         assert not missing, f"file_reader.MIME_TYPES is missing: {sorted(missing)}"
 
     def test_rubric_emitter_reuses_canonical_sets(self) -> None:
-        from responses_api_agents.stirrup_agent import file_reader
+        from resources_servers.gdpval import file_reader
 
         assert file_reader.AUDIO_EXTS is AUDIO_EXTS
         assert file_reader.VIDEO_EXTS is VIDEO_EXTS
@@ -481,3 +486,80 @@ class TestRunTrialsPanel:
                 submission_b=[],
                 num_trials=2,
             )
+
+    @pytest.mark.parametrize("invalid_answers", [0, 2, 3])
+    def test_retries_preserve_judge_and_positions_without_repeating_valid_votes(self, monkeypatch, invalid_answers):
+        responses = ["BOXED[B]", *["" if i % 2 == 0 else "malformed" for i in range(invalid_answers)], "BOXED[A]"]
+        send = MagicMock(side_effect=responses)
+        monkeypatch.setattr("resources_servers.gdpval.comparison.send_judge_request", send)
+        panel = [_judge_returning("one", "unused"), _judge_returning("two", "unused")]
+        result = run_trials(
+            judges=panel,
+            task_prompt="Compare submissions",
+            refs=[],
+            submission_a=[{"type": "text", "text": "First artifact"}],
+            submission_b=[{"type": "text", "text": "Second artifact"}],
+            num_trials=2,
+            rng=make_rng(0, "task"),
+            invalid_response_retries=2,
+            return_raw_responses=True,
+        )
+
+        exhausted = invalid_answers == 3
+        assert result["winner"] == B_WIN_RESPONSE
+        assert result["win_count_b"] == (1 if exhausted else 2)
+        assert result["task_count"] == (1 if exhausted else 2)
+        assert result["invalid_count"] == int(exhausted)
+        assert result["raw_responses"] == ["BOXED[B]", "" if exhausted else "BOXED[A]"]
+        assert len(result["trial_judges"]) == 2
+        assert send.call_count == 1 + min(invalid_answers + 1, 3)
+        first, second, *retries = send.call_args_list
+        assert first.args[1] == f"model-{result['trial_judges'][0]}"
+        assert second.args[1] == f"model-{result['trial_judges'][1]}"
+        assert str(first.args[2]).index("First artifact") < str(first.args[2]).index("Second artifact")
+        assert str(second.args[2]).index("Second artifact") < str(second.args[2]).index("First artifact")
+        if retries:
+            assert retries[0] == second  # An empty answer repeats the unchanged request.
+        if len(retries) > 1:
+            assert retries[1].args[:2] == second.args[:2]
+            assert retries[1].args[3:] == second.args[3:]
+            assert retries[1].args[2][:-1] == second.args[2]
+            assert retries[1].args[2][-1] == {
+                "role": "user",
+                "content": "End with exactly one verdict: BOXED[A], BOXED[B], or BOXED[TIE].",
+            }
+            assert "malformed" not in str(retries[1].args[2])
+
+    def test_retry_exhaustion_does_not_turn_all_invalid_votes_into_ties(self, monkeypatch):
+        send = MagicMock(return_value="")
+        monkeypatch.setattr("resources_servers.gdpval.comparison.send_judge_request", send)
+        with pytest.raises(ValueError, match="All 2 pairwise judge responses were invalid"):
+            run_trials(
+                judges=[_judge_returning("solo", "unused")],
+                task_prompt="Compare submissions",
+                refs=[],
+                submission_a=[],
+                submission_b=[],
+                num_trials=2,
+                invalid_response_retries=2,
+            )
+        assert send.call_count == 6
+
+    def test_malformed_answer_adds_format_reminder_only_once(self, monkeypatch):
+        send = MagicMock(side_effect=["Unstructured winner explanation", "Still unstructured", "BOXED[B]"])
+        monkeypatch.setattr("resources_servers.gdpval.comparison.send_judge_request", send)
+        result = run_trials(
+            judges=[_judge_returning("solo", "unused")],
+            task_prompt="Compare submissions",
+            refs=[],
+            submission_a=[],
+            submission_b=[],
+            num_trials=1,
+            invalid_response_retries=2,
+        )
+        assert result["winner"] == B_WIN_RESPONSE
+        first, second, third = send.call_args_list
+        assert second == third
+        assert second.args[2][:-1] == first.args[2]
+        assert len(second.args[2]) == len(first.args[2]) + 1
+        assert "unstructured" not in str(second.args[2]).lower()

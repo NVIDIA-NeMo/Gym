@@ -27,8 +27,10 @@ import pytest
 
 
 # Stub out nemo_gym so we can import app.py without the full dependency
+# app.py imports the base classes from the nemo_gym.server_runtime package,
+# and the multi-worker entrypoint check from nemo_gym.utils.
 _nemo_stub = types.ModuleType("nemo_gym")
-_nemo_base = types.ModuleType("nemo_gym.base_resources_server")
+_nemo_server_runtime = types.ModuleType("nemo_gym.server_runtime")
 for cls_name in (
     "BaseResourcesServerConfig",
     "BaseRunRequest",
@@ -36,10 +38,14 @@ for cls_name in (
     "BaseVerifyResponse",
     "SimpleResourcesServer",
 ):
-    setattr(_nemo_base, cls_name, type(cls_name, (), {}))
-_nemo_stub.base_resources_server = _nemo_base
+    setattr(_nemo_server_runtime, cls_name, type(cls_name, (), {}))
+_nemo_utils = types.ModuleType("nemo_gym.utils")
+_nemo_utils.is_nemo_gym_fastapi_entrypoint = lambda file: False
+_nemo_stub.server_runtime = _nemo_server_runtime
+_nemo_stub.utils = _nemo_utils
 sys.modules["nemo_gym"] = _nemo_stub
-sys.modules["nemo_gym.base_resources_server"] = _nemo_base
+sys.modules["nemo_gym.server_runtime"] = _nemo_server_runtime
+sys.modules["nemo_gym.utils"] = _nemo_utils
 
 # Now we can import app.py
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

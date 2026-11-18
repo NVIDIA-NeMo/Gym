@@ -141,11 +141,13 @@ for the input format, explicit group IDs, and recovery limits.
 |-----------|------|---------|-------------|
 | `genrm_model_server` | ModelServerRef | *required* | Reference to the GenRM model server (default: `genrm_model`) |
 | `genrm_responses_create_params` | object | *required* | Generation parameters for GenRM calls |
+| `comparison_mode` | string | `"rollout_cohort"` | Compare rollouts with each other (`"rollout_cohort"`) or with a fixed response (`"fixed_baseline"`) |
 | `comparison_strategy` | string | `"circular"` | Pair generation strategy: `"circular"` or `"all_pairs"` |
 | `num_judges_per_comparison` | int | `1` | Number of judge passes per pair (for majority voting) |
 | `use_principle` | bool | `false` | Enable principle-based comparison |
 | `default_principle` | string | *(see config)* | Default principle when none provided in request |
 | `aggregator_method` | string | `"simple_tiebreaker"` | Score aggregation method |
+| `score_source` | string | `"overall"` | Use the GenRM overall score (`"overall"`) or the equal-weight mean of rubric scores (`"rubric_mean"`) |
 | `reasoning_bonus` | float | `0.0` | Bonus for shortest reasoning among top performers |
 | `answer_bonus` | float | `0.0` | Bonus for shortest answer among top performers |
 | `top_percentile` | float | `0.2` | Percentile threshold for applying bonuses |
@@ -160,8 +162,63 @@ for the input format, explicit group IDs, and recovery limits.
 | `cohort_collection_timeout_s` | float | `1800` | Deadline to collect all group members |
 | `cohort_evaluation_timeout_s` | float | `1800` | Overall judging deadline after collection |
 | `judge_request_timeout_s` | float | `1800` | Per-request deadline, including connection retries |
-| `cohort_result_ttl_s` | float or null | `3600` | Terminal-record retention; null disables time expiry, but the count cap still applies |
-| `max_terminal_cohorts` | int | `4096` | Maximum number of retained terminal groups |
+| `cohort_result_ttl_s` | float or null | `3600` | Retention time for results and finished-group attempt records; null disables time expiry only |
+| `max_terminal_cohorts` | int | `4096` | Count limit applied separately to results and finished-group attempt records |
+
+### Fixed-baseline and rubric-mean scoring
+
+Set `comparison_mode: fixed_baseline` to compare each rollout with the reference in
+`responses_create_params.metadata.baseline_response`. Set `num_rollouts_per_prompt` to the actual
+rollouts per group and admit all members concurrently; a singleton still calls the judge.
+
+Set `score_source: rubric_mean` to use equal-weight rubric scores. Each task row must provide a
+top-level `expected_rubric_ids` list, and the prompt or principle must define the rubrics.
+All group members must share the same baseline and rubric ID set; ID order does not matter.
+
+These options work independently or together. Defaults use rollout-cohort comparisons and overall
+scores. `/compare` ignores `comparison_mode` and always compares the submitted responses with each
+other; it still requires `expected_rubric_ids` when using rubric scoring.
+
+For example, with `expected_rubric_ids: [1, 2]`, the judge must return:
+
+```json
+{"rubric_evaluations": [
+  {"rubric_id": 1, "score_1": 5, "score_2": 3, "ranking": 1},
+  {"rubric_id": 2, "score_1": 4, "score_2": 2, "ranking": 2}
+]}
+```
+
+Each expected ID must appear exactly once. IDs must be integer-valued, with finite scores in 1-5
+and rankings in 1-6. One invalid rubric rejects the whole rubric verdict.
+After exhausted parse retries, that comparison uses `default_score` and `default_ranking`.
+With neutral `default_ranking: 3.5`, its fallback aggregate is `default_score`
+before length/style adjustments; a nonneutral ranking can also affect the tiebreaker.
+Judge API failures retain the masked-failure handling described below.
+
+### Verification reward diagnostics
+
+All score aggregates include the existing tiebreaker. `/verify` returns:
+
+| Field | Meaning |
+| --- | --- |
+| `reward`, `reward_score_raw` | Selected score-source aggregate after and before length/style adjustments. |
+| `reward_length_adjustment` | Adjustment applied to the selected score source: `reward - reward_score_raw`. |
+| `reward_rubric_aggregate_valid` | Rubric aggregate before adjustments; null in overall mode or if any comparison for this rollout failed rubric parsing. |
+| `reward_overall_score_raw`, `reward_overall_score` | Overall aggregates before and after length/style adjustments. |
+| `genrm_parse_failure_rate_per_group` | Fraction of final comparison verdicts that failed overall parsing. |
+| `genrm_rubric_parse_failure_rate_per_group` | Fraction that failed rubric parsing; zero in overall mode. |
+| `reasoning_text`, `answer_text` | Reasoning and final answer extracted from the rollout. |
+
+### Token-usage metrics
+
+When the GenRM response includes usage data, `/verify` reports:
+
+- Input and output tokens per comparison: mean, p50, and p95
+- Total output tokens per group
+- Fraction of comparisons that reached `max_output_tokens`
+
+Counts include reported usage from retry attempts. Unavailable usage fields are null in `/verify`
+and omitted from `/compare` metrics. Skip null values when averaging usage and valid-rubric metrics.
 
 ## Comparison Strategies
 
@@ -398,16 +455,68 @@ restart the entire cohort.
 ### Replacement attempts and retention
 
 To replace a group, the caller increments `_ng_group_attempt` for **every** member and dispatches the entire
-group. Newer attempts retire active older ones. An older judge task cannot publish rewards into a newer
-attempt. An individual rollout's retry counter does not advance this shared group attempt.
+group. Newer attempts retire active older ones. If Gym still remembers the prior attempt, it also removes
+that attempt's saved result. An older judge task cannot publish rewards into a newer attempt. An individual
+rollout's retry counter does not advance this shared group attempt.
 
 Run the resources server with one HTTP worker. State is process-local. Completed explicit-ID groups and
 failed groups retain compact response digests, rewards when completed, and failure/attempt information;
-full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`.
+full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`,
+except for groups an open session still needs during a partial-rollout checkpoint (see below).
+
+Results expire from completion time. Time-based retention of the newest-attempt record also starts at
+completion. Retries for a retained, finished attempt with matching prompt and principle refresh its attempt
+record, even when the answer conflicts or the attempt failed. They do not extend the result's lifetime.
+If Gym still remembers an attempt but its result has been evicted, another request for that attempt receives 409 immediately.
+Recover by dispatching a complete group with a higher shared `_ng_group_attempt`.
+
+Cleanup visits finished groups only. Active groups keep their attempt records and do not count toward
+`max_terminal_cohorts`. Results and finished-group attempt records are capped separately. An exact retry
+can still replay a retained result after its attempt record is evicted; superseded results are removed
+when a newer attempt is accepted while the prior attempt is tracked.
 
 The count cap can evict state before the TTL. After eviction or restart, replay and stale-attempt detection
 are no longer guaranteed. The caller must enforce accepted attempt identity across those boundaries and
-use fresh group IDs for unrelated work. This cache does not provide durable recovery.
+use fresh group IDs for unrelated work. Outside a partial-rollout checkpoint, this cache does not provide
+durable recovery.
+
+### Partial-rollout checkpoints
+
+With checkpointing on, GenRM is an `exported` resources server whose `/verify` replays after a crash. Its
+outcomes reach a group's members one reply at a time, so a checkpoint can land after one member recorded its
+reward but before a sibling did. That sibling replays `/verify` after a restore; the member that already
+recorded its reward never does. So each resources session still open on a finished explicit-ID group exports
+its member's outcome, the reward or the judge failure that callers record as a masked row, and a restore
+reinstalls that finished group. The replay then gets the recorded outcome without another judge call. A
+group still collecting or evaluating exports nothing, and its members rebuild it by replaying, as before. Each saved
+response digest names how the response was serialized; a restore refuses digests saved under a scheme it
+does not know rather than refusing every replay. New answers use `orjson-sorted-sha256`. Checkpoints that saved
+the previous `json-ascii-sha256` digests still restore: those members are compared under their saved scheme, so
+an exact replay gets its outcome and a changed answer is refused, and later checkpoints keep that scheme.
+
+While a checkpoint is open, a finished evaluation holds its rewards or judge failure until resume, so no
+member records an outcome after this server exported. If a restored member's session is retired before it
+replays, for example after a failed restore, the member is dropped; a restored group left with no member is
+dropped with the attempt watermark its restore installed, so the rollouts that start over from their inputs
+re-form the group under the same attempt.
+
+A finished group that a member with an open session may still need is kept past `cohort_result_ttl_s` and
+beyond `max_terminal_cohorts`, so pruning cannot evict an outcome a later checkpoint must export or
+a replay must return. Its attempt record is kept too, so the group still refuses older attempts. Each time
+pruning keeps either record, that record's retention restarts. A kept record does not count toward
+`max_terminal_cohorts`, so it cannot evict another group's record. Each prune checks the longest-kept record
+again, and a record becomes an ordinary tombstone once its members have closed their sessions or been retired.
+A newer attempt of the group still removes it, because the caller has replaced the whole group.
+Restored groups join the same retention order as other finished groups. After a restore, a member of a superseded
+group therefore has no saved outcome. If the newer attempt's result was restored too, its replay is refused as
+superseded (409). Otherwise its replay re-forms the old attempt. If every member of the old attempt replays before
+a member of the newer attempt arrives, the old attempt is judged again and its members get new outcomes, which
+the caller discards because it replaced the group. If only some members replay, the old attempt fails after
+`cohort_collection_timeout_s` (503), or when the newer attempt supersedes it.
+
+Only groups with an explicit `_ng_group_id` are exported. A member that is started over from its input while
+its restored group still holds continued members gets a conflicting response for its slot; the controller
+must replace the whole group by advancing `_ng_group_attempt`.
 
 ### Using the file collector
 
@@ -442,7 +551,8 @@ when only some completed rewards reached disk. The collector's individual rollou
 not coordinate a group attempt. A failed legacy run requires a fresh explicit group ID and a complete
 replacement submission with a fresh output path. Plain `--resume` against the retained failed legacy key
 returns its failure again. Partial resume is also unsafe: if only some rewards reached disk, the missing
-members cannot form a full group by themselves. Use caller-coordinated complete attempts for recovery. Durable answer reuse and training checkpoint recovery require caller-side coordination.
+members cannot form a full group by themselves. Use caller-coordinated complete attempts for recovery. The file collector takes no checkpoints, so durable
+answer reuse requires caller-side coordination; for training, see [Partial-rollout checkpoints](#partial-rollout-checkpoints).
 
 ### Reverification limits
 
@@ -496,8 +606,8 @@ client for callers that already hold all answers for a batch comparison.
 - **GenRM Model**: `responses_api_models/genrm_model/` - Response API model with custom roles (`response_1`, `response_2`, `principle`); default config uses server name `genrm_model` (local vLLM)
 - **Comparison Strategies**: `comparison_strategies.py` (in this package) - Strategy infrastructure
 - **Base VLLM Model**: `responses_api_models/vllm_model/` - Generic model (unchanged)
-- **Type Definitions**: `nemo_gym/openai_utils.py` - Custom role type support
-- **Rollout Collection**: `nemo_gym/rollout_collection.py` - Collects per-rollout agent results
+- **Type Definitions**: `nemo_gym/core/responses_api_types.py` - Custom role type support
+- **Rollout Collection**: `nemo_gym/rollouts/rollout_collection.py` - Collects per-rollout agent results
 
 ## License
 
