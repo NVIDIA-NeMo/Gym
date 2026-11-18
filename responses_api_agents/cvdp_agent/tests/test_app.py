@@ -618,6 +618,21 @@ class TestAgenticSandboxSpec:
         assert caught.value.failure_kind == AGENT_ROUTE_FAILED
         agent.server_client.post.assert_not_called()
 
+    async def test_invalid_utf8_target_is_a_scored_failure_with_original_response(self) -> None:
+        box = self._target_box(
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+            download_target=lambda dest: dest.write_bytes(bytes([255])),
+        )
+        agent = self._target_agent()
+
+        result = await self._run_to_verification(agent, box)
+
+        assert result.reward == 0.0 and result.mask_sample is False
+        assert result.response.id == "r" and result.response.model == "m"
+        assert result.response.output == []
+        assert "rtl/top.sv is not UTF-8" in result.container_stderr
+        agent.server_client.post.assert_not_called()
+
     def test_deps_archive_contains_runtime_root(self, tmp_path) -> None:
         agent = self._agent()
         deps = tmp_path / "hermes"

@@ -56,6 +56,31 @@ def test_project_replay_preserves_assets_deletions_links_and_modes(tmp_path: Pat
     assert not (before / "rundir").exists()
 
 
+@pytest.mark.parametrize("replacement", ["file", "symlink"])
+def test_directory_replaced_by_file_or_symlink_replays_exactly(tmp_path: Path, replacement: str) -> None:
+    before = tmp_path / "before"
+    after = tmp_path / "after"
+    (before / "old_tree").mkdir(parents=True)
+    (before / "old_tree/a.v").write_text("old RTL")
+    (before / "other").mkdir()
+    (before / "other/b.v").write_text("unchanged RTL")
+    shutil.copytree(before, after, symlinks=True)
+    initial = snapshot(before)
+    shutil.rmtree(after / "old_tree")
+    if replacement == "file":
+        (after / "old_tree").write_text("replacement text")
+    else:
+        (after / "old_tree").symlink_to("other", target_is_directory=True)
+    archive = tmp_path / "changes.tar.gz"
+    changes = collect_changes(after, initial, archive)
+    changes["archive"] = base64.b64encode(archive.read_bytes()).decode()
+
+    apply_changes(before, changes)
+
+    assert snapshot(before) == snapshot(after)
+    assert (before / "other/b.v").read_text() == "unchanged RTL"
+
+
 @pytest.mark.parametrize("name", ["../escaped", "/tmp/escaped", ".cvdp_harness/src/test.py", "rundir/test.py"])
 def test_rejects_delta_outside_project(tmp_path: Path, name: str) -> None:
     raw = io.BytesIO()

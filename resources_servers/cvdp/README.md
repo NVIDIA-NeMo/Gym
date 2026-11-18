@@ -1,5 +1,7 @@
 # CVDP Benchmark
 
+For heavy repository tasks, follow the [CVDP heavy preparation and run procedure](https://docs.nvidia.com/nemo/gym/main/build-verifiers/verification-patterns/execution-and-state-match#cvdp-heavy-repository-tasks).
+
 This resources server is for model evaluation purposes. It is reproducing [CVDP](https://github.com/NVlabs/cvdp_benchmark).
 
 Models are given a hardware design specification and asked to produce a SystemVerilog

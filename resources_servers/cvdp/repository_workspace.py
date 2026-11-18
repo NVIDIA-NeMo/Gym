@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import tarfile
 from pathlib import Path
@@ -124,6 +125,8 @@ def apply_changes(root: Path, changes: RepositoryChanges) -> None:
                 raise ValueError(f"Repository change escapes workspace: {member.name}")
             if target.is_symlink():
                 target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target)
             archive.extract(member, root, filter="data")
 
 

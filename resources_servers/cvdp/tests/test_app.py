@@ -1682,3 +1682,55 @@ class TestSnapshotRaceWithRealTar:
             pytest.skip("this tar does not report the change")
         assert snapshot.return_code == 1
         assert _snapshot_only_raced(snapshot) is accepted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "summary, explicit_rtl",
+    [("The design is already correct.", None), ("", None), ("Summary only.", "module explicit_core; endmodule")],
+)
+async def test_empty_repository_delta_verifies_collected_project_not_summary(tmp_path, summary, explicit_rtl):
+    import base64
+    import hashlib
+    import io
+    import tarfile
+
+    original = "module core; endmodule"
+    prepared = tmp_path / "snapshots"
+    prepared.mkdir()
+    starting = tmp_path / "starting.tar.gz"
+    with tarfile.open(starting, "w:gz") as archive:
+        member = tarfile.TarInfo("core.v")
+        member.size = len(original.encode())
+        archive.addfile(member, io.BytesIO(original.encode()))
+    digest = hashlib.sha256(starting.read_bytes()).hexdigest()
+    starting.rename(prepared / f"{digest}.tar.gz")
+    empty_delta = io.BytesIO()
+    with tarfile.open(fileobj=empty_delta, mode="w:gz"):
+        pass
+    body = _make_body(output_text=summary, target_files=["core.v"])
+    body["verifier_metadata"]["repository_workspace_sha256"] = digest
+    body["repository_changes"] = {
+        "changed_count": 0,
+        "deleted": [],
+        "archive": base64.b64encode(empty_delta.getvalue()).decode(),
+    }
+    if explicit_rtl is not None:
+        body["rtl_files"] = {"core.v": explicit_rtl}
+    server = _make_server()
+    server.config.prepared_repository_dir = str(prepared)
+    seen = []
+    expected = explicit_rtl if explicit_rtl is not None else original
+
+    async def check_materialized_project(workspace_archive, *args, **kwargs):
+        # Inspect the actual restored/replayed archive delivered to the service.
+        with tarfile.open(workspace_archive) as archive:
+            actual = archive.extractfile("core.v").read().decode()
+        seen.append(actual)
+        return (0 if actual == expected else 1), "checked prepared source"
+
+    server._harness._run_service = check_materialized_project
+    result = await server.verify(_make_request(body))
+
+    assert seen == [expected]
+    assert result.reward == 1.0 and result.evaluation_completed and not result.mask_sample

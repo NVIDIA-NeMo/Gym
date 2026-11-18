@@ -1172,11 +1172,16 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                                 continue  # the agent did not write this target: a genuine miss
                             try:
                                 await box.download(target, dest)
-                                rtl_files[tf] = dest.read_text(encoding="utf-8")
                             except Exception as error:
                                 raise _agent_route_failed(
                                     f"target file download of {tf} failed: {error}", "agent.download"
                                 ) from error
+                            try:
+                                rtl_files[tf] = dest.read_text(encoding="utf-8")
+                            except UnicodeDecodeError:
+                                return self._failed_agentic_response(
+                                    body, f"target file {tf} is not UTF-8"
+                                ).model_copy(update={"response": response})
 
             payload = body.model_dump() | {"response": response.model_dump()}
             payload["verifier_metadata"] = meta | {"context_files": remaining_context}

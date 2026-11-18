@@ -125,6 +125,11 @@ def convert_public_task(task: RawTask) -> dict[str, object]:
     categories = task.get("categories") or []
     if not categories or categories[0] not in _SUPPORTED_CATEGORIES:
         raise ValueError(f"{task['id']}: unsupported non-commercial code-generation category {categories!r}")
+    if len(categories) == 1:
+        difficulty = task.get("difficulty", "")
+        if difficulty not in {"easy", "medium", "hard"}:
+            raise ValueError(f"{task['id']}: missing or invalid task difficulty")
+        categories = [categories[0], difficulty]
     targets = list(((task.get("output") or {}).get("context") or {}).keys())
     if not targets:
         raise ValueError(f"{task['id']}: code-generation task has no target files")

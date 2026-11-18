@@ -345,11 +345,9 @@ class CVDPResourcesServer(SimpleResourcesServer):
         # wrote on disk. Grade those directly. Model-only flow: fall back to
         # parsing RTL out of the model's text response.
         if meta.repository_workspace_sha256 and body.repository_changes is not None:
-            # A heavy agent can legitimately leave the baseline unchanged. Retain the
-            # response-text fallback only when no project changes were collected.
+            # Successful collection is authoritative, including an empty delta:
+            # verify the unchanged baseline rather than interpreting the final summary as source.
             rtl_files = dict(body.rtl_files or {})
-            if not body.repository_changes.get("changed_count") and not body.repository_changes.get("deleted"):
-                rtl_files = rtl_files or _parse_model_response(model_out, meta.target_files) or {}
         elif body.rtl_files:
             rtl_files = dict(body.rtl_files)
         else:

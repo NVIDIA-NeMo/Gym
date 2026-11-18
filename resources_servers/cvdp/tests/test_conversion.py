@@ -65,6 +65,7 @@ def test_public_single_file_prompt_preserves_starting_rtl_and_excludes_reference
     assert user["content"].endswith("Your response will be saved directly to: rtl/latch.sv.\n")
     assert "secret-reference" not in json.dumps(row)
     assert row["task_id"] == row["verifier_metadata"]["task_id"] == "public-task"
+    assert row["verifier_metadata"]["categories"] == ["cid003", "easy"]
     assert row["verifier_metadata"]["context_files"] == {"rtl/latch.sv": "module latch; endmodule"}
     assert row["verifier_metadata"]["harness_files"] == {
         "src/lint.vlt": "keep\r\nlint_off -rule WIDTH\r\n",
@@ -200,3 +201,69 @@ def test_cli_rejects_missing_or_conflicting_inputs(tmp_path, monkeypatch, argume
     with pytest.raises(SystemExit) as error:
         main()
     assert error.value.code == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("categories, expected_difficulty", [(["cid003"], "easy"), (["cid003", "medium"], "medium")])
+async def test_public_category_envelope_reaches_verification(public_task, categories, expected_difficulty):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nemo_gym.client import ServerClient
+    from resources_servers.cvdp.app import CVDPResourcesServer, CVDPResourcesServerConfig, CVDPVerifyRequest
+
+    public_task["categories"] = categories
+    row = conversion.convert_public_task(public_task)
+    server = CVDPResourcesServer(
+        config=CVDPResourcesServerConfig(host="127.0.0.1", port=0, name="cvdp", entrypoint=""),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    server._harness.run = AsyncMock(return_value=(0, "passed", []))
+    body = CVDPVerifyRequest.model_validate(
+        row
+        | {
+            "response": {
+                "id": "converted-answer",
+                "created_at": 0,
+                "model": "test",
+                "object": "response",
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+                "output": [
+                    {
+                        "id": "message",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "module latch; endmodule", "annotations": []}],
+                    }
+                ],
+            }
+        }
+    )
+
+    reply = await server.verify(body)
+
+    assert reply.reward == 1.0 and not reply.mask_sample and reply.evaluation_completed
+    assert reply.difficulty == expected_difficulty
+    assert row["verifier_metadata"]["categories"] == ["cid003", expected_difficulty]
+
+
+@pytest.mark.parametrize("difficulty", [None, "", "unknown"])
+def test_public_invalid_difficulty_preserves_existing_output(public_input, public_task, difficulty):
+    raw, _, options = public_input
+    if difficulty is None:
+        public_task.pop("difficulty")
+    else:
+        public_task["difficulty"] = difficulty
+    raw.write_text(json.dumps(public_task) + "\n")
+    options["expected_raw_sha256"] = hashlib.sha256(raw.read_bytes()).hexdigest()
+    output = options["output"]
+    output.parent.mkdir()
+    output.write_text("previous verified dataset")
+
+    with pytest.raises(ValueError, match="missing or invalid task difficulty"):
+        conversion.prepare_public_dataset(raw_path=raw, **options)
+
+    assert output.read_text() == "previous verified dataset"
+    assert list(output.parent.iterdir()) == [output]
