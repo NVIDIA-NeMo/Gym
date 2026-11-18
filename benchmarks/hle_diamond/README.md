@@ -438,8 +438,9 @@ multipleChoice):
   `++hle_diamond_opencode_agent.responses_api_agents.opencode_agent.opencode_config.compaction.auto=false`
   and
   `++hle_diamond_opencode_agent.responses_api_agents.opencode_agent.opencode_config.agent.build.steps=400`
-  (`hle_diamond_opencode_reference_agent` on `opencode_reference`). Either can move scores. The
-  profile keeps these presets and `benchmarks/hle`'s alike, so a change there belongs in the profile.
+  (`hle_diamond_opencode_reference_agent` on `opencode_reference`, `opencode_hle_tools` and
+  `opencode_hle_tools_full`). Either can move scores. The profile keeps these presets and
+  `benchmarks/hle`'s alike, so a change there belongs in the profile.
 - Failed runs: a session run that stops at its output, context or time limit is graded on what it
   produced, as in `benchmarks/hle`. A harness crash (a nonzero exit, no result) is retried and then
   reported as a failed rollout, so it leaves the denominator; the relay presets'
@@ -1265,6 +1266,38 @@ with the agent asking the user a question instead of an `Answer:` line, as an in
 does when it cannot verify; upstream's protocol adds no nudge and neither does this preset. One run, one
 repeat, no confidence interval, open egress: a comparison, not a reproduction (Reference preset >
 OpenSandbox gate).
+
+**Judge settings, paired regrade, 2026-11-18** (`gym eval reverify` over the pilot's 1,000 saved rollouts:
+same completions, same row ids, same judge `azure/openai/o3-mini`, no policy call). Two judge settings
+differ from the ones this preset had on main before this change: `question_extract_regex` (the bare
+question) and `max_output_tokens: 4096`. The earlier settings are applied here to all 1,000 rows; the
+preset then covered the 728 text rows. Three passes:
+
+| Judge settings | Correct of 1,000 | Text | Image | Knowledge | Reasoning | `no_verdict` | Largest judge output |
+|---|---|---|---|---|---|---|---|
+| this preset, the pilot's own verdicts | 827 | 624/728 | 203/272 | 403/500 | 424/500 | 0 | 1,914 tokens |
+| this preset, regraded | 826 | 625/728 | 201/272 | 401/500 | 425/500 | 0 | 2,153 tokens |
+| earlier: whole user message, no cap | 824 | 623/728 | 201/272 | 402/500 | 422/500 | 18 | 4,702 tokens |
+
+Each pass made 999 judge calls; the remaining row has an empty final answer and scores 0 without one. The
+two passes under this preset's settings saw identical judge inputs and disagree on 7 rows (3 correct only
+in the regrade, 4 only in the pilot): one sample of o3-mini's run-to-run noise on this set, and the scale
+for reading the third row. The earlier settings differ from the pilot's verdicts on 13 rows (8 that they
+score 0 and the pilot 1, 5 the reverse) and from the regrade on 16 (9 and 7). Six of those 8, and of
+those 9, are the same rows with one cause: the judge read the answer-format instruction folded after the
+question (`prompts/opencode.yaml`; on the image rows, the prepared dataset) as part of `[question]`,
+replied in that format (`Answer: yes`, no `Judgement:` line) and was scored 0 as `no_verdict` on an
+answer it had called correct. All 18 `no_verdict` calls are that failure (6 `Answer: yes`, 9
+`Answer: no`, 3 `Answer: None`; the 12 without a yes score 0 in every pass); the bare question removes
+it, 0 of 999 in both passes. That leaves 7 and 10 differing rows, comparable to the 7 between the two
+same-settings passes; 5 rows differ from both of those passes (2 down, 3 up), each a borderline
+equivalence call under a normal `Judgement:` line, none decided on format. The cap changed no verdict:
+no judge call under this preset's settings came within 1,900 tokens of it and none ended incomplete. One
+uncapped call spent 4,702 tokens (4,480 of reasoning) on a row all three passes score correct, so a
+cut-off verdict is possible under the cap, as it is upstream, and was not observed. The earlier settings
+have one pass, so the 2- to 3-row difference in the totals is not itself significant; the `no_verdict`
+mechanism is. Every other OpenCode and Pi preset (session, full and legacy) leaves
+`question_extract_regex` unset and sends the judge the same folded message as the third row.
 
 ### Search exclusions
 
