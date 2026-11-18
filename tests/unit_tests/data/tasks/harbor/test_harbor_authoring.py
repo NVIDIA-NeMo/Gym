@@ -54,7 +54,7 @@ from tests.unit_tests.data.tasks.harbor.test_harbor_tasks import HELLO_TOML, wri
 
 
 REPO = Path(__file__).resolve().parents[5]
-EXAMPLES = REPO / "environments"
+EXAMPLES = REPO / "cookbook" / "tasks"
 
 ANSWER_VERIFIER = """
 from pathlib import Path
@@ -601,7 +601,7 @@ class TestTemplateRendering:
         assert {p.name: p.stat().st_ino for p in evaluated.folder.iterdir()} == inodes
 
     def test_the_example_template_renders(self, tmp_path):
-        out = render_template_folder(EXAMPLES / "hello_parameterized_tasks", tmp_path / "rendered")
+        out = render_template_folder(EXAMPLES / "parameterized_tasks", tmp_path / "rendered")
         assert sorted(p.name for p in out.iterdir() if p.is_dir()) == ["addition", "multiplication"]
         assert "What is 17 + 25?" in (out / "addition" / "instruction.md").read_text()
         # The reference answer is a rendered text file, never a value inside a quoted shell literal.
@@ -618,8 +618,8 @@ class TestTemplateRendering:
     def test_the_example_template_types_its_rows(self, tmp_path):
         import shutil
 
-        example = tmp_path / "hello_parameterized_tasks"
-        shutil.copytree(EXAMPLES / "hello_parameterized_tasks", example)
+        example = tmp_path / "parameterized_tasks"
+        shutil.copytree(EXAMPLES / "parameterized_tasks", example)
         prepared = prepare_target(str(example), output_root=tmp_path / "out")
         assert [t.task_id for t in prepared.tasks] == ["addition", "multiplication"]
         assert all(t.python_verifier == t.path / "tests" / "verifier.py" and t.has_solution for t in prepared.tasks)
@@ -1180,16 +1180,16 @@ class TestAnswerAndSolutions:
         assert task.digest != load_task(write_task(tmp_path / "ds2" / "a")).digest  # solution/ enters the digest
 
     def test_every_example_has_a_solution(self):
-        for name in ("hello_world", "hello_python_verifier", "hello_mcp_tool"):
+        for name in ("hello_world", "python_verifier", "mcp_tool"):
             assert (EXAMPLES / name / "solution" / "solve.sh").is_file(), name
         for name in (
-            "hello_dataset/hello",
-            "hello_dataset/goodbye",
-            "hello_verifier_reuse/exact-greeting",
-            "hello_verifier_reuse/uppercase-greeting",
+            "dataset/hello",
+            "dataset/goodbye",
+            "shared_verifier/exact-greeting",
+            "shared_verifier/uppercase-greeting",
         ):
             assert (EXAMPLES / name / "solution" / "solve.sh").is_file(), name
-        assert (EXAMPLES / "hello_parameterized_tasks" / "solution" / "answer.template.md").is_file()
+        assert (EXAMPLES / "parameterized_tasks" / "solution" / "answer.template.md").is_file()
 
 
 class TestPublish:

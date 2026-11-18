@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Runs every cookbook recipe's reference solutions in Docker sandboxes (tier 1 of the cookbook's CI).
+# The recipe contract checks that need no sandbox run with the unit tests (tests/unit_tests/test_cookbook.py).
+
+name: Cookbook recipes
+
+# Mirrored PR branches and a schedule, so a change elsewhere that breaks a recipe is caught within a day. A push
+# path filter would compare only that push's commits, so a later push that touches no recipe would skip a PR that
+# changed one; the `changes` job compares the whole branch with main instead.
+on:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  changes:
+    name: Detect cookbook changes
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.diff.outputs.relevant }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      # Scheduled and manual runs always validate. A PR runs when its branch differs from main in a recipe or the
+      # code recipes run on.
+      - name: Compare the branch with main
+        id: diff
+        run: |
+          if [[ "${{ github.event_name }}" != "push" ]]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags origin main
+          base=$(git merge-base origin/main HEAD)
+          paths=(
+            cookbook
+            nemo_gym/data/tasks
+            nemo_gym/verifiers
+            nemo_gym/sandbox
+            environment_servers/harbor
+            responses_api_agents/harbor_oracle_agent
+            tests/unit_tests/test_cookbook.py
+            .github/workflows/cookbook.yml
+          )
+          if git diff --quiet "$base" HEAD -- "${paths[@]}"; then
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  validate:
+    name: Validate recipe solutions
+    needs: [changes]
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Cache uv dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Install Gym
+        run: |
+          source scripts/ci/setup_dev.sh
+          uv sync --extra dev
+          # The servers gym starts in later steps install their environments with uv.
+          dirname "$(command -v uv)" >> "$GITHUB_PATH"
+
+      - name: Recipe contract
+        run: |
+          source .venv/bin/activate
+          pytest tests/unit_tests/test_cookbook.py
+
+      # Each solution must score 1. Input comes from /dev/null and output is not piped, so a server process
+      # that outlives the command cannot hold the step open.
+      - name: Play reference solutions
+        run: |
+          source .venv/bin/activate
+          failed=()
+          for recipe in cookbook/*/*/; do
+            find "$recipe" -name task.toml -print -quit | grep -q . || continue
+            echo "::group::${recipe}"
+            gym dataset validate "${recipe%/}" --sandbox docker < /dev/null || failed+=("${recipe}")
+            echo "::endgroup::"
+          done
+          if (( ${#failed[@]} )); then
+            printf '::error::Recipe solutions did not all score 1: %s\n' "${failed[*]}"
+            exit 1
+          fi
+
+      - name: Upload validation results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cookbook-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: results/harbor/validation/
+          if-no-files-found: ignore
