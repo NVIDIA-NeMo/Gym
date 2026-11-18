@@ -73,7 +73,11 @@ def _client(model_cls, *, fail: bool, wait_for_keepalive: bool = False, **config
     server.setup_exception_middleware(app)
     if not wait_for_keepalive:
         return TestClient(app)
+    return _keepalive_client(server, app)
 
+
+def _keepalive_client(server, app) -> TestClient:
+    """Run a scripted backend only after its real streaming response has opened."""
     keepalive_sent = asyncio.Event()
     object.__setattr__(server, "_keepalive_sent", keepalive_sent)
 
