@@ -19,6 +19,7 @@ itself is exercised by the golden-patch run, which needs a live OpenSandbox endp
 """
 
 import re
+import signal
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -232,6 +233,158 @@ class TestRunVerification:
         )
         assert result.completed and result.resolved
         assert sandbox.commands == ["bash /tmp/nemo_gym_eval.sh"]
+
+    @pytest.mark.asyncio
+    async def test_signal_interruption_does_not_grade_partial_passing_output(self) -> None:
+        process = subprocess.run(
+            ["bash", "-c", 'printf "%s\\n" "$1" "a PASSED"; kill -KILL $$', "bash", TEST_OUTPUT_BEGIN],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert process.returncode == -signal.SIGKILL
+        assert "a PASSED" in process.stdout and TEST_OUTPUT_END not in process.stdout
+        parsed: list[str] = []
+
+        def parse(log: str) -> dict[str, str]:
+            parsed.append(log)
+            return {"a": "PASSED"} if "a PASSED" in log.splitlines() else {}
+
+        result = await run_verification(
+            sandbox=_FakeSandbox(process.stdout, return_code=process.returncode),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parse,
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_results["tests_observed"] == 1
+        assert result.test_results["resolved"] is False
+        assert parsed == ["\na PASSED\n"]
+        assert result.test_output == process.stdout
+        assert "return code -9" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "return_code,end_marker,error_type,completed,resolved",
+        [
+            (-1, False, None, False, False),  # OpenSandbox signal death without a known cause.
+            (-1, True, None, True, True),  # The complete test section remains gradeable.
+            (-9, True, None, True, True),
+            (124, False, None, True, True),  # Preserve the non-signal exit-code policy.
+            (128, False, None, True, True),
+            (129, False, None, False, False),  # Shells encode signal exits as 128 + signal.
+            (137, False, None, False, False),  # Docker reports SIGKILL as 137.
+            (143, False, None, False, False),
+            (137, True, None, True, True),
+            (-1, False, "timeout", True, False),  # Preserve the explicit timeout policy.
+            (137, False, "timeout", True, False),
+            (-1, False, "sandbox", False, False),
+        ],
+    )
+    async def test_interruption_guard_preserves_known_outcomes(
+        self, return_code: int, end_marker: bool, error_type: str | None, completed: bool, resolved: bool
+    ) -> None:
+        output = f"{TEST_OUTPUT_BEGIN}\na PASSED\n" + (TEST_OUTPUT_END if end_marker else "")
+        sandbox = _FakeSandbox(output, return_code=return_code)
+        sandbox._result.error_type = error_type
+        parsed: list[str] = []
+
+        def parse(log: str) -> dict[str, str]:
+            parsed.append(log)
+            return {"a": "PASSED"} if "a PASSED" in log.splitlines() else {}
+
+        result = await run_verification(
+            sandbox=sandbox, inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]), parser=parse
+        )
+        assert result.completed is completed and result.resolved is resolved
+        assert bool(parsed) is (error_type is None)
+        assert result.test_output == output
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "statuses,completed",
+        [
+            ({"a [123 ms]": "FAILED"}, True),  # A normalized FAIL_TO_PASS name explicitly failed.
+            ({"b in 1 sec": "FAILED"}, True),  # PASS_TO_PASS failures also establish a zero.
+            ({"unrelated": "FAILED"}, False),
+            ({"a": "PASSED", "b": "PASSED"}, False),
+            ({}, False),  # Malformed/truncated log with no recognized tests.
+            ({"a": "ERROR"}, False),  # Do not infer an explicit FAILED status from another parser label.
+        ],
+    )
+    @pytest.mark.parametrize("return_code", [-1, 137])
+    async def test_interrupted_output_retains_only_conclusive_required_failures(
+        self, statuses: dict[str, str], completed: bool, return_code: int
+    ) -> None:
+        output = f"{TEST_OUTPUT_BEGIN}\n" + "\n".join(f"{name}: {status}" for name, status in statuses.items())
+        result = await run_verification(
+            sandbox=_FakeSandbox(output, return_code=return_code),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=["b"]),
+            parser=lambda log: dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line),
+        )
+        assert result.completed is completed and result.resolved is False
+        assert (result.error is None) is completed
+        assert result.test_output == output
+
+    @pytest.mark.asyncio
+    async def test_interrupted_install_failure_is_not_a_test_verdict(self) -> None:
+        def parse(log: str) -> dict[str, str]:
+            pytest.fail("The interrupted install output must not reach the test parser")
+
+        result = await run_verification(
+            sandbox=_FakeSandbox("a: FAILED\n", return_code=-1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parse,
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_results["tests_observed"] == 0
+        assert result.patch_applied is False
+
+    @pytest.mark.asyncio
+    async def test_interrupted_log_parser_failure_is_incomplete(self) -> None:
+        def parse(log: str) -> dict[str, str]:
+            raise ValueError("truncated test result")
+
+        result = await run_verification(
+            sandbox=_FakeSandbox(f"{TEST_OUTPUT_BEGIN}\na: FAILED", return_code=-1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parse,
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_results is None
+        assert "truncated test result" in result.error
+
+    @pytest.mark.asyncio
+    async def test_interrupted_failure_after_a_failed_test_patch_is_incomplete(self) -> None:
+        """A required FAILED is not a verdict when the held-out tests never applied."""
+        result = await run_verification(
+            sandbox=_FakeSandbox(f"{TEST_PATCH_FAILED}\n{TEST_OUTPUT_BEGIN}\na: FAILED", return_code=-1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=lambda log: dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line),
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_patch_failed is True and result.patch_applied is True
+        assert result.error.startswith("held-out test patch did not apply")
+        assert "return code -1" in result.error
+
+    @pytest.mark.asyncio
+    async def test_interrupted_output_ignores_appended_stderr(self) -> None:
+        """Without the end marker, stderr (install output included) must not supply the verdict."""
+        sandbox = _FakeSandbox(f"{TEST_OUTPUT_BEGIN}\na: PASSED", return_code=-1)
+        sandbox._result.stderr = "a: FAILED"
+        parsed: list[str] = []
+
+        def parse(log: str) -> dict[str, str]:
+            parsed.append(log)
+            return dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line)
+
+        result = await run_verification(
+            sandbox=sandbox, inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]), parser=parse
+        )
+        assert parsed == ["\na: PASSED"]
+        assert result.completed is False and result.resolved is False
+        assert result.test_results["resolved"] is False
+        assert result.test_output.endswith("\na: FAILED")
 
     @pytest.mark.asyncio
     async def test_a_test_patch_that_does_not_apply_is_incomplete(self) -> None:
