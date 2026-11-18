@@ -2777,6 +2777,61 @@ def test_phase_networks_compare_ip_literals_in_their_canonical_spelling(tmp_path
         load_task(root)
 
 
+def test_phase_networks_respell_only_hosts_whose_rule_cannot_change():
+    """A host takes its egress rule's spelling only where that cannot change what the policy builder makes of it: an
+    IP literal canonically, an ASCII host name lower-cased and without its one trailing dot. Any other entry is kept as
+    written, so the builder refuses the spelling the task used, never a repaired one, and it is never the valid host it
+    resembles."""
+    malformed = ["example.com..", "2001:db8::1.", "Kexample.com", "example.com\t.", "."]
+    network = PhaseNetwork.of(
+        "allowlist", ["Example.com.", "example.com", "*.Example.com.", "2001:DB8:0::1", *malformed]
+    )
+    assert network.allowed_hosts == ("example.com", "*.example.com", "2001:db8::1", *malformed)
+    for host in malformed:
+        assert PhaseNetwork.of("allowlist", [host]) != PhaseNetwork.of("allowlist", ["example.com"])
+
+
+def test_an_empty_allowlist_is_the_same_network_as_no_network(tmp_path):
+    """An allowlist without hosts makes ``no-network``'s deny-all policy, so the phases that must agree on a network
+    agree on the two (a shared verifier and the agent, every step's agent), and each keeps the mode it declares for
+    reporting. Public is not deny-all, an allowlist with hosts (malformed ones too) is neither, and two allowlists
+    still differ by their hosts."""
+    deny_all = PhaseNetwork("no-network")
+    empty = PhaseNetwork.of("allowlist", [])
+    assert empty == deny_all and hash(empty) == hash(deny_all) and empty.mode == "allowlist"
+    assert PhaseNetwork("public") != deny_all and PhaseNetwork("public") != empty
+    assert PhaseNetwork.of("allowlist", ["example.com.."]) != deny_all
+    assert PhaseNetwork.of("allowlist", ["a.org"]) != PhaseNetwork.of("allowlist", ["b.org"])
+
+    no_network = 'network_mode = "no-network"\n'
+    empty_allowlist = 'network_mode = "allowlist"\nallowed_hosts = []\n'
+    for name, environment, verifier in (("a", no_network, empty_allowlist), ("b", empty_allowlist, no_network)):
+        toml = HELLO_TOML.replace("[environment]\n", "[environment]\n" + environment).replace(
+            "[verifier]\n", "[verifier]\n" + verifier
+        )
+        task = load_task(write_task(tmp_path / name, toml=toml))
+        assert task.config.is_shared_verifier
+        assert task.config.agent_network() == task.config.verifier_network(separate=False) == deny_all
+        assert task.config.verifier_network(separate=False).mode == task.config.verifier.network_mode
+
+    root = write_multi_step_task(tmp_path / "steps")
+    separate = (
+        (root / "task.toml")
+        .read_text()
+        .replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        .replace("[agent]\n", '[verifier.environment]\ndocker_image = "org/verifier:1"\n\n[agent]\n')
+    )
+    # 01_plan's agent declares no-network; 02_implement's takes the task's empty [agent] allowlist.
+    (root / "task.toml").write_text(
+        separate.replace("[agent]\n", "[agent]\n" + empty_allowlist).replace(
+            "[steps.agent]\n", "[steps.agent]\n" + no_network
+        )
+    )
+    task = load_task(root)
+    assert [task.config.agent_network(step).mode for step in task.config.steps] == ["no-network", "allowlist"]
+    assert {task.config.agent_network(step) for step in task.config.steps} == {deny_all}
+
+
 @pytest.mark.parametrize("policy", ['network_mode = "no-network"', 'network_mode = "public"', ""])
 def test_loader_refuses_verifier_allowed_hosts_without_an_allowlist(tmp_path, policy):
     toml = SEPARATE_VERIFIER_TOML.replace(

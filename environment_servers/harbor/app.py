@@ -1401,8 +1401,9 @@ class HarborEnvironmentServer(
 
         Refused with HTTP 422 before anything is provisioned, as a retry would fail the same way: a provider other
         than OpenSandbox, a Compose group, a harness that declares nothing, a host the policy cannot express or the
-        sandbox cannot reach, or a deny-by-default deployment policy the result would widen. An agent server that
-        cannot be asked raises HTTP 503, retried.
+        sandbox cannot reach, a deny-by-default deployment policy the result would widen, or deny rules in the
+        deployment's policy that a result allowing any host would drop. An agent server that cannot be asked raises
+        HTTP 503, retried.
         """
         network = task.config.agent_network(task.config.steps[0] if task.config.steps else None)
         if not network.restricted:
@@ -1438,6 +1439,7 @@ class HarborEnvironmentServer(
                 policy, [*egress.model_hosts, *egress.install_hosts, *egress.tool_hosts, *task_tool_hosts]
             )
             self._refuse_widening_the_deployment(policy, sandbox="the agent")
+            self._refuse_dropping_the_deployments_denials(policy)
         except ValueError as exc:
             raise HTTPException(422, f"{where}: {exc}") from exc
         LOGGER.info(

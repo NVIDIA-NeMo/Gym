@@ -5627,12 +5627,28 @@ class TestVerifierNetwork:
         # Refused before anything was provisioned: no agent sandbox, no verifier.
         assert created == [] and specs == []
 
-    async def test_hosts_the_policy_cannot_express_are_refused_at_seed(self, tmp_path, monkeypatch):
-        toml = self.ALLOWLIST_TOML.replace('"10.0.0.7"', '"10.0.0.0/8"')
-        server, task, _, _, _, created = self.prepared(tmp_path, monkeypatch, toml=toml)
+    @pytest.mark.parametrize(
+        ("host", "reason"),
+        [
+            ("10.0.0.0/8", "CIDR ranges are not supported"),
+            # Spellings the policy builder refuses, which comparing networks must not repair on the way to it: a
+            # second trailing dot, an IP literal behind a dot, a Kelvin sign (lower-cased, an ASCII "k") and
+            # whitespace before the one trailing dot.
+            ("example.com..", "'example.com..' is not a host name"),
+            ("2001:db8::1.", "'2001:db8::1.' is not a host name"),
+            ("Kexample.com", "'Kexample.com' is not a host name"),
+            ("example.com\t.", "'example.com\\t.' is not a host name"),
+        ],
+        ids=["cidr", "two-trailing-dots", "ipv6-trailing-dot", "kelvin-sign", "whitespace-before-dot"],
+    )
+    async def test_hosts_the_policy_cannot_express_are_refused_at_seed(self, tmp_path, monkeypatch, host, reason):
+        toml = self.ALLOWLIST_TOML.replace('"10.0.0.7"', json.dumps(host))
+        server, task, _, _, specs, created = self.prepared(tmp_path, monkeypatch, toml=toml)
         response = await run_episode(server, task)
-        assert response.failure.stage == "seed" and response.failure.terminal and created == []
-        assert "CIDR ranges are not supported" in response.failure.failure_reason
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert created == [] and specs == []
+        assert reason in failure.failure_reason
 
     async def test_a_restricted_verifier_in_the_agents_sandbox_is_refused_at_seed(self, tmp_path, monkeypatch):
         # The loader admits the policy for separate-mode tasks only; the seed keeps the invariant for a task
@@ -5655,7 +5671,7 @@ class TestVerifierNetwork:
         [
             ('network_mode = "no-network"', "", False, "no-network", {"defaultAction": "deny", "egress": []}),
             (
-                'network_mode = "allowlist"\nallowed_hosts = ["Example.com"]',
+                'network_mode = "allowlist"\nallowed_hosts = ["Example.com."]',
                 "",
                 False,
                 "allowlist",
@@ -5921,6 +5937,102 @@ class TestAgentNetwork:
         )
         assert (await run_episode(server, task)).result is not None
         assert sandbox.network_policy == {"defaultAction": "deny", "egress": []}
+
+    # An allow-by-default deployment that denies one host.
+    BLOCKING = {"defaultAction": "allow", "egress": [{"action": "deny", "target": "blocked.example"}]}
+
+    @pytest.mark.parametrize(
+        ("toml", "egress"),
+        [
+            (
+                TASK_TOML.replace(
+                    "[environment]\n",
+                    '[environment]\nnetwork_mode = "allowlist"\nallowed_hosts = ["blocked.example"]\n',
+                ),
+                {},
+            ),
+            (NO_NETWORK_TOML, {"tool_hosts": ["blocked.example"]}),
+        ],
+        ids=["task-allowlist", "harness-tool-host"],
+    )
+    async def test_the_deployments_deny_rules_are_not_dropped(self, tmp_path, monkeypatch, toml, egress):
+        """The agent's policy replaces the deployment's, deny rules included, so an allow rule for a host the operator
+        denied would open it: an agent policy that allows any host under a deployment with deny rules is refused at
+        seed, before any sandbox, whether the task or the harness names the host."""
+        server, task, _, created = self.prepared(
+            tmp_path, monkeypatch, toml=toml, egress=egress, sandbox_provider_options={"network_policy": self.BLOCKING}
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal and created == []
+        assert "the agent's allow rules (blocked.example) would replace this deployment's" in failure.failure_reason
+        assert "drop its deny rules ['blocked.example']" in failure.failure_reason
+        assert server.config.sandbox_provider_options["network_policy"] == self.BLOCKING
+
+    async def test_a_deny_all_or_public_agent_keeps_the_deployments_deny_rules(self, tmp_path, monkeypatch):
+        """A deny-all agent policy (the oracle on a `no-network` task) keeps every denial and passes; a public agent's
+        sandbox keeps the deployment's policy itself."""
+        server, task, sandbox, _ = self.prepared(
+            tmp_path,
+            monkeypatch,
+            toml=self.NO_NETWORK_TOML,
+            egress={},
+            sandbox_provider_options={"network_policy": self.BLOCKING},
+        )
+        assert (await run_episode(server, task)).result is not None
+        assert sandbox.network_policy == {"defaultAction": "deny", "egress": []}
+        server, task, sandbox, _ = self.prepared(
+            tmp_path / "public",
+            monkeypatch,
+            toml=TASK_TOML,
+            sandbox_provider_options={"network_policy": self.BLOCKING},
+        )
+        assert (await run_episode(server, task)).result is not None
+        assert sandbox.network_policy is None
+        assert server._sandbox_spec(task, "/app").provider_options["network_policy"] == self.BLOCKING
+
+    @pytest.mark.parametrize(
+        ("environment", "verifier"),
+        [
+            ('network_mode = "no-network"', 'network_mode = "allowlist"\nallowed_hosts = []'),
+            ('network_mode = "allowlist"\nallowed_hosts = []', 'network_mode = "no-network"'),
+        ],
+        ids=["no-network-agent", "empty-allowlist-agent"],
+    )
+    async def test_an_empty_allowlist_and_no_network_are_one_deny_all_policy(
+        self, tmp_path, monkeypatch, environment, verifier
+    ):
+        """A shared verifier that declares the agent's deny-all network the other way loads and runs in the agent's
+        deny-all sandbox; the result reports the mode the verifier declares."""
+        toml = TASK_TOML.replace("[environment]\n", f"[environment]\n{environment}\n").replace(
+            "[verifier]\n", f"[verifier]\n{verifier}\n"
+        )
+        server, task, sandbox, _ = self.prepared(tmp_path, monkeypatch, toml=toml, egress={})
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == task.config.verifier.network_mode
+        assert sandbox.network_policy == {"defaultAction": "deny", "egress": []}
+
+    async def test_steps_under_no_network_and_an_empty_allowlist_share_one_deny_all_sandbox(
+        self, tmp_path, monkeypatch
+    ):
+        """Separately verified steps whose agents declare an empty allowlist and `no-network` ask for one deny-all
+        policy, so the task loads and the one agent sandbox every step works in is created deny-all."""
+        task_dir = tmp_path / "datasets" / "ds" / "hello"
+        for name in ("plan", "build"):
+            (task_dir / "steps" / name / "tests").mkdir(parents=True)
+            (task_dir / "steps" / name / "instruction.md").write_text(f"Do the {name} step.")
+            (task_dir / "steps" / name / "tests" / "test.sh").write_text(
+                "#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n"
+            )
+        toml = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n') + (
+            '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+            '\n[[steps]]\nname = "plan"\n[steps.agent]\nnetwork_mode = "allowlist"\nallowed_hosts = []\n'
+            '\n[[steps]]\nname = "build"\n[steps.agent]\nnetwork_mode = "no-network"\n'
+        )
+        server, task, _, _ = self.prepared(tmp_path, monkeypatch, toml=toml, egress={})
+        assert [task.config.agent_network(step).mode for step in task.config.steps] == ["allowlist", "no-network"]
+        assert await server._agent_network_policy(task) == {"defaultAction": "deny", "egress": []}
 
     async def test_a_compose_group_is_refused_at_seed(self, tmp_path, monkeypatch):
         server, task, _, created = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)

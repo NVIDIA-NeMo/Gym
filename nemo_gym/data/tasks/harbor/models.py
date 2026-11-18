@@ -96,35 +96,58 @@ class HarborMCPServer(HarborSettings):
 NetworkMode = Literal["public", "no-network", "allowlist"]
 
 
+def _rule_spelling(host: str) -> str:
+    """``host`` as its egress rule names it, where respelling it cannot change what the Environment Server's policy
+    builder makes of it: an IP literal in its canonical spelling, an ASCII host name lower-cased and without its one
+    trailing dot. Any other entry is kept as written, so the builder refuses the spelling the task used, not a repaired
+    one (``example.com..``, ``2001:db8::1.``, a Kelvin sign that lower-cases to an ASCII ``k``)."""
+    target = str(host).strip()
+    try:
+        return str(ipaddress.ip_address(target))
+    except ValueError:
+        pass
+    if not target.isascii():
+        return target
+    name = target.removesuffix(".")
+    if name == target:
+        return target.lower()
+    # One trailing dot goes only from what the builder reads as the same host name without it: not from a second
+    # dot, an empty name, whitespace the builder would strip, or an IP literal, which takes no trailing dot.
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        if name and not name.endswith(".") and name == name.strip():
+            return name.lower()
+    return target
+
+
 @dataclass(frozen=True, eq=False)
 class PhaseNetwork:
     """The network one phase runs under once Harbor's settings are resolved: a ``network_mode`` and, for an
     ``allowlist``, the ``allowed_hosts`` it opens, in the order written, without repeats, each in the form its egress
-    rule takes: an IP literal in its canonical spelling, anything else lower-cased and without a trailing dot. Two
-    networks are equal when they open the same hosts, in whatever order or spelling. An entry no rule can express is
-    kept, for the policy builder to refuse."""
+    rule takes where respelling cannot change what the policy builder accepts (:func:`_rule_spelling`); any other entry
+    is kept as written, for the builder to refuse. Two networks are equal when they make the same egress policy: the
+    same hosts in those forms, in whatever order, and an allowlist without hosts is ``no-network``'s deny-all policy.
+    ``mode`` stays the declared one, for reporting."""
 
     mode: NetworkMode
     allowed_hosts: tuple[str, ...] = ()
 
     @classmethod
     def of(cls, mode: NetworkMode, allowed_hosts: list[str] | None) -> "PhaseNetwork":
-        def normalize(host: str) -> str:
-            target = str(host).strip()
-            try:
-                return str(ipaddress.ip_address(target))
-            except ValueError:
-                return target.rstrip(".").lower()
+        return cls(mode, tuple(dict.fromkeys(_rule_spelling(host) for host in allowed_hosts or ())))
 
-        return cls(mode, tuple(dict.fromkeys(normalize(host) for host in allowed_hosts or ())))
+    def _comparison_key(self) -> tuple[str, frozenset[str]]:
+        mode = "no-network" if self.mode == "allowlist" and not self.allowed_hosts else self.mode
+        return mode, frozenset(self.allowed_hosts)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, PhaseNetwork):
             return NotImplemented
-        return (self.mode, frozenset(self.allowed_hosts)) == (other.mode, frozenset(other.allowed_hosts))
+        return self._comparison_key() == other._comparison_key()
 
     def __hash__(self) -> int:
-        return hash((self.mode, frozenset(self.allowed_hosts)))
+        return hash(self._comparison_key())
 
     @property
     def restricted(self) -> bool:

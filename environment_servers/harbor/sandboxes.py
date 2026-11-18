@@ -212,7 +212,8 @@ class HarborSandboxMixin:
         ``network_policy`` is the provider's egress policy for this sandbox (the agent's network, see
         ``_agent_network_policy``, or the separate verifier's, see :meth:`_verifier_network_policy`); it replaces the
         deployment's ``sandbox_provider_options.network_policy`` for that sandbox (never widening a deny-by-default
-        one, which both refuse), as Harbor's explicit phase policy replaces the environment baseline.
+        one, which both refuse, nor, for the agent, opening hosts past its deny rules), as Harbor's explicit phase
+        policy replaces the environment baseline.
         """
         global_config_dict = get_global_config_dict()
         if environment is None:
@@ -313,6 +314,31 @@ class HarborSandboxMixin:
                 f"allowed_hosts {hosts} would widen this deployment's deny-by-default "
                 f"sandbox_provider_options.network_policy for {sandbox}; run the task on an allow-by-default "
                 "deployment"
+            )
+
+    def _refuse_dropping_the_deployments_denials(self, policy: Mapping[str, Any]) -> None:
+        """Refuse an agent ``policy`` that allows any host when the deployment's network policy has deny rules.
+
+        The agent's policy replaces the deployment's ``sandbox_provider_options.network_policy`` for its sandbox, deny
+        rules included, so an allow rule (the task's ``allowed_hosts`` or a host the harness needs) for a destination
+        the operator denied would open it. Refused rather than matched rule by rule (wildcards, an address against a
+        host name) or merged (the egress sidecar's precedence between conflicting rules is not verified); a deny-all
+        policy keeps every denial and passes. A rule that is not a plain ``allow`` counts as a denial. Call it after
+        :meth:`_refuse_widening_the_deployment`, which refuses a deny-by-default deployment. Raises ``ValueError``.
+        """
+        deployment = self.config.sandbox_provider_options.get("network_policy")
+        rules = deployment.get("egress") if isinstance(deployment, Mapping) else None
+        denied = [
+            rule.get("target") if isinstance(rule, Mapping) else rule
+            for rule in rules or []
+            if not (isinstance(rule, Mapping) and rule.get("action") == "allow")
+        ]
+        if denied and policy["egress"]:
+            hosts = ", ".join(rule["target"] for rule in policy["egress"])
+            raise ValueError(
+                f"the agent's allow rules ({hosts}) would replace this deployment's "
+                f"sandbox_provider_options.network_policy and drop its deny rules {denied}; refused rather than "
+                "matched against them: run the task on a deployment whose network_policy has no deny rules"
             )
 
     def _provider_options_within(self, resources: Mapping[str, Any], task: HarborTask, role: str) -> dict[str, Any]:
