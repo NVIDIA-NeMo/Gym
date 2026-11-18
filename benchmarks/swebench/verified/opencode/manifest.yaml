@@ -50,3 +50,17 @@ model_server: policy_model
 canonical_split: test
 prompt_source: prepared
 lifecycle: active
+setups:
+- name: swebench/verified/hermes
+  config_path: ../hermes.yaml
+  description: SWE-bench Verified test-split software engineering tasks using prepared repair prompts, the Hermes harness in the benchmark's task sandbox, and binary patch-resolution scoring.
+  requirements:
+    gpu: false
+    network: allowlist
+  agent_server: hermes_agent
+  datasets:
+  - name: swebench_verified
+    type: benchmark
+    jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
+    prepare_script: benchmarks/swebench/verified/prepare.py
+    num_repeats: 1

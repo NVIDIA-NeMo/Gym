@@ -48,3 +48,9 @@ rollout_driver: benchmarks.agentic_if_realworld.rollout_driver:run_rollout_colle
 canonical_split: development_exposed
 prompt_source: prepared
 lifecycle: active
+setups:
+- name: agentic_if_realworld/native
+  config_path: native.yaml
+  integration_profile: custom-gym-verifier
+  description: Frozen evaluation-only real-world Agentic IF single-turn text challenge with strict-v2.2 judging, run as a standard Gym rollout instead of through the adaptive evaluation driver.
+  rollout_driver: null
