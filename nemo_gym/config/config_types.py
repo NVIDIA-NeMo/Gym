@@ -540,6 +540,8 @@ class Domain(str, Enum):
     - `translation`           — machine translation quality (e.g. WMT).
     - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
     - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
+    - `decision`              — typed decisions over a fixed set of options, scored on the chosen option or the
+      probability given to each option (e.g. Decision Index).
     - `other`                 — catch-all when no specific domain above applies.
     """
 
@@ -554,6 +556,7 @@ class Domain(str, Enum):
     TRANSLATION = "translation"
     E2E = "e2e"
     RLHF = "rlhf"
+    DECISION = "decision"
     OTHER = "other"
 
 
