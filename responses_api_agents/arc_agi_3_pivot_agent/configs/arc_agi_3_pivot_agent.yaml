@@ -1,0 +1,27 @@
+arc_agi_3_pivot_agent:
+  responses_api_agents:
+    arc_agi_3_pivot_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: arc_agi_3_pivot_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 20
+      max_tokens: 12288
+      max_calls: 64
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/arc_agi_3_pivot/data/example.jsonl
+
+arc_agi_3_pivot_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: arc_agi_3_pivot_agent
