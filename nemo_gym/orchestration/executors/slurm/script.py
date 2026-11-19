@@ -89,6 +89,7 @@ from nemo_gym.orchestration.exports import effective_exports, export_install_ext
 from nemo_gym.orchestration.jobs import (
     ARTIFACTS_DIRNAME,
     EVAL_SUCCEEDED_FILENAME,
+    LOGS_DIRNAME,
     ROLLOUTS_FILENAME,
     LogSource,
 )
