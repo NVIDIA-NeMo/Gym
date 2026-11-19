@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import app as code_gen_app
 import pytest
+import task_data
 from app import (
     CompCodingResourcesServer,
     CompCodingResourcesServerConfig,
@@ -356,6 +357,7 @@ class TestSandboxVerify:
         "resource_limits, timeout, memory_limit_mb, deadline_s",
         [
             (None, 10, None, None),
+            ({}, 10, None, None),
             ({"time_limit_s": 1.5}, 1.5, None, 1.5 + (1.5 + 1) * 2 + 5),
             ({"memory_limit_mb": 256}, 10, 256, None),
             ({"time_limit_s": 1.5, "memory_limit_mb": 256}, 1.5, 256, 1.5 + (1.5 + 1) * 2 + 5),
@@ -372,6 +374,7 @@ class TestSandboxVerify:
 
         monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
         request = _verify_request("n=int(input())\nprint(n*n)")
+        request.verifier_metadata["difficulty"] = "hard"
         if resource_limits is not None:
             request.verifier_metadata["unit_tests"]["type"] = "unit-tests"
             request.verifier_metadata["resource_limits"] = resource_limits
@@ -381,6 +384,47 @@ class TestSandboxVerify:
         assert args[2] == timeout
         assert (kwargs["memory_limit_mb"], kwargs["deadline_s"]) == (memory_limit_mb, deadline_s)
         assert res.limits.model_dump() == {"time_limit_s": timeout, "memory_limit_mb": memory_limit_mb}
+        assert res.difficulty == "hard"
+
+    async def test_null_task_limits_keep_the_server_defaults(self, monkeypatch) -> None:
+        async def _passing(*args, **kwargs):
+            return [True, True], None
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        request = _verify_request("n=int(input())\nprint(n*n)")
+        request.verifier_metadata["resource_limits"] = None
+        res = await self._sandbox_server().verify(request)
+
+        assert res.limits.model_dump() == {"time_limit_s": 10, "memory_limit_mb": None}
+
+    @pytest.mark.parametrize(
+        "resource_limits",
+        [
+            {"time_limit_secs": 0.5},
+            {"time_limit_s": 0},
+            {"time_limit_s": -1.0},
+            {"time_limit_s": float("inf")},
+            {"time_limit_s": float("nan")},
+            {"memory_limit_mb": 0},
+            {"memory_limit_mb": -256},
+        ],
+    )
+    async def test_invalid_task_limits_are_rejected_before_grading(self, monkeypatch, resource_limits) -> None:
+        calls = []
+
+        async def _passing(*args, **kwargs):
+            calls.append(kwargs)
+            return [True, True], None
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        request = _verify_request("n=int(input())\nprint(n*n)")
+        request.verifier_metadata["resource_limits"] = resource_limits
+        with pytest.raises(ValidationError):
+            await self._sandbox_server().verify(request)
+        assert calls == []
+
+    def test_grading_and_task_data_validation_share_one_limits_model(self) -> None:
+        assert code_gen_app.ResourceLimits is task_data.ResourceLimits
 
     @pytest.mark.parametrize(
         "resource_limits, time_limit_s, memory_limit_mb",
