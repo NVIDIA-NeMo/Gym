@@ -29,7 +29,7 @@ process.stdin.on("end", async () => {
   const mime = name === "text.mp4" ? "text/plain" : "image/jpeg";
   const image = (byte) => ({ mime, url: "data:" + mime + ";base64," + Buffer.from([byte]).toString("base64") });
   const padding = name === "big.mp4" ? "x".repeat(4096) : "";
-  process.stdout.write(JSON.stringify({ output: "Video: " + name + "\\nThis is a video:\\nFrame 1 sampled at 0.25 seconds:\\nFrame 2 sampled at 0.75 seconds:" + padding,
+  process.stdout.write(JSON.stringify({ output: "Sampled 2 frames of " + name + " from 0.00 s to 1.00 s, one every 0.5 s, at 448×252 (288 visual tokens).\\nThe 2 frames are attached after the tool results, in this order:\\nFrame 1: 0.25 s\\nFrame 2: 0.75 s" + padding,
     attachments: [image(1), image(2)], metadata: { tool: request.tool } }));
 });
 `);
@@ -56,6 +56,7 @@ const watch = plugin.tool.watch_video;
 assert.match(watch.description, /actual H\/W round down to multiples of 28, with each dimension at least 28/);
 assert.match(watch.description, /num_frames is the total sampled frame count, not FPS: at least 1, divisible by 1\./);
 assert.match(watch.description, /Per call, num_frames\*H\*W <= 67108864 pixels \(video_max_pixels\)/);
+assert.match(watch.description, /images from several tool calls in one response follow in call order\.$/);
 assert.deepEqual(Object.keys(watch.args), ["video_path", "start", "end", "num_frames", "resize_long_edge"]);
 assert.deepEqual(watch.args.num_frames, { type: "integer", exclusiveMinimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 assert.deepEqual(plugin.tool.view_image.args, { path: { type: "string", minLength: 1 } });
@@ -63,7 +64,7 @@ assert.deepEqual(plugin.tool.view_image.args, { path: { type: "string", minLengt
 // Frames: the text as the program wrote it, the images as attachments in order.
 const frames = await call(plugin, "watch_video", video("videos/a.mp4"));
 assert.equal(frames.title, "watch_video");
-assert.match(frames.output, /^Video: videos\/a\.mp4\nThis is a video:\nFrame 1 sampled at 0\.25 seconds:/);
+assert.match(frames.output, /^Sampled 2 frames of videos\/a\.mp4 from 0\.00 s to 1\.00 s, .*\nThe 2 frames are attached after the tool results, in this order:\nFrame 1: 0\.25 s\n/);
 assert.deepEqual(frames.attachments, [
   { type: "file", mime: "image/jpeg", url: "data:image/jpeg;base64,AQ==", filename: "videos/a.mp4" },
   { type: "file", mime: "image/jpeg", url: "data:image/jpeg;base64,Ag==", filename: "videos/a.mp4" },

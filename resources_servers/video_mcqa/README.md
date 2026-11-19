@@ -153,10 +153,21 @@ the seed writes from the server's `video_tools` settings.
   rounded down to the model's grid cell, `patch_size / downsample_ratio` pixels
   (`video_tools.profile`; the default is 14 / 0.5 = 28). FFmpeg
   resizes by pixel area, and each frame is a JPEG of quality 95 without chroma
-  subsampling. The text gives the window, the frame count, size and visual
-  tokens, then `This is a video:` and one `Frame i sampled at t seconds:` line
-  per frame, in the order of the images. These are the frame rules of Nemotron
-  4's agentic video training.
+  subsampling. These are the frame rules of Nemotron 4's agentic video
+  training. The text says what was sampled, that the frames are attached after
+  the tool results, and each frame's sampling time in the order of the images:
+
+  ```text
+  Sampled 42 frames of videos/a.mp4 from 120.00 s to 240.00 s, one every 2.86 s, at 616×336 (11088 visual tokens).
+  The 42 frames are attached after the tool results, in this order:
+  Frame 1: 121.43 s
+  Frame 2: 124.29 s
+  ...
+  ```
+
+  When the video holds frames, so that some samples show the same source frame,
+  the first line also gives the number of distinct frames: `42 frames (30
+  distinct)`.
 - `view_image(path)` returns an image file unchanged.
 
 Both tools read regular files under the media root and under
@@ -175,9 +186,12 @@ would pass it on, each result shows a notice in place of its images, the same in
 every request.
 
 OpenCode keeps a tool result's text in the tool message and, for an
-OpenAI-compatible provider, moves its images into the user message after it
-(`Attached media from tool result:`). The frame labels and the images are
-therefore not interleaved; the model matches them by order.
+OpenAI-compatible provider, moves the images of all the tool results of one
+response, in call order, into one user message after them (`Attached media
+from tool result:`). The frame times and the images are therefore not
+interleaved: watch_video's text lists the times in the order of the images,
+and its description says that the images of several calls follow in call
+order.
 
 ### Seeding
 

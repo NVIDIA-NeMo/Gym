@@ -10,7 +10,8 @@ The frame rules:
   video holds can repeat;
 - frames keep their aspect ratio: scaled to the requested long edge, then each side is rounded down to a multiple
   of the model's grid cell, ``patch_size / downsample_ratio`` pixels (by default 14 / 0.5 = 28);
-- frames are labelled ``Frame i sampled at t seconds:`` after ``This is a video:``.
+- the text says what was sampled and that the frames are attached after the tool results, then gives each frame's
+  sampling time, ``Frame i: t s``, in the order of the images.
 
 Only the standard library and Pydantic are imported here, so the resources server validates the same configuration
 that the tools read in the sandbox.
@@ -367,56 +368,49 @@ def resolve_frames(requested: VideoSpec, *, source: SourceVideoMetadata, profile
 
 
 def frame_labels(timestamps: tuple[float, ...]) -> str:
-    """The video prompt without its image placeholders: one line per frame, after "This is a video:"."""
+    """One line per frame, in the order of the images: the frame's sampling time."""
     if not timestamps or any(not math.isfinite(value) or value < 0 for value in timestamps):
         raise ValueError("frame labels require finite, non-negative seconds")
     if any(left > right for left, right in zip(timestamps, timestamps[1:])):
         raise ValueError("frame label times must be ordered")
-    return "This is a video:\n" + "\n".join(
-        f"Frame {index + 1} sampled at {timestamp:.2f} seconds:" for index, timestamp in enumerate(timestamps)
-    )
+    return "\n".join(f"Frame {index + 1}: {timestamp:.2f} s" for index, timestamp in enumerate(timestamps))
 
 
 def video_source_label(spec: VideoSpec) -> str:
-    """The video's path and window, without characters a tokenizer could read as special tokens."""
+    """The video's path as the text names it, without characters a tokenizer could read as special tokens."""
     if any(character in spec.video_path for character in "\r\n\x00"):
         raise ValueError("model-visible media paths must not contain line breaks or NUL")
     visible_path = PurePosixPath(spec.video_path).as_posix()
     if "<" in visible_path or ">" in visible_path or "\\" in visible_path:
         visible_path = json.dumps(visible_path, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
-    return f"Video: {visible_path}\nSource range: [{spec.start:.2f}s, {spec.end:.2f}s)\n"
+    return visible_path
 
 
 def sampling_receipt(resolved: ResolvedFrames) -> str:
-    """What the frames show: counts, repeats, size, tokens and spacing, from the resolved call only."""
-    count = resolved.requested.num_frames
+    """What was sampled, from the resolved call only: the frame count (and how many differ when the video holds
+    frames), the video, the window, the spacing of the sampling times, the frame size and the visual tokens."""
+    requested = resolved.requested
+    count = requested.num_frames
     unique = len(set(resolved.frame_indices))
-    repeated_percent = 100.0 * (count - unique) / count
-    sampling = resolved.sampling_timestamps_seconds
-    sampling_gaps = tuple(right - left for left, right in zip(sampling, sampling[1:]))
-    source_gaps = tuple(
-        right - left
-        for left, right in zip(resolved.timestamps_seconds, resolved.timestamps_seconds[1:])
-        if right > left
-    )
-    if not sampling_gaps:
-        interval = "n/a (one sample)"
-    elif math.isclose(min(sampling_gaps), max(sampling_gaps), rel_tol=1e-9, abs_tol=1e-9):
-        interval = f"{max(sampling_gaps):.6g} s"
-    else:
-        interval = f"{min(sampling_gaps):.6g}–{max(sampling_gaps):.6g} s"
-    source_gap = f"{max(source_gaps):.6g} s" if source_gaps else "n/a (one unique source frame)"
+    frames = f"{count} frames" if count > 1 else "1 frame"
+    if unique < count:
+        frames += f" ({unique} distinct)"
+    # The sampling times are the bin centers, so consecutive ones are one bin apart.
+    spacing = f", one every {(requested.end - requested.start) / count:.3g} s" if count > 1 else ""
     return (
-        video_source_label(resolved.requested)
-        + "Temporal labels are sampling times; original source PTS is preserved separately.\n"
-        + f"Frames: {count} total, {unique} unique source frames ({repeated_percent:.1f}% repeated)\n"
-        + f"Resolution: {resolved.width}×{resolved.height}\n"
-        + f"Visual tokens: {resolved.vision_tokens}\n"
-        + f"Sampling interval: {interval}\n"
-        + f"Maximum gap between distinct source-frame PTS: {source_gap}"
+        f"Sampled {frames} of {video_source_label(requested)} from {requested.start:.2f} s to {requested.end:.2f} s"
+        f"{spacing}, at {resolved.width}×{resolved.height} ({resolved.vision_tokens} visual tokens)."
     )
 
 
 def watch_video_text(resolved: ResolvedFrames) -> str:
-    """The tool result's text: the receipt, then one label per frame, in the order of the returned images."""
-    return sampling_receipt(resolved) + "\n" + frame_labels(resolved.sampling_timestamps_seconds)
+    """The tool result's text. For an OpenAI-compatible provider, OpenCode sends a tool result's images after the tool
+    results of the response (video_tools.mjs), so the text says what was sampled, that the frames follow the tool
+    results, and then each frame's sampling time in the order of the images."""
+    count = resolved.requested.num_frames
+    where = (
+        f"The {count} frames are attached after the tool results, in this order:"
+        if count > 1
+        else "The frame is attached after the tool results:"
+    )
+    return f"{sampling_receipt(resolved)}\n{where}\n{frame_labels(resolved.sampling_timestamps_seconds)}"
