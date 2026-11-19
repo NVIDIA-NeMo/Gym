@@ -343,7 +343,7 @@ class TestVerify:
     async def test_a_graded_row_records_its_judge_grading_and_is_not_graded_again(
         self, server: GdpPdfResourcesServer
     ) -> None:
-        from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+        from nemo_gym.eval.recovery.grading import reverification_cause, saved_row_evidence
         from nemo_gym.server_runtime import verifier_observability
         from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 
@@ -823,6 +823,30 @@ class TestPrepare:
         assert [r["verifier_metadata"]["task_id"] for r in written] == ["t1", "t2"]
         assert written[0]["verifier_metadata"]["document_manifest"] == "documents/t1/manifest.json"
         assert written[0]["verifier_metadata"]["source_pdf"] == "media/pdfs/a.pdf"
+
+    def test_opencode_puts_document_path_in_user_message(self, monkeypatch, tmp_path: Path) -> None:
+        from benchmarks.gdp_pdf import prepare_opencode
+
+        rendered = []
+        self._patch_hf(monkeypatch, [self._source_row("t1", "a.pdf")], [], rendered)
+        monkeypatch.setattr(prepare_opencode, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(prepare_opencode, "MEDIA_DIR", tmp_path / "media")
+        monkeypatch.setattr(prepare_opencode, "DOCUMENTS_DIR", tmp_path / "documents")
+        row = json.loads(prepare_opencode.prepare().read_text())
+        assert row["responses_create_params"]["input"] == [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"The document is available at `/workspace/document.pdf`.\n\n{PROMPT}",
+                    }
+                ],
+            }
+        ]
+        assert row["verifier_metadata"]["prompt"] == PROMPT
+        assert row["verifier_metadata"]["criteria"][0]["criterion"] == "Says the thing."
+        assert rendered == []
 
     def test_limit_truncates_the_task_list(self, monkeypatch, tmp_path: Path) -> None:
         downloaded: list = []

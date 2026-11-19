@@ -65,7 +65,7 @@ from nemo_gym.environment.scaffold import ScaffoldError
 from nemo_gym.server_runtime.supervisor.server_supervisor import (
     _FORCE_KILL_REAP_TIMEOUT_SEC,
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
-    RunHelper,
+    ServerSupervisor,
     _resolve_server_dir,
 )
 
@@ -364,7 +364,7 @@ class TestCLI:
 
         assert not server_path.exists()
 
-    def test_run_helper_prefers_cwd_server_over_install(self, tmp_path: Path) -> None:
+    def test_server_supervisor_prefers_cwd_server_over_install(self, tmp_path: Path) -> None:
         """ng_run should use a local CWD server dir instead of the installed one."""
         # Create a fake local server dir in tmp_path (simulates user's own resources_servers/)
         local_server = tmp_path / "resources_servers" / "my_server"
@@ -378,7 +378,7 @@ class TestCLI:
 
         assert dir_path == local_server
 
-    def test_run_helper_falls_back_to_install_when_not_in_cwd(self, tmp_path: Path) -> None:
+    def test_server_supervisor_falls_back_to_install_when_not_in_cwd(self, tmp_path: Path) -> None:
         """ng_run should fall back to PARENT_DIR when the server doesn't exist in CWD."""
         with patch.object(Path, "cwd", return_value=tmp_path):
             _cwd_path = Path.cwd() / Path("resources_servers", "arc_agi")
@@ -404,13 +404,64 @@ class TestResolveServerDir:
         rel = Path("resources_servers/arc_agi")
         assert _resolve_server_dir(rel) == PARENT_DIR / rel
 
+    def test_refuses_a_local_server_without_install_marker_that_an_installed_one_would_replace(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # NVIDIA-NeMo/Gym#4725: a local server dir without requirements.txt silently resolved to the installed one.
+        local = tmp_path / "resources_servers" / "arc_agi"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(
+            ConfigError, match=r"contains server code but no requirements.txt or pyproject.toml, so Gym would use"
+        ):
+            _resolve_server_dir(Path("resources_servers/arc_agi"))
+
+    def test_a_local_data_copy_without_server_code_still_resolves_to_the_installed_server(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Data paths such as resources_servers/<env>/data/example.jsonl resolve by name, so a local data copy
+        # beside a built-in server name is legitimate and must not be mistaken for a server.
+        data = tmp_path / "resources_servers" / "arc_agi" / "data"
+        data.mkdir(parents=True)
+        (data / "example.jsonl").write_text("{}\n", encoding="utf-8")
+        # A helper script or package marker beside the data is not a server entrypoint.
+        (data.parent / "__init__.py").write_text("", encoding="utf-8")
+        (data.parent / "prepare_data.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rel = Path("resources_servers/arc_agi")
+        assert _resolve_server_dir(rel) == PARENT_DIR / rel
+
+    def test_a_local_server_without_install_marker_and_no_installed_one_resolves_locally(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        local = tmp_path / "resources_servers" / "only_here"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_server_dir(Path("resources_servers/only_here")) == local
+
+    def test_refuses_a_search_dir_server_without_install_marker_that_an_installed_one_would_replace(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # --search-dir and NEMO_GYM_EXTRA_ROOTS roots outrank cwd and the install root, so they get the same check.
+        search_dir = tmp_path / "search"
+        local = search_dir / "resources_servers" / "arc_agi"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(search_dir))
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ConfigError, match="contains server code") as error:
+            _resolve_server_dir(Path("resources_servers/arc_agi"))
+        assert f"Server directory {local} contains" in str(error.value)
+
     def test_test_config_resolved_dir_path_uses_install_root(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         cfg = EnvironmentTestConfig(entrypoint="resources_servers/arc_agi")
         assert cfg.resolved_dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
 
 
-class TestRunHelperDryRunSpinup:
+class TestServerSupervisorDryRunSpinup:
     """A dry run that fails to build a venv must not report success.
 
     uv creates the venv before installing into it, so a failed install still leaves an interpreter
@@ -419,10 +470,10 @@ class TestRunHelperDryRunSpinup:
     much later as an ImportError from a server.
     """
 
-    def _runner(self, processes: dict) -> RunHelper:
-        runner = RunHelper()
-        runner._processes = processes
-        return runner
+    def _supervisor(self, processes: dict) -> ServerSupervisor:
+        supervisor = ServerSupervisor()
+        supervisor._processes = processes
+        return supervisor
 
     @pytest.mark.parametrize("source_checkout", [True, False], ids=["source-checkout", "wheel-install"])
     def test_server_process_uses_resolved_component_root(
@@ -479,8 +530,8 @@ class TestRunHelperDryRunSpinup:
             MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
         )
 
-        runner = RunHelper()
-        runner.start(MagicMock())
+        supervisor = ServerSupervisor()
+        supervisor.start(MagicMock())
 
         assert run.call_args.kwargs["project_root"] == (tmp_path if source_checkout else None)
         extra_env = run.call_args.kwargs["extra_env"]
@@ -493,17 +544,17 @@ class TestRunHelperDryRunSpinup:
         return process
 
     def test_returns_when_every_process_succeeds(self) -> None:
-        runner = self._runner({"a": self._process([0]), "b": self._process([None, 0])})
+        supervisor = self._supervisor({"a": self._process([0]), "b": self._process([None, 0])})
 
-        runner.wait_for_dry_run_spinup()
+        supervisor.wait_for_dry_run_spinup()
 
     def test_raises_naming_each_failed_server(self) -> None:
-        runner = self._runner(
+        supervisor = self._supervisor(
             {"good": self._process([0]), "bad": self._process([1]), "worse": self._process([None, 2])}
         )
 
         with raises(RuntimeError) as excinfo:
-            runner.wait_for_dry_run_spinup()
+            supervisor.wait_for_dry_run_spinup()
 
         message = str(excinfo.value)
         assert "`bad` exited with 1" in message
@@ -512,14 +563,14 @@ class TestRunHelperDryRunSpinup:
         assert "2 servers" in message
 
     def test_a_single_failure_reads_as_one_server(self) -> None:
-        runner = self._runner({"only": self._process([3])})
+        supervisor = self._supervisor({"only": self._process([3])})
 
         with raises(RuntimeError, match="1 server"):
-            runner.wait_for_dry_run_spinup()
+            supervisor.wait_for_dry_run_spinup()
 
 
-class TestRunHelperLaunchEnvironment:
-    """RunHelper.start must pass config dict and path via process environment rather than command line."""
+class TestServerSupervisorLaunchEnvironment:
+    """ServerSupervisor.start must pass config dict and path via process environment rather than command line."""
 
     def test_secrets_passed_in_env_not_command_line(self, monkeypatch: MonkeyPatch) -> None:
         from nemo_gym.config.global_config import (
@@ -582,9 +633,9 @@ class TestRunHelperLaunchEnvironment:
             return mock_proc
 
         monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "run_command", mock_run_command)
-        runner = RunHelper()
-        runner.wait_for_dry_run_spinup = MagicMock()
-        runner.start(MagicMock())
+        supervisor = ServerSupervisor()
+        supervisor.wait_for_dry_run_spinup = MagicMock()
+        supervisor.start(MagicMock())
 
         assert len(captured_calls) == 1
         cmd, extra_env = captured_calls[0]
@@ -597,8 +648,8 @@ class TestRunHelperLaunchEnvironment:
         assert extra_env[NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME] == "test_server"
 
 
-class TestRunHelperH2PingSidecar:
-    """RunHelper starts the sidecar before the servers, stops it after them, and skips it in a dry run."""
+class TestServerSupervisorH2PingSidecar:
+    """ServerSupervisor starts the sidecar before the servers, stops it after them, and skips it in a dry run."""
 
     def _patch_launch(self, monkeypatch: MonkeyPatch, cfg, events: list) -> None:
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
@@ -668,24 +719,24 @@ class TestRunHelperH2PingSidecar:
             return manager
 
         monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "start_h2_ping_sidecar", fake_start)
-        runner = RunHelper()
-        runner.wait_for_server_readiness = MagicMock()
-        runner.start(MagicMock())
+        supervisor = ServerSupervisor()
+        supervisor.wait_for_server_readiness = MagicMock()
+        supervisor.start(MagicMock())
 
         assert events[0] == "sidecar started"
         _, extra_env = events[1]
         # The servers learn their URLs from the serialized config, so it must carry the rewritten one.
         assert "http://127.0.0.1:1250/v1" in extra_env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME]
 
-        runner.poll = RunHelper.poll.__get__(runner)
-        runner._head_server_thread = MagicMock(is_alive=lambda: True)
-        runner.poll()
+        supervisor.poll = ServerSupervisor.poll.__get__(supervisor)
+        supervisor._head_server_thread = MagicMock(is_alive=lambda: True)
+        supervisor.poll()
         manager.check.assert_called_once()
 
-        runner.shutdown()
+        supervisor.shutdown()
         assert events[-1] == "sidecar stopped"
         manager.stop.assert_called_once()
-        assert runner._h2_ping_sidecar is None
+        assert supervisor._h2_ping_sidecar is None
 
     def test_failed_sidecar_start_aborts_before_any_server(self, monkeypatch: MonkeyPatch) -> None:
         events: list = []
@@ -695,10 +746,10 @@ class TestRunHelperH2PingSidecar:
             "start_h2_ping_sidecar",
             MagicMock(side_effect=RuntimeError("no port")),
         )
-        runner = RunHelper()
+        supervisor = ServerSupervisor()
 
         with raises(RuntimeError, match="no port"):
-            runner.start(MagicMock())
+            supervisor.start(MagicMock())
 
         assert events == []
 
@@ -707,14 +758,14 @@ class TestRunHelperH2PingSidecar:
         self._patch_launch(monkeypatch, self._config(dry_run=True), events)
         start = MagicMock()
         monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "start_h2_ping_sidecar", start)
-        runner = RunHelper()
-        runner.wait_for_dry_run_spinup = MagicMock()
-        runner.start(MagicMock())
+        supervisor = ServerSupervisor()
+        supervisor.wait_for_dry_run_spinup = MagicMock()
+        supervisor.start(MagicMock())
         start.assert_not_called()
 
 
-class TestRunHelperRayStartup:
-    """RunHelper.start starts or joins Ray only when a configured server may use it."""
+class TestServerSupervisorRayStartup:
+    """ServerSupervisor.start starts or joins Ray only when a configured server may use it."""
 
     def _start(
         self, monkeypatch: MonkeyPatch, tmp_path: Path, *, ray_enabled: bool | None, ray_installed: bool
@@ -768,9 +819,9 @@ class TestRunHelperRayStartup:
         monkeypatch.setattr(nemo_gym.cli.env, "run_command", run_command)
         monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "run_command", run_command)
 
-        runner = RunHelper()
-        runner.wait_for_dry_run_spinup = MagicMock()
-        runner.start(MagicMock())
+        supervisor = ServerSupervisor()
+        supervisor.wait_for_dry_run_spinup = MagicMock()
+        supervisor.start(MagicMock())
         return initialize_ray, run_command
 
     @pytest.mark.parametrize(
@@ -808,21 +859,21 @@ class TestRunHelperRayStartup:
             self._start(monkeypatch, tmp_path, ray_enabled=True, ray_installed=False)
 
 
-class TestRunHelperServerReadiness:
+class TestServerSupervisorServerReadiness:
     def test_marks_head_ready_only_after_servers_and_model_endpoints(self) -> None:
-        runner = RunHelper()
-        runner._head_server_instance = MagicMock()
+        supervisor = ServerSupervisor()
+        supervisor._head_server_instance = MagicMock()
         events = []
-        runner.wait_for_spinup = MagicMock(side_effect=lambda: events.append("servers"))
-        runner._start_memory_profiler = MagicMock(side_effect=lambda: events.append("memory"))
-        runner.wait_for_model_endpoints = MagicMock(side_effect=lambda _config: events.append("models"))
-        runner._head_server_instance.mark_ready.side_effect = lambda: events.append("head")
+        supervisor.wait_for_spinup = MagicMock(side_effect=lambda: events.append("servers"))
+        supervisor._start_memory_profiler = MagicMock(side_effect=lambda: events.append("memory"))
+        supervisor.wait_for_model_endpoints = MagicMock(side_effect=lambda _config: events.append("models"))
+        supervisor._head_server_instance.mark_ready.side_effect = lambda: events.append("head")
         config = OmegaConf.create({})
 
-        runner.wait_for_server_readiness(config)
+        supervisor.wait_for_server_readiness(config)
 
         assert events == ["servers", "memory", "models", "head"]
-        runner.wait_for_model_endpoints.assert_called_once_with(config)
+        supervisor.wait_for_model_endpoints.assert_called_once_with(config)
 
     def test_memory_profiler_uses_spawned_server_metadata(self, monkeypatch: MonkeyPatch) -> None:
         from nemo_gym.telemetry.config import MemoryProfilingConfig
@@ -835,14 +886,14 @@ class TestRunHelperServerReadiness:
             "get_telemetry",
             MagicMock(return_value=SimpleNamespace(is_exporting=True)),
         )
-        runner = RunHelper()
-        runner._memory_profiling_config = MemoryProfilingConfig(enabled=True, interval_seconds=2.5)
-        runner._telemetry_metrics_enabled = True
-        runner._server_instance_display_configs = [
+        supervisor = ServerSupervisor()
+        supervisor._memory_profiling_config = MemoryProfilingConfig(enabled=True, interval_seconds=2.5)
+        supervisor._telemetry_metrics_enabled = True
+        supervisor._server_instance_display_configs = [
             SimpleNamespace(process_name="weather", server_type="resources_servers", pid=123)
         ]
 
-        runner._start_memory_profiler()
+        supervisor._start_memory_profiler()
 
         targets = profiler_type.call_args.args[0]
         assert [(target.name, target.server_type, target.pid) for target in targets] == [
@@ -858,35 +909,35 @@ class TestRunHelperServerReadiness:
         from nemo_gym.config.config_types import BaseServerConfig
         from nemo_gym.server_runtime.registry_server import HeadServer
 
-        runner = RunHelper()
-        runner._head_server_instance = HeadServer(config=BaseServerConfig(host="", port=0))
-        runner.wait_for_spinup = MagicMock()
-        runner.wait_for_model_endpoints = MagicMock()
-        getattr(runner, failing_method).side_effect = RuntimeError("readiness failed")
+        supervisor = ServerSupervisor()
+        supervisor._head_server_instance = HeadServer(config=BaseServerConfig(host="", port=0))
+        supervisor.wait_for_spinup = MagicMock()
+        supervisor.wait_for_model_endpoints = MagicMock()
+        getattr(supervisor, failing_method).side_effect = RuntimeError("readiness failed")
 
-        with TestClient(runner._head_server_instance.setup_webserver()) as client:
+        with TestClient(supervisor._head_server_instance.setup_webserver()) as client:
             with raises(RuntimeError, match="readiness failed"):
-                runner.wait_for_server_readiness(OmegaConf.create({}))
+                supervisor.wait_for_server_readiness(OmegaConf.create({}))
 
             response = client.get("/health")
             assert response.status_code == 503
             assert response.json() == {"status": "starting"}
 
     def test_server_spinup_timeout_names_waiting_servers(self, monkeypatch: MonkeyPatch) -> None:
-        runner = RunHelper()
-        runner._server_spinup_timeout_seconds = 1.0
-        runner._server_instance_display_configs = [SimpleNamespace(process_name="broken")]
-        runner.poll = MagicMock()
-        runner.check_http_server_statuses = MagicMock(return_value=[("broken", "connection_error")])
+        supervisor = ServerSupervisor()
+        supervisor._server_spinup_timeout_seconds = 1.0
+        supervisor._server_instance_display_configs = [SimpleNamespace(process_name="broken")]
+        supervisor.poll = MagicMock()
+        supervisor.check_http_server_statuses = MagicMock(return_value=[("broken", "connection_error")])
         monotonic_mock = MagicMock(side_effect=[0.0, 2.0])
         monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "monotonic", monotonic_mock)
 
         with raises(RuntimeError, match="Timed out after 1s.*broken") as excinfo:
-            runner.wait_for_spinup()
+            supervisor.wait_for_spinup()
 
         assert "`++server_spinup_timeout_seconds=<seconds>`" in str(excinfo.value)
         assert "set it to 0" in str(excinfo.value)
-        runner.poll.assert_called_once_with()
+        supervisor.poll.assert_called_once_with()
 
     def test_server_spinup_deadline_bounds_multiple_stalled_servers(self) -> None:
         """Each probe used to wait its full 5s, so the deadline was checked only after every server had been tried."""
@@ -907,21 +958,21 @@ class TestRunHelperServerReadiness:
                 "resources_servers": {name: {"host": "127.0.0.1", "port": stalled_socket.getsockname()[1]}}
             }
 
-        runner = RunHelper()
-        runner._server_spinup_timeout_seconds = 1.0
-        runner._server_client = ServerClient(
+        supervisor = ServerSupervisor()
+        supervisor._server_spinup_timeout_seconds = 1.0
+        supervisor._server_client = ServerClient(
             head_server_config=BaseServerConfig(host="127.0.0.1", port=0),
             global_config_dict=OmegaConf.create(servers),
         )
-        runner._server_instance_display_configs = [
+        supervisor._server_instance_display_configs = [
             SimpleNamespace(process_name=name, config_path=name) for name in servers
         ]
-        runner.poll = MagicMock()
+        supervisor.poll = MagicMock()
 
         started_at = nemo_gym.server_runtime.supervisor.server_supervisor.monotonic()
         try:
             with raises(RuntimeError, match="stalled_a, stalled_b"):
-                runner.wait_for_spinup()
+                supervisor.wait_for_spinup()
         finally:
             for stalled_socket in stalled_sockets:
                 stalled_socket.close()
@@ -929,12 +980,12 @@ class TestRunHelperServerReadiness:
         assert nemo_gym.server_runtime.supervisor.server_supervisor.monotonic() - started_at < 3.0
 
     def test_zero_server_spinup_timeout_waits_without_a_deadline(self, monkeypatch: MonkeyPatch) -> None:
-        runner = RunHelper()
-        runner._server_spinup_timeout_seconds = 0.0
-        runner._server_instance_display_configs = [SimpleNamespace(process_name="slow")]
-        runner.poll = MagicMock()
-        runner.display_server_instance_info = MagicMock()
-        runner.check_http_server_statuses = MagicMock(
+        supervisor = ServerSupervisor()
+        supervisor._server_spinup_timeout_seconds = 0.0
+        supervisor._server_instance_display_configs = [SimpleNamespace(process_name="slow")]
+        supervisor.poll = MagicMock()
+        supervisor.display_server_instance_info = MagicMock()
+        supervisor.check_http_server_statuses = MagicMock(
             side_effect=[[("slow", "connection_error")]] * 3 + [[("slow", "success")]]
         )
         # A clock that has run far past the default budget must not end the wait.
@@ -944,10 +995,10 @@ class TestRunHelperServerReadiness:
         sleep_mock = MagicMock()
         monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "sleep", sleep_mock)
 
-        runner.wait_for_spinup()
+        supervisor.wait_for_spinup()
 
-        assert runner.check_http_server_statuses.call_count == 4
-        for call in runner.check_http_server_statuses.call_args_list:
+        assert supervisor.check_http_server_statuses.call_count == 4
+        for call in supervisor.check_http_server_statuses.call_args_list:
             assert call.kwargs == {"deadline": None}
         assert [call.args for call in sleep_mock.call_args_list] == [(3,)] * 3
 
@@ -985,7 +1036,7 @@ class TestServerSpinupTimeoutFromConfig:
             nemo_gym.server_runtime.supervisor.server_supervisor._server_spinup_timeout_seconds(config)
 
 
-class TestRunHelperStartUnwind:
+class TestServerSupervisorStartUnwind:
     """Every caller calls start() outside its own try, so start() must release what it acquired."""
 
     @pytest.mark.parametrize(
@@ -998,24 +1049,24 @@ class TestRunHelperStartUnwind:
         ids=["server_crash", "endpoint_timeout", "interrupt"],
     )
     def test_startup_failure_shuts_down_and_reraises(self, error: BaseException) -> None:
-        runner = RunHelper()
-        runner._start = MagicMock(side_effect=error)
-        runner.shutdown = MagicMock()
+        supervisor = ServerSupervisor()
+        supervisor._start = MagicMock(side_effect=error)
+        supervisor.shutdown = MagicMock()
 
         with raises(type(error)) as excinfo:
-            runner.start(None)
+            supervisor.start(None)
 
         assert excinfo.value is error
-        runner.shutdown.assert_called_once_with()
+        supervisor.shutdown.assert_called_once_with()
 
     def test_successful_start_leaves_servers_running(self) -> None:
-        runner = RunHelper()
-        runner._start = MagicMock()
-        runner.shutdown = MagicMock()
+        supervisor = ServerSupervisor()
+        supervisor._start = MagicMock()
+        supervisor.shutdown = MagicMock()
 
-        runner.start(None)
+        supervisor.start(None)
 
-        runner.shutdown.assert_not_called()
+        supervisor.shutdown.assert_not_called()
 
     def test_invalid_timeout_fails_before_anything_starts(self, monkeypatch: MonkeyPatch) -> None:
         """Runs the real start() and shutdown(), so cleanup state must already exist at the earliest failure."""
@@ -1033,44 +1084,44 @@ class TestRunHelperStartUnwind:
         run_command = MagicMock()
         monkeypatch.setattr(nemo_gym.cli.env, "run_command", run_command)
 
-        runner = RunHelper()
+        supervisor = ServerSupervisor()
         with raises(ConfigError, match="server_spinup_timeout_seconds"):
-            runner.start(None)
+            supervisor.start(None)
 
         initialize_ray.assert_not_called()
         run_command.assert_not_called()
-        assert runner._processes == {}
-        assert runner._head_server is None
+        assert supervisor._processes == {}
+        assert supervisor._head_server is None
 
     def test_failure_after_spawning_stops_the_spawned_server_with_real_shutdown(self) -> None:
-        runner = RunHelper()
+        supervisor = ServerSupervisor()
         process = MagicMock()
         process.wait.return_value = 0
         error = RuntimeError("Process `broken` finished unexpectedly!")
 
         def spawn_then_fail(_config: object) -> None:
-            runner._processes["healthy"] = process
+            supervisor._processes["healthy"] = process
             raise error
 
-        runner._start = MagicMock(side_effect=spawn_then_fail)
+        supervisor._start = MagicMock(side_effect=spawn_then_fail)
 
         with raises(RuntimeError) as excinfo:
-            runner.start(None)
+            supervisor.start(None)
 
         assert excinfo.value is error
         process.send_signal.assert_called_once()
-        assert runner._processes == {}
+        assert supervisor._processes == {}
 
 
-class TestRunHelperShutdownReap:
-    """RunHelper.shutdown must reap every server subprocess on every exit path."""
+class TestServerSupervisorShutdownReap:
+    """ServerSupervisor.shutdown must reap every server subprocess on every exit path."""
 
-    def _make_runner_with_processes(self, processes: dict) -> RunHelper:
-        runner = RunHelper()
-        runner._processes = processes
-        runner._head_server = MagicMock()
-        runner._head_server_thread = MagicMock()
-        return runner
+    def _make_supervisor_with_processes(self, processes: dict) -> ServerSupervisor:
+        supervisor = ServerSupervisor()
+        supervisor._processes = processes
+        supervisor._head_server = MagicMock()
+        supervisor._head_server_thread = MagicMock()
+        return supervisor
 
     def test_kill_is_followed_by_reap_wait(self) -> None:
         good = MagicMock()
@@ -1078,8 +1129,8 @@ class TestRunHelperShutdownReap:
         bad = MagicMock()
         bad.wait.side_effect = [TimeoutExpired(cmd="bad", timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC), 0]
 
-        runner = self._make_runner_with_processes({"good_server": good, "bad_server": bad})
-        runner.shutdown()
+        supervisor = self._make_supervisor_with_processes({"good_server": good, "bad_server": bad})
+        supervisor.shutdown()
 
         good.send_signal.assert_called_once()
         bad.send_signal.assert_called_once()
@@ -1087,14 +1138,14 @@ class TestRunHelperShutdownReap:
         bad.kill.assert_called_once()
         assert good.wait.call_count == 1
         assert bad.wait.call_count == 2
-        assert runner._processes == {}
+        assert supervisor._processes == {}
 
     def test_unreaped_server_after_sigkill_is_warned(self, capsys) -> None:
         zombie = MagicMock()
         zombie.wait.side_effect = TimeoutExpired(cmd="zombie", timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
 
-        runner = self._make_runner_with_processes({"zombie_server": zombie})
-        runner.shutdown()
+        supervisor = self._make_supervisor_with_processes({"zombie_server": zombie})
+        supervisor.shutdown()
 
         zombie.kill.assert_called_once()
         assert zombie.wait.call_count == 2
@@ -1106,8 +1157,8 @@ class TestRunHelperShutdownReap:
     def test_shutdown_message_matches_actual_timeout(self, capsys) -> None:
         bad = MagicMock()
         bad.wait.side_effect = [TimeoutExpired(cmd="bad", timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC), 0]
-        runner = self._make_runner_with_processes({"bad": bad})
-        runner.shutdown()
+        supervisor = self._make_supervisor_with_processes({"bad": bad})
+        supervisor.shutdown()
 
         out: str = capsys.readouterr().out
         assert f"{_GRACEFUL_SHUTDOWN_TIMEOUT_SEC}s timeout" in out
@@ -1117,49 +1168,49 @@ class TestRunHelperShutdownReap:
         a.wait.return_value = 0
         b = MagicMock()
         b.wait.return_value = 0
-        runner = self._make_runner_with_processes({"a": a, "b": b})
-        runner.shutdown()
+        supervisor = self._make_supervisor_with_processes({"a": a, "b": b})
+        supervisor.shutdown()
 
         a.kill.assert_not_called()
         b.kill.assert_not_called()
         assert a.wait.call_count == 1
         assert b.wait.call_count == 1
-        assert runner._processes == {}
+        assert supervisor._processes == {}
 
     def test_memory_profiler_stops_before_servers(self) -> None:
         profiler = MagicMock()
         process = MagicMock()
         process.wait.return_value = 0
         process.send_signal.side_effect = lambda _signal: profiler.stop.assert_called_once_with()
-        runner = self._make_runner_with_processes({"server": process})
-        runner._memory_profiler = profiler
+        supervisor = self._make_supervisor_with_processes({"server": process})
+        supervisor._memory_profiler = profiler
 
-        runner.shutdown()
+        supervisor.shutdown()
 
         profiler.stop.assert_called_once_with()
-        assert runner._memory_profiler is None
+        assert supervisor._memory_profiler is None
 
     def test_second_shutdown_does_not_repeat_teardown(self) -> None:
         process = MagicMock()
         process.wait.return_value = 0
-        runner = self._make_runner_with_processes({"server": process})
-        head_server_thread = runner._head_server_thread
+        supervisor = self._make_supervisor_with_processes({"server": process})
+        head_server_thread = supervisor._head_server_thread
 
-        runner.shutdown()
-        runner.shutdown()
+        supervisor.shutdown()
+        supervisor.shutdown()
 
         process.send_signal.assert_called_once()
         head_server_thread.join.assert_called_once_with()
-        assert runner._head_server is None
+        assert supervisor._head_server is None
 
     def test_shutdown_before_head_server_started(self) -> None:
-        runner = RunHelper()
-        runner._processes = {}
-        runner._head_server = None
+        supervisor = ServerSupervisor()
+        supervisor._processes = {}
+        supervisor._head_server = None
 
-        runner.shutdown()
+        supervisor.shutdown()
 
-        assert runner._processes == {}
+        assert supervisor._processes == {}
 
 
 class TestExitCleanlyOnConfigError:
@@ -2152,6 +2203,38 @@ class TestListEnvironments:
             "usage_example": "gym env start --environment alpha --model-type vllm_model",
         }
 
+    @pytest.mark.parametrize(
+        ("kind", "harbor_target", "usage"),
+        [
+            (
+                "benchmark",
+                "terminal_bench_4",
+                "gym eval run --benchmark tb4 --sandbox <provider> --model-type vllm_model",
+            ),
+            (
+                "environment",
+                "terminal_bench_4",
+                "gym eval run terminal_bench_4 --agent <harness> --sandbox <provider> --model-type vllm_model",
+            ),
+            ("benchmark", None, "gym env start --benchmark tb4 --model-type vllm_model"),
+        ],
+    )
+    def test_inspect_shows_how_a_harbor_backed_entry_runs(
+        self, monkeypatch: MonkeyPatch, capsys, kind, harbor_target, usage
+    ) -> None:
+        """`gym env start` does not compose a Harbor-backed entry's environment server; `gym eval run` does."""
+        entry = replace(self._ALPHA, name="tb4", kind=kind, harbor_target=harbor_target)
+        self._mock_catalog(monkeypatch, overrides={"component_name": "tb4", "json": True}, entries=(entry,))
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {"domain": "agent", "description": "", "value": None, "datasets": []},
+        )
+
+        list_environments()
+
+        assert json.loads(capsys.readouterr().out)["usage_example"] == usage
+
     def test_inspect_unknown_environment_exits(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_catalog(monkeypatch, overrides={"component_name": "alfa"}, entries=(self._ALPHA,))
 
@@ -2249,7 +2332,7 @@ def test_missing_local_lock_does_not_fall_back_to_installed_component(tmp_path, 
 
 
 def test_managed_servers_use_sessions_and_the_configured_shutdown_budget(monkeypatch):
-    fixture = TestRunHelperH2PingSidecar()
+    fixture = TestServerSupervisorH2PingSidecar()
     config = fixture._config(dry_run=False)
     config["server_shutdown_timeout_seconds"] = "7"
     fixture._patch_launch(monkeypatch, config, [])
@@ -2257,14 +2340,14 @@ def test_managed_servers_use_sessions_and_the_configured_shutdown_budget(monkeyp
     launch = MagicMock(return_value=process)
     monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "run_command", launch)
     monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "start_h2_ping_sidecar", MagicMock())
-    runner = RunHelper()
-    runner.wait_for_server_readiness = MagicMock()
-    runner.start(MagicMock())
+    supervisor = ServerSupervisor()
+    supervisor.wait_for_server_readiness = MagicMock()
+    supervisor.start(MagicMock())
     try:
         assert launch.call_args.kwargs["start_new_session"] is True
-        assert runner._server_shutdown_timeout_seconds == 7
+        assert supervisor._server_shutdown_timeout_seconds == 7
     finally:
-        runner.shutdown()
+        supervisor.shutdown()
 
 
 def test_invalid_shutdown_budget_fails_before_spawning(monkeypatch):
@@ -2282,7 +2365,7 @@ def test_invalid_shutdown_budget_fails_before_spawning(monkeypatch):
     monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "initialize_ray", initialize)
     monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "run_command", launch)
     with raises(ConfigError, match="server_shutdown_timeout_seconds"):
-        RunHelper().start(None)
+        ServerSupervisor().start(None)
     initialize.assert_not_called()
     launch.assert_not_called()
 

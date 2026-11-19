@@ -18,6 +18,9 @@ import json
 import logging
 import os
 import socket
+import subprocess
+import sys
+import textwrap
 import time
 from contextlib import nullcontext
 from copy import deepcopy
@@ -84,6 +87,7 @@ from nemo_gym.models import (
     VLLMWorkerCaptureHandler,
     generation_cut_requester,
     install_model_call_capture,
+    make_external_capture_handler,
     start_model_execution,
 )
 from nemo_gym.models.token_capture import (
@@ -122,6 +126,8 @@ from responses_api_models.vllm_model.app import (
     _redacted_error_repr,
     _transport_images,
     _transport_log_context,
+    apply_sampling_overrides,
+    merge_chat_extra_body,
 )
 
 
@@ -903,6 +909,8 @@ class TestApp:
         endpoint_retry_after_s: float = 60.0,
         forward_session_id_as_conversation_id: bool = False,
         session_key_headers: list[str] | None = None,
+        return_token_id_information: bool = False,
+        dynamo_frontend: bool = False,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -912,7 +920,8 @@ class TestApp:
             model="dummy_model",
             entrypoint="",
             name="",
-            return_token_id_information=False,
+            return_token_id_information=return_token_id_information,
+            dynamo_frontend=dynamo_frontend,
             uses_reasoning_parser=False,
             propagate_context_overflow_errors=propagate_context_overflow_errors,
             use_completions_api=use_completions_api,
@@ -1688,6 +1697,230 @@ class TestApp:
             "generation_log_probs",
         ):
             assert field_name not in served_message, field_name
+
+    @mark.parametrize(
+        ("capture", "result", "error"),
+        [
+            (False, {"prompt_token_ids": [1, 2], "generation_token_ids": [3], "generation_log_probs": [-0.5]}, None),
+            (False, None, "without nvext.nemo_rl"),
+            (
+                False,
+                {"prompt_token_ids": [1, 2], "generation_token_ids": [3]},
+                "without: generation_log_probs",
+            ),
+            (
+                False,
+                {"prompt_token_ids": [1, 2], "generation_token_ids": [3], "generation_log_probs": [-0.5, -0.1]},
+                "mismatched generation token IDs and log probabilities",
+            ),
+            (True, None, None),
+            (
+                False,
+                {
+                    "prompt_token_ids": [1, 2],
+                    "generation_token_ids": [3],
+                    "generation_log_probs": [-0.5],
+                    # Router replay: the base64 routes envelope, as the native endpoint attaches it.
+                    "routed_experts": "cm91dGVz",
+                },
+                None,
+            ),
+        ],
+        ids=[
+            "token-information",
+            "missing-result",
+            "missing-logprobs",
+            "logprob-count-mismatch",
+            "capture",
+            "routed-experts",
+        ],
+    )
+    async def test_dynamo_frontend_dialect(self, monkeypatch: MonkeyPatch, capture, result, error) -> None:
+        # The Dynamo frontend accepts only OpenAI fields plus nvext. NeMo RL's request fields ride in one
+        # `nemo_rl:gym:` annotation and its call result in `nvext.nemo_rl`, both under the native names.
+        server = self._setup_server(
+            monkeypatch,
+            dynamo_frontend=True,
+            return_token_id_information=not capture,
+            external_staging_backend="dynamo_worker" if capture else None,
+        )
+        context = None
+        if capture:
+            context = CaptureContext(
+                capture_key="rollout-1",
+                model_call_id="c1",
+                token_sink=None,
+                lineage_store=InMemoryLineageStore(),
+                external_staging=True,
+                request_items=[{"role": "user", "content": "go"}],
+                capture_admission=CaptureAdmission(capture_key="rollout-1", model_call_id="c1", mode="text"),
+            )
+            result = {
+                "ng_commit_coords": {
+                    "capture_key": "rollout-1",
+                    "model_call_id": "c1",
+                    "prev_len": 0,
+                    "delta_len": 3,
+                    "cum_len": 3,
+                    "weight_version": 7,
+                    "digest": "0" * 64,
+                    "extras_digest": "1" * 64,
+                    "staging_key": "rollout-1/c1",
+                    "chain_hash": "2" * 64,
+                    "cumulative_hash": "3" * 64,
+                }
+            }
+        engine_response = {
+            "id": "dynamo-1",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [
+                {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "done"}},
+            ],
+        }
+        if result is not None:
+            engine_response["nvext"] = {"nemo_rl": result}
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs)
+            return SimpleNamespace(status=200, ok=True, read=AsyncMock(return_value=json.dumps(engine_response)))
+
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", fake_request)
+        server._clients = [
+            NeMoGymAsyncOpenAI(base_url="http://dynamo/v1", api_key="key", default_headers={"x-default": "kept"})
+        ]
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "session-1"}
+        request.headers = {}
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[
+                {"role": "user", "content": "hi"},
+                # A token-information turn echoed back by the agent.
+                {
+                    "role": "assistant",
+                    "content": "hello",
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                    "generation_log_probs": [-0.1],
+                },
+                {"role": "user", "content": "go"},
+            ],
+        )
+        token = set_token_sink(context) if capture else None
+        try:
+            with raises(RuntimeError, match=error) if error else nullcontext():
+                response = await server.chat_completions(request, body)
+            if capture:
+                await server._finalize_served_response(response)
+        finally:
+            if token is not None:
+                reset_token_sink(token)
+
+        outbound = sent[0]["json"]
+        assert "prompt_token_ids" not in outbound["messages"][1]
+        assert "generation_token_ids" not in outbound["messages"][1]
+        assert "generation_log_probs" not in outbound["messages"][1]
+        assert not {"ng_capture", "required_prefix_token_ids"} & outbound.keys()
+        # A capture call carries its admission; otherwise the echoed turn's tokens ride as the prefix the
+        # engine splices, as NeMo RL's native server derives it from the messages.
+        assert outbound["nvext"].keys() == {"annotations"}
+        (annotation,) = outbound["nvext"]["annotations"]
+        assert annotation.startswith("nemo_rl:gym:")
+        extras = json.loads(annotation.removeprefix("nemo_rl:gym:"))
+        if capture:
+            assert extras.keys() == {"ng_capture"}
+            assert CaptureAdmission.model_validate(extras["ng_capture"]) == context.capture_admission
+        else:
+            assert extras == {"required_prefix_token_ids": [1, 2]}
+        assert sent[0]["headers"]["x-default"] == "kept"
+        if error:
+            return
+        served = response.model_dump()
+        assert "nvext" not in served
+        if capture:
+            # The admission is the only capture field in the annotation. The call asks for the sampled
+            # tokens' log probabilities, which the engine generates with and stages.
+            assert (outbound["logprobs"], outbound["top_logprobs"]) == (True, 0)
+            assert outbound["stream"] is False
+            assert sent[0]["headers"]["x-dynamo-session-id"] == "rollout-1"
+            assert context.committed is True
+            manifest = await context.lineage_store.manifest("rollout-1")
+            assert manifest["records"][0]["staging_key"] == "rollout-1/c1"
+            assert "ng_commit_coords" not in served
+        else:
+            assert "x-dynamo-session-id" not in sent[0]["headers"]
+            message = served["choices"][0]["message"]
+            assert message["prompt_token_ids"] == [1, 2]
+            assert message["generation_token_ids"] == [3]
+            assert message["generation_log_probs"] == [-0.5]
+            assert message.get("routed_experts") == result.get("routed_experts")
+
+    @mark.parametrize(
+        ("settings", "error"),
+        [
+            # The dialect covers only the chat completions call.
+            ({"use_completions_api": True}, "dynamo_frontend is not supported with"),
+            ({"is_responses_native": True}, "dynamo_frontend is not supported with"),
+            # The frontend rejects the top-level required_prefix_token_ids field.
+            ({"supply_prefix_token_ids": True}, "dynamo_frontend is not supported with"),
+            # The frontend rejects the return_token_ids field this flag sends.
+            ({"request_prompt_and_generation_token_ids": True}, "return_token_ids"),
+            # The frontend rejects the conversation_params field this flag sends.
+            ({"forward_session_id_as_conversation_id": True}, "conversation_params"),
+            # An echoed reasoning turn would carry both `reasoning` and its alias.
+            ({"uses_reasoning_parser": True, "reasoning_field": "both"}, "duplicate field 'reasoning'"),
+            ({"uses_reasoning_parser": True, "reasoning_field": "reasoning_content"}, None),
+            # Reasoning is parsed from responses but never replayed, so no message carries both keys.
+            ({"uses_reasoning_parser": True, "uses_interleaved_reasoning": False, "reasoning_field": "both"}, None),
+            (
+                {
+                    "uses_reasoning_parser": True,
+                    "reasoning_field": "both",
+                    "preserve_reasoning_in_assistant_content": True,
+                },
+                None,
+            ),
+        ],
+    )
+    def test_dynamo_frontend_rejects_settings_it_cannot_serve(self, settings, error) -> None:
+        fields = {
+            "host": "0.0.0.0",
+            "port": 8081,
+            "base_url": "http://dynamo/v1",
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "entrypoint": "",
+            "name": "",
+            "dynamo_frontend": True,
+            "return_token_id_information": True,
+            "uses_reasoning_parser": False,
+            **settings,
+        }
+        with raises(ValueError, match=error) if error else nullcontext():
+            VLLMModelConfig(**fields)
+
+    @mark.parametrize(
+        ("backend", "dynamo_frontend", "error"),
+        [
+            # A judge shares the global dynamo_worker capture block without speaking the dialect.
+            ("dynamo_worker", False, None),
+            ("vllm_worker", True, "needs token_id_capture.external_staging_backend=dynamo_worker"),
+        ],
+    )
+    def test_dynamo_worker_backend_pairing(self, monkeypatch: MonkeyPatch, backend, dynamo_frontend, error) -> None:
+        with raises(ValueError, match=error) if error else nullcontext():
+            self._setup_server(monkeypatch, external_staging_backend=backend, dynamo_frontend=dynamo_frontend)
+
+    def test_dynamo_frontend_sends_an_empty_annotation_for_a_plain_call(self, monkeypatch: MonkeyPatch) -> None:
+        # NeMo RL's chat engine refuses a chat call without the annotation, so a call with no capture and no
+        # echoed turn still carries one.
+        server = self._setup_server(monkeypatch, dynamo_frontend=True)
+        outbound = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert outbound["nvext"] == {"annotations": ["nemo_rl:gym:{}"]}
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
@@ -5059,14 +5292,15 @@ class TestReasoningFieldConfig:
         ],
     )
     @mark.parametrize("content", [None, "visible answer", [{"type": "text", "text": "visible answer"}]])
+    @mark.parametrize("input_field", ["reasoning_content", "reasoning"])
     def test_explicit_harness_reasoning_reaches_selected_backend_fields(
-        self, reasoning_field: str, expected_keys: set[str], content: Any
+        self, reasoning_field: str, expected_keys: set[str], content: Any, input_field: str
     ) -> None:
         model = _make_reasoning_history_model(preserve_content=False, reasoning_field=reasoning_field)
         body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
             {
                 "model": "caller-model",
-                "messages": [{"role": "assistant", "content": content, "reasoning_content": "prior reasoning"}],
+                "messages": [{"role": "assistant", "content": content, input_field: "prior reasoning"}],
             }
         )
         assistant = model._preprocess_chat_completion_create_params(MagicMock(), body.model_dump(exclude_unset=True))[
@@ -5450,19 +5684,69 @@ class TestAudioPathSplice:
         assert _b64.b64decode(content[1]["audio_url"]["url"].split(",", 1)[1]) == b"BBBB"
         assert content[2] == {"type": "text", "text": "Compare these."}
 
-    def test_audio_paths_must_be_a_list(self, tmp_path) -> None:
+    def test_audio_paths_rejects_a_plain_path_string(self, tmp_path) -> None:
+        # A bare path is neither a list nor a JSON-encoded list.
         model = _make_audio_path_model()
         body = {
             "model": "dummy-model",
             "messages": [{"role": "user", "content": "x"}],
-            "metadata": {"audio_paths": str(tmp_path / "a.wav")},  # string, not list
+            "metadata": {"audio_paths": str(tmp_path / "a.wav")},
         }
-        try:
+        with raises(ValueError, match="must be a list or JSON-encoded list"):
             model._preprocess_chat_completion_create_params(MagicMock(), body)
-        except ValueError as e:
-            assert "must be a list" in str(e)
-        else:
-            raise AssertionError("expected ValueError when audio_paths is not a list")
+
+    @mark.parametrize(
+        "audio_paths",
+        [
+            "123",  # valid JSON, but not a list
+            '"a.wav"',
+            '{"a": "a.wav"}',
+            "null",
+            "[]",  # an empty list carries no audio
+            '[""]',  # empty entry
+            '["a.wav", ""]',
+            "[1]",  # non-string entry
+            '["a.wav", null]',
+            '[["a.wav"]]',  # nested list
+        ],
+    )
+    def test_audio_paths_json_must_be_a_nonempty_list_of_path_strings(self, audio_paths) -> None:
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "x"}],
+            "metadata": {"audio_paths": audio_paths},
+        }
+        with raises(ValueError, match="nonempty list of path strings"):
+            model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+    @mark.parametrize("audio_paths", [["a.wav", ""], [1], [None]])
+    def test_audio_paths_list_entries_must_be_nonempty_strings(self, audio_paths) -> None:
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "x"}],
+            "metadata": {"audio_paths": audio_paths},
+        }
+        with raises(ValueError, match="nonempty list of path strings"):
+            model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+    def test_audio_paths_accept_json_encoded_list(self, tmp_path) -> None:
+        a = tmp_path / "a.wav"
+        b = tmp_path / "b.wav"
+        a.write_bytes(b"AAAA")
+        b.write_bytes(b"BBBB")
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Compare these."}],
+            "metadata": {"audio_paths": json.dumps([str(a), str(b)])},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        content = result["messages"][0]["content"]
+        assert [part["type"] for part in content] == ["audio_url", "audio_url", "text"]
+        assert _b64.b64decode(content[0]["audio_url"]["url"].split(",", 1)[1]) == b"AAAA"
+        assert _b64.b64decode(content[1]["audio_url"]["url"].split(",", 1)[1]) == b"BBBB"
 
     def test_audio_keys_mutually_exclusive(self, tmp_path) -> None:
         wav = tmp_path / "clip.wav"
@@ -6634,6 +6918,7 @@ def _make_top_logprobs_model(
     extra_body: dict[str, Any] | None = None,
     sampling_overrides: dict[str, Any] | None = None,
     request_prompt_and_generation_token_ids: bool = False,
+    dynamo_frontend: bool = False,
 ) -> VLLMModel:
     """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
     config = VLLMModelConfig(
@@ -6650,6 +6935,7 @@ def _make_top_logprobs_model(
         uses_interleaved_reasoning=False,
         extra_body=extra_body,
         sampling_overrides=sampling_overrides,
+        dynamo_frontend=dynamo_frontend,
     )
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
@@ -6696,14 +6982,17 @@ class TestTopLogprobsHandling:
 
     @mark.parametrize("source", ["request", "extra_body", "sampling_overrides"])
     @mark.parametrize("token_ids", [[1], list(range(16))])
-    def test_topk_capture_rejects_specific_logprob_ids(self, source: str, token_ids: list[int]) -> None:
+    # The Dynamo handler sends the admission in the annotation, with no top-level ng_capture.
+    @mark.parametrize("backend", ["vllm_worker", "dynamo_worker"])
+    def test_topk_capture_rejects_specific_logprob_ids(self, source: str, token_ids: list[int], backend: str) -> None:
         fields = {"logprob_token_ids": token_ids}
         model = _make_top_logprobs_model(
             return_token_id_information=False,
             extra_body=fields if source == "extra_body" else None,
             sampling_overrides=fields if source == "sampling_overrides" else None,
+            dynamo_frontend=backend == "dynamo_worker",
         )
-        model._external_capture_handler = VLLMWorkerCaptureHandler()
+        model._external_capture_handler = make_external_capture_handler(backend)
         body = {"messages": [{"role": "user", "content": "hi"}], "top_logprobs": 16}
         if source == "request":
             body.update(fields)
@@ -7271,10 +7560,91 @@ class TestSamplingOverrides:
         out = server._preprocess_chat_completion_create_params(
             MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 262144}
         )
-        assert out["max_completion_tokens"] is None
+        assert "max_completion_tokens" not in out
         assert "max_tokens" not in out
         # Not a Chat Completions field, and stricter endpoints reject it.
         assert "max_output_tokens" not in out
+
+    def test_a_null_override_removes_the_parameter(self) -> None:
+        """A null pin sends no value, so the engine's default replaces the request's and ``extra_body``'s."""
+        server = self._server({"temperature": None, "top_k": None, "top_p": 1.0}, extra_body={"top_k": 20})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2, "top_p": 0.5}
+        )
+        assert "temperature" not in out
+        assert "top_k" not in out
+        assert out["top_p"] == 1.0
+
+    @mark.parametrize("api", ["chat", "completions", "responses"])
+    @mark.parametrize("pinned_name", ["max_tokens", "max_completion_tokens", "max_output_tokens"])
+    def test_a_null_limit_pin_sends_no_limit_on_any_endpoint(self, api: str, pinned_name: str) -> None:
+        """A null limit pin removes the request's limit under every name and sends none, on every endpoint."""
+        server = self._server({pinned_name: None})
+        body = {"temperature": 0.2, "max_tokens": 500, "max_completion_tokens": 500, "max_output_tokens": 500}
+        assert server._apply_sampling_overrides(body, api=api) == {"temperature": 0.2}
+
+    @mark.parametrize("is_responses_native", [False, True])
+    def test_a_null_max_tokens_pin_lifts_a_responses_request_limit(self, is_responses_native: bool) -> None:
+        """A ``/v1/responses`` request that sets ``max_output_tokens`` reaches the engine with no limit under any name,
+        whether the server forwards it to the Chat endpoint or to the Responses endpoint."""
+        server = self._server({"max_tokens": None}, is_responses_native=is_responses_native)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+        )
+        provider.create_response = AsyncMock(
+            return_value={
+                "id": "resp_1",
+                "object": "response",
+                "created_at": FIXED_TIME,
+                "model": "dummy_model",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        server._clients = [provider]
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"input": "hi", "max_output_tokens": 500}
+        )
+
+        assert response.status_code == 200
+        call = provider.create_response if is_responses_native else provider.create_chat_completion
+        assert not {"max_tokens", "max_completion_tokens", "max_output_tokens"} & call.await_args.kwargs.keys()
+
+    def test_a_non_null_limit_pin_is_sent_next_to_a_null_one(self) -> None:
+        """The first pinned name in ``_OUTPUT_BUDGET_KEYS`` order still decides the limit. Here that name carries 200,
+        so every endpoint sends 200 and the null under the other name changes nothing."""
+        server = self._server({"temperature": 1.0, "max_tokens": None, "max_completion_tokens": 200})
+        sent = [
+            server._apply_sampling_overrides({"temperature": 0.2, "max_tokens": 500}, api=api)
+            for api in ("chat", "completions", "responses")
+        ]
+        assert sent == [
+            {"temperature": 1.0, "max_completion_tokens": 200},
+            {"temperature": 1.0, "max_tokens": 200},
+            {"temperature": 1.0, "max_output_tokens": 200},
+        ]
+
+    def test_a_null_limit_pin_under_the_first_name_sends_no_limit(self, caplog) -> None:
+        """The first pinned name in ``_OUTPUT_BUDGET_KEYS`` order decides the limit also when its value is null:
+        no endpoint sends a limit, the 200 under the later name is not sent, and the start-up warning says so."""
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            server = self._server({"max_completion_tokens": None, "max_tokens": 200})
+        sent = [
+            server._apply_sampling_overrides({"max_tokens": 500}, api=api)
+            for api in ("chat", "completions", "responses")
+        ]
+        assert sent == [{}, {}, {}]
+        assert "every endpoint sends no limit, because max_completion_tokens is null" in caplog.text
 
     def test_pinned_limit_reaches_the_responses_native_path_as_max_output_tokens(self) -> None:
         """vLLM's Responses endpoint reads only ``max_output_tokens``, so a Chat-spelled pin is sent under that name."""
@@ -7404,6 +7774,25 @@ class TestSamplingOverrides:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
             self._server({"max_output_tokens": None, "max_tokens": None, "max_completion_tokens": None})
         assert "different values under different names" not in caplog.text
+
+    @mark.parametrize("api", ["chat", "completions", "responses"])
+    def test_a_null_limit_pin_removes_every_limit_name_and_keeps_the_other_pins(self, api: str) -> None:
+        """Other pins still apply, the limit is removed under every name, and the caller's pins are not mutated."""
+        pins = {"temperature": 1.0, "max_tokens": None}
+        body = {"temperature": 0.2, "max_tokens": 500, "max_completion_tokens": 500, "max_output_tokens": 500}
+        assert apply_sampling_overrides(body, sampling_overrides=pins, api=api) == {"temperature": 1.0}
+        assert pins == {"temperature": 1.0, "max_tokens": None}
+
+    def test_a_request_limit_beats_an_extra_body_limit_under_either_chat_name(self) -> None:
+        """extra_body's limit is a default: it applies only when the request sets no limit of its own."""
+        extra_body = {"max_completion_tokens": 64, "temperature": 0.5}
+        assert merge_chat_extra_body({"max_tokens": 500}, extra_body=extra_body) == {
+            "max_tokens": 500,
+            "temperature": 0.5,
+        }
+        assert merge_chat_extra_body({}, extra_body=extra_body) == extra_body
+        # A null request limit sets no limit, so the default still applies.
+        assert merge_chat_extra_body({"max_tokens": None}, extra_body=extra_body) == {**extra_body, "max_tokens": None}
 
     def test_transport_log_records_the_request_the_engine_receives(
         self, monkeypatch: MonkeyPatch, tmp_path, capsys
@@ -8660,7 +9049,9 @@ class TestUnrepresentableRequestFields:
     BODY = {"input": "hi", "include": ["reasoning.encrypted_content"]}
 
     @staticmethod
-    def _client(monkeypatch: MonkeyPatch, *, drop: bool) -> tuple[TestClient, dict[str, Any]]:
+    def _client(
+        monkeypatch: MonkeyPatch, *, drop: bool, inline_tool_output_images: bool = False
+    ) -> tuple[TestClient, dict[str, Any]]:
         """A test client for a model server, plus the dict that records the converted chat params."""
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -8673,6 +9064,7 @@ class TestUnrepresentableRequestFields:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             drop_unrepresentable_request_fields=drop,
+            inline_tool_output_images=inline_tool_output_images,
         )
         server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         captured: dict[str, Any] = {}
@@ -8720,6 +9112,37 @@ class TestUnrepresentableRequestFields:
         assert response.headers["content-type"].startswith("text/event-stream")
         assert "event: response.completed" in response.text
         assert "include" not in captured["value"].model_dump(exclude_unset=True)
+
+    IMAGE_OUTPUT_BODY = {
+        "input": [
+            {"type": "function_call", "call_id": "c1", "name": "view_image", "arguments": '{"path":"a.png"}'},
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": [{"type": "input_image", "image_url": "data:image/png;base64,YWJj"}],
+            },
+        ]
+    }
+
+    @mark.parametrize("stream", [False, True])
+    @mark.parametrize(
+        ("drop", "inline_tool_output_images", "expected_part"),
+        [
+            (True, False, {"type": "text", "text": "[image omitted from tool output]"}),
+            (False, True, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}}),
+            (True, True, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}}),
+        ],
+        ids=["placeholder", "image", "image_wins_over_placeholder"],
+    )
+    def test_tool_output_image(
+        self, monkeypatch: MonkeyPatch, stream: bool, drop: bool, inline_tool_output_images: bool, expected_part: dict
+    ) -> None:
+        # `inline_tool_output_images` passes Codex's `view_image` output to the backend as an image part
+        # of the tool message; without it the image becomes the placeholder.
+        client, captured = self._client(monkeypatch, drop=drop, inline_tool_output_images=inline_tool_output_images)
+
+        assert client.post("/v1/responses", json={**self.IMAGE_OUTPUT_BODY, "stream": stream}).status_code == 200
+        assert captured["value"].messages[-1] == {"role": "tool", "tool_call_id": "c1", "content": [expected_part]}
 
 
 class TestPreserveEnvelopeIdFollowsCaptureContext:
@@ -9231,6 +9654,50 @@ class TestCodexRequests:
         "output": [{"type": "input_image", "image_url": PNG_URL, "detail": "high"}],
     }
 
+    THINKING_BLOCKS = [{"type": "thinking", "thinking": "Read the test first.", "signature": "EqQBCkgIBhAB-sig"}]
+
+    def test_preserve_thinking_blocks_needs_the_chat_path(self) -> None:
+        with raises(ValueError, match="requires is_responses_native=false"):
+            self._server(preserve_thinking_blocks=True, is_responses_native=True)
+        with raises(ValueError, match="requires use_completions_api=false"):
+            self._server(preserve_thinking_blocks=True, use_completions_api=True)
+
+    def test_preserve_thinking_blocks_round_trips_through_the_server(self) -> None:
+        # An Anthropic model behind LiteLLM: signed thinking blocks on the answer must come back, verbatim, on the
+        # assistant message of the next turn, or the provider rejects the tool-call continuation.
+        server, client = self._server(**self.CODEX_FIELDS, preserve_thinking_blocks=True)
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "shell_command", "arguments": json.dumps({"command": "ls"})},
+        }
+        answer = {
+            "role": "assistant",
+            "content": None,
+            "reasoning": self.REASONING_TEXT,
+            "provider_specific_fields": {"thinking_blocks": self.THINKING_BLOCKS},
+            "tool_calls": [call],
+        }
+        client.create_chat_completion = AsyncMock(return_value=self._completion(answer))
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+        assert first.status_code == 200
+        items = [event["item"] for event in self._events(first.text) if event["type"] == "response.output_item.done"]
+        reasoning = next(item for item in items if item["type"] == "reasoning")
+        assert reasoning["encrypted_content"]
+
+        client.create_chat_completion.reset_mock()
+        tool_output = {"type": "function_call_output", "call_id": "call_1", "output": "a.py"}
+        second = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER, *items, tool_output]))
+        assert second.status_code == 200
+        messages = [
+            message if isinstance(message, dict) else dict(message)
+            for message in client.create_chat_completion.await_args.kwargs["messages"]
+        ]
+        assistant = next(message for message in messages if message["role"] == "assistant")
+        assert assistant["thinking_blocks"] == self.THINKING_BLOCKS
+
     def test_inline_tool_output_images_needs_the_chat_path(self) -> None:
         with raises(ValueError, match="requires is_responses_native=false"):
             self._server(inline_tool_output_images=True, is_responses_native=True)
@@ -9427,6 +9894,10 @@ _REFIT_STATED_PROMPT_V029 = (
 _REFIT_NO_PROMPT_COUNT = (
     "max_tokens=131072 cannot be greater than max_model_len=8192. Please request fewer output tokens."
 )
+# How NeMo RL's chat engine, behind a Dynamo frontend, refuses a prompt that fills the window.
+_REFIT_DYNAMO_PROMPT_FILLS_WINDOW = (
+    "Prompt length (8200) fills or exceeds this model's maximum context length (8192). No room for output tokens."
+)
 
 
 def _refit_model(monkeypatch: MonkeyPatch, use_completions_api: bool) -> VLLMModel:
@@ -9565,6 +10036,22 @@ async def test_a_refit_counts_the_prompt_with_tokenize_when_the_refusal_does_not
         assert tokenize.kwargs == {"model": "dummy_model", "messages": first["messages"]}
     execution = request.state.nemo_gym_model_execution
     assert (execution["requested_max_tokens"], execution["applied_max_tokens"]) == (131072, _REFIT_APPLIED)
+
+
+async def test_a_refusal_through_dynamo_is_not_counted_with_tokenize(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
+    model = TestApp()._setup_server(monkeypatch, dynamo_frontend=True)
+    client = _refit_engine(_engine_bad_request_error(_REFIT_DYNAMO_PROMPT_FILLS_WINDOW))
+    model._clients = [client]
+
+    response = await model.chat_completions(_refit_request(), _refit_body({"max_tokens": 131072}))
+
+    assert response.choices[0].finish_reason == "length"
+    # The frontend has no /tokenize, and the budget is NeMo RL's to lower: one call, no count, no resend.
+    [call] = _generation_calls(client, False)
+    assert call["max_tokens"] == 131072
+    client.create_tokenize.assert_not_awaited()
 
 
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
@@ -10297,3 +10784,31 @@ def test_messages_repetition_capture_does_not_invent_a_bound_response(tmp_path: 
     digest = _health_for_messages_call(tmp_path, call, bound=False)
     assert digest.responses is None
     assert "model_call_runaway_generation" in digest.unobserved
+
+
+@mark.parametrize(
+    ("old_name", "new_name"),
+    [
+        ("VLLMConverter", "ChatCompletionsConverter"),
+        ("VLLMConverterResponsesToChatCompletionsState", "ChatCompletionsConverterState"),
+    ],
+)
+def test_converter_aliases_resolve_from_this_module_with_a_warning(old_name: str, new_name: str) -> None:
+    # In a fresh interpreter: each old path warns only on its first use in a process.
+    code = textwrap.dedent(
+        f"""
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from responses_api_models.vllm_model.app import {old_name} as old
+        from nemo_gym.models.chat_completions_converter import {new_name} as new
+        assert old is new, (old, new)
+        messages = [str(w.message) for w in caught if w.category is DeprecationWarning and "{old_name}`" in str(w.message)]
+        assert len(messages) == 1, messages
+        (message,) = messages
+        assert "chat_completions_converter.{new_name}`" in message, message
+        assert "removed in nemo_gym 0.10.0" in message, message
+        """
+    )
+    # The repository root puts responses_api_models on the path, wherever pytest was started.
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=PARENT_DIR)
