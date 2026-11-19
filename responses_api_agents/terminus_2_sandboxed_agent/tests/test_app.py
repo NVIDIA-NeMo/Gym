@@ -1558,3 +1558,27 @@ def test_only_the_legacy_run_configuration_logs_the_deprecation_once(caplog, mon
     assert warnings == ([app_module.DEPRECATION_WARNING] if legacy_run and not worker else [])
     for phrase in ("legacy /run", "episode sessions", "gym eval run terminal_bench_2_1", "README.md"):
         assert phrase in app_module.DEPRECATION_WARNING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("cap", "expected"), [(60.0, [0.5, 60.0]), (1200.0, [0.5, 900.0]), (0.2, [0.2, 0.2])])
+async def test_command_durations_are_capped_at_the_configured_wait(cap, expected):
+    from harbor.llms.base import LLMResponse
+
+    from responses_api_agents.terminus_2_sandboxed_agent.terminal import TerminusJSONParser
+
+    content = (
+        '{"analysis": "a", "plan": "p", "commands": ['
+        '{"keystrokes": "ls\\n", "duration": 0.5}, {"keystrokes": "make bench\\n", "duration": 900}]}'
+    )
+    agent = object.__new__(NeMoGymTerminus2)
+    agent._max_command_duration_sec = cap
+    agent._parser = TerminusJSONParser()
+    agent._nemo_gym_llm = SimpleNamespace(observations=None)
+    agent.logger = logging.getLogger(__name__)
+    agent._query_llm = AsyncMock(return_value=LLMResponse(content=content))
+
+    commands, *_ = await agent._handle_llm_interaction(SimpleNamespace(), "prompt")
+
+    assert [command.keystrokes for command in commands] == ["ls\n", "make bench\n"]
+    assert [command.duration_sec for command in commands] == expected

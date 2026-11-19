@@ -105,6 +105,10 @@ def _warn_deprecated_once() -> None:
         LOGGER.warning(DEPRECATION_WARNING)
 
 
+# Harbor 0.22 applies this limit to each parsed terminal command.
+HARBOR_MAX_COMMAND_DURATION_SEC = 60.0
+
+
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     # Only the legacy `/run` route seeds and verifies through a resources server. Episode sessions get their
     # sandbox from the environment server that drives them and need none.
@@ -129,6 +133,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_timeout: float
     remote_tmux_binary_path: Optional[str]
+    max_command_duration_sec: float = Field(default=HARBOR_MAX_COMMAND_DURATION_SEC, gt=0, allow_inf_nan=False)
 
 
 # Model HTTP statuses that mean the endpoint is down, unauthorized or saturated, not that the model
@@ -491,9 +496,11 @@ class NeMoGymTerminus2(Terminus2):
         llm: NeMoGymLLM,
         dump_trajectory: bool,
         terminal_hidden_mounts: list[str] | None = None,
+        max_command_duration_sec: float = HARBOR_MAX_COMMAND_DURATION_SEC,
         **kwargs: Any,
     ):
         self._nemo_gym_llm = llm
+        self._max_command_duration_sec = max_command_duration_sec
         self._dump_trajectory_enabled = dump_trajectory
         self._terminal_mount_bootstrap = (
             private_terminal_bootstrap(terminal_hidden_mounts) if terminal_hidden_mounts else None
@@ -572,6 +579,15 @@ class NeMoGymTerminus2(Terminus2):
                 observations.finish_decision(self._completed_command_batches)
         # Harbor returns (commands, is_task_complete, feedback, analysis, plan, llm_response).
         self._last_turn_claimed_completion = bool(result[1])
+        if self._max_command_duration_sec != HARBOR_MAX_COMMAND_DURATION_SEC:
+            parsed = self._parser.last_result.commands
+            commands = [
+                Command(
+                    keystrokes=command.keystrokes, duration_sec=min(source.duration, self._max_command_duration_sec)
+                )
+                for command, source in zip(result[0], parsed, strict=True)
+            ]
+            result = (commands, *result[1:])
         return result
 
     async def _query_llm(self, *args, **kwargs):
@@ -797,6 +813,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 dump_trajectory=self.config.dump_trajectory,
                 interleaved_thinking=self.config.interleaved_thinking,
                 terminal_hidden_mounts=self.config.terminal_hidden_mounts,
+                max_command_duration_sec=self.config.max_command_duration_sec,
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")
