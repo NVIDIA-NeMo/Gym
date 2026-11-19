@@ -943,6 +943,20 @@ def _eval_status(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error(str(exc))
 
 
+def _eval_lustre_stats(args: argparse.Namespace, overrides: list[str]) -> None:
+    expected_overrides = ["+verbose=true"] if args.verbose else []
+    if args.json:
+        expected_overrides.append("+json=true")
+    if overrides != expected_overrides:
+        args._parser.error("lustre-stats does not accept Hydra overrides")
+    from nemo_gym.orchestration.executors.slurm.lustre_md_stats import print_lustre_md_stats
+
+    try:
+        print_lustre_md_stats(Path(args.target), json_output=args.json)
+    except OSError as exc:
+        args._parser.error(str(exc))
+
+
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     expected_overrides = ["+verbose=true"] if args.verbose else []
     if args.json:
@@ -1630,6 +1644,11 @@ COMMANDS = {
         target=_eval_status,
         summary="Show saved progress for a run directory or Gym job ID.",
         flags=(Flag(register=lambda p: p.add_argument("run", metavar="RUN_DIR_OR_JOB_ID")), JSON),
+    ),
+    "eval lustre-stats": Command(
+        target=_eval_lustre_stats,
+        summary="Summarize the Lustre metadata requests a submitted Slurm job made, per phase (lustre_md_stats).",
+        flags=(Flag(register=lambda p: p.add_argument("target", metavar="BENCHMARK_DIR_OR_TSV")), JSON),
     ),
     "eval health-check": Command(
         target=_eval_health_check,
