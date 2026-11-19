@@ -2580,3 +2580,42 @@ def test_chat_message_without_a_known_role_gets_one_error_naming_the_roles(messa
     (error,) = excinfo.value.errors()
     assert error["type"] == "chat_message_role"
     assert "role" in error["msg"] and "assistant" in error["msg"]
+
+
+@pytest.mark.parametrize("role", ["user", "system", "developer"])
+def test_chat_input_media_preserves_order_and_caller(converter, role):
+    target = "data:image/png;base64,dGFyZ2V0"
+    preview = "data:image/png;base64,cHJldmlldw=="
+    message = {
+        "role": role,
+        "content": [
+            {"type": "text", "text": "target"},
+            {"type": "image_url", "image_url": {"url": target, "detail": "high"}},
+            {"type": "input_text", "text": "preview"},
+            {"type": "image_url", "image_url": {"url": preview}},
+        ],
+    }
+    before = deepcopy(message)
+    items = converter.chat_completions_messages_to_responses_items([message])
+    request = NeMoGymResponseCreateParamsNonStreaming(input=items, temperature=0.6, top_p=0.95)
+    assert request.model_dump()["input"][0]["content"] == [
+        {"type": "input_text", "text": "target"},
+        {"type": "input_image", "image_url": target, "detail": "high"},
+        {"type": "input_text", "text": "preview"},
+        {"type": "input_image", "image_url": preview, "detail": "auto"},
+    ]
+    assert (request.temperature, request.top_p) == (0.6, 0.95)
+    assert message == before
+
+
+def test_tool_responses_content_preserves_existing_parts(converter: ChatCompletionsConverter):
+    content = [
+        {"type": "input_text", "text": "Target and preview"},
+        {"type": "input_image", "image_url": PNG_URL, "detail": "original"},
+        {"type": "input_file", "file_id": "file_existing"},
+    ]
+    items = converter.chat_completions_messages_to_responses_items(
+        [{"role": "tool", "tool_call_id": "existing_call", "content": content}]
+    )
+    assert items[0].call_id == "existing_call"
+    assert items[0].model_dump(exclude_none=True)["output"] == content

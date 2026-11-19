@@ -45,6 +45,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.trajectory import ModelCallRef, ObservationGap
 
 
@@ -256,6 +257,10 @@ def _responses_input(
             continue
         if "type" in message:
             result.append(_dump(message))
+            continue
+        if message.get("role") in {"user", "tool"} and isinstance(message.get("content"), list):
+            converter = ChatCompletionsConverter(return_token_id_information=False)
+            result.extend(_dump(item) for item in converter.chat_completions_messages_to_responses_items([message]))
             continue
         if message.get("role") == "tool":
             result.append(
