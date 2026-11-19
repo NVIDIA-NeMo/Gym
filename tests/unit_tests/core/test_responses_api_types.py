@@ -1155,11 +1155,49 @@ class TestNeMoGymChatCompletionSchemas:
     @pytest.mark.parametrize(
         "tool_call",
         [
+            {"id": "call_1", "type": "function", "index": 0, "function": {"name": "bash", "arguments": "{}"}},
+            {"id": "call_1", "type": "custom", "index": 0, "custom": {"name": "bash", "input": "ls"}},
+            {
+                "id": "call_1",
+                "type": "function",
+                "index": 1,
+                "name": "bash",
+                "function": {"name": "bash", "arguments": "{}"},
+            },
+        ],
+    )
+    def test_tool_call_strips_the_outer_index_without_mutating_input(self, tool_call: dict[str, Any]) -> None:
+        # Some providers return index on non-streaming tool calls, and agents replay the assistant message unchanged.
+        payload = {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+            ],
+            "model": "m",
+        }
+        original = deepcopy(payload)
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+        expected = {key: value for key, value in tool_call.items() if key not in ("index", "name")}
+        assert params.messages[1]["tool_calls"][0] == expected
+        assert params.model_dump(exclude_unset=True)["messages"][1]["tool_calls"][0] == expected
+        assert payload == original
+
+    @pytest.mark.parametrize(
+        "tool_call",
+        [
             {
                 "id": "call-1",
                 "type": "function",
                 "function": {"name": "f", "arguments": "{}"},
                 "not_a_real_field": 1,
+            },
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "f", "arguments": "{}", "index": 0},
             },
             {
                 "id": "call-1",
