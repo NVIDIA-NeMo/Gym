@@ -87,12 +87,7 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
     assert model.inline_tool_output_images
     assert env.agent_server.name == f"deepcad_{harness}_agent"
     if harness == "hermes":
-        from responses_api_agents.hermes_agent.app import HermesAgentConfig
-
-        hermes = HermesAgentConfig(
-            name="deepcad_hermes_agent",
-            **OmegaConf.to_container(config.deepcad_hermes_agent.responses_api_agents.hermes_agent, resolve=True),
-        )
+        hermes = config.deepcad_hermes_agent.responses_api_agents.hermes_agent
         assert hermes.image_input is True
         assert hermes.enabled_toolsets == ["terminal", "file", "vision"]
     assert "required_model_servers" not in config.get("model_call_sampling", {})
@@ -127,6 +122,8 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
     if harness in {"opencode", "pi", "openclaw"}:
         assert agent_config.max_output_tokens == 32768
     if harness == "hermes":
+        assert agent_config.image_input is True
+        assert agent_config.enabled_toolsets == ["terminal", "file", "vision"]
         assert agent_config.max_tokens == 32768 and not agent_config.compression_enabled
     if harness in {"pi", "openclaw"}:
         assert agent_config.image_input
