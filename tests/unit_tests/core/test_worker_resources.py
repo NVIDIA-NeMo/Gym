@@ -27,7 +27,7 @@ from nemo_gym.core import worker_resources
 from nemo_gym.core.worker_resources import (
     PROCESS_GROUPS_DIR_NAME,
     ProcessGroupRecord,
-    recorded_process_group,
+    record_process_group,
     recorded_process_groups,
     set_worker_routing_id,
     worker_mkdtemp,
@@ -162,37 +162,53 @@ def test_replacing_a_routing_id_already_used_is_logged(
     assert f"replaces {used}, which this worker already used" in caplog.text
 
 
-def test_a_child_process_group_is_recorded_while_it_runs(worker: Path) -> None:
+def test_a_child_process_group_is_recorded_until_forgotten(worker: Path) -> None:
     child = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
-        with recorded_process_group(child.pid) as record:
-            assert record is not None and record.pgid == child.pid
-            assert recorded_process_groups(ROUTING_ID) == [record]
-            assert record.is_running()
-            child.kill()
-            child.wait()
-            assert not record.is_running()
+        record = record_process_group(child.pid)
+        assert record is not None and record.pgid == child.pid
+        assert recorded_process_groups(ROUTING_ID) == [record]
+        assert record.is_running()
+        child.kill()
+        child.wait()
+        assert not record.is_running()
+        record.forget()
     finally:
         child.kill()
         child.wait()
     assert recorded_process_groups(ROUTING_ID) == []
 
 
+def test_ending_a_record_kills_its_group_and_removes_the_record(worker: Path) -> None:
+    child = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        record = record_process_group(child.pid)
+        assert record is not None
+        # The reap reads the record back from its file and ends it the same way.
+        (read_back,) = recorded_process_groups(ROUTING_ID)
+        read_back.end()
+        assert child.wait(timeout=5) == -signal.SIGKILL
+        assert recorded_process_groups(ROUTING_ID) == []
+    finally:
+        child.kill()
+        child.wait()
+
+
 def test_a_group_whose_leader_exited_still_runs_while_a_member_does(worker: Path) -> None:
     # The usual way a command leaves a background server: the shell exits, its child keeps the group.
     shell = subprocess.Popen(["sh", "-c", "sleep 30 & echo $!"], start_new_session=True, stdout=subprocess.PIPE)
     try:
-        with recorded_process_group(shell.pid) as record:
-            assert record is not None
-            shell.stdout.readline()  # the member started before the shell exits
-            shell.wait()
-            assert record.is_running()
-            os.killpg(shell.pid, signal.SIGKILL)
-            for _ in range(500):
-                if not record.is_running():
-                    break
-                time.sleep(0.01)
-            assert not record.is_running()
+        record = record_process_group(shell.pid)
+        assert record is not None
+        shell.stdout.readline()  # the member started before the shell exits
+        shell.wait()
+        assert record.is_running()
+        record.end()
+        for _ in range(500):
+            if not record.is_running():
+                break
+            time.sleep(0.01)
+        assert not record.is_running()
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(shell.pid, signal.SIGKILL)
@@ -203,10 +219,14 @@ def test_a_group_whose_leader_exited_still_runs_while_a_member_does(worker: Path
 def test_a_record_whose_process_id_was_reused_is_not_running(worker: Path) -> None:
     child = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
-        with recorded_process_group(child.pid) as record:
-            assert record is not None
-            # Another process with the same ID started at a different time: the record must not match it.
-            assert not ProcessGroupRecord(pgid=child.pid, start_ticks=record.start_ticks - 1).is_running()
+        record = record_process_group(child.pid)
+        assert record is not None
+        # Another process with the same ID started at a different time: the record must not match it.
+        reused = ProcessGroupRecord(pgid=child.pid, start_ticks=record.start_ticks - 1)
+        assert not reused.is_running()
+        reused.end()
+        assert child.poll() is None
+        record.forget()
     finally:
         child.kill()
         child.wait()
@@ -215,9 +235,10 @@ def test_a_record_whose_process_id_was_reused_is_not_running(worker: Path) -> No
 def test_a_child_that_does_not_lead_its_group_is_not_running(worker: Path) -> None:
     child = subprocess.Popen(["sleep", "30"])
     try:
-        with recorded_process_group(child.pid) as record:
-            assert record is not None
-            assert not record.is_running()
+        record = record_process_group(child.pid)
+        assert record is not None
+        assert not record.is_running()
+        record.forget()
     finally:
         child.kill()
         child.wait()
@@ -226,10 +247,13 @@ def test_a_child_that_does_not_lead_its_group_is_not_running(worker: Path) -> No
 def test_two_records_of_one_process_id_are_removed_independently(worker: Path) -> None:
     child = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
-        with recorded_process_group(child.pid) as outer:
-            with recorded_process_group(child.pid):
-                assert len(recorded_process_groups(ROUTING_ID)) == 2
-            assert recorded_process_groups(ROUTING_ID) == [outer]
+        outer = record_process_group(child.pid)
+        inner = record_process_group(child.pid)
+        assert outer is not None and inner is not None
+        assert len(recorded_process_groups(ROUTING_ID)) == 2
+        inner.forget()
+        assert recorded_process_groups(ROUTING_ID) == [outer]
+        outer.forget()
     finally:
         child.kill()
         child.wait()
@@ -238,9 +262,8 @@ def test_two_records_of_one_process_id_are_removed_independently(worker: Path) -
 def test_a_child_already_reaped_runs_unrecorded(worker: Path) -> None:
     child = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
     child.wait()
-    with recorded_process_group(child.pid) as record:
-        assert record is None
-        assert recorded_process_groups(ROUTING_ID) == []
+    assert record_process_group(child.pid) is None
+    assert recorded_process_groups(ROUTING_ID) == []
 
 
 def test_unreadable_records_are_skipped(worker: Path) -> None:
@@ -274,3 +297,22 @@ async def test_the_local_provider_works_and_runs_commands_under_this_worker(work
         await provider.close(handle)
     assert recorded_process_groups(ROUTING_ID) == []
     assert not handle.raw["workspace"].exists()
+
+
+async def test_the_local_provider_keeps_a_background_process_recorded_until_close(worker: Path) -> None:
+    provider = LocalProvider()
+    handle = await provider.create(SandboxSpec())
+    try:
+        result = await provider.exec(handle, "sleep 300 >/dev/null 2>&1 & echo $!")
+        background = int(result.stdout)
+        # The command returned, but its background process keeps the group, so a peer's reap can still find it.
+        (record,) = recorded_process_groups(ROUTING_ID)
+        assert record.is_running() and os.getpgid(background) == record.pgid
+    finally:
+        await provider.close(handle)
+    for _ in range(500):
+        if not record.is_running():
+            break
+        time.sleep(0.01)
+    assert not record.is_running()
+    assert recorded_process_groups(ROUTING_ID) == []

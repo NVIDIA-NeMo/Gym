@@ -28,8 +28,9 @@ The ID groups everything the worker creates on the host:
   The record is what ties the group to the worker.
   A reader checks the record against ``/proc`` before it signals the group, so a reused process ID is never killed.
 
-The records only exist while the worker lives.
-Ending them for a worker that died is the reap's job.
+A record stays while its group runs, including processes a command left running in the background.
+Whoever owns the group, such as a local sandbox at its close, ends it with ``ProcessGroupRecord.end``.
+Ending the groups of a worker that died is the reap's job.
 Process group records need Linux's ``/proc``; elsewhere children run unrecorded.
 """
 
@@ -37,12 +38,11 @@ import atexit
 import logging
 import os
 import secrets
+import signal
 import stat
 import tempfile
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -94,6 +94,8 @@ def workspace_root() -> Path:
 
     It is ``NEMO_GYM_WORKSPACE_ROOT``, else a per-user directory in the system temporary directory.
     The default is per user, so two users on one node never share one directory or fight over its mode.
+    The root must be on a node-local filesystem.
+    Process group records name processes of this node, and each local command writes and removes one in the event loop.
     """
     configured = os.environ.get(WORKSPACE_ROOT_ENV_VAR, "").strip()
     if configured:
@@ -136,6 +138,8 @@ class ProcessGroupRecord:
 
     pgid: int
     start_ticks: int
+    # The record's file, removed by ``forget``; ``None`` for a record that was never written.
+    path: Path | None = field(default=None, compare=False)
 
     def is_running(self) -> bool:
         """Whether the recorded group still has a process.
@@ -149,38 +153,47 @@ class ProcessGroupRecord:
             return False
         return _group_has_members(self.pgid)
 
+    def end(self) -> None:
+        """Kill the group if it still runs, then remove its record."""
+        if self.is_running():
+            try:
+                os.killpg(self.pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.forget()
 
-@contextmanager
-def recorded_process_group(pid: int) -> Iterator[ProcessGroupRecord | None]:
-    """Record the process group that child ``pid`` leads under this worker while the block runs.
+    def forget(self) -> None:
+        """Remove the record, leaving the group as it is; logs a record it cannot remove."""
+        if self.path is None:
+            return
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError as error:
+            LOGGER.warning("Could not remove the record of child process group %d: %r", self.pgid, error)
 
-    Call it right after starting the child with ``start_new_session=True``.
-    Leave the block once the child has exited.
+
+def record_process_group(pid: int) -> ProcessGroupRecord | None:
+    """Record the process group that child ``pid`` leads under this worker.
+
+    Call it right after starting the child with ``start_new_session=True``, before waiting for it.
+    The caller owns the record: once the group has no process left it calls ``forget``, and to stop the group it calls
+    ``end``.
     Each record has its own file, so a reused process ID never removes another command's record.
-    It logs and yields ``None`` when the child is gone, ``/proc`` is unavailable or the record cannot be written.
+    It logs and returns ``None`` when the child is gone, ``/proc`` is unavailable or the record cannot be written.
     The child then runs unrecorded.
     """
     ticks = _start_ticks(pid)
     if ticks is None:
         LOGGER.warning("Could not record child process group %d of this worker: its start time is unavailable", pid)
-        yield None
-        return
-    record = ProcessGroupRecord(pgid=pid, start_ticks=ticks)
+        return None
     try:
         records = _private_dir(worker_workspace_dir() / PROCESS_GROUPS_DIR_NAME)
         path = records / f"{pid}-{secrets.token_hex(4)}"
         path.write_text(f"{pid} {ticks}", encoding="ascii")
     except OSError as error:
         LOGGER.warning("Could not record child process group %d of this worker: %r", pid, error)
-        yield None
-        return
-    try:
-        yield record
-    finally:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as error:
-            LOGGER.warning("Could not remove the record of child process group %d: %r", pid, error)
+        return None
+    return ProcessGroupRecord(pgid=pid, start_ticks=ticks, path=path)
 
 
 def recorded_process_groups(routing_id: str) -> list[ProcessGroupRecord]:
@@ -193,7 +206,7 @@ def recorded_process_groups(routing_id: str) -> list[ProcessGroupRecord]:
     for entry in entries:
         try:
             pgid, ticks = entry.read_text("ascii").split()
-            records.append(ProcessGroupRecord(pgid=int(pgid), start_ticks=int(ticks)))
+            records.append(ProcessGroupRecord(pgid=int(pgid), start_ticks=int(ticks), path=entry))
         except (OSError, ValueError):
             LOGGER.warning("Skipping unreadable process group record %s", entry)
     return records

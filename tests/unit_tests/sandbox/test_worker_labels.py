@@ -104,3 +104,11 @@ async def test_close_by_metadata_needs_a_provider_that_lists_by_label() -> None:
 
     with pytest.raises(NotImplementedError, match="'plain' cannot close sandboxes by label"):
         await close_by_metadata(_NoListing(), {WORKER_LABEL: "dead"})
+
+
+async def test_close_by_metadata_refuses_a_value_providers_would_rewrite() -> None:
+    provider = _Provider({"any": {WORKER_LABEL: "a/b"}})
+
+    with pytest.raises(ValueError, match="valid Kubernetes label values"):
+        await close_by_metadata(provider, {WORKER_LABEL: "a/b"})
+    assert provider.closed == []

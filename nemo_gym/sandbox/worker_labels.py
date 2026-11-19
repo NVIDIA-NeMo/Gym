@@ -89,11 +89,18 @@ async def close_by_metadata(provider: SandboxProvider, labels: Mapping[str, str]
 
     Raises:
         ValueError: ``labels`` is empty or has an empty value; that would select sandboxes nobody named.
+            Also raised for a value that is not a valid Kubernetes label value.
+            Providers that store labels as Kubernetes labels rewrite such a value at create, so it would never match.
         NotImplementedError: The provider cannot find sandboxes by label.
     """
     wanted = dict(labels)
     if not wanted or not all(wanted.values()):
         raise ValueError(f"close_by_metadata needs at least one label and no empty value, got {wanted!r}")
+    rewritten = {key: value for key, value in wanted.items() if sanitize_label_value(value) != value}
+    if rewritten:
+        raise ValueError(
+            f"close_by_metadata needs valid Kubernetes label values, which providers store unchanged; got {rewritten!r}"
+        )
     if not isinstance(provider, SupportsSandboxCloseByMetadata):
         provider_name = getattr(provider, "name", type(provider).__name__)
         raise NotImplementedError(f"Sandbox provider {provider_name!r} cannot close sandboxes by label")

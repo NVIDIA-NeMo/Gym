@@ -102,13 +102,13 @@ Unknown `provider_options` keys raise `ValueError`; wrong-typed values raise `Ty
   - `gym env` stops servers with SIGKILL one second after the shutdown signal by default, so deletes queued by
     the last episodes of a run are lost. Raise `server_shutdown_timeout_seconds` to cover the delete budget when
     you use OpenShell.
-  - At `aclose()`, when this process has no sandbox live or being created, it reaps this process's orphaned
-    sandboxes: it lists the gateway sandboxes labelled `nemo-gym.nvidia.com/process=<this process>` and
-    `nemo-gym.sandbox=1` (needs `attribution.enabled`) and deletes those it does not track, for example a
+  - At `aclose()`, when this process has no sandbox live or being created, it reaps this worker's orphaned
+    sandboxes: it lists the gateway sandboxes labelled `nemo-gym-worker=<this worker's routing ID>` and
+    `nemo-gym.sandbox=1` and deletes those it does not track, for example a
     create that was cancelled after the gateway committed it. A create's name is tracked before the RPC is
     issued, so the reap never takes a sandbox another episode is still creating, and a create cancelled
-    during the RPC is deleted when the RPC returns. The per-process label (written last, so caller metadata
-    cannot replace it) keeps the reap from touching sibling processes of the same job, which share the run id.
+    during the RPC is deleted when the RPC returns. The worker label (written last, so caller metadata
+    cannot replace it) keeps the reap from touching sibling workers of the same job, which share the run id.
 - A sandbox that never becomes READY (for example an unpullable image) fails after `create.ready_timeout_s`.
   The SDK exposes no pull-specific signal, so the provider does not guess; the error message includes the
   conditions the gateway reports (`SandboxStatus.conditions`) for diagnosis.

@@ -41,7 +41,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.sandbox.attribution import PROCESS_KEY, AttributionConfig, resolve_process_id, sanitize_label_value
+from nemo_gym.core.worker_resources import worker_routing_id
+from nemo_gym.sandbox.attribution import AttributionConfig, sanitize_label_value
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -50,6 +51,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.worker_labels import WORKER_LABEL
 
 
 LOGGER = logging.getLogger(__name__)
@@ -722,11 +724,12 @@ class OpenShellProvider:
         options = OpenShellProviderOptions.from_mapping(spec.provider_options)
         pb_spec = self._build_sandbox_spec(spec, image, options)
         name = _generate_sandbox_name()
-        # Explicit spec keys win over attribution keys. The marker label and the process label (which the orphan
-        # reap selects on) go last so no caller metadata replaces them. Label values must be valid Kubernetes label
-        # values (at most 63 characters), so sanitize them all.
+        # Explicit spec keys win over attribution keys.
+        # The marker label and the worker label, which the orphan sweep selects on, go last so no caller metadata
+        # replaces them.
+        # Label values must be valid Kubernetes label values (at most 63 characters), so sanitize them all.
         attribution = self._attribution.metadata()
-        owner = {f"{self._attribution.key_prefix}{PROCESS_KEY}": resolve_process_id()} if attribution else {}
+        owner = {WORKER_LABEL: worker_routing_id()}
         labels = {
             str(key): sanitize_label_value(value)
             for key, value in {**attribution, **spec.metadata, **owner, SANDBOX_LABEL: "1"}.items()
@@ -1033,12 +1036,12 @@ class OpenShellProvider:
         return dict(ref.labels)
 
     async def _reap_orphans(self) -> None:
-        """Delete this process's orphaned sandboxes: ones it no longer tracks, for example a create cancelled
-        after the gateway committed it. Selected by the process label, which needs attribution to be enabled."""
-        if not self._attribution.enabled:
-            return
-        prefix = self._attribution.key_prefix
-        selector = f"{prefix}{PROCESS_KEY}={resolve_process_id()},{SANDBOX_LABEL}=1"
+        """Delete this worker's orphaned sandboxes: ones it no longer tracks.
+
+        An example is a create cancelled after the gateway committed it.
+        They are selected by this worker's ``nemo-gym-worker`` label, which every create sets.
+        """
+        selector = f"{WORKER_LABEL}={worker_routing_id()},{SANDBOX_LABEL}=1"
         workspace = self._connection.workspace
         try:
             refs = await self._call(self._client.list_all, workspace=workspace, label_selector=selector)
@@ -1049,7 +1052,7 @@ class OpenShellProvider:
             key = (ref.workspace or workspace, ref.name)
             if key in _LIVE_SANDBOXES or key in _PENDING_DELETES:
                 continue
-            LOGGER.warning(f"Deleting orphaned OpenShell sandbox {ref.name!r} of this process ({selector}).")
+            LOGGER.warning(f"Deleting orphaned OpenShell sandbox {ref.name!r} of this worker ({selector}).")
             self._submit_delete(_OpenShellSandbox(name=ref.name, sandbox_id=ref.id, workspace=key[0], image=None))
 
     async def aclose(self) -> None:

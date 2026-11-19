@@ -177,9 +177,3 @@ def test_metadata_when_enabled_prefixes_the_resolved_keys() -> None:
 
 def test_metadata_when_disabled_is_empty() -> None:
     assert attribution.AttributionConfig(enabled=False, team="t").metadata() == {}
-
-
-def test_process_id_differs_from_the_run_id_and_is_stable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NEMO_GYM_RUN_ID", "shared")
-    assert attribution.resolve_process_id() == attribution.resolve_process_id()
-    assert attribution.resolve_process_id() != resolve_run_id()

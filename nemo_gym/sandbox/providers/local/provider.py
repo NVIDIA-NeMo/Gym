@@ -23,7 +23,7 @@ import signal
 import uuid
 from pathlib import Path
 
-from nemo_gym.core.worker_resources import recorded_process_group, worker_workspace_dir
+from nemo_gym.core.worker_resources import record_process_group, worker_workspace_dir
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
@@ -87,7 +87,8 @@ class LocalProvider:
         return SandboxHandle(
             sandbox_id=sandbox_id,
             provider_name=self.name,
-            raw={"workspace": workspace, "env": dict(spec.env), "owned": owned},
+            # Records of process groups a command left running in the background; close ends them.
+            raw={"workspace": workspace, "env": dict(spec.env), "owned": owned, "process_groups": []},
         )
 
     async def exec(
@@ -111,34 +112,49 @@ class LocalProvider:
             exec_cwd = inst["workspace"] / exec_cwd
         timeout = timeout_s if timeout_s is not None else self._default_timeout_s
         async with self._semaphore:
+            # The shell waits for one line on stdin, sent once its process group is recorded, then runs the command in
+            # place with stdin from /dev/null.
+            # Recording after the command started would race a command that exits at once and leaves a process
+            # running in the background.
             process = await asyncio.create_subprocess_exec(
                 self._shell,
                 "-c",
+                'read -r _ && exec "$0" -c "$1" </dev/null',
+                self._shell,
                 command,
                 cwd=str(exec_cwd),
                 env={**os.environ, **inst["env"], **(env or {})},
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
-            # Recorded under this worker until the shell is reaped, so a peer can kill the group if this worker dies.
-            with recorded_process_group(process.pid):
-                try:
-                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-                except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError) as exc:
-                    with contextlib.suppress(ProcessLookupError):
-                        # start_new_session makes the PID the group ID, even after the shell exits.
-                        os.killpg(process.pid, signal.SIGKILL)
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(process.wait(), timeout=REAP_TIMEOUT_S)
-                    if isinstance(exc, asyncio.CancelledError):
-                        raise
-                    return SandboxExecResult(
-                        stdout=None,
-                        stderr=f"local command timed out after {timeout:g}s",
-                        return_code=SANDBOX_RUNTIME_RETURN_CODE,
-                        error_type="timeout",
-                    )
+            # Recorded under this worker, so a peer can kill the group if this worker dies.
+            record = record_process_group(process.pid)
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(b"\n"), timeout=timeout)
+            except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError) as exc:
+                with contextlib.suppress(ProcessLookupError):
+                    # start_new_session makes the PID the group ID, even after the shell exits.
+                    os.killpg(process.pid, signal.SIGKILL)
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(process.wait(), timeout=REAP_TIMEOUT_S)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                return SandboxExecResult(
+                    stdout=None,
+                    stderr=f"local command timed out after {timeout:g}s",
+                    return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                    error_type="timeout",
+                )
+            finally:
+                if record is not None:
+                    # A process the command left running in the background keeps the group alive.
+                    # The sandbox keeps its record until close ends the group.
+                    if record.is_running():
+                        inst.setdefault("process_groups", []).append(record)
+                    else:
+                        record.forget()
         return SandboxExecResult(
             stdout=stdout.decode(errors="replace"),
             stderr=stderr.decode(errors="replace"),
@@ -168,7 +184,12 @@ class LocalProvider:
         return SandboxStatus.RUNNING if handle.raw["workspace"].is_dir() else SandboxStatus.STOPPED
 
     async def close(self, handle: SandboxHandle) -> None:
+        """End the processes commands left running in the background, then remove an owned workspace."""
         inst = handle.raw
+        groups = inst.get("process_groups", [])
+        while groups:
+            await asyncio.to_thread(groups[-1].end)
+            groups.pop()
         if inst["owned"]:
             await asyncio.to_thread(shutil.rmtree, inst["workspace"], ignore_errors=True)
 
