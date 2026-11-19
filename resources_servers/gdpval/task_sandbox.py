@@ -91,6 +91,7 @@ async def start_task_sandbox(
             await sandbox.start(spec)
             break
         except SandboxCreateError as error:
+            await sandbox.stop()
             if attempt == start_attempts:
                 raise
             LOGGER.warning(
