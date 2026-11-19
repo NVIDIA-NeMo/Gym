@@ -1,10 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Harvey AI
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT
+
+# Original Harvey LAB portions remain under MIT; NVIDIA modifications follow.
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Harvey LAB source (MIT): https://github.com/harveyai/harvey-labs/blob/
+# f46ef86e4788545622db25dcffa3aebb7a139929/harness/tools.py
 """Container-side implementation for non-bash Harbor agent tools.
 
-LegalAgentBenchHarborAgent invokes this script inside the Harbor environment
-with a tool name and a JSON argument payload. It returns one JSON object on
+The native Gym agent invokes this script in its borrowed sandbox with a tool
+name and a JSON argument payload over stdin. It returns one JSON object on
 stdout:
 
     {"result": "...", "metrics": {...}}
@@ -36,15 +43,18 @@ MAX_READ_LINES = 200
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
+    if len(sys.argv) == 3:
+        raw_arguments = sys.argv[2]
+    elif len(sys.argv) == 2:
+        raw_arguments = sys.stdin.read()
+    else:
         _emit("Error: expected tool name and JSON arguments", {})
         return
-
     tool_name = sys.argv[1]
     try:
-        arguments = json.loads(sys.argv[2])
-    except json.JSONDecodeError as exc:
-        _emit(f"Error: invalid JSON arguments: {exc}", {})
+        arguments = json.loads(raw_arguments)
+    except json.JSONDecodeError as error:
+        _emit(f"Error: invalid JSON arguments: {error}", {})
         return
 
     metrics: dict[str, Any] = {}
