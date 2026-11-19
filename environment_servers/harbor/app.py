@@ -221,6 +221,8 @@ class _AgentSessionHandle:
     cookies: dict[str, str]
     cleanup: Any
     continuation: bool = False
+    # The seed's declaration that the close's observations hold the conversation the model received.
+    reports_model_conversation: bool = False
     observations: AgentObservationBundle | None = None
     trajectory: TrajectoryRecord | None = None
     closed: bool = False
@@ -915,7 +917,7 @@ class HarborEnvironmentServer(
                 if task_input.turns:
                     return await self._run_turns(request, session, access, cleanup, progress)
 
-                agent_response, agent_observations, agent_trajectory = await self._agent_turn(
+                agent_response, agent_observations, agent_trajectory, conversation = await self._agent_turn(
                     request,
                     access,
                     task_input.responses_create_params,
@@ -926,7 +928,9 @@ class HarborEnvironmentServer(
                 )
                 progress.stage = "verification"
                 try:
-                    outcome = await self._verified_outcome(session, request, agent_response)
+                    outcome = await self._verified_outcome(
+                        session, request, agent_response, conversation_observations=conversation
+                    )
                 except HTTPException as error:
                     raise self._failure(
                         stage="verification",
@@ -1036,19 +1040,24 @@ class HarborEnvironmentServer(
         request: HarborEpisodeRequest,
         agent_response: NeMoGymResponse,
         turn: tuple[HarborTurn, Any] | None = None,
+        *,
+        conversation_observations: AgentObservationBundle | None = None,
     ) -> dict[str, Any]:
         """Export the turn's transcript for the verifier and run it: the task's verifier for a single-turn
         episode, or, for ``turn`` (the step and the request it was sent), the turn's collection pass
         (:meth:`_collect_turn_artifacts`) and then the step's verifier with its settings and ``tests/``, in the
         agent's sandbox or, for a step that verifies separately (:meth:`_turn_separate`), in a verifier sandbox of
         its own. A transcript the converter cannot represent masks the turn instead of grading it; a collection the
-        sandbox could not serve masks it as an outage."""
+        sandbox could not serve masks it as an outage. ``conversation_observations`` are the close's observations of
+        a harness that reports the conversation the model received, which the transcript is exported from."""
         task = session.task
         try:
             if turn is None:
-                trajectory = self._export_trajectory(request, agent_response)
+                trajectory = self._export_trajectory(request, agent_response, observations=conversation_observations)
             else:
-                trajectory = self._export_trajectory(request, agent_response, turn[1])
+                trajectory = self._export_trajectory(
+                    request, agent_response, turn[1], observations=conversation_observations
+                )
         except AtifExportError as error:
             LOGGER.error(f"{task.task_id}: could not export the agent transcript to ATIF: {error}")
             return self._masked(TRAJECTORY_EXPORT_KIND, f"Could not export the agent transcript to ATIF: {error}")
@@ -1133,12 +1142,14 @@ class HarborEnvironmentServer(
         progress: "_TurnProgress",
         *,
         agent_timeout_sec: float,
-    ) -> tuple[NeMoGymResponse, AgentObservationBundle | None, TrajectoryRecord | None]:
+    ) -> tuple[NeMoGymResponse, AgentObservationBundle | None, TrajectoryRecord | None, AgentObservationBundle | None]:
         """One agent turn in its own session on the episode's sandbox: seed, one activation, close.
 
         The session is closed before this returns, so the harness has let go of the sandbox and its
         observations are in hand. A failed seed or activation raises the staged episode failure.
         ``progress`` is kept current with what the turn has produced, for the task deadline's failure.
+        The last item is the observations again when the harness declared that they hold the conversation the
+        model received, for the turn's transcript export (:meth:`_export_trajectory`); otherwise None.
         """
         handle = await self._open_agent_session(
             request, access, cleanup, task, progress, agent_timeout_sec=agent_timeout_sec, continuation=False
@@ -1148,7 +1159,8 @@ class HarborEnvironmentServer(
         # observations travel with the result.
         await self._close_agent_session(handle, task, progress, partial_response=agent_response)
         self._route_failed_response(agent_response, handle)
-        return agent_response, handle.observations, handle.trajectory
+        conversation = handle.observations if handle.reports_model_conversation else None
+        return agent_response, handle.observations, handle.trajectory, conversation
 
     async def _open_agent_session(
         self,
@@ -1222,6 +1234,7 @@ class HarborEnvironmentServer(
             if agent_session.agent_session_id != handle.agent_session_id:
                 raise ValueError("Agent seed returned a different agent_session_id")
             handle.cookies = _cookies(agent_create_http_response)
+            handle.reports_model_conversation = agent_session.reports_model_conversation
             unreached = self._unreached_task_tools(task, mcp_servers, tool_accesses)
             if unreached and not agent_session.supports_task_tool_context:
                 # The task's tools would never reach this harness, and the run would score a silent zero.
@@ -1425,8 +1438,9 @@ class HarborEnvironmentServer(
         on disk and its borrowed connection to the sandbox then stay in place while every step's verifier but the
         last's runs (the harness process has exited between activations, as Harbor's resumed agent has between
         steps); a task whose steps switch the agent user cannot continue, since
-        the session runs as the user it was seeded with (refused at seed, before any sandbox). Before a turn the previous turn's grading files are cleared, the sandbox
-        takes the step's ``[steps.agent].user`` when it has one, the step's ``workdir/``, ``setup.sh`` and
+        the session runs as the user it was seeded with (refused at seed, before any sandbox). Before a turn the
+        previous turn's grading files and, for a fresh session, its agent logs are cleared, the sandbox takes the
+        step's ``[steps.agent].user`` when it has one, the step's ``workdir/``, ``setup.sh`` and
         ``[steps.healthcheck]`` are applied and the oracle gets the step's own solution (:meth:`_prepare_turn`). The episode stops after a turn whose
         preparation failed (recorded as a failed turn with no agent response and no verifier result, Harbor's
         step ``exception_info``, scored 0 by :func:`roll_up_turns` when a turn ran before it), or that is masked,
@@ -1488,10 +1502,10 @@ class HarborEnvironmentServer(
                     trajectory=handle.trajectory if handle is not None else None,
                 ) from error
             except Exception as error:
-                # The sandbox could not clear the previous turn's grading files or take the turn's user or solution:
-                # a provider-side failure, retried elsewhere; a task-caused non-zero exit (turn 1 replaced /tests
-                # with a file) takes the same retryable path. The next agent never opens with those files at their
-                # paths.
+                # The sandbox could not clear the previous turn's grading files or agent logs, or take the turn's user
+                # or solution: a provider-side failure, retried elsewhere; a task-caused non-zero exit (turn 1
+                # replaced /tests with a file) takes the same retryable path. The next agent never opens with those
+                # files at their paths.
                 last_response = results[-1].response if results else None
                 await self._close_before_failure(handle, task, progress, partial_response=last_response)
                 raise self._failure(
@@ -1529,10 +1543,11 @@ class HarborEnvironmentServer(
                     # separately stops the agent's sandbox (`_verified_outcome`), where a close could no longer run
                     # in it (OpenCode's close removes its session directory from a borrowed sandbox).
                     await self._close_agent_session(handle, task, progress, partial_response=response)
-                # A continued session's observations and trajectory are the whole episode's, at its close.
-                observations, trajectory = None, None
+                # A continued session's observations and trajectory are the whole episode's, at its close, so the
+                # turn's transcript is its response output.
+                observations, trajectory, conversation = None, None, None
             else:
-                response, observations, trajectory = await self._agent_turn(
+                response, observations, trajectory, conversation = await self._agent_turn(
                     request,
                     access,
                     turn_input.responses_create_params,
@@ -1548,7 +1563,11 @@ class HarborEnvironmentServer(
                 # verifier), then the step's user is back in place for the next turn's switch to compare with.
                 with self._as_seed_default_user(session):
                     outcome = await self._verified_outcome(
-                        session, request, response, (turn, turn_input.responses_create_params)
+                        session,
+                        request,
+                        response,
+                        (turn, turn_input.responses_create_params),
+                        conversation_observations=conversation,
                     )
             except HTTPException as error:
                 # A continued session's evidence sits on the handle once its close has returned: after the last
@@ -1627,11 +1646,13 @@ class HarborEnvironmentServer(
         empties ``/tests`` and ``/logs/verifier`` only right before each step's shared verifier, so its next step's
         agent still sees the previous step's tests, and its separate mode never touches the agent's ``/tests``;
         Harbor main moved that reset into its step preparation, gated on the previous step having run a shared
-        verifier there, and this follows main. Harbor also empties the whole ``/logs/agent`` before a step
-        that does not resume (or moves the bind-mounted contents away); here only the server's
-        ``trajectory.json`` goes and the agent's own files under ``/logs/agent`` stay. The reset removes files at
-        those paths: a process the previous agent left running, or a copy it took during its verification, is out
-        of scope, as under Harbor's shared mode. Harbor runs each step as its own ``[steps.agent].user``
+        verifier there, and this follows main. Every turn after the first that opens a fresh agent session (not a
+        continued one) then finds ``/logs/agent`` empty (:meth:`_reset_agent_logs`), whatever mode the previous
+        turn verified in, as Harbor empties it before a step that does not resume (or moves the bind-mounted
+        contents away): the previous harness's logs there (Codex's ``codex.txt`` and ``sessions/``) hold its
+        conversation. A continued session keeps the folder, as a resumed Harbor step does. The resets remove files
+        at those paths: a process the previous agent left running, or a copy it took during its verification, is
+        out of scope, as under Harbor's shared mode. Harbor runs each step as its own ``[steps.agent].user``
         (else the task's ``[agent].user``), so when the turn's user differs from the one the sandbox runs as, the
         sandbox's default user, the working directory's owner and the user the harness is handed switch to it
         (:meth:`_apply_turn_user`), and the access the harness gets is rebuilt for it; the verifier keeps its own
@@ -1648,6 +1669,8 @@ class HarborEnvironmentServer(
         index = next(i for i, candidate in enumerate(task.turns) if candidate is turn)
         if index and not self._turn_separate(task, task.turns[index - 1]):
             await self._reset_shared_verifier_dirs(session.sandbox, keep=task.config.verifier.inputs)
+        if index and self.config.turn_sessions == "fresh":
+            await self._reset_agent_logs(session.sandbox)
         user = str(turn.config.agent.user) if turn.config.agent.user is not None else task.user
         # Compared as written (the seed's or the previous turn's), not with the form the sandbox installed.
         if user != session.requested_user:

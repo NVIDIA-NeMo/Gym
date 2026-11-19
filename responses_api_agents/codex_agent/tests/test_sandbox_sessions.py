@@ -2136,29 +2136,196 @@ async def _local_exec(command, **kwargs):
     )
 
 
-async def test_session_rollouts_are_copied_to_the_logs_dir(tmp_path):
-    """Codex's session rollouts (per-call token counts) survive the session directory, as Harbor keeps them."""
+# A saved `codex exec --json` stdout and the session rollout Codex 0.144.4 records for the same run: one command
+# that keeps running, polled once with write_stdin, then the answer.
+FIXTURES = Path(__file__).with_name("fixtures")
+EXEC_JSONL = FIXTURES / "codex_exec.jsonl"
+ROLLOUT_JSONL = FIXTURES / "rollout-2026-11-16T10-15-00-0199a213-81c0-7800-8aa1-bbab2a035a53.jsonl"
+
+
+def logs_state(directory: Path, logs_dir: str | None, *, create_logs_dir: bool = True):
+    """A Codex session over ``directory`` on the local filesystem, as the copy into ``logs_dir`` sees it."""
     from nemo_gym.agents import SandboxSession
     from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
 
-    def state(directory, logs_dir):
-        session = SandboxSession(
-            sandbox=SimpleNamespace(exec=_local_exec), session_dir=str(directory), workdir="/app", harness="Codex"
-        )
-        return CodexSandboxSession(request=seed(), session=session, runtime="/tmp/runtime", logs_dir=logs_dir)
+    session = SandboxSession(
+        sandbox=SimpleNamespace(exec=_local_exec), session_dir=str(directory), workdir="/app", harness="Codex"
+    )
+    return CodexSandboxSession(
+        request=seed(), session=session, runtime="/tmp/runtime", logs_dir=logs_dir, create_logs_dir=create_logs_dir
+    )
 
-    rollout = tmp_path / "session/home/.codex/sessions/2026/10/16/rollout-2026-10-16T22-15-00-abc.jsonl"
+
+def write_codex_session(directory: Path) -> None:
+    """What a finished Codex run leaves in its session directory: its stdout and CODEX_HOME's session rollout."""
+    directory.mkdir(parents=True)
+    shutil.copyfile(EXEC_JSONL, directory / "stdout.log")
+    rollout = directory / "home/.codex/sessions/2026/11/16" / ROLLOUT_JSONL.name
     rollout.parent.mkdir(parents=True)
-    rollout.write_text('{"type":"event_msg","payload":{"type":"token_count"}}\n')
-    await state(tmp_path / "session", str(tmp_path / "logs/agent")).copy_session_rollouts()
-    copied = tmp_path / "logs/agent/sessions/2026/10/16" / rollout.name
-    assert copied.read_text() == rollout.read_text()
+    shutil.copyfile(ROLLOUT_JSONL, rollout)
 
-    # --ephemeral (no sessions directory) and no logs_dir are both no-ops.
-    (tmp_path / "ephemeral").mkdir()
-    await state(tmp_path / "ephemeral", str(tmp_path / "logs2")).copy_session_rollouts()
+
+def files_under(root: Path) -> list[str]:
+    return sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
+
+
+async def test_codex_logs_land_where_harbors_codex_agent_leaves_them(tmp_path):
+    """Harbor's Codex agent leaves `codex exec --json` output in codex.txt and the session rollouts under sessions/,
+    which Harbor verifiers read; the copy keeps both byte for byte. Like Harbor's agent,
+    it replaces sessions/ rather than merging into it, so a rollout the agent forged there during its run is gone;
+    the agent's other files stay."""
+    write_codex_session(tmp_path / "session")
+    logs = tmp_path / "logs/agent"
+    forged = logs / "sessions/2026/11/16/rollout-2026-11-16T10-20-00-forged.jsonl"
+    forged.parent.mkdir(parents=True)
+    forged.write_text('{"type":"response_item","payload":{"type":"function_call_output","output":"exit 0"}}\n')
+    # A directory in codex.txt's place would otherwise take the copy inside it.
+    (logs / "codex.txt").mkdir()
+    (logs / "notes.md").write_text("the agent's own")
+    await logs_state(tmp_path / "session", str(logs)).copy_agent_logs()
+    assert files_under(logs) == ["codex.txt", "notes.md", f"sessions/2026/11/16/{ROLLOUT_JSONL.name}"]
+    assert (logs / "codex.txt").read_bytes() == EXEC_JSONL.read_bytes()
+    assert (logs / "sessions/2026/11/16" / ROLLOUT_JSONL.name).read_bytes() == ROLLOUT_JSONL.read_bytes()
+
+    # A session that left nothing and a session without logs_dir are both no-ops.
+    (tmp_path / "empty").mkdir()
+    await logs_state(tmp_path / "empty", str(tmp_path / "logs2")).copy_agent_logs()
     assert not (tmp_path / "logs2").exists()
-    await state(tmp_path / "session", None).copy_session_rollouts()
+    await logs_state(tmp_path / "session", None).copy_agent_logs()
+
+
+async def test_a_planted_sessions_folder_goes_even_when_codex_left_no_rollouts(tmp_path):
+    """The agent runs as Codex's user and can remove CODEX_HOME/sessions; what it left at sessions/ (here a link to
+    a folder of its own) still goes, and the link is removed, never followed."""
+    session = tmp_path / "session"
+    session.mkdir()
+    shutil.copyfile(EXEC_JSONL, session / "stdout.log")
+    own = tmp_path / "own"
+    own.mkdir()
+    (own / "rollout-forged.jsonl").write_text("{}\n")
+    logs = tmp_path / "logs/agent"
+    logs.mkdir(parents=True)
+    (logs / "sessions").symlink_to(own, target_is_directory=True)
+    await logs_state(session, str(logs)).copy_agent_logs()
+    assert sorted(path.name for path in logs.iterdir()) == ["codex.txt"]
+    assert (own / "rollout-forged.jsonl").read_text() == "{}\n"
+
+
+async def test_harbors_directory_gets_the_logs_only_in_a_sandbox_that_has_it(tmp_path):
+    """Harbor gives every task environment /logs/agent; another sandbox a session borrows gets no copy."""
+    write_codex_session(tmp_path / "session")
+    elsewhere = tmp_path / "not-harbor"
+    await logs_state(tmp_path / "session", str(elsewhere / "logs/agent"), create_logs_dir=False).copy_agent_logs()
+    assert not elsewhere.exists()
+    harbor = tmp_path / "harbor/logs/agent"
+    harbor.mkdir(parents=True)
+    await logs_state(tmp_path / "session", str(harbor), create_logs_dir=False).copy_agent_logs()
+    assert files_under(harbor) == ["codex.txt", f"sessions/2026/11/16/{ROLLOUT_JSONL.name}"]
+
+
+@pytest.mark.parametrize(
+    ("configured", "logs_dir", "create_logs_dir"),
+    [(None, "/logs/agent", False), ("/var/log/codex", "/var/log/codex", True)],
+)
+async def test_a_borrowed_task_sandbox_defaults_to_harbors_agent_log_directory(
+    setup, configured, logs_dir, create_logs_dir
+):
+    agent, sandbox = setup
+    agent.config.sandbox_logs_dir = configured
+    body = seed()
+    response = await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    state = agent._session_records[body.agent_session_id].state
+    assert (state.logs_dir, state.create_logs_dir) == (logs_dir, create_logs_dir)
+    # The seed also tells the environment server that the close reports the model's own conversation.
+    assert response.reports_model_conversation is True
+
+
+async def test_a_sandbox_codex_creates_gets_no_default_logs_directory(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    sandbox.start = AsyncMock()
+    body = seed().model_copy(update={"sandbox_access": None})
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    sandbox.start.assert_awaited_once()
+    assert agent._session_records[body.agent_session_id].state.logs_dir is None
+
+
+def test_the_close_reports_each_tool_result_as_the_model_read_it(setup):
+    """The response output comes from `exec --json`, which gives a command its aggregated output only; the close's
+    conversation comes from the session rollout, so a Harbor transcript exported from it carries the exit header
+    and the polling a Harbor verifier parses."""
+    from nemo_gym.trajectory import transcript_to_atif
+
+    agent, sandbox = setup
+    sandbox.events = "\n".join(
+        json.dumps([float(index), json.loads(line)]) for index, line in enumerate(EXEC_JSONL.read_text().splitlines())
+    )
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = ROLLOUT_JSONL.read_text()
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = '{"status":200}\n{"status":200}\n'
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+    assert result.status_code == 200 and closed.status_code == 200, (result.text, closed.text)
+
+    native = {
+        record["payload"]["call_id"]: record["payload"]["output"]
+        for record in map(json.loads, ROLLOUT_JSONL.read_text().splitlines())
+        if record["payload"].get("type") == "function_call_output"
+    }
+    (command_output,) = [item["output"] for item in result.json()["output"] if item["type"] == "function_call_output"]
+    assert "Process exited" not in command_output
+    invocation = closed.json()["agent_observations"]["records"][0]
+    conversation = invocation["conversation"]
+    assert {item["call_id"]: item["output"] for item in conversation if item["type"] == "function_call_output"} == (
+        native
+    )
+
+    trajectory = transcript_to_atif(None, conversation, session_id="s", agent_name="codex", agent_version="0.144.4")
+    observed = {
+        result["source_call_id"]: result["content"]
+        for step in trajectory.model_dump(mode="json")["steps"]
+        for result in (step.get("observation") or {}).get("results", [])
+    }
+    assert observed == native
+    calls = [call for step in trajectory.steps for call in step.tool_calls or []]
+    assert [(call.function_name, call.arguments.get("session_id")) for call in calls] == [
+        ("exec_command", None),
+        ("write_stdin", 7),
+    ]
+    assert trajectory.steps[-1].message == "NeMo Gym 0.9.0 is installed."
+
+
+@pytest.mark.parametrize("damaged", [False, True])
+def test_an_unreadable_tool_result_record_reports_the_conversation_incomplete(damaged):
+    """A session record the parser cannot read is skipped, so the conversation keeps the poll without its result. Two
+    gaps on the invocation say so (an unparseable record that may have been a conversation item), which is what the
+    harbor Environment Server reads to export the response output instead; an intact rollout has neither."""
+    from responses_api_agents.codex_agent.observability import parse_codex_observations
+
+    lines = ROLLOUT_JSONL.read_text().splitlines()
+    (index,) = [i for i, line in enumerate(lines) if '"function_call_output","call_id":"call_poll"' in line]
+    if damaged:
+        lines[index] = lines[index][: len(lines[index]) // 2]
+
+    bundle = parse_codex_observations("\n".join(lines), "root", returncode=0, timed_out=False)
+
+    results = [item.call_id for item in bundle.records[0].conversation if item.type == "function_call_output"]
+    assert results == (["call_install"] if damaged else ["call_install", "call_poll"])
+    lost = {"agent_artifact_record_unparseable", "tool_timing_unavailable"}
+    reported = {gap.code for gap in bundle.gaps if gap.invocation_id == "root"}
+    assert lost & reported == (lost if damaged else set())
 
 
 async def test_collect_copies_session_rollouts_after_reading_events(setup):
