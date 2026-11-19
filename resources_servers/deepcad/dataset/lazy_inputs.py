@@ -159,8 +159,7 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
         timed_out = root / f"{key}.timeout-{config.timeout_s}.json"
         if timed_out.exists() and not target.exists():
             detail = json.loads(timed_out.read_text())
-            if detail.get("confirmation_count") == 2:
-                raise ReferenceRenderTimeout(detail["reason"])
+            raise ReferenceRenderTimeout(detail["reason"])
         if target.exists():
             row = json.loads(target.read_text())
         else:
@@ -214,10 +213,7 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                             "source_sha256": record["source_sha256"],
                             "timeout_s": config.timeout_s,
                             "status": "render_timeout_unverified",
-                            "confirmation_key": "renderer_timeout",
                         }
-                        _confirm_failure(target, detail, config)
-                        detail["status"] = "render_timeout_confirmed"
                         temporary = timed_out.with_suffix(".building")
                         temporary.write_text(json.dumps(detail))
                         temporary.replace(timed_out)
@@ -245,6 +241,19 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
 
                         detail = json.loads(failure.read_text())
                         detail.update(asset_id=record.get("asset_id"), source_sha256=record["source_sha256"])
+                        # A budget overrun is sufficient to replace a slow reference;
+                        # it is not evidence that the CAD program is invalid.
+                        if (
+                            detail.get("confirmation_key") == "reference_execution_timeout"
+                            and record.get("source_kind") == "cad_corpus"
+                            and config.reference_catalog
+                        ):
+                            detail.update(status="render_timeout_unverified", timeout_s=config.timeout_s)
+                            temporary = timed_out.with_suffix(".building")
+                            temporary.write_text(json.dumps(detail))
+                            temporary.replace(timed_out)
+                            logger.warning("Quarantined reference execution timeout: %s", detail)
+                            raise ReferenceRenderTimeout(detail["reason"])
                         if detail.get("confirmation_key"):
                             _confirm_failure(target, detail, config)
                         temporary = rejected.with_suffix(".building")
