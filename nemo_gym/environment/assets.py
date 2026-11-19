@@ -4,6 +4,8 @@
 """Resolve a named asset (a benchmark, environment, resources server, model type or agent type) to its config path."""
 
 import logging
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from nemo_gym import component_search_roots
@@ -33,29 +35,52 @@ def _path_candidates(tree: Path, value: str) -> list[Path]:
     return [*nested, tree / server_name / f"{config_flavor or 'config'}.yaml"]
 
 
-def _catalog_configs_in_tree(tree: Path, value: str, kind: str) -> tuple[Path | None, Path | None]:
-    """The config one catalog tree resolves a name to as a catalog entry, and otherwise by its old path.
+@dataclass(frozen=True)
+class _DeclaredNames:
+    """The names the manifests of one benchmarks/ or environments/ tree declare, read once per selection."""
 
-    The catalog entry is what the catalog lists under the name: the manifest, or the setup or protocol a manifest
-    lists, that declares it, or else a config the catalog lists under that name and no manifest claims. Any other
-    config at that path, such as an environment flavor file, a nested benchmark config or a config that a manifest
-    claims under another name, is returned separately: it is used only when no root has a catalog entry, which keeps
-    such paths working.
-    """
+    tree: Path
+    # Each declared name, a main manifest's or that of a setup or protocol it lists -> (main manifest's name, config).
+    configs: dict[str, tuple[str, Path]]
+    # Every config a manifest in the tree declares; the catalog does not list these again under their path.
+    claimed: frozenset[Path]
+
+
+def _declared_names(tree: Path) -> _DeclaredNames:
     # Imported here so that commands that never select a benchmark or environment, such as --help, stay fast.
-    from nemo_gym.environment.registry import _legacy_config_name, _manifest_configs, declared_manifests
+    from nemo_gym.environment.registry import _manifest_configs, declared_manifests
 
+    configs: dict[str, tuple[str, Path]] = {}
     claimed: set[Path] = set()
     for manifest_path, manifest in declared_manifests(tree):
         for name, config_path in _manifest_configs(manifest_path, manifest):
-            if name == value:
-                return config_path, None
+            configs.setdefault(name, (manifest.name, config_path))
             claimed.add(config_path)
-    candidates = [candidate for candidate in _path_candidates(tree, value) if candidate.is_file()]
-    for candidate in candidates:
-        if candidate.resolve() not in claimed and _legacy_config_name(tree, candidate, kind) == value:
-            return candidate.resolve(), None
-    return None, (candidates[0].resolve() if candidates else None)
+    return _DeclaredNames(tree, configs, frozenset(claimed))
+
+
+def _catalog_config(trees: Sequence[_DeclaredNames], index: int, value: str, kind: str) -> Path | None:
+    """The config the catalog lists under a name from ``trees[index]``, or None when that tree lists no such entry.
+
+    That is the manifest, or the setup or protocol a manifest lists, that declares the name, or else a config at the
+    name's path that the catalog lists under that name and no manifest claims. As in catalog discovery, a manifest
+    whose own name an earlier tree lists is shadowed together with every setup and protocol it lists.
+    """
+    from nemo_gym.environment.registry import _legacy_config_name
+
+    names = trees[index]
+    if value in names.configs:
+        main_name, config_path = names.configs[value]
+        if main_name == value or not any(_catalog_config(trees, earlier, main_name, kind) for earlier in range(index)):
+            return config_path
+    for candidate in _path_candidates(names.tree, value):
+        if (
+            candidate.is_file()
+            and candidate.resolve() not in names.claimed
+            and _legacy_config_name(names.tree, candidate, kind) == value
+        ):
+            return candidate.resolve()
+    return None
 
 
 def asset_config_path(flag: str, value: str) -> str:
@@ -78,15 +103,19 @@ def asset_config_path(flag: str, value: str) -> str:
     matches: list[Path] = []
 
     if flag in _CATALOG_FLAGS:
-        # The catalog's rule, root by root: the highest-priority root with a catalog entry for the name wins.
-        old_paths: list[Path] = []
-        for root in roots:
-            entry, old_path = _catalog_configs_in_tree(root / parent, value, flag)
-            if entry is not None and entry not in matches:
-                matches.append(entry)
-            if old_path is not None and old_path not in old_paths:
-                old_paths.append(old_path)
-        matches = matches or old_paths
+        # The catalog's rule: the highest-priority root whose catalog lists the name wins.
+        trees = [_declared_names(root / parent) for root in roots]
+        for index in range(len(trees)):
+            config_path = _catalog_config(trees, index, value, flag)
+            if config_path is not None and config_path not in matches:
+                matches.append(config_path)
+        if not matches:
+            # Any other config at the name's path, such as an environment flavor file, a nested benchmark config or a
+            # config that a manifest declares under another name, selects only when no root lists the name.
+            for names in trees:
+                candidate = next((path for path in _path_candidates(names.tree, value) if path.is_file()), None)
+                if candidate is not None and candidate.resolve() not in matches:
+                    matches.append(candidate.resolve())
     else:
         for root in roots:
             candidate = root / path
@@ -106,15 +135,15 @@ def asset_config_path(flag: str, value: str) -> str:
 
     # No match: build a "did you mean?" hint and the roots searched
     if flag in _CATALOG_FLAGS:
-        from nemo_gym.environment.registry import _legacy_config_paths, declared_manifests
+        from nemo_gym.environment.registry import _legacy_config_paths
 
         # Suggest declared IDs as well as the folder/flavor aliases that remain selectable.
         config_names: set[str] = set()
-        for root in roots:
-            tree = root / parent
+        for names in trees:
+            tree = names.tree
             if not tree.is_dir():
                 continue
-            config_names.update(name for _, manifest in declared_manifests(tree) for name in manifest.declared_names())
+            config_names.update(names.configs)
             config_names.update(
                 name for name, _ in _legacy_config_paths(tree, "benchmark" if flag == "benchmark" else "environment")
             )

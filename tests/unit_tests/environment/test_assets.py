@@ -90,6 +90,27 @@ def test_a_shadowed_manifests_folder_does_not_take_that_name_from_a_later_root(
     assert _selected("moved") == _listed("moved") == target.with_name("config.yaml").resolve()
 
 
+@pytest.mark.parametrize("first_suite", ["manifest", "config without a manifest"])
+def test_a_setup_of_a_shadowed_manifest_does_not_take_its_name_from_a_later_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_suite: str
+) -> None:
+    # The first root's `suite` shadows the middle root's `suite` and the setup `suite/fast` it lists, so the catalog
+    # lists the last root's `suite/fast`.
+    first, middle, last = tmp_path / "first", tmp_path / "middle", tmp_path / "last"
+    _use_roots(monkeypatch, first, middle, last)
+    if first_suite == "manifest":
+        _write_manifest(first, "environments", "suite", _manifest("suite"))
+    else:
+        (first / "environments/suite").mkdir(parents=True)
+        (first / "environments/suite/config.yaml").write_text("{}\n", encoding="utf-8")
+    listing = {"setups": [{"name": "suite/fast", "config_path": "fast.yaml"}]}
+    hidden = _write_manifest(middle, "environments", "suite", _manifest("suite", **listing)).with_name("fast.yaml")
+    hidden.write_text("{}\n", encoding="utf-8")
+    declared = _write_manifest(last, "environments", "fast", _manifest("suite/fast"))
+
+    assert _selected("suite/fast") == _listed("suite/fast") == declared.with_name("config.yaml").resolve()
+
+
 def test_a_flavor_path_in_an_earlier_root_does_not_shadow_a_declared_name(roots: tuple[Path, Path]) -> None:
     # The catalog lists no environment flavor file, so `suite/fast` here is a path, not a catalog entry.
     earlier, later = roots
