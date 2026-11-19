@@ -46,7 +46,7 @@ DEFAULT_DEST = HERE / ".runtime"
 HARNESS_PROJECT = HERE.parents[1] / "responses_api_agents" / "arc_agi_3_agent" / "pyproject.toml"
 # The source commit of the Kaggle kit's harness (its HARNESS-PROVENANCE.json): the harness revision the example pool was
 # recorded with. Pool rows carry it as their harness revision.
-HARNESS_COMMIT = "30d2cc8bb582c4126e1020d084a94468a057dea7"
+HARNESS_COMMIT = "30d2cc8bb582c4126e1020d084a94468a057dea7"  # pragma: allowlist secret
 DIGEST = re.compile(r"[0-9a-f]{64}")
 # One component of a game's path: a game id or version (no separator, not "." or "..").
 PATH_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
