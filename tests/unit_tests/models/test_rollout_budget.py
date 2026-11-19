@@ -12,32 +12,29 @@ from fastapi import HTTPException
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode_context import rollout_context
+from nemo_gym.core.generation_budget import EpisodeGenerationBudget, generation_budget_context
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
 from nemo_gym.models.model_call_capture import _fail_uncommitted_external_call
-from nemo_gym.models.rollout_budget import BUDGET_STOP_REASON, RolloutGenerationBudget, RolloutGenerationBudgetConfig
+from nemo_gym.models.rollout_budget import BUDGET_STOP_REASON, RolloutGenerationBudget
 from nemo_gym.models.token_capture.lineage import InMemoryLineageStore
 from nemo_gym.models.token_capture.sink import CaptureContext
 
 
 def _reserve(root):
-    budget = RolloutGenerationBudget(
-        RolloutGenerationBudgetConfig(max_calls=10, state_dir=root, agent_servers=["agent"])
-    )
-    return budget.reserve("shared")
+    budget = RolloutGenerationBudget(root)
+    return budget.reserve("shared", 10)
 
 
 def test_processes_and_restarts_share_hard_cap(tmp_path):
     with ProcessPoolExecutor(max_workers=4) as pool:
         assert sorted(value for value in pool.map(_reserve, [tmp_path] * 40) if value) == list(range(1, 11))
     assert not _reserve(tmp_path)
-    budget = RolloutGenerationBudget(
-        RolloutGenerationBudgetConfig(max_calls=10, state_dir=tmp_path, agent_servers=["agent"])
-    )
-    assert budget.reserve("another-rollout")
+    budget = RolloutGenerationBudget(tmp_path)
+    assert budget.reserve("another-rollout", 10)
 
 
 class Model(SimpleResponsesAPIModel):
@@ -62,7 +59,7 @@ def _model(tmp_path):
             openai_api_key="test",
             entrypoint="",
             name="model",
-            rollout_generation_budget={"max_calls": 10, "state_dir": tmp_path, "agent_servers": ["agent"]},
+            generation_budget_state_dir=str(tmp_path),
         ),
         server_client=client,
     )
@@ -78,7 +75,10 @@ async def test_dispatch_counts_generation_once_and_stops_before_eleventh(tmp_pat
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=True))
     response_params = NeMoGymResponseCreateParamsNonStreaming(input="same input")
     chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(model="policy", messages=[])
-    with rollout_context("r"):
+    with (
+        rollout_context("r"),
+        generation_budget_context(EpisodeGenerationBudget(max_calls=10, rollout_id="r", agent_server="agent")),
+    ):
         for index in range(10):
             if index % 2:
                 await model._invoke_chat_completions(request, chat_params)
@@ -117,8 +117,12 @@ async def test_refused_generation_has_no_capture_intent_or_backend_call(tmp_path
     monkeypatch.setattr(base, "register_call_intent", register)
     monkeypatch.setattr(base, "capture_tokens", capture)
     for _ in range(10):
-        assert model._generation_budget.reserve("r")
-    with rollout_context("r"), pytest.raises(HTTPException):
+        assert model._generation_budget.reserve("r", 10)
+    with (
+        rollout_context("r"),
+        generation_budget_context(EpisodeGenerationBudget(max_calls=10, rollout_id="r", agent_server="agent")),
+        pytest.raises(HTTPException),
+    ):
         await model._invoke_responses(
             SimpleNamespace(is_disconnected=AsyncMock(return_value=True)),
             NeMoGymResponseCreateParamsNonStreaming(input="test"),
@@ -140,13 +144,20 @@ async def test_missing_correlation_and_stop_failure_fail_closed(tmp_path, monkey
     generated = AsyncMock(return_value={"output": []})
     monkeypatch.setattr(Model, "chat_completions", generated)
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=True))
-    with pytest.raises(HTTPException, match="correlation"):
+    with (
+        generation_budget_context(EpisodeGenerationBudget(max_calls=10, rollout_id="r", agent_server="agent")),
+        pytest.raises(HTTPException, match="logical rollout"),
+    ):
         await model._invoke_responses(request, NeMoGymResponseCreateParamsNonStreaming(input="test"))
     generated.assert_not_awaited()
     for _ in range(10):
-        model._generation_budget.reserve("r")
+        model._generation_budget.reserve("r", 10)
     client.post.side_effect = RuntimeError("transport failed")
-    with rollout_context("r"), pytest.raises(RuntimeError, match="transport failed"):
+    with (
+        rollout_context("r"),
+        generation_budget_context(EpisodeGenerationBudget(max_calls=10, rollout_id="r", agent_server="agent")),
+        pytest.raises(RuntimeError, match="transport failed"),
+    ):
         await model._generation_budget.admit(request, client)
 
 
@@ -154,7 +165,10 @@ async def test_missing_correlation_and_stop_failure_fail_closed(tmp_path, monkey
 async def test_concurrent_admissions_never_exceed_limit(tmp_path):
     model, client = _model(tmp_path)
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=True))
-    with rollout_context("r"):
+    with (
+        rollout_context("r"),
+        generation_budget_context(EpisodeGenerationBudget(max_calls=10, rollout_id="r", agent_server="agent")),
+    ):
         results = await asyncio.gather(
             *(model._generation_budget.admit(request, client) for _ in range(25)), return_exceptions=True
         )
@@ -165,7 +179,11 @@ async def test_concurrent_admissions_never_exceed_limit(tmp_path):
 @pytest.mark.asyncio
 async def test_multi_completion_cannot_bypass_budget(tmp_path):
     model, _ = _model(tmp_path)
-    with rollout_context("r"), pytest.raises(HTTPException, match="one completion"):
+    with (
+        rollout_context("r"),
+        generation_budget_context(EpisodeGenerationBudget(max_calls=10, rollout_id="r", agent_server="agent")),
+        pytest.raises(HTTPException, match="one completion"),
+    ):
         await model._invoke_chat_completions(
             SimpleNamespace(), NeMoGymChatCompletionCreateParamsNonStreaming(model="policy", messages=[], n=2)
         )
@@ -178,11 +196,36 @@ async def test_stop_waits_for_cli_disconnect(tmp_path, monkeypatch):
 
     model, client = _model(tmp_path)
     for _ in range(10):
-        model._generation_budget.reserve("r")
+        model._generation_budget.reserve("r", 10)
     request = SimpleNamespace(is_disconnected=AsyncMock(side_effect=[False, False, True]))
     sleep = AsyncMock()
     monkeypatch.setattr(module.asyncio, "sleep", sleep)
-    with rollout_context("r"), pytest.raises(HTTPException):
+    with (
+        rollout_context("r"),
+        generation_budget_context(EpisodeGenerationBudget(max_calls=10, rollout_id="r", agent_server="agent")),
+        pytest.raises(HTTPException),
+    ):
         await model._generation_budget.admit(request, client)
     assert sleep.await_count == 2
     assert request.is_disconnected.await_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured,rollout", [(False, "r"), (True, "different")])
+async def test_budget_without_storage_or_matching_identity_never_dispatches(
+    tmp_path, monkeypatch, configured, rollout
+):
+    model, _ = _model(tmp_path)
+    if not configured:
+        model._generation_budget = None
+    generated = AsyncMock(return_value={"output": []})
+    monkeypatch.setattr(Model, "chat_completions", generated)
+    with (
+        rollout_context(rollout),
+        generation_budget_context(EpisodeGenerationBudget(max_calls=10, rollout_id="r", agent_server="agent")),
+        pytest.raises(HTTPException) as error,
+    ):
+        await model._invoke_responses(SimpleNamespace(), NeMoGymResponseCreateParamsNonStreaming(input="test"))
+    assert error.value.status_code == (422 if configured else 503)
+    generated.assert_not_awaited()
+    assert not list(tmp_path.glob("*.generation-count"))

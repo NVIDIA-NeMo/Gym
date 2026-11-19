@@ -51,6 +51,7 @@ from nemo_gym.config.config_types import (
 )
 
 
+GENERATION_BUDGET_PATH_SEGMENT = "ng-generation-budget"
 AGENT_INSTANCE_PATH_SEGMENT = "ng-agent-instance"
 # ``\Z`` rather than ``$``: ``$`` also matches before a final newline.
 AGENT_INSTANCE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z0-9_-]+)?\Z")
@@ -60,6 +61,7 @@ _SEGMENT_LITERALS = frozenset(
         AGENT_INSTANCE_PATH_SEGMENT,
         TOKEN_CAPTURE_PATH_SEGMENT,
         MODEL_SAMPLING_PATH_SEGMENT,
+        GENERATION_BUDGET_PATH_SEGMENT,
         TRACE_CONTEXT_PATH_SEGMENT,
     }
 )
@@ -112,6 +114,7 @@ class CorrelationContext:
     agent_instance: str | None = None
     token_capture: bool = False
     model_sampling: str | None = None
+    generation_budget: str | None = None
     trace_parent: str | None = None
 
     def __post_init__(self) -> None:
@@ -128,6 +131,13 @@ class CorrelationContext:
             or self.model_sampling in RESERVED_AGENT_INSTANCE_NAMES
         ):
             raise ValueError(f"invalid model sampling value {self.model_sampling!r}")
+        if self.generation_budget is not None and (
+            self.capture_key is None
+            or not self.generation_budget
+            or "/" in self.generation_budget
+            or self.generation_budget in RESERVED_AGENT_INSTANCE_NAMES
+        ):
+            raise ValueError("generation budget requires a rollout and a valid segment")
         if self.trace_parent is not None and not TRACEPARENT_PATTERN.match(self.trace_parent):
             raise ValueError(f"invalid traceparent {self.trace_parent!r}")
 
@@ -147,6 +157,8 @@ def encode(context: CorrelationContext) -> str:
             prefix += f"/{TOKEN_CAPTURE_PATH_SEGMENT}"
     if context.model_sampling is not None:
         prefix += f"/{MODEL_SAMPLING_PATH_SEGMENT}/{context.model_sampling}"
+    if context.generation_budget is not None:
+        prefix += f"/{GENERATION_BUDGET_PATH_SEGMENT}/{context.generation_budget}"
     if context.trace_parent is not None:
         prefix += f"/{TRACE_CONTEXT_PATH_SEGMENT}/{context.trace_parent}"
     return prefix
@@ -165,7 +177,7 @@ def parse_path(path: str, *, allow_empty_rest: bool = False) -> tuple[Correlatio
     segments = path.split("/")
     # segments[0] is the empty string before the leading slash.
     index = 1
-    capture_key = agent_instance = model_sampling = trace_parent = None
+    capture_key = agent_instance = model_sampling = generation_budget = trace_parent = None
     token_capture = False
 
     def value_after(literal: str) -> str:
@@ -187,6 +199,9 @@ def parse_path(path: str, *, allow_empty_rest: bool = False) -> tuple[Correlatio
     if index < len(segments) and segments[index] == MODEL_SAMPLING_PATH_SEGMENT:
         model_sampling = value_after(MODEL_SAMPLING_PATH_SEGMENT)
         index += 2
+    if index < len(segments) and segments[index] == GENERATION_BUDGET_PATH_SEGMENT:
+        generation_budget = value_after(GENERATION_BUDGET_PATH_SEGMENT)
+        index += 2
     if index < len(segments) and segments[index] == TRACE_CONTEXT_PATH_SEGMENT:
         trace_parent = value_after(TRACE_CONTEXT_PATH_SEGMENT)
         index += 2
@@ -203,6 +218,7 @@ def parse_path(path: str, *, allow_empty_rest: bool = False) -> tuple[Correlatio
             token_capture=token_capture,
             model_sampling=model_sampling,
             trace_parent=trace_parent,
+            generation_budget=generation_budget,
         )
     except ValueError as error:
         raise CorrelationPathError(str(error), path) from error

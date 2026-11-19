@@ -74,10 +74,10 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
     assert row["agent_ref"]["name"] == env.agent_server.name
     assert env.resources_server.name == "deepcad_opencode"
     assert env.resources_tool_transports == []
-    budget = config.deepcad_policy_model.responses_api_models.vllm_model.rollout_generation_budget
-    assert budget.max_calls == 10
-    assert len(budget.agent_servers) == 7
-    assert env.agent_server.name in budget.agent_servers
+    assert env.max_model_calls == 10
+    assert config.deepcad_policy_model.responses_api_models.vllm_model.generation_budget_state_dir == str(
+        tmp_path / "budget"
+    )
     assert (
         len([key for key, value in config.items() if isinstance(value, DictConfig) and "environment_servers" in value])
         == 7
@@ -213,6 +213,7 @@ def test_cad_blend_does_not_override_other_benchmark_agent(
         combined.deepcad_pi_environment_server.environment_servers.single_agent_turn_legacy.agent_server.name
         == "deepcad_pi_agent"
     )
-    assert set(
-        combined.deepcad_policy_model.responses_api_models.vllm_model.rollout_generation_budget.agent_servers
-    ) == {f"deepcad_{name}_agent" for name in ["opencode", "pi", "hermes", "codex", "claude_code", "openclaw", "nooa"]}
+    for name in ["opencode", "pi", "hermes", "codex", "claude_code", "openclaw", "nooa"]:
+        env = combined[f"deepcad_{name}_environment_server"].environment_servers.single_agent_turn_legacy
+        assert env.max_model_calls == 10
+        assert env.agent_server.name == f"deepcad_{name}_agent"

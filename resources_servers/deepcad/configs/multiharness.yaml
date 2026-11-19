@@ -122,16 +122,3 @@ deepcad_nooa_environment_server:
   environment_servers:
     single_agent_turn_legacy:
       agent_server: {type: responses_api_agents, name: deepcad_nooa_agent}
-
-deepcad_policy_model:
-  responses_api_models:
-    vllm_model:
-      rollout_generation_budget:
-        agent_servers:
-          - deepcad_opencode_agent
-          - deepcad_pi_agent
-          - deepcad_hermes_agent
-          - deepcad_codex_agent
-          - deepcad_claude_code_agent
-          - deepcad_openclaw_agent
-          - deepcad_nooa_agent

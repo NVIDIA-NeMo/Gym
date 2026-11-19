@@ -153,8 +153,9 @@ sandbox_plugin_dependencies_sha256: 12ce5f79b27aa8886b64082c1f5d23ab4bc7410e193b
 
 ## Limits and validation boundary
 
-- The shared model-server budget permits at most **ten generation admissions per
-  rollout**, including auxiliary calls using that route. The next call is rejected.
+- Each CAD environment server sets `max_model_calls: 10`: at most **ten generation admissions
+  across all retries of one logical rollout**, including auxiliary calls carrying its budget.
+  The next call stops the explicit owning agent. Uncapped episodes on the same model server are unaffected.
   This is not ten tool actions or a guarantee of ten successful model responses.
   No shared-budget final prompt or forced final tool choice is configured.
 - The row's output cap is an upper bound: the model middleware uses the smaller
