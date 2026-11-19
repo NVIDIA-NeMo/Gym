@@ -358,6 +358,10 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
+    # Hermes' `compression.threshold_tokens`: compress once a prompt reaches this many tokens, if that is lower
+    # than the compression_threshold trigger. Hermes raises compression_threshold to at least 0.75 for windows
+    # under 512,000 tokens, so this is the only way to compress earlier in such a window.
+    compression_threshold_tokens: Optional[int] = Field(default=None, gt=0)
     # The model's context window, as Hermes' `model.context_length`. Compression triggers at
     # compression_threshold of it. Unset, Hermes probes the endpoint, which the Gym model server does not
     # answer, and falls back to 128,000 tokens.
@@ -502,6 +506,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "compression": {
                 "enabled": self.config.compression_enabled,
                 "threshold": self.config.compression_threshold,
+                "threshold_tokens": self.config.compression_threshold_tokens,
             },
             "terminal": {
                 "backend": self.config.terminal_backend,

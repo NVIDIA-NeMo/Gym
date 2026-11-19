@@ -131,6 +131,18 @@ class TestSanity:
         )
         assert yaml.safe_load(agent._build_config())["model"] == {"default": "policy", "context_length": 262144}
 
+    @pytest.mark.parametrize("threshold_tokens", [None, 20000])
+    def test_compression_token_threshold_is_written_to_the_compression_config(self, threshold_tokens) -> None:
+        agent = HermesAgent(
+            config=_config(compression_threshold=0.5, compression_threshold_tokens=threshold_tokens),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        assert yaml.safe_load(agent._build_config())["compression"] == {
+            "enabled": True,
+            "threshold": 0.5,
+            "threshold_tokens": threshold_tokens,
+        }
+
     def test_model_stays_a_name_without_context_length(self) -> None:
         agent = HermesAgent(config=_config(model="policy"), server_client=MagicMock(spec=ServerClient))
         assert yaml.safe_load(agent._build_config())["model"] == "policy"
