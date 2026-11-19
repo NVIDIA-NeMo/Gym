@@ -600,8 +600,10 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
     ) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         target_config = get_first_server_config_dict(self.server_client.global_config_dict, target_name)
+        # A request whose rollout skips capture (a validation rollout) activates no participant with the tag.
         token_capture = (
             capture_training_tokens
+            and not request.skip_token_capture
             and bool(block.get("enabled", False))
             and (bool(block.get("all_agents", False)) or bool(target_config.get("token_id_capture", False)))
         )

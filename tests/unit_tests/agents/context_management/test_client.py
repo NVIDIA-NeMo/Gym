@@ -8,7 +8,7 @@ from inspect import signature
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientConnectorError, ClientSession, ServerDisconnectedError
+from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, ServerDisconnectedError
 from omegaconf import DictConfig
 
 import nemo_gym.client.http_client
@@ -182,7 +182,11 @@ async def test_context_client_uses_real_transport_retry_controls(monkeypatch, me
         payload = {"prompt_token_count": 10} if url.endswith("/measure") else answer(1).model_dump(mode="json")
         return http_response(payload)
 
-    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+    monkeypatch.setattr(
+        nemo_gym.client.http_client,
+        "get_global_aiohttp_client",
+        lambda: MagicMock(request=send, timeout=ClientTimeout()),
+    )
     client = ContextManagedResponsesClient(
         server_client=transport,
         model_server=ModelServerRef(name="policy", type="responses_api_models"),

@@ -1,0 +1,28 @@
+{
+  "base": "cpu-tool-trial-healthy.json",
+  "set": [
+    [["results", 0, "_ng_collected_grading_binding"], "7ae88e7e4b4edaeb8b5a7e237cd916811f29749b9cf3682b54f285cbad151b96"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "invocation_id"], "verify-4b275c75c2774455a15a3d2484790a70"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "grading_operations", 0, "operation_id"], "grade-e8bbf297c65a4b7982edbdd264b556e6"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "grading_operations", 0, "result_binding_sha256"], "7ae88e7e4b4edaeb8b5a7e237cd916811f29749b9cf3682b54f285cbad151b96"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "model_call_id"], "453e5e5661734e6db73dd1363859c809"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "response_metadata", "model_operations", 0, "operation_id"], "ccc3aeb314df48a6a4c2190cb3cb286e"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "response_metadata", "model_operations", 0, "final_attempt_id"], "ccc3aeb314df48a6a4c2190cb3cb286e-1"],
+    [["results", 0, "ng_trial_observations", "model_calls", 1, "model_call_id"], "b0b5df09991d4bbdbda3d751786e5982"],
+    [["results", 0, "ng_trial_observations", "model_calls", 1, "response_metadata", "model_operations", 0, "operation_id"], "c6a7bdca37ea4e7298ba185e31b74a2e"],
+    [["results", 0, "ng_trial_observations", "model_calls", 1, "response_metadata", "model_operations", 0, "final_attempt_id"], "c6a7bdca37ea4e7298ba185e31b74a2e-1"],
+    [["results", 0, "ng_trial_observations", "tool_calls", 0, "status"], "failed"],
+    [["results", 0, "ng_trial_observations", "tool_calls", 0, "error_type"], "http_500"],
+    [["quality", "provenance", "rollout_artifact_digests", 0, "rollouts_jsonl_fpath"], "1761ba9c61f9d31a01dc1124f0d4c0154652856b765f3c0a49e6073a926ffb16"],
+    [["quality", "provenance", "rollout_artifact_digests", 0, "resolved_config_yaml_fpath"], "3ea23500160623c373af47113ec6c247925786c8795216cf63637a4053f2fbf0"],
+    [["quality", "observed_runtime", "row_elapsed_s", "sum_observed"], 0.07987989496905357],
+    [["quality", "observed_request_effort", "request_elapsed_ms", "sum_observed"], 2.036091056652367],
+    [["source_digests", "rollouts.jsonl"], "1761ba9c61f9d31a01dc1124f0d4c0154652856b765f3c0a49e6073a926ffb16"],
+    [["source_digests", "rollouts_resolved_config.yaml"], "3ea23500160623c373af47113ec6c247925786c8795216cf63637a4053f2fbf0"],
+    [["source_digests", "rollouts_aggregate_metrics.json"], "0abe6dc49a295fa1c5de30112d7f8aaf4a40db9fb39483de462ac7857536e323"],
+    [["source_digests", "quality_summary.json"], "127007d0f0d9bf8d749f818b00f8627b2cfbdbb2a717055a7d82d5036020aa03"],
+    [["source_digests", "rollouts_manifest.json"], "d7120098e6fc1fc62abc7707f677922a9a734c3dda229ea927d20bca5f349b56"],
+    [["source_digests", "rollouts_coverage.json"], "ccecf2f03ec15db326f86aefc98d1795c8336d3bc47bf6f69d0c70bf8b02226a"],
+    [["source_job_identity", 2], 30320731]
+  ]
+}

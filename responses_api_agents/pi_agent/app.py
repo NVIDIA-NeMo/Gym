@@ -39,6 +39,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -245,12 +246,15 @@ fi
     return bootstrap + f"mkdir -p {shlex.quote(directory + '/home/.pi/agent')}"
 
 
-def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
+def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int | None]]:
     if isinstance(stdout, bytes):
         stdout = stdout.decode(errors="replace")
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
+    # Unknown until every assistant message reports a positive cacheRead; see the loop below.
+    cached_tokens: int | None = None
+    cache_measured = True
 
     for line in stdout.split("\n"):
         line = line.strip()
@@ -280,6 +284,11 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
             input_tokens += int(usage.get("input") or 0)
             if type(cache_read) is int and cache_read >= 0:
                 input_tokens += cache_read
+            # Pi also emits zero when backend cache details are absent; zero has no measured provenance.
+            if type(cache_read) is not int or cache_read <= 0:
+                cache_measured = False
+            elif cache_measured:
+                cached_tokens = (cached_tokens or 0) + cache_read
             output_tokens += int(usage.get("output") or 0)
             texts = [b["text"] for b in content if isinstance(b, dict) and (b.get("text") or "").strip()]
             if texts:
@@ -321,7 +330,11 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
                 )
             )
 
-    return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    return output_items, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens if cache_measured else None,
+    }
 
 
 def _parse_recorded_events(raw: str) -> list[tuple[float, dict[str, Any]]]:
@@ -1432,28 +1445,22 @@ class PiAgent(SimpleResponsesAPIAgent):
                 env=env,
             )
             assert proc.stdout is not None and proc.stderr is not None
-            events: list[tuple[float, dict[str, Any]]] = []
-            if collect_observations:
-                stdout_task = asyncio.create_task(_read_pi_stdout(proc.stdout))
-                stderr_task = asyncio.create_task(proc.stderr.read())
-                output_task = asyncio.gather(stdout_task, stderr_task, proc.wait())
-                try:
-                    (stdout, events), stderr, _ = await asyncio.wait_for(asyncio.shield(output_task), timeout=timeout)
-                except asyncio.TimeoutError:
-                    if proc.returncode is None:
-                        proc.kill()
-                    (_, events), _, _ = await output_task
-                    events.append((time(), {"type": "_ng_process_exit", "timed_out": True}))
-                    LOG.warning("pi timed out after %ss", timeout)
-                    return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
-            else:
-                try:
-                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-                except asyncio.TimeoutError:
+            # Read stdout as it streams, also when no observations are collected: a cancelled communicate() drops
+            # what it had read, so a run stopped at its deadline would lose the transcript it printed.
+            stdout_task = asyncio.create_task(_read_pi_stdout(proc.stdout))
+            stderr_task = asyncio.create_task(proc.stderr.read())
+            output_task = asyncio.gather(stdout_task, stderr_task, proc.wait())
+            try:
+                (stdout, events), stderr, _ = await asyncio.wait_for(asyncio.shield(output_task), timeout=timeout)
+            except asyncio.TimeoutError:
+                if proc.returncode is None:
                     proc.kill()
-                    await proc.communicate()
-                    LOG.warning("pi timed out after %ss", timeout)
-                    return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
+                (stdout, events), _, _ = await output_task
+                events.append((time(), {"type": "_ng_process_exit", "timed_out": True}))
+                LOG.warning("pi timed out after %ss", timeout)
+                return (*parse_pi_events(stdout), self.config.model, events if collect_observations else [])
+            if not collect_observations:
+                events = []
 
             if proc.returncode == MCP_SETUP_ERROR_EXIT_CODE and self.config.mcp_servers:
                 raise RuntimeError("Required Gym MCP tools could not be initialized")
@@ -1524,7 +1531,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage.get("cached_tokens")),
                 output_tokens=output_tokens,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
@@ -1562,9 +1569,9 @@ class PiAgent(SimpleResponsesAPIAgent):
             assert isinstance(state, PiSandboxSession)
             rollout_id = request.path_params.get("rollout_id")
             if state.request.episode_id.capture_key != rollout_id:
-                raise HTTPException(409, "Pi activation does not match the seeded session and rollout route")
+                raise AgentSessionConflictError("Pi activation does not match the seeded session and rollout route")
             if state.session.closing:
-                raise HTTPException(409, "Pi session is closing")
+                raise AgentSessionConflictError("Pi session is closing")
             if state.task is None:
                 # Validate and decode only for a new activation: a retry is compared with the stored request, so
                 # its media are never decoded again. Bind the request before the first await so retries join one
@@ -1576,7 +1583,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     self._sandbox_response(state, validated, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "Pi sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError("Pi sandbox sessions support one activation; retry the same request")
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         # AnySWE, AnyTerminal and HarnessAgent pass generic Responses fields here.
@@ -1597,7 +1604,7 @@ class PiAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: PiAgentRunRequest) -> PiAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Pi sessions require EnvironmentServer /run")
+            raise AgentSessionConflictError("Pi sessions require EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Pi /run requires resources_server; use EnvironmentServer /run for sandbox sessions"

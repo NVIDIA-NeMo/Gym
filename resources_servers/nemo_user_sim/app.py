@@ -11,6 +11,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from importlib import metadata
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +19,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from environments.nemo_user_sim.prepare import NEMOTRON_PERSONAS_VERSIONS
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import (
@@ -37,6 +39,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
     SimpleResourcesServer,
     lost_session_verification,
 )
@@ -67,17 +70,43 @@ PROBE_SCORERS = {
 ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
 # A failed simulation whose outcome names no failure_class.
 SIMULATION_FAILED = "usersim:simulation_failed"
+# UserSim records commits in git's 12-character short form.
+USERSIM_REVISION_LENGTH = 12
+# A revision is either that short form or the full 40-character commit.
+REVISION_PATTERN = re.compile(r"[0-9a-f]{12}(?:[0-9a-f]{28})?")
 logger = logging.getLogger(__name__)
+
+
+def installed_usersim_revision() -> str:
+    """Return the commit the installed UserSim was built from, in UserSim's 12-character form.
+
+    A git install records its commit in ``direct_url.json`` (PEP 610), so the
+    ``pyproject.toml`` pin is the only place the revision is written down.
+    """
+    # Read only the declared distribution. An environment upgraded in place can still hold the
+    # superseded nemo-usersim distribution, which provides the same import package.
+    try:
+        raw = metadata.distribution("usersim").read_text("direct_url.json")
+    except metadata.PackageNotFoundError:
+        raw = None
+    commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id") if raw else None
+    if isinstance(commit, str) and commit:
+        return commit[:USERSIM_REVISION_LENGTH]
+    raise RuntimeError(
+        "The installed UserSim records no git commit. Install it from the pinned git revision "
+        "or set usersim_revision in the Resources Server config."
+    )
 
 
 class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     """Configure materialized-row validation and trajectory verification."""
 
     usersim_revision: str = Field(
-        "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee",  # pragma: allowlist secret
-        pattern=r"^[0-9a-f]{40}$",
+        default_factory=installed_usersim_revision,
+        pattern=rf"^[0-9a-f]{{{USERSIM_REVISION_LENGTH}}}$",
     )
-    nemotron_personas_version: str = "0.0.2"
+    # Locale -> Nemotron-Personas version that prepared rows of that locale must record.
+    nemotron_personas_versions: dict[str, str] = Field(default_factory=lambda: dict(NEMOTRON_PERSONAS_VERSIONS))
     probe_scorer_model: ModelServerRef
     judge_max_output_tokens: int = Field(16_384, gt=0)
     judge_max_output_tokens_non_ascii: int = Field(32_768, gt=0)
@@ -221,7 +250,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
             _validate_resolved_row(
                 task.resolved_row,
                 expected_revision=self.config.usersim_revision,
-                expected_personas_version=self.config.nemotron_personas_version,
+                expected_personas_versions=self.config.nemotron_personas_versions,
             )
         except (ValidationError, ValueError) as error:
             detail = error.errors() if isinstance(error, ValidationError) else str(error)
@@ -230,7 +259,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         self._expire_sessions()
         resolved_row = task.resolved_row
         if body.resources_session_id in self.fenced_resources_session_ids:
-            raise HTTPException(status_code=409, detail="Resources session is already closed")
+            raise ResourcesSessionConflictError("Resources session is already closed")
         existing_session_id = (
             session_id
             if session_id in self.session_id_to_seed
@@ -244,7 +273,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 or existing.task_id != body.task_id
                 or existing.resolved_row_sha256 != _row_digest(resolved_row)
             ):
-                raise HTTPException(status_code=409, detail="Resources session is already seeded for another task")
+                raise ResourcesSessionConflictError("Resources session is already seeded for another task")
             if existing_session_id != session_id:
                 # A seed retried after its reply was lost carries a new cookie; move the record to it.
                 self.session_id_to_seed[session_id] = self.session_id_to_seed.pop(existing_session_id)
@@ -285,15 +314,15 @@ class UserSimResourcesServer(SimpleResourcesServer):
             return UserSimVerification(**lost, reward_components={}, scenario_completed=False)
         verification_input = body.verification_input
         if body.episode_id != seeded.episode_id or body.task_id != seeded.task_id:
-            raise HTTPException(status_code=409, detail="Verification identity does not match the seeded episode")
+            raise ResourcesSessionConflictError("Verification identity does not match the seeded episode")
         if _row_digest(verification_input.resolved_row) != seeded.resolved_row_sha256:
-            raise HTTPException(status_code=409, detail="Verified resolved row does not match the seeded task")
+            raise ResourcesSessionConflictError("Verified resolved row does not match the seeded task")
 
         usersim_result = verification_input.usersim_result
         result_row = usersim_result.model_dump(mode="python")
         trajectory_id = seeded.resolved_row.get("trajectory_id")
         if trajectory_id and result_row.get("trajectory_id") != trajectory_id:
-            raise HTTPException(status_code=409, detail="UserSim result trajectory_id does not match the seeded task")
+            raise ResourcesSessionConflictError("UserSim result trajectory_id does not match the seeded task")
 
         if usersim_result.simulation_outcome.get("failure_attribution") == "assistant_model":
             participants_completed = {"user", "assistant"} <= _conversation_roles(usersim_result)
@@ -480,7 +509,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         self._expire_sessions()
         fenced = self.fenced_resources_session_ids.get(body.resources_session_id)
         if fenced is not None and fenced[0] != body.episode_id:
-            raise HTTPException(status_code=409, detail="Resources session was closed by another episode")
+            raise ResourcesSessionConflictError("Resources session was closed by another episode")
         # The Environment Server closes by resources_session_id and may not hold the seed's cookie.
         session_id = self.resources_session_id_to_session_id.get(
             body.resources_session_id, request.session[SESSION_ID_KEY]
@@ -488,7 +517,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         seeded = self.session_id_to_seed.get(session_id)
         if seeded is not None:
             if body.resources_session_id != seeded.resources_session_id or body.episode_id != seeded.episode_id:
-                raise HTTPException(status_code=409, detail="Resources session does not match the active episode")
+                raise ResourcesSessionConflictError("Resources session does not match the active episode")
             del self.session_id_to_seed[session_id]
             self.resources_session_id_to_session_id.pop(seeded.resources_session_id, None)
         self.fenced_resources_session_ids.setdefault(
@@ -521,7 +550,7 @@ def _validate_resolved_row(
     row: Mapping[str, Any],
     *,
     expected_revision: str,
-    expected_personas_version: str,
+    expected_personas_versions: Mapping[str, str],
 ) -> None:
     required = ("persona", "probe_type", "conversation_language", "trajectory_id", "usersim_config")
     missing = [name for name in required if not row.get(name)]
@@ -530,14 +559,22 @@ def _validate_resolved_row(
     if row.get("probe_variant") == "guarded":
         raise ValueError("Guarded health probes are unsupported by the pinned UserSim revision")
     provenance = _decode_provenance(row.get("usersim_provenance"))
-    if provenance.get("code_sha") != expected_revision:
-        raise ValueError(
-            f"Resolved UserSim row revision {provenance.get('code_sha')!r} does not match {expected_revision!r}"
-        )
+    # Rows record either the full commit or UserSim's short form; both start with the expected revision.
+    code_sha = provenance.get("code_sha")
+    if (
+        not isinstance(code_sha, str)
+        or REVISION_PATTERN.fullmatch(code_sha) is None
+        or not code_sha.startswith(expected_revision)
+    ):
+        raise ValueError(f"Resolved UserSim row revision {code_sha!r} does not match {expected_revision!r}")
     personas_version = provenance.get("nemotron_personas_version")
-    if personas_version != "synthetic" and personas_version != expected_personas_version:
+    locale = row.get("locale")
+    expected_personas_version = expected_personas_versions.get(locale) if isinstance(locale, str) else None
+    if personas_version != "synthetic" and (
+        expected_personas_version is None or personas_version != expected_personas_version
+    ):
         raise ValueError(
-            f"Resolved UserSim row Nemotron-Personas version {personas_version!r} "
+            f"Resolved UserSim row Nemotron-Personas version {personas_version!r} for locale {locale!r} "
             f"is neither 'synthetic' nor the configured version {expected_personas_version!r}"
         )
 

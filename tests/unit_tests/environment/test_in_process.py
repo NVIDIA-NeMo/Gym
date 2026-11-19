@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError
@@ -22,6 +24,7 @@ from nemo_gym.environment.in_process import (
     serve_benchmark,
 )
 from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
+from nemo_gym.rollouts import rollout_collection
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSpinupTimeoutError, ServerStartFailedError
@@ -504,14 +507,97 @@ class TestTaskRunner:
 
         assert result.reward == 1.0
 
-    def test_refuses_a_materialized_task_row(self) -> None:
-        materialized = {
-            "task_id": {"taskset": "bench", "task_id": "a"},
+    @staticmethod
+    def _typed_row(task_id: str) -> dict:
+        return {
+            "task_id": {"taskset": "bench", "task_id": task_id},
             "task_input": {"responses_create_params": {"input": []}, "task_data": {}},
         }
 
-        with pytest.raises(ConfigError, match="materialized"):
-            TaskRunner([materialized], registry_server=HEAD)
+    @staticmethod
+    def _registry_config(monkeypatch: pytest.MonkeyPatch, config: dict) -> list:
+        reads: list = []
+
+        def setup_server_client(head_server_config=None):
+            reads.append(head_server_config)
+            return type("Client", (), {"global_config_dict": OmegaConf.create(config)})()
+
+        monkeypatch.setattr(rollout_collection, "setup_server_client_utils", setup_server_client)
+        return reads
+
+    async def test_runs_a_materialized_task_on_the_environment_server_its_taskset_routes_to(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner = TaskRunner([self._typed_row("a")], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        self._registry_config(monkeypatch, {"environment_server_routes": {"bench": "bench_env"}})
+
+        result = await runner.run_task("a", rollout_id="trial-1")
+
+        assert result.reward == 1.0
+        (sent,) = runs.sent[0]
+        assert sent["task_id"] == {"taskset": "bench", "task_id": "a"}
+        assert sent["_ng_environment_server"] == "bench_env"
+        assert sent["_ng_rollout_id"] == "trial-1"
+
+    async def test_selects_flat_and_materialized_tasks_by_id_and_shares_one_registry_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner = TaskRunner([_row("flat"), self._typed_row("typed")], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        reads = self._registry_config(monkeypatch, {"environment_server_routes": {"bench": "bench_env"}})
+
+        await runner.run_task("flat")
+        assert reads == []
+        await runner.run_task("typed")
+        await runner.run_task("typed")
+        runner._helper.setup_server_client(HEAD)  # what `run_outcomes` calls when it dispatches
+
+        assert runner.task_ids() == ["flat", "typed"]
+        assert "_ng_environment_server" not in runs.sent[0][0]
+        assert [sent[0].get("_ng_environment_server") for sent in runs.sent[1:]] == ["bench_env", "bench_env"]
+        assert reads == [HEAD]
+
+    async def test_a_materialized_task_keeps_its_dataset_label_and_gains_no_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner = TaskRunner([{**self._typed_row("a"), "task_source": "bench"}], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        self._registry_config(monkeypatch, {"environment_server_routes": {"bench": "bench_env"}})
+
+        await runner.run_task("a")
+
+        (sent,) = runs.sent[0]
+        assert sent["task_source"] == "bench"
+        assert sent["_ng_environment_server"] == "bench_env"
+        assert "agent_ref" not in sent
+
+    async def test_a_route_given_as_an_interpolation_is_resolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        runner = TaskRunner([self._typed_row("a")], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        self._registry_config(
+            monkeypatch,
+            {
+                "environment_server_name": "bench_env",
+                "environment_server_routes": {"bench": "${environment_server_name}"},
+            },
+        )
+
+        await runner.run_task("a")
+
+        assert runs.sent[0][0]["_ng_environment_server"] == "bench_env"
+
+    async def test_a_materialized_task_without_a_route_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        runner = TaskRunner([self._typed_row("a")], registry_server=HEAD)
+        self._serve(monkeypatch, _FakeRuns())
+        self._registry_config(monkeypatch, {})
+
+        with pytest.raises(ValueError, match="No environment server route is configured for taskset 'bench'"):
+            await runner.run_task("a")
 
     async def test_unknown_task_is_a_config_error(self) -> None:
         with pytest.raises(ConfigError, match="No input rows for task ids"):
@@ -658,8 +744,8 @@ class TestDottedOverrides:
         assert in_process._checked_overrides(None) == {}
 
 
-class _FakeRunHelper:
-    """Stands in for `RunHelper`: records the config it is started with and whether it was shut down."""
+class _FakeServerSupervisor:
+    """Stands in for `ServerSupervisor`: records the config it is started with and whether it was shut down."""
 
     started_with = None
     shut_down = 0
@@ -680,9 +766,11 @@ class _FakeRunHelper:
 class TestServeBenchmark:
     @pytest.fixture(autouse=True)
     def fakes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _FakeRunHelper.started_with, _FakeRunHelper.shut_down, _FakeRunHelper.start_error = None, 0, None
-        _FakeRunHelper.registry_port = None
-        monkeypatch.setattr("nemo_gym.environment.in_process.RunHelper", _FakeRunHelper)
+        _FakeServerSupervisor.started_with = None
+        _FakeServerSupervisor.shut_down = 0
+        _FakeServerSupervisor.start_error = None
+        _FakeServerSupervisor.registry_port = None
+        monkeypatch.setattr("nemo_gym.environment.in_process.ServerSupervisor", _FakeServerSupervisor)
         monkeypatch.setattr(
             "nemo_gym.environment.in_process.asset_config_path",
             lambda flag, name: f"{'benchmarks' if flag == 'benchmark' else 'responses_api_models'}/{name}.yaml",
@@ -690,7 +778,9 @@ class TestServeBenchmark:
         monkeypatch.setattr(
             ServerClient,
             "load_head_server_config",
-            classmethod(lambda cls: BaseServerConfig(host=HEAD.host, port=_FakeRunHelper.registry_port or HEAD.port)),
+            classmethod(
+                lambda cls: BaseServerConfig(host=HEAD.host, port=_FakeServerSupervisor.registry_port or HEAD.port)
+            ),
         )
 
     def test_serves_from_a_config_dict_and_stops_on_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -699,29 +789,29 @@ class TestServeBenchmark:
 
         with serve_benchmark("bench", overrides=overrides) as registry_server:
             assert registry_server == HEAD
-            assert _FakeRunHelper.shut_down == 0
+            assert _FakeServerSupervisor.shut_down == 0
 
-        parser_config = _FakeRunHelper.started_with
+        parser_config = _FakeServerSupervisor.started_with
         assert parser_config.skip_load_from_cli
         assert parser_config.initial_global_config_dict == {
             "config_paths": ["benchmarks/bench.yaml", "responses_api_models/openai_model.yaml"],
             "judge": {"model": "x"},
             "policy_base_url": "http://model/v1",
         }
-        assert _FakeRunHelper.shut_down == 1
+        assert _FakeServerSupervisor.shut_down == 1
         assert sys.argv == ["gym", "unrelated=1"]
 
     def test_the_registry_port_is_set_in_the_config(self) -> None:
         with serve_benchmark("bench", registry_port=5555):
             pass
 
-        assert _FakeRunHelper.started_with.initial_global_config_dict["head_server"] == {"port": 5555}
+        assert _FakeServerSupervisor.started_with.initial_global_config_dict["head_server"] == {"port": 5555}
 
     def test_the_registry_port_keeps_the_rest_of_the_registry_server_config(self) -> None:
         with serve_benchmark("bench", overrides={"head_server": {"host": "0.0.0.0"}}, registry_port=5555):
             pass
 
-        assert _FakeRunHelper.started_with.initial_global_config_dict["head_server"] == {
+        assert _FakeServerSupervisor.started_with.initial_global_config_dict["head_server"] == {
             "host": "0.0.0.0",
             "port": 5555,
         }
@@ -730,7 +820,7 @@ class TestServeBenchmark:
         with serve_benchmark("bench"):
             pass
 
-        assert "head_server" not in _FakeRunHelper.started_with.initial_global_config_dict
+        assert "head_server" not in _FakeServerSupervisor.started_with.initial_global_config_dict
 
     @pytest.mark.parametrize("port", [0, -1, 65536, 70000])
     def test_a_registry_port_that_is_not_a_port_is_refused_before_anything_starts(self, port: int) -> None:
@@ -738,13 +828,13 @@ class TestServeBenchmark:
             with serve_benchmark("bench", registry_port=port):
                 pass
 
-        assert _FakeRunHelper.started_with is None
+        assert _FakeServerSupervisor.started_with is None
 
     def test_the_model_type_is_a_parameter(self) -> None:
         with serve_benchmark("bench", model_type="vllm_model"):
             pass
 
-        assert _FakeRunHelper.started_with.initial_global_config_dict["config_paths"][1] == (
+        assert _FakeServerSupervisor.started_with.initial_global_config_dict["config_paths"][1] == (
             "responses_api_models/vllm_model.yaml"
         )
 
@@ -752,7 +842,7 @@ class TestServeBenchmark:
         with serve_benchmark("bench", overrides={"config_paths": ["mine.yaml"]}):
             pass
 
-        assert _FakeRunHelper.started_with.initial_global_config_dict["config_paths"] == ["mine.yaml"]
+        assert _FakeServerSupervisor.started_with.initial_global_config_dict["config_paths"] == ["mine.yaml"]
 
     @pytest.mark.parametrize("overrides", DOTTED_OVERRIDES)
     def test_serving_refuses_a_dotted_key_before_starting_anything(self, overrides: dict) -> None:
@@ -760,23 +850,23 @@ class TestServeBenchmark:
             with serve_benchmark("bench", overrides=overrides):
                 pytest.fail("the body must not run")
 
-        assert _FakeRunHelper.started_with is None
+        assert _FakeServerSupervisor.started_with is None
 
     def test_stops_the_servers_when_the_caller_fails(self) -> None:
         with pytest.raises(RuntimeError, match="boom"):
             with serve_benchmark("bench"):
                 raise RuntimeError("boom")
 
-        assert _FakeRunHelper.shut_down == 1
+        assert _FakeServerSupervisor.shut_down == 1
 
     def test_a_failed_start_raises_and_leaves_the_clean_up_to_start(self) -> None:
-        _FakeRunHelper.start_error = ConfigError("model endpoint never answered")
+        _FakeServerSupervisor.start_error = ConfigError("model endpoint never answered")
 
         with pytest.raises(ConfigError, match="never answered"):
             with serve_benchmark("bench"):
                 pytest.fail("the body must not run")
 
-        assert _FakeRunHelper.shut_down == 0
+        assert _FakeServerSupervisor.shut_down == 0
 
     def test_a_registry_port_in_use_stops_the_servers_and_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
@@ -789,14 +879,14 @@ class TestServeBenchmark:
             with serve_benchmark("bench", registry_port=5555):
                 pytest.fail("the body must not run")
 
-        assert _FakeRunHelper.shut_down == 1
+        assert _FakeServerSupervisor.shut_down == 1
 
     @pytest.mark.parametrize(
         "error",
         [ServerSpinupTimeoutError("too slow"), ServerStartFailedError("it exited", server_name="agent", errno=None)],
     )
     def test_a_server_that_does_not_start_is_a_config_error_with_the_cause(self, error: RuntimeError) -> None:
-        _FakeRunHelper.start_error = error
+        _FakeServerSupervisor.start_error = error
 
         with pytest.raises(ConfigError, match="did not start") as raised:
             with serve_benchmark("bench"):
@@ -810,4 +900,25 @@ class TestServeBenchmark:
         with serve_benchmark("bench"):
             pass
 
-        assert _FakeRunHelper.started_with.skip_exporters
+        assert _FakeServerSupervisor.started_with.skip_exporters
+
+
+class TestReadJsonlRows:
+    def test_a_row_with_unicode_line_separators_is_read_whole(self, tmp_path: Path) -> None:
+        from nemo_gym.environment.benchmark_preparation import read_jsonl_rows
+
+        text = "a b\u0085c\x0bd\x0ce"
+        path = tmp_path / "rows.jsonl"
+        path.write_text(
+            "".join(json.dumps({"q": text, "n": n}, ensure_ascii=False) + "\n" for n in range(2)), encoding="utf-8"
+        )
+
+        assert read_jsonl_rows(path) == [{"q": text, "n": 0}, {"q": text, "n": 1}]
+
+    def test_blank_lines_are_skipped(self, tmp_path: Path) -> None:
+        from nemo_gym.environment.benchmark_preparation import read_jsonl_rows
+
+        path = tmp_path / "rows.jsonl"
+        path.write_text('{"a": 1}\n\n{"a": 2}\n   \n', encoding="utf-8")
+
+        assert read_jsonl_rows(path) == [{"a": 1}, {"a": 2}]

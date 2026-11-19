@@ -25,7 +25,13 @@ import json
 import pytest
 from anthropic.types import Message
 
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
+)
 from nemo_gym.models.anthropic_converter import AnthropicConverter
 
 
@@ -299,6 +305,51 @@ class TestResponsesToAnthropicResponse:
         request_body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
         return conv, conv.anthropic_to_responses(anthropic_response, request_body=request_body, model="m")
 
+    @pytest.mark.parametrize(
+        ("stop_reason", "metadata"),
+        [
+            ("end_turn", {"native_finish_reason": "repetition"}),
+            ("end_turn", {"native_stop_reason": "repetition_detected"}),
+            ("end_turn", {"native_stop_reason": 0}),
+            ("end_turn", {"native_stop_reason": 11}),
+            ("end_turn", {"native_finish_reason": ""}),
+            ("end_turn", {"native_finish_reason": "stop", "native_stop_reason": "stop_sequence"}),
+            ("end_turn", {}),
+            ("end_turn", {"native_finish_reason": None, "native_stop_reason": None}),
+            ("tool_use", {"native_finish_reason": "repetition", "native_stop_reason": "repetition_detected"}),
+            ("max_tokens", {"native_finish_reason": "repetition", "native_stop_reason": "repetition_detected"}),
+            ("refusal", {"native_finish_reason": "repetition", "native_stop_reason": "repetition_detected"}),
+        ],
+    )
+    def test_preserves_provider_termination_without_replacing_anthropic_stop(
+        self, stop_reason: str, metadata: dict[str, str | int | None]
+    ) -> None:
+        content = [{"type": "text", "text": "Retained answer."}]
+        if stop_reason == "tool_use":
+            content.append({"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"city": "Paris"}})
+        usage = {"input_tokens": 3, "output_tokens": 5}
+        conv, response = self._response_from_anthropic(
+            {"content": content, "stop_reason": stop_reason, "usage": usage}
+        )
+        response = NeMoGymResponse.model_validate_json(response.model_copy(update=metadata).model_dump_json())
+        original = response.model_dump_json()
+
+        result = conv.responses_to_anthropic_response(response, model="m")
+
+        assert result["stop_reason"] == stop_reason
+        assert result["content"] == content
+        assert result["usage"] == usage
+        retained = {
+            field: result[field] for field in ("native_finish_reason", "native_stop_reason") if field in result
+        }
+        assert retained == {field: value for field, value in metadata.items() if value is not None}
+        message = Message.model_validate_json(json.dumps(result))
+        for field, value in retained.items():
+            assert getattr(message, field) == value
+            assert type(getattr(message, field)) is type(value)
+        assert message.stop_reason == stop_reason
+        assert response.model_dump_json() == original
+
     def test_text_and_tool_use_and_stop_reason(self) -> None:
         conv, resp = self._response_from_anthropic(
             {
@@ -320,6 +371,37 @@ class TestResponsesToAnthropicResponse:
         assert tool_use["input"] == {"a": 1}
         assert out["stop_reason"] == "tool_use"
         assert out["usage"] == {"input_tokens": 5, "output_tokens": 7}
+
+    def test_token_metadata_is_dropped_from_the_anthropic_response(self) -> None:
+        conv, resp = self._response_from_anthropic(
+            {
+                "content": [
+                    {"type": "thinking", "thinking": "step", "signature": "sig"},
+                    {"type": "text", "text": "Hello"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {"a": 1}},
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 5, "output_tokens": 7},
+            }
+        )
+        tokens = {
+            "prompt_token_ids": [1, 2],
+            "generation_token_ids": [3],
+            "generation_log_probs": [-0.5],
+            "routed_experts": [[[0]]],
+        }
+        # Served responses carry token metadata on training variants of their output items.
+        training_resp = NeMoGymResponse.model_validate(
+            {**resp.model_dump(), "output": [{**item.model_dump(), **tokens} for item in resp.output]}
+        )
+        assert all(item.prompt_token_ids == [1, 2] for item in training_resp.output)
+
+        out = conv.responses_to_anthropic_response(training_resp, model="m")
+
+        assert out == conv.responses_to_anthropic_response(resp, model="m")
+        assert not any(field in json.dumps(out) for field in tokens)
+        # The mapping ignores token fields either way; the item dumps skip them so the lists are not copied.
+        assert not any(field in item for item in conv._iter_output_dicts(training_resp) for field in tokens)
 
     def test_reasoning_becomes_thinking_block(self) -> None:
         conv, resp = self._response_from_anthropic(
@@ -403,6 +485,28 @@ class TestResponsesToAnthropicResponse:
         assert message.stop_reason == "tool_use"
         assert message.content[1].input == {"a": 1}
 
+    @pytest.mark.parametrize("blank", ["", " ", "\n\t"])
+    def test_mixed_response_preserves_blank_text_and_other_blocks(self, blank):
+        content = [
+            {"type": "thinking", "thinking": "keep reasoning", "signature": ""},
+            {"type": "text", "text": blank},
+            {"type": "text", "text": "  keep this text\n"},
+            {"type": "tool_use", "id": "call-1", "name": "check", "input": {}},
+        ]
+        conv, response = self._response_from_anthropic({"content": content, "stop_reason": "tool_use"})
+        # Build distinct Responses text parts: the inverse converter coalesces
+        # adjacent Anthropic text blocks before this serialization boundary.
+        payload = response.model_dump(mode="json")
+        for item in payload["output"]:
+            if item["type"] == "message":
+                item["content"] = [
+                    {"type": "output_text", "text": block["text"], "annotations": []} for block in content[1:3]
+                ]
+        response = type(response).model_validate(payload)
+        served = conv.responses_to_anthropic_response(response, model="m")
+        assert served["content"] == content
+        assert served["stop_reason"] == "tool_use"
+
     def test_empty_output_yields_empty_content(self) -> None:
         # Defensive: a downstream response carrying no output items maps to empty content,
         # which is still a valid Anthropic Message. (Realistic empty responses arrive as an
@@ -446,7 +550,7 @@ class TestAnthropicResponseToSSE:
                 ],
                 "stop_reason": "tool_use",
                 "stop_sequence": None,
-                "usage": {"input_tokens": 3, "output_tokens": 4},
+                "usage": {"input_tokens": 3, "output_tokens": 4, "cache_read_input_tokens": 2},
             }
         )
         types = [t for t, _ in events]
@@ -463,6 +567,12 @@ class TestAnthropicResponseToSSE:
         ]
         # message_start carries an empty content list
         assert events[0][1]["message"]["content"] == []
+        assert events[0][1]["message"]["stop_reason"] is None
+        assert events[0][1]["message"]["usage"] == {
+            "input_tokens": 3,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 2,
+        }
         # text delta
         assert events[2][1]["delta"] == {"type": "text_delta", "text": "hi"}
         # tool_use input arrives as input_json_delta
@@ -471,6 +581,12 @@ class TestAnthropicResponseToSSE:
         # message_delta carries stop_reason + output usage
         assert events[7][1]["delta"]["stop_reason"] == "tool_use"
         assert events[7][1]["usage"] == {"output_tokens": 4}
+
+    def test_missing_usage_stays_absent(self) -> None:
+        events = self._events({"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"})
+        assert "usage" not in events[0][1]["message"]
+        assert "usage" not in events[-2][1]
+        assert events[-2][1]["delta"]["stop_reason"] == "end_turn"
 
     def test_thinking_block_delta(self) -> None:
         events = self._events(
@@ -627,6 +743,91 @@ class TestSharedHelperBranches:
         assert anthropic_body["tool_choice"] == {"type": "any"}
 
 
+class TestCacheUsage:
+    """Anthropic reports cache reads and writes apart from ``input_tokens``; Responses counts them inside it."""
+
+    def _served(self, usage: dict):
+        return _converter().anthropic_to_responses(
+            {"content": [{"type": "text", "text": "x"}], "stop_reason": "end_turn", "usage": usage},
+            request_body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            model="m",
+        )
+
+    def test_anthropic_cache_reads_and_writes_join_the_responses_input(self) -> None:
+        usage = self._served(
+            {
+                "input_tokens": 200,
+                "cache_creation_input_tokens": 100,
+                "cache_read_input_tokens": 800,
+                "output_tokens": 50,
+            }
+        ).usage
+        assert (usage.input_tokens, usage.input_tokens_details.cached_tokens, usage.output_tokens) == (1100, 800, 50)
+        assert usage.input_tokens_details.cache_write_tokens == 100
+        assert usage.total_tokens == 1150
+        assert usage.output_tokens_details.reasoning_tokens is None
+
+    def test_anthropic_usage_without_cache_counts_reports_none_cached(self) -> None:
+        usage = self._served({"input_tokens": 5, "output_tokens": 7}).usage
+        assert (usage.input_tokens, usage.input_tokens_details.cached_tokens, usage.total_tokens) == (5, None, 12)
+
+    def test_responses_cached_input_becomes_anthropic_cache_reads(self) -> None:
+        conv = _converter()
+        response = self._served({"input_tokens": 1, "output_tokens": 1})
+        response.usage = NeMoGymResponseUsage(
+            input_tokens=1000,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=800),
+            output_tokens=50,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
+            total_tokens=1050,
+        )
+        out = conv.responses_to_anthropic_response(response, model="m")
+        assert out["usage"] == {"input_tokens": 200, "cache_read_input_tokens": 800, "output_tokens": 50}
+        events = [
+            json.loads(line.split("data: ", 1)[1]) for line in conv.anthropic_response_to_sse(out) if "data: " in line
+        ]
+        start = next(event for event in events if event["type"] == "message_start")
+        delta = next(event for event in events if event["type"] == "message_delta")
+        # The split arrives with message_start; message_delta adds only the output, as Anthropic streams it.
+        assert start["message"]["usage"] == {**out["usage"], "output_tokens": 0}
+        assert delta["usage"] == {"output_tokens": 50}
+
+    def test_responses_usage_without_a_cache_count_has_no_cache_reads(self) -> None:
+        response = self._served({"input_tokens": 5, "output_tokens": 7})
+        assert _converter().responses_to_anthropic_response(response, model="m")["usage"] == {
+            "input_tokens": 5,
+            "output_tokens": 7,
+        }
+
+    @pytest.mark.parametrize(
+        "usage",
+        [
+            {"input_tokens": 200, "cache_read_input_tokens": 800, "output_tokens": 50},
+            {"input_tokens": 200, "cache_read_input_tokens": 0, "output_tokens": 50},
+            {
+                "input_tokens": 200,
+                "cache_creation_input_tokens": 100,
+                "cache_read_input_tokens": 800,
+                "output_tokens": 50,
+            },
+            {"input_tokens": 200, "cache_creation_input_tokens": 100, "output_tokens": 50},
+            {"input_tokens": 5, "output_tokens": 7},
+        ],
+    )
+    def test_round_trip_keeps_the_input_without_double_counting_cache_tokens(self, usage: dict) -> None:
+        conv = _converter()
+        served = self._served(usage)
+        rebuilt = conv.responses_to_anthropic_response(served, model="m")
+        assert rebuilt["usage"] == usage
+        again = self._served(rebuilt["usage"]).usage
+        details, served_details = again.input_tokens_details, served.usage.input_tokens_details
+        assert (again.input_tokens, details.cached_tokens, details.cache_write_tokens) == (
+            served.usage.input_tokens,
+            served_details.cached_tokens,
+            served_details.cache_write_tokens,
+        )
+
+
 @pytest.mark.parametrize("count", [None, 0, 7])
 def test_anthropic_cache_creation_usage_preserves_reported_counts(count: int | None) -> None:
     usage = {"input_tokens": 11, "output_tokens": 3}
@@ -636,4 +837,6 @@ def test_anthropic_cache_creation_usage_preserves_reported_counts(count: int | N
     result = _converter()._usage_to_responses_usage(usage)
 
     assert result.input_tokens_details.cache_write_tokens == count
-    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (11, 3, 14)
+    # Responses counts the cache writes inside input_tokens.
+    written = count or 0
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (11 + written, 3, 14 + written)

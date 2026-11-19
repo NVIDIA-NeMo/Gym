@@ -1,7 +1,17 @@
 {
+  "benchmarks/vstar_spatiotemporal": {
+    "override-dependencies": [
+      "opencv-python-headless==5.0.0.93"
+    ]
+  },
   "environment_servers/nemo_user_sim": {
     "override-dependencies": [
       "pyarrow>=25.0.1,<26"
+    ]
+  },
+  "resources_servers/agentic_mme": {
+    "override-dependencies": [
+      "opencv-python-headless==5.0.0.93"
     ]
   },
   "resources_servers/code_fim": {
@@ -14,18 +24,32 @@
       "pathspec"
     ]
   },
+  "resources_servers/critpt_custom_grader": {
+    "override-dependencies": [
+      "pillow==12.3.0"
+    ]
+  },
+  "resources_servers/ether0": {
+    "exclude-dependencies": [
+      "pyonmttok"
+    ]
+  },
   "resources_servers/gdpval": {
     "include-dependencies": [
       "cryptography"
     ]
   },
-  "resources_servers/longmt_eval": {
+  "resources_servers/longmt_eval/scoring": {
+    "standalone": true,
+    "reason": "Python 3.12 SEGALE/COMET 2.2.7 environment: Transformers 4.x compatibility and protobuf 4.25.9 retained from the validated scoring stack. These are explicit compatibility exceptions, not a claim that older versions meet the root security floor.",
     "constraint-dependencies": [
-      "transformers>=4.17,<5"
-    ],
+      "transformers>=4.17,<5",
+      "protobuf==4.25.9"
+    ]
+  },
+  "resources_servers/model_identity": {
     "override-dependencies": [
-      "torchvision==0.27.0",
-      "protobuf==6.33.6"
+      "pyarrow>=25.0.1,<26"
     ]
   },
   "resources_servers/nemo_user_sim": {
@@ -84,7 +108,7 @@
   },
   "responses_api_agents/agentic_mme_agent": {
     "override-dependencies": [
-      "opencv-python-headless>=4.10"
+      "opencv-python-headless==5.0.0.93"
     ]
   },
   "responses_api_agents/harbor_agent": {

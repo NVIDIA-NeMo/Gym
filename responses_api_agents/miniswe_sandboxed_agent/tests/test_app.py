@@ -24,7 +24,10 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
 ):
     requests = []
     full_output = "start" + "x" * 6000 + "MIDDLE_MUST_BE_ELIDED" + "y" * 6000 + "end"
-    commands = ["echo first", "cat large.txt; sleep 10", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    # Leave time for the shell and cat to start on loaded CI hosts so the
+    # timeout exercises output truncation, not an empty startup observation.
+    step_timeout = 10
+    commands = ["echo first", "cat large.txt; sleep 60", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
 
     async def query(params):
         index = len(requests)
@@ -63,7 +66,7 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
         context=module.HarnessContext(
             session_id="task", instruction="Official task instruction", skills_dir="/skills"
         ),
-        config=module.MiniSWEConfig(step_timeout_sec=1),
+        config=module.MiniSWEConfig(step_timeout_sec=step_timeout),
         params=NeMoGymResponseCreateParamsNonStreaming(input=[], tool_choice="required"),
         query=query,
         model_name="model",
@@ -71,7 +74,7 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
         observability_enabled=observability_enabled,
     )
     Path(harness.context.workdir, "large.txt").write_text(full_output)
-    # Allow runner startup headroom on loaded CI hosts; the command timeout under test stays at 1 s.
+    # The runner budget includes startup, separate from the command timeout under test.
     response, termination, extra = await harness.execute(120)
     assert termination.reason == "completed", termination
     assert extra["harness_version"] == "2.4.6"
@@ -94,7 +97,7 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
     assert observation["output_head"] == full_output[:5000]
     # Some shells append a killed-process notice to stderr after the timeout.
     assert "end" in observation["output_tail"] and len(observation["output_tail"]) == 5000
-    assert "timed out after 1 seconds" in observation["exception_info"]
+    assert f"timed out after {step_timeout} seconds" in observation["exception_info"]
     native = extra["mini_swe_trajectory"]
     assert full_output in next(m for m in native["messages"] if m.get("call_id") == "call_1")["extra"]["raw_output"]
     assert [item["id"] for item in requests[-1]["input"] if item.get("type") == "reasoning"] == ["rs_0", "rs_1"]

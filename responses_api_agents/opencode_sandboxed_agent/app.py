@@ -36,7 +36,6 @@ from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
 from uuid import uuid4
 
-from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
@@ -145,6 +144,8 @@ _RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
 _RIPGREP_UPLOAD_MAX_CONCURRENT = 2
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+# Written by stable-date.js once it pins a date; must match its MARKER.
+STABLE_DATE_MARKER = "/tmp/nemo-gym-stable-date-active"
 # Image parts of the user turn are uploaded here and handed to `opencode run -f`. Outside the task
 # workdir on purpose (see the export path below) and fixed because each rollout owns its sandbox.
 _REMOTE_ATTACHMENTS_DIR = "/tmp/nemo-gym-attachments"
@@ -731,6 +732,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_failed: bool = False
     # Images of the user turn uploaded into the sandbox and attached with `opencode run -f`.
     opencode_attachment_count: int = 0
+    # The last assistant message stopped on length: the session ended on a full context.
+    opencode_context_limited: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -902,6 +905,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             policy_plugins.append("remaining-context.js")
         if self.config.tool_servers:
             policy_plugins.append("required-mcp.js")
+        if self._token_id_capture_enabled():
+            # Source-history capture links calls by exact prompt text; keep the date stable.
+            policy_plugins.append("stable-date.js")
         uploads.extend((Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}") for name in policy_plugins)
         return uploads
 
@@ -1369,7 +1375,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
-        && rm -f /tmp/nemo-gym-mcp-setup-error
+        && rm -f /tmp/nemo-gym-mcp-setup-error {STABLE_DATE_MARKER}
         """
         agent_command = f"""
         {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
@@ -1540,6 +1546,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     operation="opencode.setup",
                     stage="seed",
                     failure_reason="Required Gym MCP tools could not be initialized",
+                )
+        if self._token_id_capture_enabled() and result is not None and result.return_code == 0:
+            # A finished run made model calls; without the marker the date pin did not apply.
+            marker_check = await sandbox.exec(command=f"test -f {STABLE_DATE_MARKER}", timeout_s=30)
+            if marker_check.return_code != 0 or marker_check.error_type:
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.capture",
+                    failure_reason="OpenCode stable-date plugin did not pin the system prompt date",
                 )
 
         export_fname = "export.json"
@@ -1745,7 +1761,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ]
             length_limited = bool(assistant_infos and assistant_infos[-1].get("finish") == "length")
             terminal_error = assistant_infos[-1].get("error") if assistant_infos else None
-            if terminal_error and not run_error_type:
+            # The sandbox's exec timeout outranks the error the killed session left in its export,
+            # so rules that match opencode_error_type == "timeout" still see it.
+            if terminal_error and not run_error_type and getattr(result, "error_type", None) is None:
                 run_error_type = (
                     terminal_error.get("name", "OpenCodeError")
                     if isinstance(terminal_error, dict)
@@ -1836,6 +1854,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # so an empty string means the run ended some other way (answered, or infra failure).
             "opencode_terminal_reason": _terminal_reason(run_output),
             "opencode_attachment_count": len(attachments),
+            "opencode_context_limited": length_limited,
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
@@ -1947,17 +1966,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             del request.state._ng_observation_invocation_id
             del request.state._ng_opencode_mcp
             # A server cancels its handler when the caller disconnects, and OpenCode keeps running
-            # in its pod regardless: only stopping the sandbox ends it. Shielded because the
-            # cancellation is re-delivered at every await until the handler exits, so an unshielded
-            # stop would itself be cancelled and leave the pod generating until its TTL.
-            with CancelScope(shield=True):
-                try:
-                    await sandbox.stop()
-                except Exception:
-                    print("Failed to stop sandbox", format_exc(), file=sys.stderr)
-                finally:
-                    self._sandbox_id_to_sandbox.pop(session_key, None)
-                    self._sandbox_id_to_run_result.pop(session_key, None)
+            # in its pod regardless: only stopping the sandbox ends it. AsyncSandbox.stop is shielded
+            # from that cancellation and bounded in time, so the pod does not generate until its TTL.
+            try:
+                await sandbox.stop()
+            except Exception:
+                print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+            finally:
+                self._sandbox_id_to_sandbox.pop(session_key, None)
+                self._sandbox_id_to_run_result.pop(session_key, None)
 
         response_dict |= run_result
         if trajectory is not None:

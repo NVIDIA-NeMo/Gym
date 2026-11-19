@@ -77,6 +77,7 @@ from nemo_gym.utils.path_utils import (
     failures_path_for,
     rerun_masked_journal_path_for,
     resubmit_offset_path_for,
+    task_selection_path_for,
 )
 
 
@@ -288,6 +289,8 @@ class RolloutStore:
             aggregate_metrics_path_for(output),
             # A shard list an earlier aggregation into this path left names other rows.
             aggregation_sources_path_for(output),
+            # The tasks an earlier run selected by id; a subset run records its own once it starts.
+            task_selection_path_for(output),
         ):
             path.unlink(missing_ok=True)
         output.touch()
@@ -575,7 +578,8 @@ class RolloutStore:
             reservations.append((row, identity, attempt))
             next_attempt[identity] = attempt + 1
         manifest = self.manifest.model_copy(update={"next_attempt": next_attempt})
-        manifest.write(manifest_path_for(self.output))
+        # A reservation leaves the configuration identity as opening the store saved it.
+        manifest.write(manifest_path_for(self.output), write_config_identity=False)
         # Publish in memory only after all reservations are durable.
         self.manifest = self._state.manifest = manifest
         for row, identity, attempt in reservations:

@@ -43,7 +43,7 @@ def _browsers_dir() -> pathlib.Path:
         return pathlib.Path.home() / "Library" / "Caches" / "ms-playwright"
     if sys.platform == "win32":
         return pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright"
-    return pathlib.Path.home() / ".cache" / "ms-playwright"
+    return pathlib.Path(os.environ.get("XDG_CACHE_HOME") or pathlib.Path.home() / ".cache") / "ms-playwright"
 
 
 def _executable_present() -> bool:

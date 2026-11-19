@@ -18,11 +18,13 @@ scale_swe_resources_server:
       apply_anti_cheating: true
 
       sandbox_provider: sandbox
+      enforce_agent_no_network: false
+      sandbox_model_server: null
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
         # Limits are the BURST ceiling; requests are the guaranteed floor -- see
-        # resources_servers/swe_rebench/configs/swe_rebench.yaml for the measurement behind this
+        # resources_servers/swe_rebench/configs/swe_rebench_legacy_agent.yaml for the measurement behind this
         # split (2.8x faster than requests==limits at no cost in resolved rate or incompletes).
         #
         # memory_mib raised 8192 -> 16384 on direct evidence, not a guess: a full-set 20,181-row
@@ -57,6 +59,8 @@ scale_swe_golden_patch_resources_server:
       is_verifying_golden_patch: true
 
       sandbox_provider: sandbox
+      enforce_agent_no_network: false
+      sandbox_model_server: null
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
