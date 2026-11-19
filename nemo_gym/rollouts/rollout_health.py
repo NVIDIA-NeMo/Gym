@@ -44,6 +44,7 @@ from nemo_gym.rollouts.health.checks import (
     _is_failed,
     _is_failed_attempt,
     _is_length_refusal,
+    _is_repetition_stop,
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
@@ -255,7 +256,6 @@ def evaluate_record(
             for call in bindings.matched_calls
         ):
             unobserved.append(spec.id)
-            continue
         try:
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:
@@ -527,8 +527,8 @@ def _response_population(scope_complete: bool, bindings: Any) -> dict[str, list[
     Selected means bound to an agent turn of a complete call scope. A bound call that failed is a trial matter and
     is left out. Every other bound call must carry an explicit 2xx/3xx status, a raw response and a call id, or the
     population is unknown. A fault is judged from the raw output itself: a length-limited finish that is not a
-    length refusal (truncated), or an output with nothing usable (`_response_has_usable_output`: empty, reasoning
-    only or malformed). Token counts alone are never a fault.
+    length refusal (truncated), an explicit provider repetition stop, or an output with nothing usable
+    (`_response_has_usable_output`: empty, reasoning only or malformed). Token counts alone are never a fault.
     """
     if not scope_complete or not bindings.complete:
         return None
@@ -553,7 +553,7 @@ def _response_population(scope_complete: bool, bindings: Any) -> dict[str, list[
             return None
         selected.append(identity)
         truncated = call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS and not _is_length_refusal(call)
-        if truncated or not _response_has_usable_output(call["response"]):
+        if truncated or _is_repetition_stop(call) or not _response_has_usable_output(call["response"]):
             faulted.append(identity)
     return {"selected": sorted(selected), "faulted": sorted(faulted)}
 
@@ -1354,13 +1354,21 @@ def _mlflow_configured(config: Mapping[str, Any]) -> bool | None:
     return all(state == "set" for state in states)
 
 
+def _provenance_reference_name(reference: object, expected_kind: str) -> str | None:
+    if not isinstance(reference, dict) or reference.get("type", expected_kind) != expected_kind:
+        return None
+    value = reference.get("name")
+    return value if isinstance(value, str) and value and "${" not in value else None
+
+
 def run_provenance(rollout_path: Path) -> dict[str, Any]:
     """Facts about how the run was configured, read from the resolved config saved beside the rollouts.
 
     Only values the config states are reported: ``route_failures_to_sidecar`` and each agent's ``skip_verification``
     are booleans when written as booleans and ``None`` otherwise, never a default. Each top-level server entry
     reports its kind (``responses_api_agents``, ``resources_servers`` or ``environment_servers``), its implementation
-    key and, for an agent, the resources server it names. No values beyond these names and flags are copied.
+    key and the agent/resources bindings used to attribute verification. No values beyond these names and flags
+    are copied.
     """
     import yaml
 
@@ -1382,12 +1390,37 @@ def run_provenance(rollout_path: Path) -> dict[str, Any]:
             if not isinstance(block, dict) or len(block) != 1:
                 continue
             [(implementation, settings)] = block.items()
+            settings_malformed = not isinstance(settings, dict)
             settings = settings if isinstance(settings, dict) else {}
             fact: dict[str, Any] = {"kind": kind, "implementation": str(implementation)}
             if kind == "responses_api_agents":
                 resources = settings.get("resources_server")
                 fact["resources_server"] = resources.get("name") if isinstance(resources, dict) else None
                 fact["skip_verification"] = _flag(settings.get("skip_verification"))
+            elif kind == "environment_servers":
+                # Match routing attribution: an explicit agent_server, otherwise the only typed agent reference.
+                # Malformed or ambiguous references prove no binding; never choose an agent from the run at large.
+                agents = [
+                    _provenance_reference_name(reference, "responses_api_agents")
+                    for reference in settings.values()
+                    if isinstance(reference, dict) and reference.get("type") == "responses_api_agents"
+                ]
+                primary = settings.get("agent_server")
+                if primary is not None:
+                    fact["agent_server"] = _provenance_reference_name(primary, "responses_api_agents")
+                else:
+                    fact["agent_server"] = agents[0] if len(agents) == 1 else None
+                resources = settings.get("resources_server")
+                fact["resources_server"] = _provenance_reference_name(resources, "resources_servers")
+                # An absent/ambiguous primary leaves an explicit row agent authoritative. A malformed declared
+                # reference must remain distinguishable so that compatibility path cannot hide a bad binding.
+                if (
+                    settings_malformed
+                    or any(agent is None for agent in agents)
+                    or (primary is not None and fact["agent_server"] is None)
+                    or (resources is not None and fact["resources_server"] is None)
+                ):
+                    fact["bindings_malformed"] = True
             servers[str(name)] = fact
     return {
         "resolved_config": "read",

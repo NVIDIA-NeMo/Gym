@@ -77,11 +77,14 @@ Compare its value with the queue-duration histogram count to calculate the queue
 Rollout outcomes
 ----------------
 ``gym.rollout.completed_total`` (counter): one per rollout attempt the collection driver finished
-handling, recorded after the recovery store accepts the saved outcome. An attempt is one dispatch of
+handling, recorded (for the collection driver) after the recovery store accepts the saved outcome. An attempt is one dispatch of
 one row in one collection run; a retry on a later resume run is another attempt, and an HTTP-level
-re-send of ``/run`` inside one dispatch is not. Only ``run_from_config`` (``gym eval run`` with
-serving) records it: ``--no-serve`` initialises no telemetry, and ``run_examples`` callers,
-reverification and the GDPVal multistage driver do not call the recorder.
+re-send of ``/run`` inside one dispatch is not. Two producers record it. The collection driver is
+``run_from_config`` (``gym eval run`` with serving): ``--no-serve`` initialises no telemetry, and ``run_examples``
+callers, reverification and the GDPVal multistage driver do not call the recorder. ``TaskRunner.run_task``, the
+in-process API, also records each rollout outcome it returns, without a recovery-store write: for it ``failed``
+means the outcome has a failure (labeled with its kind only), ``scored`` a reward and no failure, and ``unscored``
+neither. ``gym.rollout.rewarded_total`` counts only the finite rewards of scored rollouts, masked ones included.
 
 ``nemo.gym.rollout.outcome`` is ``scored`` (main output, including masked, forced-zero and supported
 unscored completions), ``failed`` (saved failures, including kill-shaped) or ``omitted`` (saved
@@ -130,7 +133,8 @@ Partial-rollout checkpoints
 ---------------------------
 ``gym.checkpoint.operation_duration_ms`` (histogram): wall-clock of one checkpoint operation.
 ``nemo.gym.checkpoint.operation`` is a participant's control operation (``prepare``, ``commit``, ``restore``,
-``resume``, ``retire``, or ``forget``), ``lease_reopen`` for one attempt to reopen a participant whose lease expired,
+``resume``, ``retire``, ``forget``, or ``release``), ``lease_reopen`` for one attempt to reopen a participant whose
+lease expired,
 or ``coordinate.<operation>`` for one call the controller makes to every participant.
 It also carries ``nemo.gym.checkpoint.participant_kind`` (``controller`` for coordination) and ``outcome``
 (``ok`` or ``error``).
@@ -158,7 +162,7 @@ by ``nemo.gym.checkpoint.event``:
 
 import logging
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Literal, Optional
 
 
@@ -187,6 +191,14 @@ HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+RUN_METRIC_PREFIX = "gym.run."
+RUN_ID_ATTRIBUTE = "nemo.gym.run.id"
+RUN_INFO_INSTRUMENT = "gym.run.info"
+# The failure class in `coverage/failed/<class>`.
+RUN_METRIC_BUCKET_ATTRIBUTE = "nemo.gym.run.bucket"
+RUN_METRIC_UNREGISTERED_BUCKET = "unregistered"
+# Failure classes outside the registered failure kinds that still name a bounded bucket.
+_RUN_METRIC_EXTRA_BUCKETS = frozenset({"skipped", "unknown"})
 ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
 ROLLOUT_OUTCOME_ATTRIBUTE = "nemo.gym.rollout.outcome"
 FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
@@ -493,6 +505,39 @@ def record_http_connection_pool_connect_duration(duration_ms: float, *, outcome:
         {HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE: outcome, HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name},
         boundaries=HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS,
     )
+
+
+def record_run_summary(summary: Mapping[str, float], *, run_id: Optional[str]) -> None:
+    """Record a finished run's coverage and retry counts as gauges, one per key, under its run id.
+
+    ``coverage/scored`` becomes ``gym.run.coverage.scored``. ``coverage/failed/<class>`` becomes
+    ``gym.run.coverage.failed`` with the class as the bucket attribute. A class outside the registered failure kinds
+    is counted under ``unregistered``, so the attribute stays bounded. ``run_id`` is left off for a merge of several
+    shards; the job's ``nemo.run.id`` resource attribute identifies it.
+    """
+    meter = _meter()
+    if meter is None:
+        return
+    from nemo_gym.core.failure_kinds import FAILURE_KINDS
+
+    buckets = FAILURE_KINDS | _RUN_METRIC_EXTRA_BUCKETS
+    run: dict[str, Any] = {RUN_ID_ATTRIBUTE: run_id} if run_id else {}
+    points: dict[tuple[str, Optional[str]], float] = {}
+    for key, value in summary.items():
+        parts = key.split("/", 2)
+        bucket = None
+        if len(parts) > 2:
+            bucket = parts[2] if parts[2] in buckets else RUN_METRIC_UNREGISTERED_BUCKET
+        name = RUN_METRIC_PREFIX + ".".join(parts[:2])
+        points[(name, bucket)] = points.get((name, bucket), 0) + value
+    points[(RUN_INFO_INSTRUMENT, None)] = 1  # One series per finished run, for dashboards to join the gauges on.
+    for (name, bucket), value in points.items():
+        attributes = run if bucket is None else {**run, RUN_METRIC_BUCKET_ATTRIBUTE: bucket}
+        try:
+            gauge = _get_or_create(meter, name, lambda name=name: meter.create_gauge(name, unit="1"))
+            gauge.set(value, attributes=attributes)
+        except Exception:
+            logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
 
 def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[str, int]]) -> None:

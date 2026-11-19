@@ -213,6 +213,12 @@ For local checks on a workstation, a single-container task can also use Gym's `d
 sandbox provider. An offline verifier then runs with `docker run --network none`. EFS logs
 and Compose still require OpenSandbox.
 
+`environment.sandbox_provider` is an inline single-key provider block (the OpenSandbox default) or the name of a
+top-level sandbox block that a provider config defines, as DeepSWE's `sandbox_provider: sandbox` does. A name
+that no block defines stops the server at startup. A task that needs more than the selected provider offers (Compose
+without `SupportsSandboxNetwork`, an offline verifier outside OpenSandbox and Docker) raises `ProviderCapabilityError`
+at seed time: a terminal infrastructure failure that no retry repeats, with no sandbox started.
+
 `/verify` also reports `partial_credit`: the fraction of reported tests that passed
 (`num_tests_passed / num_tests_total`, so skipped tests count as not passed), never below the
 official reward. Without usable test counts it equals the official reward. `reward` stays the

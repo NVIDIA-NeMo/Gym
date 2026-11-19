@@ -1675,6 +1675,9 @@ class CollectedEvidence(BaseModel):
     # The aggregate's own (metric_coverage/trials, metric_coverage/expected, metric_coverage/name or None): the trials
     # the benchmark's headline metric covered, as the benchmark declares them.
     benchmark_metric_coverage: tuple[int, int, str | None] | None = None
+    # rollouts_task_selection.json: the subset the run selected by task id (source, tasks, rows, task_ids_sha256; a
+    # field is None when the record was unreadable), or None when the run took every task of its input.
+    task_selection: dict[str, Any] | None = None
     # Why the chain's accounting is unknown (the marker's reason or an unobserved claim), and the counter files' own
     # states (absent, ok, malformed) when the sources were stable.
     accounting_unknown_reason: str | None = None
@@ -2559,8 +2562,10 @@ def allocation_cut_from_accounting(rows: list[tuple[str, str, int, int]], alloca
     Only the first incarnation (no restarts) runs work: the prologue stops a requeued one before any. A state that is
     absent, ambiguous or not terminal is not an ending.
     """
+    later = any(job_id == allocation_id and restarts > 0 for job_id, _, _, restarts in rows)
+    ended = ALLOCATION_ENDED_STATES | {"REQUEUED"} if later else ALLOCATION_ENDED_STATES
     states = {state for job_id, state, _, restarts in rows if job_id == allocation_id and restarts == 0}
-    return allocation_id is not None and len(states) == 1 and states <= ALLOCATION_ENDED_STATES
+    return allocation_id is not None and len(states) == 1 and states <= ended
 
 
 def _store_writer_ended(collected: CollectedEvidence, previous_job_id: str) -> bool:
@@ -2599,9 +2604,12 @@ def accounted_requeued_chain_walltime(
     }
     if not job_chain or len(set(job_chain)) != len(job_chain) or {row[0] for row in rows} != set(job_chain):
         return None
+    last = {job_id: max(row[3] for row in rows if row[0] == job_id) for job_id in job_chain}
     restarts: dict[str, list[int]] = {}
     for job_id, state, _, restart in rows:
-        if state not in terminal:
+        # A REQUEUED incarnation that a later one followed has ended (its Start and End are recorded, so its elapsed
+        # time is known); the last incarnation still REQUEUED waits to run again and stays unknown.
+        if state not in terminal and not (state == "REQUEUED" and restart < last[job_id]):
             return None
         restarts.setdefault(job_id, []).append(restart)
     if any(sorted(numbers) != list(range(len(numbers))) for numbers in restarts.values()):
@@ -3687,18 +3695,14 @@ def _observed_trial_operations(
                 continue  # A counted grading fault (``_scored_fault``): its reward is no grade to observe.
             truncated = _incomplete_answer(row)
             prior_recovered_events = set(recovered_events)
-            agent = servers[row["agent_ref"]["name"]]
-            owner = _verification_owner(row["agent_ref"]["name"], agent)
+            owner = _verification_owner(row, servers)
+            if owner is None:
+                return False
             # An agent without a resources server grades its own rollouts (verifiers_agent); it has no resources
             # server to look up, and only its own grading record can observe such a trial (below).
-            resource = servers[owner] if owner == agent.get("resources_server") else None
-            environment = servers[row["_ng_environment_server"]]
+            resource = servers[owner] if servers[owner].get("kind") == "resources_servers" else None
             if (
-                agent.get("kind") != "responses_api_agents"
-                or (resource is not None and resource.get("kind") != "resources_servers")
-                or environment.get("kind") != "environment_servers"
-                or row.get("_ng_result_type") != environment.get("implementation")
-                or row.get(FAILURE_CLASS) is not None
+                row.get(FAILURE_CLASS) is not None
                 or row.get("failure_kind") is not None
                 or row.get(FAILURE_ID) is not None
                 or row.get("_ng_failure_events_omitted", False) is not False
@@ -4475,14 +4479,18 @@ def _graded(row: Mapping[str, Any]) -> bool:
     )
 
 
-def _bound_grading(row: Mapping[str, Any]) -> bool:
+def _bound_grading(row: Mapping[str, Any], collected: CollectedEvidence) -> bool:
     """Whether the row is ``_graded`` and every grading operation binds its saved answer and score, as the gate
     requires (``_ng_collected_grading_binding``)."""
     observed = row.get("ng_trial_observations")
     binding = row.get("_ng_collected_grading_binding")
+    provenance = (collected.quality or {}).get("provenance")
+    servers = provenance.get("servers") if isinstance(provenance, dict) else None
     return (
         _graded(row)
         and _bound_answer(row)
+        and isinstance(servers, dict)
+        and _verification_owner(row, servers) is not None
         and all(
             item.get("result_binding_sha256") == binding
             for item in observed["verifier_invocations"][0]["grading_operations"]
@@ -4490,21 +4498,53 @@ def _bound_grading(row: Mapping[str, Any]) -> bool:
     )
 
 
-def _bound_artifact(row: Mapping[str, Any]) -> bool:
+def _bound_artifact(row: Mapping[str, Any], collected: CollectedEvidence) -> bool:
     """Whether a saved grading artifact or the model's own failed answer resolves the row, as the gate requires: an
-    artifact other than the model's failed answer must bind the saved answer and score."""
-    if grading_artifact(row) is not None and _bound_answer(row):
-        return True
-    return grading_artifact(row) is None and _model_failure(row)
+    artifact other than the model's failed answer must bind the saved answer and score to its verification owner."""
+    if grading_artifact(row) is None:
+        return _model_failure(row)
+    provenance = (collected.quality or {}).get("provenance")
+    servers = provenance.get("servers") if isinstance(provenance, dict) else None
+    return _bound_answer(row) and isinstance(servers, dict) and _verification_owner(row, servers) is not None
 
 
-def _verification_owner(agent_name: Any, agent: Mapping[str, Any]) -> Any:
-    """Who verifies an agent's rollouts: its resources server, or the agent itself when it names none.
+def _verification_owner(row: Mapping[str, Any], servers: Mapping[str, Any]) -> str | None:
+    """Resolve verification from saved routing bindings, including taskset results without ``agent_ref``.
 
-    An agent that runs its own rubric (verifiers_agent) has no resources server; its grading record names the agent.
+    The environment owns a session's verification. An agent reference on a compatibility result must agree with
+    a declared primary agent; without one, its explicit reference retains its existing attribution.
+    An agent that grades its own rollouts names itself when neither configuration binds a resources server.
     """
-    server = agent.get("resources_server")
-    return server if server is not None else agent_name
+    environment_name = row.get("_ng_environment_server")
+    environment = servers.get(environment_name) if isinstance(environment_name, str) else None
+    if (
+        not isinstance(environment, dict)
+        or environment.get("kind") != "environment_servers"
+        or environment.get("bindings_malformed", False) is not False
+        or row.get("_ng_result_type") != environment.get("implementation")
+    ):
+        return None
+    reference = row.get("agent_ref")
+    if reference is None:
+        agent_name = environment.get("agent_server")
+    elif isinstance(reference, dict):
+        agent_name = reference.get("name")
+        if environment.get("agent_server") is not None and agent_name != environment["agent_server"]:
+            return None
+    else:
+        return None
+    agent = servers.get(agent_name) if isinstance(agent_name, str) and agent_name else None
+    if not isinstance(agent, dict) or agent.get("kind") != "responses_api_agents":
+        return None
+    owner = environment.get("resources_server")
+    if owner is None:
+        if reference is None:
+            return None
+        owner = agent.get("resources_server")
+    if owner is None:
+        return agent_name
+    resource = servers.get(owner) if isinstance(owner, str) and owner else None
+    return owner if isinstance(resource, dict) and resource.get("kind") == "resources_servers" else None
 
 
 def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: Any) -> bool:
@@ -4539,27 +4579,28 @@ def _recorded_by_verifier(row: Mapping[str, Any], collected: CollectedEvidence) 
     """Whether the row's one verifier invocation saved its own grading record for it (``_verifier_recorded``)."""
     provenance = (collected.quality or {}).get("provenance")
     servers = provenance.get("servers") if isinstance(provenance, dict) else None
-    agent_ref = row.get("agent_ref")
-    agent = servers.get(agent_ref.get("name")) if isinstance(servers, dict) and isinstance(agent_ref, dict) else None
+    owner = _verification_owner(row, servers) if isinstance(servers, dict) else None
     observed = row.get("ng_trial_observations")
     verifiers = observed.get("verifier_invocations") if isinstance(observed, dict) else None
     return (
-        isinstance(agent, dict)
+        owner is not None
         and isinstance(verifiers, list)
         and len(verifiers) == 1
-        and _verifier_recorded(verifiers[0], row, _verification_owner(agent_ref.get("name"), agent))
+        and _verifier_recorded(verifiers[0], row, owner)
     )
 
 
 def _verifying_servers(collected: CollectedEvidence) -> str:
-    """The resources servers the run's agents name, from the run provenance, for an unobserved-trial reason."""
+    """The resources servers the run binds, from its provenance, for an unobserved-trial reason."""
     provenance = (collected.quality or {}).get("provenance")
     servers = provenance.get("servers") if isinstance(provenance, dict) else None
     names = sorted(
         {
             str(fact["resources_server"])
             for fact in (servers.values() if isinstance(servers, dict) else ())
-            if isinstance(fact, dict) and fact.get("kind") == "responses_api_agents" and fact.get("resources_server")
+            if isinstance(fact, dict)
+            and fact.get("kind") in {"responses_api_agents", "environment_servers"}
+            and fact.get("resources_server")
         }
     )
     return ", ".join(names) if names else "a resources server the run provenance does not name"
@@ -4630,13 +4671,15 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     ]
     # The same per-trial evidence the gate validates: a grading bound to the saved row, the verifier's own record, or
     # a bound grading artifact. A mismatched or missing binding stays unobserved, never healthy.
-    recorded = sum(1 for row in rows if not _bound_grading(row) and _recorded_by_verifier(row, collected))
+    recorded = sum(1 for row in rows if not _bound_grading(row, collected) and _recorded_by_verifier(row, collected))
     artifacts = sum(
         1
         for row in rows
-        if not _bound_grading(row) and not _recorded_by_verifier(row, collected) and _bound_artifact(row)
+        if not _bound_grading(row, collected)
+        and not _recorded_by_verifier(row, collected)
+        and _bound_artifact(row, collected)
     )
-    unobserved = sum(1 for row in rows if not _bound_grading(row)) - recorded - artifacts
+    unobserved = sum(1 for row in rows if not _bound_grading(row, collected)) - recorded - artifacts
     counts: dict[str, Any] = {
         "observed_healthy": trials - unhealthy - unobserved,
         "unhealthy": unhealthy,
@@ -4748,7 +4791,13 @@ def _recorded_grade(row: Mapping[str, Any], collected: CollectedEvidence | None)
     record, or a saved grading artifact (``GRADING_ARTIFACTS``). The model's own failed answer is not one."""
     return (
         _graded(row)
-        or (collected is not None and _recorded_by_verifier(row, collected))
+        # A shared record also covers an early zero returned for an empty answer; unlike an explicit grading
+        # operation, its completion alone does not show that an incomplete, text-free answer was judged.
+        or (
+            collected is not None
+            and not (_incomplete_answer(row) and _empty_answer(row))
+            and _recorded_by_verifier(row, collected)
+        )
         or grading_artifact(row) is not None
     )
 
@@ -5593,20 +5642,54 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         "response_failures": family(responses, RESPONSE_FAILURE_CAUSES),
         "trial_failures": family(causes, TRIAL_FAILURE_CAUSES),
         "metric_coverage": metric_coverage(decision, collected),
-        "output_budget_refits": output_budget_refits(collected),
+        "output_budget_refits": output_budget_refits(decision, collected),
+        "repetition_stops": repetition_stops(decision, collected),
         "agent_adaptations": agent_adaptations(decision, collected),
     }
 
 
-def output_budget_refits(collected: CollectedEvidence | None) -> dict[str, int]:
-    """How many model calls in the saved results were sent again with an output budget lowered to fit the context
-    window (``output_budget_refit`` in a call's response metadata), and in how many result rows.
+def _deciding_rows(decision: RecoveryDecision, collected: CollectedEvidence | None) -> list[Mapping[str, Any]]:
+    """The saved result row that decides each scored trial: the last one saved for its identity, so an attempt a later
+    one superseded is not counted again."""
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    latest: dict[Identity, Mapping[str, Any]] = {}
+    for row in (collected.results or []) if collected is not None else []:
+        if (identity := _identity(row)) in scored:
+            latest[identity] = row
+    return list(latest.values())
+
+
+def _verifier_owned(row: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
+    """Whether one of the row's verifier invocations owns the captured call (a judge's call), matched by its call id,
+    else by its model and response id: a judge served by the policy's own server is still the judge."""
+    observed = row.get("ng_trial_observations")
+    verifiers = observed.get("verifier_invocations") if isinstance(observed, Mapping) else None
+    meta = call.get("response_metadata") if isinstance(call.get("response_metadata"), Mapping) else {}
+    for verifier in verifiers if isinstance(verifiers, list) else []:
+        owned = verifier.get("model_calls") if isinstance(verifier, Mapping) else None
+        for ref in owned if isinstance(owned, list) else []:
+            if not isinstance(ref, Mapping):
+                continue
+            if ref.get("model_call_id"):
+                if ref["model_call_id"] == call.get("model_call_id"):
+                    return True
+            elif ref.get("response_id") and (ref.get("response_id"), ref.get("model_ref")) == (
+                meta.get("response_id"),
+                meta.get("model_ref"),
+            ):
+                return True
+    return False
+
+
+def output_budget_refits(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, int]:
+    """How many model calls in the rows that decide the scored trials were sent again with an output budget lowered
+    to fit the context window (``output_budget_refit`` in a call's response metadata), and in how many of those rows.
 
     A count, never a failure: the call generated within the window it was served at. A reader flags a cell whose
     requests were budget-capped from it.
     """
     count = rows = 0
-    for row in (collected.results or []) if collected is not None else []:
+    for row in _deciding_rows(decision, collected):
         observed = row.get("ng_trial_observations")
         calls = observed.get("model_calls") if isinstance(observed, dict) else None
         refits = sum(
@@ -5617,6 +5700,31 @@ def output_budget_refits(collected: CollectedEvidence | None) -> dict[str, int]:
         )
         count += refits
         rows += refits > 0
+    return {"count": count, "rows": rows}
+
+
+def repetition_stops(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, int]:
+    """How many of the policy's model calls in the rows that decide the scored trials the provider stopped for
+    repetition, and in how many of those rows: a ``repetition`` finish reason or a ``repetition_detected`` stop reason
+    (vLLM's repetition detection), as the evidence collector flags each call.
+
+    The model's own ending, never a failure: the answer it produced is scored as it is and nothing is retried, so the
+    count only makes loops visible. A call a verifier owns (a judge's, also when it shares the policy's server) or
+    another model's call is not counted, nor is an attempt a later one superseded.
+    """
+    count = rows = 0
+    for row in _deciding_rows(decision, collected):
+        observed = row.get("ng_trial_observations")
+        calls = observed.get("model_calls") if isinstance(observed, dict) else None
+        stops = sum(
+            isinstance(call, dict)
+            and call.get("repetition_stop") is True
+            and _policy_call(row, call)
+            and not _verifier_owned(row, call)
+            for call in calls or []
+        )
+        count += stops
+        rows += stops > 0
     return {"count": count, "rows": rows}
 
 
@@ -5674,6 +5782,17 @@ def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | N
     return {"trials": trials, "expected": expected, "source": "saved_rows"}
 
 
+def subset_note(selection: Mapping[str, Any]) -> str:
+    """The label of a run that selected its tasks by id: its score is the subset's, never the benchmark's."""
+    if selection.get("task_ids_sha256") is None:
+        return "subset run: the task selection record is unreadable; its score is a subset score, not the benchmark's"
+    return (
+        f"subset run: {selection['tasks']} tasks ({selection['rows']} rows) selected by task id from "
+        f"{selection['source']} (task_ids sha256 {selection['task_ids_sha256'][:12]}); its score is a subset score, "
+        "report it under the subset's name, never as the benchmark's"
+    )
+
+
 def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | None) -> str:
     """``evaluation health: PASS; response failures: 4.70% (truncated 41, empty 6 of 1000); trial failures: ...;
     metric over 1000 of 1000 trials``."""
@@ -5686,6 +5805,11 @@ def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | No
         text += f"; {name.replace('_', ' ')}: {found['rate']:.2%} ({named or 'none'} of {facts['expected']})"
     if facts["omitted"]:
         text += f"; {facts['omitted']} accepted stage omission(s) are not counted"
+    stops = facts.get("repetition_stops")
+    if stops and stops["count"]:
+        text += (
+            f"; repetition stops: {stops['count']} policy calls in {stops['rows']} trials (model, scored as answered)"
+        )
     coverage = facts.get("metric_coverage")
     if coverage is not None:
         text += f"; {coverage.get('name') or 'metric'} over {coverage['trials']} of {coverage['expected']} trials"
@@ -5821,6 +5945,9 @@ def gate_summary_from_collected(
         health_reasons=[] if trial_passed else [trial_reason],
     )
     task["criteria"] = criteria.report(classification=decision_classification(decision))
+    task["task_selection"] = collected.task_selection
+    if collected.task_selection is not None:
+        task["warnings"] = [subset_note(collected.task_selection)] + task["warnings"]
     if collected.unreadable_files:
         # What an unreadable metric, summary or record holds is unknown: never a pass.
         task["errors"].append(f"unreadable artifacts, read as unknown: {collected.unreadable_files[:20]}")

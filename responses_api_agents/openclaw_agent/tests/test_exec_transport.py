@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SUPERVISOR_FILE, SandboxSession
+from nemo_gym.agents.utils.supervisor_client import LAUNCH_CLAIM_FILE, SUPERVISOR_PID_FILE
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.openclaw_agent.sandbox import OpenClawSandboxSession
 from responses_api_agents.openclaw_agent.tests.test_sandbox import seed
@@ -26,6 +27,9 @@ CLOSE_TIMEOUT = 10
 
 
 class ExecOnlySandbox:
+    # File copies do not wait for the supervised exec in this local provider.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.cancelled_launch = False
         self.lost_launch = False
@@ -97,7 +101,8 @@ def payload(state, code):
 
 
 @pytest.mark.parametrize("ending", ["natural", "crash", "timeout", "cancel", "close"])
-async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_path, ending):
+@pytest.mark.parametrize("startup_delay", [0, 0.6])
+async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_path, ending, startup_delay):
     state, provider, workdir = make_session(tmp_path)
     # Complete the tool before interruption so its detached service is already adopted.
     tool = (
@@ -108,18 +113,25 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
     )
     code = (
         "import os,subprocess,sys,time,pathlib; "
+        f"time.sleep({startup_delay}); "
         f"subprocess.run([sys.executable,'-c',{tool!r}],check=True); "
         "pathlib.Path('ready').touch(); "
         + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
-    deadline = 3 if ending == "timeout" else 60
+    # Expire only after the detached child is ready; startup speed is not under test.
+    deadline = 60
     task = state.task = asyncio.create_task(
         state.execute(payload(state, code), timeout=deadline, close_timeout=CLOSE_TIMEOUT)
     )
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while not (workdir / "ready").exists():
+                if task.done():
+                    await task
+                    pytest.fail("Harness exited before its detached child was ready")
                 await asyncio.sleep(0.01)
+        if ending == "timeout":
+            assert await state.session.expire(timeout=CLOSE_TIMEOUT)
         if ending == "cancel":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -167,7 +179,7 @@ async def test_supervisor_and_runner_run_under_neutral_names(tmp_path):
         state.execute(payload(state, code), timeout=60, close_timeout=CLOSE_TIMEOUT)
     )
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while not (workdir / "ready").exists():
                 await asyncio.sleep(0.01)
         supervisor_pid = int((Path(state.session.session_dir) / "supervisor.pid").read_text())
@@ -182,20 +194,31 @@ async def test_supervisor_and_runner_run_under_neutral_names(tmp_path):
     assert provider.disconnected
 
 
-async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
+@pytest.mark.parametrize("retired", [False, True], ids=["before_retirement", "after_retirement"])
+async def test_lost_launch_is_fenced_before_and_after_directory_retirement(tmp_path, retired):
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
-        await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=CLOSE_TIMEOUT)
+        await state.execute(payload(state, "open('started','w').close()"), timeout=10, close_timeout=CLOSE_TIMEOUT)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert state.session.cleanup["return_code"] is None
     assert state.session.cleanup["error"] is None
     assert state.runtime_info is None
-    await state.close(CLOSE_TIMEOUT)
     provider.lost_launch = False
+    session_dir = Path(state.session.session_dir)
+    if retired:
+        await state.close(CLOSE_TIMEOUT)
+    else:
+        # The supervisor is still in place, so only the stop's launch claim can fence the delayed command.
+        assert (session_dir / SUPERVISOR_FILE).exists()
     await provider.exec(provider.delayed_command, cwd=str(workdir))
+    # Under a broken claim the stop file halts the harness before it writes this; the PID file shows the start.
     assert not (workdir / "started").exists()
-    assert not Path(state.session.session_dir).exists()
+    if not retired:
+        assert not (session_dir / SUPERVISOR_PID_FILE).exists()
+        assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
+        await state.close(CLOSE_TIMEOUT)
+    assert not session_dir.exists()
 
 
 async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):

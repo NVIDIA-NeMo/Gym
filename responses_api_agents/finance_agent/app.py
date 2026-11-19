@@ -55,6 +55,7 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -410,7 +411,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             try:
                 coro = self.server_client.post(
                     server_name=self.config.model_server.name,
-                    url_path="/v1/responses",
+                    url_path=self.url_path_for_request("/v1/responses", request),
                     json=new_body,
                     cookies=model_server_cookies,
                 )
@@ -649,7 +650,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
         response = await self.server_client.post(
             server_name=self.config.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_run("/v1/responses", body),
             json=body.responses_create_params,
             cookies=cookies,
         )
@@ -682,3 +683,6 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     FinanceAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = FinanceAgent.run_webserver()  # noqa: F401

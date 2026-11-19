@@ -232,6 +232,52 @@ async def test_stop_reaches_running_supervisor_through_the_stop_file(session, tm
     assert (session_dir / "checkpoint").read_text() == "saved\n"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
+async def test_stop_claiming_after_the_guard_still_fences_the_launch(session, tmp_path):
+    # The guard is only a fast path. A stop can claim the launch after the guard passes,
+    # and then `ln -s` alone must keep the supervisor from starting.
+    sandbox, session_dir = session
+    shutil.copyfile(SUPERVISOR_SCRIPT, session_dir / SUPERVISOR_FILE)
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    reached, release = gate / "reached", gate / "release"
+    # Hold the launch shell at its `bash -n` check, which runs between the guard and `ln -s`.
+    shim = gate / "bash"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = -n ]; then touch {quote(str(reached))}; i=0; '
+        f"while [ ! -e {quote(str(release))} ]; do i=$((i + 1)); [ $i -gt 6000 ] && exit 1; sleep 0.01; done; fi\n"
+        f'exec {quote(shutil.which("bash"))} "$@"\n'
+    )
+    shim.chmod(0o755)
+    command = supervised_launch_command(
+        session_dir=str(session_dir),
+        command=["touch", str(session_dir / "started")],
+        timeout=5,
+        cleanup_timeout=1,
+    )
+    launch = asyncio.create_task(sandbox.exec(f"PATH={quote(str(gate))}:$PATH; {command}", timeout_s=60))
+    try:
+        async with asyncio.timeout(60):
+            while not reached.exists():
+                if launch.done():
+                    pytest.fail(f"launch finished before its bash -n check: {launch.result()}")
+                await asyncio.sleep(0.01)
+        assert not (session_dir / LAUNCH_CLAIM_FILE).is_symlink()
+        receipt = await stop_and_confirm_cleanup(
+            sandbox, session_dir=str(session_dir), workdir=str(tmp_path), timeout=5, harness="test"
+        )
+    finally:
+        release.touch()
+        launched = await asyncio.wait_for(launch, 60)
+    assert launched.return_code == 0, launched.stderr
+    assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": None, "timed_out": False}
+    assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
+    assert not (session_dir / SUPERVISOR_PID_FILE).exists()
+    assert not (session_dir / OUTPUT_LOG_FILE).exists()
+    assert not (session_dir / "started").exists()
+
+
 def _parent(pid: int) -> int:
     return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
 

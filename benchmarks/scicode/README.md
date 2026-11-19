@@ -62,6 +62,12 @@ to write the next function directly.
 SciCode executes generated solutions in a separate Python 3.11 environment with
 pinned scientific dependencies; see [Grading environment](#grading-environment).
 
+Problems 13 and 62 each have one sub-step the benchmark prefills with reference code instead of
+generating it (13.6 builds `class Maxwell`, 62.1 builds `class Block` and `class EnlargedBlock`);
+every later step of the problem uses that class. The agent inserts the official reference files for
+these two steps whole, from `responses_api_agents/scicode_agent/prefilled_steps/`, so the cumulative
+program defines the classes. This also shows the model the whole class in the later steps' prompts.
+
 ## Running servers
 
 ```bash

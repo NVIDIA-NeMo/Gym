@@ -104,7 +104,6 @@ from nemo_gym.orchestration.jobs import (
     ROLLOUTS_FILENAME,
     BenchmarkJob,
     SubmissionRecord,
-    installed_gym_commit,
     new_gym_job_id,
     utc_now,
     utc_timestamp,
@@ -145,6 +144,7 @@ from nemo_gym.orchestration.recovery import (
     select_managed_evidence,
     stopped_followup,
 )
+from nemo_gym.utils.gym_commit import installed_gym_commit
 from nemo_gym.utils.path_utils import attempt_extension_path_for
 
 

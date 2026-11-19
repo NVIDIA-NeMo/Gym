@@ -96,6 +96,7 @@ from starlette.routing import Mount, Route
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.core.episode_context import current_episode_id
+from nemo_gym.core.tool_output_images import split_tool_output_images
 from nemo_gym.server_runtime._checkpoint.errors import RolloutIdRequiredError
 from nemo_gym.server_runtime.base_resources_server import (
     MCP_TOKEN_EPISODE_CLAIM,
@@ -770,8 +771,15 @@ def _parse_session_token(
 
 
 def _to_result(payload: Any, *, output_schema: Optional[dict] = None) -> types.CallToolResult:
-    """Preserve text content and object-only structured content on both SDK versions."""
-    structured = payload if isinstance(payload, dict) else None
+    """Preserve text content and object-only structured content on both SDK versions.
+
+    Images a tool lists under ``tool_output_images`` leave the text and structured content and follow it as MCP
+    image content, each after its label. A result with images carries no structured content unless the tool declares
+    an output schema: some clients, such as OpenCode, replace the content with the structured content when it is
+    present, which would drop the images.
+    """
+    payload, images = split_tool_output_images(payload)
+    structured = payload if isinstance(payload, dict) and (not images or output_schema is not None) else None
     if output_schema is not None:
         if structured is None:
             raise ValueError("Output validation error: outputSchema defined but no structured output returned")
@@ -780,9 +788,12 @@ def _to_result(payload: Any, *, output_schema: Optional[dict] = None) -> types.C
         except jsonschema.ValidationError as exc:
             raise ValueError(f"Output validation error: {exc.message}") from exc
     text = payload if isinstance(payload, str) else JSONResponse(payload).body.decode("utf-8")
-    return types.CallToolResult(
-        content=[types.TextContent(type="text", text=text)], structuredContent=structured, isError=False
-    )
+    content: list[types.TextContent | types.ImageContent] = [types.TextContent(type="text", text=text)]
+    for image in images:
+        if image.label:
+            content.append(types.TextContent(type="text", text=image.label))
+        content.append(types.ImageContent(type="image", data=image.data, mimeType=image.media_type))
+    return types.CallToolResult(content=content, structuredContent=structured, isError=False)
 
 
 def _make_mcp_server(

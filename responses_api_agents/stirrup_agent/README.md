@@ -45,13 +45,13 @@ episode.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `model_server` | required | The policy model. |
-| `agent_max_turns` | `250` | Turn cap for the agent loop. |
+| `agent_max_turns` | `250` | Turn cap for the agent loop. A run that uses every turn without a finish call answers `status: incomplete` with `metadata.stop_reason: max_turns`. |
 | `concurrency` | `32` | Maximum concurrent episodes. |
 | `temperature` | `0.6` | Sampling temperature when the request sets none. |
 | `finish_tool_names` | `null` | Request tools that end the episode when they succeed; `null` uses Stirrup's own finish tool. |
 | `code_exec` | `true` | Whether the model gets the `code_exec` shell tool. Off when the request's tools are the only tools the task allows (EnterpriseOps-Gym). |
 | `sandbox_install_timeout_seconds` | `900` | Bound on building, uploading and installing the runtime at seed. |
-| `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode. At the limit the response carries the turns completed so far, with `status: incomplete` and `metadata.stop_reason: wall_time`. |
+| `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode; a request's `metadata.agent_timeout_sec` (as Harbor task rows carry) can shorten it, never extend it, and the response metadata records the applied `agent_timeout_sec`. At the limit the response carries the turns completed so far, with `status: incomplete` and `metadata.stop_reason: wall_time`. |
 | `session_close_timeout_seconds` | `30` | Bound on each cleanup phase at close. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
 
