@@ -1,0 +1,49 @@
+name: ether0
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: ether0 chemistry questions whose answers are molecules, scored with ether0's
+  reward functions.
+modality: text
+licensing: CC-BY-4.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- cmunley1
+intended_use:
+- training
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- chemistry
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: ether0
+agent_server: simple_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: environments/ether0/data/example.jsonl
+  num_repeats: 1
+- name: val
+  type: validation
+  jsonl_fpath: environments/ether0/data/val.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active

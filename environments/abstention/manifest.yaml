@@ -1,0 +1,54 @@
+name: abstention
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-verifier
+domain: rlhf
+description: Factual questions from Nemotron-RL-QA-Abstention-v1 that reward a correct
+  answer 1, abstaining with \boxed{[IDK]} 0.5 and a wrong answer 0, graded by an LLM
+  judge.
+modality: text
+licensing: CC-BY-4.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- mahanfathi
+intended_use:
+- training
+capabilities:
+- knowledge
+- knowledge/knowledge_uncertainty
+- knowledge/factual_knowledge
+- knowledge/expert_knowledge
+- writing_and_editing
+- writing_and_editing/general_qa
+- safety
+- safety/epistemic_and_autonomy_safety
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- general
+- law
+- medicine
+requirements:
+  gpu: true
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: abstention
+agent_server: simple_agent
+datasets:
+- name: nemotron_qa_abstention_train
+  type: train
+  jsonl_fpath: environments/abstention/data/nemotron_qa_abstention_train.jsonl
+  num_repeats: 1
+- name: example
+  type: example
+  jsonl_fpath: environments/abstention/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active

@@ -1,0 +1,46 @@
+name: instruction_following
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-verifier
+domain: instruction_following
+description: IFEval- and Open-Instruct-style prompts with verifiable constraints,
+  scored on whether the response follows them.
+modality: text
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- cmunley1
+intended_use:
+- training
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/structured_output
+- writing_and_editing
+- writing_and_editing/general_qa
+domains:
+- general
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: instruction_following
+agent_server: simple_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: environments/instruction_following/data/example.jsonl
+  num_repeats: 1
+- name: train
+  type: train
+  jsonl_fpath: environments/instruction_following/data/train.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active
