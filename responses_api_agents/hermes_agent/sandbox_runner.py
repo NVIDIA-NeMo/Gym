@@ -83,9 +83,9 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
             from request_gzip import install_request_gzip
 
         install_request_gzip(payload["model_base_url"])
-        compression_base_url = config["auxiliary"][_COMPRESSION_CONFIG_KEY]["base_url"]
-        if compression_base_url != payload["model_base_url"]:
-            install_request_gzip(compression_base_url)
+        context_compression_base_url = config["auxiliary"][_COMPRESSION_CONFIG_KEY]["base_url"]
+        if context_compression_base_url != payload["model_base_url"]:
+            install_request_gzip(context_compression_base_url)
     _use_model_server(payload["model_base_url"], api_key)
 
     try:

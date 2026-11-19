@@ -942,9 +942,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
 
     @model_validator(mode="after")
     def _validate_gzip_version(self) -> Self:
-        if self.gzip_requests_enabled and opencode_major(self.opencode_version) >= 2:
+        if self.gzip_requests_enabled and _is_opencode2(self.opencode_version):
             raise ValueError(
-                "gzip_requests_enabled supports OpenCode 1 sandbox sessions only; OpenCode 2 is unsupported"
+                "gzip_requests_enabled works only in OpenCode 1 agent sessions. OpenCode 2 is unsupported."
             )
         return self
 
@@ -1334,7 +1334,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         collect_observations: bool = True,
     ) -> AgentEpisode:
         if self.config.gzip_requests_enabled:
-            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
+            raise HTTPException(
+                422, "OpenCode requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]

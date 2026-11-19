@@ -21,7 +21,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
-    REQUEST_GZIP_FETCH_SOURCE,
+    REQUEST_GZIP_SCRIPT,
     AgentSessionState,
     NothingCapturedError,
     RestoredLaunch,
@@ -532,7 +532,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             )
         directory = self.session.session_dir
         if payload.get("gzip_requests_enabled"):
-            await self.session.sandbox.upload(REQUEST_GZIP_FETCH_SOURCE, f"{directory}/request_gzip.mjs")
+            await self.session.sandbox.upload(REQUEST_GZIP_SCRIPT, f"{directory}/request_gzip.mjs")
             await self.session.sandbox.upload(
                 Path(__file__).with_name("request_gzip_plugin.mjs"), f"{directory}/request_gzip_plugin.mjs"
             )

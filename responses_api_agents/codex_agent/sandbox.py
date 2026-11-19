@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
-    REQUEST_GZIP_FETCH_SOURCE,
+    REQUEST_GZIP_SCRIPT,
     AgentSessionState,
     CleanupReceipt,
     SandboxCommand,
@@ -197,7 +197,7 @@ class CodexSandboxSession(AgentSessionState):
         """
         directory = self.session.session_dir
         if payload.get("gzip_requests_enabled"):
-            await self.session.sandbox.upload(REQUEST_GZIP_FETCH_SOURCE, f"{directory}/request_gzip.mjs")
+            await self.session.sandbox.upload(REQUEST_GZIP_SCRIPT, f"{directory}/request_gzip.mjs")
         for name, text in (files or {}).items():
             await self.upload_text(name, text)
         if media:

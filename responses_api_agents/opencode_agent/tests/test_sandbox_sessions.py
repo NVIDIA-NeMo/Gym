@@ -300,11 +300,17 @@ def test_gzip_rejects_local_execution_before_calling_resources(setup):
     with TestClient(agent.setup_webserver()) as client:
         response = client.post("/v1/responses", json={"input": "task"})
         assert response.status_code == 422
-        assert response.json()["detail"] == "gzip_requests_enabled requires an agent session"
+        assert (
+            response.json()["detail"]
+            == "OpenCode requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
 
         run = client.post("/run", json={"responses_create_params": {"input": "task"}})
         assert run.status_code == 422
-        assert run.json()["detail"] == "gzip_requests_enabled requires an agent session"
+        assert (
+            run.json()["detail"]
+            == "OpenCode requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
     agent.server_client.post.assert_not_called()
     sandbox.exec.assert_not_awaited()
 
@@ -319,6 +325,20 @@ def test_gzip_rejects_opencode_2_configuration():
             opencode_version="2.2.7",
             gzip_requests_enabled=True,
         )
+
+
+def test_gzip_accepts_latest_opencode_version_at_config_validation():
+    config = OpenCodeAgentConfig(
+        name="opencode",
+        host="localhost",
+        port=8001,
+        entrypoint="app.py",
+        opencode_version="latest",
+        gzip_requests_enabled=True,
+    )
+
+    assert config.opencode_version == "latest"
+    assert config.gzip_requests_enabled is True
 
 
 @pytest.mark.parametrize("stage", ["prepare", "install"])

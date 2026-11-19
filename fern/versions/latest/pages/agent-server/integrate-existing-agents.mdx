@@ -62,7 +62,7 @@ Both paths of `miniswe_sandboxed_agent` are superseded by `mini_swe_agent` agent
 ### Gzip model requests
 
 Supported agents can gzip model requests from an agent session to reduce traffic to the NeMo Gym model server.
-Compression is lossless and disabled by default. It requires an agent session and is unavailable in OpenCode 2.
+Gzip is lossless and off by default. It requires an agent session and is unavailable in OpenCode 2.
 
 Set `gzip_requests_enabled: true` on the agent and point its `model_server` reference to a NeMo Gym model server.
 For example, add this override when the Hermes agent and its model server are already configured.

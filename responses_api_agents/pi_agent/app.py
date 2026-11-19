@@ -37,7 +37,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
-    REQUEST_GZIP_FETCH_SOURCE,
+    REQUEST_GZIP_SCRIPT,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -1258,7 +1258,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         for extension in extensions:
             files[extension] = Path(__file__).with_name(extension)
         if self.config.gzip_requests_enabled:
-            files["request_gzip.mjs"] = REQUEST_GZIP_FETCH_SOURCE
+            files["request_gzip.mjs"] = REQUEST_GZIP_SCRIPT
         payload = self._sandbox_payload(state, prompt=prompt, system=system, extensions=extensions)
         # Pi attaches `@file` arguments, media included, to the prompt it reads from stdin.
         # The paths depend only on the content, so the same task gives Pi the same prompt in every sandbox.
@@ -1684,7 +1684,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         collect_observations: bool = True,
     ) -> AgentEpisode:
         if self.config.gzip_requests_enabled:
-            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
+            raise HTTPException(
+                422, "Pi requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -1812,7 +1814,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         if self._agent_session_id_from_request(request) is not None:
             raise AgentSessionConflictError("Pi sessions require EnvironmentServer /run")
         if self.config.gzip_requests_enabled:
-            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
+            raise HTTPException(
+                422, "Pi requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Pi /run requires resources_server; use EnvironmentServer /run for sandbox sessions"

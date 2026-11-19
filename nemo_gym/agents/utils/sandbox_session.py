@@ -55,11 +55,11 @@ LOG = logging.getLogger(__name__)
 # Shared runner uploaded by adapters; reads the bash source written by shell_assignments().
 HARNESS_RUNNER_FILE = "harness_runner.sh"
 HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
-REQUEST_GZIP_FETCH_SOURCE = Path(__file__).with_name("request_gzip.mjs")
 # The runner's exit statuses when the CLI never ran: its own failure (bad cwd, setup), and a CLI that
 # could not be started. Any other status is the CLI's own.
 HARNESS_RUNNER_FAILED = 125
 HARNESS_COMMAND_NOT_STARTED = (126, 127)
+REQUEST_GZIP_SCRIPT = Path(__file__).with_name("request_gzip.mjs")
 # A receipt wait gives up after this many consecutive failed polls that also span this many seconds: a sandbox being
 # snapshotted, or a gateway restart, refuses commands for a while.
 _RECEIPT_POLL_FAILURES = 5
