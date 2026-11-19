@@ -180,6 +180,26 @@ the reward file's `reward` key, so a `reward.json` with only component keys alwa
 `{ core_pass_rate = 0.5 }` gates each key it names. An agent failure that `agent_outcome_policy` retries or fails
 ends the episode ungraded.
 
+## Retries as steps
+
+A task whose steps are attempts at one problem can stop at the first success and show the agent why the previous
+attempt failed. Both are settings of the environment server, so the task folder stays a plain Harbor task:
+
+- `stop_on_reward` stops the episode after a turn whose rewards meet it, the mirror of a step's `min_reward`. A number
+  gates `reward`, a table gates each key it names. The result sets `stopped_after_turn` and `stopped_on_reward: true`.
+  Set the task's `multi_step_reward_strategy = "final"` so the success is the episode's reward.
+- `turn_feedback` puts the previous turn's verifier output in front of the next step's instruction. The server reads
+  the first file of `files` (default `feedback.md`, then `test-stdout.txt`) among the files the verifier left in
+  `/logs/verifier`, keeps its last `max_bytes` bytes (default 65536) and renders `template` around the instruction
+  (`{feedback}` and `{instruction}`). Nothing is added when no file exists. It works with separate verifiers, whose
+  logs are copied to the server.
+
+```bash
+  ++harbor_environment_server.environment_servers.harbor.turn_sessions=continue \
+  ++harbor_environment_server.environment_servers.harbor.stop_on_reward=1.0 \
+  ++harbor_environment_server.environment_servers.harbor.turn_feedback.max_bytes=65536
+```
+
 ## Reference solutions per step
 
 `gym dataset validate` runs the oracle. Before each turn the server places `steps/<name>/solution/` at `/solution`,

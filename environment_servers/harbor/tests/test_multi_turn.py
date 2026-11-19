@@ -3287,3 +3287,149 @@ def test_the_budget_counts_a_verifier_sandbox_start_per_separate_turn(tmp_path, 
         {"plan": "P", "build": "B", "check": "C"},
     )
     assert server._post_seed_budget_s(task) == shared_only[0]._post_seed_budget_s(shared_only[1]) + 900
+
+
+# ---------------------------------------------------------------- retries as steps: stop_on_reward and turn_feedback
+
+RETRIES = '[[steps]]\nname = "attempt-1"\n[[steps]]\nname = "attempt-2"\n[[steps]]\nname = "attempt-3"\n'
+RETRY_STEPS = {"attempt-1": "Prove it.", "attempt-2": "Try again.", "attempt-3": "Try again."}
+
+
+def verifier_files_per_turn(server, sandbox: FakeSandbox, per_turn: list[dict[str, str]]) -> None:
+    """The files the verifier of the n-th turn leaves in /logs/verifier."""
+    pending = list(per_turn)
+
+    def next_files():
+        sandbox.verifier_files = pending.pop(0)
+
+    server.server_client.turn_hooks.append(next_files)
+
+
+def sent_instructions(server) -> list[str]:
+    turns = [
+        call[2]["json"].model_dump(mode="json", exclude_unset=True)
+        for call in server.server_client.calls
+        if call[1].endswith("/v1/responses")
+    ]
+    return [turn["input"][0]["content"] for turn in turns]
+
+
+async def test_stop_on_reward_ends_the_retries_at_the_first_success(tmp_path, monkeypatch):
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        RETRIES,
+        RETRY_STEPS,
+        head='multi_step_reward_strategy = "final"\n',
+        stop_on_reward=1.0,
+    )
+    rewards_per_turn(server, sandbox, ["0", "1", "1"])
+
+    result = (await server.run_request(request_for(task))).result
+
+    assert [turn.name for turn in result.turns] == ["attempt-1", "attempt-2"]
+    assert (result.stopped_after_turn, result.stopped_on_reward) == ("attempt-2", True)
+    assert (result.reward, result.mask_sample, result.failure_kind) == (1.0, False, None)
+    assert sum(path.endswith("/v1/responses") for path in server.server_client.paths()) == 2
+
+
+async def test_stop_on_reward_is_not_an_early_stop_on_the_last_step_or_without_success(tmp_path, monkeypatch):
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        RETRIES,
+        RETRY_STEPS,
+        head='multi_step_reward_strategy = "final"\n',
+        stop_on_reward={"reward": 1.0},
+    )
+    rewards_per_turn(server, sandbox, ["0", "0", "1"])
+    result = (await server.run_request(request_for(task))).result
+    assert len(result.turns) == 3 and result.reward == 1.0
+    assert (result.stopped_after_turn, result.stopped_on_reward) == (None, None)
+    assert "stopped_on_reward" not in result.model_dump(mode="json")
+
+    server.server_client.turn_hooks.clear()
+    rewards_per_turn(server, sandbox, ["0", "0", "0"])
+    result = (await server.run_request(request_for(task, rollout="r2"))).result
+    assert len(result.turns) == 3 and result.reward == 0.0 and result.stopped_on_reward is None
+
+
+async def test_turn_feedback_puts_the_previous_verdict_before_the_next_instruction(tmp_path, monkeypatch):
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        RETRIES,
+        RETRY_STEPS,
+        head='multi_step_reward_strategy = "final"\n',
+        stop_on_reward=1.0,
+        turn_feedback={},
+    )
+    verifier_files_per_turn(
+        server,
+        sandbox,
+        [
+            {"reward.txt": "0", "feedback.md": "unsolved goal {x}", "test-stdout.txt": "noise"},
+            {"reward.txt": "0", "test-stdout.txt": "error: type mismatch"},
+            {"reward.txt": "1"},
+        ],
+    )
+
+    result = (await server.run_request(request_for(task))).result
+
+    assert [turn.reward for turn in result.turns] == [0.0, 0.0, 1.0]
+    first, second, third = sent_instructions(server)
+    assert first == "Prove it."
+    # feedback.md comes first; braces in the feedback are kept as written.
+    assert second == (
+        "The verifier did not accept your previous attempt. Its output:\n\n"
+        "<verifier_feedback>\nunsolved goal {x}\n</verifier_feedback>\n\nTry again."
+    )
+    # Without feedback.md the verifier's stdout is the feedback.
+    assert "<verifier_feedback>\nerror: type mismatch\n</verifier_feedback>" in third and third.endswith("Try again.")
+
+
+async def test_turn_feedback_keeps_the_tail_of_a_long_file_and_adds_nothing_without_one(tmp_path, monkeypatch):
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        RETRIES,
+        RETRY_STEPS,
+        turn_feedback={"files": ["feedback.md"], "max_bytes": 8, "template": "[{feedback}] {instruction}"},
+        turn_sessions="continue",
+    )
+    server.server_client.continuation_capabilities = CONTINUES
+    server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
+    server.server_client.trajectory = {"task_id": "hello", "rollout_id": "r1", "turns": []}
+    verifier_files_per_turn(
+        server,
+        sandbox,
+        [
+            {"reward.txt": "0", "feedback.md": "0123456789ABCDEF"},
+            {"reward.txt": "0", "test-stdout.txt": "not configured"},
+            {"reward.txt": "0"},
+        ],
+    )
+
+    await server.run_request(request_for(task))
+
+    # Continued sessions get the feedback on each activation too; the cut is noted.
+    assert sent_instructions(server) == [
+        "Prove it.",
+        "[[... first 8 bytes cut ...]\n89ABCDEF] Try again.",
+        "Try again.",
+    ]
+
+
+def test_turn_feedback_settings_are_checked():
+    from environment_servers.harbor.app import HarborTurnFeedback, stop_on_reward_met
+
+    with pytest.raises(ValueError, match="plain file names"):
+        HarborTurnFeedback(files=["../reward.txt"])
+    with pytest.raises(ValueError, match="instruction"):
+        HarborTurnFeedback(template="{feedback}")
+    assert HarborTurnFeedback(template="{instruction} / {feedback}").render("a {instruction}", "B") == (
+        "B / a {instruction}"
+    )
+    assert stop_on_reward_met({"reward": 1.0}, 1.0) and not stop_on_reward_met({"reward": 0.5}, 1.0)
+    assert not stop_on_reward_met(None, 1.0) and not stop_on_reward_met({"reward": 1.0}, None)
+    assert not stop_on_reward_met({"reward": 1.0}, {"reward": 1.0, "audit": 1.0})
