@@ -15,10 +15,11 @@ recipe.
 | `full.yaml` | Full: 22 databases | c-Interact | 600 |
 | `full_a_interact.yaml` | Full | a-Interact | 600 |
 
-Every task has a follow-up question, its phase 2. Both kinds of task run. As in BIRD-Interact, a query (195 in Lite,
-410 in Full) is graded by comparing its result with the solution's, even when its ground truth has test cases. A
-management task (105 in Lite, 190 in Full) is graded by its own test cases, in the episode's sandbox. auto-ontology-eval
-runs only the query tasks, so compare its scores with the query tasks' alone.
+Every task has a follow-up question, its phase 2. Both kinds of task run: query tasks (195 in Lite, 410 in Full) and
+management tasks (105 in Lite, 190 in Full). As in BIRD-Interact, each phase is graded by its own category: a query
+phase by comparing its result with the solution's, a management phase by its own test cases, in the episode's
+sandbox. Many management tasks have a query follow-up. auto-ontology-eval runs only the query tasks, so compare its
+scores with the query tasks' alone.
 
 ## 1. Build the database image
 
@@ -101,12 +102,16 @@ agent can pass that phase, so leave these tasks out when you compare against a s
 
 | Cause | Tasks (phase) |
 |---|---|
-| The ADK's `DISTINCT` removal, which Gym copies, turns `DISTINCT ON (...)` into `ON (...)` and `IS DISTINCT FROM` into `IS FROM` | `crypto_10` (2), `disaster_1` (2), `fake_5` (1, 2), `insider_M_4` (1, 2), `insider_M_6` (1, 2), `mental_4` (2), `mental_5` (1, 2), `mental_6` (1, 2), `mental_11` (1, 2), `museum_3` (2), `museum_5` (1, 2) |
+| The ADK's `DISTINCT` removal, which Gym copies, turns `DISTINCT ON (...)` into `ON (...)` and `IS DISTINCT FROM` into `IS FROM` | `crypto_10` (2), `disaster_1` (2), `fake_5` (1, 2), `insider_M_4` (2), `insider_M_6` (2), `mental_4` (2), `mental_5` (1, 2), `mental_6` (1, 2), `mental_11` (1, 2), `museum_3` (2), `museum_5` (1, 2) |
 | The solution is not valid SQL: a comma before `FROM` (`archeology_7`, `fake_7`), a stray word (`alien_8`), a row where a number is needed (`cross_db_M_5`), a table that does not exist (`museum_7`) | `alien_8` (2), `archeology_7` (1), `cross_db_M_5` (2), `fake_7` (2), `museum_7` (2) |
 | Phase 2's solution uses a view, table or function that phase 1's solution creates; it fails when the agent's phase 1 SQL passed but created it with another name, columns or types | `archeology_M_3`, `crypto_M_2`, `disaster_M_2`, `disaster_M_3`, `gaming_M_2`, `mental_M_2`, `polar_M_4`, `polar_M_5` (2) |
 
 The first two causes fail every submission of that phase; the third only after some phase 1 submissions. Gym keeps
 the ADK's normalization, so its scores stay comparable with the ADK's and auto-ontology-eval's.
+
+Three management tasks need a superuser where the ADK has one: Lite's `gaming_M_4` (1) and `virtual_M_4` (1) set
+`session_replication_role`, and Full's `virtual_idol_M_2` (2) creates a role. Gym runs agent SQL as a role that is not a
+superuser (see the server's README), so a submission that does the same fails there. None of them is a query task.
 
 ## Licensing
 
