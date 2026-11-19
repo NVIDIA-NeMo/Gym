@@ -159,9 +159,10 @@ class AgentSession:
                 self._cookies.update({name: cookie.value for name, cookie in response.cookies.items()})
                 agent_response = NeMoGymResponse.model_validate(await get_response_json(response))
         except TimeoutError as error:
-            # An outer deadline, such as the episode's own, also raises TimeoutError here; only this turn's is handled.
+            # An outer deadline, such as the episode's, reaches this await as a cancellation, not a TimeoutError. So a
+            # TimeoutError before this turn's deadline is the call's own, such as a socket timeout: the agent failed.
             if not timer.expired():
-                raise
+                raise self.failure(error, stage="agent") from error
             raise TurnDeadlineExpired(f"Agent turn {turn} passed its deadline") from error
         except Exception as error:
             raise self.failure(error, stage="agent") from error
