@@ -43,6 +43,7 @@ from resources_servers.big_finance.app import (
     BigFinanceResourcesServer,
     BigFinanceResourcesServerConfig,
     BigFinanceVerifyRequest,
+    ScratchDirPythonExecTool,
     _answer_judge_prompt,
     extract_final_answer,
     format_trace,
@@ -507,6 +508,45 @@ def test_tools_package_dependency_is_commit_pinned() -> None:
     assert len(sha) == 40
     assert all(char in "0123456789abcdef" for char in sha)
     assert sha == spec["tools_package_commit_id"]
+
+
+@pytest.mark.asyncio
+async def test_python_exec_runs_each_call_in_a_fresh_temporary_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The server's working directory is the Gym checkout in training; the policy's code must not write into it.
+    monkeypatch.chdir(tmp_path)
+    tool = _server()._tools["python_exec"]
+    assert isinstance(tool, ScratchDirPythonExecTool)
+    code = "import os, pathlib; pathlib.Path('result.json').write_text('{}'); print(os.getcwd())"
+
+    outputs = [await tool.run({"code": code}) for _ in range(2)]
+
+    workdirs = []
+    for output in outputs:
+        assert output.startswith("exit_code: 0\n\nstdout:\n")
+        workdirs.append(Path(output.split("stdout:\n", 1)[1].strip()))
+    assert workdirs[0] != workdirs[1]
+    for workdir in workdirs:
+        assert workdir.name.startswith("big_finance_python_exec_")
+        assert not workdir.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_python_exec_keeps_the_upstream_result_errors_and_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    code = "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"
+
+    assert await ScratchDirPythonExecTool(timeout_s=30).run({"code": code}) == await PythonExecTool(timeout_s=30).run(
+        {"code": code}
+    )
+    with pytest.raises(ToolError, match="code is required"):
+        await ScratchDirPythonExecTool(timeout_s=30).run({"code": "  "})
+    with pytest.raises(ToolError, match="timed out after 1s"):
+        await ScratchDirPythonExecTool(timeout_s=1).run({"code": "import time; time.sleep(30)"})
 
 
 @pytest.mark.asyncio

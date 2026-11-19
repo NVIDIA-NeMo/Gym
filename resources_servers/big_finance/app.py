@@ -25,6 +25,8 @@ import asyncio
 import json
 import logging
 import os
+import sys
+import tempfile
 from typing import Any, ClassVar, Literal, Optional
 
 from big_finance_harness.tools import (
@@ -33,6 +35,7 @@ from big_finance_harness.tools import (
     ToolError,
     WebSearchTool,
 )
+from big_finance_harness.tools.python_exec import MAX_OUTPUT_CHARS as PYTHON_EXEC_MAX_OUTPUT_CHARS
 from fastapi import Body, FastAPI
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
@@ -63,6 +66,47 @@ from resources_servers.big_finance.sec_cache import CachedEdgarSearchTool, Cache
 
 
 logger = logging.getLogger(__name__)
+
+
+class ScratchDirPythonExecTool(PythonExecTool):
+    """PythonExecTool whose code runs in a fresh temporary directory, removed after each call.
+
+    Upstream starts the interpreter in the server's working directory, which is this checkout, so any file the policy's
+    code writes lands in the Gym tree (on shared storage in training). Same interpreter, flags, timeout and output as
+    big-finance-harness@dffb394's PythonExecTool.run.
+    """
+
+    async def run(self, args: dict[str, Any]) -> str:
+        code = args.get("code", "")
+        if not code.strip():
+            raise ToolError("code is required and must be non-empty")
+
+        with tempfile.TemporaryDirectory(prefix="big_finance_python_exec_") as workdir:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                "-c",
+                code,
+                cwd=workdir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=self.timeout_s)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise ToolError(f"python_exec timed out after {self.timeout_s}s") from None
+
+        stdout = stdout_b.decode("utf-8", errors="replace")[:PYTHON_EXEC_MAX_OUTPUT_CHARS]
+        stderr = stderr_b.decode("utf-8", errors="replace")[:PYTHON_EXEC_MAX_OUTPUT_CHARS]
+        parts: list[str] = [f"exit_code: {proc.returncode}"]
+        if stdout:
+            parts.append(f"stdout:\n{stdout}")
+        if stderr:
+            parts.append(f"stderr:\n{stderr}")
+        return "\n\n".join(parts)
+
 
 _MAX_TRACE_CHARS = 150_000
 _TOOL_RESULT_CAP = 4_000
@@ -516,7 +560,7 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
             "web_search": web_search,
             "edgar_search": edgar_search,
             "fetch_url": fetch_url,
-            "python_exec": PythonExecTool(timeout_s=self.config.python_exec_timeout_s),
+            "python_exec": ScratchDirPythonExecTool(timeout_s=self.config.python_exec_timeout_s),
             "final_answer": FinalAnswerTool(),
         }
 
