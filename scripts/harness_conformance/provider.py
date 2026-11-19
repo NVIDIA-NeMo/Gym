@@ -18,10 +18,10 @@ from starlette.middleware.sessions import SessionMiddleware
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymChatCompletion
 from nemo_gym.models import (
+    AnthropicConverter,
     ModelCallCaptureConfig,
     flatten_namespace_tools,
     install_model_call_capture,
-    message_content_to_text,
     restore_namespace_tool_calls,
     synthesize_chat_completion_sse,
     synthesize_responses_sse,
@@ -34,39 +34,35 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.verification import call_judge
 
+from .messages import is_title_request, messages_response
 from .scenarios import Scenario
 
 
-SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec", "exec", "python_cell")
+SHELL_TOOLS = (
+    "bash",
+    "Bash",
+    "terminal",
+    "shell",
+    "shell_command",
+    "exec_command",
+    "code_exec",
+    "exec",
+    "python_cell",
+)
 # Harnesses that end an episode on a tool call rather than on a text answer.
 FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"
-
-
-# Identify the actual summary instruction, never the availability of tools or a
-# token threshold. These prefixes are exercised against the pinned CLI requests.
-SUMMARY_PROMPTS = (
-    "Create a new anchored summary from the conversation history.",
-    "Update the existing anchored summary using the new conversation history.",
-    "You are performing a CONTEXT CHECKPOINT COMPACTION.",
-    "The context window is approaching its limit. Please create a concise summary",
-    "Create a structured handoff summary for a later assistant",
-)
-
-
-def is_compaction_request(body: dict) -> bool:
-    messages = body.get("messages", body.get("input", []))
-    if not isinstance(messages, list) or not messages or not isinstance(messages[-1], dict):
-        return False
-    last = messages[-1]
-    return last.get("role") == "user" and message_content_to_text(last.get("content")).startswith(SUMMARY_PROMPTS)
 
 
 @dataclass
 class Probe:
     scenario: Scenario
     directory: Path
+    harness: str = ""
+    responses: list[dict] | None = None
+    final_responses: int = 1
     attempts: list[dict] = field(default_factory=list)
+    auxiliary_calls: list[dict] = field(default_factory=list)
     tool_calls: list[dict] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
@@ -75,16 +71,22 @@ class Probe:
     seeded: int = 0
     closed: int = 0
     finished: bool = False
+    completion_proposed: bool = False
     finish_call: dict | None = None
     compaction_summary: str = field(
         default_factory=lambda: f"COMPACTION_SUMMARY_{uuid4().hex}: continue the shell checks."
     )
     compaction_response_ids: list[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if self.responses is None:
+            self.responses = self.scenario.default_responses(final_responses=self.final_responses)
+
     def save(self) -> None:
         """Persist independent observations even if collection fails."""
         witness = {
             "attempts": self.attempts,
+            "auxiliary_calls": self.auxiliary_calls,
             "tool_calls": self.tool_calls,
             "violations": self.violations,
             "verifications": self.verifications,
@@ -111,6 +113,9 @@ class Probe:
 
     def _tool(self, body: dict) -> tuple[str, dict, dict]:
         tools, namespaces = flatten_namespace_tools(body.get("tools"))
+        if self.harness == "terminus_2_sandboxed":
+            # Terminus sends terminal commands inside JSON text, without advertising function tools.
+            tools = [{"name": "terminal", "parameters": {"properties": {"command": {"type": "string"}}}}]
         for tool in tools:
             function = tool.get("function", tool)
             name = function.get("name", "")
@@ -122,6 +127,10 @@ class Probe:
                 marker = self.directory / f"tool-{index}.txt"
                 code = self.scenario.tool_exit_code if index == 0 else 0
                 command = f"printf %s {shlex.quote(token)} > {shlex.quote(str(marker))}; printf %s {shlex.quote(token)}; exit {code}"
+                if self.harness == "terminus_2_sandboxed":
+                    # Terminal panes echo keystrokes. Only stdout may contain the intact witness token.
+                    parts = f"{shlex.quote(token[:6])} {shlex.quote(token[6:])}"
+                    command = f"printf %s%s {parts} > {shlex.quote(str(marker))}; printf %s%s {parts}; exit {code}"
                 if bare == "python_cell" and "code" in properties:
                     args = {
                         "code": (
@@ -158,6 +167,16 @@ class Probe:
     def _finish(self, body: dict) -> tuple[str, dict, dict] | None:
         """Return a call to an advertised finish tool carrying the answer, or None to answer in text."""
         tools, namespaces = flatten_namespace_tools(body.get("tools"))
+        if self.harness == "miniswe_sandboxed":
+            for tool in tools:
+                function = tool.get("function", tool)
+                if function.get("name") == "bash":
+                    return (
+                        "bash",
+                        {"command": f"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT; echo {ANSWER}"},
+                        namespaces,
+                    )
+            raise ValueError("mini-SWE did not advertise its bash submission tool")
         for tool in tools:
             function = tool.get("function", tool)
             name = function.get("name", "")
@@ -211,6 +230,17 @@ class Probe:
                     and item.get("call_id") in result_ids
                 )
             ]
+            if self.harness == "terminus_2_sandboxed":
+                results = [
+                    item
+                    for item in history
+                    if isinstance(item, dict)
+                    and item.get("role") == "user"
+                    and call["token"] in json.dumps(item.get("content"))
+                ]
+                # A later terminal pane can still contain previous output.
+                # Keep the first model-visible observation of this command.
+                results = [] if call["result_seen"] else results[:1]
             call["result_seen"] = call["result_seen"] or any(
                 call["token"] in json.dumps(item.get("content", item.get("output"))) for item in results
             )
@@ -221,9 +251,47 @@ class Probe:
             marker = Path(call["marker"])
             call["executed"] = marker.is_file() and marker.read_text() == call["token"]
 
+    def _next_reply(self, index: int) -> dict:
+        if index >= len(self.responses):
+            raise ValueError("unexpected model request after the scripted replies")
+        return self.responses[index]
+
     async def model(self, request: Request) -> JSONResponse | StreamingResponse:
         body = await request.json()
-        self._observe_tool_results(body)
+        messages_api = request.url.path.endswith("/messages")
+        if messages_api and is_title_request(body):
+            # Titles do not consume task replies or the prescribed task failures,
+            # but remain in the witness and every canonical exchange comparison.
+            payload = messages_response(
+                body["model"],
+                f"resp_{uuid4().hex}",
+                [
+                    {
+                        "type": "message",
+                        "id": f"msg_{uuid4().hex}",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {"type": "output_text", "text": '{"title":"Conformance check"}', "annotations": []}
+                        ],
+                    }
+                ],
+                usage=self.scenario.usage,
+                index=len(self.auxiliary_calls),
+            )
+            self.auxiliary_calls.append({"request": body, "response": payload, "status_code": 200})
+            self.save()
+            if body.get("stream"):
+                return StreamingResponse(
+                    AnthropicConverter().anthropic_response_to_sse(payload), media_type="text/event-stream"
+                )
+            return JSONResponse(payload)
+        protocol_body = (
+            AnthropicConverter().anthropic_request_to_responses(body).model_dump(mode="json", exclude_none=True)
+            if messages_api
+            else body
+        )
+        self._observe_tool_results(protocol_body)
         index = len(self.attempts)
         status = 200
         if index < len(self.scenario.http_errors):
@@ -232,7 +300,6 @@ class Probe:
             status = self.scenario.http_errors[-1]
         response_id = f"resp_{uuid4().hex}"
         namespaces = {}
-        compacting = self.scenario.compaction is not None and is_compaction_request(body)
         if status != 200:
             payload = {
                 "error": {"message": "controlled model failure", "type": "conformance_error", "code": str(status)}
@@ -241,6 +308,10 @@ class Probe:
             try:
                 if self.finished:
                     raise ValueError("unexpected model request after the scripted final answer")
+                reply = self._next_reply(index - len(self.scenario.http_errors))
+                if reply["kind"] not in ("tool", "summary", "final"):
+                    raise ValueError(f"unknown scripted reply kind: {reply['kind']}")
+                compacting = reply["kind"] == "summary"
                 # A summary can cover only older history. Policy requests must still
                 # show every executed result before receiving the next scripted action.
                 if not compacting and any(
@@ -248,8 +319,6 @@ class Probe:
                 ):
                     raise ValueError("tool execution or model-visible result was not witnessed")
                 if compacting:
-                    if self.scenario.compaction is not True or not self.tool_calls or self.compaction_response_ids:
-                        raise ValueError("unexpected compaction request outside the single summary stage")
                     output = [
                         {
                             "type": "message",
@@ -259,8 +328,8 @@ class Probe:
                             "content": [{"type": "output_text", "text": self.compaction_summary, "annotations": []}],
                         }
                     ]
-                elif len(self.tool_calls) < self.scenario.tool_steps:
-                    name, arguments, namespaces = self._tool(body)
+                elif reply["kind"] == "tool":
+                    name, arguments, namespaces = self._tool(protocol_body)
                     call = self.tool_calls[-1]
                     output = [
                         {
@@ -272,7 +341,7 @@ class Probe:
                             "status": "completed",
                         }
                     ]
-                elif (finish := self._finish(body)) is not None:
+                elif (finish := self._finish(protocol_body)) is not None:
                     name, arguments, namespaces = finish
                     self.finish_call = {"id": f"call_{uuid4().hex}", "name": name, "arguments": arguments}
                     output = [
@@ -298,18 +367,50 @@ class Probe:
                     ]
                     self.finished = True
                 calls_tool = output[0]["type"] == "function_call"
-                prompt_tokens = 20 + index
-                completion_tokens = 11 if compacting else 8
-                if self.scenario.compaction is not None:
-                    policy_index = index - len(self.compaction_response_ids)
-                    prompt_tokens = (
-                        500
-                        if compacting
-                        else 27000 + policy_index
-                        if not self.compaction_response_ids
-                        else 100 + policy_index
+                prompt_tokens = reply["input_tokens"]
+                completion_tokens = reply["output_tokens"]
+                if self.harness == "terminus_2_sandboxed" and not compacting:
+                    # A runner's login shell can still be starting when the first command is sent.
+                    commands = (
+                        [{"keystrokes": f"sh -c {shlex.quote(arguments['command'])}\n", "duration": 2.0}]
+                        if calls_tool
+                        else []
                     )
-                if request.url.path.endswith("/chat/completions"):
+                    if calls_tool:
+                        call["arguments"] = commands[0]
+                    text = json.dumps(
+                        {
+                            "analysis": "Perform the prescribed check." if calls_tool else ANSWER,
+                            "plan": "Run the command." if calls_tool else ANSWER,
+                            "commands": commands,
+                            "task_complete": not calls_tool,
+                        }
+                    )
+                    output = [
+                        {
+                            "type": "message",
+                            "id": f"msg_{uuid4().hex}",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": text, "annotations": []}],
+                        }
+                    ]
+                    if not calls_tool and not self.completion_proposed:
+                        # Harbor asks the model to confirm completion once before returning.
+                        self.completion_proposed = True
+                        self.finished = False
+                    calls_tool = False
+                if messages_api:
+                    payload = messages_response(
+                        body["model"],
+                        response_id,
+                        output,
+                        usage=self.scenario.usage,
+                        index=index,
+                        input_tokens=prompt_tokens,
+                        output_tokens=completion_tokens,
+                    )
+                elif request.url.path.endswith("/chat/completions"):
                     message = {
                         "role": "assistant",
                         "content": None if calls_tool else output[0]["content"][0]["text"],
@@ -379,11 +480,12 @@ class Probe:
         self.save()
         if status != 200 or not body.get("stream"):
             return JSONResponse(payload, status_code=status, headers={"Retry-After": "0"})
-        events = (
-            synthesize_chat_completion_sse(payload, include_usage=True)
-            if request.url.path.endswith("/chat/completions")
-            else synthesize_responses_sse(payload)
-        )
+        if messages_api:
+            events = AnthropicConverter().anthropic_response_to_sse(payload)
+        elif request.url.path.endswith("/chat/completions"):
+            events = synthesize_chat_completion_sse(payload, include_usage=True)
+        else:
+            events = synthesize_responses_sse(payload)
         return StreamingResponse(events, media_type="text/event-stream")
 
     def model_app(self, *, assistant_message_header: bytes | None = None) -> FastAPI:
@@ -396,6 +498,7 @@ class Probe:
         )
         app.post("/v1/chat/completions", response_model=None)(self.model)
         app.post("/v1/responses", response_model=None)(self.model)
+        app.post("/v1/messages", response_model=None)(self.model)
         return app
 
     def judge_app(self) -> FastAPI:
@@ -424,7 +527,9 @@ class Probe:
 
         return app
 
-    def resources_app(self, *, server_client: ServerClient | None = None) -> FastAPI:
+    def resources_app(
+        self, *, server_client: ServerClient | None = None, sandbox_access: dict | None = None
+    ) -> FastAPI:
         app = FastAPI()
         app.add_middleware(RolloutContextMiddleware)
         app.add_middleware(SessionMiddleware, secret_key=uuid4().hex, session_cookie="probe_resources_session")
@@ -439,6 +544,8 @@ class Probe:
             result = {"resources_session_id": session.resources_session_id} if "resources_session_id" in body else {}
             if "resources_session_id" in body:
                 result.update(await self.seed_sandbox())
+            if sandbox_access is not None:
+                result["sandbox_access"] = sandbox_access
             return result
 
         async def close(body: ResourcesCloseSessionRequest) -> dict:
@@ -476,6 +583,17 @@ class Probe:
                 and any(part.get("text") == ANSWER for part in item.get("content", []) if isinstance(part, dict))
                 for item in output
             )
+            if self.harness == "terminus_2_sandboxed":
+                for item in output:
+                    if item.get("type") != "message" or item.get("role") != "assistant":
+                        continue
+                    for part in item.get("content", []):
+                        try:
+                            content = json.loads(part.get("text", ""))
+                        except (ValueError, TypeError, AttributeError):
+                            continue
+                        if isinstance(content, dict):
+                            answered |= content.get("task_complete") is True and content.get("analysis") == ANSWER
             # A harness that ends on a finish tool may never emit a final assistant message.
             finish_name = (self.finish_call or {}).get("name", "").rsplit("__", 1)[-1]
             finished_by_tool = bool(finish_name) and any(
