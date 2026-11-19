@@ -6,7 +6,6 @@
 import argparse
 import asyncio
 import importlib
-import importlib.util
 import json
 import math
 import os
@@ -40,7 +39,17 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     """Record session runtime pins or require a preinstalled legacy runtime."""
     if harness == "simple":
         return {"installation": "builtin"}
-    if use_agent_sessions and harness != "hermes":
+    if harness == "hermes":
+        # Hermes runs from a pinned upstream checkout in its own Python environment, not from this one.
+        from responses_api_agents.hermes_agent.runtime import HERMES_PYTHON_VERSION, HERMES_SOURCE, source_checkout
+
+        return {
+            "installation": "agent_session" if use_agent_sessions else "host_worker",
+            "hermes_source": HERMES_SOURCE,
+            "python_version": HERMES_PYTHON_VERSION,
+            "lock_sha256": digest_file(source_checkout() / "uv.lock"),
+        }
+    if use_agent_sessions:
         runtime = {"installation": "agent_session"}
         if harness == "nooa":
             adapter = Path(__file__).resolve().parents[2] / "responses_api_agents/nooa_agent"
@@ -53,14 +62,7 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
                 observer_sha256=digest_file(Path(__file__).with_name("nooa_observer.py")),
             )
         return runtime
-    if harness == "hermes":
-        if importlib.util.find_spec("run_agent") is None or importlib.util.find_spec("model_tools") is None:
-            raise RuntimeError(
-                "sync responses_api_agents/hermes_agent with uv sync --locked in this isolated Python environment"
-            )
-        source = Path(importlib.util.find_spec("run_agent").origin)
-        return {"source": str(source), "sha256": digest_file(source)}
-    elif not shutil.which(harness):
+    if not shutil.which(harness):
         raise RuntimeError(f"install the {harness} runtime and put it on PATH before running probes")
     version = subprocess.run(
         [harness, "--version"], capture_output=True, text=True, errors="replace", timeout=10, check=True
@@ -228,8 +230,12 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             elif harness == "stirrup":
                 agent_config.update(context_window_tokens=32768)
             elif harness == "hermes":
+                # Below a 512K window Hermes compresses at no less than 75% of it, so use an absolute trigger.
+                # Hermes measures the scripted prompt (27,000 + policy index) plus about 62 tokens for the newest
+                # tool result, and after a no-progress attempt it waits 300 s before trying again. This trigger
+                # first fires around the eighth policy call, once there is history to summarize.
                 agent_config.update(
-                    compression_enabled=True, compression_threshold=0.1, max_turns=scenario.tool_steps + 4
+                    compression_enabled=True, compression_threshold_tokens=27070, max_turns=scenario.tool_steps + 4
                 )
             elif harness == "simple":
                 agent_config.update(max_steps=scenario.tool_steps + 4)

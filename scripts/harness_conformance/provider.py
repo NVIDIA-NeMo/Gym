@@ -51,6 +51,7 @@ SUMMARY_PROMPTS = (
     "You are performing a CONTEXT CHECKPOINT COMPACTION.",
     "The context window is approaching its limit. Please create a concise summary",
     "Create a structured handoff summary for a later assistant",
+    "TURNS TO SUMMARIZE:",
 )
 
 

@@ -123,6 +123,22 @@ def test_session_runtime_does_not_require_host_cli(monkeypatch):
         episode.check_runtime("pi")
 
 
+def test_hermes_runtime_records_its_pinned_worker_without_importing_hermes(monkeypatch, tmp_path):
+    from scripts.harness_conformance import episode
+
+    from responses_api_agents.hermes_agent import runtime as hermes_runtime
+
+    (tmp_path / "uv.lock").write_text("locked\n")
+    monkeypatch.setattr(hermes_runtime, "source_checkout", lambda: tmp_path)
+    expected = {
+        "hermes_source": hermes_runtime.HERMES_SOURCE,
+        "python_version": hermes_runtime.HERMES_PYTHON_VERSION,
+        "lock_sha256": episode.digest_file(tmp_path / "uv.lock"),
+    }
+    assert episode.check_runtime("hermes", use_agent_sessions=True) == {"installation": "agent_session", **expected}
+    assert episode.check_runtime("hermes") == {"installation": "host_worker", **expected}
+
+
 @pytest.mark.parametrize(
     "interface", ["legacy", "session", "session_setup_error", "session_response_error", "session_close_error"]
 )
