@@ -52,7 +52,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.client import request as http_request
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
 from nemo_gym.models.token_capture.completion import completion_items
 from nemo_gym.server_runtime import DirectHTTPToolAccess
@@ -165,6 +165,10 @@ class ArcAgi3PivotAgent(SimpleResponsesAPIAgent):
         return body
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> PivotSessionState:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError(
+                "The pivot agent does not support sandbox access; its harness runs in the window"
+            )
         direct = [a for a in self.effective_tool_accesses(body) if isinstance(a, DirectHTTPToolAccess)]
         if len(direct) != 1:
             raise AgentSeedRejectedError(
@@ -300,13 +304,6 @@ class ArcAgi3PivotAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=False,
             metadata={"agent_error": agent_error} if agent_error else None,
         )
-
-    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        response = await self.server_client.post(
-            server_name=self.config.resources_server.name, url_path="/aggregate_metrics", json=body
-        )
-        await raise_for_status(response)
-        return AggregateMetrics.model_validate(await get_response_json(response))
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.arc_agi_3_pivot_agent import app as app_module
 from responses_api_agents.arc_agi_3_pivot_agent.app import (
@@ -271,6 +272,16 @@ def test_a_seed_without_a_direct_http_grant_is_refused(servers):
     client = TestClient(make_agent(servers).setup_webserver())
     response = client.post("/v1/agent_sessions", json=seed_body(grants=False).model_dump(mode="json"))
     assert response.status_code == 422 and "direct HTTP grant" in response.text
+
+
+def test_a_lent_sandbox_is_refused(servers):
+    client = TestClient(make_agent(servers).setup_webserver())
+    sandbox = SandboxAccess(
+        connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}), workdir="/work"
+    )
+    body = seed_body().model_copy(update={"sandbox_access": sandbox})
+    response = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+    assert response.status_code == 422 and "does not support sandbox access" in response.text
 
 
 async def test_closing_the_session_cancels_a_pending_activation(servers):
