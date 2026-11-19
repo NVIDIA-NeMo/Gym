@@ -562,7 +562,7 @@ class _FakeSandbox:
     async def upload(self, local_path, remote_path):
         pass
 
-    async def disconnect(self):
+    async def disconnect(self, **_):
         self.disconnected = True
 
 

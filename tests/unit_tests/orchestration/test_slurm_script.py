@@ -33,6 +33,7 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
+from nemo_gym.orchestration.executors.otel import COLLECTOR_SERVICE_NAME
 from nemo_gym.orchestration.executors.script_templates import (
     RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
@@ -56,6 +57,7 @@ from nemo_gym.orchestration.executors.slurm.script import (
     _with_default_capture_dir,
     _with_resume_flag,
     build_sbatch_script,
+    planned_log_sources,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
 
@@ -823,6 +825,38 @@ def test_render_driver_entrypoint_with_gym_install():
     assert '"${GYM_CMD[@]}"' in out
 
 
+@pytest.mark.parametrize("failed_command", ["clone", "checkout"])
+def test_driver_checkout_failure_stops_before_environment_setup(tmp_path: Path, failed_command: str) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    marker = tmp_path / "uv-was-run"
+    scripts = {
+        "curl": "#!/bin/bash\nexit 0\n",
+        "git": (
+            "#!/bin/bash\n"
+            f"if [[ $1 == {shlex.quote(failed_command)} ]]; then exit 73; fi\n"
+            'if [[ $1 == clone ]]; then mkdir -p "${@: -1}"; fi\n'
+            "exit 0\n"
+        ),
+        "uv": f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\nexit 0\n",
+    }
+    for name, content in scripts.items():
+        path = tools / name
+        path.write_text(content)
+        path.chmod(0o755)
+    entrypoint = render_driver_entrypoint("https://example.invalid/gym", "pinned-ref", None, cleanup=True)
+    result = subprocess.run(
+        ["bash", "-c", "GYM_CMD=(true); " + entrypoint],
+        cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": f"{tools}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 73, result.stderr
+    assert not marker.exists()
+
+
 def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
     # The uv installer does not write $HOME/.local/bin/env when that directory is
     # already on PATH, so sourcing it would abort the `set -e` preamble.
@@ -859,10 +893,10 @@ def _run_private_uv_entrypoint(
         shared.chmod(0o755)
     # The clone declares the extras the entrypoint asks for, and `python` is the one that reads them.
     (tools / "git").write_text(
-        '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "$3"; '
+        '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "${@: -1}"; '
         'printf "[tool.uv]\\n%b[project.optional-dependencies]\\nray = []\\n" '
         + shlex.quote(f'required-version = "{required_version}"\\n' if required_version else "")
-        + ' > "$3/pyproject.toml"; fi\nexit 0\n'
+        + ' > "${@: -1}/pyproject.toml"; fi\nexit 0\n'
     )
     (tools / "python").symlink_to(sys.executable)
     curl_log = tmp_path / "curl.log"
@@ -962,7 +996,7 @@ def test_a_private_uv_reader_never_bases_its_venv_on_a_shared_python_on_path(tmp
     shutil.copy(shutil.which("uv"), home / ".local/bin/uv")
     shared_python = home / ".local/bin" / f"python{sys.version_info[0]}.{sys.version_info[1]}"
     shared_python.symlink_to(Path(sys.executable).resolve())
-    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "$3"\nexit 0\n')
+    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "${@: -1}"\nexit 0\n')
     (tools / "git").chmod(0o755)
     report = "python -c 'import sys; print(\"BASE=\" + sys.base_prefix)'"
     out = render_driver_entrypoint(
@@ -2072,7 +2106,7 @@ def test_gym_install_does_not_clone_into_the_job_directory():
     entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
 
     assert "mktemp -d /tmp/gym-install-" in entrypoint
-    assert 'git clone https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
+    assert 'git clone --filter=blob:none --no-checkout https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
 
 
 def test_gym_install_runs_from_the_install_root():
@@ -3448,3 +3482,110 @@ def test_a_private_uv_entrypoint_creates_its_shared_cache_dir_private(tmp_path: 
     cache = shared_tmp / f"gym-uv-cache-{os.getuid()}"
     assert dict(part.split("=", 1) for part in stdout.split())["CACHE"] == str(cache)
     assert cache.stat().st_mode & 0o777 == 0o700
+
+
+# ---------------------------------------------------------------------------
+# planned_log_sources
+# ---------------------------------------------------------------------------
+
+
+def _ray_alongside_a_policy(tmp_path):
+    return _placement_config(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "ray": {"type": "ray", "container": "img", "node_pools": ["gpu", "aux"], "port": 6380},
+        },
+        _TWO_POOLS,
+    )
+
+
+def _with_a_collector(tmp_path):
+    return SubmitConfig.model_validate(
+        {
+            "services": {"policy": _vllm(8000, "aux", tensor_parallel_size=4)},
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
+            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": _TRACED_OTEL,
+        }
+    )
+
+
+_LOG_PLAN_CONFIGS = {
+    "two pinned services": lambda tmp_path: _placement_config(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
+        },
+        _TWO_POOLS,
+    ),
+    "a ray service with worker steps": _ray_alongside_a_policy,
+    "a prefill/decode pair": lambda tmp_path: _pd_config(tmp_path),
+    "a per-node prefill/decode pair": lambda tmp_path: _pd_config(tmp_path, services=_per_node_services()),
+    "a telemetry collector": _with_a_collector,
+}
+
+
+@pytest.mark.parametrize("make_config", _LOG_PLAN_CONFIGS.values(), ids=_LOG_PLAN_CONFIGS.keys())
+def test_the_planned_log_sources_are_exactly_the_logs_the_script_writes(tmp_path, make_config):
+    config = make_config(tmp_path)
+    compute = config.compute["hsg"]
+
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], compute, tmp_path / "jobs" / "b")
+
+    written = set(re.findall(r"--output=(logs/\S+)", script))
+    planned = {source.location.replace("{job_id}", "$SLURM_JOB_ID") for source in planned_log_sources(config, compute)}
+    assert written == planned
+    assert len(written) > 1
+
+
+def _without_telemetry(config):
+    return config.model_copy(update={"otel": config.otel.model_copy(update={"enabled": False})})
+
+
+def test_a_ray_service_plans_a_log_for_its_head_and_for_each_worker_step(tmp_path):
+    config = _without_telemetry(_ray_alongside_a_policy(tmp_path))
+
+    sources = planned_log_sources(config, config.compute["hsg"])
+
+    assert [source.name for source in sources] == ["driver", "policy", "ray", "ray_aux_workers"]
+
+
+def test_the_driver_is_planned_first_and_is_the_only_driver_source(tmp_path):
+    config = _pd_config(tmp_path)
+
+    sources = planned_log_sources(config, config.compute["hsg"])
+
+    assert sources[0].name == "driver"
+    assert [source.kind for source in sources].count("driver") == 1
+    assert {source.kind for source in sources[1:]} == {"service"}
+
+
+def test_a_prefill_decode_pair_plans_both_tiers_and_the_router(tmp_path):
+    config = _without_telemetry(_pd_config(tmp_path))
+
+    names = [source.name for source in planned_log_sources(config, config.compute["hsg"])]
+
+    assert names == ["driver", "policy-prefill", "policy-decode", "policy"]
+
+
+def test_the_telemetry_collector_has_a_planned_log_only_when_it_is_on(tmp_path):
+    with_collector = _with_a_collector(tmp_path)
+    without = _without_telemetry(with_collector)
+
+    on = [s.name for s in planned_log_sources(with_collector, with_collector.compute["hsg"])]
+    off = [s.name for s in planned_log_sources(without, without.compute["hsg"])]
+
+    assert on == ["driver", COLLECTOR_SERVICE_NAME, "policy"]
+    assert off == ["driver", "policy"]
+
+
+def test_planned_locations_keep_the_job_id_open_for_the_reader(tmp_path):
+    config = _pd_config(tmp_path)
+
+    locations = [s.location for s in planned_log_sources(config, config.compute["hsg"])]
+
+    assert locations[0] == "logs/driver-{job_id}.log"
+    assert all("{job_id}" in location and "$SLURM_JOB_ID" not in location for location in locations)

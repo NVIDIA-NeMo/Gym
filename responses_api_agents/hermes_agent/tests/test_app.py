@@ -720,7 +720,7 @@ class TestSanity:
             async def upload(self, *_args) -> None:
                 pass
 
-            async def disconnect(self) -> None:
+            async def disconnect(self, **_) -> None:
                 pass
 
             async def download(self, remote_path, local_path) -> None:

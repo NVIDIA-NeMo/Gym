@@ -40,11 +40,14 @@ gym_ci_setup_dev() {
     else
         # Online environment (e.g. GitHub Actions) without the pinned uv: download
         # it and let it resolve from the package index as before.
-        setup_uv_installer="$(
+        (
+            setup_uv_installer="$(mktemp)"
+            trap 'rm -f -- "${setup_uv_installer}"' EXIT
             curl -LsSf --retry 5 --retry-all-errors --retry-max-time 300 \
-                --connect-timeout 30 --max-time 120 "${setup_uv_install_url}"
-        )"
-        printf '%s\n' "${setup_uv_installer}" | env UV_UNMANAGED_INSTALL="${setup_uv_bin_dir}" sh
+                --connect-timeout 30 --max-time 120 \
+                --output "${setup_uv_installer}" "${setup_uv_install_url}" || exit "$?"
+            env UV_UNMANAGED_INSTALL="${setup_uv_bin_dir}" sh "${setup_uv_installer}"
+        )
         export PATH="${setup_uv_bin_dir}:${PATH}"
         test "$(uv --version | awk '{print $2}')" = "0.13.4"
         setup_uv_sync_args=()
