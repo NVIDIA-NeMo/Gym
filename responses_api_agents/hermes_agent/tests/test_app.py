@@ -1384,3 +1384,64 @@ def test_native_model_error_is_reported_with_classification(status):
         "failure_kind": "model_request_error",
         "status_code": status,
     }
+
+
+def _host_worker_agent(monkeypatch, tmp_path, script: str) -> HermesAgent:
+    """A Hermes agent whose host worker interpreter is the given shell script."""
+    worker = tmp_path / "worker"
+    worker.write_text("#!/bin/sh\n" + script)
+    worker.chmod(0o755)
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.host_python", lambda: worker)
+    hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(hermes, "_ensure_sigterm_handler", lambda: None)
+    return hermes
+
+
+@pytest.mark.parametrize(
+    ("script", "message"),
+    [
+        ("cat >/dev/null\nexit 3\n", "exited with status 3 without a response"),
+        (
+            'cat >/dev/null\necho \'{"error_type": "ImportError", "error": "no module"}\'\nexit 1\n',
+            r"Hermes worker failed \(ImportError\): no module",
+        ),
+    ],
+)
+def test_host_worker_failure_raises_with_its_reason(monkeypatch, tmp_path, script, message) -> None:
+    hermes = _host_worker_agent(monkeypatch, tmp_path, script)
+
+    with pytest.raises(RuntimeError, match=message):
+        asyncio.run(hermes._run_host_worker({"history": []}))
+    assert hermes.active_agents == set()
+
+
+def test_host_worker_cancel_kills_its_process_group(monkeypatch, tmp_path) -> None:
+    import os
+    import signal
+
+    child_pid = tmp_path / "child.pid"
+    # The worker starts a tool-like grandchild in its own process group, then waits.
+    hermes = _host_worker_agent(monkeypatch, tmp_path, f"sleep 300 &\necho $! > {child_pid}\nwait\n")
+
+    async def cancel_running_worker() -> None:
+        task = asyncio.create_task(hermes._run_host_worker({"history": []}))
+        for _ in range(500):
+            if child_pid.exists() and child_pid.read_text().strip():
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        # A surviving grandchild keeps the worker's stdout open, so cleanup would wait for it.
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10)
+
+    try:
+        asyncio.run(cancel_running_worker())
+    finally:
+        pid = int(child_pid.read_text())
+        try:
+            os.kill(pid, signal.SIGKILL)
+            survived = True
+        except ProcessLookupError:
+            survived = False
+    assert not survived, "the worker's process group outlived the cancelled activation"
+    assert hermes.active_agents == set()

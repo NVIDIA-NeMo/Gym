@@ -194,7 +194,7 @@ def test_summary_calls_keep_invocation_identity_and_usage(monkeypatch, usage):
     assert observations["compactions"][0]["summary"] == "Preserve progress."
 
 
-def test_worker_attributes_child_and_executor_interval_to_native_call_id():
+def test_worker_attributes_child_and_executor_interval_to_hermes_tool_call_id():
     agent = _Agent()
     agent._invoke_tool = lambda *_: agent._active_children.append(_Agent())
     observer = SandboxHermesObserver().instrument(agent)

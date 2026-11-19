@@ -73,6 +73,7 @@ def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported()
             {
                 "invocation_id": "root.child-1",
                 "parent_invocation_id": "root",
+                "spawned_by_tool_call_id": "call-delegate",
                 "status": "incomplete",
                 "stop_reason": "max_iterations",
             },
@@ -89,6 +90,9 @@ def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported()
     assert invocations[0].status == "completed"
     assert invocations[0].stop_reason is None
     assert invocations[1].parent_invocation_id == "root"
+    # The delegating tool call is what links a child invocation to the parent's trajectory.
+    assert invocations[0].spawned_by_tool_call_id is None
+    assert invocations[1].spawned_by_tool_call_id == "call-delegate"
     assert invocations[1].status == "incomplete"
     assert invocations[1].stop_reason == "max_iterations"
 
