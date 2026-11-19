@@ -597,6 +597,28 @@ async def test_an_owned_sandbox_is_started_and_stopped_through_async_sandbox(mon
     agent._provider.aclose.assert_not_awaited()
 
 
+@pytest.mark.parametrize("descriptor", [None, {"sandbox_id": "box-1", "user": "nobody"}])
+async def test_commands_run_as_the_providers_default_user(descriptor):
+    # The direct provider calls this agent made named no user, so a configured sandbox user never reached an exec.
+    agent = _make_agent(sandbox_spec={"user": "nobody"})
+    handle = SandboxHandle("box-1", "docker", None)
+    agent._provider.create = AsyncMock(return_value=handle)
+    agent._provider.connect = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(side_effect=asyncio.CancelledError())
+    agent._provider.close = AsyncMock()
+    token = _RUN_CONTEXT.set({"sandbox_descriptor": descriptor} if descriptor else {})
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await agent._provision_box("image", {}, "https://model.example")
+    finally:
+        _RUN_CONTEXT.reset(token)
+
+    assert agent._provider.exec.await_args.kwargs.get("user") is None
+    if descriptor is None:
+        # The spec still carries the user, for a provider that applies it at create.
+        assert agent._provider.create.await_args.args[0].user == "nobody"
+
+
 async def test_local_provider_provisions_in_its_workspace(tmp_path):
     server = await asyncio.start_server(lambda *_: None, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]

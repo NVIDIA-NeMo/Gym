@@ -437,6 +437,10 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 self._provider, SandboxSpec(image=image, metadata=metadata, **spec_config), owns_provider=False
             )
             await sandbox.start()
+        # Commands run as the provider's default user, as the direct provider calls this agent made before did.
+        # A provider that applies the spec's user at create still runs them as that user.
+        # Docker does not, so applying it per exec would stage /work as a user that cannot create it.
+        sandbox.set_default_user(None)
         try:
             work_dir = self._box_path(sandbox, "/work")
             await sandbox.exec(f"mkdir -p {shlex.quote(work_dir)}", timeout_s=60)
