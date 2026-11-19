@@ -147,7 +147,7 @@ class TestShippedConfig:
     def test_answer_template_is_stem_v11(self) -> None:
         # Pins the stem_v11 prompt as it was measured offline.
         digest = hashlib.sha256((SERVER_DIR / "prompt_templates" / "stem_v11.txt").read_bytes()).hexdigest()
-        assert digest == "9b9dd45f94b114c0ea03c7a4bf91a41b37f6f62bbcbafea5eac0b99be8598498"
+        assert digest == "9b9dd45f94b114c0ea03c7a4bf91a41b37f6f62bbcbafea5eac0b99be8598498"  # pragma: allowlist secret
 
 
 class TestFinalAnswer:
