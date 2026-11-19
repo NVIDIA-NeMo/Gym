@@ -103,7 +103,6 @@ class Harness:
         *,
         skip_verification: bool = False,
         restart_resource: bool = False,
-        restore_before_agent_close: bool = False,
         fail_verification: bool = False,
         detached_dispatch: bool = False,
     ):
@@ -115,7 +114,6 @@ class Harness:
         self.model_paths: list[str] = []
         self.verifications = self.closes = 0
         self.restart_resource = restart_resource
-        self.restore_before_agent_close = restore_before_agent_close
         self.fail_verification = fail_verification
         self.detached_dispatch = detached_dispatch
         self.model_handlers: list[asyncio.Task] = []
@@ -178,8 +176,6 @@ class Harness:
             headers = {"x-ng-checkpoint-verify": "replay"}
             if self.restart_resource:
                 headers["x-ng-checkpoint-restart"] = "1"
-            if self.restore_before_agent_close:
-                headers["x-ng-checkpoint-restore-policy"] = "before_agent_close"
             return Reply({}, headers=headers, cookies={"session": "resource-session"})
         if url_path == "/verify":
             self.verifications += 1
@@ -388,10 +384,8 @@ async def test_old_attempt_cannot_consume_the_restored_reply(harnesses, tmp_path
     assert (await asyncio.wait_for(second.start(1), 2)).reward == 1.0
 
 
-@pytest.mark.parametrize("resource", ["restart_resource", "restore_before_agent_close"])
-async def test_unsupported_resource_keeps_restart_fallback(harnesses, resource):
-    # Also a resource a restore can continue only until the agent's turn ends: this run cannot tell it when that is.
-    first = harnesses(**{resource: True})
+async def test_unsupported_resource_keeps_restart_fallback(harnesses):
+    first = harnesses(restart_resource=True)
     run = first.start()
     await asyncio.wait_for(first.model_started.wait(), 2)
     await first.prepare()

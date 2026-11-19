@@ -13,12 +13,13 @@ seed, verify, close, fences and expiry it keeps as they are:
   and a verify after the restore grades the patch the checkpoint saved instead of capturing it again;
 - a release deletes the snapshots of checkpoints the controller no longer keeps.
 
-A snapshot may hold the sandbox's files only, not its running processes; OpenSandbox's do. A server whose grader
-needs processes the agent started declares ``restore_policy = "before_agent_close"``: the environment server then
-starts such an episode over after a crash once its agent's turn ended, instead of continuing it in a fork.
-
 With checkpointing on, a server exports its sessions only when its sandbox provider can snapshot; otherwise it runs
-``restart_only``, and its episodes start over after a crash.
+``restart_only``, and its episodes start over after a crash. A server whose grader needs something a snapshot of its
+provider does not keep, such as processes the agent started, declares ``checkpoint_mode = "restart_only"`` itself.
+
+Only a session an episode seed started is exported. A task sandbox started for any other seed, such as the task row
+an agent's ``/run`` sends, is not registered for checkpoints: the seed's reply says its episode starts over after a
+crash, and a commit leaves the session out.
 
 A subclass starts each task sandbox with ``new_task_sandbox``, which puts it on the provider every session shares and
 registers it for the session and its checkpoints, sets ``task_model`` to the model of its episode seed's
@@ -34,14 +35,14 @@ being snapshotted nor changes what the commit exports.
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from pathlib import Path
 from time import monotonic
-from typing import Any, ClassVar, Literal, Optional, get_args
+from typing import Any, ClassVar, Literal
 
 import anyio
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym.config import get_global_config_dict
@@ -60,7 +61,6 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLocks,
     SandboxCheckpointConfig,
     SandboxSessionCheckpointer,
-    checkpoint_settings,
     checkpoint_state_dir,
     next_attempt,
 )
@@ -69,29 +69,14 @@ from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesS
 
 LOG = logging.getLogger(__name__)
 
-RestorePolicy = Literal["any_step", "before_agent_close"]
-
-_JSON = TypeAdapter(JsonValue)
+# The name of a session's task sandbox among the sandboxes a checkpoint saves for the session.
+TASK_SANDBOX = "task"
 
 
 class SandboxCheckpointFields(BaseModel):
     """The config field of a server that checkpoints its sessions' task sandboxes."""
 
     sandbox_checkpoint: SandboxCheckpointConfig = Field(default_factory=SandboxCheckpointConfig)
-
-
-class _CheckpointedSession(BaseModel):
-    """The exported state of one episode session."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    seed: ResourcesSeedSessionRequest
-    workdir: str
-    # The task sandbox's checkpoint state, or ``None`` once verify stopped it after capturing the patch.
-    sandbox: Optional[dict[str, JsonValue]] = None
-    capture_ready: bool = False
-    capture: JsonValue = None
-    task_state: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
@@ -101,15 +86,13 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
     """
 
     checkpoint_mode: ClassVar[CheckpointMode] = "exported"
-    # Whether a fork of the task sandbox can continue an episode at every step, or only until its agent's turn ends.
-    restore_policy: ClassVar[RestorePolicy] = "any_step"
     # The model of an episode seed's ``task_data``; a restore rebuilds the session's task from it.
     task_model: ClassVar[type[BaseModel]]
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        self._provider: Optional[SandboxProvider] = None
-        self._sandbox_checkpointer: Optional[SandboxSessionCheckpointer] = None
+        self._provider: SandboxProvider | None = None
+        self._sandbox_checkpointer: SandboxSessionCheckpointer | None = None
         # Held by a commit's export and by every stop of a task sandbox, so a commit never snapshots one being stopped.
         # Separate from the session lock, which verify holds while it grades.
         self._export_locks = ResourcesSessionLocks()
@@ -143,13 +126,16 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
             )
         return "restart_only"
 
+    def _exports_sessions(self) -> bool:
+        """Whether checkpointing is on and this server exports its sessions; known once the app is set up."""
+        return self._checkpoint is not None and self._checkpoint.mode == "exported"
+
     def _checkpointer(self) -> SandboxSessionCheckpointer:
         if self._sandbox_checkpointer is None:
-            global_config = getattr(self.server_client, "global_config_dict", None)
-            state_dir: Optional[Path] = None
-            if checkpoint_settings(global_config) is not None and self.checkpoint_mode_in_effect() == "exported":
+            state_dir: Path | None = None
+            if self._exports_sessions():
                 # Fails at startup, not at the first commit, when checkpointing is on without a usable state_dir.
-                state_dir = checkpoint_state_dir(global_config)
+                state_dir = checkpoint_state_dir(getattr(self.server_client, "global_config_dict", None))
             self._sandbox_checkpointer = SandboxSessionCheckpointer.from_config(
                 self.shared_provider(),
                 self.config.sandbox_checkpoint,
@@ -159,24 +145,17 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
         return self._sandbox_checkpointer
 
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
-        # At startup, like the base's class settings: a misspelt policy would be sent and read as "any_step".
-        if self.restore_policy not in get_args(RestorePolicy):
-            raise ValueError(
-                f"{type(self).__name__}.restore_policy must be one of {get_args(RestorePolicy)}, "
-                f"not {self.restore_policy!r}"
-            )
         super().setup_resources_checkpoint(app)
-        if self._checkpoint is not None:
-            self._checkpoint.restore_policy = self.restore_policy
-            if self._checkpoint.mode == "exported":
-                task_model = getattr(type(self), "task_model", None)
-                if not (isinstance(task_model, type) and issubclass(task_model, BaseModel)):
-                    # Otherwise the first restore after a crash is what finds it missing.
-                    raise TypeError(
-                        f"{type(self).__name__}.task_model must be the pydantic model of its episode seed's "
-                        f"task_data, not {task_model!r}"
-                    )
-                self._checkpointer()
+        if self._exports_sessions():
+            task_model = getattr(type(self), "task_model", None)
+            if not (isinstance(task_model, type) and issubclass(task_model, BaseModel)):
+                # Otherwise the first restore after a crash is what finds it missing.
+                raise TypeError(
+                    f"{type(self).__name__}.task_model must be the pydantic model of its episode seed's "
+                    f"task_data, not {task_model!r}"
+                )
+            # Built here, once the participant says whether sessions are exported: that decides its state_dir.
+            self._checkpointer()
 
     async def shutdown(self) -> None:
         """Stop the task sandboxes as the base does, then close the shared provider.
@@ -193,31 +172,65 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
 
     # -- for subclasses ----------------------------------------------------------------------------------------
 
+    async def seed_task_sandbox_session(
+        self, request: Request, body: ResourcesSeedSessionRequest, task_model: type[BaseModel]
+    ) -> ResourcesSeedSessionResponse:
+        # A restore reads the saved task data with ``task_model``, so a seed must read it with the same model.
+        declared = getattr(type(self), "task_model", None)
+        if declared is not None and task_model is not declared:
+            raise TypeError(
+                f"{type(self).__name__} seeds sessions with {task_model.__name__} but declares "
+                f"task_model = {getattr(declared, '__name__', declared)}; a restore would read the saved task data "
+                "with another model than the seed"
+            )
+        return await super().seed_task_sandbox_session(request, body, task_model)
+
     def new_task_sandbox(self, session_id: str, spec: SandboxSpec) -> AsyncSandbox:
         """A task sandbox for ``session_id`` on the shared provider, registered for the session and its checkpoints.
 
         Call it from ``_start_task_sandbox`` before starting the sandbox, so a failed setup still stops it.
+
+        Only the sandbox of a session an episode seed started is registered for checkpoints. One started for any
+        other seed, such as the task row an agent's ``/run`` sends, has no episode seed a restore could install it
+        for: while the server exports sessions, that seed's reply says its episode starts over after a crash.
         """
+        if session_id in self._session_id_to_sandbox:
+            raise ValueError(f"{session_id!r} already has a sandbox")
         sandbox = AsyncSandbox(self.shared_provider(), spec, owns_provider=False)
-        # The checkpointer first: it refuses a session that already has a sandbox, and then nothing changed.
-        self._checkpointer().add(session_id, sandbox, spec)
+        record = self._task_sessions.get(session_id)
+        if record is not None and record.seed is not None:
+            # Before the session registers it: the checkpointer refuses a key that still has a sandbox.
+            self._checkpointer().add(self._sandbox_key(session_id), sandbox, spec)
+        elif self._exports_sessions():
+            self._checkpoint.restart_session(session_id)
         self._session_id_to_sandbox[session_id] = sandbox
         return sandbox
 
     def _export_task_sandbox_state(self, session_id: str) -> dict[str, JsonValue]:
-        """The task state, other than the sandbox, that a restored session needs, such as its starting commit."""
+        """The task state, other than the sandbox, that a restored session needs, such as its starting commit.
+
+        ``{}`` for a session the server keeps no task state for, including one it never saw or has forgotten.
+        """
         return {}
 
     def _restore_task_sandbox_state(self, session_id: str, state: dict[str, JsonValue]) -> None:
-        """Install the task state ``_export_task_sandbox_state`` returned, for a restored session."""
+        """Install the task state ``_export_task_sandbox_state`` returned, for a restored session.
+
+        It runs before ``_task_sandbox_response`` builds the restored session's seed reply, as a seed's setup does.
+        """
+
+    @staticmethod
+    def _sandbox_key(session_id: str, name: str = TASK_SANDBOX) -> str:
+        """The checkpointer's key for the sandbox ``name`` of ``session_id``."""
+        return f"{session_id}/{name}"
 
     # -- stopping ----------------------------------------------------------------------------------------------
 
-    async def _stop_released_task_sandbox(self, session_id: str) -> None:
+    async def _stop_unclaimed_task_sandbox(self, session_id: str) -> None:
         # Not around ``_stop_task_sandbox``: its wait for a claim ends in ``_release_task_sandbox``, which takes
         # this lock too.
         async with self._export_locks.locked(session_id):
-            await super()._stop_released_task_sandbox(session_id)
+            await super()._stop_unclaimed_task_sandbox(session_id)
             if session_id not in self._session_id_to_sandbox:
                 await self._untrack(session_id)
 
@@ -240,93 +253,140 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
 
         The checkpointer stops what it still tracks, which does nothing to a sandbox that already stopped.
         """
-        if self._sandbox_checkpointer is not None and session_id in self._sandbox_checkpointer:
-            await self._sandbox_checkpointer.stop(session_id)
+        key = self._sandbox_key(session_id)
+        if self._sandbox_checkpointer is not None and key in self._sandbox_checkpointer:
+            await self._sandbox_checkpointer.stop(key)
 
     # -- partial-rollout checkpoint hooks ----------------------------------------------------------------------
 
     async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
-        """Snapshot each seeded session's task sandbox and export the session; one past capture exports no sandbox."""
+        """Snapshot each seeded session's task sandbox and export the session; one past capture exports no sandbox.
+
+        Every session is checked, and what a checkpoint cannot store refused, before any snapshot is taken. Each
+        session then keeps its export lock only until its own snapshot is done, so a slow snapshot of one session
+        does not hold up a capture or a stop of another.
+        """
+        checkpointer = self._checkpointer()
+        locks: dict[str, AsyncExitStack] = {}
+        # Releases the locks no session released itself, such as after a refusal below.
         async with AsyncExitStack() as held:
-            locked = [session_id for session_id in sorted(set(session_ids)) if self._exportable(session_id)]
-            for session_id in locked:
-                await held.enter_async_context(self._export_locks.locked(session_id))
-            # A stop that held the lock first may have released a sandbox meanwhile.
-            exported = [session_id for session_id in locked if self._exportable(session_id)]
-            checkpointer = self._checkpointer()
+            for session_id in sorted(set(session_ids)):
+                if self._exportable(session_id):
+                    locks[session_id] = AsyncExitStack()
+                    held.push_async_exit(locks[session_id])
+                    await locks[session_id].enter_async_context(self._export_locks.locked(session_id))
+            # A stop that held the lock first may have released a sandbox meanwhile, and a session may have expired.
+            exported = [session_id for session_id in locks if self._exportable(session_id)]
+            for session_id in locks.keys() - set(exported):
+                await locks[session_id].aclose()
             for session_id in exported:
-                if session_id in self._session_id_to_sandbox and session_id not in checkpointer:
+                if session_id in self._session_id_to_sandbox and self._sandbox_key(session_id) not in checkpointer:
                     raise RuntimeError(
                         f"{type(self).__name__} started the task sandbox of session {session_id!r} without "
                         "new_task_sandbox, so a checkpoint cannot snapshot it"
                     )
-            # Before any snapshot is taken: a capture a checkpoint cannot store fails every commit, and whether the
-            # session has one is read together with it.
-            captures = {session_id: self._exported_capture(session_id) for session_id in exported}
-            snapshots = await checkpointer.export(
-                [session_id for session_id in exported if session_id in checkpointer], checkpoint_id=checkpoint_id
+            # Before any snapshot is taken: a capture or task state a checkpoint cannot store fails every commit.
+            # Read here, under every lock, so what a session exports does not change once its own lock is released.
+            sessions = {session_id: self._session_state(session_id) for session_id in exported}
+
+            async def export_one(session_id: str) -> JsonValue:
+                key = self._sandbox_key(session_id)
+                try:
+                    # A key without a live sandbox maps to None: verify stopped it after capturing the patch.
+                    snapshot = (await checkpointer.export([key], checkpoint_id=checkpoint_id))[key]
+                finally:
+                    await locks[session_id].aclose()
+                state = sessions[session_id].model_copy(update={"sandboxes": {TASK_SANDBOX: snapshot}})
+                return state.model_dump(mode="json")
+
+            # Every snapshot is awaited before the first failure is raised, as the checkpointer does for a batch.
+            outcomes = await asyncio.gather(
+                *(export_one(session_id) for session_id in exported), return_exceptions=True
             )
-            return {
-                session_id: self._session_state(
-                    session_id, snapshots.get(session_id), *captures[session_id]
-                ).model_dump(mode="json")
-                for session_id in exported
-            }
+            failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+            if failures:
+                raise failures[0]
+            return dict(zip(exported, outcomes))
 
     def _exportable(self, session_id: str) -> bool:
         record = self._task_sessions.get(session_id)
-        return record is not None and record.seed is not None and record.response is not None and not record.expired
+        return (
+            record is not None
+            and record.seed is not None
+            and record.response is not None
+            and not record.expired
+            # Past its deadline the provider may have ended the sandbox, and the sweep that marks the session expired
+            # runs only when a request arrives: without this, one such session would fail the commit for all.
+            and self._open_task_sessions.get(session_id, float("inf")) > monotonic()
+        )
 
-    def _exported_capture(self, session_id: str) -> tuple[bool, JsonValue]:
-        """Whether the session captured its patch, and the capture."""
+    def _session_state(self, session_id: str) -> "_CheckpointedSession":
+        """What a commit exports for the session, apart from its sandboxes; raises for what it cannot store."""
         record = self._task_sessions[session_id]
-        if not record.capture_ready:
-            return False, None
+        capture: JsonValue = None
         try:
-            return True, _JSON.validate_python(record.capture)
+            if record.capture_ready:
+                capture = _JSON.validate_python(record.capture)
         except ValidationError as error:
             raise TypeError(f"{type(self).__name__} captured a patch a checkpoint cannot store: {error}") from error
-
-    def _session_state(
-        self, session_id: str, sandbox: Optional[dict[str, JsonValue]], capture_ready: bool, capture: JsonValue
-    ) -> _CheckpointedSession:
-        record = self._task_sessions[session_id]
+        try:
+            task_state = _TASK_STATE.validate_python(self._export_task_sandbox_state(session_id))
+        except ValidationError as error:
+            raise TypeError(f"{type(self).__name__} exported task state a checkpoint cannot store: {error}") from error
         return _CheckpointedSession(
             seed=record.seed,
             workdir=record.workdir,
-            sandbox=sandbox,
-            capture_ready=capture_ready,
+            capture_ready=record.capture_ready,
             capture=capture,
-            task_state=self._export_task_sandbox_state(session_id),
+            task_state=task_state,
         )
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
         """Fork every task sandbox from its snapshot, all or none, then install each session for its next attempt."""
-        parsed: dict[str, tuple[_CheckpointedSession, BaseModel]] = {}
+        parsed: dict[str, tuple["_CheckpointedSession", BaseModel]] = {}
         for session_id, state in states.items():
+            version = state.get("version", _SESSION_VERSION) if isinstance(state, Mapping) else _SESSION_VERSION
+            if version != _SESSION_VERSION:
+                raise ValueError(
+                    f"{self.config.name} session state for {session_id!r} has version {version!r}; "
+                    f"this server reads version {_SESSION_VERSION}"
+                )
             try:
                 session = _CheckpointedSession.model_validate(state)
                 task = self.task_model.model_validate(session.seed.task_data)
             except ValidationError as error:
                 raise ValueError(f"invalid {self.config.name} session state for {session_id!r}: {error}") from error
+            unknown = sorted(set(session.sandboxes) - {TASK_SANDBOX})
+            if unknown:
+                raise ValueError(
+                    f"invalid {self.config.name} session state for {session_id!r}: it saves sandboxes {unknown}, "
+                    f"and this server restores only {TASK_SANDBOX!r}"
+                )
             if session_id in self._task_sessions or session_id in self._session_id_to_sandbox:
                 raise ValueError(f"resources session {session_id!r} is already held by this worker")
             parsed[session_id] = (session, task)
         checkpointer = self._checkpointer()
         await checkpointer.restore(
-            {session_id: session.sandbox for session_id, (session, _) in parsed.items() if session.sandbox is not None}
+            {
+                self._sandbox_key(session_id): sandbox
+                for session_id, (session, _) in parsed.items()
+                if (sandbox := session.sandboxes.get(TASK_SANDBOX)) is not None
+            }
         )
         try:
             for session_id, (session, task) in parsed.items():
                 await self._install_restored_session(session_id, session, task)
         except BaseException:
             # All or none: the forks are running, so a failed install must not leave any of them or of the records.
+            # Shielded: a client that disconnects cancels the request through its scope, and every await in it.
             with anyio.CancelScope(shield=True):
                 await self._discard_restored_sessions(list(parsed))
             raise
 
-    async def _install_restored_session(self, session_id: str, session: _CheckpointedSession, task: BaseModel) -> None:
-        sandbox = self._checkpointer().get(session_id)
+    async def _install_restored_session(
+        self, session_id: str, session: "_CheckpointedSession", task: BaseModel
+    ) -> None:
+        sandbox = self._checkpointer().get(self._sandbox_key(session_id))
         if sandbox is not None:
             self._session_id_to_sandbox[session_id] = sandbox
         record = _TaskSession(
@@ -336,6 +396,12 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
             capture=session.capture,
             capture_ready=session.capture_ready,
         )
+        self._task_sessions[session_id] = record
+        # Nobody may seed the session again; then it is closed at this deadline, as one a seed started is.
+        self._open_task_sessions[session_id] = monotonic() + self._session_lifetime_s()
+        # Before the seed reply is built, as a seed's setup records the task state before its reply: a subclass's
+        # ``_task_sandbox_response`` may read it.
+        self._restore_task_sandbox_state(session_id, session.task_state)
         # The replacement attempt's identical seed gets the fork. A session past capture lends no sandbox:
         # the base refuses a seed of it as one whose task sandbox is no longer available.
         record.response = (
@@ -343,29 +409,16 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
             if sandbox is not None
             else ResourcesSeedSessionResponse(resources_session_id=session_id)
         )
-        self._task_sessions[session_id] = record
-        self._open_task_sessions[session_id] = monotonic() + self._session_lifetime_s()
-        self._restore_task_sandbox_state(session_id, session.task_state)
 
     async def _discard_restored_sessions(self, session_ids: list[str]) -> None:
         """Stop the forks of a restore that failed after forking and drop what it installed.
 
-        A retry can run once every fork stopped; one whose stop failed stays registered until shutdown, or a seed of
-        its session, stops it.
+        Every session is free for a retried restore at once. A fork whose stop failed is left to the checkpointer,
+        which stops it again at the next restore and at shutdown.
         """
-        checkpointer = self._checkpointer()
-
-        async def stop(session_id: str) -> None:
-            try:
-                await checkpointer.stop(session_id)
-            except Exception:
-                LOG.exception("Failed to stop the fork of session %s after a failed restore", session_id)
-
-        await asyncio.gather(*(stop(session_id) for session_id in session_ids))
+        await self._checkpointer().discard([self._sandbox_key(session_id) for session_id in session_ids])
         for session_id in session_ids:
-            if session_id not in checkpointer:
-                self._session_id_to_sandbox.pop(session_id, None)
-            # A fork that did not stop stays registered, so shutdown stops it.
+            self._session_id_to_sandbox.pop(session_id, None)
             self._task_sessions.pop(session_id, None)
             self._open_task_sessions.pop(session_id, None)
             self._forget_task_sandbox_state(session_id)
@@ -380,3 +433,28 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
     async def delete_external_state(self, kept: frozenset[str]) -> None:
         # Also in a process that has not created a sandbox yet: the index holds what a crashed process took.
         await self._checkpointer().delete_snapshots(kept)
+
+
+_SESSION_VERSION = 1
+
+_JSON = TypeAdapter(JsonValue)
+_TASK_STATE = TypeAdapter(dict[str, JsonValue])
+
+
+class _CheckpointedSession(BaseModel):
+    """The exported state of one episode session.
+
+    ``version`` is the version of this record's format; a restore refuses one it does not know.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = _SESSION_VERSION
+    seed: ResourcesSeedSessionRequest
+    workdir: str
+    # The checkpoint state of each of the session's sandboxes, by name: ``TASK_SANDBOX`` for the task sandbox.
+    # ``None`` for one that has stopped, as the task sandbox has once verify captured the patch.
+    sandboxes: dict[str, dict[str, JsonValue] | None] = Field(default_factory=dict)
+    capture_ready: bool = False
+    capture: JsonValue = None
+    task_state: dict[str, JsonValue] = Field(default_factory=dict)

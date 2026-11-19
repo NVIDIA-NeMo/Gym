@@ -23,7 +23,6 @@ from nemo_gym.server_runtime._checkpoint.errors import (
     ExportFailedError,
     StaleAttemptError,
 )
-from nemo_gym.server_runtime._checkpoint.steps import EpisodeSteps
 
 
 TASK = {"task_id": "t"}
@@ -715,38 +714,3 @@ def test_a_record_with_nothing_spent_is_written_without_the_field_so_an_earlier_
     assert RecordBeforeTheField.model_validate(unspent).episode_id == episode_id
     assert EpisodeRecord.model_validate(unspent).elapsed_s == 0.0
     assert spent["elapsed_s"] == 1.5 and EpisodeRecord.model_validate(spent).elapsed_s == 1.5
-
-
-@pytest.mark.parametrize("known", [True, False])
-async def test_marking_an_episode_that_is_already_a_restart_or_unknown_does_not_wait_for_resume(known: bool) -> None:
-    notified: list[bool] = []
-
-    async def notify() -> None:
-        notified.append(True)
-
-    steps = EpisodeSteps(notify)
-    if known:
-        steps.begin("r", restart=True)
-    steps.close()
-    # Nothing would change, so there is nothing to keep from the open checkpoint.
-    await asyncio.wait_for(steps.mark_restart("r"), 1)
-
-    assert steps.restarts() == (["r"] if known else []) and notified == []
-
-
-async def test_a_parked_episode_becomes_a_restart_only_after_resume() -> None:
-    async def notify() -> None:
-        pass
-
-    steps = EpisodeSteps(notify)
-    steps.begin("r")
-    steps.close()
-    parked = asyncio.create_task(steps.boundary("r", {"next": "verify"}))
-    await asyncio.sleep(0.01)
-    marking = asyncio.create_task(steps.mark_restart("r"))
-    await asyncio.sleep(0.01)
-    during = steps.restarts()
-    steps.open()
-    await asyncio.wait_for(asyncio.gather(parked, marking), 1)
-
-    assert during == [] and steps.restarts() == ["r"]

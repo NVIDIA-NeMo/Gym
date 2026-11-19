@@ -87,17 +87,6 @@ def seed_rebinds_tool_accesses(headers: Optional[Mapping[str, str]]) -> bool:
     return (headers or {}).get(CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER) == "1"
 
 
-# A resources server whose state a restore can continue only until the episode's agent ended its turn,
-# such as one whose grader needs processes the agent started while its snapshots hold files only,
-# says so on its seed reply. The environment server then makes the episode a restart once the agent's turn ended.
-CHECKPOINT_RESTORE_POLICY_HEADER = "x-ng-checkpoint-restore-policy"
-
-
-def seed_restores_before_agent_close(headers: Optional[Mapping[str, str]]) -> bool:
-    """Whether a resources seed reply says a restore can continue the session only until its agent's turn ends."""
-    return (headers or {}).get(CHECKPOINT_RESTORE_POLICY_HEADER) == "before_agent_close"
-
-
 def seed_restarts(headers: Optional[Mapping[str, str]]) -> bool:
     """Whether a seed reply says its session cannot be captured, so its episode must start over after a crash."""
     return (headers or {}).get(CHECKPOINT_RESTART_HEADER) == "1"
@@ -209,13 +198,7 @@ class EpisodeSteps:
         self._blocking += _blocks(episode)
 
     async def mark_restart(self, key: str) -> None:
-        """Make this episode a restart from now on, once no checkpoint is open; see the module docstring.
-
-        An episode that is already a restart, or is unknown, returns without waiting.
-        """
-        episode = self._episodes.get(key)
-        if episode is None or episode.restart:
-            return
+        """Make this episode a restart from now on, once no checkpoint is open; see the module docstring."""
         while self.closed:
             await self._open.wait()
         episode = self._episodes.get(key)

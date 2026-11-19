@@ -77,7 +77,6 @@ from nemo_gym.server_runtime import (
     is_handled_episode_failure,
     seed_rebinds_tool_accesses,
     seed_restarts,
-    seed_restores_before_agent_close,
     seed_verify_step_type,
 )
 from nemo_gym.trajectory import (
@@ -113,9 +112,6 @@ class SessionHandles(BaseModel):
     observation: str | None = None
     # Keyed by tool server name.
     tool_sessions: dict[str, ToolSession] = Field(default_factory=dict)
-    # Whether a restore can continue the resources session only until the agent's turn ended, as its seed reply
-    # reported.
-    resources_restores_before_agent_close: bool = False
     # Whether the agent borrows a sandbox the resources server lent in its seed reply.
     # A restore rebuilds that sandbox under a new id, so the replacement attempt seeds both sessions again.
     borrowed_sandbox: bool = False
@@ -314,13 +310,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     failure.episode_evidence["agent_observations"] = closed_agent[-1].agent_observations
                     failure.episode_evidence["trajectory"] = closed_agent[-1].trajectory
                 raise
-            if handles.resources_restores_before_agent_close:
-                # A fork of the resources session cannot continue once the agent's turn ended: it lacks the
-                # processes the agent left for the grader, and nothing starts them again. Marked before the
-                # close boundary, so no checkpoint that opens after the turn ended exports the episode. One
-                # already open when the turn ended keeps it at the invoke_agent boundary, as one taken during
-                # the turn's last model call does.
-                await self.checkpoint_restart(request)
             stage = "close_agent"
 
         if stage == "close_agent":
@@ -511,9 +500,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             await raise_boundary_failure(seed_http_response)
             handles.resources_cookies = _cookies(seed_http_response)
             handles.resources_verify_step_type = seed_verify_step_type(seed_http_response.headers)
-            handles.resources_restores_before_agent_close = seed_restores_before_agent_close(
-                seed_http_response.headers
-            )
             if seed_restarts(seed_http_response.headers):
                 await self.checkpoint_restart(request)
             if not handles.resources_cookies:

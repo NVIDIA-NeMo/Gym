@@ -42,6 +42,12 @@ A server declares how its sessions checkpoint:
   every other request is admitted.
   This fails closed for servers nobody has audited.
 
+An ``exported`` server that cannot export one of its sessions,
+such as one a request started without the episode seed a restore installs a session for,
+reports it with ``ResourcesParticipant.restart_session`` while it handles the request that starts the session.
+That session is then treated as every session of a ``restart_only`` server is:
+its seed reply and prepare say its episode is a restart, and a commit leaves it out.
+
 A retire releases each of the attempt's sessions through ``retire_session_state`` in every mode,
 so a server that keeps per-session state without checkpointing it, such as a restart-only game, still releases it.
 
@@ -85,7 +91,6 @@ from nemo_gym.server_runtime._checkpoint.errors import (
 from nemo_gym.server_runtime._checkpoint.steps import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     CHECKPOINT_RESTART_HEADER,
-    CHECKPOINT_RESTORE_POLICY_HEADER,
     CHECKPOINT_VERIFY_HEADER,
     StepType,
 )
@@ -176,9 +181,6 @@ class ResourcesParticipant(CheckpointParticipant):
         # yields the same result from either the state before it captured what it grades or the state after.
         # A seed is waited for, so the session matches the environment's boundary.
         self.replayable_paths = {"/verify"} if verify_step_type == "replay" else set()
-        # "before_agent_close" when a fork of the session's state cannot continue an episode once its agent's turn
-        # ended, such as a grader that needs the agent's running processes; the seed reply says so.
-        self.restore_policy = "any_step"
         self.accepting = True
         self._open = asyncio.Event()
         self._open.set()
@@ -207,6 +209,8 @@ class ResourcesParticipant(CheckpointParticipant):
         self._session_waited: Counter[str] = Counter()
         # Restored sessions no request has used yet; a commit that no longer continues their episode retires them.
         self._unclaimed: set[str] = set()
+        # Sessions an exported server said it cannot export, until they end; see ``restart_session``.
+        self._restart_sessions: set[str] = set()
 
     def admit(
         self,
@@ -264,6 +268,29 @@ class ResourcesParticipant(CheckpointParticipant):
         while not self._open.is_set():
             await self._open.wait()
 
+    def restart_session(self, session_id: str) -> None:
+        """An ``exported`` server cannot export ``session_id``, so its episode starts over after a crash.
+
+        The server calls it from the handler of the request that starts the session, before it replies.
+        The reply then carries the restart header, prepare reports the session's episode as a restart,
+        and a commit leaves the session out, as for every session of a ``restart_only`` server.
+        It lasts until the session ends.
+        """
+        self._restart_sessions.add(session_id)
+
+    def session_restarts(self, session_id: Optional[str]) -> bool:
+        """Whether the server reported ``session_id`` through ``restart_session``."""
+        return session_id in self._restart_sessions
+
+    def seed_failed(self, session_id: Optional[str]) -> None:
+        """A request that would have started ``session_id`` failed.
+
+        What its handler reported through ``restart_session`` is forgotten, unless an earlier request started the
+        session and it is still live.
+        """
+        if session_id not in self._sessions:
+            self._restart_sessions.discard(session_id)
+
     def seeded(self, session_id: str, episode_id: EpisodeId) -> None:
         """A request started ``session_id`` for ``episode_id``."""
         self._bind(session_id, episode_id)
@@ -292,6 +319,7 @@ class ResourcesParticipant(CheckpointParticipant):
         self._unbind(session_id)
         self._unclaimed.discard(session_id)
         self._restored_sessions.discard(session_id)
+        self._restart_sessions.discard(session_id)
 
     def session_ended_by(self, session_id: str, path: str, *, close_follows: bool = False) -> None:
         """A request on ``path`` ended ``session_id``.
@@ -356,7 +384,15 @@ class ResourcesParticipant(CheckpointParticipant):
                 | {episode_id.capture_key for episode_id in self._seeding}
             )
             if self.mode == "restart_only"
-            else sorted(episode_id.capture_key for episode_id in self._first_seed_restarts)
+            else sorted(
+                {episode_id.capture_key for episode_id in self._first_seed_restarts}
+                # The sessions the server cannot export: their seed replies said so too.
+                | {
+                    episode_id.capture_key
+                    for session_id, episode_id in self._checkpointed_sessions()
+                    if session_id in self._restart_sessions
+                }
+            )
         )
         # A session whose retire was cut short is still being released: a checkpoint waits for a retried retire.
         blockers = sorted(
@@ -576,6 +612,8 @@ class ResourcesParticipant(CheckpointParticipant):
             and session_id not in carried
             # Nor a session a seed of the open checkpoint created: that seed's episode restarts.
             and episode_id not in self._first_seed_restarts
+            # Nor a session the server said it cannot export: its episode restarts too.
+            and session_id not in self._restart_sessions
         ]
         if self.mode == "stateless":
             # No state, only which sessions continue, so a restore places them where their requests are routed.
@@ -743,17 +781,24 @@ class ResourcesCheckpointMiddleware:
             for key, value in scope.get("headers", ())
         )
 
+        def seeded_session_id() -> Optional[str]:
+            # A seed handler may replace the session's ID,
+            # for example with the caller's resources session ID; later requests carry the new one,
+            # so that is the session to track.
+            return (scope.get("session") or {}).get(SESSION_ID_KEY) or session_id
+
         def apply_session_change(status: int) -> None:
             # Applied once the handler has changed the session, before the reply is sent:
             # a client that disconnects while it is sent cancels the request, which must not lose the change.
             # Registered while the request still counts as in flight, so a prepare that waits for it sees the session.
-            if session_id is None or not 200 <= status < 300:
+            if not 200 <= status < 300:
+                if seed is not None:
+                    self.participant.seed_failed(seeded_session_id())
+                return
+            if session_id is None:
                 return
             if seed is not None:
-                # A seed handler may replace the session's ID,
-                # for example with the caller's resources session ID; later requests carry the new one,
-                # so that is the session to track.
-                self.participant.seeded((scope.get("session") or {}).get(SESSION_ID_KEY) or session_id, seed)
+                self.participant.seeded(seeded_session_id(), seed)
             elif path in _SESSION_ENDS:
                 self.participant.session_ended_by(session_id, path, close_follows=close_follows)
 
@@ -764,14 +809,12 @@ class ResourcesCheckpointMiddleware:
                 if seed is not None:
                     # Tell the caller, before it ever verifies, whether this server's /verify may be replayed,
                     # and whether its episode must start over after a crash because this server cannot capture it,
-                    # or can continue it only until its agent's turn ends.
+                    # or cannot capture this session.
                     headers = [(CHECKPOINT_VERIFY_HEADER.encode(), self.participant.verify_step_type.encode())]
-                    if self.participant.mode == "restart_only":
+                    if self.participant.mode == "restart_only" or self.participant.session_restarts(
+                        seeded_session_id()
+                    ):
                         headers.append((CHECKPOINT_RESTART_HEADER.encode(), b"1"))
-                    elif self.participant.restore_policy != "any_step":
-                        headers.append(
-                            (CHECKPOINT_RESTORE_POLICY_HEADER.encode(), self.participant.restore_policy.encode())
-                        )
                     message = {**message, "headers": [*message.get("headers", []), *headers]}
                 apply_session_change(message["status"])
             await send(message)
@@ -783,6 +826,9 @@ class ResourcesCheckpointMiddleware:
         finally:
             self.participant.request_ended(session_id, counted=counted)
             if seed is not None:
+                if not started:
+                    # The handler raised, so no reply passed through here.
+                    self.participant.seed_failed(seeded_session_id())
                 self.participant.seed_ended(seed)
             await self.participant.notify()
 

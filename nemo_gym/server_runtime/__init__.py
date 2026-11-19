@@ -52,13 +52,11 @@ if TYPE_CHECKING:
         SandboxSessionCheckpointer,
         checkpoint_state_dir,
     )
-    from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
     from nemo_gym.server_runtime._checkpoint.steps import (
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
         seed_rebinds_tool_accesses,
         seed_restarts,
-        seed_restores_before_agent_close,
         seed_verify_step_type,
     )
     from nemo_gym.server_runtime._checkpoint.store import write_participant_state
@@ -247,7 +245,6 @@ _PUBLIC_API = {
     "ToolSpec": "episode_tools",
     "TypedToolset": "episode_tools",
     "check_resources_session_contract": "testing.session_conformance",
-    "checkpoint_settings": "_checkpoint.settings",
     "checkpoint_state_dir": "_checkpoint.sandbox",
     "dependency_failure": "base_environment_server",
     "entrypoint_ray_enabled": "ray_support",
@@ -270,7 +267,6 @@ _PUBLIC_API = {
     "require_rollout": "_checkpoint.agent",
     "seed_rebinds_tool_accesses": "_checkpoint.steps",
     "seed_restarts": "_checkpoint.steps",
-    "seed_restores_before_agent_close": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",
     "write_participant_state": "_checkpoint.store",

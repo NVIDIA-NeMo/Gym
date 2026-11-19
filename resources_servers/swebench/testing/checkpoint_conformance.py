@@ -3,16 +3,16 @@
 """Conformance checks for ``CheckpointedSandboxSessionResourcesServer`` subclasses. Import them from tests.
 
 :func:`check_sandbox_session_checkpoints` drives a subclass through its real routes, checkpoint control routes and
-middleware, in process, against :class:`FakeSnapshotProvider`, a provider with durable snapshots that behaves like
-OpenSandbox's: a snapshot is an independent copy that lives until deleted, and ``create_from_snapshot`` forks it
-under a new id. A server's own tests call it with a factory that builds the server on the provider it is given, and
-one seed request the server accepts.
+middleware, in process, against :class:`FakeSnapshotProvider`, a provider with durable snapshots: a snapshot is an
+independent copy that lives until deleted, and ``create_from_snapshot`` forks it under a new id. A server's own tests
+call it with a factory that builds the server on the provider it is given, one seed request the server accepts, and
+the ``/verify`` body that goes with that seed.
 """
 
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from nemo_gym.sandbox import (
     SandboxExecResult,
@@ -22,8 +22,9 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SandboxStatus,
 )
-from nemo_gym.server_runtime import ResourcesSeedSessionRequest, SandboxCheckpointError
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest, SandboxCheckpointError, seed_restarts
 from nemo_gym.server_runtime._checkpoint import sandbox as sandbox_checkpoints
+from resources_servers.swebench.sandbox_session_checkpoints import TASK_SANDBOX
 
 
 TOKEN = "conformance-token"
@@ -39,7 +40,7 @@ class FakeSandboxProvider:
 
     name = "fake"
 
-    def __init__(self, exec_results: Optional[Callable[[str], Optional[SandboxExecResult]]] = None) -> None:
+    def __init__(self, exec_results: Callable[[str], SandboxExecResult | None] | None = None) -> None:
         self.boxes: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str]] = []
         self._exec_results = exec_results
@@ -67,7 +68,7 @@ class FakeSandboxProvider:
             raise ValueError("create needs an image; a fork goes through create_from_snapshot")
         return self._add_box([], from_snapshot=None)
 
-    def _add_box(self, commands: list[str], *, from_snapshot: Optional[str]) -> SandboxHandle:
+    def _add_box(self, commands: list[str], *, from_snapshot: str | None) -> SandboxHandle:
         sandbox_id = self._next_id("sb")
         self.calls.append(("create", sandbox_id))
         self.boxes[sandbox_id] = {"state": "running", "commands": commands, "from_snapshot": from_snapshot}
@@ -102,7 +103,7 @@ class FakeSandboxProvider:
     async def aclose(self) -> None:
         pass
 
-    async def serialize_handle(self, handle: SandboxHandle, *, scope: Optional[str] = None) -> dict[str, Any]:
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         return {"sandbox_id": handle.sandbox_id}
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
@@ -116,7 +117,7 @@ class FakeSnapshotProvider(FakeSandboxProvider):
 
     name = "fake-snapshots"
 
-    def __init__(self, exec_results: Optional[Callable[[str], Optional[SandboxExecResult]]] = None) -> None:
+    def __init__(self, exec_results: Callable[[str], SandboxExecResult | None] | None = None) -> None:
         super().__init__(exec_results)
         self.snapshots: dict[str, dict[str, Any]] = {}
         self.fail_snapshots = 0
@@ -127,7 +128,7 @@ class FakeSnapshotProvider(FakeSandboxProvider):
             raise SandboxSnapshotNotFoundError(f"provider {self.name!r} has no snapshot {snapshot_id!r}")
         return self._add_box(list(snapshot["commands"]), from_snapshot=snapshot_id)
 
-    async def snapshot(self, handle: SandboxHandle, *, name: Optional[str] = None) -> str:
+    async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
         self.calls.append(("snapshot", handle.sandbox_id))
         if self.fail_snapshots:
             self.fail_snapshots -= 1
@@ -162,42 +163,43 @@ def checkpointing_config(state_dir: Path) -> dict[str, Any]:
     return {"checkpoint": {"enabled": True, "control_auth_token": TOKEN, "state_dir": str(state_dir)}}
 
 
-def _control(checkpoint_id: str, **extra: Any) -> dict[str, Any]:
-    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 30, **extra}
-
-
 async def check_sandbox_session_checkpoints(
     make_server: Callable[[FakeSandboxProvider, dict[str, Any]], Any],
     seed: ResourcesSeedSessionRequest,
     state_dir: Path,
+    *,
+    verify_body: dict[str, Any] | None = None,
 ) -> None:
     """Check the checkpoint contract of a server that checkpoints its task sandboxes; raise ``AssertionError``.
 
     ``make_server(provider, global_config)`` builds the server on ``provider`` (``shared_provider()`` must return
     it) with ``global_config`` as its global configuration. ``seed`` is an episode seed the server accepts for a
-    fresh ``resources_session_id``.
+    fresh ``resources_session_id``. ``verify_body`` is the ``/verify`` request body that goes with ``seed``'s task;
+    pass it, or the check of grading after a restore is skipped.
 
     Checked: the episode seed lends the task sandbox and is idempotent, and a conflicting seed is refused; a commit
     snapshots the sandbox and indexes the snapshot; after a crash, a restore forks the snapshot, the replacement
     attempt's seed gets the fork without running the setup again, the patch verify captured survives, and a seed of
     any other attempt is refused; a restore whose fork fails leaves no fork running; a commit after verify stopped
     the sandbox exports the session without one; a release deletes the snapshots of every checkpoint it does not
-    keep, including ones a crashed process indexed and ones it never indexed; a close stops the sandbox and fences a
-    late seed; shutdown stops what is left; and on a provider that cannot snapshot the server runs
-    ``restart_only`` and says so on its seed reply.
+    keep, including ones a crashed process indexed and ones it never indexed; a close stops the sandbox, forgets the
+    session's task state and fences a late seed; a restore of a checkpoint taken before verify captured the patch
+    installs the task state the commit exported, and a retire of that session stops its fork and forgets the state;
+    with ``verify_body``, the server's own ``/verify`` after such a restore replies as it does without the crash;
+    shutdown stops what is left; and on a provider that cannot snapshot the server runs ``restart_only`` and says so
+    on its seed reply.
     """
     import httpx
 
-    seed_path = f"/ng-rollout/{seed.episode_id.capture_key}/seed_session"
-    seed_body = seed.model_dump(mode="json")
     session_id = seed.resources_session_id
-    provider = FakeSnapshotProvider()
-    config = checkpointing_config(state_dir)
 
-    def client_of(server: Any) -> httpx.AsyncClient:
+    def client_of(
+        server: Any, provider: FakeSandboxProvider, *, raise_app_exceptions: bool = True
+    ) -> httpx.AsyncClient:
         app = server.setup_webserver()
         assert server.shared_provider() is provider, "make_server must build the server on the given provider"
-        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://resources")
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=raise_app_exceptions)
+        return httpx.AsyncClient(transport=transport, base_url="http://resources")
 
     async def control(http: httpx.AsyncClient, operation: str, checkpoint_id: str, **extra: Any) -> dict[str, Any]:
         reply = await http.post(
@@ -206,24 +208,37 @@ async def check_sandbox_session_checkpoints(
         assert reply.status_code == 200, f"{operation} failed: {reply.status_code} {reply.text}"
         return reply.json()
 
+    def attempt(offset: int) -> ResourcesSeedSessionRequest:
+        # Derived from the seed, so it names another episode whatever attempt the seed has.
+        episode_id = seed.episode_id.model_copy(update={"attempt": seed.episode_id.attempt + offset})
+        return seed.model_copy(update={"episode_id": episode_id})
+
+    def route(request: ResourcesSeedSessionRequest, name: str) -> str:
+        return f"/ng-rollout/{request.episode_id.capture_key}/{name}"
+
+    async def post_seed(http: httpx.AsyncClient, request: ResourcesSeedSessionRequest) -> httpx.Response:
+        return await http.post(route(request, "seed_session"), json=request.model_dump(mode="json"))
+
+    async def post_close(http: httpx.AsyncClient, request: ResourcesSeedSessionRequest) -> httpx.Response:
+        body = {"resources_session_id": session_id, "episode_id": request.episode_id.model_dump(mode="json")}
+        return await http.post(route(request, "close_session"), json=body)
+
+    scope = [seed.episode_id.model_dump(mode="json")]
+    replacement = attempt(1)
+
     # -- seed, commit -------------------------------------------------------------------------------------------
+    provider = FakeSnapshotProvider()
+    config = checkpointing_config(state_dir)
     first = make_server(provider, config)
-    async with client_of(first) as http:
-        seeded = await http.post(seed_path, json=seed_body)
+    async with client_of(first, provider) as http:
+        seeded = await post_seed(http, seed)
         assert seeded.status_code == 200, f"episode seed failed: {seeded.text}"
         access = seeded.json().get("sandbox_access")
         assert access is not None, "the seed reply lends the session's task sandbox"
-        assert seeded.headers.get("x-ng-checkpoint-restart") is None, "a provider that snapshots exports sessions"
-        if first.restore_policy == "before_agent_close":
-            assert seeded.headers.get("x-ng-checkpoint-restore-policy") == "before_agent_close"
-        retried = await http.post(seed_path, json=seed_body)
+        assert not seed_restarts(seeded.headers), "a provider that snapshots exports sessions"
+        retried = await post_seed(http, seed)
         assert retried.status_code == 200 and retried.json()["sandbox_access"] == access, "an identical retry"
-        # Derived from the seed, so it names another episode whatever attempt the seed has.
-        other_attempt = seed.episode_id.attempt + 1
-        other = seed.model_copy(update={"episode_id": seed.episode_id.model_copy(update={"attempt": other_attempt})})
-        conflicting = await http.post(
-            f"/ng-rollout/{other.episode_id.capture_key}/seed_session", json=other.model_dump(mode="json")
-        )
+        conflicting = await post_seed(http, replacement)
         assert conflicting.status_code == 409, "a seed naming the session with another episode is refused"
         created = provider.created_from_image()
 
@@ -249,16 +264,10 @@ async def check_sandbox_session_checkpoints(
 
     # -- a crash, then a restore into a fork ----------------------------------------------------------------------
     restored = make_server(provider, config)
-    async with client_of(restored) as http:
-        scope = [seed.episode_id.model_dump(mode="json")]
+    async with client_of(restored, provider) as http:
         await control(http, "restore", "r1", checkpoint_dir=str(state_dir / "ckpt-c1"), episode_ids=scope)
         await control(http, "resume", "r1")
-        replacement = seed.model_copy(
-            update={"episode_id": seed.episode_id.model_copy(update={"attempt": seed.episode_id.attempt + 1})}
-        )
-        reseeded = await http.post(
-            f"/ng-rollout/{replacement.episode_id.capture_key}/seed_session", json=replacement.model_dump(mode="json")
-        )
+        reseeded = await post_seed(http, replacement)
         assert reseeded.status_code == 200, f"the replacement attempt's seed failed: {reseeded.text}"
         fork = reseeded.json()["sandbox_access"]
         assert fork["connection"]["descriptor"] != access["connection"]["descriptor"], "the seed lends the fork"
@@ -269,12 +278,7 @@ async def check_sandbox_session_checkpoints(
             "the captured patch survives a restore"
         )
         assert calls == ["capture"], "a restored session does not capture its patch again"
-        later = seed.model_copy(
-            update={"episode_id": seed.episode_id.model_copy(update={"attempt": seed.episode_id.attempt + 2})}
-        )
-        refused = await http.post(
-            f"/ng-rollout/{later.episode_id.capture_key}/seed_session", json=later.model_dump(mode="json")
-        )
+        refused = await post_seed(http, attempt(2))
         assert refused.status_code == 409, "only the attempt a restore continues gets the restored session"
         await restored._checkpointer().settle()
         assert crashed_sandbox not in provider.live(), "the restore stops the sandbox the fork supersedes"
@@ -299,15 +303,10 @@ async def check_sandbox_session_checkpoints(
         assert provider.snapshots == {}, f"release deletes every snapshot of dropped checkpoints: {provider.snapshots}"
         assert restored._checkpointer().indexed_snapshots == {}, "release empties the index"
 
-        closed = await http.post(
-            f"/ng-rollout/{replacement.episode_id.capture_key}/close_session",
-            json={"resources_session_id": session_id, "episode_id": replacement.episode_id.model_dump(mode="json")},
-        )
+        closed = await post_close(http, replacement)
         assert closed.status_code == 200, f"close failed: {closed.text}"
         assert session_id not in restored._session_id_to_sandbox
-        late = await http.post(
-            f"/ng-rollout/{replacement.episode_id.capture_key}/seed_session", json=replacement.model_dump(mode="json")
-        )
+        late = await post_seed(http, replacement)
         assert late.status_code == 409, "a seed after close is refused"
 
     # -- a restore whose fork fails leaves nothing running --------------------------------------------------------
@@ -324,7 +323,12 @@ async def check_sandbox_session_checkpoints(
             "snapshot_ready_ts": 0.0,
         }
         session_seed = seed.model_copy(update={"resources_session_id": session_id})
-        return {"seed": session_seed.model_dump(mode="json"), "workdir": "/testbed", "sandbox": sandbox}
+        return {
+            "version": 1,
+            "seed": session_seed.model_dump(mode="json"),
+            "workdir": "/testbed",
+            "sandboxes": {TASK_SANDBOX: sandbox},
+        }
 
     states = {"ok": session_state("ok", good), "missing": session_state("missing", "snap-missing")}
     live_before = set(rollback_provider.live())
@@ -346,31 +350,86 @@ async def check_sandbox_session_checkpoints(
 
     # -- a close stops a task sandbox that is still running -------------------------------------------------------
     closing_provider = FakeSnapshotProvider()
-    provider = closing_provider  # client_of checks the server is built on this provider
     closing = make_server(closing_provider, checkpointing_config(state_dir / "closing"))
-    async with client_of(closing) as http:
-        seeded = await http.post(seed_path, json=seed_body)
+    async with client_of(closing, closing_provider) as http:
+        seeded = await post_seed(http, seed)
         assert seeded.status_code == 200, f"episode seed failed: {seeded.text}"
         started = set(closing_provider.live())
         assert started, "the seed starts the task sandbox"
-        closed = await http.post(
-            f"/ng-rollout/{seed.episode_id.capture_key}/close_session",
-            json={"resources_session_id": session_id, "episode_id": seed.episode_id.model_dump(mode="json")},
-        )
+        closed = await post_close(http, seed)
         assert closed.status_code == 200, f"close failed: {closed.text}"
         assert not started & set(closing_provider.live()), "a close stops the session's running task sandbox"
+        assert closing._export_task_sandbox_state(session_id) == {}, "a close forgets the session's task state"
     await closing.shutdown()
+
+    # -- a checkpoint before verify captured the patch: the usual one ---------------------------------------------
+    early_provider = FakeSnapshotProvider()
+    early_config = checkpointing_config(state_dir / "early")
+    early_checkpoint = str(state_dir / "early-ckpt")
+    working = make_server(early_provider, early_config)
+    async with client_of(working, early_provider) as http:
+        seeded = await post_seed(http, seed)
+        assert seeded.status_code == 200, f"episode seed failed: {seeded.text}"
+        task_state = working._export_task_sandbox_state(session_id)
+        await control(http, "prepare", "e1")
+        await control(http, "commit", "e1", checkpoint_dir=early_checkpoint)
+        await control(http, "resume", "e1")
+
+    def running_forks() -> set[str]:
+        boxes = early_provider.boxes
+        return {sandbox_id for sandbox_id in early_provider.live() if boxes[sandbox_id]["from_snapshot"] is not None}
+
+    # A retire of the restored session, as when the controller discards the attempt.
+    retiring = make_server(early_provider, early_config)
+    async with client_of(retiring, early_provider) as http:
+        await control(http, "restore", "r2", checkpoint_dir=early_checkpoint, episode_ids=scope)
+        await control(http, "resume", "r2")
+        assert retiring._export_task_sandbox_state(session_id) == task_state, (
+            "a restore installs the task state the commit exported"
+        )
+        assert running_forks(), "the restore forked the task sandbox"
+        await retiring.retire_session_state(session_id)
+        assert not running_forks(), "a retire stops the restored session's fork"
+        assert retiring._export_task_sandbox_state(session_id) == {}, "a retire forgets the session's task state"
+    await retiring.shutdown()
+
+    if verify_body is not None:
+        # The restored episode is graded by the server's own /verify, which captures the patch from the fork with
+        # the task state the restore installed. Its reply is the one an episode gets without the crash.
+        uninterrupted_provider = FakeSnapshotProvider()
+        uninterrupted = make_server(uninterrupted_provider, checkpointing_config(state_dir / "uninterrupted"))
+        async with client_of(uninterrupted, uninterrupted_provider, raise_app_exceptions=False) as http:
+            seeded = await post_seed(http, seed)
+            assert seeded.status_code == 200, f"episode seed failed: {seeded.text}"
+            expected = await http.post(route(seed, "verify"), json=verify_body, cookies=seeded.cookies)
+            assert expected.status_code == 200, f"verify failed without a checkpoint: {expected.text}"
+        await uninterrupted.shutdown()
+
+        continued = make_server(early_provider, early_config)
+        async with client_of(continued, early_provider, raise_app_exceptions=False) as http:
+            await control(http, "restore", "r3", checkpoint_dir=early_checkpoint, episode_ids=scope)
+            await control(http, "resume", "r3")
+            reseeded = await post_seed(http, replacement)
+            assert reseeded.status_code == 200, f"the replacement attempt's seed failed: {reseeded.text}"
+            graded = await http.post(route(replacement, "verify"), json=verify_body, cookies=reseeded.cookies)
+        assert (graded.status_code, graded.json() if graded.status_code == 200 else graded.text) == (
+            200,
+            expected.json(),
+        ), f"/verify after a restore replies as it does without the crash: {graded.status_code} {graded.text}"
+        await continued.shutdown()
 
     # -- shutdown, and a provider that cannot snapshot ------------------------------------------------------------
     plain = FakeSandboxProvider()
-    provider = plain  # client_of checks the server is built on this provider
     restart_only = make_server(plain, checkpointing_config(state_dir / "plain"))
-    app_client = client_of(restart_only)
-    async with app_client as http:
+    async with client_of(restart_only, plain) as http:
         status = await http.get("/ng-control/v1/checkpoint/status", headers=_AUTH)
         assert status.json()["mode"] == "restart_only", "a provider that cannot snapshot makes the server restart_only"
-        seeded = await http.post(seed_path, json=seed_body)
+        seeded = await post_seed(http, seed)
         assert seeded.status_code == 200
-        assert seeded.headers.get("x-ng-checkpoint-restart") == "1", "its seed reply makes the episode a restart"
+        assert seed_restarts(seeded.headers), "its seed reply makes the episode a restart"
     await restart_only.shutdown()
     assert plain.live() == [], "shutdown stops every live sandbox"
+
+
+def _control(checkpoint_id: str, **extra: Any) -> dict[str, Any]:
+    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 30, **extra}

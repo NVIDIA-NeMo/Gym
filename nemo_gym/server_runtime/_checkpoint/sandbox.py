@@ -970,6 +970,19 @@ class SandboxSessionCheckpointer:
         await self._stop_sandbox(entry.sandbox)
         self._entries.pop(key, None)
 
+    async def discard(self, keys: Iterable[str]) -> None:
+        """Give up the sandboxes of ``keys`` and stop them; for the forks of a restore its owner could not install.
+
+        Unlike :meth:`stop`, every key is free at once, so the owner can restore the same keys again whether or not
+        the stops succeed. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is logged and joins the
+        forks that :meth:`settle`, the next restore and :meth:`aclose` stop again. A key without a sandbox is skipped.
+        """
+        for key in keys:
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self._unstopped_forks.append(entry.sandbox)
+        await self._stop_forks()
+
     async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
         # The time limit starts once the stop has its turn, so a stop that waits behind others is not cut short.
         async with self._semaphore, asyncio.timeout(STOP_TIMEOUT_S):

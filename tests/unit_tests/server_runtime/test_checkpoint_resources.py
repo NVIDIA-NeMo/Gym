@@ -17,11 +17,7 @@ from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
 from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
-from nemo_gym.server_runtime._checkpoint.steps import (
-    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
-    CHECKPOINT_RESTORE_POLICY_HEADER,
-    seed_restores_before_agent_close,
-)
+from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -600,34 +596,6 @@ async def test_the_seed_reply_and_status_report_the_verify_step_type(
 
     assert seed.headers["x-ng-checkpoint-verify"] == expected
     assert status["verify"] == expected
-
-
-@pytest.mark.parametrize("policy", ["any_step", "before_agent_close"])
-async def test_the_seed_reply_reports_a_restore_policy_other_than_any_step(policy: str) -> None:
-    server, client = make_server()
-    server._checkpoint.restore_policy = policy
-    async with client:
-        seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
-
-    assert seed.status_code == 200
-    assert seed.headers.get(CHECKPOINT_RESTORE_POLICY_HEADER) == (None if policy == "any_step" else policy)
-    assert seed_restores_before_agent_close(seed.headers) is (policy == "before_agent_close")
-
-
-@pytest.mark.parametrize(
-    "headers, expected",
-    [
-        ({CHECKPOINT_RESTORE_POLICY_HEADER: "before_agent_close"}, True),
-        ({CHECKPOINT_RESTORE_POLICY_HEADER: "any_step"}, False),
-        ({CHECKPOINT_RESTORE_POLICY_HEADER: "before_agent_closed"}, False),
-        ({}, False),
-        (None, False),
-    ],
-)
-def test_only_the_before_agent_close_policy_ends_restores_at_the_agent_s_turn(
-    headers: dict[str, str] | None, expected: bool
-) -> None:
-    assert seed_restores_before_agent_close(headers) is expected
 
 
 async def test_the_seed_reply_reports_nothing_when_checkpointing_is_off() -> None:
@@ -1941,3 +1909,84 @@ def test_an_exported_server_whose_export_hook_cannot_take_the_checkpoint_id_fail
         ExportsWithoutTheId(config=config, server_client=server_client, counters={}).setup_webserver()
     ExportsWithKeywords(config=config, server_client=server_client, counters={}).setup_webserver()
     CounterServer(config=config, server_client=server_client, counters={}).setup_webserver()
+
+
+class PartlyExportedServer(CounterServer):
+    """An exported server that cannot export the sessions seeded while ``unexported`` is set."""
+
+    unexported: bool = False
+    seed_error: Any = None
+
+    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+        if self.unexported:
+            self._checkpoint.restart_session(request.session[SESSION_ID_KEY])
+        if self.seed_error is not None:
+            raise self.seed_error
+        return await super().seed_session(request, body)
+
+
+async def test_a_session_an_exported_server_cannot_export_is_a_restart_and_is_left_out_of_the_commit(
+    tmp_path: Path,
+) -> None:
+    server, client = make_server(PartlyExportedServer)
+    async with client:
+        server.unexported = True
+        unexported = await client.post("/ng-rollout/r-a2/seed_session", json=SEED)
+        server.unexported = False
+        # Another caller: the session cookie of the first seed would name the same session.
+        client.cookies.clear()
+        exported = await client.post("/ng-rollout/q/seed_session", json=SEED)
+        prepared = (await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)).json()
+        refused = await client.post(
+            "/ng-control/v1/checkpoint/commit",
+            json=control(checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r", "attempt": 2}]),
+            headers=AUTH,
+        )
+        committed = await client.post(
+            "/ng-control/v1/checkpoint/commit",
+            json=control(checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "q"}]),
+            headers=AUTH,
+        )
+        # Without a scope too: the hook must not be asked for a session the server said it cannot export.
+        everything = await server._checkpoint.export(None, checkpoint_id="c1")
+        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+
+    # Only that session's seed reply tells its episode to start over after a crash, as a restart_only server's does.
+    assert unexported.headers["x-ng-checkpoint-restart"] == "1"
+    assert exported.status_code == 200 and "x-ng-checkpoint-restart" not in exported.headers
+    assert prepared["phase"] == "prepared" and prepared["report"]["restarts"] == ["r-a2"]
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_restart_in_scope"
+    assert committed.status_code == 200 and committed.json()["manifest"]["record_count"] == 1
+    assert [record.episode_id.rollout_id for record in everything] == ["q"]
+    assert len(server.counters) == 2, "the server holds both sessions; only one is exported"
+
+
+@pytest.mark.parametrize("error", [HTTPException(500, "setup failed"), RuntimeError("setup failed")])
+async def test_a_seed_that_fails_leaves_no_session_reported_as_a_restart(error: Exception) -> None:
+    server, client = make_server(PartlyExportedServer)
+    server.unexported, server.seed_error = True, error
+    async with client:
+        if isinstance(error, HTTPException):
+            assert (await client.post("/ng-rollout/r/seed_session", json=SEED)).status_code == 500
+        else:
+            # The handler raised, so no reply passed through the checkpoint middleware.
+            with pytest.raises(RuntimeError, match="setup failed"):
+                await client.post("/ng-rollout/r/seed_session", json=SEED)
+
+    assert server._checkpoint._restart_sessions == set() and server._checkpoint.readiness().restarts == []
+
+
+async def test_a_session_the_server_cannot_export_is_reported_as_a_restart_only_until_it_ends() -> None:
+    server, client = make_server(PartlyExportedServer)
+    server.unexported = True
+    async with client:
+        seeded = await client.post("/ng-rollout/r/seed_session", json=SEED)
+        during = server._checkpoint.readiness().restarts
+        session_id = next(iter(server.counters))
+        closed = await client.post(
+            "/ng-rollout/r/close_session", json={"resources_session_id": session_id, "episode_id": {"rollout_id": "r"}}
+        )
+
+    assert seeded.status_code == 200 and during == ["r"]
+    assert closed.status_code == 200, closed.text
+    assert server._checkpoint._restart_sessions == set() and server._checkpoint.readiness().restarts == []
