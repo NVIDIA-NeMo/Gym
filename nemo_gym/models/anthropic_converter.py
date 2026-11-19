@@ -388,6 +388,10 @@ class AnthropicConverter:
                 pending_parts.append({"type": "input_text", "text": block.get("text", "")})
             elif block_type == "image":
                 pending_parts.append(self._anthropic_image_to_input_part(block))
+            elif block_type == "tool_addition":
+                # A tool made available mid-conversation; the converted request declares every tool from the start.
+                name = (block.get("tool") or {}).get("name")
+                pending_parts.append({"type": "input_text", "text": f"[tool loaded: {name}]"})
             elif block_type == "tool_use":
                 flush_message()
                 items.append(

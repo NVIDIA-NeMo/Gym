@@ -218,6 +218,23 @@ class TestAnthropicRequestToResponses:
         )
         assert params.input[0].output == "[tool loaded: SendMessage]\n[tool loaded: TaskStop]"
 
+    def test_tool_addition_names_the_added_tool(self) -> None:
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Go on."},
+                            {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "ListAgents"}},
+                        ],
+                    }
+                ],
+            }
+        )
+        assert [part["text"] for part in params.input[0].content] == ["Go on.", "[tool loaded: ListAgents]"]
+
     def test_thinking_block_becomes_reasoning_item(self) -> None:
         params = _converter().anthropic_request_to_responses(
             {
