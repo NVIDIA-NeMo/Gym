@@ -297,6 +297,26 @@ The recipe records its own choices explicitly: a 300-second command deadline, fo
 with hidden grading behavior. This server uses the supplied task schema and its documented comparison policy;
 it does not call an external grading API.
 
+#### Grading the same answers through Artificial Analysis
+
+On the CritPt problems, the answers of a run can also be graded by the Artificial Analysis CritPt API, which accepts
+batches of exactly 70 submissions, one per problem. `export_aa_batches` writes one such batch per repeat, in the format
+`resources_servers/critpt`'s replay tool sends:
+
+```bash
+python -m resources_servers.critpt_custom_grader.export_aa_batches \
+    --rollouts results/critpt_rollouts.jsonl --out-dir results/aa_batches --model <model name>
+# With the approved key in the environment variable the replay tool reads; one repeat directory per call.
+python -m resources_servers.critpt.replay --cache-dir results/aa_batches/repeat-0
+```
+
+Each answer is extracted from the saved trajectory with the rule above, independently of the local verdict, so an
+answer whose local reference preflight failed is still exported. A scored no-answer is sent as an empty code block,
+which the API grades as incorrect. A repeat with an unscorable rollout (`response_incomplete` or `submission_invalid`)
+or a missing one is not written: regenerate those rollouts and export again. `repeat-<r>/sources.jsonl` maps each
+submission to its rollout, and `manifest.json` records the counts and digests; the tool exits with code 3 when a repeat
+was not written.
+
 ### Semantic answer validators
 
 Some tasks admit several valid outputs: a protocol can be split into more stages without changing its result, and
