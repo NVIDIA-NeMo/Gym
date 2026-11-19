@@ -5,7 +5,7 @@
 Its ``/run`` also takes a flat row.
 It materializes the row with ``materialize_task(row, taskset=task_source)`` and validates the result as this ``TaskInput``.
 
-Data tooling loads this module without the server's dependencies (see ``nemo_gym/data/task_input.py``).
+Collation and ``gym env validate`` load this module without the server's dependencies (see ``nemo_gym/data/task_input.py``).
 """
 
 from nemo_gym.server_runtime import SingleAgentTurnTaskInput as TaskInput

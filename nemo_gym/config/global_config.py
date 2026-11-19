@@ -2450,6 +2450,27 @@ def dataset_agent_pins(global_config_dict: DictConfig, instance_name: str) -> Li
     return pins
 
 
+class ConflictingAgentPinsError(ConfigError):
+    """One server instance's datasets pin different agents, so a row that names only that instance has no agent."""
+
+
+def task_source_agent(global_config_dict: DictConfig, task_source: str) -> Optional[str]:
+    """The agent that runs a flat row whose only route is its ``task_source``, the instance that declared its dataset.
+
+    The row does not say which of the instance's datasets it came from.
+    So every dataset ``agent:`` pin of the instance applies, and pins that disagree raise ``ConflictingAgentPinsError``.
+    Otherwise this is ``resolve_dataset_agent`` with the one pin, which raises ``ConfigError`` when no agent fits.
+    Rollout collection and collation both resolve a flat row's agent with it.
+    """
+    pins = dataset_agent_pins(global_config_dict, task_source)
+    if len(pins) > 1:
+        raise ConflictingAgentPinsError(
+            f"its datasets pin conflicting agents ({sorted(pins)}), which task_source alone cannot tell apart; "
+            f"pass +agent_map={{{task_source}: <agent>}} to pick one"
+        )
+    return resolve_dataset_agent(global_config_dict, task_source, pin=pins[0] if pins else None)
+
+
 def environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
     """Map each agent name to the environment servers that front it."""
     servers_by_agent: dict[str, list[str]] = {}
@@ -2505,7 +2526,9 @@ def environment_server_for_row(
     ``agent`` routes it by its agent (``environment_server_for_agent``), and the function returns None.
     ``legacy`` sends every flat row to ``environment_server_name``.
     ``taskset`` refuses flat rows, so a run of task rows cannot silently pick up flat input.
-    Rollout collection routes with this function; it passes None for a taskset that is missing, empty or not a string.
+    Rollout collection and collation route with this function.
+    Rollout collection passes None for a taskset that is missing, empty or not a string.
+    Collation refuses such a row as an invalid task row before it routes it.
     Raises ``ValueError`` for a row that cannot be routed, or for a ``legacy`` or unknown ``routing_mode`` it cannot apply.
     """
     if taskset is not None:

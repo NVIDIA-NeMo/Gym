@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The episode request validates the TaskInput that data tooling loads."""
+"""The episode request validates the TaskInput that collation and ``gym env validate`` load."""
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServer
 from environment_servers.single_agent_turn.task_input import TaskInput

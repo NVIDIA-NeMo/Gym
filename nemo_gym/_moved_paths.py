@@ -545,6 +545,8 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         "_environment_server_for_agent": MovedPath(
             new="nemo_gym.config.global_config:environment_server_for_agent", since="0.8.0"
         ),
+        # rollout_collection imported these to resolve a task_source's agent, which task_source_agent now does.
+        **_names("nemo_gym.config.global_config", "0.8.0", "dataset_agent_pins resolve_dataset_agent"),
         # Moved, and still imported by rollout_collection for its own use.
         **_names(
             "nemo_gym.artifacts.rollout_rows",

@@ -6,7 +6,7 @@ An environment server with a typed episode protocol ships ``task_input.py`` next
 The module exports ``TaskInput``, the type its ``request_model`` (``BaseEpisodeRequest[TaskInput]``) is parameterized by.
 It may also export ``ACCEPTS_FLAT_ROWS = True`` when the server's ``/run`` takes a flat row too.
 Such a server materializes the row with ``materialize_task(row, taskset=task_source)`` and validates the result as ``TaskInput``.
-The server and data tooling share this one definition.
+The server, collation and ``gym env validate`` share this one definition.
 
 A relay ships the module with ``TaskInput = None``.
 Its ``/run`` passes a flat row to the agent's ``/run``, which validates a ``BaseRunRequest``, and it takes no task rows.

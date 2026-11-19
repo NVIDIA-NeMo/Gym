@@ -1271,12 +1271,14 @@ class TestMaterializedTasksetBenchmark:
 
         source = tmp_path / "source.jsonl"
         rows = [{"instance_id": f"task-{index}", "answer": "expected"} for index in range(5)]
-        source.write_text("".join(json.dumps(row) + "\n" for row in rows))
         dataset = multi_agent_config.resources.resources_servers.impl.datasets[0]
         if dataset_type != "benchmark":
+            # Without the benchmark's prompt template, the row carries the request single_agent_turn requires.
+            rows = [row | {"responses_create_params": {"input": "solve it"}} for row in rows]
             dataset.type = dataset_type
             del dataset["prepare_script"]
             dataset.license = "Apache 2.0"
+        source.write_text("".join(json.dumps(row) + "\n" for row in rows))
         mode = "example_validation" if dataset_type == "example" else "train_preparation"
         multi_agent_config.update({"mode": mode, "output_dirpath": str(tmp_path / "collated")})
         TrainDataProcessor().run(multi_agent_config)
@@ -1289,6 +1291,28 @@ class TestMaterializedTasksetBenchmark:
         )
         assert {row["_ng_environment_server"] for row in loaded} == {"environment"}
         assert loaded[0]["task_input"]["answer"] == "expected"
+
+    def test_collation_checks_rows_against_the_routed_server_through_run(self, multi_agent_config, tmp_path):
+        """``run()`` hands the run config to the request check, so a row the routed server refuses fails collation."""
+        import json
+
+        from nemo_gym.data.dataset_preparation import TrainDataProcessor
+
+        source = tmp_path / "source.jsonl"
+        # single_agent_turn requires responses_create_params; without the benchmark's prompt template, none is set.
+        source.write_text("".join(json.dumps({"instance_id": f"task-{index}"}) + "\n" for index in range(5)))
+        dataset = multi_agent_config.resources.resources_servers.impl.datasets[0]
+        dataset.type = "example"
+        del dataset["prepare_script"]
+        dataset.license = "Apache 2.0"
+        multi_agent_config.update({"mode": "example_validation", "output_dirpath": str(tmp_path / "collated")})
+
+        with pytest.raises(ValueError) as error:
+            TrainDataProcessor().run(multi_agent_config)
+
+        message = str(error.value)
+        assert "5/5 rows failed request validation" in message
+        assert "rows go to: environment (single_agent_turn) (5 rows)" in message
 
     def test_listing_names_the_environment_server_without_a_single_agent(self, multi_agent_config, tmp_path):
         from nemo_gym.environment.benchmarks import BenchmarkConfig

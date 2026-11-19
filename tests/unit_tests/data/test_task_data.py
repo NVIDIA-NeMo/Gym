@@ -348,6 +348,15 @@ class TestOwningResourcesServerImpl:
         # Nothing names the agent: it falls back to its own folder.
         assert TrainDataProcessor._schema_home_for(agent, [other, agent]) == ("simple_agent", "responses_api_agents")
 
+    def test_the_routed_environment_server_owns_the_data_of_an_agent_several_servers_name(self):
+        agent = self._agent("shared_agent", None)
+        first = self._env("first_env", "other", "shared_agent")
+        routed = self._env("routed_env", "harbor", "shared_agent")
+        configs = [agent, first, routed]
+        assert TrainDataProcessor._owning_environment_server_impl(agent, configs) == "other"
+        assert TrainDataProcessor._owning_environment_server_impl(agent, configs, "routed_env") == "harbor"
+        assert TrainDataProcessor._schema_home_for(agent, configs, "routed_env") == ("harbor", "environment_servers")
+
     def test_resources_server_reference_wins_over_an_environment_server(self):
         rs = self._rs("bench_rs", "mcqa")
         agent = self._agent("bench_agent", {"type": "resources_servers", "name": "bench_rs"})

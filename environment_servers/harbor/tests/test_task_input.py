@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The episode request validates the TaskInput that data tooling loads."""
+"""The episode request validates the TaskInput that collation and ``gym env validate`` load."""
 
 from environment_servers.harbor.app import HarborEnvironmentServer
 from environment_servers.harbor.task_input import TaskInput

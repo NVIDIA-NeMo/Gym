@@ -102,6 +102,15 @@ It also sets the `request_model` and `response_model` class attributes to subcla
 `BaseEpisodeResponse`, which define the `/run` schema; the server does not start without them. Declare the server's
 own settings on a subclass of `BaseEnvironmentServerConfig`, which refuses unknown keys.
 
+Put the task input type, the `T` of `request_model = BaseEpisodeRequest[T]`, in a `task_input.py` next to `app.py`,
+exported as `TaskInput`, and import it in `app.py` from there. `gym dataset collate` and `gym env validate` load that
+module to check each task row routed to the server before a run starts. They load it without the server's
+dependencies, so it may import only the standard library, pydantic, resources servers' `task_data.py` modules and
+`nemo_gym` packages at or below `nemo_gym.data`. Set `ACCEPTS_FLAT_ROWS = True` as well if `/run` also takes a flat
+row and validates it as `TaskInput`, as `single_agent_turn_legacy` does. A server that only relays flat rows to an
+agent's `/run` sets `TaskInput = None`. Without the module, collation does not check the server's task rows, and it
+checks flat rows sent to it only as run requests.
+
 The base class applies the episode limits above, so `run()` only orders the calls. The agents it drives must
 implement agent sessions; see [Agent Server and Environment Server](/main/agent-server/add-or-update-a-harness#agent-server-and-environment-server)
 for the three endpoints and [Configure Agents](/main/agent-server) for the agent side.

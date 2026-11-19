@@ -1212,8 +1212,9 @@ class TestRequestValidationReport:
 
         message = str(error.value)
         assert f"{data_fpath}: 2/3 rows failed request validation" in message
-        assert "  row 0: responses_create_params.tools.0." in message
-        assert "  row 2: responses_create_params.tools.0." in message
+        assert "  rows go to: test_agent /run (3 rows)" in message
+        assert "  row 0: test_agent /run: responses_create_params.tools.0." in message
+        assert "  row 2: test_agent /run: responses_create_params.tools.0." in message
         assert "  row 1:" not in message
 
     def test_error_mode_lists_every_failing_file_and_writes_no_sidecar(self, tmp_path: Path) -> None:
@@ -1288,7 +1289,9 @@ class TestRequestValidationReport:
             [_agent_config_for(data_fpath)], overwrite_metrics_conflicts=False, task_data_validation="error"
         )
 
-        assert "request validation" not in capsys.readouterr().out
+        output = capsys.readouterr().out
+        assert "none of 2 rows failed request validation, but some were not fully checked." in output
+        assert "  1 rows not checked: no responses_create_params" in output
         assert metrics["train"].number_of_examples == 1
         assert (tmp_path / "train_metrics.json").exists()
         assert compute_sample_metrics(json.dumps({"task_idx": 0})) == (DatasetMetrics(), True)
