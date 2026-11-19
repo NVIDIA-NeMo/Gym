@@ -86,6 +86,15 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
     )
     assert model.inline_tool_output_images
     assert env.agent_server.name == f"deepcad_{harness}_agent"
+    if harness == "hermes":
+        from responses_api_agents.hermes_agent.app import HermesAgentConfig
+
+        hermes = HermesAgentConfig(
+            name="deepcad_hermes_agent",
+            **OmegaConf.to_container(config.deepcad_hermes_agent.responses_api_agents.hermes_agent, resolve=True),
+        )
+        assert hermes.image_input is True
+        assert hermes.enabled_toolsets == ["terminal", "file", "vision"]
     assert "required_model_servers" not in config.get("model_call_sampling", {})
     params = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
     assert len(params.input) == 1

@@ -149,7 +149,7 @@ images outside user messages return HTTP 422. Use a vision model: Hermes passes 
 text-only deployment rejects the request. The response output keeps only each message's text, while the session
 conversation in the agent observations keeps the images, so base64 data makes those records large. Hermes estimates
 context use from message length, base64 included, so images weigh heavily in its preflight compression check on a
-long history. Hermes' vision tools, images returned by MCP tools, and token capture with images are not qualified.
+long history. Images returned by MCP tools and token capture with images are not qualified.
 
 Compatibility: the host path previously let config `system_prompt` replace the dataset's
 system message and ignored request `temperature`. It now combines the prompts and honors
@@ -160,7 +160,17 @@ Remove unsupported fields that older versions silently ignored.
 
 Sandbox sessions live in the memory of the worker that seeded them. With several agent workers, session routing sends each session's requests to the worker that seeded it. Calling the agent's `/run` directly keeps no session.
 
-Each sandbox session installs the Hermes version pinned in `pyproject.toml`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<key>/python`, for example because an earlier session in the same sandbox installed it. The key covers the Python build, the Hermes requirement and this server's package versions. The Agent Server builds the runtime for the sandbox's architecture and C library: a pinned standalone CPython plus Hermes and its dependencies at this server's versions, cached under `sandbox_python` in Gym's `cache_dir`. Building needs `uv` and outbound access to GitHub and the Python package index on the Agent Server; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python build can be given the file in that cache directory. The sandbox needs only x86_64 or aarch64 Linux, `bash`, `tar` with gzip and glibc 2.17 or musl, with no network or Python of its own. Hermes calls the Model Server directly from the sandbox, so the sandbox must reach the Model Server at its configured host and port.
+By default, each sandbox session installs the Hermes version pinned in `pyproject.toml`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<key>/python`, for example because an earlier session in the same sandbox installed it. The key covers the Python build, the Hermes requirement and this server's package versions. The Agent Server builds the runtime for the sandbox's architecture and C library: a pinned standalone CPython plus Hermes and its dependencies at this server's versions, cached under `sandbox_python` in Gym's `cache_dir`. Building needs `uv` and outbound access to GitHub and the Python package index on the Agent Server; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python build can be given the file in that cache directory. The sandbox needs only x86_64 or aarch64 Linux, `bash`, `tar` with gzip and glibc 2.17 or musl, with no network or Python of its own. Hermes calls the Model Server directly from the sandbox, so the sandbox must reach the Model Server at its configured host and port.
+
+For native file-image reads, set `image_input: true` and include `vision` in `enabled_toolsets` (for example,
+`[terminal, file, vision]`). This requires a seeded sandbox session and a vision-capable primary model. At seed,
+the same installer builds and uploads an isolated Hermes `0ee05d72f2b30385d4861fd8e30511c6d51100e4` runtime with
+Python 3.13.14 and `image-runtime-constraints.txt`, including MCP 1. The host stays on its existing Hermes/MCP
+versions. No preprovisioned interpreter path is needed. Native `vision_analyze` returns file pixels to the primary
+model instead of using an auxiliary vision model. The DeepCAD multi-harness recipe enables this mode; model-call
+capture, generation budgets and session cleanup use the existing paths. Runtime installation and wheel availability
+must succeed for the target platform; failures do not fall back to host execution. This opt-in is not a real-policy
+CAD quality or training-token qualification.
 
 Sessions use MCP tool grants and reject other required grants. Each granted MCP server is added to that session's Hermes configuration, so the sandbox must reach it at the granted URL, usually the Resources Server's `/mcp` endpoint. An activation fails before its first model call when a required server does not connect. Hermes names MCP tools `mcp_<server>_<tool>`; the response reports them as `mcp__<server>__<tool>`, the form Gym strips before verification, while captured model calls keep Hermes' names. The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
 

@@ -329,6 +329,7 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: int = 32
     max_turns: int = 90
     max_tokens: Optional[int] = None
+    image_input: bool = False
     enabled_toolsets: Optional[list[str]] = None
     disabled_toolsets: Optional[list[str]] = None
     temperature: float | None = None
@@ -508,6 +509,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "enabled": self.config.checkpoints_enabled,
             },
         }
+        if self.config.image_input:
+            config["model"] = {
+                **(model if isinstance(model, dict) else {"default": model}),
+                "supports_vision": True,
+                "provider": "custom",
+            }
+            config["agent"]["image_input_mode"] = "native"
         if mcp_accesses:
             # A grant is for tools, so Hermes' resource and prompt helper tools stay off.
             config["mcp_servers"] = {
@@ -607,6 +615,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         session_dir = f"/tmp/nemo-gym-hermes-sessions/{uuid4().hex}"
         state = HermesSandboxSession(
             request=body,
+            image_input=self.config.image_input,
             session=SandboxSession(
                 sandbox=sandbox,
                 workdir=workdir,
@@ -1137,6 +1146,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        if self.config.image_input and self._agent_session_id_from_request(request) is None:
+            raise HTTPException(422, "File images require a seeded sandbox session")
         body = self._validate_request(body)
         agent_session_id = self._agent_session_id_from_request(request)
         path_params = getattr(request, "path_params", None)
