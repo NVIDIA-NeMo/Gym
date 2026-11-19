@@ -734,6 +734,13 @@ def _build_messages_model_fn(
         }
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
+        for key in ("tools", "tool_choice"):
+            if payload.get(key) is not None:
+                create_kwargs[key] = payload[key]
+        if payload.get("chat_template_kwargs") is not None:
+            create_kwargs["extra_body"] = {"chat_template_kwargs": dict(payload["chat_template_kwargs"])}
+        if payload.get("skip_special_tokens") is not None:
+            create_kwargs.setdefault("extra_body", {})["skip_special_tokens"] = payload["skip_special_tokens"]
         if rollout_purpose is not None:
             # The Gym vLLM proxy reads metadata.extra_body and forwards the
             # decoded fields to NeMo-RL's internal vLLM endpoint. Standalone
@@ -822,6 +829,7 @@ def _build_messages_model_fn(
             normalized = _normalize_chat_message(
                 choice.message,
                 structured=structured_response,
+                preserve_response=bool(payload.get("_nemo_gym_preserve_response")),
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
@@ -835,6 +843,7 @@ def _build_messages_model_fn(
             normalized = _normalize_chat_message(
                 choice.message,
                 structured=structured_response,
+                preserve_response=bool(payload.get("_nemo_gym_preserve_response")),
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
@@ -1015,10 +1024,47 @@ def _normalize_chat_content(content: Any, *, _depth: int = 0) -> str:
     return candidate
 
 
-def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
+def _normalize_chat_message(message: Any, *, structured: bool = False, preserve_response: bool = False) -> Any:
     """Normalize OpenAI native tool calls for text-protocol OSWorld agents."""
 
     raw_content = message.content or ""
+    if preserve_response:
+        if not structured:
+            raise ValueError("Preserving a model response requires a structured protocol")
+        # Tool protocols consume the served fields directly. In particular,
+        # never decode/re-encode tool arguments, recover fenced code, concatenate
+        # multiple content parts, or synthesize XML around a native tool call.
+        model_extra = getattr(message, "model_extra", None) or {}
+        result = {
+            "content": message.content,
+            "raw_content": message.content,
+            "reasoning_content": None,
+            "tool_calls": [
+                {
+                    "id": getattr(call, "id", None),
+                    "type": getattr(call, "type", "function"),
+                    "function": {
+                        "name": call.function.name,
+                        "arguments": call.function.arguments,
+                    },
+                }
+                for call in (getattr(message, "tool_calls", None) or [])
+            ],
+        }
+        for field in (
+            "reasoning_content",
+            "reasoning",
+            "prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+            "routed_experts",
+        ):
+            value = getattr(message, field, None)
+            if value is None:
+                value = model_extra.get(field)
+            if value is not None:
+                result[field] = value
+        return result
     normalization_error = None
     try:
         content = _normalize_chat_content(raw_content)
