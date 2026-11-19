@@ -9,9 +9,9 @@ not downloaded; they are in the sandbox image that ``Dockerfile`` builds.
 
 The public rows withhold the ground truth: ``sol_sql``, ``external_knowledge`` and ``test_cases``, for the task and
 for its follow-up. The authors send it on request, and ``prepare`` merges it in by ``instance_id``. It keeps the rows
-that the server can grade: those with their ground truth, and without custom test cases for the task or its follow-up
-(BIRD-Interact's management tasks). It reads the file the authors sent from ``data/`` (``GROUND_TRUTH_FILES``), which
-git ignores, unless ``ground_truth_jsonl`` names another.
+that the server can grade: query tasks, whose two phases are both ``Query``, with their ground truth and without custom
+test cases. BIRD-Interact's management tasks, which test cases grade, are left out. It reads the file the authors sent
+from ``data/`` (``GROUND_TRUTH_FILES``), which git ignores, unless ``ground_truth_jsonl`` names another.
 """
 
 import json
@@ -36,6 +36,14 @@ GROUND_TRUTH_FILES = {
     "lite": "bird_interact_gt_kg_testcases_1008.jsonl",
     "full": "bird_interact_full_gt_kg_testcases_08022.jsonl",
 }
+# The revision of each release's Hugging Face dataset that the ground truth files belong to, so a later edit upstream
+# cannot pair new rows with old ground truth.
+RELEASE_REVISIONS = {
+    "lite": "f7881a9c2b9630cc4fc13b0c39279740b0a2fd87",
+    "full": "5d78b0722433c3821e1ebda5d8c39d24070049d7",
+}
+# A phase's category when its row names none, as in the ADK.
+QUERY_CATEGORY = "Query"
 
 
 def database_dir(release: str) -> Path:
@@ -48,7 +56,10 @@ def download_release(release: str) -> Path:
 
     return Path(
         snapshot_download(
-            repo_id=f"birdsql/bird-interact-{release}", repo_type="dataset", local_dir=database_dir(release)
+            repo_id=f"birdsql/bird-interact-{release}",
+            repo_type="dataset",
+            revision=RELEASE_REVISIONS[release],
+            local_dir=database_dir(release),
         )
     )
 
@@ -85,8 +96,11 @@ def select_tasks(
             continue
         merged = merge_ground_truth(row, truth)
         follow_up = merged.get("follow_up")
+        categories = {merged.get("category") or QUERY_CATEGORY, (follow_up or {}).get("category") or QUERY_CATEGORY}
         if not merged["sol_sql"] or (follow_up is not None and not follow_up.get("sol_sql")):
             left_out["no ground truth"] += 1
+        elif categories != {QUERY_CATEGORY}:
+            left_out["management task"] += 1
         elif merged["test_cases"] or (follow_up is not None and follow_up.get("test_cases")):
             left_out["custom test cases"] += 1
         else:

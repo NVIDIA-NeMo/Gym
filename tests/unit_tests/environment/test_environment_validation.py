@@ -95,6 +95,23 @@ def test_static_wiring_fills_an_auxiliary_models_endpoint_but_no_other_missing_v
     assert OmegaConf.is_missing(config, "unrelated_setting")
 
 
+def test_static_wiring_keeps_a_supplied_model_setting() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.environment.validation import _StaticWiringParser
+
+    config = OmegaConf.create(
+        {
+            "user_model_base_url": "https://simulator.example/v1",
+            "user_model": {"responses_api_models": {"vllm_model": {"base_url": "${user_model_base_url}"}}},
+        }
+    )
+
+    _StaticWiringParser()._recursively_swap_keys(config)
+
+    assert config.user_model.responses_api_models.vllm_model.base_url == "https://simulator.example/v1"
+
+
 def test_manifest_resolves_dataset_interpolation_against_its_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     path = _asset(tmp_path)

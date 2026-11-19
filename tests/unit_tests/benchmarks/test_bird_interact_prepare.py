@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from benchmarks.bird_interact import prepare as bird_prepare
 
@@ -85,6 +86,30 @@ class TestSelectTasks:
         assert kept == []
         assert left_out == {"no ground truth": 2, "custom test cases": 2}
 
+    @pytest.mark.parametrize("phase", ["task", "follow_up"])
+    def test_a_management_task_is_left_out_by_its_category_even_without_test_cases(self, phase: str) -> None:
+        row = _row("m1")
+        (row if phase == "task" else row["follow_up"])["category"] = "Management"
+
+        kept, left_out = bird_prepare.select_tasks([row], {"m1": _truth("m1")})
+
+        assert (kept, left_out) == ([], {"management task": 1})
+
+    def test_a_phase_without_a_category_is_a_query_as_in_the_adk(self) -> None:
+        row = _row("q1")
+        del row["category"]
+
+        kept, _ = bird_prepare.select_tasks([row], {"q1": _truth("q1")})
+
+        assert [task["instance_id"] for task in kept] == ["q1"]
+
+    def test_a_row_the_server_could_not_read_is_refused(self) -> None:
+        row = _row("q1")
+        del row["selected_database"]
+
+        with pytest.raises(ValidationError):
+            bird_prepare.select_tasks([row], {"q1": _truth("q1")})
+
 
 class TestPrepare:
     def test_writes_the_mode_file_from_the_download_and_the_ground_truth(
@@ -103,7 +128,7 @@ class TestPrepare:
         assert output == tmp_path / "data" / "full" / "a_interact.jsonl"
         (task,) = [json.loads(line) for line in output.read_text().splitlines()]
         assert task["task_id"] == {"taskset": "bird_interact:a_interact", "task_id": "q1"}
-        assert task["task_input"]["instance_id"] == "q1" and task["task_input"]["sol_sql"]
+        assert task["task_input"]["instance_id"] == "q1" and task["task_input"]["sol_sql"] == ["SELECT 1"]
         assert "kept 1 of 2 tasks; left out: 1 with no ground truth" in capsys.readouterr().out
 
     @pytest.mark.parametrize(
@@ -142,6 +167,25 @@ class TestPrepare:
         assert [json.loads(line)["task_input"]["sol_sql"] for line in output.read_text().splitlines()] == [
             ["SELECT 1"]
         ]
+
+    def test_each_release_reads_its_own_download(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(bird_prepare, "DATA_DIR", tmp_path / "data")
+        for release in ("lite", "full"):
+            bird_prepare.database_dir(release).mkdir(parents=True)
+            row = _row(f"{release}_q1")
+            (bird_prepare.database_dir(release) / bird_prepare.ROWS_FILE).write_text(json.dumps(row) + "\n")
+        monkeypatch.setattr(bird_prepare, "download_release", bird_prepare.database_dir)
+        ground_truth = tmp_path / "ground_truth.jsonl"
+        ground_truth.write_text("".join(json.dumps(_truth(f"{release}_q1")) + "\n" for release in ("lite", "full")))
+
+        written = {
+            release: bird_prepare.prepare(release, "c_interact", ground_truth_jsonl=str(ground_truth))
+            for release in ("lite", "full")
+        }
+
+        for release, output in written.items():
+            (task,) = [json.loads(line) for line in output.read_text().splitlines()]
+            assert task["task_input"]["instance_id"] == f"{release}_q1"
 
     def test_the_ground_truth_of_another_release_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
