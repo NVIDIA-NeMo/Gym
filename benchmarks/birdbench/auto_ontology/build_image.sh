@@ -15,11 +15,12 @@
 # of an hour.
 set -euo pipefail
 
-# The one Auto Ontology that Gym runs: its main (a630ebd), NVIDIA/auto-ontology#543 (the openai version nemo-gym pins)
-# and the ReAct loop's extra tools (NVIDIA/auto-ontology#559), which BIRD-Interact's ask_user needs. Move it to
-# NVIDIA/auto-ontology once both merge.
+# The one Auto Ontology that Gym runs: release 1.3.0 (7dac5ff, the version auto-ontology-eval's BIRD-Interact runs
+# use, with its interactive coordinator), NVIDIA/auto-ontology#543 (the openai version nemo-gym pins) and the ReAct
+# loop's extra tools (NVIDIA/auto-ontology#559), which BIRD-Interact's ask_user needs. Move it to NVIDIA/auto-ontology
+# once both merge.
 AUTO_ONTOLOGY_REPOSITORY=https://github.com/ffrujeri/auto-ontology.git
-AUTO_ONTOLOGY_COMMIT=6137967703a550a2c88860af22e9dc11fc49a64d
+AUTO_ONTOLOGY_COMMIT=4d7b623b46dba7365fd431de2cd78d3eb72f03f6
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
