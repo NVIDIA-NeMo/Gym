@@ -13,9 +13,9 @@ modes, the user simulator, the rewards and the grading. The server's own five-ta
 | `full.yaml` | Full: 22 databases | c-Interact | Up to 410 of 600 |
 | `full_a_interact.yaml` | Full | a-Interact | Up to 410 of 600 |
 
-Every task has a follow-up question, its phase 2. Only query tasks run: the management tasks (105 in Lite, 190 in
-Full) have custom test cases, which the server does not run yet, and `prepare.py` leaves out each task whose ground
-truth has them.
+Every task has a follow-up question, its phase 2. Only query tasks run: `prepare.py` leaves out each management task
+(105 in Lite, 190 in Full), a task with a phase that is not a query, because the server does not run their custom test
+cases yet.
 
 ## 1. Build the database image
 
@@ -81,7 +81,7 @@ gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark
 
 ## Results
 
-None yet: Lite and Full run once the ground truth is in hand (GYMINT-592).
+None published yet.
 
 ## Licensing
 

@@ -38,7 +38,7 @@ RUN set -eu; \
     gosu postgres createdb root; \
     for script in /docker-entrypoint-initdb.d/*.sh; do \
         gosu postgres bash "$script" > /tmp/restore-output.log 2>&1 || { cat /tmp/restore-output.log; exit 1; }; \
-        if grep -E "^Error" /tmp/restore-output.log; then exit 1; fi; \
+        if grep -qE "^Error" /tmp/restore-output.log; then cat /tmp/restore-output.log; exit 1; fi; \
     done; \
     restored="$(gosu postgres psql --dbname=postgres --tuples-only --no-align \
         --command="SELECT count(*) FROM pg_database WHERE datname LIKE '%\_template' AND datname <> 'sql_test_template'")"; \
