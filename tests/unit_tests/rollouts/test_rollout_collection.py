@@ -16045,6 +16045,70 @@ class TestRunRecordWriter:
             await second
         assert len(settled) == 2
 
+    @pytest.mark.parametrize("close", ["aclose", "aclose_and_drain"])
+    async def test_a_publish_that_fails_on_close_is_retried_by_the_next_close(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close: str
+    ) -> None:
+        from nemo_gym.rollouts import rollout_collection
+
+        rows = self._staged_rows(2)
+
+        class Completions:
+            def __init__(self, futures):
+                self._futures = iter(futures)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._futures)
+
+            async def aclose(self):
+                pass
+
+            async def aclose_and_drain(self):
+                return []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for row in examples:
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=row, result={"reward": 1.0}, rollout_latency_ms=1.0))
+                    futures.append(future)
+                return Completions(futures)
+
+        run_dir = tmp_path / "run"
+        completions = Helper().run_examples(
+            rows, record_output_dir=run_dir, record_shard="s", record_staging_dir=tmp_path / "local"
+        )
+        await next(completions)
+        copyfile = shutil.copyfile
+        copies: list[str] = []
+
+        def failing_copyfile(source, target):
+            raise OSError(28, "No space left on device")
+
+        def counting_copyfile(source, target):
+            copies.append(Path(source).name)
+            return copyfile(source, target)
+
+        monkeypatch.setattr(rollout_collection.shutil, "copyfile", failing_copyfile)
+        with pytest.raises(OSError, match="publishing .* failed.*No space left"):
+            await getattr(completions, close)()
+        assert [path.name for path in run_dir.iterdir()] == [".rollouts-s.jsonl.lock"]
+
+        monkeypatch.setattr(rollout_collection.shutil, "copyfile", counting_copyfile)
+        await getattr(completions, close)()
+        assert [row[TASK_INDEX_KEY_NAME] for row in self._lines(run_dir / "rollouts-s.jsonl")] == [0]
+        assert list((tmp_path / "local").iterdir()) == []
+        published = len(copies)
+        await getattr(completions, close)()
+        assert len(copies) == published
+
     def test_run_examples_refuses_a_staging_dir_without_a_run_folder(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="record_staging_dir"):
             RolloutCollectionHelper().run_examples([], record_staging_dir=tmp_path)

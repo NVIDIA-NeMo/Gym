@@ -3555,10 +3555,13 @@ class _RowResultIterator:
         self._closed = False
 
     def _finish(self) -> None:
-        """Run the close hook once, after the outcomes a close still delivers have been enriched."""
-        on_close, self._on_close = self._on_close, None
-        if on_close is not None:
-            on_close()
+        """Run the close hook after the outcomes a close still delivers have been enriched, until it succeeds.
+
+        A hook that raises stays, so the next close runs it again: publishing a staged shard can fail and be retried.
+        """
+        if self._on_close is not None:
+            self._on_close()
+            self._on_close = None
 
     def __iter__(self):
         return self
