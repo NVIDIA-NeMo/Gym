@@ -181,9 +181,11 @@ reduced silently. One frame is at most 2048×2048 pixels, the frames of one call
 at most `profile.video_max_pixels` (67,108,864) pixels, an image file at most
 32 MiB, and one call at most `timeout_seconds` (1,260 s). Every request sends the
 episode's earlier tool images again, so the plugin caps them at
-`max_tool_media_bytes` (400 MiB of base64): from the tool result whose images
-would pass it on, each result shows a notice in place of its images, the same in
-every request.
+`max_tool_media_bytes` (400 MiB of base64) and `max_tool_media_images` (8,192
+images): from the tool result whose images would pass either on, each result
+shows a notice in place of its images, the same in every request. Set
+`max_tool_media_images` to the model server's image limit per request (vLLM's
+`--limit-mm-per-prompt` image count), and change the two together.
 
 OpenCode keeps a tool result's text in the tool message and, for an
 OpenAI-compatible provider, moves the images of all the tool results of one
@@ -529,8 +531,11 @@ sandboxes are OpenSandbox sandboxes from the image of `sandbox_image/Dockerfile`
 ```bash
 vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 --max-model-len 131072 \
   --trust-remote-code --video-pruning-rate 0.5 --reasoning-parser nemotron_v3 \
-  --enable-auto-tool-choice --tool-call-parser qwen3_coder --limit-mm-per-prompt '{"image": 256, "video": 0}'
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --limit-mm-per-prompt '{"image": 8192, "video": 0}'
 ```
+
+The image count is the plugin's default `video_tools.max_tool_media_images`
+(8,192); a server with another image limit needs the same value there.
 
 ```bash
 export VIDEO_MCQA_SANDBOX_IMAGE=<the sandbox image, pinned by digest>  # and OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY

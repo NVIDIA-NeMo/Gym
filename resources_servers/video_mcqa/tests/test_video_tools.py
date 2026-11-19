@@ -187,6 +187,10 @@ def test_profile_and_tool_configuration_are_checked() -> None:
     config = ToolConfig(workspace_root="/testbed", cache_dir="/tmp/video-mcqa/index")
     assert config.command == ["/usr/local/bin/python3", "-I", "-m", "video_tools.cli"]
     assert config.max_tool_media_bytes == 400 << 20 and config.profile == FrameProfile()
+    # As many images as the vLLM example in the README takes per request (--limit-mm-per-prompt).
+    assert config.max_tool_media_images == 8192
+    with pytest.raises(ValidationError, match="greater than 0"):
+        ToolConfig(workspace_root="/testbed", cache_dir="/tmp/index", max_tool_media_images=0)
     with pytest.raises(ValidationError, match="outside workspace_root"):
         ToolConfig(workspace_root="/testbed", cache_dir="/testbed/index")
     with pytest.raises(ValidationError, match="absolute"):

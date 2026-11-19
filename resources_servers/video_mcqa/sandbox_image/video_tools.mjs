@@ -12,8 +12,9 @@
 // tool results and lists each frame's time in the order of the images, and its description gives the call order.
 //
 // Every request sends the episode's earlier tool images again. From the tool result whose images would pass
-// max_tool_media_bytes (base64 bytes, all tools together) on, each result shows a notice in place of its images, the
-// same in every request, so OpenCode's request stays under Node's string limit.
+// max_tool_media_bytes (base64 bytes, all tools together) or max_tool_media_images (their number) on, each result
+// shows a notice in place of its images, the same in every request, so OpenCode's request stays under Node's string
+// limit and the model server's image limit per request.
 //
 // The tools take plain JSON Schema arguments (OpenCode builds a tool's parameters from them), so the plugin imports
 // nothing outside Node's standard library. The video_tools program validates every argument.
@@ -71,24 +72,28 @@ function attachmentBytes(part) {
   return (part.state.attachments ?? []).reduce((total, attachment) => total + (attachment.url?.length ?? 0), 0);
 }
 
-/** Drop the images of every tool result from the one that passes the budget on, in history order, so that each
- * request shows the same earlier history. The stored messages stay unchanged. */
-function limitToolMedia(messages, maxBytes) {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("tool media budget must be a positive integer");
-  const limit = `${Math.floor(maxBytes / (1024 * 1024))} MiB`;
-  let used = 0, exhausted = false;
+/** Drop the images of every tool result from the one that passes the budget (bytes or images) on, in history order,
+ * so that each request shows the same earlier history. The stored messages stay unchanged. */
+function limitToolMedia(messages, maxBytes, maxImages) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || !Number.isSafeInteger(maxImages) || maxImages <= 0) {
+    throw new Error("tool media budgets must be positive integers");
+  }
+  const limit = `${Math.floor(maxBytes / (1024 * 1024))} MiB or ${maxImages} images`;
+  let usedBytes = 0, usedImages = 0, exhausted = false;
   return messages.map((message) => ({
     ...message,
     parts: message.parts.map((part) => {
       const bytes = attachmentBytes(part);
       if (!bytes) return part;
-      if (!exhausted && used + bytes <= maxBytes) {
-        used += bytes;
+      const images = part.state.attachments.length;
+      if (!exhausted && usedBytes + bytes <= maxBytes && usedImages + images <= maxImages) {
+        usedBytes += bytes;
+        usedImages += images;
         return part;
       }
       exhausted = true;
       return { ...part, state: { ...part.state, attachments: [],
-        output: `Tool result images not shown: this episode's tool images reached their ${limit} limit, ` +
+        output: `Tool result images not shown: this episode's tool images reached their limit (${limit}), ` +
           "so no further images can be sent. Continue with the evidence you have." } };
     }),
   }));
@@ -163,7 +168,10 @@ export default async function VideoToolsPlugin() {
     },
     "experimental.chat.messages.transform": async (_, output) => {
       // OpenCode keeps its own reference to this array, so the transform edits it in place.
-      output.messages.splice(0, output.messages.length, ...limitToolMedia(output.messages, config.max_tool_media_bytes));
+      output.messages.splice(
+        0, output.messages.length,
+        ...limitToolMedia(output.messages, config.max_tool_media_bytes, config.max_tool_media_images),
+      );
     },
   };
 }

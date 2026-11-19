@@ -39,7 +39,7 @@ function configure(updates = {}) {
     workspace_root: "/testbed", cache_dir: "/tmp/video-mcqa/index",
     profile: { patch_size: 14, downsample_ratio: 0.5, video_max_pixels: 67108864, decode_timeout_seconds: 120, max_materialized_bytes: 8589934592 },
     command: [process.execPath, program], timeout_seconds: 30, max_output_bytes: 1 << 20, max_tool_media_bytes: 419430400,
-    ...updates,
+    max_tool_media_images: 8192, ...updates,
   }));
 }
 
@@ -119,9 +119,28 @@ assert.equal(first.messages[1].parts[0].state.attachments.length, 1);
 for (const index of [2, 3]) {
   // "d" alone would fit what is left, but nothing is sent after the first result over the budget.
   assert.deepEqual(first.messages[index].parts[0].state.attachments, []);
-  assert.match(first.messages[index].parts[0].state.output, /^Tool result images not shown: this episode's tool images reached their 0 MiB limit/);
+  assert.match(first.messages[index].parts[0].state.output, /^Tool result images not shown: this episode's tool images reached their limit \(0 MiB or 8192 images\)/);
 }
 assert.deepEqual(first.messages[0].parts[1], { type: "text", text: "between" });
 assert.equal(stored[2].state.attachments.length, 1, "the stored tool part keeps its images");
+
+// The number of images is capped the same way, at the model server's image limit per request: two results of 150
+// small frames each fit the byte budget, but not a server that takes 256 images.
+configure({ max_tool_media_images: 256 });
+const counted = await mod.default();
+const frameParts = (id, count) => part(id, "watch_video", Array.from({ length: count }, () => image(8)));
+const many = {
+  messages: [
+    { info: { role: "assistant" }, parts: [frameParts("e", 150)] },
+    { info: { role: "assistant" }, parts: [frameParts("f", 150)] },
+    { info: { role: "assistant" }, parts: [frameParts("g", 1)] },
+  ],
+};
+await counted["experimental.chat.messages.transform"]({}, many);
+assert.equal(many.messages[0].parts[0].state.attachments.length, 150);
+for (const index of [1, 2]) {
+  assert.deepEqual(many.messages[index].parts[0].state.attachments, []);
+  assert.match(many.messages[index].parts[0].state.output, /reached their limit \(400 MiB or 256 images\)/);
+}
 
 console.log("video tools plugin: all checks passed");
