@@ -15,6 +15,8 @@ recipe.
 | `full.yaml` | Full: 22 databases | c-Interact | 600 |
 | `full_a_interact.yaml` | Full | a-Interact | 600 |
 | `auto_ontology_agent.yaml`, `full_auto_ontology_agent.yaml` | Lite, Full | c-Interact with Auto Ontology's ReAct agent; see [Auto Ontology](#auto-ontology) | 300, 600 |
+| `auto_ontology_interactive.yaml`, `full_auto_ontology_interactive.yaml` | Lite, Full | c-Interact with Auto Ontology's interactive pipeline | 300, 600 |
+| `full_auto_ontology_a_interact.yaml` | Full | a-Interact with Auto Ontology's interactive pipeline | 600 |
 
 Every task has a follow-up question, its phase 2. Both kinds of task run: query tasks (195 in Lite, 410 in Full) and
 management tasks (105 in Lite, 190 in Full). As in BIRD-Interact, each phase is graded by its own category: a query

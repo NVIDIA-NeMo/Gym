@@ -11,7 +11,7 @@ import yaml
 from benchmarks.bird_interact.auto_ontology import build_catalog
 
 
-BENCHMARK_DIR = Path(__file__).resolve().parents[1]
+BENCHMARK_DIR = Path(__file__).resolve().parents[3] / "benchmarks" / "bird_interact"
 BUILD_IMAGE = (BENCHMARK_DIR / "auto_ontology" / "build_image.sh").read_text()
 
 
