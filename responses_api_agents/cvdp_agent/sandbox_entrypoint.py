@@ -90,7 +90,9 @@ def main() -> None:
             agent._resolve_model_base_url = lambda: v1
         if hasattr(agent, "resolve_model_base_url"):
             v1 = model_url if model_url.endswith("/v1") else model_url + "/v1"
-            object.__setattr__(agent, "resolve_model_base_url", lambda model_server_name, rollout_id=None: v1)
+            # Accept every keyword (for example ``trained=False`` for Hermes compression calls): the sandbox
+            # reaches one model URL, which the parent already built for this rollout.
+            object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: v1)
         if hasattr(agent, "_resolve_base_url"):
             agent._resolve_base_url = lambda: model_url
 
