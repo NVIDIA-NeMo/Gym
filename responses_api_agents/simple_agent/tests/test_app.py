@@ -2384,7 +2384,11 @@ async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_traje
     async def post(*, url_path, **kwargs):
         if url_path == "/seed_session":
             return _mock_response(
-                {}, headers={"x-ng-checkpoint-verify": "replay", "x-ng-resources-session-id": "resources-session"}
+                {},
+                headers={
+                    "x-ng-checkpoint-verify": "replay",
+                    "x-ng-checkpoint-resources-session-id": "resources-session",
+                },
             )
         if url_path.endswith("/v1/responses"):
             return _mock_response(_FINAL_RESPONSE | {"_ng_trajectory": trajectory})
@@ -3221,7 +3225,7 @@ async def test_a_legacy_run_closes_its_resources_session_after_a_verification_a_
             response = _mock_response({})
             response.headers = {"x-ng-checkpoint-verify": resources_verify_step_type}
             if resources_session_id is not None:
-                response.headers["x-ng-resources-session-id"] = resources_session_id
+                response.headers["x-ng-checkpoint-resources-session-id"] = resources_session_id
             response.cookies = {"session": MagicMock(value="resources-cookie")}
             return response
         if url_path.endswith("/v1/responses"):

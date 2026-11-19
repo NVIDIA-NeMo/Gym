@@ -91,9 +91,9 @@ from nemo_gym.server_runtime._checkpoint.errors import (
 )
 from nemo_gym.server_runtime._checkpoint.steps import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    CHECKPOINT_RESOURCES_SESSION_ID_HEADER,
     CHECKPOINT_RESTART_HEADER,
     CHECKPOINT_VERIFY_HEADER,
-    RESOURCES_SESSION_ID_HEADER,
     StepType,
 )
 
@@ -826,7 +826,10 @@ class ResourcesCheckpointMiddleware:
                     resources_session_id = seeded_session_id()
                     if 200 <= message["status"] < 300 and isinstance(resources_session_id, str):
                         headers.append(
-                            (RESOURCES_SESSION_ID_HEADER.encode(), quote(resources_session_id, safe="").encode())
+                            (
+                                CHECKPOINT_RESOURCES_SESSION_ID_HEADER.encode(),
+                                quote(resources_session_id, safe="").encode(),
+                            )
                         )
                     if restarts:
                         headers.append((CHECKPOINT_RESTART_HEADER.encode(), b"1"))

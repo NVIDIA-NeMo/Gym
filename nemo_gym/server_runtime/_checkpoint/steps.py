@@ -59,14 +59,15 @@ _BLOCKING: frozenset[str] = frozenset({"running", "wait_step"})
 # Every episode seeds before it verifies, so the caller learns the step type without another request.
 CHECKPOINT_VERIFY_HEADER = "x-ng-checkpoint-verify"
 
-# An agent-run seed assigns no resources session ID. Report the ID bound to its cookie so its caller can
-# close that session, including after restoring a boundary. Quote it because session IDs need not be ASCII.
-RESOURCES_SESSION_ID_HEADER = "x-ng-resources-session-id"
+# Every successful seed reports the resources session ID bound to its cookie. An agent-run seed has no other way
+# to learn it, and its caller closes the session by that ID, also after restoring a boundary. The value is quoted
+# because session IDs need not be ASCII.
+CHECKPOINT_RESOURCES_SESSION_ID_HEADER = "x-ng-checkpoint-resources-session-id"
 
 
 def seed_resources_session_id(headers: Mapping[str, str] | None) -> str | None:
     """The resources session ID reported by a seed reply, or ``None`` for an older server."""
-    value = (headers or {}).get(RESOURCES_SESSION_ID_HEADER)
+    value = (headers or {}).get(CHECKPOINT_RESOURCES_SESSION_ID_HEADER)
     return unquote(value) if isinstance(value, str) and value else None
 
 

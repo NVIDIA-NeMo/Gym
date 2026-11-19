@@ -1299,8 +1299,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     ) -> None:
         """Close the resources session a legacy /run seeded, keeping the run's verdict if the close fails.
 
-        Use the ID reported by the resources seed, not the agent's own session key.
-        Keep the previous fallback for older servers and boundaries that did not report an ID.
+        The seed reply reports the resources session ID bound to the session cookie, and the close names that ID.
+        A seed reply or restored boundary without one falls back to the /run's own session key. Session routing
+        refuses that close with HTTP 409, so it cannot release the session.
         """
         episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
         try:

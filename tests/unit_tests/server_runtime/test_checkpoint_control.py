@@ -589,11 +589,11 @@ def test_seed_reply_reports_a_resources_session_id_without_interpreting_it(sessi
 
     from nemo_gym.server_runtime._checkpoint.steps import seed_resources_session_id
 
-    headers = CIMultiDict({"X-NG-Resources-Session-Id": quote(session_id, safe="")})
+    headers = CIMultiDict({"X-NG-Checkpoint-Resources-Session-Id": quote(session_id, safe="")})
     assert seed_resources_session_id(headers) == session_id
     assert seed_resources_session_id({}) is None
     assert seed_resources_session_id(None) is None
-    assert seed_resources_session_id({"x-ng-resources-session-id": ""}) is None
+    assert seed_resources_session_id({"x-ng-checkpoint-resources-session-id": ""}) is None
 
 
 async def test_an_episode_woken_by_resume_stays_parked_if_a_new_checkpoint_closes_first() -> None:

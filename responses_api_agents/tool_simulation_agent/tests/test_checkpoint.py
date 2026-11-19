@@ -173,7 +173,10 @@ class Harness:
             await self.reply_delivery.wait()
             return Reply(response.model_dump(mode="json"))
         if url_path == "/seed_session":
-            headers = {"x-ng-checkpoint-verify": "replay", "x-ng-resources-session-id": "resource-session-id"}
+            headers = {
+                "x-ng-checkpoint-verify": "replay",
+                "x-ng-checkpoint-resources-session-id": "resource-session-id",
+            }
             if self.restart_resource:
                 headers["x-ng-checkpoint-restart"] = "1"
             return Reply({}, headers=headers, cookies={"session": "resource-session"})
