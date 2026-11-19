@@ -273,7 +273,10 @@ async def test_async_real_dom_image_capture_and_delta_scoring(
     state.update(colors=before, selector=selector)
     task_id, query, config, plan = _image_task(base, selector)
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(executable_path=playwright.chromium.executable_path, headless=True)
+        executable = playwright.chromium.executable_path
+        if not Path(executable).is_file():
+            pytest.skip("Real-browser regression tests require the qualified Chromium bundle")
+        browser = await playwright.chromium.launch(executable_path=executable, headless=True)
         context = await browser.new_context()
         page = await context.new_page()
         try:
