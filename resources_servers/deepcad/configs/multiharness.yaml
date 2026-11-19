@@ -1,16 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Seven concurrent native pairings; prepare each row with --file-input --harness NAME.
+# Five concurrent native pairings; prepare each row with --file-input --harness NAME.
 config_paths:
   - resources_servers/deepcad/configs/opencode.yaml
   - responses_api_agents/pi_agent/configs/pi_agent.yaml
-  - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
   - responses_api_agents/codex_agent/configs/codex_agent.yaml
   - responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml
   - responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml
-  - responses_api_agents/nooa_agent/configs/nooa_agent.yaml
-
-nooa_environment_server: null
 
 deepcad_pi_agent:
   _inherit_from: pi_agent
@@ -30,26 +26,6 @@ deepcad_pi_environment_server:
   environment_servers:
     single_agent_turn_legacy:
       agent_server: {type: responses_api_agents, name: deepcad_pi_agent}
-
-deepcad_hermes_agent:
-  _inherit_from: hermes_agent
-  responses_api_agents:
-    hermes_agent:
-      host: 127.0.0.1
-      resources_server: null
-      model_server: {type: responses_api_models, name: deepcad_policy_model}
-      sandbox_runner_timeout_seconds: 1800
-      max_tokens: 32768
-      context_length: 131072
-      compression_enabled: false
-      temperature: null
-      enabled_toolsets: [terminal, file]
-
-deepcad_hermes_environment_server:
-  _copy: deepcad_opencode_environment_server
-  environment_servers:
-    single_agent_turn_legacy:
-      agent_server: {type: responses_api_agents, name: deepcad_hermes_agent}
 
 deepcad_codex_agent:
   _inherit_from: codex_agent
@@ -103,21 +79,3 @@ deepcad_openclaw_environment_server:
   environment_servers:
     single_agent_turn_legacy:
       agent_server: {type: responses_api_agents, name: deepcad_openclaw_agent}
-
-deepcad_nooa_agent:
-  _inherit_from: nooa_agent
-  responses_api_agents:
-    nooa_agent:
-      host: 127.0.0.1
-      resources_server: null
-      model_server: {type: responses_api_models, name: deepcad_policy_model}
-      nooa:
-        execution_mode: sandboxed
-      sandbox_runner_timeout_seconds: 1800
-      context_window: 131072
-
-deepcad_nooa_environment_server:
-  _copy: deepcad_opencode_environment_server
-  environment_servers:
-    single_agent_turn_legacy:
-      agent_server: {type: responses_api_agents, name: deepcad_nooa_agent}

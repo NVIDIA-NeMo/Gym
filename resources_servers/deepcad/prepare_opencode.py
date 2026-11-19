@@ -27,7 +27,7 @@ Do not delegate or compact the conversation.
 """
 
 
-HARNESSES = ("opencode", "pi", "hermes", "codex", "claude_code", "openclaw", "nooa")
+HARNESSES = ("opencode", "pi", "codex", "claude_code", "openclaw")
 
 
 def prepare_row(row: dict) -> dict:

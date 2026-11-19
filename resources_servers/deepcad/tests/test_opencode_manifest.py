@@ -217,7 +217,7 @@ def test_sampling_marker_preserves_values_and_rejects_conflicts(tmp_path, field,
         prepared(conflict_dir, row, file_input=True)
 
 
-@pytest.mark.parametrize("harness", ["pi", "hermes", "codex", "claude_code", "openclaw", "nooa"])
+@pytest.mark.parametrize("harness", ["pi", "codex", "claude_code", "openclaw"])
 def test_non_opencode_requires_file_input(tmp_path, harness):
     with pytest.raises(ValueError, match="require --file-input"):
         prepared(tmp_path, harness=harness)
@@ -323,7 +323,7 @@ def test_real_environment_task_conversion_keeps_resource_seed_images(tmp_path, m
     assert seeded.target_images == row["target_images"]
 
 
-@pytest.mark.parametrize("harness", ["opencode", "pi", "hermes", "codex", "claude_code", "openclaw", "nooa"])
+@pytest.mark.parametrize("harness", ["opencode", "pi", "codex", "claude_code", "openclaw"])
 def test_lazy_file_input_requires_materialization_first(tmp_path, harness, monkeypatch):
     source, output = tmp_path / "lazy.jsonl", tmp_path / "prepared.jsonl"
     source.write_text(json.dumps({"deepcad_lazy": {}, "responses_create_params": {"input": []}}) + "\n")

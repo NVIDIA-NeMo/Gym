@@ -1,6 +1,6 @@
 # CAD workspaces with native agents
 
-`configs/multiharness.yaml` composes seven native Agent Servers, each with its own
+`configs/multiharness.yaml` composes five native Agent Servers, each with its own
 `single_agent_turn_legacy` Environment Server, sharing one CAD Resources Server
 and policy Model Server. It uses the session interfaces from
 [Gym #5950](https://github.com/NVIDIA-NeMo/Gym/pull/5950) alongside the Agentic-MME example
@@ -38,7 +38,7 @@ python -m resources_servers.deepcad.prepare_opencode INPUT.jsonl pi.jsonl \
   --file-input --harness pi
 ```
 
-Use `--file-input` for the shared seven-agent recipe; non-OpenCode selections
+Use `--file-input` for the shared five-agent recipe; non-OpenCode selections
 require it. Preparation retains the
 original images in explicit `target_images` for resource seeding, while the
 outer activation contains task instructions and target-file
@@ -53,11 +53,12 @@ activation retains inline images; not every native adapter accepts that format.
 outputs for each harness and concatenate those rows to collect a mixed run; do
 not replace their routing with a single global `--agent` override.
 
-Load the model config first, then the CAD recipe, then benchmark profiles such as
-`benchmarks/hle/pi.yaml`. CAD inherits stock agents under task-scoped names, but
-reloading stock configs after a profile can overwrite that profile's settings.
-In particular, placing CAD after HLE resets HLE's Pi version, model and timeout;
-that ordering is not supported.
+Load the model config first, then the CAD recipe. CAD inherits stock agents
+under task-scoped names, so a profile that edits a stock agent block, such as
+`benchmarks/hle/pi.yaml`, also changes the CAD agent that inherits that block.
+CAD also sets the top-level `sandbox` block to Docker. Do not blend CAD with a
+profile that edits a stock agent block, or with a recipe that sets another
+`sandbox` provider.
 
 `deepcad_policy_model` copies the selected `policy_model` backend while keeping
 CAD's tool-image handling and token-capture options off the
@@ -77,9 +78,7 @@ with collection-time sampling flags.
 ## Runtime prerequisites
 
 Every workspace image must retain CadQuery, the CAD renderer, and its graphics
-libraries. The supplied image builds only the OpenCode runtime. It also makes
-`/opt/nemo-gym-nooa` writable by the `cad` user so NOOA's
-native installer can provision its private runtime without root privileges.
+libraries. The supplied image builds only the OpenCode runtime.
 
 ```bash
 docker build --platform linux/amd64 -t deepcad-cadquery:2.8.0 resources_servers/deepcad
@@ -91,16 +90,13 @@ docker build --platform linux/amd64 -t deepcad-opencode:1.17.11 \
 |---|---|
 | `opencode` | Pinned 1.17.11 binary and plugin archive are preinstalled by the supplied Dockerfile and SHA-256 checked. |
 | `pi` | Pinned 0.80.2 plus private Node 22.19.0; existing installer or a verified `sandbox_runtime_dir` containing both. |
-| `hermes` | Controller builds and uploads the server-locked Hermes Python runtime through `SandboxPythonRuntime`; install the server component from its lock. |
 | `codex` | Pinned 0.144.4 plus private Node 22.19.0; existing installer or verified `sandbox_runtime_dir`. |
 | `claude_code` | Pinned 2.1.108 Linux binary cached on the controller and uploaded; supplied local/sandbox binaries require `sandbox_executable_sha256`. |
 | `openclaw` | Pinned 2026.6.11 plus private Node 22.19.0; existing installer or verified `sandbox_runtime_dir`. |
-| `nooa` | Sandboxed, component-locked NOOA runtime packages the launching tracked Gym source into private Python; use its existing offline `runtime_wheelhouse` for offline setup. |
 
 Pi, Codex, and OpenClaw installers need package-download access unless their
 runtime directories are preinstalled; missing OS prerequisites may require root.
-Hermes and Claude obtain artifacts on the controller. NOOA requires a Git checkout
-and Git on the controller; its offline bundle must match the packaged source.
+Claude obtains its artifact on the controller.
 Use these native setup mechanisms rather than assuming the OpenCode image already
 contains every CLI. Runtime setup and the task's actual Python/CadQuery imports
 must be checked before a model run, including native shell environment behavior.
@@ -148,17 +144,18 @@ sandbox_plugin_dependencies_sha256: 12ce5f79b27aa8886b64082c1f5d23ab4bc7410e193b
   Codex, Pi, and OpenClaw have no native turn limit, so only the timeout bounds them.
 - Image delivery uses each harness's existing support on main; this recipe adds none.
   OpenCode, Pi, and OpenClaw take `image_input: true`, and Codex sends `input_image`.
-  Hermes, NOOA, and Claude Code have no such option, so the target and preview PNGs are
-  only files in the workspace for them. Those three are not qualified for this vision
-  task until their adapters accept images; a score from them is not comparable.
+  Claude Code has no such option and reads the PNG files itself.
+  Hermes and NOOA are not part of this recipe: Hermes' vision tool is not qualified in
+  Gym and NOOA passes only text, so each needs its own image path and a real-model
+  smoke run before it can be added.
 - The row's output cap is an upper bound: the model middleware uses the smaller
   of that cap and the native request's cap. It does not raise a client's smaller
   output limit. Missing source caps leave native/backend defaults in effect. This
   multi-turn per-call limit is not an original single-turn total-token budget.
 - Explicit context/output settings are applied where the public adapter supports
-  them. Claude has no equivalent typed context/output controls; Codex and NOOA
-  rely on the row cap for the output ceiling. Inspect actual model requests before
-  claiming equal effective context or output limits across all seven.
+  them. Claude has no equivalent typed context/output controls; Codex
+  relies on the row cap for the output ceiling. Inspect actual model requests before
+  claiming equal effective context or output limits across all five.
 - Native turn, summary, delegation, and compaction behavior remains relevant.
   Supported recipe settings disable some automatic behavior; the task prompt's
   prohibition is not a universal runtime switch. OpenCode's `build.steps` is
@@ -171,14 +168,14 @@ sandbox_plugin_dependencies_sha256: 12ce5f79b27aa8886b64082c1f5d23ab4bc7410e193b
 Focused checks are in `tests/test_opencode_sessions.py` and
 `tests/test_opencode_manifest.py`. They cover preparation, routing, resource
 sessions, file authority, and cleanup; they do not establish a fresh image build
-or seven real-model rollouts. Earlier internal CAD quality/training experiments
+or real-model rollouts. Earlier internal CAD quality/training experiments
 used different runtime/protocol configurations and do not validate this public
 file-input recipe. No new cross-harness quality or training parity is claimed.
 
 ## Validation
 
 The following results validate the upstream standalone OpenCode recipe from #5950,
-not this seven-harness file-input recipe.
+not this five-harness file-input recipe.
 
 Automated tests cover resource sessions, final-file authority, retained source,
 cleanup/retries, prompt/image preservation, and stock-harness input/config compatibility.

@@ -40,8 +40,7 @@ RUN case "$TARGETARCH" in \
 COPY --from=plugin-archive /opencode-1.17.11-plugin-dependencies.tar.gz /opt/opencode/
 COPY resources_servers/deepcad/sandbox_image/cad_render.py /workspace/.cad/cad_render.py
 COPY resources_servers/deepcad/dataset/prepare_gym.py resources_servers/deepcad/dataset/augment_inputs.py /workspace/.cad/resources_servers/deepcad/dataset/
-RUN mkdir -p /opt/nemo-gym-nooa \
-    && chown -R cad:cad /workspace /opt/nemo-gym-nooa
+RUN chown -R cad:cad /workspace
 ENV OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 MESA_SHADER_CACHE_DISABLE=true
 USER cad
 WORKDIR /workspace

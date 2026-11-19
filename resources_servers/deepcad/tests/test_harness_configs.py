@@ -21,11 +21,9 @@ from resources_servers.deepcad.tests.test_opencode_manifest import CONFIG, prepa
     [
         ("opencode", "OpenCodeAgent", "_session_input"),
         ("pi", "PiAgent", "_validate_request"),
-        ("hermes", "HermesAgent", "_validate_request"),
         ("codex", "CodexAgent", "_sandbox_input"),
         ("claude_code", "ClaudeCodeAgent", "_validate_sandbox_request"),
         ("openclaw", "OpenClawAgent", "_sandbox_input"),
-        ("nooa", "NOOAAgent", None),
     ],
 )
 @pytest.mark.parametrize("validate_boundary", [False, True])
@@ -75,7 +73,7 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
     assert env.resources_tool_transports == []
     assert (
         len([key for key, value in config.items() if isinstance(value, DictConfig) and "environment_servers" in value])
-        == 7
+        == 5
     )
     from responses_api_models.vllm_model.app import VLLMModelConfig
 
@@ -85,9 +83,6 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
     )
     assert model.inline_tool_output_images
     assert env.agent_server.name == f"deepcad_{harness}_agent"
-    if harness == "hermes":
-        hermes = config.deepcad_hermes_agent.responses_api_agents.hermes_agent
-        assert hermes.enabled_toolsets == ["terminal", "file"]
     assert "required_model_servers" not in config.get("model_call_sampling", {})
     params = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
     assert len(params.input) == 1
@@ -96,57 +91,37 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
     assert "input_image" not in str(serialized) and "data:image" not in str(serialized)
     if not validate_boundary:
         return
-    if harness == "hermes":
-        pytest.importorskip("model_tools")
-    if harness == "nooa":
-        pytest.importorskip("nooa")
-        pytest.importorskip("nooa_bench")
     module = import_module(f"responses_api_agents.{harness}_agent.app")
-    config_module = import_module("responses_api_agents.nooa_agent.config") if harness == "nooa" else module
     values = OmegaConf.to_container(
         config[env.agent_server.name].responses_api_agents[harness + "_agent"], resolve=True
     )
-    agent_config = getattr(config_module, class_name + "Config")(name=env.agent_server.name, **values)
+    agent_config = getattr(module, class_name + "Config")(name=env.agent_server.name, **values)
     context_fields = {
         "opencode": "context_window",
         "pi": "context_window",
-        "hermes": "context_length",
         "codex": "model_context_window",
         "openclaw": "context_window",
-        "nooa": "context_window",
     }
     if harness in context_fields:
         assert getattr(agent_config, context_fields[harness]) == 131072
     if harness in {"opencode", "pi", "openclaw"}:
         assert agent_config.max_output_tokens == 32768
-    if harness == "hermes":
-        assert agent_config.enabled_toolsets == ["terminal", "file"]
-        assert agent_config.max_tokens == 32768 and not agent_config.compression_enabled
     if harness in {"pi", "openclaw"}:
         assert agent_config.image_input
     if harness == "pi":
         assert not agent_config.auto_compaction
     params = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
-    if harness == "nooa":
-        from responses_api_agents.nooa_agent.task_agent import _latest_user_text
-
-        assert agent_config.nooa.execution_mode == "sandboxed"
-        assert "/workspace/target-0.png" in _latest_user_text(params)
-        assert "model.py" in _latest_user_text(params)
-    else:
-        client = MagicMock(spec=ServerClient)
-        client.global_config_dict = config
-        agent = getattr(module, class_name)(config=agent_config, server_client=client)
-        getattr(agent, boundary)(params)
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = config
+    agent = getattr(module, class_name)(config=agent_config, server_client=client)
+    getattr(agent, boundary)(params)
 
 
 @pytest.mark.parametrize(
     "other_recipe,other_agent,harness,cad_first",
     [
-        ("benchmarks/swebench/multimodal/hermes.yaml", "swebench_multimodal_hermes_agent", "hermes", False),
-        ("benchmarks/swebench/multimodal/hermes.yaml", "swebench_multimodal_hermes_agent", "hermes", True),
-        # Stock/base imports must precede HLE's offline-science profile.
-        ("benchmarks/hle/pi.yaml", "hle_pi_agent", "pi", True),
+        ("benchmarks/swebench/verified/opencode.yaml", "swebench_verified_opencode_agent", "opencode", False),
+        ("benchmarks/swebench/verified/opencode.yaml", "swebench_verified_opencode_agent", "opencode", True),
     ],
 )
 def test_cad_blend_does_not_override_other_benchmark_agent(
@@ -180,6 +155,7 @@ def test_cad_blend_does_not_override_other_benchmark_agent(
     other = str(root / other_recipe)
     cad = str(CONFIG.with_name("multiharness.yaml"))
     baseline = resolve([other])
+    cad_only = resolve([cad])
     combined = resolve([cad, other] if cad_first else [other, cad])
     # Compare actual resolved benchmark components, not only raw recipe keys.
     before = OmegaConf.to_container(baseline[other_agent], resolve=False)
@@ -197,13 +173,18 @@ def test_cad_blend_does_not_override_other_benchmark_agent(
         stock_model.api_key,
     )
     cad_config = combined[f"deepcad_{harness}_agent"].responses_api_agents[harness + "_agent"]
-    assert cad_config.resources_server is None
+    # Only the standalone OpenCode recipe binds its own resources server; the others are borrowed through the environment server.
+    assert (cad_config.resources_server is None) == (harness != "opencode")
     assert cad_config.model_server.name == "deepcad_policy_model"
     assert cad_config.get("datasets") is None
+    # The whole CAD agent block must equal its CAD-only resolve, not just a few keys.
+    assert OmegaConf.to_container(combined[f"deepcad_{harness}_agent"], resolve=False) == OmegaConf.to_container(
+        cad_only[f"deepcad_{harness}_agent"], resolve=False
+    )
     assert (
         combined.deepcad_pi_environment_server.environment_servers.single_agent_turn_legacy.agent_server.name
         == "deepcad_pi_agent"
     )
-    for name in ["opencode", "pi", "hermes", "codex", "claude_code", "openclaw", "nooa"]:
+    for name in ["opencode", "pi", "codex", "claude_code", "openclaw"]:
         env = combined[f"deepcad_{name}_environment_server"].environment_servers.single_agent_turn_legacy
         assert env.agent_server.name == f"deepcad_{name}_agent"

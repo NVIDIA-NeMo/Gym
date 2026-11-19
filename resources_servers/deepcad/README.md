@@ -121,7 +121,7 @@ workspace except for the supplied target PNGs.
 python -m pytest resources_servers/deepcad/tests -q
 ```
 
-Image-rendering tests require a functioning VTK/OpenGL runtime. The seven-agent
+Image-rendering tests require a functioning VTK/OpenGL runtime. The five-agent
 file-input recipe and runtime prerequisites are documented in
 [`CAD workspaces with native agents`](OPENCODE.md).
 
