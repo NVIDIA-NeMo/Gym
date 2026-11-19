@@ -3,8 +3,10 @@
 """benchmarks/mm_lifelong_v1_1_agentic: prepare.py on an invented release and image catalogs, the image build script
 without Docker, the Hub or FFmpeg, and the config (no download, no sandbox)."""
 
+import errno
 import hashlib
 import json
+import os
 import types
 from pathlib import Path
 
@@ -248,6 +250,80 @@ def test_the_build_checks_every_video_and_writes_both_catalogs(tmp_path, monkeyp
     (videos / "2.mp4").write_bytes(b"short")
     with pytest.raises(ValueError, match="missing or not"):
         build.build(args)
+
+
+def test_the_image_gets_only_the_releases_files(tmp_path, monkeypatch, capsys) -> None:
+    videos = tmp_path / "data" / "videos" / "week"
+    expected = {}
+    for relpath in ("day1/a.mp4", "day2/b.mp4"):
+        content = relpath.encode() * 10
+        (videos / relpath).parent.mkdir(parents=True, exist_ok=True)
+        (videos / relpath).write_bytes(content)
+        expected[relpath] = (len(content), hashlib.sha256(content).hexdigest())
+    # Files of a local copy that the release does not list.
+    (videos / "day1" / "a.mp4.incomplete").write_bytes(b"partial")
+    (videos / "notes.txt").write_text("mine")
+    timeline = tmp_path / "timeline.json"
+    timeline.write_text(json.dumps(TIMELINE))
+    monkeypatch.setattr(build, "release_files", lambda domain: expected)
+    monkeypatch.setattr(build, "TIMELINE_SHA256", hashlib.sha256(timeline.read_bytes()).hexdigest())
+    monkeypatch.setattr(build, "duration", lambda path, ffprobe: 1.0)
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *args, **kwargs: str(timeline))
+    builds = []
+
+    def docker(command: list[str], check: bool) -> None:
+        context = Path(command[command.index("--build-context") + 1].removeprefix("videos="))
+        files = sorted(str(path.relative_to(context)) for path in context.rglob("*") if path.is_file())
+        builds.append((context, files, {relpath: (context / relpath).stat() for relpath in files}))
+
+    monkeypatch.setattr(build.subprocess, "run", docker)
+    args = types.SimpleNamespace(
+        domain="week",
+        data_dir=tmp_path / "data",
+        output_dir=tmp_path / "out",
+        workers=2,
+        ffprobe="ffprobe",
+        no_build=False,
+        base_image="base",
+        tag="tag",
+    )
+    build.build(args)
+    ((context, files, stats),) = builds
+    # Hard links to the checked videos, nothing else; the folder is gone after the build.
+    assert files == ["day1/a.mp4", "day2/b.mp4"]
+    assert all(stats[relpath].st_ino == (videos / relpath).stat().st_ino for relpath in files)
+    assert context.parent == tmp_path / "out" and not context.exists()
+    assert "holds 2 files" in capsys.readouterr().err
+
+
+def test_staging_copies_across_file_systems_and_keeps_the_folders_times(tmp_path, monkeypatch) -> None:
+    videos = tmp_path / "videos"
+    (videos / "day1").mkdir(parents=True)
+    (videos / "day1" / "a.mp4").write_bytes(b"a" * 10)
+    (videos / "top.mp4").write_bytes(b"t" * 10)
+    for path, seconds in ((videos / "day1" / "a.mp4", 1_000), (videos / "day1", 2_000), (videos, 3_000)):
+        os.utime(path, ns=(seconds * 10**9, seconds * 10**9))
+
+    def no_link(source: Path, target: Path) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(build.os, "link", no_link)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    assert build.stage_videos(videos, ["day1/a.mp4", "top.mp4"], stage) is True
+    for relpath in ("day1/a.mp4", "top.mp4", "day1", "."):
+        assert (stage / relpath).stat().st_mtime_ns == (videos / relpath).stat().st_mtime_ns
+    assert (stage / "day1" / "a.mp4").read_bytes() == b"a" * 10
+    assert (stage / "top.mp4").stat().st_ino != (videos / "top.mp4").stat().st_ino
+
+    def refused(source: Path, target: Path) -> None:
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(build.os, "link", refused)
+    with pytest.raises(PermissionError):
+        build.stage_videos(videos, ["top.mp4"], tmp_path / "other")
 
 
 def test_the_config_lends_the_rows_images_and_grades_with_the_dataset_grader(monkeypatch) -> None:

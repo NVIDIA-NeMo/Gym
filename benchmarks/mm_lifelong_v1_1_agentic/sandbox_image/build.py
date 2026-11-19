@@ -20,7 +20,9 @@ The script
 3. writes a Dockerfile that adds the videos to the video tools' image (BASE_IMAGE, built from this repository's
    resources_servers/video_mcqa/sandbox_image) under /testbed/videos/<domain>/, one layer per top-level file or day
    folder and read-only, and the catalog as /testbed/videos/catalog.json; and builds it with
-   ``docker buildx build`` unless ``--no-build`` is given.
+   ``docker buildx build`` unless ``--no-build`` is given. The build reads the videos from a temporary folder in
+   OUTPUT_DIR that holds only the catalog's files, hard links to your copy (copies when OUTPUT_DIR is on another file
+   system), so other files in your videos/<domain>/ never reach the image; the script lists them.
 
 The agentic benchmark's prepare.py reads ``OUTPUT_DIR`` (``mm_lifelong_v1_1_agentic_media_dir``) to pin each row to
 its image's catalog. Usage:
@@ -30,12 +32,17 @@ its image's catalog. Usage:
 """
 
 import argparse
+import errno
 import hashlib
 import json
 import math
+import os
 import re
 import shlex
+import shutil
 import subprocess
+import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -48,6 +55,8 @@ TIMELINE_REVISION = "b8a87afff4e24e76f6333937fb7b1c77dd5036fc"  # pragma: allowl
 TIMELINE_SHA256 = "c6fdf4191a6bfe52d6f620223bba9795b0d547e1183f7f399cce863626438b5f"  # pragma: allowlist secret
 DOMAINS = ("day", "week", "month")
 SANDBOX_VIDEOS = PurePosixPath("/testbed/videos")
+# os.link's errors on another file system or one that refuses the link: the file is copied instead.
+CANNOT_LINK = frozenset({errno.EXDEV, errno.EPERM, errno.EMLINK, errno.ENOTSUP})
 
 
 def natural_key(path: str) -> list[int | str]:
@@ -135,6 +144,36 @@ def model_records(domain: str, durations: dict[str, float], timeline: dict[str, 
     return records
 
 
+def extra_files(videos: Path, relpaths: list[str]) -> list[str]:
+    """The files under ``videos`` that the release does not list, relative to it."""
+    listed = set(relpaths)
+    found = (str(path.relative_to(videos)) for path in videos.rglob("*") if not path.is_dir())
+    return sorted((relpath for relpath in found if relpath not in listed), key=natural_key)
+
+
+def stage_videos(videos: Path, relpaths: list[str], stage: Path) -> bool:
+    """Put the release's files ``relpaths`` of ``videos`` into the empty folder ``stage``, which the build reads: a hard
+    link to each file, or a copy with its times when the link fails (another file system). Each folder gets its source
+    folder's times, so without other files in ``videos`` the image's layers are the same as from ``videos`` itself.
+    Return whether any file was copied."""
+    copied = False
+    for relpath in relpaths:
+        target = stage / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(videos / relpath, target)
+        except OSError as error:
+            if error.errno not in CANNOT_LINK:
+                raise
+            shutil.copy2(videos / relpath, target)
+            copied = True
+    folders = {PurePosixPath(relpath).parent for relpath in relpaths}
+    for folder in sorted({parent for folder in folders for parent in (folder, *folder.parents)}, reverse=True):
+        times = (videos / folder).stat()
+        os.utime(stage / folder, ns=(times.st_atime_ns, times.st_mtime_ns))
+    return copied
+
+
 def dockerfile(domain: str, relpaths: list[str]) -> str:
     """The image: the base, then one read-only layer per top-level file or folder of the domain, then the catalog."""
     lines = ["# syntax=docker/dockerfile:1.7", "ARG BASE_IMAGE", "FROM ${BASE_IMAGE}"]
@@ -180,22 +219,33 @@ def build(args: argparse.Namespace) -> Path:
     (output / "Dockerfile").write_text(dockerfile(args.domain, relpaths), encoding="utf-8")
     print(f"{output / 'catalog.json'}: sha256 {file_sha256(output / 'catalog.json')}")
     if not args.no_build:
-        subprocess.run(
-            [
-                "docker",
-                "buildx",
-                "build",
-                "--build-arg",
-                f"BASE_IMAGE={args.base_image}",
-                "--build-context",
-                f"videos={videos}",
-                "--tag",
-                args.tag,
-                "--load",
-                str(output),
-            ],
-            check=True,
-        )
+        extra = extra_files(videos, relpaths)
+        if extra:
+            print(
+                f"{videos} holds {len(extra)} files that {REPO_ID}@{DATASET_REVISION} does not list; the image leaves "
+                f"them out: {', '.join(extra[:20])}{', ...' if len(extra) > 20 else ''}",
+                file=sys.stderr,
+            )
+        # Beside the domain's folder, outside the build context of the Dockerfile and the catalogs.
+        with tempfile.TemporaryDirectory(prefix=f".{args.domain}-videos-", dir=args.output_dir) as stage:
+            if stage_videos(videos, relpaths, Path(stage)):
+                print(f"Copied the videos to {stage}: it is on another file system than {videos}", file=sys.stderr)
+            subprocess.run(
+                [
+                    "docker",
+                    "buildx",
+                    "build",
+                    "--build-arg",
+                    f"BASE_IMAGE={args.base_image}",
+                    "--build-context",
+                    f"videos={stage}",
+                    "--tag",
+                    args.tag,
+                    "--load",
+                    str(output),
+                ],
+                check=True,
+            )
     return output
 
 

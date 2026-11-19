@@ -1,7 +1,8 @@
 # MM-Lifelong v1.1 (day_test, week_test, month_val: 1,023 questions about a recorded day, week and month), single
 # turn: one model call per question with the split's video as num_frames frames from the dataset's frame cache, graded
 # 0-5 against the question's frozen rubric by the dataset's grader (video_qa_rubric's reference_levels protocol,
-# grading.yaml). Each split is a subset, and the dataset's overall score is the mean of the split scores.
+# grading.yaml). The dataset's overall score pools all 1,023 questions (mean/rubric_score); the mean of the three
+# split scores is a separate metric.
 # Data: prepare.py downloads the annotations at a pinned revision into mm_lifelong_v1_1_data_dir, which must hold the
 # dataset's frame cache (frames/), and writes one MP4 per split into mm_lifelong_v1_1_frames_dir. The model server
 # reads those MP4s at mm_lifelong_v1_1_frames_url_dir (vLLM: --allowed-local-media-path covering it and

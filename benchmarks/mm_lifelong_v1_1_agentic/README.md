@@ -27,7 +27,10 @@ episode's sandbox starts from its domain's image with nothing uploaded (video_mc
    catalog that the model reads: each file's path, duration, and the recording's place in time from the dataset's
    `src/codex_video_timeline.json` at revision `b8a87afff4e24e76f6333937fb7b1c77dd5036fc`);
 3. builds the image from the video tools' image (`resources_servers/video_mcqa/sandbox_image` of this checkout): the
-   videos under `/testbed/videos/<domain>/`, one read-only layer per file or day folder, and the catalog.
+   videos under `/testbed/videos/<domain>/`, one read-only layer per file or day folder, and the catalog. The build
+   reads a temporary folder in `<media_dir>` that holds only the catalog's files, as hard links to your copy (copies
+   if `<media_dir>` is on another file system), so other files in your copy stay out of the image; the script lists
+   them.
 
 ```bash
 hf download MM-Lifelong/MM-Lifelong --repo-type dataset --revision efa197479b25fbcf4f7881f9218d703c57dfc9bb \
