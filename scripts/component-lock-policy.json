@@ -106,6 +106,11 @@
       "protobuf==6.33.6"
     ]
   },
+  "resources_servers/workplace_assistant": {
+    "constraint-dependencies": [
+      "pandas>=3.1.1"
+    ]
+  },
   "responses_api_agents/agentic_mme_agent": {
     "override-dependencies": [
       "opencv-python-headless==5.0.0.93"
