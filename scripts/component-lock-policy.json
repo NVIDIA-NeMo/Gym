@@ -1,4 +1,9 @@
 {
+  "benchmarks/vstar_spatiotemporal": {
+    "override-dependencies": [
+      "opencv-python-headless==5.0.0.93"
+    ]
+  },
   "environment_servers/nemo_user_sim": {
     "override-dependencies": [
       "pyarrow>=25.0.1,<26"
@@ -17,6 +22,16 @@
   "resources_servers/conversational_tool_use_simulation": {
     "override-dependencies": [
       "pathspec"
+    ]
+  },
+  "resources_servers/critpt_custom_grader": {
+    "override-dependencies": [
+      "pillow==12.3.0"
+    ]
+  },
+  "resources_servers/ether0": {
+    "exclude-dependencies": [
+      "pyonmttok"
     ]
   },
   "resources_servers/gdpval": {

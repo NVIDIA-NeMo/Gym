@@ -126,7 +126,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
-    from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
+    from nemo_gym.server_runtime.sandbox_lending import SHUTDOWN_STOP_CONCURRENCY, STOP_TIMEOUT_S, LentSandboxes
     from nemo_gym.server_runtime.single_agent_turn_types import (
         SingleAgentTurnAgentContext,
         SingleAgentTurnFailure,
@@ -217,6 +217,8 @@ _PUBLIC_API = {
     "RolloutContextMiddleware": "request_handling.rollout_context",
     "RolloutIdRequiredError": "_checkpoint.errors",
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
+    "SHUTDOWN_STOP_CONCURRENCY": "sandbox_lending",
+    "STOP_TIMEOUT_S": "sandbox_lending",
     "ServedTools": "base_environment_server",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",

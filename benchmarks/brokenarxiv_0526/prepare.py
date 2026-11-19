@@ -52,6 +52,7 @@ def prepare() -> Path:
     with open(OUTPUT_FPATH, "w") as f:
         for row in ds:
             out = {
+                "task_id": str(row["problem_idx"]),
                 # `question` feeds the prompt template; the verifier reads it
                 # back as the false statement shown to the model.
                 "question": row["problem"],

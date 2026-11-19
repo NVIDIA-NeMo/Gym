@@ -11,7 +11,7 @@ from typing import Any
 
 import cv2
 from aiohttp import ClientError, ClientResponseError
-from fastapi import HTTPException, Request, Response
+from fastapi import Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import (
@@ -20,6 +20,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
@@ -442,10 +443,10 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         if not isinstance(state, AgenticMMESessionState):
             raise TypeError("Expected Agentic-MME session state")
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Agent session does not match the rollout route")
+            raise AgentSessionConflictError("Agent session does not match the rollout route")
         key = (body.model_copy(deep=True), route)
         if state.activation_key is not None and state.activation_key != key:
-            raise HTTPException(409, "Session already has another activation")
+            raise AgentSessionConflictError("Session already has another activation")
         if state.execution is None:
             state.activation_key = key
             state.execution = asyncio.create_task(self._session_episode(body, dict(request.cookies), route))
@@ -454,7 +455,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         except asyncio.CancelledError:
             request_task = asyncio.current_task()
             if state.execution.cancelled() and request_task is not None and not request_task.cancelling():
-                raise HTTPException(409, "Agent session is closing") from None
+                raise AgentSessionConflictError("Agent session is closing") from None
             raise
         for name, value in model_cookies.items():
             response.set_cookie(name, value)
