@@ -309,6 +309,7 @@ class DockerProvider:
         self._probe = _coerce_config(probe, DockerProbeConfig)
         self._binary = _require_docker()
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+        self._upload_semaphore = asyncio.Semaphore(self._exec_config.concurrency)
         # Live PTY sessions by container name; closed with their container and at provider shutdown.
         self._pty_sessions: dict[str, set[docker_pty.DockerPtySession]] = {}
 
@@ -344,10 +345,15 @@ class DockerProvider:
         return {"run_args": ["--pull", policy]}
 
     async def _run(
-        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
+        self,
+        argv: list[str],
+        *,
+        timeout_s: float | None,
+        stdin: bytes | None = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> tuple[int, str, str]:
-        """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout."""
-        async with self._semaphore:
+        """Run a docker CLI command; kill and reap its local group on timeout or cancellation."""
+        async with semaphore if semaphore is not None else self._semaphore:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdin=asyncio.subprocess.PIPE if stdin is not None else None,
@@ -357,11 +363,13 @@ class DockerProvider:
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
-            except asyncio.TimeoutError as e:
+            except (asyncio.TimeoutError, asyncio.CancelledError) as e:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 with contextlib.suppress(Exception):
                     await proc.wait()
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 raise TimeoutError(f"docker command timed out after {timeout_s:g}s: {_redact_argv(argv)}") from e
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
@@ -698,6 +706,33 @@ class DockerProvider:
             if probe.stable_delay_s > 0:
                 await asyncio.sleep(probe.stable_delay_s)
 
+    def _exec_argv(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | int | None = None,
+        stdin: bytes | None = None,
+    ) -> list[str]:
+        inst = handle.raw
+        flags: list[str] = []
+        if stdin is not None:
+            flags.append("-i")
+        if cwd is not None:
+            flags += ["-w", cwd]
+        merged_env = dict(getattr(inst, "env", {}))
+        if env:
+            merged_env.update(env)
+        for key, value in merged_env.items():
+            flags += ["--env", f"{key}={value}"]
+        if user is not None:
+            flags += ["--user", _user_flag(user)]
+        flags += list(self._exec_config.extra_exec_args)
+
+        return [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]
+
     async def exec(
         self,
         handle: SandboxHandle,
@@ -714,22 +749,7 @@ class DockerProvider:
         ``user`` maps to ``--user`` (root/0 -> 0). A timeout kills the local docker client only; the
         in-container process is reaped when the sandbox is closed.
         """
-        inst = handle.raw
-        flags: list[str] = []
-        if stdin is not None:
-            flags.append("-i")
-        if cwd is not None:
-            flags += ["-w", cwd]
-        merged_env = dict(getattr(inst, "env", {}))
-        if env:
-            merged_env.update(env)
-        for key, value in merged_env.items():
-            flags += ["--env", f"{key}={value}"]
-        if user is not None:
-            flags += ["--user", _user_flag(user)]
-        flags += list(self._exec_config.extra_exec_args)
-
-        argv = [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]
+        argv = self._exec_argv(handle, command, cwd=cwd, env=env, user=user, stdin=stdin)
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
         try:
             code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
@@ -860,17 +880,29 @@ class DockerProvider:
         except Exception:
             LOGGER.warning("Failed to close PTY session %s of %r", session.session_id, name, exc_info=True)
 
+    def uploads_independent_of_execs(self) -> bool:
+        """Uploads use their own bounded CLI capacity, including parent-directory creation."""
+        return True
+
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one host file (creates the parent dir; the file lands owned by root)."""
         inst = handle.raw
         parent = posixpath.dirname(target_path)
         if parent:
-            mk = await self.exec(handle, f"mkdir -p {shlex.quote(parent)}", user="root")
-            if mk.return_code != 0:
-                raise RuntimeError(f"docker upload to {target_path!r} failed (mkdir parent): {mk.stderr}")
+            try:
+                code, _out, err = await self._run(
+                    self._exec_argv(handle, f"mkdir -p {shlex.quote(parent)}", user="root"),
+                    timeout_s=self._exec_config.default_timeout_s,
+                    semaphore=self._upload_semaphore,
+                )
+            except TimeoutError as error:
+                raise RuntimeError(f"docker upload to {target_path!r} failed (mkdir parent): {error}") from error
+            if code != 0:
+                raise RuntimeError(f"docker upload to {target_path!r} failed (mkdir parent): {err}")
         code, _out, err = await self._run(
             [self._binary, "cp", str(source_path), f"{inst.name}:{target_path}"],
             timeout_s=self._exec_config.default_timeout_s,
+            semaphore=self._upload_semaphore,
         )
         if code != 0:
             raise RuntimeError(f"docker cp upload to {target_path!r} failed: {err.strip()}")
