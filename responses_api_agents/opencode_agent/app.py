@@ -1584,6 +1584,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 failure_reason=command_failure_reason(f"OpenCode setup failed: command={command!r}", result),
             )
 
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, OpenCodeSandboxSession) else None
+
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Finalize and release the connection; retain release failures for retry."""
         assert isinstance(state, OpenCodeSandboxSession)
@@ -2343,7 +2346,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             response = response.model_copy(
                 update={"metadata": {**(response.metadata or {}), HARNESS_STEP_LIMIT_METADATA_KEY: "true"}}
             )
-        return self.report_outcome(response, native_result)
+        return self.report_rollout_stop(self.report_outcome(response, native_result), state.session)
 
 
 if __name__ == "__main__":

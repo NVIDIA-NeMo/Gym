@@ -43,6 +43,7 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    EpisodeGenerationBudget,
     FailureBoundary,
     FailureReport,
     FailureReportRow,
@@ -53,6 +54,7 @@ from nemo_gym.core import (
     RequestFailureLog,
     model_sampling_path_segment,
     rebuild_failure,
+    with_generation_budget,
 )
 from nemo_gym.metrics import add_perf_metrics
 from nemo_gym.server_runtime import (
@@ -131,6 +133,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     model_config = ConfigDict(extra="forbid")
 
+    max_model_calls: int | None = Field(default=None, gt=0)
     resources_server: ResourcesServerRef
     agent_server: AgentServerRef
     agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
@@ -612,7 +615,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         try:
             agent_create_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
-                url_path="/v1/agent_sessions",
+                url_path=self._budget_path(request, "/v1/agent_sessions"),
                 json=AgentSeedSessionRequest(
                     agent_session_id=handles.agent_session_id,
                     episode_id=request.episode_id,
@@ -907,7 +910,23 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
         # The agent is the one the training framework trains, so its model calls carry the episode's values.
         sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=True))
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
+        return self._budget_path(
+            request, f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
+        )
+
+    def _budget_path(self, request: SingleAgentTurnRequest, path: str) -> str:
+        if self.config.max_model_calls is None:
+            return path
+        if not path.startswith("/ng-rollout/"):
+            path = f"/ng-rollout/{request.episode_id.capture_key}{path}"
+        return with_generation_budget(
+            path,
+            EpisodeGenerationBudget(
+                max_calls=self.config.max_model_calls,
+                rollout_id=request.episode_id.rollout_id,
+                agent_server=self.config.agent_server.name,
+            ),
+        )
 
     @staticmethod
     def _failure(

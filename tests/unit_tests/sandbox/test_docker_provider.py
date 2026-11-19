@@ -13,7 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import os
+import shlex
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,7 +50,12 @@ class RunRecorder:
         self._responder = responder
 
     async def __call__(
-        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
+        self,
+        argv: list[str],
+        *,
+        timeout_s: float | None,
+        stdin: bytes | None = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> tuple[int, str, str]:
         self.calls.append({"argv": list(argv), "timeout_s": timeout_s, "stdin": stdin})
         return self._responder(list(argv))
@@ -1116,3 +1125,96 @@ def test_service_options_and_pull_policy_become_run_flags(fake_binary: str) -> N
     assert provider.pull_policy_options("always") == {"run_args": ["--pull", "always"]}
     with pytest.raises(ValueError, match="always, missing or never"):
         provider.pull_policy_options("Always")
+
+
+async def test_upload_completes_while_exec_capacity_is_occupied(fake_binary, tmp_path, monkeypatch):
+    provider = docker_provider.DockerProvider(exec={"concurrency": 1})
+    script = tmp_path / "docker"
+    script.write_text(
+        f"#!{sys.executable}\nimport os,sys,shutil\n"
+        "if sys.argv[1]=='exec': os.execv('/bin/sh',['sh','-c',sys.argv[-1]])\n"
+        "else: shutil.copyfile(sys.argv[2],sys.argv[3].split(':',1)[1])\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(provider, "_binary", str(script))
+    ready = asyncio.Event()
+    original_spawn = asyncio.create_subprocess_exec
+    processes = []
+
+    async def spawn(*args, **kwargs):
+        proc = await original_spawn(*args, **kwargs)
+        processes.append(proc)
+        ready.set()
+        return proc
+
+    monkeypatch.setattr(docker_provider.asyncio, "create_subprocess_exec", spawn)
+    command = shlex.join([sys.executable, "-c", "import time;time.sleep(30)"])
+    running = asyncio.create_task(provider.exec(_make_handle(), command))
+    try:
+        await asyncio.wait_for(ready.wait(), 5)
+        source = tmp_path / "source"
+        source.write_bytes(b"expiry marker")
+        target = tmp_path / "nested" / "expiry"
+        await asyncio.wait_for(provider.upload_file(_make_handle(), source, str(target)), 5)
+        assert provider.uploads_independent_of_execs()
+        assert target.read_bytes() == b"expiry marker"
+        assert not running.done()
+        assert processes[0].returncode is None
+    finally:
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    assert all(proc.returncode is not None for proc in processes)
+    with pytest.raises(ProcessLookupError):
+        os.kill(processes[0].pid, 0)
+
+
+async def test_upload_capacity_is_bounded_and_released_on_cancel(fake_binary, tmp_path, monkeypatch):
+    provider = docker_provider.DockerProvider(exec={"concurrency": 1})
+    original_spawn = asyncio.create_subprocess_exec
+    started = asyncio.Event()
+    processes = []
+
+    async def spawn(*args, **kwargs):
+        proc = await original_spawn(sys.executable, "-c", "import time;time.sleep(30)", **kwargs)
+        processes.append(proc)
+        started.set()
+        return proc
+
+    monkeypatch.setattr(docker_provider.asyncio, "create_subprocess_exec", spawn)
+    source = tmp_path / "source"
+    source.write_bytes(b"marker")
+    first = asyncio.create_task(provider.upload_file(_make_handle(), source, "first"))
+    second = None
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        started.clear()
+        second = asyncio.create_task(provider.upload_file(_make_handle(), source, "second"))
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(started.wait(), 0.1)
+        assert len(processes) == 1
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await asyncio.wait_for(started.wait(), 5)
+        assert processes[0].returncode is not None
+        assert len(processes) == 2
+    finally:
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+    assert all(proc.returncode is not None for proc in processes)
+
+
+@pytest.mark.parametrize("target,error_type", [("nested/file", RuntimeError), ("file", TimeoutError)])
+async def test_upload_timeout_keeps_existing_error_contract(fake_binary, monkeypatch, tmp_path, target, error_type):
+    def timeout(argv):
+        raise TimeoutError("bounded CLI timeout")
+
+    provider, _rec = _make_provider(monkeypatch, timeout)
+    source = tmp_path / "source"
+    source.write_bytes(b"marker")
+    with pytest.raises(error_type, match="bounded CLI timeout"):
+        await provider.upload_file(_make_handle(), source, target)

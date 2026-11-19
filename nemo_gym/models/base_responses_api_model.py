@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Adapted from NVIDIA NeMo Gym (Apache-2.0), original path: nemo_gym/models/base_responses_api_model.py
+# Source: https://gitlab-master.nvidia.com/tongc/gym/-/tree/d8c548915431e59169890d34cd8cea56ef2a905e
 """Model server base classes.
 
 Every Gym model server derives from ``SimpleResponsesAPIModel``.
@@ -40,6 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from nemo_gym.config.global_config import model_call_sampling_config
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.generation_budget import current_generation_budget
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -82,6 +85,7 @@ from nemo_gym.models.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
+from nemo_gym.models.rollout_budget import RolloutGenerationBudget
 from nemo_gym.models.token_capture.config import NonGeneratingRequest, token_capture_config
 from nemo_gym.models.token_capture.harness_notes import trailing_harness_note
 from nemo_gym.models.token_capture.protocols import (
@@ -100,6 +104,7 @@ from nemo_gym.models.token_capture.sink import (
 from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.request_handling.generation_budget import GenerationBudgetMiddleware
 from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -280,6 +285,7 @@ class ModelCheckpointConfig(BaseModel):
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
+    generation_budget_state_dir: str | None = None
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
     drop_hosted_tools: bool = Field(
@@ -348,6 +354,7 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    _generation_budget: RolloutGenerationBudget | None = PrivateAttr(default=None)
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
@@ -390,6 +397,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return False
 
     def setup_webserver(self) -> FastAPI:
+        if self.config.generation_budget_state_dir is not None:
+            self._generation_budget = RolloutGenerationBudget(self.config.generation_budget_state_dir)
         if self.config.stream_keepalive_s is not None and not self._mints_response_ids():
             raise ValueError(
                 f"stream_keepalive_s is not supported on {type(self).__name__}: its responses carry the ids "
@@ -460,6 +469,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             ModelSamplingMiddleware,
             required=sampling_config is not None and self.config.name in sampling_config.required_model_servers,
         )
+        app.add_middleware(GenerationBudgetMiddleware)
         return app
 
     def setup_policy_checkpoint(self, app: FastAPI, capture_ledger: CaptureLedger | None) -> None:
@@ -864,9 +874,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         return _BackendStreamingResponse(events(), backend=pending)
 
+    async def _admit_generation(self, request: Request) -> None:
+        if current_generation_budget() is not None:
+            if self._generation_budget is None:
+                raise HTTPException(503, "Episode generation budget requires shared state storage")
+            await self._generation_budget.admit(request, self.server_client)
+
     async def _invoke_chat_completions(
         self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming
     ) -> NeMoGymChatCompletion:
+        if current_generation_budget() is not None and params.n not in (None, 1):
+            raise HTTPException(422, "Generation budget requires exactly one completion per request")
         # chat_completions() signatures vary across servers: some take a leading `request`, some
         # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
         # all of them.
@@ -886,6 +904,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 request_messages = _request_messages(params)
             try:
                 await resolve_parent(request_messages)
+                await self._admit_generation(request)
                 await register_call_intent()
             except CaptureAdmissionError as error:
                 raise HTTPException(status_code=409, detail=str(error)) from error
@@ -893,6 +912,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 raise HTTPException(status_code=422, detail=str(error)) from error
         else:
             request_messages = None
+            await self._admit_generation(request)
         if "request" in inspect.signature(self.chat_completions).parameters:
             completion = await self.chat_completions(request=request, body=params)
         else:
@@ -951,6 +971,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             request_messages = _request_messages(params)
             try:
                 await resolve_parent(request_messages)
+                await self._admit_generation(request)
                 await register_call_intent()
             except CaptureAdmissionError as error:
                 raise HTTPException(status_code=409, detail=str(error)) from error
@@ -958,6 +979,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 raise HTTPException(status_code=422, detail=str(error)) from error
         else:
             request_messages = None
+            await self._admit_generation(request)
         if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
         else:

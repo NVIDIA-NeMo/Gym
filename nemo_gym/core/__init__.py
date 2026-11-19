@@ -95,6 +95,7 @@ if TYPE_CHECKING:
         reply_failure_report,
         report_for_current_request,
     )
+    from nemo_gym.core.generation_budget import EpisodeGenerationBudget, with_generation_budget
     from nemo_gym.core.media import MediaFile, UnsupportedContentError, split_text_and_media
     from nemo_gym.core.model_call_sampling import (
         MODEL_SAMPLING_HEADER,
@@ -300,6 +301,8 @@ _PUBLIC_API = {
     "accumulate_response_usage": "responses_api_types",
     "agent_route_failure": "typed_exceptions",
     "choose_action": "outcome_policy",
+    "EpisodeGenerationBudget": "generation_budget",
+    "with_generation_budget": "generation_budget",
     "current_model_sampling_segment": "model_call_sampling",
     "current_rollout_id": "episode_context",
     "current_rollout_skips_token_capture": "episode_context",

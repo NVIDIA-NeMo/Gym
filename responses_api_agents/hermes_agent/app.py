@@ -432,6 +432,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             raise TypeError("Expected Hermes agent session state")
         return state
 
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, HermesSandboxSession) else None
+
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, HermesSandboxSession):
             raise TypeError("Expected Hermes agent session state")
@@ -832,7 +835,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 harness_python=runtime.python or "",
             )
         return AgentEpisode(
-            response=response,
+            response=self.report_rollout_stop(response, state.session),
             observations=self._sandbox_observations(result, output.get("observations"), runtime_info=runtime),
         )
 

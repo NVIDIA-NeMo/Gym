@@ -311,6 +311,7 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
         request=seed(),
         runtime="/runtime",
         session=SimpleNamespace(
+            expired=False,
             session_dir="/tmp/session",
             workdir="/app",
             cleanup={"timed_out": timed_out, "return_code": code, "cleanup_confirmed": True},
@@ -322,7 +323,10 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
     body = NeMoGymResponseCreateParamsNonStreaming(
         input=[{"role": "system", "content": "System"}, {"role": "user", "content": "Question"}]
     )
+    state.session.expired = timed_out
+    state.session.expire_reason = "budget"
     response = await instance._sandbox_response(state, body, prompt="Question", system="System")
+    assert (response.metadata or {}).get("ng_rollout_stop") == ('{"reason":"budget"}' if timed_out else None)
     payload = execute.await_args.args[0]
     assert payload["command"] == [
         "/runtime/claude",
@@ -335,7 +339,7 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
     assert response.output[0].content[0].text == "partial"
     assert response.status == status
     assert response.usage.total_tokens == 12
-    assert response.metadata is None  # no adapter-specific runtime policy fields
+    assert response.metadata == ({"ng_rollout_stop": '{"reason":"budget"}'} if timed_out else None)
     assert "model_call_ownership_unavailable" in [gap.code for gap in state.observations.gaps]
 
 
@@ -345,6 +349,7 @@ async def test_artifact_capture_reads_separate_stdout_and_process_info(monkeypat
         request=seed(),
         runtime="/runtime",
         session=SimpleNamespace(
+            expired=False,
             session_dir="/tmp/session",
             sandbox=SimpleNamespace(exec=AsyncMock(return_value=result(code=1))),
             read_output_log=AsyncMock(return_value='{"type":"result","subtype":"error_fake"}'),
@@ -394,7 +399,10 @@ async def test_close_bounds_a_stubborn_activation():
     task = asyncio.create_task(activation())
     await started.wait()
     state = adapter.ClaudeCodeSandboxSession(
-        request=seed(), runtime="/runtime", session=SimpleNamespace(close=AsyncMock(), artifacts=None), task=task
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(expired=False, close=AsyncMock(), artifacts=None),
+        task=task,
     )
     try:
         with pytest.raises(TimeoutError):
@@ -439,6 +447,7 @@ async def test_close_joins_captured_observations_during_parsing(monkeypatch, par
         request=seed(),
         runtime="/runtime",
         session=SimpleNamespace(
+            expired=False,
             session_dir="/tmp/session",
             workdir="/app",
             artifacts=artifacts,
@@ -486,7 +495,7 @@ async def test_sandbox_honors_task_timeout_and_server_ceiling(monkeypatch, metad
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
         runtime="/runtime",
-        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+        session=SimpleNamespace(expired=False, session_dir="/tmp/session", workdir="/app", cleanup=None),
     )
     execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
@@ -513,7 +522,7 @@ def request(session_id="session", rollout="rollout"):
 async def test_retry_shares_execution_and_rejects_changed_body(monkeypatch):
     instance = agent()
     state = adapter.ClaudeCodeSandboxSession(
-        request=seed(), runtime="/runtime", session=SimpleNamespace(closing=False)
+        request=seed(), runtime="/runtime", session=SimpleNamespace(expired=False, closing=False)
     )
     async with instance._locked_agent_session("session") as record:
         record.state = state
@@ -573,7 +582,11 @@ async def test_empty_sandbox_output_uses_local_padding(monkeypatch):
         request=seed(),
         runtime="/runtime",
         session=SimpleNamespace(
-            session_dir="/tmp/session", workdir="/app", artifacts=None, cleanup={"timed_out": False, "return_code": 0}
+            expired=False,
+            session_dir="/tmp/session",
+            workdir="/app",
+            artifacts=None,
+            cleanup={"timed_out": False, "return_code": 0},
         ),
     )
     monkeypatch.setattr(
@@ -594,7 +607,7 @@ async def test_sandbox_only_receives_direct_credentials_without_gym_model_server
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
         runtime="/runtime",
-        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+        session=SimpleNamespace(expired=False, session_dir="/tmp/session", workdir="/app", cleanup=None),
     )
     execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
@@ -618,6 +631,7 @@ async def test_cancelled_activation_reports_sandbox_outcome(monkeypatch, timed_o
         request=seed(),
         runtime="/runtime",
         session=SimpleNamespace(
+            expired=False,
             session_dir="/tmp/session",
             workdir="/app",
             artifacts=adapter.ClaudeCodeArtifacts(""),
@@ -647,7 +661,9 @@ async def test_skills_are_staged_before_launch_and_disable_bare(monkeypatch, tmp
 
     remote = SimpleNamespace(upload=upload)
     state = adapter.ClaudeCodeSandboxSession(
-        request=seed(), runtime="/runtime", session=SimpleNamespace(session_dir="/tmp/session", sandbox=remote)
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(expired=False, session_dir="/tmp/session", sandbox=remote),
     )
     payload = {
         "command": ["/runtime/claude"],
