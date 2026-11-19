@@ -710,6 +710,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 f"Claude sandbox setup failed (exit={result.return_code}, error={result.error_type}): {details[-16000:]}"
             )
 
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, ClaudeCodeSandboxSession) else None
+
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Confirm cleanup and return a bundle even when no activation ran."""
         assert isinstance(state, ClaudeCodeSandboxSession)
@@ -862,7 +865,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if failure is not None:
             raise failure
-        return self._response_from_output(body, items, model, run_metadata, status=status)
+        response = self._response_from_output(body, items, model, run_metadata, status=status)
+        return self.report_rollout_stop(response, state.session)
 
     async def responses(
         self,
