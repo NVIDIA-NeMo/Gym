@@ -1,0 +1,30 @@
+# Apex Agents: pinned upstream harness in an Apptainer sandbox plus a held-out Gym verifier.
+config_paths:
+  - resources_servers/apex_agents/configs/apex_agents.yaml
+  - responses_api_agents/apex_agent/configs/apex_agent.yaml
+
+apex_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,${policy_base_url}}
+      openai_api_key: ${oc.select:judge_api_key,${policy_api_key}}
+      openai_model: ${oc.select:judge_model_name,${policy_model_name}}
+
+apex_agents_benchmark_resources_server:
+  _inherit_from: apex_agents
+
+apex_agents_benchmark_agent:
+  _inherit_from: apex_agent
+  responses_api_agents:
+    apex_agent:
+      resources_server:
+        name: apex_agents_benchmark_resources_server
+      datasets:
+      - name: apex_agents
+        type: benchmark
+        jsonl_fpath: benchmarks/apex_agents/data/apex_agents_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/apex_agents/prepare.py
+        num_repeats: 1
+        license: CC-BY-4.0
