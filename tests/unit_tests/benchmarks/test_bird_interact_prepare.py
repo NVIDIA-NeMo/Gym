@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import huggingface_hub
 import pytest
 from pydantic import ValidationError
 
@@ -196,3 +197,76 @@ class TestPrepare:
 
         with pytest.raises(ValueError, match="none of lite's tasks"):
             bird_prepare.prepare("lite", "c_interact", ground_truth_jsonl=str(ground_truth))
+
+    def test_an_empty_ground_truth_file_downloads_and_keeps_the_rows_already_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._download(tmp_path, monkeypatch)
+        ground_truth = tmp_path / "ground_truth.jsonl"
+        ground_truth.write_text(json.dumps(_truth("q1")) + "\n")
+        output = bird_prepare.prepare("lite", "c_interact", ground_truth_jsonl=str(ground_truth))
+        written = output.read_text()
+        ground_truth.write_text("")
+
+        assert bird_prepare.prepare("lite", "c_interact", ground_truth_jsonl=str(ground_truth)) == output
+
+        assert output.read_text() == written
+        assert "is empty, so no rows were written" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("content", "message"),
+        [
+            (
+                json.dumps({"sol_sql": ["SELECT 1"]}) + "\n",
+                r"ground_truth.jsonl, line 1: the entry has no instance_id",
+            ),
+            ("\n" + json.dumps(_truth("q1"))[:-1] + "\n", r"ground_truth.jsonl, line 2: not JSON"),
+            (None, r"No ground truth file at .*ground_truth.jsonl"),
+        ],
+    )
+    def test_a_bad_ground_truth_file_is_refused_by_name_before_the_download(
+        self, content: str | None, message: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bird_prepare, "DATA_DIR", tmp_path / "data")
+        downloads: list[str] = []
+        monkeypatch.setattr(bird_prepare, "download_release", downloads.append)
+        ground_truth = tmp_path / "ground_truth.jsonl"
+        if content is not None:
+            ground_truth.write_text(content)
+
+        with pytest.raises(ValueError, match=message):
+            bird_prepare.prepare("lite", "c_interact", ground_truth_jsonl=str(ground_truth))
+
+        assert downloads == []
+
+    def test_a_null_ground_truth_field_is_an_empty_list(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._download(tmp_path, monkeypatch)
+        truth = _truth("q1") | {"external_knowledge": None}
+        ground_truth = tmp_path / "ground_truth.jsonl"
+        ground_truth.write_text(json.dumps(truth) + "\n")
+
+        output = bird_prepare.prepare("lite", "c_interact", ground_truth_jsonl=str(ground_truth))
+
+        (task,) = [json.loads(line) for line in output.read_text().splitlines()]
+        assert task["task_input"]["external_knowledge"] == []
+
+
+@pytest.mark.parametrize("release", ["lite", "full"])
+def test_download_release_is_pinned_to_the_ground_truth_revision(
+    release: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(bird_prepare, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        huggingface_hub, "snapshot_download", lambda **kwargs: calls.append(kwargs) or kwargs["local_dir"]
+    )
+
+    assert bird_prepare.download_release(release) == tmp_path / release / "databases"
+    assert calls == [
+        {
+            "repo_id": f"birdsql/bird-interact-{release}",
+            "repo_type": "dataset",
+            "revision": bird_prepare.RELEASE_REVISIONS[release],
+            "local_dir": tmp_path / release / "databases",
+        }
+    ]

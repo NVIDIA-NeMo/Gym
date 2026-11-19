@@ -39,8 +39,8 @@ GROUND_TRUTH_FILES = {
 # The revision of each release's Hugging Face dataset that the ground truth files belong to, so a later edit upstream
 # cannot pair new rows with old ground truth.
 RELEASE_REVISIONS = {
-    "lite": "f7881a9c2b9630cc4fc13b0c39279740b0a2fd87",
-    "full": "5d78b0722433c3821e1ebda5d8c39d24070049d7",
+    "lite": "f7881a9c2b9630cc4fc13b0c39279740b0a2fd87",  # pragma: allowlist secret
+    "full": "5d78b0722433c3821e1ebda5d8c39d24070049d7",  # pragma: allowlist secret
 }
 # A phase's category when its row names none, as in the ADK.
 QUERY_CATEGORY = "Query"
@@ -66,8 +66,8 @@ def download_release(release: str) -> Path:
 
 def _phase_truth(truth: dict[str, Any]) -> dict[str, Any]:
     """A phase's ground truth fields. The authors' Lite file writes most follow-ups' ``sol_sql`` as one string, not a
-    list of statements; it becomes a list of that one statement."""
-    fields = {field: truth.get(field, []) for field in GROUND_TRUTH_FIELDS}
+    list of statements; it becomes a list of that one statement. A missing or ``null`` field becomes an empty list."""
+    fields = {field: truth.get(field) or [] for field in GROUND_TRUTH_FIELDS}
     if isinstance(fields["sol_sql"], str):
         fields["sol_sql"] = [fields["sol_sql"]]
     return fields
@@ -113,10 +113,30 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def read_ground_truth(path: Path) -> dict[str, dict[str, Any]]:
+    """The ground truth file's entries by ``instance_id``. Raises a ``ValueError`` that names the file, and the line
+    when one is wrong, so a bad file is found before the download."""
+    if not path.is_file():
+        raise ValueError(f"No ground truth file at {path}")
+    ground_truth: dict[str, dict[str, Any]] = {}
+    for number, line in enumerate(path.read_text().splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            truth = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"{path}, line {number}: not JSON: {error}") from error
+        if not isinstance(truth, dict) or not isinstance(truth.get("instance_id"), str):
+            raise ValueError(f"{path}, line {number}: the entry has no instance_id")
+        ground_truth[truth["instance_id"]] = truth
+    return ground_truth
+
+
 def prepare(release: str = "lite", mode: str = "c_interact", ground_truth_jsonl: str | None = None) -> Path:
     """Write the release's rows for ``mode`` to ``data/<release>/<mode>.jsonl`` and return that path.
 
-    The rows are the same for both modes; each mode has its own file, so each run has its own metrics.
+    The rows are the same for both modes; each mode has its own file, so each run has its own metrics. An empty ground
+    truth file only downloads the release: no rows are written, and an earlier file stays as it was.
     """
     if release not in RELEASES:
         raise ValueError(f"release must be one of {', '.join(RELEASES)}, not {release!r}")
@@ -130,14 +150,17 @@ def prepare(release: str = "lite", mode: str = "c_interact", ground_truth_jsonl:
                 "with +prepare_script_args.ground_truth_jsonl=<path>; see benchmarks/bird_interact/README.md."
             )
         ground_truth_jsonl = str(default)
+    ground_truth = read_ground_truth(Path(ground_truth_jsonl))
     rows = _read_jsonl(download_release(release) / ROWS_FILE)
-    ground_truth = {truth["instance_id"]: truth for truth in _read_jsonl(Path(ground_truth_jsonl))}
-    if ground_truth and not ground_truth.keys() & {row["instance_id"] for row in rows}:
+    output = DATA_DIR / release / f"{mode}.jsonl"
+    if not ground_truth:
+        print(f"BIRD-Interact {release}: downloaded; {ground_truth_jsonl} is empty, so no rows were written.")
+        return output
+    if not ground_truth.keys() & {row["instance_id"] for row in rows}:
         raise ValueError(
             f"{ground_truth_jsonl} has the ground truth of none of {release}'s tasks: is it another release's?"
         )
     kept, left_out = select_tasks(rows, ground_truth)
-    output = DATA_DIR / release / f"{mode}.jsonl"
     output.parent.mkdir(parents=True, exist_ok=True)
     # Materialized for the mode's taskset, so manifest validation reads each row as the server's task input.
     taskset = f"bird_interact:{mode}"
