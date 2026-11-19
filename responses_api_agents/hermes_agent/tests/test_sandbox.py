@@ -1246,6 +1246,24 @@ def test_agent_timeout_is_the_task_budget_capped_by_the_ceiling(agent, raw, expe
     assert agent._agent_timeout_sec(body) == expected
 
 
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+async def test_agent_passes_gzip_flag_to_sandbox_runner(agent, state, gzip_enabled):
+    agent.config.gzip_requests_enabled = gzip_enabled
+    state.execute = AsyncMock(
+        return_value={"result": {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}}
+    )
+
+    await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        agent_session_id="session",
+        state=state,
+    )
+
+    state.execute.assert_awaited_once()
+    (payload,) = state.execute.await_args.args
+    assert payload["gzip_requests_enabled"] is gzip_enabled
+
+
 @pytest.mark.parametrize("budget", [None, "900.0"])
 async def test_task_timeout_bounds_the_sandbox_activation(agent, state, budget):
     metadata = None if budget is None else {AGENT_TIMEOUT_METADATA_KEY: budget}
