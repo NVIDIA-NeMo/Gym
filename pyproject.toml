@@ -827,6 +827,8 @@ extend-exclude = [
     "*.ipynb",
     # Vendored apple/ToolSandbox source — kept verbatim (see its VENDORING.md).
     "resources_servers/toolsandbox/tool_sandbox",
+    # ARC-AGI-3 example games — kept verbatim below a provenance header (their sha256 is pinned in data/example.jsonl).
+    "resources_servers/arc_agi_3/data/environment_files",
 ]
 [tool.ruff.lint]
 # Configure linting rules
