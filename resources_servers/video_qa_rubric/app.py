@@ -95,12 +95,10 @@ class VideoQARubricResourcesServerConfig(VideoSandboxServerConfig):
     judge_attempt_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     judge_retry_base_delay_seconds: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     judge_retry_max_delay_seconds: float = Field(default=30.0, ge=0, allow_inf_nan=False)
-    # Training only: the reward of an attempt that produced output but no final answer (reasoning only, an unfinished
-    # reasoning block, an empty message). With this option set, the answer must also be the last thing the model
-    # produced: an attempt that ended on a tool call or result, or on reasoning, is not graded by an earlier message.
-    # A response without any output stays 0: Gym's agents verify a failed run (execution_failure_reward_zero) as an
-    # empty response and require exactly 0. None scores attempts without an answer 0 and grades the last assistant
-    # message.
+    # Training only, as video_mcqa's option: the reward of an attempt that produced output but no final answer
+    # (reasoning only, an unfinished reasoning block, an empty message). A response without any output stays 0: Gym's
+    # agents verify a failed run (execution_failure_reward_zero) as an empty response and require exactly 0. None
+    # scores attempts without an answer 0.
     empty_answer_reward: float | None = Field(default=None, le=0, allow_inf_nan=False)
 
 
@@ -133,14 +131,12 @@ class VideoQARubricVerifyResponse(VideoQARubricVerifyRequest, BaseVerifyResponse
     evaluation_completed: bool
 
 
-def final_answer(response: NeMoGymResponse, *, last_item_only: bool) -> str:
+def final_answer(response: NeMoGymResponse) -> str:
     """The final answer: the text of the last assistant message after any reasoning block, never a reasoning item or a
-    tool result. With LAST_ITEM_ONLY that message must also be the last thing the model produced, reasoning aside."""
+    tool result."""
     for item in reversed(response.output):
         if item.type == "message" and getattr(item, "role", None) == "assistant":
             return final_answer_text("".join(part.text for part in item.content if part.type == "output_text"))
-        if last_item_only and item.type != "reasoning":
-            return ""
     return ""
 
 
@@ -183,9 +179,9 @@ class VideoQARubricResourcesServer(VideoSandboxServer):
                 failure_kind=f"video_qa_rubric:{failure}",
                 failure_reason=failure_reason,
             )
-        penalty = self.config.empty_answer_reward
-        answer = final_answer(response, last_item_only=penalty is not None)
+        answer = final_answer(response)
         if not answer:
+            penalty = self.config.empty_answer_reward
             reward = 0.0 if penalty is None or not response.output else penalty
             return self._respond(body, outcome="empty_answer", rubric_score=0.0, reward=reward)
 
