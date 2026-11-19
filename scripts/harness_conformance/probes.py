@@ -59,7 +59,8 @@ ANSWER = "CONFORMANCE_DONE"
 class Probe:
     scenario: Scenario
     directory: Path
-    harness: str = ""
+    tool_protocol: str = "function_call"
+    finish_protocol: str = "advertised_tool"
     responses: list[dict] | None = None
     final_responses: int = 1
     attempts: list[dict] = field(default_factory=list)
@@ -112,7 +113,7 @@ class Probe:
 
     def _tool(self, body: dict) -> tuple[str, dict, dict]:
         tools, namespaces = flatten_namespace_tools(body.get("tools"))
-        if self.harness == "terminus_2_sandboxed":
+        if self.tool_protocol == "terminal_json":
             # Terminus sends terminal commands inside JSON text, without advertising function tools.
             tools = [{"name": "terminal", "parameters": {"properties": {"command": {"type": "string"}}}}]
         for tool in tools:
@@ -126,7 +127,7 @@ class Probe:
                 marker = self.directory / f"tool-{index}.txt"
                 code = self.scenario.tool_exit_code if index == 0 else 0
                 command = f"printf %s {shlex.quote(token)} > {shlex.quote(str(marker))}; printf %s {shlex.quote(token)}; exit {code}"
-                if self.harness == "terminus_2_sandboxed":
+                if self.tool_protocol == "terminal_json":
                     # Terminal panes echo keystrokes. Only stdout may contain the intact witness token.
                     parts = f"{shlex.quote(token[:6])} {shlex.quote(token[6:])}"
                     command = f"printf %s%s {parts} > {shlex.quote(str(marker))}; printf %s%s {parts}; exit {code}"
@@ -166,7 +167,7 @@ class Probe:
     def _finish(self, body: dict) -> tuple[str, dict, dict] | None:
         """Return a call to an advertised finish tool carrying the answer, or None to answer in text."""
         tools, namespaces = flatten_namespace_tools(body.get("tools"))
-        if self.harness == "miniswe_sandboxed":
+        if self.finish_protocol == "bash_marker":
             for tool in tools:
                 function = tool.get("function", tool)
                 if function.get("name") == "bash":
@@ -229,7 +230,7 @@ class Probe:
                     and item.get("call_id") in result_ids
                 )
             ]
-            if self.harness == "terminus_2_sandboxed":
+            if self.tool_protocol == "terminal_json":
                 results = [
                     item
                     for item in history
@@ -341,7 +342,7 @@ class Probe:
                 calls_tool = output[0]["type"] == "function_call"
                 prompt_tokens = reply["input_tokens"]
                 completion_tokens = reply["output_tokens"]
-                if self.harness == "terminus_2_sandboxed" and not compacting:
+                if self.tool_protocol == "terminal_json" and not compacting:
                     # A runner's login shell can still be starting when the first command is sent.
                     commands = (
                         [{"keystrokes": f"sh -c {shlex.quote(arguments['command'])}\n", "duration": 2.0}]
@@ -555,7 +556,7 @@ class Probe:
                 and any(part.get("text") == ANSWER for part in item.get("content", []) if isinstance(part, dict))
                 for item in output
             )
-            if self.harness == "terminus_2_sandboxed":
+            if self.tool_protocol == "terminal_json":
                 for item in output:
                     if item.get("type") != "message" or item.get("role") != "assistant":
                         continue
