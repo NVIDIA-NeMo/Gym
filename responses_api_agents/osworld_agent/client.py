@@ -39,6 +39,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import requests
 
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
+from responses_api_agents.osworld_agent.frozen_evaluators import (
+    apply_task_reward_contract,
+    clear_frozen_evaluators,
+    register_frozen_evaluators,
+)
 from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
 from responses_api_agents.osworld_agent.reward_modes import REWARD_MODES, reward_from_score
 from responses_api_agents.osworld_agent.rollout_outcome import (
@@ -1722,6 +1727,92 @@ def _evaluate_osworld_env(
                 os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
 
 
+def _report_execution_results(controller: Any, record: Callable[[str, Any], None]) -> None:
+    """Pass each guest ``/execute`` reply to ``record``; ``DesktopEnv.step`` discards it."""
+
+    execute_python_command = controller.execute_python_command
+
+    def _execute_and_record(command: str) -> Any:
+        result = execute_python_command(command)
+        record(command, result)
+        return result
+
+    controller.execute_python_command = _execute_and_record
+
+
+def _reset_snapshot_env(env: Any, task_config: Dict[str, Any]) -> None:
+    """``DesktopEnv.reset`` for a guest started from a snapshot taken after the task setup: bind the task, skip the setup."""
+    env._traj_no += 1  # noqa: SLF001
+    env._step_no = 0  # noqa: SLF001
+    env.action_history.clear()
+    env.current_use_proxy = bool(task_config.get("proxy", False) and env.enable_proxy)
+    env._set_task_info(task_config)  # noqa: SLF001
+    env.setup_controller.reset_cache_dir(env.cache_dir)
+    env.is_environment_used = bool(env.config)
+
+
+def prepare_osworld_snapshot(
+    task_config: Dict[str, Any],
+    *,
+    snapshot_name: str,
+    sandbox_provider_config: Dict[str, Any],
+    sandbox_spec: Dict[str, Any],
+    vm_path: Optional[str] = None,
+    sandbox_require_kvm: bool = True,
+    sandbox_ready_timeout_s: float = 600.0,
+    sandbox_ready_poll_s: float = 2.0,
+    sandbox_vnc_guest_port: Optional[int] = None,
+    screen_size: tuple = (1920, 1080),
+    headless: bool = True,
+    client_password: str = "password",
+    enable_proxy: bool = False,
+    cache_dir: str = "cache",
+    setup_cache_dir: Optional[str] = None,
+    post_setup_settle_s: float = 0.0,
+    frozen_evaluator_root: Optional[str] = None,
+) -> str:
+    """Run a task's setup once in a fresh guest and snapshot it.
+
+    Returns the id of a ready snapshot for ``run_osworld_task``'s ``sandbox_snapshot_id``;
+    the caller owns the snapshot. The set-up guest is stopped before returning.
+    """
+    _patch_chrome_setup_cdp_lifecycle()
+    env_cls = load_attr(SANDBOX_DESKTOP_ENV_CLASS)
+    env_kwargs: Dict[str, Any] = {
+        "provider_name": "docker",
+        "action_space": "pyautogui",
+        "screen_size": screen_size,
+        "headless": headless,
+        "require_a11y_tree": False,
+        "os_type": "Ubuntu",
+        "client_password": client_password,
+        "cache_dir": cache_dir,
+        "enable_proxy": enable_proxy,
+        "sandbox_provider": dict(sandbox_provider_config),
+        "sandbox_spec": dict(sandbox_spec),
+        "sandbox_require_kvm": sandbox_require_kvm,
+        "sandbox_ready_timeout_s": sandbox_ready_timeout_s,
+        "sandbox_ready_poll_s": sandbox_ready_poll_s,
+        "sandbox_vnc_guest_port": sandbox_vnc_guest_port,
+    }
+    if vm_path:
+        env_kwargs["path_to_vm"] = vm_path
+    env = env_cls(**env_kwargs)
+    try:
+        _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
+        register_task_plugins(task_config)
+        if frozen_evaluator_root:
+            register_frozen_evaluators(task_config, frozen_evaluator_root)
+        env.reset(task_config=_sanitize_setup_task_config(task_config))
+        if post_setup_settle_s > 0:
+            time.sleep(post_setup_settle_s)
+        return env.provider.snapshot(name=snapshot_name)
+    finally:
+        clear_task_plugins()
+        clear_frozen_evaluators()
+        env.close()
+
+
 def run_osworld_task(
     task_config: Dict[str, Any],
     model_fn: ModelFn,
@@ -1750,6 +1841,10 @@ def run_osworld_task(
     # default: 8006 for the OSWorld Docker image, 6901 for AgentENV's osworld-slim.
     sandbox_vnc_guest_port: Optional[int] = None,
     sandbox_ready_poll_s: float = 2.0,
+    # A guest from ``prepare_osworld_fork``: attach to it and skip the task setup it already ran.
+    sandbox_snapshot_id: Optional[str] = None,
+    # Root of an RLVR snapshot's per-task evaluator modules; see frozen_evaluators.py.
+    frozen_evaluator_root: Optional[str] = None,
     max_steps: int = 15,
     max_trajectory_length: int = 3,
     sleep_after_execution: float = 0.5,
@@ -1828,6 +1923,10 @@ def run_osworld_task(
     use_gym_sandbox = sandbox_provider_config is not None
     if use_remote_resources and use_gym_sandbox:
         raise ValueError("resources_server and sandbox_provider are mutually exclusive OSWorld backends")
+    if sandbox_snapshot_id is not None and not use_gym_sandbox:
+        raise ValueError("sandbox_snapshot_id requires sandbox_provider")
+    if frozen_evaluator_root and use_remote_resources:
+        raise ValueError("frozen evaluators run in this process and need the local resources path")
     if vm_path and sandbox_vm_path and os.path.realpath(vm_path) != os.path.realpath(sandbox_vm_path):
         raise ValueError("vm_path and deprecated sandbox_vm_path refer to different qcow2 files")
     effective_vm_path = vm_path or sandbox_vm_path
@@ -2039,6 +2138,8 @@ def run_osworld_task(
                     "sandbox_vnc_guest_port": sandbox_vnc_guest_port,
                 }
             )
+            if sandbox_snapshot_id is not None:
+                env_kwargs["sandbox_snapshot_id"] = sandbox_snapshot_id
         if not use_remote_resources and effective_vm_path:
             env_kwargs["path_to_vm"] = effective_vm_path
         env = env_cls(
@@ -2058,8 +2159,19 @@ def run_osworld_task(
                 len(plugin_functions),
                 _safe_task_id(task_config),
             )
+        if frozen_evaluator_root:
+            frozen_functions = register_frozen_evaluators(task_config, frozen_evaluator_root)
+            if frozen_functions:
+                LOG.info(
+                    "Registered %d frozen evaluator function(s) for task %s",
+                    len(frozen_functions),
+                    _safe_task_id(task_config),
+                )
         rollout_phase = "environment_reset"
-        env.reset(task_config=_sanitize_setup_task_config(task_config))
+        if sandbox_snapshot_id is not None:
+            _reset_snapshot_env(env, _sanitize_setup_task_config(task_config))
+        else:
+            env.reset(task_config=_sanitize_setup_task_config(task_config))
         if use_gym_sandbox and runner_spec.kind == "pointer_agent":
             _install_guest_idle_inhibitor(env.setup_controller, task_logger)
         rollout_phase = "rollout"
@@ -2140,6 +2252,9 @@ def run_osworld_task(
 
             native_agent.call_llm = _call_nemotron_llm
             native_agent.reset(task_logger)
+            record_execution_result = getattr(native_agent, "record_execution_result", None)
+            if callable(record_execution_result):
+                _report_execution_results(env.controller, record_execution_result)
         elif runner_spec.kind == "qwen3_omni_agent":
             if not runner_spec.agent_class_path:
                 raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
@@ -2612,6 +2727,8 @@ def run_osworld_task(
         try:
             eval_logger = pointer_logger if pointer_agent is not None else task_logger
             final_score = _evaluate_osworld_env(env, eval_logger, disable_gpu=evaluator_disable_gpu)
+            if frozen_evaluator_root:
+                final_score = apply_task_reward_contract(task_config, final_score)
             evaluation_completed = True
         except Exception as exc:  # noqa: BLE001
             evaluation_error = f"env.evaluate() failed: {exc}"
@@ -2692,6 +2809,7 @@ def run_osworld_task(
                     LOG.exception("env.close() raised")
         finally:
             clear_task_plugins()
+            clear_frozen_evaluators()
 
     reward = reward_from_score(reward_mode, final_score, agent_terminal_action)
 

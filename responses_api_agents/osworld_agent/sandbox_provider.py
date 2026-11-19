@@ -9,25 +9,34 @@ port publication, and cleanup into Gym's provider-neutral Sandbox API.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import copy
 import logging
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from http.server import ThreadingHTTPServer
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 import requests
 
-from nemo_gym.sandbox import Sandbox, SandboxEndpoint, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox import (
+    Sandbox,
+    SandboxEndpoint,
+    SandboxSpec,
+    SandboxStatus,
+    create_provider,
+    provider_capabilities,
+)
 from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
 from responses_api_agents.osworld_agent.runtime_errors import OSWorldGuestStartTimeoutError
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.sandbox_provider")
+T = TypeVar("T")
 
 OSWORLD_SERVER_PORT = 5000
 OSWORLD_CHROMIUM_PORT = 9222
@@ -65,6 +74,22 @@ def _resolve_pool_vm_path(sandbox_provider: Mapping[str, Any], path_to_vm: Any) 
     if provider_name == "e2b":
         return AGENTENV_TEMPLATE_VM_PATH
     return path_to_vm
+
+
+async def with_sandbox_provider(sandbox_provider: Mapping[str, Any], call: Callable[[Any], Awaitable[T]]) -> T:
+    """Run ``call`` with a provider built from ``sandbox_provider``, then close the provider."""
+    provider = create_provider(sandbox_provider)
+    try:
+        return await call(provider)
+    finally:
+        aclose = getattr(provider, "aclose", None)
+        if aclose is not None:
+            with contextlib.suppress(Exception):
+                await aclose()
+
+
+async def _snapshots_keep_processes(provider: Any) -> bool:
+    return "processes" in provider_capabilities(provider).snapshot_keeps
 
 
 def _string_list(value: Any, *, field: str) -> list[str]:
@@ -147,6 +172,7 @@ class GymSandboxDesktopProvider:
         ready_poll_s: float = 2.0,
         vnc_guest_port: int | None = None,
         cleanup_timeout_s: float = 120.0,
+        snapshot_id: str | None = None,
     ) -> None:
         if not isinstance(sandbox_provider, Mapping) or len(sandbox_provider) != 1:
             raise ValueError("sandbox_provider must be a single-key Gym Sandbox provider config")
@@ -186,6 +212,8 @@ class GymSandboxDesktopProvider:
         self._ready_timeout_s = float(ready_timeout_s)
         self._ready_poll_s = float(ready_poll_s)
         self._cleanup_timeout_s = float(cleanup_timeout_s)
+        # The first start creates the guest from this snapshot instead of the image.
+        self._snapshot_id = snapshot_id
         self._sandbox: Sandbox | None = None
         self._forwarders: list[ThreadingHTTPServer] = []
         self._host: str | None = None
@@ -413,9 +441,10 @@ class GymSandboxDesktopProvider:
         if self._sandbox is not None:
             raise RuntimeError("OSWorld Gym Sandbox emulator is already running")
 
+        snapshot_id, self._snapshot_id = self._snapshot_id, None
         sandbox = Sandbox(self._sandbox_provider)
         try:
-            sandbox.start(self._build_spec(path_to_vm, headless=headless, os_type=os_type))
+            sandbox.start(self._build_spec(path_to_vm, headless=headless, os_type=os_type), snapshot_id=snapshot_id)
             host, ports = self._resolve_service_endpoints(sandbox)
             self._wait_for_vm_ready(sandbox, host, ports[OSWORLD_SERVER_PORT])
         except BaseException as startup_error:
@@ -473,6 +502,31 @@ class GymSandboxDesktopProvider:
             raise RuntimeError("OSWorld Gym Sandbox emulator has not started")
         host = f"[{self._host}]" if ":" in self._host else self._host
         return f"{host}:{self.server_port}:{self.chromium_port}:{self.vnc_port}:{self.vlc_port}"
+
+    def snapshot(self, *, name: str) -> str:
+        """Snapshot the running guest, memory and processes included, and return once it can start guests.
+
+        The caller owns the snapshot and deletes it with the provider's ``delete_snapshot``.
+        """
+        if self._sandbox is None:
+            raise RuntimeError("OSWorld Gym Sandbox emulator has not started")
+        if not asyncio.run(with_sandbox_provider(self._sandbox_provider, _snapshots_keep_processes)):
+            raise NotImplementedError(
+                f"Sandbox provider {self._sandbox_provider_name!r} snapshots do not keep running processes, "
+                "so a guest started from one would lose the task setup's desktop state"
+            )
+        snapshot_id = self._sandbox.snapshot(name=name)
+
+        async def wait_ready(provider: Any) -> None:
+            try:
+                await provider.wait_snapshot_ready(snapshot_id)
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await provider.delete_snapshot(snapshot_id)
+                raise
+
+        asyncio.run(with_sandbox_provider(self._sandbox_provider, wait_ready))
+        return snapshot_id
 
     def save_state(self, path_to_vm: str, snapshot_name: str) -> None:
         del path_to_vm, snapshot_name

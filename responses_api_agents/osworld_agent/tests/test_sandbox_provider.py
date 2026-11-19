@@ -24,11 +24,12 @@ class FakeSandbox:
     def __init__(self, provider: dict[str, Any]) -> None:
         self.provider = provider
         self.spec = None
+        self.snapshot_id = None
         self.stopped = 0
         FakeSandbox.instances.append(self)
 
-    def start(self, spec: Any) -> "FakeSandbox":
-        self.spec = spec
+    def start(self, spec: Any, *, snapshot_id: str | None = None) -> "FakeSandbox":
+        self.spec, self.snapshot_id = spec, snapshot_id
         return self
 
     def endpoint(self, port: int) -> SandboxEndpoint:
@@ -749,3 +750,94 @@ def test_a_logged_readiness_url_carries_no_credentials() -> None:
     assert osworld_sandbox._url_without_credentials("http://[2001:db8::1]:5000/screenshot") == (
         "http://[2001:db8::1]:5000/screenshot"
     )
+
+
+def test_only_the_first_start_uses_the_snapshot(tmp_path, monkeypatch) -> None:
+    FakeSandbox.instances.clear()
+    monkeypatch.setattr(osworld_sandbox, "Sandbox", FakeSandbox)
+    vm_path = tmp_path / "Ubuntu.qcow2"
+    vm_path.write_bytes(b"qcow2")
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}}, {"image": "osworld:fixed"}, snapshot_id="snap-1"
+    )
+    monkeypatch.setattr(provider, "_wait_for_vm_ready", lambda *_args: None)
+
+    provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
+    provider.revert_to_snapshot(str(vm_path), "init_state")
+    provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
+    provider.stop_emulator(str(vm_path))
+
+    first, second = FakeSandbox.instances
+    assert (first.snapshot_id, second.snapshot_id) == ("snap-1", None)
+    assert first.spec is not None and first.stopped == 1
+
+
+class SnapshotProvider:
+    def __init__(self, keeps: frozenset[str], *, ready_error: Exception | None = None) -> None:
+        self.keeps = keeps
+        self.ready_error = ready_error
+        self.ready: list[str] = []
+        self.deleted: list[str] = []
+
+    async def wait_snapshot_ready(self, snapshot_id: str) -> None:
+        self.ready.append(snapshot_id)
+        if self.ready_error is not None:
+            raise self.ready_error
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        self.deleted.append(snapshot_id)
+
+
+def _started_snapshot_provider(tmp_path, monkeypatch, sandbox_provider: SnapshotProvider):
+    class SnapshottingSandbox(FakeSandbox):
+        names: list[str | None] = []
+
+        def snapshot(self, *, name: str | None = None) -> str:
+            SnapshottingSandbox.names.append(name)
+            return "snap-1"
+
+    async def with_provider(_config, call):
+        return await call(sandbox_provider)
+
+    monkeypatch.setattr(osworld_sandbox, "Sandbox", SnapshottingSandbox)
+    monkeypatch.setattr(osworld_sandbox, "with_sandbox_provider", with_provider)
+    monkeypatch.setattr(
+        osworld_sandbox,
+        "provider_capabilities",
+        lambda provider: SimpleNamespace(snapshot_keeps=provider.keeps),
+    )
+    vm_path = tmp_path / "Ubuntu.qcow2"
+    vm_path.write_bytes(b"qcow2")
+    provider = osworld_sandbox.GymSandboxDesktopProvider({"docker": {}}, {"image": "osworld:fixed"})
+    monkeypatch.setattr(provider, "_wait_for_vm_ready", lambda *_args: None)
+    with pytest.raises(RuntimeError, match="has not started"):
+        provider.snapshot(name="osworld-group-a")
+    provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
+    return provider, SnapshottingSandbox.names
+
+
+def test_snapshot_returns_once_the_snapshot_is_ready(tmp_path, monkeypatch) -> None:
+    sandbox_provider = SnapshotProvider(frozenset({"files", "processes"}))
+    provider, names = _started_snapshot_provider(tmp_path, monkeypatch, sandbox_provider)
+
+    assert provider.snapshot(name="osworld-group-a") == "snap-1"
+    assert names == ["osworld-group-a"]
+    assert (sandbox_provider.ready, sandbox_provider.deleted) == (["snap-1"], [])
+
+
+def test_snapshot_refuses_a_provider_that_drops_running_processes(tmp_path, monkeypatch) -> None:
+    sandbox_provider = SnapshotProvider(frozenset({"files"}))
+    provider, names = _started_snapshot_provider(tmp_path, monkeypatch, sandbox_provider)
+
+    with pytest.raises(NotImplementedError, match="do not keep running processes"):
+        provider.snapshot(name="osworld-group-a")
+    assert names == []
+
+
+def test_a_snapshot_that_never_becomes_ready_is_deleted(tmp_path, monkeypatch) -> None:
+    sandbox_provider = SnapshotProvider(frozenset({"files", "processes"}), ready_error=TimeoutError("not ready"))
+    provider, _names = _started_snapshot_provider(tmp_path, monkeypatch, sandbox_provider)
+
+    with pytest.raises(TimeoutError, match="not ready"):
+        provider.snapshot(name="osworld-group-a")
+    assert sandbox_provider.deleted == ["snap-1"]

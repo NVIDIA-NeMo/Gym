@@ -8,12 +8,13 @@ boundary so the suite runs on a login node without OSWorld installed.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 from types import SimpleNamespace
 from typing import Any, Dict, List, Literal, Optional
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 import ray
@@ -23,6 +24,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.osworld_agent.app import (
+    OSWORLD_GROUP_SNAPSHOT_PREFIX,
     OSWorldAgent,
     OSWorldAgentConfig,
     OSWorldRunRequest,
@@ -2627,3 +2629,124 @@ def test_a_sandbox_start_failure_keeps_its_own_fields_beside_the_generic_typing(
     ).model_dump(mode="json")
     assert _failure_event(row)["operation"] == "osworld.sandbox_start"
     assert (row["failure_kind"], row["sandbox_provider"]) == ("infrastructure_error", "docker")
+
+
+def _fork_request(rollout_index: int, *, active: Optional[List[int]] = None, **extra: Any) -> OSWorldRunRequest:
+    return OSWorldRunRequest.model_validate(
+        {
+            **make_run_request(osworld_task=DEFAULT_OSWORLD_TASK).model_dump(),
+            "_ng_group_id": "group-7",
+            "_ng_group_attempt": 0,
+            "_ng_rollout_index": rollout_index,
+            "_ng_active_generation_indices": [0, 1, 2] if active is None else active,
+            **extra,
+        }
+    )
+
+
+class TestForkRolloutGroups:
+    def test_fork_requires_a_sandbox_provider(self) -> None:
+        with pytest.raises(ValueError, match="fork_rollout_groups requires sandbox_provider"):
+            OSWorldAgent(config=make_config(fork_rollout_groups=True), server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.parametrize("weights", [{"a": 0.0}, {"a": -1.0}, {"a": float("inf")}, {" ": 1.0}])
+    def test_image_weights_must_be_positive(self, weights: Dict[str, float]) -> None:
+        with pytest.raises(ValueError, match="sandbox_image_weights"):
+            make_config(sandbox_image_weights=weights)
+
+    @patch("responses_api_agents.osworld_agent.app.with_sandbox_provider")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._prepare_osworld_snapshot_remote")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_one_setup_snapshot_serves_every_rollout_of_the_group(
+        self,
+        mock_to_thread,
+        mock_run_remote,
+        mock_prepare_remote,
+        mock_get_first_server_config_dict,
+        mock_with_sandbox_provider,
+    ) -> None:
+        prepare_future, run_future = MagicMock(name="prepare"), MagicMock(name="run")
+        mock_prepare_remote.options.return_value.remote.return_value = prepare_future
+        mock_run_remote.options.return_value.remote.return_value = run_future
+        mock_to_thread.side_effect = lambda _fn, future, **_kwargs: (
+            "snap-1" if future is prepare_future else dict(DEFAULT_RUN_RESULT)
+        )
+        provider = MagicMock()
+        provider.delete_snapshot = AsyncMock()
+
+        async def with_provider(config, call):
+            assert config == {"e2b": {"create": {"template": "base"}}}
+            return await call(provider)
+
+        mock_with_sandbox_provider.side_effect = with_provider
+        server_client = make_server_client(
+            mock_get_first_server_config_dict, osworld_sandbox={"e2b": {"create": {"template": "base"}}}
+        )
+        agent = OSWorldAgent(
+            config=make_config(
+                sandbox_provider="osworld_sandbox",
+                sandbox_spec={"image": "osworld-slim"},
+                fork_rollout_groups=True,
+                fork_post_setup_settle_s=20.0,
+                sandbox_image_weights={"osworld-slim-v2": 1.0},
+            ),
+            server_client=server_client,
+        )
+
+        responses = await asyncio.gather(*(agent.run(_fork_request(index)) for index in (2, 0, 1)))
+
+        assert [response.reward for response in responses] == [1.0, 1.0, 1.0]
+        assert mock_prepare_remote.options.return_value.remote.call_count == 1
+        task_config, prepare_kwargs = mock_prepare_remote.options.return_value.remote.call_args.args
+        assert task_config["id"] == "test-task-001"
+        assert prepare_kwargs["sandbox_provider_config"] == {"e2b": {"create": {"template": "base"}}}
+        assert prepare_kwargs["sandbox_spec"]["image"] == "osworld-slim-v2"
+        assert prepare_kwargs["post_setup_settle_s"] == 20.0
+        assert prepare_kwargs["snapshot_name"].startswith(OSWORLD_GROUP_SNAPSHOT_PREFIX)
+        started_from = [
+            call_args.args[1]["sandbox_snapshot_id"]
+            for call_args in mock_run_remote.options.return_value.remote.call_args_list
+        ]
+        assert started_from == ["snap-1", "snap-1", "snap-1"]
+        provider.delete_snapshot.assert_awaited_once_with("snap-1")
+
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._prepare_osworld_snapshot_remote")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_rows_without_group_identity_start_fresh(
+        self, mock_to_thread, mock_run_remote, mock_prepare_remote, mock_get_first_server_config_dict
+    ) -> None:
+        mock_run_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+        agent = OSWorldAgent(
+            config=make_config(sandbox_provider="osworld_sandbox", fork_rollout_groups=True),
+            server_client=make_server_client(mock_get_first_server_config_dict, osworld_sandbox={"e2b": {}}),
+        )
+
+        await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        mock_prepare_remote.options.return_value.remote.assert_not_called()
+        assert "sandbox_snapshot_id" not in mock_run_remote.options.return_value.remote.call_args.args[1]
+
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._prepare_osworld_snapshot_remote")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_a_failed_group_setup_is_an_infrastructure_failure(
+        self, mock_to_thread, mock_run_remote, mock_prepare_remote, mock_get_first_server_config_dict
+    ) -> None:
+        mock_prepare_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.side_effect = RuntimeError("snapshot refused")
+        agent = OSWorldAgent(
+            config=make_config(sandbox_provider="osworld_sandbox", fork_rollout_groups=True),
+            server_client=make_server_client(mock_get_first_server_config_dict, osworld_sandbox={"e2b": {}}),
+        )
+
+        response = await agent.run(_fork_request(0, active=[0]))
+
+        assert response.verifier_metadata["osworld_termination_reason"] == "sandbox_fork_failure"
+        assert "snapshot refused" in response.verifier_metadata["osworld_error"]
+        mock_run_remote.options.return_value.remote.assert_not_called()
