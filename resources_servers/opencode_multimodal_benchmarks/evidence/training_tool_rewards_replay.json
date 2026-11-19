@@ -1,0 +1,132 @@
+{
+  "source_job": "1934156",
+  "rollouts": 12,
+  "profiles": 6,
+  "before_mean": 0.9958333333333332,
+  "after_mean": 0.9958333333333332,
+  "response_and_inputs_unchanged": true,
+  "results": [
+    {
+      "profile": "opencode_mcqa_offline",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 2
+    },
+    {
+      "profile": "opencode_mcqa_offline",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 2
+    },
+    {
+      "profile": "opencode_string_web",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 4
+    },
+    {
+      "profile": "opencode_string_web",
+      "before": 0.95,
+      "after": 0.95,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": -0.05
+      },
+      "tool_calls": 5
+    },
+    {
+      "profile": "opencode_math_offline",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 2
+    },
+    {
+      "profile": "opencode_math_offline",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 2
+    },
+    {
+      "profile": "opencode_math_web",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 4
+    },
+    {
+      "profile": "opencode_math_web",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 4
+    },
+    {
+      "profile": "opencode_mcqa_web",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 4
+    },
+    {
+      "profile": "opencode_mcqa_web",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 4
+    },
+    {
+      "profile": "opencode_string_offline",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 2
+    },
+    {
+      "profile": "opencode_string_offline",
+      "before": 1.0,
+      "after": 1.0,
+      "components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "tool_calls": 2
+    }
+  ],
+  "scope": "Replay of saved real OpenCode trajectories through the renamed wrappers; no new policy or judge calls, no benchmark score. Math uses symbolic verification.",
+  "recorded_date": "2026-11-14"
+}

@@ -60,6 +60,7 @@ gym eval resubmit             # queue a submitted benchmark again, or recover it
 gym eval aggregate            # merge sharded rollout results
 gym eval export               # export a finished run (default exporter: atif)
 gym eval status               # show saved run progress
+gym eval lustre-stats         # summarize a submitted job's Lustre metadata requests per phase
 gym eval health-check         # verify rollout artifact quality for an existing run
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
@@ -1249,6 +1250,19 @@ identities warn once and disable status reporting while collection continues. Gy
 Fresh runs clear their output stem's previous status before initializing the tracker. Manifest-backed runs
 retain strict validation. Resume loading retains compact identities rather than full input payloads,
 and general-run progress counters update incrementally as results arrive.
+
+### `gym eval lustre-stats`
+
+Summarize the Lustre metadata requests of a job whose Slurm compute sets `lustre_md_stats: true`. Pass the
+benchmark directory, which reads every `logs/lustre-md-stats-<slurm job id>.tsv` in it, or one such file:
+
+```bash
+gym eval lustre-stats <job.output_path>/<gym job id>/<benchmark>
+gym eval lustre-stats <benchmark dir>/logs/lustre-md-stats-123456.tsv --json
+```
+
+It prints one table per Slurm job, with a row per phase interval. `--json` prints a mapping from each file to its
+report. See [Lustre Metadata Load](/orchestration/how-to/lustre-metadata-stats).
 
 ### `gym eval health-check`
 

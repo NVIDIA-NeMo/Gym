@@ -88,7 +88,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
     SandboxProvider,
@@ -363,10 +363,6 @@ class _SnapshotIndex:
             yield
         finally:
             os.close(descriptor)
-
-
-# How long one sandbox stop may take. A stop that hangs must not hold up a shutdown or the stops behind it.
-STOP_TIMEOUT_S = 120.0
 
 
 @dataclass
@@ -850,9 +846,10 @@ class SandboxSessionCheckpointer:
             return
         sandbox_id = state.descriptor.get("sandbox_id")
         try:
-            async with self._semaphore, asyncio.timeout(STOP_TIMEOUT_S):
-                old = await AsyncSandbox.connect(state.descriptor, provider=self._provider, owns_provider=False)
-                await old.stop()
+            async with self._semaphore:
+                async with asyncio.timeout(STOP_TIMEOUT_S):
+                    old = await AsyncSandbox.connect(state.descriptor, provider=self._provider, owns_provider=False)
+                await old.stop(timeout_s=STOP_TIMEOUT_S)
         except Exception as error:
             # Already gone (ended by its lifetime), or unreachable: its lifetime ends it.
             LOGGER.info("superseded sandbox %s of %s was not stopped: %r", sandbox_id, key, error)
@@ -971,9 +968,9 @@ class SandboxSessionCheckpointer:
         self._entries.pop(key, None)
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
-        # The time limit starts once the stop has its turn, so a stop that waits behind others is not cut short.
-        async with self._semaphore, asyncio.timeout(STOP_TIMEOUT_S):
-            await sandbox.stop()
+        # The stop's own limit starts once it has its turn, so a stop that waits behind others is not cut short.
+        async with self._semaphore:
+            await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
 
     def _provider_name(self) -> str:
         return getattr(self._provider, "name", type(self._provider).__name__)

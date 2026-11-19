@@ -108,6 +108,7 @@ A mapping with exactly one entry; its key is a name you choose (the examples use
 | `forward_env` | `[]` | Environment variable names to forward from the submitting shell to `sbatch`. Missing variables fail submission before staging. Values are sent over SSH stdin and are not stored in job artifacts. |
 | `node_pools` | `{}` | Named groups of nodes. See below. |
 | `extra_args` | `{}` | Extra job-level `#SBATCH` directives, written without leading dashes: `{comment: my-run}` becomes `#SBATCH --comment=my-run`. |
+| `lustre_md_stats` | `false` | When `true`, each benchmark's job records every node's Lustre metadata request counters at four points of the job, in `logs/lustre-md-stats-<slurm job id>.tsv`. Read it with `gym eval lustre-stats`. See [Lustre Metadata Load](/orchestration/how-to/lustre-metadata-stats). |
 
 Use `forward_env` with `runtime:` for credentials needed by a remote job:
 
