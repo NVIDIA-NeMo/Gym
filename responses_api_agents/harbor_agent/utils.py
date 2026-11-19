@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from nemo_gym.core import (
@@ -31,6 +33,9 @@ from nemo_gym.core import (
 # Harbor's verifier raises these when uploading the tests to the sandbox, or downloading the verifier's output from
 # it, fails; the verifier then reports no result.
 VERIFIER_SETUP_EXCEPTIONS = frozenset({"AddTestsDirError", "DownloadVerifierDirError"})
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -331,7 +336,8 @@ class HarborAgentUtils:
            Uses ``NeMoGymResponseOutputMessageForTraining`` when the step
            carries token IDs / logprobs, otherwise ``NeMoGymResponseOutputMessage``.
         2. One **function_call** item per tool call the agent made.
-        3. One **function_call_output** item per observation result.
+        3. One **function_call_output** item per observation result of a call;
+           a result with no matching call becomes a **user message**.
 
         When the trajectory was produced with ``raw_content=true`` (no
         ``tool_calls`` on agent steps), function calls are parsed from the
@@ -418,13 +424,18 @@ class HarborAgentUtils:
 
             # --- Observation / function call outputs ---
             for i, result in enumerate(results):
-                call_id = (
-                    tool_calls[i].get("tool_call_id", f"call_{uuid4().hex[:8]}")
-                    if i < len(tool_calls)
-                    else f"call_{uuid4().hex[:8]}"
-                )
+                if i >= len(tool_calls):
+                    # Terminus-2 sends terminal output after a turn with no commands: it is the next
+                    # user turn, not a result of any call.
+                    content = result.get("content", "")
+                    output_items.append(
+                        NeMoGymEasyInputMessage(
+                            role="user", content=content if isinstance(content, str) else json.dumps(content)
+                        ).model_dump()
+                    )
+                    continue
                 fco = NeMoGymFunctionCallOutput(
-                    call_id=call_id,
+                    call_id=tool_calls[i].get("tool_call_id", f"call_{uuid4().hex[:8]}"),
                     output=result.get("content", ""),
                     type="function_call_output",
                     id=f"fco_{uuid4().hex[:8]}",
@@ -435,6 +446,69 @@ class HarborAgentUtils:
             agent_step_index += 1
 
         return output_items
+
+    @staticmethod
+    def read_trajectory_segments(agent_dir: Path) -> List[Dict[str, Any]]:
+        """A trial's ATIF segments in order: ``trajectory.json``, then each continuation it names.
+
+        Harbor writes a new segment (``trajectory.cont-N.json``) after a context compaction and links it from the
+        previous one through ``continued_trajectory_ref``. The chain stops, with a warning, at a cycle, at a file
+        that is missing, unreadable or outside ``agent_dir``, so the segments read so far are kept. No
+        ``trajectory.json`` gives no segments.
+        """
+        segments: List[Dict[str, Any]] = []
+        root = agent_dir.resolve()
+        path = agent_dir / "trajectory.json"
+        visited: set[Path] = set()
+        while path.is_file():
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root):
+                logger.warning("ATIF segment %s is outside the trial directory", path)
+                break
+            if resolved in visited:
+                logger.warning(
+                    "Cycle in the continued_trajectory_ref chain at %s; keeping the segments before it", path
+                )
+                break
+            visited.add(resolved)
+            try:
+                segment = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Cannot read the ATIF segment %s (%s); keeping the segments before it", path, exc)
+                break
+            if not isinstance(segment, dict):
+                logger.warning("The ATIF segment %s is not an object; keeping the segments before it", path)
+                break
+            segments.append(segment)
+            ref = segment.get("continued_trajectory_ref")
+            if not ref:
+                break
+            path = agent_dir / str(ref)
+            if not path.resolve().is_relative_to(root) or not path.is_file():
+                logger.warning(
+                    "continued_trajectory_ref %r in %s names no file in %s; keeping the segments before it",
+                    ref,
+                    resolved.name,
+                    agent_dir,
+                )
+                break
+        return segments
+
+    @staticmethod
+    def segments_to_responses(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """Output items of every segment in order, and the id of the first item of each continuation segment.
+
+        The ids mark where Harbor started a new context, so a reader can judge or show the trial segment by
+        segment. A continuation without agent steps adds no items and no id.
+        """
+        output_items: List[Dict[str, Any]] = []
+        continuation_first_item_ids: List[str] = []
+        for number, segment in enumerate(segments):
+            items = HarborAgentUtils.trajectory_to_responses(segment)
+            if number > 0 and items:
+                continuation_first_item_ids.append(items[0]["id"])
+            output_items.extend(items)
+        return output_items, continuation_first_item_ids
 
     # ------------------------------------------------------------------ #
     #  Main entry point — trial result → NeMo Gym output items            #

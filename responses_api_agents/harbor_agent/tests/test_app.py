@@ -25,6 +25,7 @@ import pytest
 
 from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.core import ModelCallSampling, NeMoGymResponseCreateParamsNonStreaming, encode_model_sampling
+from nemo_gym.trajectory import transcript_to_atif
 from responses_api_agents.harbor_agent.app import (
     HarborAgent,
     HarborAgentConfig,
@@ -966,3 +967,140 @@ def test_startup_logs_the_deprecation_notice(caplog) -> None:
     # Users of the built-in benchmarks did not pick this agent, so the notice says no action is needed yet.
     assert "no action is needed" in notice
     assert server.sem is not None
+
+
+# ===========================================================================
+#  Continuation segments (trajectory.cont-N.json)
+# ===========================================================================
+
+
+def _continuation(name: str, message: str, next_ref: Optional[str] = None) -> Dict[str, Any]:
+    segment = _make_trajectory(
+        steps=[_make_step_user(1, "Summary of the context so far."), _make_step_agent(2, message)],
+        session_id=name,
+    )
+    if next_ref is not None:
+        segment["continued_trajectory_ref"] = next_ref
+    return segment
+
+
+def _write_chain(agent_dir: Path, *segments: tuple[str, Dict[str, Any]]) -> None:
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    for name, segment in segments:
+        (agent_dir / name).write_text(json.dumps(segment))
+
+
+class TestTrajectorySegments:
+    def test_the_chain_is_read_in_order(self, tmp_path):
+        first = {**DEFAULT_TRAJECTORY, "continued_trajectory_ref": "trajectory.cont-1.json"}
+        cont_1 = _continuation("c1", "Second context.", "trajectory.cont-2.json")
+        cont_2 = _continuation("c2", "Third context.")
+        _write_chain(
+            tmp_path,
+            ("trajectory.json", first),
+            ("trajectory.cont-1.json", cont_1),
+            ("trajectory.cont-2.json", cont_2),
+        )
+
+        assert HarborAgentUtils.read_trajectory_segments(tmp_path) == [first, cont_1, cont_2]
+
+    def test_no_trajectory_gives_no_segments(self, tmp_path):
+        assert HarborAgentUtils.read_trajectory_segments(tmp_path) == []
+
+    @pytest.mark.parametrize("ref", ["trajectory.cont-9.json", "../outside.json", "trajectory.json"])
+    def test_a_missing_outside_or_cyclic_ref_keeps_the_segments_before_it(self, tmp_path, ref):
+        (tmp_path / "outside.json").write_text(json.dumps(_continuation("x", "Not this trial's.")))
+        first = {**DEFAULT_TRAJECTORY, "continued_trajectory_ref": ref}
+        _write_chain(tmp_path / "agent", ("trajectory.json", first))
+
+        assert HarborAgentUtils.read_trajectory_segments(tmp_path / "agent") == [first]
+
+    def test_initial_segment_must_be_inside_the_trial_directory(self, tmp_path):
+        agent = tmp_path / "agent"
+        agent.mkdir()
+        outside = tmp_path / "unrelated.json"
+        outside.write_text(json.dumps(DEFAULT_TRAJECTORY))
+        (agent / "trajectory.json").symlink_to(outside)
+        assert HarborAgentUtils.read_trajectory_segments(agent) == []
+
+    def test_each_continuation_adds_its_items_and_marks_its_first_one(self):
+        empty = _make_trajectory(steps=[_make_step_user(1, "Summary only.")], session_id="empty")
+        segments = [DEFAULT_TRAJECTORY, _continuation("c1", "Second context."), empty]
+
+        items, first_ids = HarborAgentUtils.segments_to_responses(segments)
+
+        first_segment = HarborAgentUtils.trajectory_to_responses(DEFAULT_TRAJECTORY)
+        second_segment = HarborAgentUtils.trajectory_to_responses(segments[1])
+        assert len(items) == len(first_segment) + len(second_segment)
+        assert first_ids == [items[len(first_segment)]["id"]]
+        assert items[len(first_segment)]["content"][0]["text"] == "Second context."
+
+    def test_terminal_output_after_a_turn_without_commands_is_a_user_turn(self):
+        # The shape of Harbor's golden terminus_2 linear-history continuation: commands=[] plus terminal output.
+        idle = _make_step_agent(
+            2, _raw_msg("Waiting.", "Check again.", commands=[]), observation_content="New Terminal Output:\n$ "
+        )
+        segment = _make_trajectory(steps=[_USER_STEP, idle])
+        segment["steps"][1].pop("tool_calls", None)
+
+        items = HarborAgentUtils.trajectory_to_responses(segment)
+
+        assert [(item["type"], item.get("role")) for item in items] == [("message", "assistant"), ("message", "user")]
+        assert items[1]["content"] == "New Terminal Output:\n$ "
+        atif = transcript_to_atif(
+            [{"role": "user", "content": _USER_STEP["message"]}],
+            items,
+            session_id="s",
+            agent_name="terminus-2",
+            agent_version="0",
+        )
+        assert atif.steps[-1].observation.results[0].content == "New Terminal Output:\n$ "
+
+
+class TestContinuationRun:
+    async def test_run_keeps_every_segment_and_records_each_boundary(self, tmp_path):
+        trial_dir = tmp_path / "trial"
+        trial_dir.mkdir()
+        (trial_dir / "result.json").write_text(json.dumps(DEFAULT_TRIAL_RESULT))
+        first = {**DEFAULT_TRAJECTORY, "continued_trajectory_ref": "trajectory.cont-1.json"}
+        last = _continuation("c1", "Second context.")
+        last["final_metrics"] = {
+            "total_prompt_tokens": 7802,
+            "total_completion_tokens": 1030,
+            "total_cached_tokens": 0,
+        }
+        _write_chain(
+            trial_dir / "agent",
+            ("trajectory.json", first),
+            ("trajectory.cont-1.json", last),
+        )
+        server = _make_server(harbor_ray_task_num_cpus=None)
+        with (
+            patch("responses_api_agents.harbor_agent.app.get_global_config_dict", return_value=_GLOBAL_CONFIG),
+            patch("responses_api_agents.harbor_agent.app.runner_ray_remote") as runner,
+            patch.object(HarborAgent, "_get_results_output_dir", return_value=tmp_path / "results"),
+        ):
+            runner.remote = AsyncMock(return_value=str(trial_dir))
+            response = await server.run(_make_run_request())
+
+        output = response.response.output
+        texts = [item.content[0].text for item in output if getattr(item, "role", None) == "assistant"]
+        assert texts[-1] == "Second context."
+        [record] = response.ng_agent_observations.records
+        assert record.kind == "context_compaction" and record.trigger == "harbor_continuation"
+        assert record.invocation_id == "test-session"
+        assert record.first_kept_item_id == next(
+            item.id
+            for item in output
+            if getattr(item, "role", None) == "assistant" and item.content[0].text == "Second context."
+        )
+        assert [message.content for message in response.responses_create_params.input] == [_USER_STEP["message"]]
+        assert (response.response.usage.input_tokens, response.response.usage.output_tokens) == (7802, 1030)
+
+    async def test_a_trial_without_continuations_has_no_observations(self):
+        server = _make_server()
+        with _harbor_run_mocks(trajectory=DEFAULT_TRAJECTORY):
+            response = await server.run(_make_run_request())
+
+        assert response.ng_agent_observations is None
+        assert "ng_agent_observations" not in response.model_dump()
