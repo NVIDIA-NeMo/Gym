@@ -393,7 +393,7 @@ def test_run_returns_the_call_log_revision_and_sampling(monkeypatch: pytest.Monk
     assert result.harness_revision == {
         "name": "arc-agi-3-benchmarking",
         "repository": "https://github.com/arcprize/arc-agi-3-benchmarking",
-        "commit": "27f3d03de3f2f6fa1b8c1e01cd7a9d7d77e830f0",
+        "commit": "27f3d03de3f2f6fa1b8c1e01cd7a9d7d77e830f0",  # pragma: allowlist secret
     }
     shipped = shipped_benchmark_config("provider")["request"]
     assert result.sampling["reasoning_effort"] == "max" and "model" not in result.sampling
@@ -507,7 +507,7 @@ def test_worker_tells_which_action_budget_fired() -> None:
 def test_manifest_pins_the_commit_and_license() -> None:
     manifest = load_manifest()
     provenance = manifest["provenance"]
-    assert provenance["commit"] == "27f3d03de3f2f6fa1b8c1e01cd7a9d7d77e830f0"
+    assert provenance["commit"] == "27f3d03de3f2f6fa1b8c1e01cd7a9d7d77e830f0"  # pragma: allowlist secret
     assert provenance["license"] == "MIT" and provenance["repository"].endswith("arcprize/arc-agi-3-benchmarking")
     assert "benchmarking/agent.py" in manifest["files"] and "LICENSE" in manifest["files"]
 

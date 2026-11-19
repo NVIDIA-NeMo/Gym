@@ -160,7 +160,7 @@ def test_run_sends_record_to_verifier(monkeypatch: pytest.MonkeyPatch, tmp_path:
         "name": "arc3-kaggle-kit",
         "kaggle_harness_dataset": "eladsarafian/arc3-c237-j30vfh-20261102-harness version 1",
         "kaggle_config_dataset": "eladsarafian/arc3-c237-j30vfh-20261102-config version 1",
-        "source_commit": "30d2cc8bb582c4126e1020d084a94468a057dea7",
+        "source_commit": "30d2cc8bb582c4126e1020d084a94468a057dea7",  # pragma: allowlist secret
     }
     assert result.sampling["temperature"] == 0.7 and result.sampling["top_k"] == 20
     assert result.sampling["max_output_tokens"] == 12288 and result.sampling["top_p"] is None
@@ -337,7 +337,7 @@ def test_requires_context_error_passthrough(monkeypatch: pytest.MonkeyPatch, tmp
 def test_redact() -> None:
     config = {
         "api_key": "sk-123",  # pragma: allowlist secret
-        "base_url": ["http://user:pw@host:8000/v1?token=abc&x=1"],
+        "base_url": ["http://user:pw@host:8000/v1?token=abc&x=1"],  # pragma: allowlist secret
         "nested": {"Authorization": "Bearer t", "hf_token": "", "ok": 3, "max_tokens": 9, "thinking_token_budget": 8},
         "other": object,
     }
