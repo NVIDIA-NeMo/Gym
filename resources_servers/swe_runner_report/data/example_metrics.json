@@ -1,0 +1,102 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/swe_runner_report/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 197.2,
+        "Min": 90.0,
+        "Max": 287.0,
+        "Standard deviation": 90.09
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "instance_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "language": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "workdir": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "image_ref": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "patch": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "test_patch": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "problem_statement": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "test_argv": {
+        "unique_count": 5,
+        "total_count": 25
+    },
+    "results_format": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "spec_files": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "source_prefixes": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "source_suffixes": {
+        "unique_count": 3,
+        "total_count": 15
+    },
+    "test_timeout_s": {
+        "Total # non-null values": 5,
+        "Average": 1200.0,
+        "Min": 1200.0,
+        "Max": 1200.0,
+        "Standard deviation": 0.0
+    },
+    "FAIL_TO_PASS": {
+        "unique_count": 24,
+        "total_count": 24
+    },
+    "PASS_TO_PASS": {
+        "unique_count": 329,
+        "total_count": 329
+    }
+}

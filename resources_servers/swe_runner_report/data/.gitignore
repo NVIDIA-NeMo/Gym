@@ -1,0 +1,4 @@
+# Training rows are supplied by the training recipe; only the public example fixtures are committed.
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl

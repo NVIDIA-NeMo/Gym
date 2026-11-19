@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Wires the OpenCode sandboxed agent to swe_runner_report_resources_server for training. Rows come from the training
+# recipe's own data (one row per task; see the README for the row fields), so no dataset is listed here.
+#
+#   gym env start --config resources_servers/swe_runner_report/configs/swe_runner_report_opencode.yaml
+
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/swe_runner_report/configs/swe_runner_report_legacy_agent.yaml
+
+swe_runner_report_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: swe_runner_report_resources_server
+      datasets: []
+
+swe_runner_report_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_runner_report_opencode_sandboxed_agent
