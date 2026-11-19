@@ -47,6 +47,7 @@ class HarborGeneBenchTask:
     source: GeneBenchTask
     docker_image: str
     template_dir: Path = Path(__file__).parent / "task-template"
+    data_path_prefix: str | None = field(default=None, kw_only=True)
 
     @property
     def id(self) -> str:
@@ -55,8 +56,8 @@ class HarborGeneBenchTask:
     def instruction(self, *, skip_data: bool = False) -> str:
         """Return the prompt with the input location and submission contract."""
         data_path = (
-            f"/mnt/s3-data/nemotron-life-science/harbor-data/genebench_pro/{self.id}/environment/data_files/"
-            if skip_data
+            f"{Path(self.data_path_prefix) / self.id / 'environment/data_files'}/"
+            if skip_data and self.data_path_prefix
             else "/app/data_files/"
         )
         return (
@@ -83,6 +84,8 @@ class HarborGeneBenchTask:
         task_dir = output_dir / self.id
         if task_dir.exists():
             if not force and self._is_complete(output_dir, skip_data=skip_data):
+                if skip_data:
+                    (task_dir / "instruction.md").write_text(self.instruction(skip_data=True))
                 return task_dir
             shutil.rmtree(task_dir)
 
@@ -141,6 +144,9 @@ class HarborGeneBench:
     skip_data: bool = False
     """Omit input files and environment/; supply data separately at the path in the instruction."""
 
+    data_path_prefix: str | None = None
+    """Root containing <task-id>/environment/data_files when skip_data is enabled; None uses /app/data_files/."""
+
     _data_repo_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -166,7 +172,9 @@ class HarborGeneBench:
             source_tasks = self._remote_tasks(islice(config_paths, self.limit))
 
         for source_task in islice(source_tasks, self.limit):
-            task = HarborGeneBenchTask(source=source_task, docker_image=self.docker_image)
+            task = HarborGeneBenchTask(
+                source=source_task, docker_image=self.docker_image, data_path_prefix=self.data_path_prefix
+            )
             if self._data_repo_id is not None and (
                 self.overwrite or not task._is_complete(Path(self.output_dir), skip_data=self.skip_data)
             ):
@@ -217,6 +225,7 @@ def prepare(
     limit: int | None = None,
     overwrite: bool = False,
     skip_data: bool = False,
+    data_path_prefix: str | None = None,
 ) -> Path:
     """Prepare Harbor task folders and return their output directory."""
     benchmark = HarborGeneBench(
@@ -226,6 +235,7 @@ def prepare(
         limit=limit,
         overwrite=overwrite,
         skip_data=skip_data,
+        data_path_prefix=data_path_prefix,
     )
     benchmark.write()
     return Path(benchmark.output_dir)

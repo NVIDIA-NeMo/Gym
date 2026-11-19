@@ -37,8 +37,9 @@ without downloading their inputs again. Remote preparation lists problem configs
 selected config, the shared grader and license, and the selected task's listed input files.
 
 Add `--skip-data` when inputs are supplied separately by the sandbox provider. This skips downloading
-and copying task input files and omits the entire `environment/` directory. Instructions point to
-`/mnt/s3-data/nemotron-life-science/harbor-data/genebench_pro/genebench-pro__<eval_id>/environment/data_files/`.
+and copying task input files and omits the entire `environment/` directory. Pass `--data-path-prefix /var/data`
+to point instructions to `/var/data/genebench-pro__<eval_id>/environment/data_files/`. Without a prefix,
+instructions point to `/app/data_files/`.
 Switching data modes rebuilds affected folders. Required inputs must be available before evaluation;
 `--limit` does not remove previously generated tasks.
 
