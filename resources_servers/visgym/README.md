@@ -355,9 +355,9 @@ when the pinned VisGym dependency is installed and otherwise reports a skip.
   support claims.
 - Asset-backed tasks require their provider dependencies and data. No alternate
   renderer or shaping protocol is enabled implicitly.
-- The manifest workload passes its verifier/publication checks. Legacy server CI
-  still requests five saved rollout rows; CONTRIBUTING documents this routing
-  mismatch and asks contributors not to duplicate artifacts just for that check.
+- Server CI validates the manifest workload and its committed verifier fixtures.
+  The component uses that manifest contract rather than legacy example metrics
+  or saved rollout files; the example task inputs remain available.
 - The combined NeMo-RL learner smoke still requires execution on the target GPU
   cluster before this integration is training-ready.
 - VisGym is a pinned external source dependency, not a bundled wheel. It retains

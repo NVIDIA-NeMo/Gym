@@ -12,10 +12,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
+from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
     DatasetConfig,
@@ -23,9 +25,15 @@ from nemo_gym.config import (
     ResponsesAPIAgentServerTypeConfig,
     visit_resources_server,
 )
-from nemo_gym.core import failure_kinds
+from nemo_gym.core import EpisodeId, TaskId, failure_kinds
 from nemo_gym.data import normalize_task_fields
-from nemo_gym.server_runtime import base_server
+from nemo_gym.server_runtime import (
+    ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
+    ResourcesSessionLostError,
+    base_server,
+    check_resources_session_contract,
+)
 from resources_servers.critpt_custom_grader import app as adapter
 from resources_servers.critpt_custom_grader import task_data as task_schema
 from resources_servers.critpt_custom_grader.execution import (
@@ -206,7 +214,7 @@ def make_server():
     return make
 
 
-async def post(app, path, value=None, *, raw=None):
+async def post(app, path, value=None, *, raw=None, request_headers=(), response_headers=None):
     """Exercise the ASGI parser/router/serializer without an HTTP client or sockets."""
     body = raw if raw is not None else json.dumps(value, allow_nan=False).encode()
     incoming = asyncio.Queue()
@@ -227,16 +235,415 @@ async def post(app, path, value=None, *, raw=None):
             "raw_path": path.encode(),
             "root_path": "",
             "query_string": b"",
-            "headers": [(b"content-type", b"application/json")],
+            "headers": [(b"content-type", b"application/json"), *request_headers],
             "client": ("in-memory", 1),
             "server": ("in-memory", 80),
         },
         incoming.get,
         send,
     )
-    status = next(message["status"] for message in messages if message["type"] == "http.response.start")
+    started = next(message for message in messages if message["type"] == "http.response.start")
+    status = started["status"]
+    if response_headers is not None:
+        response_headers.extend(started.get("headers", []))
     output = b"".join(message.get("body", b"") for message in messages if message["type"] == "http.response.body")
     return status, json.loads(output)
+
+
+def agentic_payload(answer=SOURCE, acknowledgement=None):
+    """A synthetic saved tool trajectory; no model or code execution."""
+    request = payload()
+    request["responses_create_params"]["tools"] = [
+        {"type": "function", "name": "finish", "parameters": {"type": "object"}, "strict": True}
+    ]
+    request["response"]["output"].append(
+        {
+            "type": "function_call",
+            "name": "finish",
+            "call_id": "finish-1",
+            "arguments": json.dumps({"reason": "done", "derivation": "synthetic identity", "answer": answer}),
+        }
+    )
+    if acknowledgement is not None:
+        request["response"]["output"].append(
+            {"type": "function_call_output", "call_id": "finish-1", "output": acknowledgement}
+        )
+    return request
+
+
+@pytest.mark.asyncio
+async def test_finish_mode_grades_only_acknowledged_submission(make_server):
+    _, app, fake = make_server(answer_source="finish_tool")
+    submitted = "def solve(value):\n    return value + 2\n"
+    status, acknowledgement = await post(
+        app, "/finish", {"reason": "done", "derivation": "synthetic", "answer": submitted}
+    )
+    assert status == 200
+    request = agentic_payload(submitted, acknowledgement)
+    status, result = await post(app, "/verify", request)
+    assert status == 200 and result["scored"] is True and result["reward"] == 1.0
+    assert fake.grade.await_args.args[1] == submitted.strip()
+
+
+@pytest.mark.asyncio
+async def test_finish_mode_completed_without_acknowledgement_scores_zero(make_server):
+    _, app, fake = make_server(answer_source="finish_tool")
+    status, result = await post(app, "/verify", agentic_payload())
+    assert status == 200
+    assert result["scored"] is True and result["reward"] == 0 and result["mask_sample"] is False
+    assert result["category"] == "candidate_no_answer"
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finish_mode_explicit_content_filter_scores_zero_without_masking(make_server):
+    _, app, fake = make_server(answer_source="finish_tool")
+    request = agentic_payload()
+    request["response"]["status"] = "incomplete"
+    request["response"]["incomplete_details"] = {"reason": "content_filter"}
+    status, result = await post(app, "/verify", request)
+    assert status == 200
+    assert result["scored"] is True and result["reward"] == 0 and result["mask_sample"] is False
+    assert result["category"] == "candidate_no_answer"
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finish_mode_failed_compaction_scores_zero_without_regeneration(make_server):
+    # The response of an episode the agent ended because every context-compaction summary was unusable.
+    _, app, fake = make_server(answer_source="finish_tool")
+    request = agentic_payload()
+    outcome = AgentOutcome(failure_kind=failure_kinds.AGENT_INVALID_OUTPUT)
+    request["response"]["status"] = "failed"
+    request["response"]["metadata"] = {
+        AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(),
+        "stop_reason": "compaction_failed",
+    }
+    status, result = await post(app, "/verify", request)
+    assert status == 200
+    assert result["scored"] is True and result["reward"] == 0 and result["mask_sample"] is False
+    assert result["category"] == "candidate_no_answer"
+    assert result["response"] == request["response"]
+    assert not any(key.startswith("_ng_failure_") for key in result)
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "condition,category,scored",
+    [
+        ("exhausted", "candidate_no_answer", True),
+        ("transport_error", "response_incomplete", False),
+        ("provider_error", "response_incomplete", False),
+        ("request_error", "response_incomplete", False),
+        ("response_error", "response_incomplete", False),
+        ("cancelled", "response_incomplete", False),
+        ("wall_time", "response_incomplete", False),
+        ("invalid_outcome", "submission_invalid", False),
+        ("acknowledged_finish", "submission_invalid", False),
+    ],
+)
+async def test_finish_token_limit_preserves_termination_evidence(make_server, condition, category, scored):
+    _, app, fake = make_server(answer_source="finish_tool")
+    acknowledgement = None
+    if condition == "acknowledged_finish":
+        status, acknowledgement = await post(
+            app, "/finish", {"reason": "done", "derivation": "synthetic", "answer": SOURCE}
+        )
+        assert status == 200
+    row = agentic_payload(acknowledgement=acknowledgement)
+    response = row["response"]
+    response["status"] = "incomplete"
+    response["incomplete_details"] = {"reason": "max_output_tokens"}
+    if condition in ("transport_error", "provider_error", "request_error"):
+        kind = {
+            "transport_error": failure_kinds.MODEL_TRANSPORT_ERROR,
+            "provider_error": failure_kinds.PROVIDER_UNAVAILABLE,
+            "request_error": failure_kinds.MODEL_REQUEST_ERROR,
+        }[condition]
+        outcome = AgentOutcome(failure_kind=kind, status_code=400 if condition == "request_error" else None)
+        response["metadata"] = {AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json()}
+    elif condition == "response_error":
+        response["error"] = {"code": "server_error", "message": "synthetic"}
+    elif condition in ("cancelled", "wall_time"):
+        response["metadata"] = {"stop_reason": condition}
+    elif condition == "invalid_outcome":
+        response["metadata"] = {AGENT_OUTCOME_METADATA_KEY: "{"}
+    status, result = await post(app, "/verify", row)
+    assert status == 200
+    assert result["reward"] == 0.0 and result["scored"] is scored
+    assert result["mask_sample"] is (not scored)
+    assert result["category"] == category
+    assert result["response"] == response
+    assert ("_ng_failure_class" in result) is (not scored)
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{}, {"reason": "done", "derivation": "x", "answer": 123}])
+async def test_finish_rejection_has_sanitized_stirrup_compatible_detail(make_server, body):
+    _, app, fake = make_server(answer_source="finish_tool")
+    status, result = await post(app, "/finish", body)
+    assert status == 422 and result == {"detail": "invalid_finish"}
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finish_tools_not_registered_in_default_mode(make_server):
+    _, app, fake = make_server()
+    status, _ = await post(app, "/finish", {"reason": "done", "derivation": "x", "answer": SOURCE})
+    assert status == 404
+    fake.grade.assert_not_awaited()
+
+
+def test_several_workers_are_refused_only_with_execution_sandboxes(make_server):
+    for overrides in ({}, {"answer_source": "finish_tool"}):
+        server, _, _ = make_server(num_workers=2, **overrides)
+        base_server.refuse_unsupported_num_workers(server)
+    execution = {
+        "sandbox_provider": {"docker": {"create": {"network": "none"}}},
+        "sandbox_spec": {"image": "example/execution:test"},
+    }
+    server, _, _ = make_server(answer_source="finish_tool", agentic_execution=execution)
+    base_server.refuse_unsupported_num_workers(server)
+    server, _, _ = make_server(answer_source="finish_tool", agentic_execution=execution, num_workers=2)
+    with pytest.raises(ValueError, match="num_workers=1: execution sandboxes"):
+        base_server.refuse_unsupported_num_workers(server)
+
+
+@pytest.mark.parametrize("overrides", [{}, {"answer_source": "finish_tool"}], ids=["output_text", "finish_tool"])
+def test_sessions_without_execution_sandboxes_follow_the_resources_session_contract(make_server, overrides):
+    _, app, fake = make_server(**overrides)
+    seed = ResourcesSeedSessionRequest(
+        resources_session_id="contract-session",
+        episode_id=EpisodeId(rollout_id="synthetic-rollout"),
+        task_id=TaskId(taskset="synthetic", task_id="synthetic-1"),
+        task_data=task_fields(),
+    )
+    check_resources_session_contract(app, seed, keeps_state=False)
+    fake.grade.assert_not_awaited()
+
+
+def episode_seed_payload():
+    return {
+        "resources_session_id": "synthetic-session",
+        "episode_id": {"rollout_id": "synthetic-rollout"},
+        "task_id": {"taskset": "synthetic", "task_id": "synthetic-1"},
+        "task_data": task_fields(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_agentic_seed_validates_task_before_creating_the_execution_sandbox(make_server):
+    server, app, _ = make_server(answer_source="finish_tool")
+    sessions = MagicMock()
+    sessions.seed = AsyncMock(
+        return_value=adapter.ResourcesSeedSessionResponse(resources_session_id="synthetic-session")
+    )
+    server._agentic_sessions = sessions
+    request = episode_seed_payload()
+    status, result = await post(app, "/seed_session", request)
+    assert status == 200 and result["resources_session_id"] == "synthetic-session"
+    assert sessions.seed.await_args.args[0].task_data == task_fields()
+    request["task_data"]["entrypoint"] = "not an identifier"
+    status, result = await post(app, "/seed_session", request)
+    assert status == 422 and result == {"error": {"category": "task_invalid"}}
+    assert sessions.seed.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_agentic_seed_requires_an_episode_seed(make_server):
+    server, app, _ = make_server(answer_source="finish_tool")
+    sessions = MagicMock()
+    sessions.seed = AsyncMock()
+    server._agentic_sessions = sessions
+    request = payload()
+    request.pop("response")
+    status, result = await post(app, "/seed_session", request)
+    assert status == 422 and result == {"error": {"category": "session_identity_required"}}
+    sessions.seed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agentic_seed_cookie_identifies_the_episode_resources_session(make_server):
+    server, app, _ = make_server(
+        answer_source="finish_tool",
+        agentic_execution={
+            "sandbox_provider": {"docker": {"create": {"network": "none"}}},
+            "sandbox_spec": {"image": "example/execution:test"},
+        },
+    )
+    sessions = MagicMock()
+    sessions.seed = AsyncMock(
+        return_value=adapter.ResourcesSeedSessionResponse(resources_session_id="synthetic-session")
+    )
+    sessions.execute = AsyncMock(side_effect=lambda session_id, cmd: f"{session_id}:{cmd}")
+    server._agentic_sessions = sessions
+    headers = []
+    status, _ = await post(app, "/seed_session", episode_seed_payload(), response_headers=headers)
+    assert status == 200
+    cookie = b"; ".join(value.split(b";", 1)[0] for name, value in headers if name.lower() == b"set-cookie")
+    assert cookie
+    status, result = await post(app, "/code_exec", {"cmd": "printf synthetic"}, request_headers=[(b"cookie", cookie)])
+    assert status == 200 and result == "synthetic-session:printf synthetic"
+    assert sessions.execute.await_args.args == ("synthetic-session", "printf synthetic")
+
+
+def agentic_server(make_server):
+    """A server configured with agentic_execution. Startup has not run, so `_agentic_sessions` is still unset."""
+    server, app, _ = make_server(
+        answer_source="finish_tool",
+        agentic_execution={
+            "sandbox_provider": {"docker": {"create": {"network": "none"}}},
+            "sandbox_spec": {"image": "example/execution:test"},
+        },
+    )
+    return server, app
+
+
+async def seeded_cookie(app):
+    """Seed the episode's resources session through the route and return the cookie its reply sets."""
+    headers = []
+    status, _ = await post(app, "/seed_session", episode_seed_payload(), response_headers=headers)
+    assert status == 200
+    return b"; ".join(value.split(b";", 1)[0] for name, value in headers if name.lower() == b"set-cookie")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure,refusal",
+    [
+        (ResourcesSessionConflictError("synthetic conflict"), (409, {"error": {"category": "session_conflict"}})),
+        (RuntimeError("synthetic provider failure"), (503, {"error": {"category": "execution_unavailable"}})),
+    ],
+    ids=["session_conflict", "execution_unavailable"],
+)
+async def test_agentic_seed_refusals_answer_category_only(make_server, failure, refusal):
+    server, app = agentic_server(make_server)
+    server._agentic_sessions = MagicMock(seed=AsyncMock(side_effect=failure))
+    assert await post(app, "/seed_session", episode_seed_payload()) == refusal
+
+
+@pytest.mark.asyncio
+async def test_agentic_seed_before_startup_is_a_503(make_server):
+    _, app = agentic_server(make_server)
+    status, result = await post(app, "/seed_session", episode_seed_payload())
+    assert (status, result) == (503, {"error": {"category": "server_not_ready"}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [b"{}", b"[]", b'{"cmd"'], ids=["no_cmd", "not_an_object", "not_json"])
+async def test_code_exec_rejection_has_sanitized_stirrup_compatible_detail(make_server, raw):
+    server, app = agentic_server(make_server)
+    server._agentic_sessions = MagicMock(execute=AsyncMock())
+    status, result = await post(app, "/code_exec", raw=raw)
+    assert status == 422 and result == {"detail": "invalid_code_exec"}
+    server._agentic_sessions.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "with_cookie,failure_kind,message",
+    [
+        (False, "session_lost", "Resources session is unavailable"),
+        (True, "session_lost", "Resources session is unavailable"),
+        (True, "session_expired", "Resources session has expired"),
+    ],
+    ids=["no_cookie", "session_not_held", "session_expired"],
+)
+async def test_code_exec_for_a_lost_resources_session_answers_404_with_its_failure_kind(
+    make_server, with_cookie, failure_kind, message
+):
+    server, app = agentic_server(make_server)
+    sessions = MagicMock()
+    sessions.seed = AsyncMock(
+        return_value=adapter.ResourcesSeedSessionResponse(resources_session_id="synthetic-session")
+    )
+    sessions.execute = AsyncMock(side_effect=ResourcesSessionLostError(message, failure_kind=failure_kind))
+    server._agentic_sessions = sessions
+    cookie = await seeded_cookie(app)
+    headers = [(b"cookie", cookie)] if with_cookie else []
+    status, result = await post(app, "/code_exec", {"cmd": "true"}, request_headers=headers)
+    assert status == 404 and result == {"detail": {"failure_kind": failure_kind, "message": message}}
+    # Without the seed's cookie the request gets a session ID of its own, never the seeded one.
+    assert (sessions.execute.await_args.args[0] == "synthetic-session") is with_cookie
+
+
+@pytest.mark.asyncio
+async def test_code_exec_request_that_names_no_resources_session_is_lost(make_server):
+    server, _ = agentic_server(make_server)
+    server._agentic_sessions = MagicMock(execute=AsyncMock())
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"cmd": "true"}', "more_body": False}
+
+    # The session middleware gives every request a session ID, so only a request that bypasses it names none.
+    request = Request({"type": "http", "method": "POST", "headers": [], "session": {}}, receive)
+    with pytest.raises(ResourcesSessionLostError) as lost:
+        await server.code_exec(request)
+    assert lost.value.status_code == 404
+    assert lost.value.detail == {"failure_kind": "session_lost", "message": "The request names no resources session"}
+    server._agentic_sessions.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_code_exec_provider_failure_is_a_503(make_server):
+    server, app = agentic_server(make_server)
+    server._agentic_sessions = MagicMock(execute=AsyncMock(side_effect=RuntimeError("synthetic provider failure")))
+    status, result = await post(app, "/code_exec", {"cmd": "true"})
+    assert (status, result) == (503, {"detail": "execution_unavailable"})
+
+
+@pytest.mark.asyncio
+async def test_agentic_close_uses_the_resources_session_id_without_cookie(make_server):
+    from nemo_gym.server_runtime import ResourcesCloseSessionResponse
+
+    server, app, _ = make_server(answer_source="finish_tool")
+    sessions = MagicMock()
+    sessions.close = AsyncMock(return_value=ResourcesCloseSessionResponse(resources_session_id="synthetic-session"))
+    server._agentic_sessions = sessions
+    status, result = await post(
+        app,
+        "/close_session",
+        {"resources_session_id": "synthetic-session", "episode_id": {"rollout_id": "synthetic-rollout"}},
+    )
+    assert status == 200 and result["resources_session_id"] == "synthetic-session"
+    assert sessions.close.await_args.args[0].resources_session_id == "synthetic-session"
+
+
+@pytest.mark.asyncio
+async def test_agentic_shutdown_still_drains_grader_if_execution_cleanup_fails(make_server):
+    server, _, fake = make_server(answer_source="finish_tool")
+    sessions = MagicMock()
+    sessions.shutdown = AsyncMock(side_effect=RuntimeError("synthetic cleanup failure"))
+    server._agentic_sessions = sessions
+    with pytest.raises(RuntimeError, match="synthetic cleanup failure"):
+        await server.shutdown()
+    fake.shutdown.assert_awaited_once()
+    assert server._agentic_sessions is sessions
+
+
+@pytest.mark.asyncio
+async def test_startup_preserves_unresolved_execution_cleanup_before_opening_another_provider(
+    make_server, monkeypatch
+):
+    server, _, _ = make_server(answer_source="finish_tool")
+    sessions = MagicMock()
+    sessions.shutdown = AsyncMock(side_effect=RuntimeError("synthetic cleanup failure"))
+    server._agentic_sessions = sessions
+    with pytest.raises(RuntimeError, match="synthetic cleanup failure"):
+        await server.shutdown()
+    opened = []
+
+    def unexpected_provider(config):
+        opened.append(config)
+        raise AssertionError("startup opened another provider before resolving execution cleanup")
+
+    monkeypatch.setattr(adapter, "create_provider", unexpected_provider)
+    with pytest.raises(RuntimeError):
+        await server.startup()
+    assert opened == []
+    assert server._agentic_sessions is sessions
 
 
 def assert_unscorable(result, *, terminal=False):
@@ -320,6 +727,21 @@ async def test_framework_bookkeeping_keys_are_stripped_before_task_validation(ma
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_report",
+    [None, {"failure_id": None, "events": {}, "omitted": True}],
+    ids=["no_events", "omitted_events"],
+)
+async def test_failure_report_of_the_verify_request_is_not_task_data(make_server, failure_report):
+    # Agents and environment servers add failure_report to every /verify body (verification_failure_fields).
+    _, app, fake = make_server()
+    status, result = await post(app, "/verify", payload() | {"failure_report": failure_report})
+    assert status == 200 and result["category"] == "passed"
+    validated, _ = fake.grade.await_args.args
+    assert validated.problem_id == "synthetic-1"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("category", NONTERMINAL_CATEGORIES + TERMINAL_CATEGORIES)
 async def test_every_unscorable_category_masks_the_sample_and_keeps_its_name(make_server, category):
     server, app, fake = make_server(grade=unscorable_verdict(category))
@@ -371,12 +793,10 @@ async def test_sandbox_observations_and_cleanup_status_are_reported(make_server)
 
 
 @pytest.mark.asyncio
-async def test_malformed_and_oversized_bodies_answer_category_only(make_server, caplog):
+async def test_malformed_body_answers_category_only(make_server, caplog):
     server, app, fake = make_server()
     status, result = await post(app, "/verify", raw=b'{"not json')
     assert (status, result) == (422, {"error": {"category": "request_invalid"}})
-    status, result = await post(app, "/verify", raw=b"x" * (adapter.MAX_REQUEST_BYTES + 1))
-    assert (status, result) == (413, {"error": {"category": "request_limit"}})
     status, result = await post(app, "/verify", payload(entrypoint=""))
     assert status == 200 and result["category"] == "task_invalid"
     assert REFERENCE_MARKER not in caplog.text
@@ -774,13 +1194,11 @@ async def test_pre_endpoint_privacy_survives_late_handler_registration(
 
 
 @pytest.mark.asyncio
-async def test_malformed_saved_response_and_ingress_limit(make_server, monkeypatch):
+async def test_malformed_saved_response_answers_category_only(make_server):
     _, app, fake = make_server()
     row = payload()
     row["response"] = {"private": REFERENCE_MARKER}
     assert await post(app, "/verify", row) == (422, {"error": {"category": "request_invalid"}})
-    monkeypatch.setattr(adapter, "MAX_REQUEST_BYTES", 64)
-    assert await post(app, "/verify", raw=b" " * 65) == (413, {"error": {"category": "request_limit"}})
     fake.grade.assert_not_awaited()
 
 
@@ -1363,6 +1781,18 @@ async def test_token_limit_is_scored_zero_without_regeneration(make_server, has_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("details", ["max_output_tokens", ["max_output_tokens"], 1])
+async def test_malformed_token_limit_details_are_rejected(make_server, details):
+    _, app, fake = make_server()
+    row = payload()
+    row["response"]["status"] = "incomplete"
+    row["response"]["incomplete_details"] = details
+    status, result = await post(app, "/verify", row)
+    assert status == 422 and result == {"error": {"category": "request_invalid"}}
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["incomplete", "incomplete_details", "error", "token_limit_with_error"])
 async def test_uncompleted_response_needs_regeneration(make_server, mode):
     # An uncompleted, incomplete, or error response has no usable source. It carries needs_regeneration, not
@@ -1796,3 +2226,104 @@ async def test_uncertainty_without_execution_provenance_stays_unscored(make_serv
     _, app, _ = make_server(grade=unscorable_verdict(), score_comparator_uncertain_as_incorrect=True)
     _, result = await post(app, "/verify", payload())
     assert_unscorable(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("reason", ["comparator_timeout", "validator_failure", "validator_return_invalid"])
+async def test_uncertainty_policy_never_scores_a_semantic_validator_outcome(make_server, enabled, reason):
+    # A validator's timeout carries the code of an ordinary per-case timeout, which the policy may score as zero.
+    from resources_servers.critpt_custom_grader.execution import Grader
+    from resources_servers.critpt_custom_grader.tests.support import (
+        compare_result,
+        happy_script,
+        make_policy,
+        make_spec,
+        make_task,
+    )
+
+    script = happy_script()
+    report = compare_result(["equal", "uncertain"])
+    report["results"][1].update(side="comparator", code=reason)
+    script[("result", "comparator")][1] = report
+    registry = {"synthetic": {"source": "def validate(**kwargs):\n    return True\n"}}
+    provider = ScriptedProvider(script)
+    server, app, _ = make_server(score_comparator_uncertain_as_incorrect=enabled, semantic_validators=registry)
+    server._grader = Grader(make_policy(), provider=provider, spec=make_spec(), semantic_validators=registry)
+    request = payload(**{**make_task().model_dump(), "semantic_validator": {"id": "synthetic"}})
+    http_status, result = await post(app, "/verify", request)
+    assert http_status == 200 and result["category"] == "comparator_uncertain"
+    assert result["candidate_uncertainty_reasons"] == []
+    assert_unscorable(result)
+    assert {spec.metadata["ng-grader-domain"] for spec in provider.created} == {"reference", "comparator", "candidate"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["passed", "truncated", "source_limit"])
+async def test_long_reasoning_preserves_response_and_executable_limits(make_server, outcome):
+    server, app, fake = make_server()
+    row = payload()
+    reasoning = {
+        "id": "reasoning-1",
+        "type": "reasoning",
+        "summary": [],
+        "content": [{"type": "reasoning_text", "text": "long reasoning " * 100_000}],
+    }
+    row["response"]["output"].insert(0, reasoning)
+    # Multi-turn prompt history can contain an earlier long reasoning item too.
+    row["responses_create_params"]["input"] = [reasoning, {"role": "user", "content": "Return the code."}]
+    if outcome == "truncated":
+        row["response"]["status"] = "incomplete"
+        row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
+    if outcome == "source_limit":
+        row["response"]["output"][-1]["content"][0]["text"] = "x" * (
+            server.config.execution.max_candidate_source_bytes + 1
+        )
+    status, result = await post(app, "/verify", row)
+    assert status == 200
+    assert result["response"] == row["response"]
+    assert result["responses_create_params"] == row["responses_create_params"]
+    assert (
+        result["category"]
+        == {"passed": "passed", "truncated": "response_truncated", "source_limit": "candidate_source_limit"}[outcome]
+    )
+    assert result["reward"] == (1.0 if outcome == "passed" else 0.0)
+    if outcome == "passed":
+        assert fake.grade.await_args.args[1] == SOURCE.strip()
+        # Judge-only replay preserves the same saved response and verdict.
+        replay_status, replay = await post(app, "/verify", {**row, "response": result["response"]})
+        assert replay_status == 200 and replay["category"] == "passed"
+        assert replay["response"] == result["response"]
+        assert fake.grade.await_count == 2
+    else:
+        fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/verify", "/seed_session"])
+async def test_large_request_uses_standard_transport_without_a_grader_byte_cap(make_server, caplog, path):
+    _, app, fake = make_server()
+    row = payload()
+    row["responses_create_params"]["input"] = "private_prompt_marker" * 600_000
+    assert len(json.dumps(row).encode()) > 10 * 1024 * 1024
+    if path == "/seed_session":
+        row.pop("response")
+    status, result = await post(app, path, row)
+    assert status == 200
+    if path == "/verify":
+        assert result["category"] == "passed"
+        fake.grade.assert_awaited_once()
+    else:
+        fake.grade.assert_not_awaited()
+    assert "private_prompt_marker" not in caplog.text
+
+
+def test_unbounded_envelope_bytes_still_enforce_json_structure_and_types():
+    for value in [float("nan"), 2**64, {"x": [None] * (task_schema.MAX_JSON_NODES + 1)}]:
+        with pytest.raises(ValueError):
+            task_schema.bounded_json(value, max_bytes=None)
+    nested = None
+    for _ in range(3 * task_schema.MAX_DEPTH + 10):
+        nested = [nested]
+    with pytest.raises(ValueError, match="structure"):
+        task_schema.bounded_json(nested, max_bytes=None)

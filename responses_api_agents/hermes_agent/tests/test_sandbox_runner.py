@@ -548,7 +548,7 @@ def test_iteration_limit_summary_reaches_the_model_server(
                     },
                 ),
             )
-            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
+            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args, **_kwargs: model_server.base_url)
             observations = []
             output = asyncio.run(
                 agent._create_response(
@@ -619,12 +619,15 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
 @pytest.mark.parametrize("cooperative", [True, False])
 @pytest.mark.parametrize("ending", ["deadline", "close"])
-def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(tmp_path, cooperative, ending):
+def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(
+    tmp_path: Path, cooperative: bool, ending: str
+) -> None:
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from responses_api_agents.hermes_agent import sandbox_runner
 
     input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
     stop_request_path = tmp_path / STOP_REQUEST_FILE
+    expire_path = tmp_path / "expire.request"
     input_path.write_text(json.dumps({**_payload("http://unused/v1"), "stop_request_path": str(stop_request_path)}))
     # Run the real worker/observer under the real supervisor, with a deterministic slow harness.
     driver = """
@@ -659,11 +662,13 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             "bash",
             str(SUPERVISOR_SCRIPT),
             "--timeout",
-            "2" if ending == "deadline" else "10",
+            "60",
             "--cleanup-timeout",
-            "0.5",
+            "5",
             "--stop-file",
             str(stop_request_path),
+            "--expire-file",
+            str(expire_path),
             "--receipt",
             str(tmp_path / "cleanup.json"),
             "--",
@@ -683,19 +688,22 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
         errors="replace",
     )
     try:
-        if ending == "close":
-            deadline = time.monotonic() + 5
-            while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert (tmp_path / "model.patch").exists()
-            # Production sends no signal; the stop file alone must stop the supervisor.
-            stop_request_path.touch()
-        _, stderr = process.communicate(timeout=10)
+        # Imports and worker startup are not part of the stop/checkpoint contract. Trigger either
+        # stop only after the handler is installed and the harness has partial work to preserve.
+        deadline = time.monotonic() + 30
+        while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert (tmp_path / "model.patch").exists(), "the worker never produced partial work"
+        assert not output_path.exists(), "the worker must still be running before the stop"
+        # Expiry takes the supervisor's deadline path without racing a loaded runner's startup.
+        # A close uses only the production stop file, not a signal from the test.
+        (expire_path if ending == "deadline" else stop_request_path).touch()
+        _, stderr = process.communicate(timeout=30)
         assert process.returncode == 0, stderr
     finally:
         if process.poll() is None:
             process.terminate()
-        process.wait(timeout=5)
+        process.wait(timeout=30)
     receipt = json.loads((tmp_path / "cleanup.json").read_text())
     assert receipt["timed_out"] is (ending == "deadline")
     assert receipt["cleanup_confirmed"] is True
@@ -734,3 +742,71 @@ def test_compression_auxiliary_uses_episode_model_route(tmp_path, restore_proces
     config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
     assert config["auxiliary"]["compression"]["base_url"] == server.base_url
     assert config["auxiliary"]["compression"]["model"] == "policy_model"
+
+
+@pytest.mark.parametrize("image_only", [False, True])
+@pytest.mark.parametrize(
+    "detail,sent_detail", [("auto", "auto"), ("low", "low"), ("high", "high"), ("original", "high")]
+)
+def test_prompt_images_reach_pinned_hermes_model_requests(
+    tmp_path, restore_process_globals, image_only, detail, sent_detail
+) -> None:
+    """Exercise the installed Hermes loop, not a mock of its multimodal input handling."""
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+    image_uri = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
+    )
+    content = [
+        {"type": "input_text", "text": "before"},
+        {"type": "input_image", "image_url": image_uri, "detail": detail},
+        {"type": "input_text", "text": "after"},
+    ]
+    if image_only:
+        content = [content[1]]
+    adapter = HermesAgent(
+        config=HermesAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            name="hermes",
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "model"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    body = adapter._validate_request(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": "prior answer"},
+                {"role": "user", "content": content},
+            ]
+        )
+    )
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        # Hermes marks a response at its iteration ceiling incomplete, even with a final answer.
+        output = _run(_payload(server.base_url, max_turns=4, **adapter._conversation_params(body)), tmp_path)
+    expected = [
+        {"type": "text", "text": "before"},
+        {"type": "image_url", "image_url": {"url": image_uri, "detail": sent_detail}},
+        {"type": "text", "text": "after"},
+    ]
+    if image_only:
+        expected = [expected[1]]
+    assert output["result"]["completed"], output["result"]
+    assert len(server.requests) == 1
+    user_messages = [message for message in server.requests[0]["messages"] if message["role"] == "user"]
+    assert [message["content"] for message in user_messages] == [expected, expected]
+    assert any(message["content"] == "prior answer" for message in server.requests[0]["messages"])
+
+
+def test_compression_auxiliary_uses_its_own_route_when_the_payload_has_one(tmp_path, restore_process_globals):
+    """The agent gives compression a URL that keeps its own sampling; the runner points Hermes at it."""
+    import yaml
+
+    compression_url = "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        _run(_payload(server.base_url, compression_model_base_url=compression_url), tmp_path)
+    config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
+    assert config["auxiliary"]["compression"]["base_url"] == compression_url

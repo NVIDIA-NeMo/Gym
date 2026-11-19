@@ -7,8 +7,10 @@ import functools
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -18,9 +20,11 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
     check_resources_session_contract,
     install_session_routing,
 )
+from resources_servers.gdpval import app as gdpval_app
 from resources_servers.gdpval import persisted_layout, task_sandbox
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest
 
@@ -45,9 +49,9 @@ def stopped(monkeypatch) -> list[AsyncSandbox]:
     stopped: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         stopped.append(self)
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
     return stopped
@@ -242,7 +246,7 @@ def test_tasks_without_submitted_files_record_how_they_ended(server, root, tmp_p
     assert sorted(p.name for p in task_dir.iterdir()) == ["finish_params.json", "reference_files"]
 
 
-def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_nothing(
+def test_an_agent_that_ran_out_of_wall_time_is_a_scored_zero_and_persists_nothing(
     server, root, tmp_path, stopped, references
 ):
     client = TestClient(server.setup_webserver())
@@ -253,8 +257,11 @@ def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_not
 
     verified = _verify(client, response_metadata={"stop_reason": "wall_time"})
 
-    assert verified["_ng_failure_class"] == "agent_timeout"
-    assert (verified["failure_kind"], verified["mask_sample"], verified["reward"]) == ("agent_timeout", True, 0.0)
+    # The model's own result: a zero that stays in the denominator, typed with model attribution. No outcome action,
+    # so a timeout whose window held a server-side fault is still run again by recovery.
+    assert "_ng_failure_class" not in verified
+    assert (verified["failure_kind"], verified["mask_sample"], verified["reward"]) == ("agent_timeout", False, 0.0)
+    assert verified["failure_outcome_attribution"] == "model"
     assert "_ng_failure_terminal" not in verified
     assert not (tmp_path / "persist").exists(), "the partial work is not collected or judged"
     assert _close(client, seed).status_code == 200
@@ -434,16 +441,27 @@ def test_a_refused_seed_does_not_hand_out_the_cookie_of_the_live_session(server,
     assert _verify(intruder)["failure_kind"] == SESSION_LOST
 
 
-def test_a_seed_whose_rollout_id_names_no_rollout_index_is_rejected(server, root, tmp_path):
-    seed = _seed(tmp_path).model_copy(update={"episode_id": EpisodeId(rollout_id="explicit")})
+def test_sessions_with_rollout_ids_another_orchestrator_assigned_keep_their_files_apart(server, root, tmp_path):
+    """Rollouts named per trial attempt: concurrent samples of one task must not share a directory."""
+    app = server.setup_webserver()
+    first, second = TestClient(app), TestClient(app)
+    first_id, second_id = "trial-trial_01aaa-attempt-0", "trial-trial_01bbb-attempt-0"
+    for client, session_id, rollout_id in ((first, "first", first_id), (second, "second", second_id)):
+        seed = _seed(tmp_path, session_id=session_id).model_copy(
+            update={"episode_id": EpisodeId(rollout_id=rollout_id)}
+        )
+        assert _post_seed(client, seed).status_code == 200
+    (root / "a.md").write_text("a")
+    (root / "b.md").write_text("b")
+    first.post("/finish", json={"reason": "first", "paths": ["a.md"]})
+    second.post("/finish", json={"reason": "second", "paths": ["b.md"]})
 
-    refused = _post_seed(TestClient(server.setup_webserver()), seed)
+    first_dir, second_dir = (Path(_verify(client)["deliverables_dir"]) for client in (first, second))
 
-    # 422, not a retried 500: a retry sends the same rollout_id.
-    assert refused.status_code == 422
-    assert "is not '<task_index>-<rollout_index>' with two integers" in refused.json()["detail"]
-
-    assert not root.exists()
+    assert (first_dir.name, second_dir.name) == (f"repeat_id_{first_id}", f"repeat_id_{second_id}")
+    assert first_dir.parent == second_dir.parent == tmp_path / "persist" / "task_task-1"
+    assert "a.md" in _files(first_dir) and "b.md" not in _files(first_dir)
+    assert "b.md" in _files(second_dir) and "a.md" not in _files(second_dir)
 
 
 def test_a_second_live_session_for_the_same_task_and_repeat_is_refused_until_the_first_closes(
@@ -770,9 +788,9 @@ def failing_stop(monkeypatch) -> list[AsyncSandbox]:
     attempted: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         attempted.append(self)
-        await real_stop(self)
+        await real_stop(self, **kwargs)
         raise OSError("stop failed")
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
@@ -796,3 +814,187 @@ def test_a_close_whose_stop_fails_is_an_error_and_can_be_retried(server, root, t
     assert _close(client, seed).status_code == 500
     assert _close(client, seed).status_code == 200
     assert list(references.iterdir()) == []
+
+
+def test_a_failed_seed_whose_stop_fails_keeps_its_sandbox_until_the_close_stops_it(
+    server, root, tmp_path, monkeypatch, references
+):
+    monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=RuntimeError("descriptor unavailable")))
+    stops: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
+        stops.append(self)
+        if len(stops) == 1:
+            raise RuntimeError("provider unreachable")
+        await real_stop(self, **kwargs)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _seed(tmp_path)
+
+    assert _post_seed(client, seed).status_code == 500
+    assert len(stops) == 1
+
+    assert _close(client, seed).status_code == 200
+    assert stops == [stops[0], stops[0]], "the close stops the sandbox whose stop failed at the seed"
+    # Once stopped, it is forgotten: a second close stops nothing.
+    assert _close(client, seed).status_code == 200
+    assert len(stops) == 2
+
+
+def test_a_failed_upload_whose_stop_fails_keeps_its_sandbox_until_the_close_stops_it(
+    server, root, tmp_path, monkeypatch, references
+):
+    monkeypatch.setattr(AsyncSandbox, "upload", AsyncMock(side_effect=RuntimeError("upload refused")))
+    stops: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
+        stops.append(self)
+        if len(stops) == 1:
+            raise RuntimeError("provider unreachable")
+        await real_stop(self, **kwargs)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _seed(tmp_path)
+
+    assert _post_seed(client, seed).status_code == 500
+    assert len(stops) == 1
+
+    assert _close(client, seed).status_code == 200
+    assert stops == [stops[0], stops[0]], "the close stops the sandbox whose stop failed at the upload"
+
+
+def _stops_that_fail(monkeypatch, failures: int) -> list[AsyncSandbox]:
+    """Every sandbox stop, in order; the first ``failures`` of them fail."""
+    stops: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
+        stops.append(self)
+        if len(stops) <= failures:
+            raise RuntimeError("provider unreachable")
+        await real_stop(self, **kwargs)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    return stops
+
+
+def test_a_failed_seed_whose_stops_keep_failing_stays_owned_until_one_succeeds(
+    server, root, tmp_path, monkeypatch, references
+):
+    monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=RuntimeError("descriptor unavailable")))
+    stops = _stops_that_fail(monkeypatch, failures=2)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _seed(tmp_path)
+
+    assert _post_seed(client, seed).status_code == 500
+    assert _close(client, seed).status_code == 500, "a close whose stop fails again is retried"
+    assert _close(client, seed).status_code == 200
+    assert len(stops) == 3 and stops[2] is stops[0]
+
+
+def test_the_shutdown_stops_a_failed_seeds_sandbox(server, root, tmp_path, monkeypatch, references):
+    monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=RuntimeError("descriptor unavailable")))
+    stops = _stops_that_fail(monkeypatch, failures=1)
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert _post_seed(client, _seed(tmp_path)).status_code == 500
+
+    assert len(stops) == 2 and stops[1] is stops[0]
+
+
+def test_a_reseed_stops_the_failed_seeds_sandbox_first(server, root, tmp_path, monkeypatch, references):
+    monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=RuntimeError("descriptor unavailable")))
+    stops = _stops_that_fail(monkeypatch, failures=1)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _seed(tmp_path)
+
+    assert _post_seed(client, seed).status_code == 500
+    _post_seed(client, seed)
+
+    assert stops[1] is stops[0], "the re-seed stops the sandbox the failed seed left before starting another"
+
+
+def test_only_its_own_episode_can_close_a_failed_seeds_sandbox(server, root, tmp_path, monkeypatch, references):
+    monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=RuntimeError("descriptor unavailable")))
+    stops = _stops_that_fail(monkeypatch, failures=1)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _seed(tmp_path)
+    assert _post_seed(client, seed).status_code == 500
+
+    other_episode = _seed(tmp_path, repeat=2).episode_id
+    assert _close(client, seed, episode_id=other_episode).status_code == 409
+    assert len(stops) == 1, "another episode's close neither stops nor fences the failed seed's sandbox"
+
+    assert _close(client, seed).status_code == 200
+    assert len(stops) == 2 and stops[1] is stops[0]
+
+
+@pytest.mark.parametrize("other", ["episode", "task"])
+def test_only_its_own_episode_and_task_can_reseed_over_a_failed_seed(
+    server, root, tmp_path, monkeypatch, references, other
+):
+    serialize = AsyncSandbox.serialize
+    monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=RuntimeError("descriptor unavailable")))
+    stops = _stops_that_fail(monkeypatch, failures=1)
+    started = []
+    real_start = gdpval_app.start_task_sandbox
+
+    async def start(*args, **kwargs):
+        started.append(kwargs["task_id"])
+        return await real_start(*args, **kwargs)
+
+    monkeypatch.setattr(gdpval_app, "start_task_sandbox", start)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _seed(tmp_path)
+    assert _post_seed(client, seed).status_code == 500
+
+    if other == "episode":
+        intruder = seed.model_copy(update={"episode_id": _seed(tmp_path, repeat=2).episode_id})
+    else:
+        intruder = seed.model_copy(update={"task_id": TaskId(taskset="gdpval:benchmark", task_id="task-2")})
+    assert _post_seed(client, intruder).status_code == 409
+    assert len(stops) == 1 and len(started) == 1, "the refused seed neither stops nor starts a sandbox"
+
+    monkeypatch.setattr(AsyncSandbox, "serialize", serialize)
+    assert _post_seed(client, seed).status_code == 200
+    assert stops[1] is stops[0], "the failed seed's own retry stops its sandbox before starting another"
+    assert len(started) == 2
+
+
+async def test_a_close_cut_short_by_a_disconnect_still_drops_the_record_and_fences_the_session(
+    server, root, tmp_path, monkeypatch, references
+):
+    seed = _seed(tmp_path)
+    await server.seed_session(SimpleNamespace(session={}), seed)
+    sandbox = server._sessions[seed.resources_session_id].sandbox
+    stopping = asyncio.Event()
+    real_close = sandbox.provider.close
+
+    async def slow_close(handle):
+        stopping.set()
+        await asyncio.sleep(0.05)
+        await real_close(handle)
+
+    monkeypatch.setattr(sandbox.provider, "close", slow_close)
+    close = ResourcesCloseSessionRequest(resources_session_id=seed.resources_session_id, episode_id=seed.episode_id)
+
+    # A client that disconnects cancels the request's cancel scope while the sandbox stops.
+    with anyio.fail_after(5):
+        with anyio.CancelScope() as request_scope:
+
+            async def disconnect() -> None:
+                await stopping.wait()
+                request_scope.cancel()
+
+            disconnecting = asyncio.create_task(disconnect())
+            await server.close_resources_session(SimpleNamespace(session={}), close)
+        await disconnecting
+
+    assert seed.resources_session_id not in server._sessions, "the record of the stopped sandbox is dropped"
+    assert list(references.iterdir()) == []
+    with pytest.raises(ResourcesSessionConflictError, match="already closed"):
+        await server.seed_session(SimpleNamespace(session={}), seed)

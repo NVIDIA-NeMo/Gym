@@ -657,10 +657,10 @@ def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private
             return SimpleNamespace(return_code=0, stdout="agent patch", stderr="")
         return SimpleNamespace(return_code=0, stdout="", stderr="")
 
-    async def stop_task() -> None:
+    async def stop_task(**_: object) -> None:
         events.append("stop-task")
 
-    async def stop_verifier() -> None:
+    async def stop_verifier(**_: object) -> None:
         events.append("stop-verifier")
 
     task_sandbox = SimpleNamespace(
@@ -779,8 +779,8 @@ def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private
         assert session_id not in server._session_id_to_sandbox
 
     assert events == ["create-task", "extract-patch", "stop-task", "create-verifier", "verify", "stop-verifier"]
-    task_sandbox.stop.assert_awaited_once()
-    verifier_sandbox.stop.assert_awaited_once()
+    task_sandbox.stop.assert_awaited_once_with(timeout_s=server.config.verification_stop_timeout)
+    verifier_sandbox.stop.assert_awaited_once_with(timeout_s=server.config.verification_stop_timeout)
 
 
 @pytest.mark.asyncio
@@ -1521,3 +1521,12 @@ async def test_patch_capture_with_filesystem_permission_error(
         assert downloaded[0].exists()
     assert denied
     assert "session" not in server._session_id_to_sandbox
+
+
+def test_several_workers_are_allowed() -> None:
+    """Session routing sends a seed and close by resources_session_id to the worker that holds the sandbox."""
+    from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+
+    server = make_server(golden=False, num_workers=2)
+    refuse_unsupported_num_workers(server)
+    assert server.routes_sessions_to_owner

@@ -13,6 +13,13 @@ from nemo_gym.server_runtime.supervisor.server_venv import setup_env_command
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_server_ci_validates_manifest_verifier(monkeypatch):
+    from nemo_gym.cli.env import TestConfig, _validate_data_single
+
+    monkeypatch.chdir(ROOT)
+    _validate_data_single(TestConfig(entrypoint="resources_servers/visgym", should_validate_data=True))
+
+
 @pytest.mark.parametrize("component", ["resources_servers/visgym", "responses_api_agents/visgym_agent"])
 def test_fresh_component_uses_locked_installer(tmp_path, component):
     config = {

@@ -391,6 +391,17 @@ class SlurmComputeConfig(BaseComputeConfig):
     walltime: str | None = None
     node_pools: dict[str, NodePool] = {}
     extra_args: dict[str, str] = {}  # Job-level #SBATCH directives (e.g. --comment, --mail-user).
+    # Snapshot every node's Lustre metadata request counters at each phase of a benchmark's job into
+    # `<benchmark dir>/logs/lustre-md-stats-<slurm job id>.tsv`; `gym eval lustre-stats` reads it.
+    lustre_md_stats: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_lustre_md_stats(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Off, the saved config is the one a launcher without the field writes and can read back.
+        data = handler(self)
+        if not self.lustre_md_stats:
+            data.pop("lustre_md_stats", None)
+        return data
 
 
 class KubernetesComputeConfig(BaseComputeConfig):
@@ -447,7 +458,7 @@ class ResumeConfig(_StrictModel):
     def _validate_recovery_outcome_policy(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         if value is not None:
             # Imported here: recovery imports the executors, which import this module.
-            from nemo_gym.orchestration.recovery import configured_outcome_policy
+            from nemo_gym.eval.recovery.policy import configured_outcome_policy
 
             configured_outcome_policy(value)
         return value
@@ -476,7 +487,9 @@ class BenchmarkRunConfig(_StrictModel):
     # Shell script the driver runs INSTEAD of `gym eval run`, for a benchmark whose
     # harness is not Gym's own runner -- one that provisions external machines and
     # drives Gym from there, for instance. `prepare` still runs first, and the
-    # driver exports NEMO_GYM_BENCH_DIR plus the policy's base URL, model name and
+    # driver exports NEMO_GYM_BENCH_DIR for both native and command benchmarks, using
+    # the bound run directory rather than the host working-directory alias. Command
+    # benchmarks additionally receive the policy's base URL, model name and
     # API key (when driver.policy_model is set) so the script can reach the served
     # model without repeating its address.
     command: str | None = None

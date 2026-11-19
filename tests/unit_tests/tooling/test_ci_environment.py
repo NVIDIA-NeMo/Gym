@@ -180,13 +180,24 @@ def test_full_suite_retry_is_bounded_and_reruns_only_failed_jobs() -> None:
 
 
 def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
-    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 4)]:
-        workflow = workflow_path.read_text()
-        assert workflow.count("run: ./scripts/ci/reclaim_runner_disk.sh") == expected_jobs
-        assert workflow.count("Reclaim runner disk") == expected_jobs
-        sections = workflow.split("- name: Reclaim runner disk")
-        for section in sections[1:]:
-            assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
+    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 5)]:
+        jobs = yaml.safe_load(workflow_path.read_text())["jobs"]
+        checked_jobs = 0
+        for job in jobs.values():
+            steps = job.get("steps", [])
+            cleanup = [i for i, step in enumerate(steps) if step.get("run") == "./scripts/ci/reclaim_runner_disk.sh"]
+            if not cleanup:
+                continue
+            assert len(cleanup) == 1
+            checked_jobs += 1
+            dependencies = [
+                i
+                for i, step in enumerate(steps)
+                if step.get("uses", "").startswith("actions/cache@") or step.get("name", "").startswith("Install ")
+            ]
+            assert dependencies
+            assert all(cleanup[0] < i for i in dependencies)
+        assert checked_jobs == expected_jobs
 
 
 def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
@@ -576,8 +587,8 @@ def test_notification_workflows_use_pinned_shared_summary_without_checkout() -> 
         assert all("checkout" not in step.get("uses", "") for step in steps)
         excluded_jobs = {"notify-failure", "merge-queue-notification"}
         if workflow_file == CICD_MAIN_WORKFLOW:
-            # Harness P0 is reported separately and is not part of Gym's nightly gate.
-            excluded_jobs.add("harness_conformance")
+            # Harness P0 and compliance are reported separately and are not part of Gym's nightly gate.
+            excluded_jobs |= {"harness_conformance", "environment_server_compliance"}
         assert set(notify["needs"]) == set(jobs) - excluded_jobs
         assert "failure()" in notify["if"]
         assert "always() && !cancelled()" in notify["if"]
@@ -594,6 +605,23 @@ def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
     assert "  workflow_dispatch:" in on_block
     assert "      send_notification:" in on_block
     assert "push:" not in on_block
+
+
+def test_full_test_suite_pushes_images_only_from_main() -> None:
+    """Every ECR login and crane push is gated on exactly `refs/heads/main`."""
+    jobs = yaml.safe_load(FULL_TEST_WORKFLOW.read_text())["jobs"]
+    conditions = [jobs["offline-image"]["if"]]
+    for name, job in jobs.items():
+        for step in job.get("steps", []):
+            if name != "offline-image" and (
+                "amazon-ecr-login" in step.get("uses", "") or "crane" in step.get("run", "")
+            ):
+                conditions.append(step["if"])
+
+    assert len(conditions) == 3
+    for condition in conditions:
+        assert "github.ref == 'refs/heads/main'" in condition
+        assert condition.count("refs/") == 1, condition
 
 
 def test_notify_failure_respects_send_notification_input() -> None:
@@ -916,7 +944,9 @@ def _write_executable(path: Path, contents: str) -> None:
     path.chmod(0o755)
 
 
-@pytest.mark.parametrize("failure", ["none", "interrupted", "permanent", "download_timeout", "index_failure"])
+@pytest.mark.parametrize(
+    "failure", ["none", "interrupted", "permanent", "download_timeout", "index_failure", "git_ppa_unavailable"]
+)
 def test_system_dependency_install_recovers_interrupted_configuration(tmp_path: Path, failure: str) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -954,6 +984,13 @@ if test "$1" = update; then
 fi
 test "$1" = install
 test "$DEBIAN_FRONTEND" = noninteractive
+# An installed runner tool must not require its newer PPA candidate.
+if test "$INSTALL_TEST_FAILURE" = git_ppa_unavailable; then
+    case " $* " in
+        *' --no-upgrade '*) ;;
+        *) echo 'git-core PPA: 503 Service Unavailable' >&2; exit 100 ;;
+    esac
+fi
 case " $* " in
     *' --download-only '*)
         test "$INSTALL_TEST_BOUNDED" = 1
@@ -1006,7 +1043,9 @@ printf '%s\\n' "$@" > "$INSTALL_TEST_STATE/installed"
         assert calls.read_text().splitlines().count("install") == 4
     else:
         assert result.returncode == 0, result.stderr
-        assert {"--no-install-recommends", "build-essential", "ffmpeg"} <= set(installed.read_text().splitlines())
+        assert {"--no-install-recommends", "--no-upgrade", "build-essential", "ffmpeg"} <= set(
+            installed.read_text().splitlines()
+        )
         assert not (tmp_path / "interrupted").exists()
         assert calls.read_text().splitlines().count("install") == (2 if failure == "interrupted" else 1)
     assert calls.read_text().splitlines().count("download") == (
@@ -1202,3 +1241,48 @@ esac
     if lock_status == 0:
         expected.append(f"sync --extra dev{offline}")
     assert capture.read_text().splitlines() == expected
+
+
+@pytest.mark.parametrize(
+    ("required", "result", "success"),
+    [
+        ("true", "success", True),
+        ("true", "failure", False),
+        ("true", "cancelled", False),
+        ("true", "skipped", False),
+        ("false", "skipped", True),
+        ("false", "failure", False),
+    ],
+)
+def test_longmt_scoring_is_in_ci_aggregate(required: str, result: str, success: bool) -> None:
+    jobs = yaml.safe_load(UNIT_TEST_WORKFLOW.read_text())["jobs"]
+    aggregate = jobs["test-result"]
+    assert "longmt-scoring" in aggregate["needs"]
+    step = aggregate["steps"][0]
+    assert step["env"]["RUN_LONGMT"] == "${{ " + jobs["longmt-scoring"]["if"] + " }}"
+    assert step["env"]["LONGMT_RESULT"] == "${{ needs.longmt-scoring.result }}"
+    env = dict(
+        os.environ,
+        DETECT_RESULT="success",
+        RUN_FULL="false",
+        RUN_SERVERS="false",
+        RUN_LONGMT=required,
+        LONGMT_RESULT=result,
+    )
+    completed = subprocess.run(["bash", "-c", step["run"]], env=env, timeout=10)
+    assert (completed.returncode == 0) is success
+
+
+def test_longmt_scoring_installs_native_build_tools_before_uv_run() -> None:
+    steps = yaml.safe_load(UNIT_TEST_WORKFLOW.read_text())["jobs"]["longmt-scoring"]["steps"]
+    install_index = next(
+        i for i, step in enumerate(steps) if step.get("run") == "bash scripts/ci/install_test_dependencies.sh"
+    )
+    scoring_index = next(
+        i
+        for i, step in enumerate(steps)
+        if "uv run --locked --project resources_servers/longmt_eval/scoring" in step.get("run", "")
+    )
+    assert install_index < scoring_index
+    command = steps[scoring_index]["run"]
+    assert "--managed-python --python 3.12" in command

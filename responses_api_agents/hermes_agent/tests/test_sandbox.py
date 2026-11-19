@@ -62,9 +62,11 @@ def agent(monkeypatch):
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
 
-    monkeypatch.setattr(
-        HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/ng-rollout/episode-a1/v1"
-    )
+    def resolve_model_base_url(*args, trained=True):
+        # As in a run that carries sampling values: a role the framework does not train gets null.
+        return f"http://model:8000/ng-rollout/episode-a1{'' if trained else '/ng-sampling/null'}/v1"
+
+    monkeypatch.setattr(HermesAgent, "resolve_model_base_url", resolve_model_base_url)
     return result
 
 
@@ -432,7 +434,7 @@ async def test_owned_stop_precedes_waiting_for_cancelled_activation(agent, state
             await stopped.wait()
             raise
 
-    state.session.sandbox.stop.side_effect = stopped.set
+    state.session.sandbox.stop.side_effect = lambda **_: stopped.set()
     download_json = mock_json_download(state.session.sandbox, side_effect=FileNotFoundError("missing cleanup receipt"))
     state.task = asyncio.create_task(activation())
     await started.wait()
@@ -476,7 +478,8 @@ def local_runner(agent, state, monkeypatch, tmp_path):
     directory.mkdir()
     state.session.session_dir = str(directory)
     state.session.workdir = str(tmp_path)
-    agent.config.session_close_timeout_seconds = 2
+    # This fixture runs real subprocesses; keep deadline behavior tests on their own short budgets.
+    agent.config.session_close_timeout_seconds = 15
     monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
     monkeypatch.setattr(
         hermes_sandbox, "_SANDBOX_RUNNER", str(Path(hermes_sandbox.__file__).with_name("sandbox_runner.py"))
@@ -495,7 +498,7 @@ def local_runner(agent, state, monkeypatch, tmp_path):
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=8)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
             return SimpleNamespace(
                 return_code=process.returncode,
                 stdout=stdout.decode(errors="replace"),
@@ -1062,6 +1065,8 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
     agent.server_client.post.assert_not_called()
     payload = state.upload_json.await_args.args[1]
     assert payload["model_base_url"] == "http://model:8000/ng-rollout/episode-a1/v1"
+    # Compression is a side call no training framework trains, so it keeps its own sampling.
+    assert payload["compression_model_base_url"] == "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
 
 
 @pytest.mark.parametrize(
@@ -1282,6 +1287,32 @@ async def test_context_limit_keeps_partial_work_verifiable(agent, state, capture
     root = episode.observations.records[0]
     assert root.status == "incomplete"
     assert root.stop_reason == "context_limit"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Response truncated due to output length limit",
+        "Response remained truncated after 3 continuation attempts",
+        "Model used all output tokens on reasoning with none left for the response. "
+        "Try lowering reasoning effort or increasing max_tokens.",
+    ],
+)
+async def test_output_limit_keeps_partial_work_and_reports_agent_limit(agent, state, error):
+    """An exhausted output budget reaches the session response as `agent_limit`, with its partial work graded."""
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Partial answer"}]
+    state.execute = AsyncMock(
+        return_value={"result": {"completed": False, "partial": True, "error": error, "messages": messages}}
+    )
+
+    episode = await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+
+    assert episode.response.status == "failed"
+    assert episode.response.output[-1].content[0].text == "Partial answer"
+    assert json.loads(episode.response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_limit"}
+    assert agent_outcome_policy(episode.response) == OutcomeAction.VERIFY
 
 
 async def test_runner_stopped_at_the_deadline_is_a_partial_response(agent, state):
@@ -1737,6 +1768,17 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
         ({"stop_reason": "wall_time"}, "agent_limit"),
         ({"failed": True, "error": "First response truncated due to output length limit"}, "agent_limit"),
         ({"partial": True, "error": "Response truncated due to output length limit"}, "agent_limit"),
+        ({"partial": True, "error": "Response remained truncated after 3 continuation attempts"}, "agent_limit"),
+        (
+            {
+                "partial": True,
+                "error": (
+                    "Model used all output tokens on reasoning with none left for the response. "
+                    "Try lowering reasoning effort or increasing max_tokens."
+                ),
+            },
+            "agent_limit",
+        ),
         ({"partial": True, "error": "Request payload too large (413). Cannot compress further."}, "agent_limit"),
         (
             {"partial": True, "error": "Request payload too large: max compression attempts (3) reached."},
@@ -1768,6 +1810,7 @@ def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, exp
         status="failed",
     )
     reported = agent.report_outcome(response, result)
+    assert json.loads(reported.metadata["ng_agent_outcome"])["failure_kind"] == expected_kind
     # Distinct overrides expose misclassification that the default verify policy hides.
     actions = {
         "agent_limit": OutcomeAction.RETRY,
@@ -1785,3 +1828,96 @@ def test_http_status_alone_does_not_establish_context_overflow(agent, status):
         "model_request_error",
         status,
     )
+
+
+_IMAGE_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
+)
+
+
+@pytest.mark.parametrize("sandbox", [False, True])
+async def test_images_reach_host_and_sandbox_without_dropping_history(agent, state, monkeypatch, sandbox):
+    content = [
+        {"type": "input_text", "text": "before"},
+        {"type": "input_image", "image_url": _IMAGE_URI, "detail": "high"},
+        {"type": "input_text", "text": "between"},
+        {"type": "input_image", "image_url": _IMAGE_URI.replace("image/png", "image/jpeg"), "detail": "low"},
+    ]
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"role": "system", "content": "instruction"},
+            {"role": "user", "content": content},
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "user", "content": content},
+        ],
+    )
+    original = body.model_dump()
+    result = {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}
+    if sandbox:
+        agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+        state.execute = AsyncMock(return_value={"result": result})
+        await agent.responses(request(state), body)
+        payload = state.execute.await_args.args[0]
+        latest, history = payload["user_message"], payload["history"]
+        await agent.responses(request(state), body)
+        state.execute.assert_awaited_once()
+        with pytest.raises(HTTPException) as error:
+            await agent.responses(request(state), body.model_copy(update={"instructions": "different"}))
+        assert error.value.status_code == 409
+    else:
+        runner = MagicMock()
+        runner.run_conversation.return_value = result
+        monkeypatch.setattr("run_agent.AIAgent", MagicMock(return_value=runner))
+        monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
+        await agent.responses(SimpleNamespace(session={}), body)
+        latest, _, history = runner.run_conversation.call_args.args
+    expected = [
+        {"type": "text", "text": "before"},
+        {"type": "image_url", "image_url": {"url": _IMAGE_URI, "detail": "high"}},
+        {"type": "text", "text": "between"},
+        {"type": "image_url", "image_url": {"url": _IMAGE_URI, "detail": "low"}},
+    ]
+    assert latest == expected
+    assert history == [{"role": "user", "content": expected}, {"role": "assistant", "content": "prior answer"}]
+    assert body.model_dump() == original
+
+
+@pytest.mark.parametrize("sandbox", [False, True])
+@pytest.mark.parametrize(
+    ("role", "image", "message"),
+    [
+        ("user", {"image_url": "https://example.com/image.png"}, "base64 data URI"),
+        ("user", {"image_url": "data:image/png;base64,%%%"}, "invalid base64"),
+        ("user", {"image_url": "data:image/png;base64,é"}, "invalid base64"),
+        ("user", {"image_url": "data:image/png;base64,aGVsbG8="}, "no data of a supported media type"),
+        ("user", {"image_url": "data:image/svg+xml;base64,PHN2Zy8+"}, "Unsupported media type"),
+        ("user", {"file_id": "file-image"}, "base64 data URI"),
+        ("system", {"image_url": _IMAGE_URI}, "only in user messages"),
+        ("assistant", {"image_url": _IMAGE_URI}, "only in user messages"),
+    ],
+)
+async def test_invalid_images_fail_before_execution(agent, state, role, image, message, sandbox):
+    items = [{"role": role, "content": [{"type": "input_image", "detail": "auto", **image}]}]
+    if role != "user":
+        items.append({"role": "user", "content": "question"})
+    body = NeMoGymResponseCreateParamsNonStreaming(input=items)
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+    agent._run_sandbox_episode = AsyncMock(side_effect=AssertionError("Must reject before execution"))
+    agent._create_response = AsyncMock(side_effect=AssertionError("Must reject before execution"))
+    with pytest.raises(HTTPException, match=message) as error:
+        await agent.responses(request(state) if sandbox else SimpleNamespace(session={}), body)
+    assert error.value.status_code == 422
+    assert state.task is None
+    agent._run_sandbox_episode.assert_not_awaited()
+    agent._create_response.assert_not_awaited()
+
+    result = episode(agent)
+    agent._run_sandbox_episode = AsyncMock(return_value=result)
+    agent._create_response = AsyncMock(return_value=result.response)
+    recovered = await agent.responses(
+        request(state) if sandbox else SimpleNamespace(session={}),
+        NeMoGymResponseCreateParamsNonStreaming(input="text recovery"),
+    )
+    assert recovered.status == "completed"
+    (agent._run_sandbox_episode if sandbox else agent._create_response).assert_awaited_once()

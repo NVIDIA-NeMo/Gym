@@ -42,6 +42,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
 
 
@@ -357,6 +358,9 @@ class ApptainerProvider:
                 )
                 try:
                     await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
+                except asyncio.CancelledError:
+                    await kill_cancelled_command(proc)
+                    raise
                 except asyncio.TimeoutError as e:
                     # Graceful timeout: SIGTERM the process group first and give it a short grace period
                     # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
@@ -396,6 +400,9 @@ class ApptainerProvider:
             )
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+            except asyncio.CancelledError:
+                await kill_cancelled_command(proc)
+                raise
             except asyncio.TimeoutError as e:
                 # Graceful timeout: SIGTERM the process group first and give it a short grace period
                 # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM

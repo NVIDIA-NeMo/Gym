@@ -18,28 +18,53 @@ import hashlib
 import json
 import math
 import re
+import shlex
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
-from nemo_gym.orchestration.executors.base import SchedulerRefusedError
-from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
-from nemo_gym.orchestration.executors.resume_script import fresh_restart_command
-from nemo_gym.orchestration.executors.slurm import SlurmExecutor, reader_token
-from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
-from nemo_gym.orchestration.recovery import (
-    MLFLOW_NOT_REQUIRED_NOTE,
-    GateCriteria,
-    OperatorBudget,
+from nemo_gym.eval.recovery.budgets import OperatorBudget
+from nemo_gym.eval.recovery.decision import (
+    ACKNOWLEDGE_JUDGE_JOBS_FLAGS,
+    RERUN_MASKED_FLAGS,
     RecoveryAction,
     RecoveryDecision,
     RecoveryOutcome,
-    RecoveryOutcomePolicyConfig,
+)
+from nemo_gym.eval.recovery.gate import (
+    MLFLOW_NOT_REQUIRED_NOTE,
+    GateCriteria,
     gate_summary_from_collected,
     gate_task_summary,
     mlflow_tracking_required,
+    tracking_export_due,
+    with_operator_verdict,
+)
+from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
+from nemo_gym.orchestration import operations
+from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.base import BaseExecutor, SchedulerRefusedError
+from nemo_gym.orchestration.executors.capabilities import (
+    Inspectable,
+    LogReadable,
+    Resubmittable,
+    Terminable,
+    require,
+)
+from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm.reader import reader_token
+from nemo_gym.orchestration.executors.slurm.resume_script import fresh_restart_command
+from nemo_gym.orchestration.jobs import (
+    BenchmarkJob,
+    JobInfo,
+    JobStatus,
+    SubmissionRecord,
+    SubmissionStatus,
+    list_submissions,
+    load_submission_record,
 )
 from nemo_gym.utils.decorators import experimental
 
@@ -68,14 +93,98 @@ def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord |
     return executor_cls().run(config, dry_run=dry_run)
 
 
+def _executor_for(record: SubmissionRecord) -> BaseExecutor:
+    executor_cls = _EXECUTORS_BY_NAME.get(record.executor)
+    if executor_cls is None:
+        raise ValueError(f"Submission {record.gym_job_id} was made by unknown executor {record.executor!r}.")
+    return executor_cls()
+
+
 @experimental
 def resubmit(gym_job_id: str, benchmark: str) -> BenchmarkJob:
     """Queue `benchmark` of submission `gym_job_id` again, in place, and return its updated record entry."""
     record = load_submission_record(gym_job_id)
+    return require(_executor_for(record), Resubmittable, "resubmit").resubmit(record, benchmark)
+
+
+@experimental
+def status(
+    ids: list[str] | None = None, *, benchmarks: list[str] | None = None, limit: int | None = 10
+) -> list[SubmissionStatus]:
+    """The live status of the submissions `ids`, or with no ids of the newest `limit` in the local index.
+
+    `benchmarks` limits each submission to those benchmarks. With ids it is strict: a submission that lacks
+    one fails the whole call. Without ids it selects: only submissions that have all of them are considered,
+    and `limit` applies after that.
+    """
+    records = _records_to_inspect(ids, benchmarks, limit)
+    by_executor: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        by_executor.setdefault(record.executor, []).append(index)
+
+    results: list[SubmissionStatus | None] = [None] * len(records)
+    for indices in by_executor.values():
+        executor = require(_executor_for(records[indices[0]]), Inspectable, "status")
+        answered = operations.status(executor, [records[index] for index in indices], benchmarks)
+        for index, submission_status in zip(indices, answered, strict=True):
+            results[index] = submission_status
+    return [submission_status for submission_status in results if submission_status is not None]
+
+
+@experimental
+def info(gym_job_id: str, benchmark: str | None = None) -> JobInfo:
+    """Describe submission `gym_job_id`, or only `benchmark` of it, and where its parts are."""
+    record = load_submission_record(gym_job_id)
+    return operations.info(require(_executor_for(record), Inspectable, "info"), record, benchmark)
+
+
+@experimental
+def cancel(gym_job_id: str, benchmark: str) -> JobStatus:
+    """Stop `benchmark` of submission `gym_job_id` and return its status as observed afterwards."""
+    record = load_submission_record(gym_job_id)
+    return operations.cancel(require(_executor_for(record), Terminable, "cancel"), record, benchmark)
+
+
+@experimental
+def cancel_submission(gym_job_id: str, *, confirm: str) -> list[JobStatus]:
+    """Stop every live benchmark of submission `gym_job_id`; `confirm` must be its id."""
+    record = load_submission_record(gym_job_id)
+    return operations.cancel_submission(require(_executor_for(record), Terminable, "cancel"), record, confirm=confirm)
+
+
+@experimental
+def logs(
+    gym_job_id: str, benchmark: str, *, source: str = "driver", instance: str | None = None, tail: int | None = None
+) -> Iterator[str]:
+    """The lines of one of `benchmark`'s logs, `tail` of them if given."""
+    record = load_submission_record(gym_job_id)
+    executor = require(_executor_for(record), LogReadable, "logs")
+    return operations.logs(executor, record, benchmark, source=source, instance=instance, tail=tail)
+
+
+def is_inspectable(record: SubmissionRecord) -> bool:
+    """Whether `gym job status` can look at `record`: its executor can say what is happening to its jobs."""
     executor_cls = _EXECUTORS_BY_NAME.get(record.executor)
-    if executor_cls is None:
-        raise ValueError(f"Submission {gym_job_id} was made by unknown executor {record.executor!r}.")
-    return executor_cls().resubmit(record, benchmark)
+    return executor_cls is not None and issubclass(executor_cls, Inspectable)
+
+
+def _records_to_inspect(
+    ids: list[str] | None, benchmarks: list[str] | None, limit: int | None
+) -> list[SubmissionRecord]:
+    if ids:
+        records, problems = [], []
+        for gym_job_id in dict.fromkeys(ids):
+            try:
+                records.append(load_submission_record(gym_job_id))
+            except ValueError as error:
+                problems.append(str(error))
+        if problems:
+            raise ValueError(" ".join(problems))
+        return records
+    records = list_submissions()
+    if benchmarks:
+        records = [r for r in records if set(benchmarks) <= {job.benchmark for job in r.benchmarks}]
+    return records if limit is None else records[:limit]
 
 
 @experimental
@@ -173,9 +282,12 @@ def recover(
         acknowledge_failed_judge_jobs=acknowledge_failed_judge_jobs,
         acknowledge_reason=acknowledge_reason,
     )
-    return outcome.model_copy(update={"reader_token": reader_token()})
+    # The verdict's command repeats the options this call asked for (its own parameters).
+    outcome = _with_requested(outcome, locals())
+    return with_operator_verdict(outcome).model_copy(update={"reader_token": reader_token()})
 
 
+@experimental
 def inspect_recovery(
     gym_job_id: str,
     benchmark: str,
@@ -236,7 +348,80 @@ def inspect_recovery(
         acknowledge_failed_judge_jobs=acknowledge_failed_judge_jobs,
         acknowledge_reason=acknowledge_reason,
     )
-    return outcome.model_copy(update={"reader_token": reader_token()})
+    # The verdict's command repeats the options this call asked for (its own parameters).
+    outcome = _with_requested(outcome, locals())
+    return with_operator_verdict(outcome).model_copy(update={"reader_token": reader_token()})
+
+
+def _requested(
+    *,
+    extend_retries: int = 0,
+    extend_attempts: int = 0,
+    max_walltime: str | None = None,
+    repin: str | None = None,
+    auto_repin: bool = True,
+    unsafe_resume_reason: str | None = None,
+    server_spinup_timeout_seconds: int | None = None,
+    judge_partition: str | None = None,
+    judge_qos: str | None = None,
+    rerun_masked_without_artifact: bool = False,
+    acknowledge_failed_judge_jobs: bool = False,
+    score_key: list[str | int] | None = None,
+    score_agent: str | None = None,
+    score_environment: str | None = None,
+    max_unhealthy_fraction: float | None = None,
+    max_response_failure_fraction: float | None = None,
+    max_trial_failure_fraction: float | None = None,
+    policy_timeout_counts_as_model: bool | None = None,
+    mlflow_run_id: str | None = None,
+    mlflow_status: str | None = None,
+    **_: Any,
+) -> list[str]:
+    """The options of a recovery call as `gym eval resubmit --recover` takes them, each reason as TEXT, so the
+    operator verdict's command repeats them: the pin choice, the budgets and fixes, and the gate's own options."""
+    q = shlex.quote
+    flags = [
+        (repin, f"--repin {repin} --repin-reason TEXT"),
+        (not auto_repin and repin is None, "--no-auto-repin"),
+        (extend_attempts, f"--extend-attempts {extend_attempts}"),
+        (extend_retries, f"--extend-retries {extend_retries}"),
+        (max_walltime, f"--max-walltime {max_walltime} --walltime-reason TEXT"),
+        (unsafe_resume_reason, "--allow-unsafe-resume --unsafe-resume-reason TEXT"),
+        (
+            server_spinup_timeout_seconds is not None,
+            f"--server-spinup-timeout-seconds {server_spinup_timeout_seconds} --spinup-timeout-reason TEXT",
+        ),
+        (judge_partition, f"--judge-partition {q(judge_partition or '')}"),
+        (judge_qos, f"--judge-qos {q(judge_qos or '')}"),
+        (rerun_masked_without_artifact, f"{RERUN_MASKED_FLAGS} TEXT"),
+        (acknowledge_failed_judge_jobs, f"{ACKNOWLEDGE_JUDGE_JOBS_FLAGS} TEXT"),
+        (score_key is not None, f"--score-key {q(json.dumps(score_key))}"),
+        (score_agent is not None, f"--score-agent {q(score_agent or '')}"),
+        (score_environment is not None, f"--score-environment {q(score_environment or '')}"),
+        (max_unhealthy_fraction is not None, f"--max-unhealthy-fraction {max_unhealthy_fraction}"),
+        (
+            max_response_failure_fraction is not None,
+            f"--max-response-failure-fraction {max_response_failure_fraction}",
+        ),
+        (max_trial_failure_fraction is not None, f"--max-trial-failure-fraction {max_trial_failure_fraction}"),
+        (
+            policy_timeout_counts_as_model is not None,
+            f"--policy-timeout-counts-as-model {str(policy_timeout_counts_as_model).lower()}",
+        ),
+        (mlflow_run_id is not None, f"--mlflow-run-id {q(mlflow_run_id or '')}"),
+        (mlflow_status is not None, f"--mlflow-status {q(mlflow_status or '')}"),
+    ]
+    return [flag for given, flag in flags if given]
+
+
+def _with_requested(outcome: RecoveryOutcome, options: dict[str, Any]) -> RecoveryOutcome:
+    """The outcome whose decision names the run and the options of the call that planned it (see ``_requested``), so
+    every command of the operator verdict is complete."""
+    if outcome.decision is None:
+        return outcome
+    target = f"{shlex.quote(options['gym_job_id'])} {shlex.quote(options['benchmark'])}"
+    decision = outcome.decision.model_copy(update={"requested": _requested(**options), "target": target})
+    return outcome.model_copy(update={"decision": decision})
 
 
 def _spinup_timeout_raise(seconds: int | None, reason: str | None) -> dict[str, Any]:
@@ -348,10 +533,9 @@ def _recover(
         else None
     )
     # A walltime raise the partition cannot take is refused at once, before the slow evidence read.
-    plan_walltime = getattr(executor, "walltime_plan", None)
     walltime_plan = (
-        plan_walltime(record, benchmark, max_walltime)
-        if max_walltime is not None and not inspect_only and plan_walltime is not None
+        executor.walltime_plan(record, benchmark, max_walltime)
+        if max_walltime is not None and not inspect_only
         else None
     )
     if walltime_plan is not None and walltime_plan.get("refused"):
@@ -428,7 +612,7 @@ def _recover(
         return decision, collected, gate_task, mlflow
 
     # A run pinned at another commit is planned with the installed Gym's rules; its pin moves only when it must.
-    pinned = executor.gym_pin(record) if repin is None and hasattr(executor, "gym_pin") else None
+    pinned = executor.gym_pin(record) if repin is None else None
     installed = executor.installed_commit() if pinned is not None else None
     pin_plan: dict[str, Any] | None = None
     if (
@@ -510,7 +694,9 @@ def _recover(
             mlflow=mlflow,
             pin_plan=pin_plan,
         )
-    if decision.action == RecoveryAction.NOOP and _tracking_export_due(decision, collected, mlflow):
+    if decision.action == RecoveryAction.NOOP and tracking_export_due(
+        decision, collected, mlflow["tracking_required"]
+    ):
         export = executor.export_tracking(record, benchmark, collected)
         if export.get("state") == "unsupported":
             reason = f"MLflow post-run export not performed: {export.get('error')}"
@@ -559,7 +745,7 @@ def _recover(
     if decision.action == RecoveryAction.RESUBMIT:
         operator = decision.operator_continuation
         try:
-            job = executor.resubmit(
+            job = require(executor, Resubmittable, "resubmit").resubmit(
                 record,
                 benchmark,
                 keep_budget=True,
@@ -618,7 +804,7 @@ def _recover(
         if repin is not None or extend_retries or extend_attempts:
             raise ValueError("a fresh restart takes only --max-walltime and --walltime-reason")
         try:
-            job = executor.resubmit(
+            job = require(executor, Resubmittable, "resubmit").resubmit(
                 record,
                 benchmark,
                 fresh_restart=True,
@@ -642,27 +828,6 @@ def _recover(
             walltime_plan=walltime_plan,
         )
     return RecoveryOutcome(decision=decision, ok=False, dispatched=None, gate_task=gate_task, mlflow=mlflow)
-
-
-def _tracking_export_due(decision: Any, collected: Any, mlflow: dict[str, Any]) -> bool:
-    """Whether a complete run lacks the MLflow export receipt its saved config requires.
-
-    Only a run whose saved config configures MLflow (tracking URI, experiment and run name) and does not set
-    ``mlflow_tracking_required`` to false, with no post-run receipt at all and no live job, is exported. A run that
-    configured no exporter is never exported, and a receipt, current or not, is never replaced.
-    """
-    if collected is None or not decision.complete or decision.scheduler_live or not mlflow["tracking_required"]:
-        return False
-    provenance = (collected.quality or {}).get("provenance")
-    facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
-    local = collected.mlflow
-    return (
-        isinstance(facts, dict)
-        and facts.get("configured") is True
-        and isinstance(local, dict)
-        and "receipt" in local
-        and local["receipt"] is None
-    )
 
 
 def _refused(

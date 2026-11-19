@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- resources_servers/mm_coding_training/configs/mm_coding_training.yaml
+- responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+use_absolute_ip: true
+absolute_ip_server_types:
+- responses_api_models
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      host: 127.0.0.1
+environment_server_routes:
+  mm-coding:opencode: mm_coding_opencode_environment
+mm_coding_opencode_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      host: 127.0.0.1
+      num_workers: 1
+      resources_server: null
+      return_session_trajectory: true
+      image_input: true
+      context_window: 8192
+      max_output_tokens: 8192
+      opencode_config:
+        compaction:
+          auto: false
+        agent:
+          build:
+            steps: 8
+      timeout: 7200
+      sandbox_executable_path: ${oc.env:MM_CODING_OPENCODE_PATH}
+      sandbox_executable_sha256: ${oc.env:MM_CODING_OPENCODE_SHA256}
+      sandbox_ripgrep_path: ${oc.env:MM_CODING_RG_PATH}
+      sandbox_ripgrep_sha256: ${oc.env:MM_CODING_RG_SHA256}
+      sandbox_plugin_dependencies_path: ${oc.env:MM_CODING_PLUGIN_BUNDLE_PATH}
+      sandbox_plugin_dependencies_sha256: ${oc.env:MM_CODING_PLUGIN_BUNDLE_SHA256}
+mm_coding_opencode_environment:
+  environment_servers:
+    single_agent_turn:
+      host: 127.0.0.1
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: mm_coding_opencode_resources
+      agent_server:
+        type: responses_api_agents
+        name: mm_coding_opencode_agent
+      resources_tool_transports: []
+      cleanup_timeout_seconds: 300
+      default_episode_timeout_seconds: 10800
+      # OpenCode runs 8 sessions at a time (opencode_agent concurrency). Admit only 8 episodes, so the others
+      # wait here with no task sandbox and no running deadline.
+      max_concurrent_episodes: 8
+      queue_timeout_seconds: 86400
+mm_coding_opencode_resources:
+  _copy: mm_coding_training
+  resources_servers:
+    mm_coding_training:
+      entrypoint: session_app.py
+      datasets: []
+      verified: false
+      description: Opencode visual coding training with isolated task and verifier
+        sandboxes.
+      allowed_agents:
+      - opencode_agent
+      sandbox_runtime_files:
+        /opt/mm-coding/rg: ${oc.env:MM_CODING_RG_SOURCE}
+        /opt/mm-coding/plugin-dependencies.tar.gz: ${oc.env:MM_CODING_PLUGIN_BUNDLE_SOURCE}
+      sandbox_config:
+        ttl_s: 14400
+        ready_timeout_s: 600
+        resources:
+          cpu: 4
+          memory_mib: 16384
+        env:
+          MPLBACKEND: Agg
+          OMP_NUM_THREADS: '1'

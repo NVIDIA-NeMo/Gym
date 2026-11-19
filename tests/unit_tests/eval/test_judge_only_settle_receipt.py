@@ -88,6 +88,30 @@ def test_the_receipt_flag_needs_settle_into_source(tmp_path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "overrides,message",
+    [
+        ({"judge_failed_only": False}, "`settle_into_source` is only valid together with `judge_failed_only`"),
+        (
+            {"settle_into_source": False, "skip_spent_judge_failures": False, "settle_receipt_fpath": None},
+            "A source snapshot requires settle_into_source",
+        ),
+    ],
+)
+def test_source_settlement_requires_explicit_recovery_mode(tmp_path, overrides, message) -> None:
+    output = _run(tmp_path, [verify_transport_masked(0), ungraded(1)])
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    snapshot = _snapshot(output)
+    before = {path.name: path.read_bytes() for path in output.parent.iterdir() if path.is_file()}
+    assert _job_config(output, settle_source_snapshot_json=snapshot).settle_into_source
+
+    with pytest.raises(ValueError, match=message):
+        _job_config(output, settle_source_snapshot_json=snapshot, **overrides)
+
+    assert {path.name: path.read_bytes() for path in output.parent.iterdir() if path.is_file()} == before
+    assert not (output.parent / "reverification").exists()
+
+
 async def test_the_pass_records_what_it_selected_judged_and_settled(tmp_path, verifier) -> None:  # noqa: F811
     output = _run(tmp_path, [verify_transport_masked(0), ungraded(1, judge_response="A")])
     helper = RolloutReverificationHelper()
@@ -212,3 +236,57 @@ def test_a_health_check_that_reads_the_store_selection_gets_the_settled_history_
     assert call["rollout_paths"] == output and call["output_dir"] == output.parent
     assert call["run_coverage"][0]["masked"] == 0
     assert not (Path(config.settle_receipt_fpath).parent / "selected_rollouts.jsonl").exists()
+
+
+def test_the_quality_summary_alone_can_be_rewritten_from_the_saved_rows(tmp_path, aggregation) -> None:  # noqa: F811
+    output = _run(tmp_path, [verify_transport_masked(0), ungraded(1, judge_response="A")])
+
+    refreshed = eval_cli._refresh_settled_source(
+        {"config_paths": ["fixture.yaml"], "health_check_workers": 1}, output, workdir=output.parent, metrics=False
+    )
+
+    assert refreshed == {"metrics_recomputed": False, "health_summary_recomputed": True}
+    assert aggregation == []
+    summary = json.loads((output.parent / "quality_summary.json").read_text())
+    digests = summary["run"]["provenance"]["rollout_artifact_digests"][0]
+    assert digests["rollouts_jsonl_fpath"] == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert summary["run"]["artifacts"]["expected"] == 2
+
+
+def test_an_incomplete_strict_pass_rewrites_the_quality_summary_from_the_rows_it_settled(
+    tmp_path, monkeypatch, verifier, aggregation
+) -> None:  # noqa: F811
+    """The summary written before the pass counts the masked row as unscored. The pass settles it and then loses its
+    connection, so it returns no count: the summary reports the Store's settled counts and the digest of the rows as
+    saved, and no aggregate metrics are computed."""
+    from types import SimpleNamespace
+
+    from aiohttp import ServerDisconnectedError
+
+    output = _run(tmp_path, [verify_transport_masked(0), ungraded(1, judge_response="A")])
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    run_config = {"config_paths": ["fixture.yaml"], "health_check_workers": 1}
+    eval_cli._refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
+    summary_path = output.parent / "quality_summary.json"
+    assert json.loads(summary_path.read_text())["run"]["artifacts"]["scored"] == 1
+
+    async def settle_for_real(config, source):
+        helper = RolloutReverificationHelper()
+        await helper.run_from_config(_job_config(source))
+        raise ServerDisconnectedError()
+
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.rejudge_saved_judge_failures", settle_for_real)
+    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda path: False)  # the strict run stays incomplete
+
+    eval_cli._rejudge_saved_judge_failures(
+        run_config, output, SimpleNamespace(disable_aggregation=False), complete_only=True
+    )
+
+    coverage = RolloutStore.read(output, import_legacy=False).coverage()
+    summary = json.loads(summary_path.read_text())
+    artifacts = summary["run"]["artifacts"]
+    assert coverage["successful"] == 2 and coverage["masked"] == 0
+    assert (artifacts["scored"], artifacts["failed"]["total"], artifacts["expected"]) == (2, 0, coverage["expected"])
+    digests = summary["run"]["provenance"]["rollout_artifact_digests"][0]
+    assert digests["rollouts_jsonl_fpath"] == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert aggregation == []  # an incomplete strict run publishes no score

@@ -307,8 +307,8 @@ class TestDiscoverBenchmarksInDir:
             pytest.param(
                 "swebench_verified_multilingual.yaml",
                 [
-                    "benchmarks/swebench/verified/opencode.yaml",
-                    "benchmarks/swebench/multilingual/opencode.yaml",
+                    "benchmarks/swebench/verified/opencode_legacy_agent.yaml",
+                    "benchmarks/swebench/multilingual/opencode_legacy_agent.yaml",
                 ],
                 1024,
                 id="swebench_verified_multilingual",
@@ -328,7 +328,7 @@ class TestDiscoverBenchmarksInDir:
             "config_paths": expected_config_paths,
             "num_samples_in_parallel": expected_concurrency,
         }
-        assert "benchmarks/swebench/pro/opencode.yaml" not in suite["config_paths"]
+        assert "benchmarks/swebench/pro/opencode_legacy_agent.yaml" not in suite["config_paths"]
 
     @pytest.mark.parametrize(
         ("suite_name", "expected_benchmark_count"),
@@ -1374,7 +1374,7 @@ class TestAgentPinDiscoveryCollateRollout:
         assert err is None, err
         monkeypatch.chdir(tmp_path)
         paths = TrainDataProcessor()._collate_samples_single_type(
-            type="benchmark", server_instance_configs=[rs_instance]
+            type="benchmark", server_instance_configs=[rs_instance], output_dir=tmp_path / "prepared"
         )
         rows = [json.loads(line) for line in open(paths[0])]
         assert rows[0]["task_source"] == "shared_rs"
