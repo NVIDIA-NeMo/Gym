@@ -999,6 +999,39 @@ class OpenShellProvider:
             )
         future.add_done_callback(lambda done, key=key: _forget_delete(key, done))
 
+    async def list_by_metadata(self, labels: Mapping[str, str]) -> list[SandboxHandle]:
+        """Handles of this workspace's Gym sandboxes that carry every label, selected by the gateway.
+
+        Values are sanitized as ``create`` sanitized them, so the labels a sandbox was created with select it.
+        """
+        terms = {str(key): sanitize_label_value(value) for key, value in labels.items()}
+        if any("," in key or "=" in key for key in terms):
+            raise ValueError(f"OpenShell label keys cannot contain ',' or '=': {sorted(terms)}")
+        selector = ",".join(f"{key}={value}" for key, value in {**terms, SANDBOX_LABEL: "1"}.items())
+        workspace = self._connection.workspace
+        refs = await self._call(self._client.list_all, workspace=workspace, label_selector=selector)
+        return [
+            SandboxHandle(
+                sandbox_id=ref.id,
+                provider_name=self.name,
+                raw=_OpenShellSandbox(
+                    name=ref.name, sandbox_id=ref.id, workspace=ref.workspace or workspace, image=None
+                ),
+            )
+            for ref in refs
+        ]
+
+    async def metadata_of(self, handle: SandboxHandle) -> dict[str, str] | None:
+        """The sandbox's labels from a fresh GetSandbox; ``None`` once the gateway no longer has it."""
+        inst = handle.raw
+        try:
+            ref = await self._call(self._client.get, inst.name, workspace=inst.workspace)
+        except Exception as e:
+            if _is_not_found(e):
+                return None
+            raise
+        return dict(ref.labels)
+
     async def _reap_orphans(self) -> None:
         """Delete this process's orphaned sandboxes: ones it no longer tracks, for example a create cancelled
         after the gateway committed it. Selected by the process label, which needs attribution to be enabled."""

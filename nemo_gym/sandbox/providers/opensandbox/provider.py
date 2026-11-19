@@ -1046,6 +1046,20 @@ class OpenSandboxDiagnosticsConfig:
 
 
 @dataclass(frozen=True)
+class _ListedSandbox:
+    """A sandbox found by its labels: ``close`` deletes it through the management API, with no SDK handle to close."""
+
+    sandbox_id: str
+    service: Any
+
+    async def kill(self) -> None:
+        await self.service.kill_sandbox(self.sandbox_id)
+
+    async def close(self) -> None:
+        return None
+
+
+@dataclass(frozen=True)
 class OpenSandboxProviderOptions:
     """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``.
 
@@ -1219,6 +1233,9 @@ class OpenSandboxProvider:
         # Sessions own aiohttp clients that only close() releases: aclose()
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
+        # The management API client for listing, reading and deleting sandboxes by id (see _lifecycle_service).
+        self._lifecycle: Any = None
+        self._lifecycle_owns_client = False
         self._renewals: dict[str, asyncio.Task[None]] = {}
         # Creates whose caller gave up; each deletes its sandbox once the server answers.
         self._abandoned_creates: set[asyncio.Task[None]] = set()
@@ -1552,6 +1569,10 @@ class OpenSandboxProvider:
                     "Failed to close PTY session %r during aclose", getattr(session, "session_id", "?"), exc_info=True
                 )
         self._pty_sessions.clear()
+        lifecycle, self._lifecycle = self._lifecycle, None
+        lifecycle_client = getattr(lifecycle, "_httpx_client", None)
+        if self._lifecycle_owns_client and lifecycle_client is not None:
+            await lifecycle_client.aclose()
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.aclose()
@@ -2849,35 +2870,89 @@ class OpenSandboxProvider:
             )
             return []
 
-    async def _delete_sandboxes_by_metadata(self, scope: dict[str, str], attempt_key: str) -> list[dict[str, Any]]:
-        AdapterFactory, SandboxFilter = _require_opensandbox_lifecycle_sdk()
-        service = AdapterFactory(self._connection_config()).create_sandbox_service()
-        found: list[dict[str, Any]] = []
+    async def list_by_metadata(self, labels: Mapping[str, str]) -> list[SandboxHandle]:
+        """Handles of the sandboxes the server lists for every label in ``labels``; ``close`` deletes them by id.
+
+        The server-side filter is advisory, so labels the listing reports are checked here.
+        ``nemo_gym.sandbox.close_by_metadata`` also re-reads each one's labels through ``metadata_of``.
+        """
+        wanted = dict(labels)
+        service = self._lifecycle_service()
+        return [
+            SandboxHandle(sandbox_id=str(info.id), provider_name=self.name, raw=_ListedSandbox(str(info.id), service))
+            for info in await self._list_sandbox_infos(service, wanted)
+            # The server's filter is advisory: drop what it listed without the labels before re-reading each one.
+            if all((info.metadata or {}).get(key) == value for key, value in wanted.items())
+        ]
+
+    async def metadata_of(self, handle: SandboxHandle) -> dict[str, str] | None:
+        """The sandbox's metadata as the server holds it now; ``None`` when the server answers 404 for it."""
+        service = self._lifecycle_service()
+
+        async def get_info_or_none() -> Any:
+            # A sandbox already gone is an answer here, not a failure: swallow the 404 before the retry wrapper.
+            try:
+                return await service.get_sandbox_info(handle.sandbox_id)
+            except Exception as error:
+                if _exception_status_code(error) == 404:
+                    return None
+                raise
+
+        info = await self._await_sdk_operation(
+            get_info_or_none,
+            operation="get_sandbox_info",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=self._connection.request_timeout_s,
+            replay_safe=True,
+        )
+        if info is None:
+            return None
+        return {str(key): str(value) for key, value in (info.metadata or {}).items()}
+
+    def _lifecycle_service(self) -> Any:
+        """The management API client, built once per provider so a reap does not open a connection pool per call."""
+        if self._lifecycle is None:
+            AdapterFactory, _ = _require_opensandbox_lifecycle_sdk()
+            config = self._connection_config()
+            self._lifecycle = AdapterFactory(config).create_sandbox_service()
+            # Without the provider's shared transport, the SDK's adapter opened its own client, which aclose closes.
+            self._lifecycle_owns_client = getattr(config, "transport", None) is None
+        return self._lifecycle
+
+    async def _list_sandbox_infos(self, service: Any, metadata: dict[str, str]) -> list[Any]:
+        """Every page of the server's listing filtered by ``metadata``; the filter is advisory."""
+        _, SandboxFilter = _require_opensandbox_lifecycle_sdk()
+        infos: list[Any] = []
         page = 1
         while True:
             listed = await self._await_sdk_operation(
-                lambda: service.list_sandboxes(SandboxFilter(metadata=scope, page=page, page_size=100)),
+                lambda: service.list_sandboxes(SandboxFilter(metadata=metadata, page=page, page_size=100)),
                 operation="list_sandboxes",
                 sandbox_id=None,
                 timeout_s=self._connection.request_timeout_s,
                 replay_safe=True,
             )
-            for info in listed.sandbox_infos:
-                # The server-side metadata filter is advisory; never delete a sandbox this attempt did not make.
-                if (info.metadata or {}).get(attempt_key) != scope.get(attempt_key):
-                    continue
-                status = getattr(info, "status", None)
-                found.append(
-                    {
-                        "id": str(info.id),
-                        "state": getattr(status, "state", None),
-                        "reason": getattr(status, "reason", None),
-                        "message": getattr(status, "message", None),
-                    }
-                )
+            infos.extend(listed.sandbox_infos)
             if not listed.pagination.has_next_page:
-                break
+                return infos
             page += 1
+
+    async def _delete_sandboxes_by_metadata(self, scope: dict[str, str], attempt_key: str) -> list[dict[str, Any]]:
+        service = self._lifecycle_service()
+        found: list[dict[str, Any]] = []
+        for info in await self._list_sandbox_infos(service, scope):
+            # The server-side metadata filter is advisory; never delete a sandbox this attempt did not make.
+            if (info.metadata or {}).get(attempt_key) != scope.get(attempt_key):
+                continue
+            status = getattr(info, "status", None)
+            found.append(
+                {
+                    "id": str(info.id),
+                    "state": getattr(status, "state", None),
+                    "reason": getattr(status, "reason", None),
+                    "message": getattr(status, "message", None),
+                }
+            )
         for orphan in found:
             await self._kill_with_retry(lambda: service.kill_sandbox(orphan["id"]), sandbox_id=orphan["id"])
             LOGGER.warning(

@@ -15,6 +15,7 @@ import pytest
 
 from nemo_gym.sandbox.adapters.docker_compose import PLACEMENT_GROUP_KEY, AsyncSandboxCompose
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
+from nemo_gym.sandbox.worker_labels import worker_labels
 
 
 pytestmark = pytest.mark.sandbox
@@ -2257,7 +2258,7 @@ async def test_forwarding_and_volumes_of_a_service_on_its_own_provider_go_throug
         assert [spec.image for spec in gpu.created] == ["alpine:3.22", "img", "img"]
         assert [spec.image for spec in cpu.created] == ["img"]
         helper, seed, side = gpu.created
-        expected = {"storage": "gpu", PLACEMENT_GROUP_KEY: group.project}
+        expected = {"storage": "gpu", PLACEMENT_GROUP_KEY: group.project, **worker_labels()}
         assert helper.metadata == expected and seed.metadata == expected
         assert side.metadata["storage"] == "gpu"
         assert seed.provider_options["volumes"] == [

@@ -1494,3 +1494,76 @@ async def test_delete_uses_its_own_long_deadline(monkeypatch: pytest.MonkeyPatch
     )
     await provider.aclose()
     assert sorted(built) == [30, 90]
+
+
+def _labeled_ref(name: str, labels: dict[str, str]) -> SandboxRef:
+    return dataclasses.replace(
+        make_ref(openshell_pb2.SANDBOX_PHASE_READY, name=name, sandbox_id=f"id-{name}"), labels=labels
+    )
+
+
+async def test_list_by_metadata_selects_gym_sandboxes_carrying_every_label(
+    make_provider, fake_client: FakeClient
+) -> None:
+    fake_client.list_results = [[_labeled_ref("a", {})]]
+    provider = make_provider()
+
+    handles = await provider.list_by_metadata({"nemo-gym-worker": "w1", "nemo-gym-server": "my/server"})
+
+    assert fake_client.list_calls == [
+        {
+            "workspace": "default",
+            "label_selector": f"nemo-gym-worker=w1,nemo-gym-server=my_server,{SANDBOX_LABEL}=1",
+        }
+    ]
+    assert [(h.sandbox_id, h.raw.name, h.raw.workspace) for h in handles] == [("id-a", "a", "default")]
+    fake_client.list_results = [[]]
+    await _drain(provider)
+
+
+async def test_list_by_metadata_refuses_a_key_that_would_split_the_selector(make_provider) -> None:
+    provider = make_provider()
+    with pytest.raises(ValueError, match="cannot contain"):
+        await provider.list_by_metadata({"a,b": "x"})
+    await _drain(provider)
+
+
+async def test_metadata_of_reads_fresh_labels_and_none_once_gone(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider()
+    fake_client.get_results = [_labeled_ref("a", {"nemo-gym-worker": "w1"})]
+    assert await provider.metadata_of(_make_handle(name="a")) == {"nemo-gym-worker": "w1"}
+
+    fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
+    assert await provider.metadata_of(_make_handle(name="a")) is None
+
+    fake_client.get_results = [FakeRpcError(grpc.StatusCode.UNAVAILABLE)]
+    with pytest.raises(grpc.RpcError):
+        await provider.metadata_of(_make_handle(name="a"))
+    await _drain(provider)
+
+
+async def test_close_by_metadata_closes_matching_and_refuses_relabeled(make_provider, fake_client: FakeClient) -> None:
+    from nemo_gym.sandbox.worker_labels import close_by_metadata
+
+    labels = {"nemo-gym-worker": "w1"}
+    fake_client.list_results = [[_labeled_ref("kept", labels), _labeled_ref("moved", labels)]]
+    current = {"kept": {**labels, SANDBOX_LABEL: "1"}, "moved": {"nemo-gym-worker": "w2", SANDBOX_LABEL: "1"}}
+
+    def get(sandbox_name: str, *, workspace: str) -> SandboxRef:
+        fake_client.get_calls.append({"name": sandbox_name, "workspace": workspace})
+        if sandbox_name in fake_client.deleted:
+            raise FakeRpcError(grpc.StatusCode.NOT_FOUND)
+        return _labeled_ref(sandbox_name, current[sandbox_name])
+
+    fake_client.get = get
+    provider = make_provider()
+
+    result = await close_by_metadata(provider, labels)
+    await _drain_deletes_only()
+
+    assert result.closed == ("id-kept",)
+    assert result.refused == ("id-moved",)
+    assert result.failed == ()
+    assert [call["name"] for call in fake_client.delete_calls] == ["kept"]
+    fake_client.list_results = [[]]  # nothing of this process is orphaned at shutdown
+    await _drain(provider)

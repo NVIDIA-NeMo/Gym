@@ -980,3 +980,94 @@ async def _return_value(value: Any) -> Any:
 
 async def _raise(error: BaseException) -> None:
     raise error
+
+
+class FakeListQuery(FakeParams):
+    pass
+
+
+class LabeledDaytonaClient:
+    """Lists sandboxes over two pages by label filter and serves ``get`` from its current labels."""
+
+    def __init__(self, pages: list[list[SimpleNamespace]]) -> None:
+        self.pages = pages
+        self.queries: list[FakeListQuery] = []
+        self.labels: dict[str, dict[str, str]] = {
+            sandbox.id: dict(sandbox.labels) for page in pages for sandbox in page
+        }
+        self.deleted: list[str] = []
+
+    async def list(self, query: FakeListQuery):
+        self.queries.append(query)
+        for page in self.pages:
+            for sandbox in page:
+                yield sandbox
+
+    async def get(self, sandbox_id: str) -> SimpleNamespace:
+        if sandbox_id not in self.labels:
+            raise RuntimeError(f"Sandbox {sandbox_id} not found")
+        return SimpleNamespace(id=sandbox_id, labels=dict(self.labels[sandbox_id]))
+
+    async def delete(self, sandbox: SimpleNamespace, timeout: float = 0) -> None:
+        self.deleted.append(sandbox.id)
+        self.labels.pop(sandbox.id, None)
+
+
+async def test_list_by_metadata_sends_the_label_filter_and_reads_every_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(daytona_provider, "_require_list_query", lambda: FakeListQuery)
+    worker = {"nemo-gym-worker": "a" * 32, "nemo-gym-run": "run1"}
+    client = LabeledDaytonaClient(
+        [
+            [SimpleNamespace(id="sandbox-1", labels=worker)],
+            [SimpleNamespace(id="sandbox-2", labels=worker)],
+        ]
+    )
+    provider = daytona_provider.DaytonaProvider(operations={"retries": 0})
+    monkeypatch.setattr(provider, "_client", lambda: client)
+
+    handles = await provider.list_by_metadata(worker)
+
+    assert [query.kwargs for query in client.queries] == [{"labels": worker}]
+    assert [(handle.sandbox_id, handle.provider_name) for handle in handles] == [
+        ("sandbox-1", "daytona"),
+        ("sandbox-2", "daytona"),
+    ]
+    assert await provider.metadata_of(handles[0]) == worker
+    client.labels.pop("sandbox-2")
+    assert await provider.metadata_of(handles[1]) is None
+
+
+async def test_metadata_of_raises_errors_other_than_a_missing_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = daytona_provider.DaytonaProvider(operations={"retries": 0})
+
+    class BrokenClient:
+        async def get(self, sandbox_id: str) -> None:
+            raise PermissionError("forbidden")
+
+    monkeypatch.setattr(provider, "_client", lambda: BrokenClient())
+    with pytest.raises(PermissionError):
+        await provider.metadata_of(SandboxHandle("sandbox-1", "daytona", raw=None))
+
+
+async def test_close_by_metadata_closes_matching_sandboxes_and_refuses_relabeled_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nemo_gym.sandbox.worker_labels import close_by_metadata
+
+    monkeypatch.setattr(daytona_provider, "_require_list_query", lambda: FakeListQuery)
+    worker = {"nemo-gym-worker": "b" * 32}
+    client = LabeledDaytonaClient(
+        [[SimpleNamespace(id="sandbox-match", labels=worker), SimpleNamespace(id="sandbox-moved", labels=worker)]]
+    )
+    # Relabeled between the listing and the stop: it now belongs to another worker.
+    client.labels["sandbox-moved"] = {"nemo-gym-worker": "c" * 32}
+    provider = daytona_provider.DaytonaProvider(operations={"retries": 0})
+    monkeypatch.setattr(provider, "_client", lambda: client)
+
+    result = await close_by_metadata(provider, worker)
+
+    assert result.closed == ("sandbox-match",)
+    assert result.refused == ("sandbox-moved",)
+    assert result.failed == ()
+    assert client.deleted == ["sandbox-match"]
+    assert "sandbox-moved" in client.labels

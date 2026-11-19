@@ -5620,6 +5620,7 @@ async def test_orphan_reap_failures_never_hide_the_create_timeout(
     # A delete that finds the sandbox already gone is success; any other delete failure is reported, not raised.
     gone = FakeLifecycleService(sandboxes=[], kill_error=SandboxApiException("not found", status_code=404))
     install_lifecycle(monkeypatch, gone)
+    provider._lifecycle = None  # the provider builds its management API client once
     real_reap = provider._reap_orphaned_create
 
     def seed(metadata: dict[str, str], attempt_key: str) -> Any:
@@ -5882,3 +5883,138 @@ async def test_create_probe_policy_uses_current_kind_not_http_status_of_lifecycl
     assert lifecycle.http_status is None
     assert request.http_status == 410
     assert request.__cause__ is DeadSandbox.request_errors[-1]
+
+
+@dataclass
+class PagedLabelService(FakeLifecycleService):
+    """A management API that lists one sandbox per page and reads each sandbox's metadata fresh by id."""
+
+    def __post_init__(self) -> None:
+        self.current = {s.id: s for s in self.sandboxes}
+
+    async def list_sandboxes(self, filter: Any) -> SimpleNamespace:
+        self.filters.append(filter)
+        matches = [
+            s for s in self.sandboxes if all((s.metadata or {}).get(k) == v for k, v in filter.metadata.items())
+        ]
+        page = matches[filter.page - 1 : filter.page]
+        return SimpleNamespace(
+            sandbox_infos=page, pagination=SimpleNamespace(has_next_page=filter.page < len(matches))
+        )
+
+    async def get_sandbox_info(self, sandbox_id: str) -> SimpleNamespace:
+        from opensandbox.exceptions import SandboxApiException
+
+        if sandbox_id not in self.current:
+            raise SandboxApiException("sandbox not found", status_code=404)
+        return self.current[sandbox_id]
+
+    async def kill_sandbox(self, sandbox_id: str) -> None:
+        self.killed.append(sandbox_id)
+        self.current.pop(sandbox_id, None)
+
+
+WORKER = {"nemo-gym-worker": "dead", "nemo-gym-run": "run1"}
+
+
+async def test_list_by_metadata_reads_every_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = PagedLabelService(
+        sandboxes=[orphan("a", WORKER), orphan("b", {"nemo-gym-worker": "live"}), orphan("c", WORKER)]
+    )
+    install_lifecycle(monkeypatch, service)
+    provider = opensandbox_provider.OpenSandboxProvider()
+
+    handles = await provider.list_by_metadata(WORKER)
+
+    assert [handle.sandbox_id for handle in handles] == ["a", "c"]
+    assert [f.page for f in service.filters] == [1, 2]
+    assert all(f.metadata == WORKER for f in service.filters)
+
+
+async def test_list_by_metadata_drops_what_an_advisory_filter_let_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    class IgnoresFilter(PagedLabelService):
+        async def list_sandboxes(self, filter: Any) -> SimpleNamespace:
+            return SimpleNamespace(sandbox_infos=self.sandboxes, pagination=SimpleNamespace(has_next_page=False))
+
+    service = IgnoresFilter(sandboxes=[orphan("a", WORKER), orphan("other-tenant", {"team": "x"})])
+    install_lifecycle(monkeypatch, service)
+    provider = opensandbox_provider.OpenSandboxProvider()
+
+    assert [handle.sandbox_id for handle in await provider.list_by_metadata(WORKER)] == ["a"]
+
+
+async def test_one_management_client_serves_a_reap_and_is_closed_with_the_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = PagedLabelService(sandboxes=[orphan("a", WORKER), orphan("b", WORKER)])
+    service._httpx_client = AsyncMock()
+    install_lifecycle(monkeypatch, service)
+    built: list[Any] = []
+    factory, sandbox_filter = opensandbox_provider._require_opensandbox_lifecycle_sdk()
+
+    class CountingFactory(factory):
+        def create_sandbox_service(self) -> Any:
+            built.append(self)
+            return super().create_sandbox_service()
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_lifecycle_sdk", lambda: (CountingFactory, sandbox_filter)
+    )
+    provider = opensandbox_provider.OpenSandboxProvider()
+    from nemo_gym.sandbox.worker_labels import close_by_metadata
+
+    result = await close_by_metadata(provider, WORKER)
+    await provider.aclose()
+
+    assert sorted(result.closed) == ["a", "b"]
+    assert len(built) == 1
+    service._httpx_client.aclose.assert_awaited_once()
+
+
+async def test_metadata_of_reads_fresh_and_is_none_once_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = PagedLabelService(sandboxes=[orphan("a", WORKER)])
+    install_lifecycle(monkeypatch, service)
+    provider = opensandbox_provider.OpenSandboxProvider(operations={"retries": 3, "retry_delay_s": 0})
+    (handle,) = await provider.list_by_metadata(WORKER)
+
+    assert await provider.metadata_of(handle) == WORKER
+    service.current["a"] = orphan("a", {"nemo-gym-worker": "other"})
+    assert await provider.metadata_of(handle) == {"nemo-gym-worker": "other"}
+    del service.current["a"]
+    with RequestFailureLog.capture() as log:
+        assert await provider.metadata_of(handle) is None
+    assert not log.report.events
+
+
+async def test_close_by_metadata_closes_matches_and_refuses_relabeled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nemo_gym.sandbox.worker_labels import close_by_metadata
+
+    service = PagedLabelService(sandboxes=[orphan("same", WORKER), orphan("relabeled", WORKER)])
+    install_lifecycle(monkeypatch, service)
+    provider = opensandbox_provider.OpenSandboxProvider()
+    real_list = provider.list_by_metadata
+
+    async def list_then_relabel(labels: Any) -> list[Any]:
+        handles = await real_list(labels)
+        # Between the listing and the stop, a live worker took this sandbox over.
+        service.current["relabeled"] = orphan("relabeled", {**WORKER, "nemo-gym-worker": "live"})
+        return handles
+
+    monkeypatch.setattr(provider, "list_by_metadata", list_then_relabel)
+
+    result = await close_by_metadata(provider, WORKER)
+
+    assert result.closed == ("same",)
+    assert result.refused == ("relabeled",)
+    assert service.killed == ["same"]
+    assert "relabeled" in service.current
+
+
+async def test_worker_labels_reach_the_create_request_unchanged(fake_opensandbox_sdk: None) -> None:
+    from nemo_gym.sandbox.worker_labels import worker_labels
+
+    labels = worker_labels()
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    await provider.create(SandboxSpec(image="image:tag", metadata=labels))
+
+    assert {key: FakeSandbox.created_kwargs["metadata"][key] for key in labels} == labels

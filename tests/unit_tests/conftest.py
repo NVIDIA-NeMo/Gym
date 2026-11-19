@@ -4,6 +4,7 @@
 """Session hygiene for the core unit tests."""
 
 import logging
+import os
 
 import pytest
 
@@ -26,6 +27,24 @@ def fake_registry(monkeypatch):
     """``prepare`` records base images through the fake registry client, which its ``missing`` and ``resolved``
     state lets a test fail a reference or read what was asked for."""
     return _use_fake_registry(monkeypatch)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def private_workspace_root(tmp_path_factory):
+    """Workers file workspaces and process group records under ``NEMO_GYM_WORKSPACE_ROOT``.
+
+    The tests' go in the session's temporary directory, not the real one.
+    There, every test process would leave a worker directory.
+    """
+    from nemo_gym.core.worker_resources import WORKSPACE_ROOT_ENV_VAR
+
+    previous = os.environ.get(WORKSPACE_ROOT_ENV_VAR)
+    os.environ[WORKSPACE_ROOT_ENV_VAR] = str(tmp_path_factory.mktemp("workspaces"))
+    yield
+    if previous is None:
+        os.environ.pop(WORKSPACE_ROOT_ENV_VAR, None)
+    else:
+        os.environ[WORKSPACE_ROOT_ENV_VAR] = previous
 
 
 @pytest.fixture(autouse=True)

@@ -20,6 +20,7 @@ import pytest
 
 from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.sandbox.providers.base import SandboxCreateError, SandboxExecResult, SandboxHandle, SandboxSpec
+from nemo_gym.sandbox.worker_labels import worker_labels
 from nemo_gym.verification.sandbox_verification import (
     SandboxVerificationConfig,
     SandboxVerificationError,
@@ -103,7 +104,7 @@ async def test_builds_spec_runs_runner_and_parses_result() -> None:
     (spec,) = provider.created_specs
     assert spec.image == "verifier:test"
     assert spec.env["OMP_NUM_THREADS"] == "4" and spec.env["EXTRA"] == "1"
-    assert spec.metadata == {"benchmark": "override", "run": "r1"}
+    assert spec.metadata == {"benchmark": "override", "run": "r1", **worker_labels()}
     assert spec.ttl_s > spec.ready_timeout_s + 120
     call_dir = _call_dir(provider)
     assert provider.uploaded[f"{call_dir}/lib/helper.py"] == "X = 1\n"

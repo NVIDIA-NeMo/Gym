@@ -64,6 +64,7 @@ from nemo_gym.sandbox.resource_telemetry import (
     requested_attributes,
     sampling_interval,
 )
+from nemo_gym.sandbox.worker_labels import worker_labels
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.gym_metrics import (
     SandboxTransferDirection,
@@ -633,6 +634,9 @@ class AsyncSandbox:
         requested_spec = spec if spec is not None else self._spec
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
+        # The worker labels go last, so a spec cannot name another worker.
+        # That worker's reap would otherwise stop this sandbox.
+        requested_spec = replace(requested_spec, metadata={**requested_spec.metadata, **worker_labels()})
         if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")

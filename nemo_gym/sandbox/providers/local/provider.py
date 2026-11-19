@@ -20,10 +20,10 @@ import logging
 import os
 import shutil
 import signal
-import tempfile
 import uuid
 from pathlib import Path
 
+from nemo_gym.core.worker_resources import recorded_process_group, worker_workspace_dir
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
@@ -79,7 +79,9 @@ class LocalProvider:
         if spec.workdir:
             workspace, owned = Path(spec.workdir).expanduser(), False
         else:
-            root = self._workspace_root or Path(tempfile.gettempdir())
+            # Without a configured root, the workspace sits under this worker's directory.
+            # A peer can then remove it if this worker dies.
+            root = self._workspace_root or worker_workspace_dir()
             workspace, owned = root / sandbox_id, True
         workspace.mkdir(parents=True, exist_ok=True)
         return SandboxHandle(
@@ -119,22 +121,24 @@ class LocalProvider:
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-            except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError) as exc:
-                with contextlib.suppress(ProcessLookupError):
-                    # start_new_session makes the PID the group ID, even after the shell exits.
-                    os.killpg(process.pid, signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(process.wait(), timeout=REAP_TIMEOUT_S)
-                if isinstance(exc, asyncio.CancelledError):
-                    raise
-                return SandboxExecResult(
-                    stdout=None,
-                    stderr=f"local command timed out after {timeout:g}s",
-                    return_code=SANDBOX_RUNTIME_RETURN_CODE,
-                    error_type="timeout",
-                )
+            # Recorded under this worker until the shell is reaped, so a peer can kill the group if this worker dies.
+            with recorded_process_group(process.pid):
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError) as exc:
+                    with contextlib.suppress(ProcessLookupError):
+                        # start_new_session makes the PID the group ID, even after the shell exits.
+                        os.killpg(process.pid, signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(process.wait(), timeout=REAP_TIMEOUT_S)
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    return SandboxExecResult(
+                        stdout=None,
+                        stderr=f"local command timed out after {timeout:g}s",
+                        return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                        error_type="timeout",
+                    )
         return SandboxExecResult(
             stdout=stdout.decode(errors="replace"),
             stderr=stderr.decode(errors="replace"),

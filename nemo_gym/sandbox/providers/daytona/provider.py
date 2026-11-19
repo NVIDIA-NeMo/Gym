@@ -104,6 +104,17 @@ def _require_daytona_sdk() -> tuple[Any, Any, Any, Any, Any, Any]:
     )
 
 
+def _require_list_query() -> Any:
+    try:
+        from daytona import ListSandboxesQuery
+    except ImportError as e:
+        raise ModuleNotFoundError(
+            "Daytona SDK is required for the daytona sandbox provider. "
+            "Install nemo-gym[sandbox] before using env.sandbox.provider.name=daytona."
+        ) from e
+    return ListSandboxesQuery
+
+
 def _require_tenacity() -> tuple[Any, Any, Any, Any]:
     try:
         from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential
@@ -253,6 +264,11 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
         return True
     message = str(exception).lower()
     return "sandbox" in message and "not found" in message
+
+
+def _is_missing_sandbox_error(exception: BaseException) -> bool:
+    not_found = _daytona_error_types().get("not_found")
+    return (not_found is not None and isinstance(exception, not_found)) or _is_missing_sandbox_delete_error(exception)
 
 
 def _daytona_exec_error_message(exception: BaseException) -> str:
@@ -934,6 +950,38 @@ class DaytonaProvider:
     async def connect(self, sandbox_id: str) -> SandboxHandle:
         sandbox = await self._client().get(sandbox_id)
         return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+
+    async def list_by_metadata(self, labels: Mapping[str, str]) -> list[SandboxHandle]:
+        """Handles of the sandboxes Daytona lists with every label in ``labels``, across every page.
+
+        Daytona filters by labels on the server; the SDK's iterator follows the page cursor to the end.
+        """
+        query = _require_list_query()(labels=_string_map(dict(labels)))
+
+        async def list_all() -> list[SandboxHandle]:
+            return [
+                SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+                async for sandbox in self._client().list(query)
+            ]
+
+        return await self._await_operation(
+            list_all, operation="list", sandbox_id="", timeout_s=self._operations.close_timeout_s
+        )
+
+    async def metadata_of(self, handle: SandboxHandle) -> dict[str, str] | None:
+        """The sandbox's labels from a fresh ``get``; ``None`` when Daytona no longer has it."""
+        try:
+            sandbox = await self._await_operation(
+                lambda: self._client().get(handle.sandbox_id),
+                operation="get",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=self._operations.close_timeout_s,
+            )
+        except Exception as e:
+            if _is_missing_sandbox_error(e):
+                return None
+            raise
+        return _string_map(dict(getattr(sandbox, "labels", None) or {}))
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         refresh_data = getattr(handle.raw, "refresh_data", None)

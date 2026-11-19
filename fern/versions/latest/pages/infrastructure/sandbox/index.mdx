@@ -363,6 +363,25 @@ sandbox = fake_sandbox()
 sandbox.provider.on_close.side_effect = RuntimeError("provider unreachable")
 ```
 
+### Worker Labels and Closing by Label
+
+`AsyncSandbox.start()` adds three labels to every sandbox's `metadata`, after the spec's own keys, so a spec cannot replace them:
+
+| Label | Value |
+| --- | --- |
+| `nemo-gym-server` | The server instance that created the sandbox. It is left out when the process was not started by the `gym` CLI. |
+| `nemo-gym-run` | The run: `NEMO_GYM_RUN_ID`, or an ID generated once per process. |
+| `nemo-gym-worker` | The worker's routing ID. With several workers, session routing sets it; otherwise it is generated once per process. |
+
+With these labels, a live worker can stop the sandboxes of a worker that died, instead of leaving them to the provider's `ttl_s`. `close_by_metadata(provider, labels)` lists the provider's sandboxes that carry every label, re-reads each one's labels, and closes it only if they still match. It returns the sandbox IDs it closed, refused because their labels changed, failed to close, and found already gone. Docker, OpenSandbox, OpenShell, E2B and Daytona support it. On OpenShell, closed means the delete was handed to its delete workers. Local, Apptainer, Enroot and ECS Fargate do not support it, and `close_by_metadata` raises `NotImplementedError` for them.
+
+Every sandbox that carries all the given labels is closed. A run or server label alone therefore also stops live workers' sandboxes; include `nemo-gym-worker` to end one worker's sandboxes.
+
+A worker also groups what it creates on the host under its routing ID, in `<root>/<routing ID>/`. The root is `NEMO_GYM_WORKSPACE_ROOT`, or `nemo-gym-workspaces-<uid>` in the system temporary directory. The worker directory, and the default root, must be directories this user owns that nobody else can write; a worker refuses a symbolic link or one another user controls. A worker that exits removes its directory once it is empty. The directory holds:
+
+- The local provider's workspaces, unless its `workspace_root` is configured.
+- One record per child process group that the local provider runs a command in, kept while the command runs. Each record holds the start time of the group's leader in clock ticks since boot, so a reused process ID is never mistaken for the group, and a group whose leader exited still counts while a member runs. Records need Linux's `/proc`; elsewhere commands run unrecorded.
+
 ## Image Rewrites
 
 Use `rewrite_image()` when a benchmark's upstream image needs to run through an internal registry mirror.

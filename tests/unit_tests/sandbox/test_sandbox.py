@@ -45,6 +45,7 @@ from nemo_gym.sandbox.providers.base import (
 )
 from nemo_gym.sandbox.providers.registry import create_provider, get_provider_class, list_providers, register_provider
 from nemo_gym.sandbox.utils import rewrite_image
+from nemo_gym.sandbox.worker_labels import worker_labels
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 
@@ -348,7 +349,7 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     handle = provider.created_handles[0]
     assert provider.marker == "configured"
     assert provider.created_specs[0].image == "image:tag"
-    assert provider.created_specs[0].metadata == {"suite": "unit"}
+    assert provider.created_specs[0].metadata == {"suite": "unit", **worker_labels()}
     assert provider.upload_calls[0][0] == handle
     assert provider.upload_calls[0][2] == "/tmp/bootstrap.txt"
 
@@ -414,7 +415,11 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
             SandboxHandle(
                 sandbox_id="fake-1",
                 provider_name="fake",
-                raw={"spec": SandboxSpec(image="image:tag", files={"/tmp/bootstrap.txt": "hello"})},
+                raw={
+                    "spec": SandboxSpec(
+                        image="image:tag", files={"/tmp/bootstrap.txt": "hello"}, metadata=worker_labels()
+                    )
+                },
             )
         )
     ]
@@ -919,7 +924,7 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
         handle = provider.created_handles[0]
         assert provider.marker == "configured"
         assert provider.created_specs[0].image == "image:tag"
-        assert provider.created_specs[0].metadata == {"suite": "unit"}
+        assert provider.created_specs[0].metadata == {"suite": "unit", **worker_labels()}
         assert provider.upload_calls[0][0] == handle
         assert provider.upload_calls[0][2] == "/tmp/bootstrap.txt"
 

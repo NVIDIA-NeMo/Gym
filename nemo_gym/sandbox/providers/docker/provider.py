@@ -17,6 +17,7 @@
 import asyncio
 import contextlib
 import ipaddress
+import json
 import logging
 import math
 import os
@@ -388,6 +389,11 @@ class DockerProvider:
         per_sandbox_args = _coerce_str_list(spec.provider_options.get("run_args"), "run_args")
 
         argv: list[str] = [self._binary, "run", "-d", "--name", name, "--label", f"{SANDBOX_LABEL}=1"]
+        # spec.metadata becomes container labels, so close_by_metadata can find them.
+        # No key replaces the marker.
+        for key, value in spec.metadata.items():
+            if key != SANDBOX_LABEL:
+                argv += ["--label", f"{key}={value}"]
         if cfg.use_init:
             argv.append("--init")
         if spec.workdir:
@@ -945,6 +951,39 @@ class DockerProvider:
         )
         if code != 0 and not _is_missing_container(err):
             raise RuntimeError(f"docker rm -f failed (code={code}) for {inst.name!r}: {err.strip()}")
+
+    async def list_by_metadata(self, labels: Mapping[str, str]) -> list[SandboxHandle]:
+        """Handles of this provider's containers, running or not, that carry every label in ``labels``."""
+        argv = [self._binary, "ps", "--all", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}"]
+        for key, value in {SANDBOX_LABEL: "1", **labels}.items():
+            argv += ["--filter", f"label={key}={value}"]
+        code, out, err = await self._run(argv, timeout_s=self._exec_config.default_timeout_s)
+        if code != 0:
+            raise RuntimeError(f"docker ps failed (code={code}) listing containers by {dict(labels)}: {err.strip()}")
+        handles: list[SandboxHandle] = []
+        for line in out.splitlines():
+            name, _, image = line.strip().partition("\t")
+            if name:
+                handles.append(
+                    SandboxHandle(
+                        sandbox_id=name, provider_name=self.name, raw=_DockerContainer(name=name, image=image)
+                    )
+                )
+        return handles
+
+    async def metadata_of(self, handle: SandboxHandle) -> dict[str, str] | None:
+        """The container's labels as Docker holds them now; ``None`` once the container is gone."""
+        name = handle.raw.name
+        code, out, err = await self._run(
+            [self._binary, "inspect", "--type", "container", "--format", "{{json .Config.Labels}}", name],
+            timeout_s=self._exec_config.default_timeout_s,
+        )
+        if code != 0:
+            if _is_missing_container(err):
+                return None
+            raise RuntimeError(f"docker inspect failed (code={code}) for {name!r}: {err.strip()}")
+        labels = json.loads(out.strip() or "null") or {}
+        return {str(key): str(value) for key, value in labels.items()}
 
     async def aclose(self) -> None:
         """Close the PTY sessions still open; the containers themselves belong to their handles."""

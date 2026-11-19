@@ -43,6 +43,7 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxCheckpointPolling,
+    SupportsSandboxCloseByMetadata,
     SupportsSandboxEndpoint,
     SupportsSandboxNetwork,
     SupportsSandboxParkedPolling,
@@ -61,6 +62,7 @@ from nemo_gym.sandbox.providers import (
     register_provider,
 )
 from nemo_gym.sandbox.utils import rewrite_image
+from nemo_gym.sandbox.worker_labels import CloseByMetadataResult, close_by_metadata
 
 
 __all__ = [
@@ -91,6 +93,7 @@ __all__ = [
     "SandboxSpec",
     "SandboxStatus",
     "SupportsSandboxCheckpointPolling",
+    "SupportsSandboxCloseByMetadata",
     "SupportsSandboxEndpoint",
     "SupportsSandboxNetwork",
     "SupportsSandboxParkedPolling",
@@ -111,6 +114,8 @@ __all__ = [
     "resolve_provider_volume_sources",
     "rewrite_image",
     "clamp_resource_requests",
+    "close_by_metadata",
+    "CloseByMetadataResult",
 ]
 
 # Public API
