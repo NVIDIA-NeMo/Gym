@@ -25,7 +25,7 @@ import warnings
 import weakref
 from asyncio import Future
 from collections import Counter, defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
@@ -16773,6 +16773,120 @@ class TestRunRecordWriter:
         assert record["ng_agent_observations"]["source"] == "agent"
         assert record["_ng_failure_record"]["failure"]["failure_reason"] == "tool crashed"
 
+    @staticmethod
+    def _scored_failed_and_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Through the real dispatcher: task 0 scores, task 1's `/run` fails, task 2 is refused at a checkpoint."""
+        refusal = {"error": {"code": "checkpoint_admission_closed", "detail": "agent admission is closed"}}
+
+        async def post(*args, **kwargs):
+            task = kwargs["json"][TASK_INDEX_KEY_NAME]
+            if task == 1:
+                raise http_error(500, body=b'{"detail": "tool crashed"}')
+            if task == 2:
+                raise http_error(409, body=orjson.dumps(refusal))
+            return FakeResponse(200, {"response": {"output": []}, "reward": 1.0, "_ng_producer_note": "kept"})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+    @staticmethod
+    def _rows() -> list[dict]:
+        rows = [failing_row(task) for task in range(3)]
+        # Routed by task_source: the call resolves the agent onto the row.
+        del rows[0][AGENT_REF_KEY_NAME]
+        rows[0][TASK_SOURCE_KEY_NAME] = "my_agent"
+        return rows
+
+    @staticmethod
+    async def _pairs(completions) -> dict[int, tuple[dict, object]]:
+        pairs = [await completion for completion in completions]
+        return {row[TASK_INDEX_KEY_NAME]: (row, result) for row, result in pairs}
+
+    async def test_plain_results_are_what_an_unrecorded_call_returns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._scored_failed_and_refused(monkeypatch)
+        unrecorded_rows, recorded_rows = self._rows(), self._rows()
+        unrecorded = await self._pairs(
+            RolloutCollectionHelper().run_examples(unrecorded_rows, route_failures_to_sidecar=True)
+        )
+        run_dir = tmp_path / "run"
+        recorded = await self._pairs(
+            RolloutCollectionHelper().run_examples(
+                recorded_rows,
+                route_failures_to_sidecar=True,
+                record_output_dir=run_dir,
+                record_shard="s",
+                return_plain_results=True,
+            )
+        )
+
+        assert recorded_rows == unrecorded_rows and recorded_rows[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+        for task, (row, result) in recorded.items():
+            assert row is recorded_rows[task]
+            assert result == unrecorded[task][1]
+        assert recorded[0][1]["_ng_producer_note"] == "kept" and "_ng_run_id" not in recorded[0][1]
+        assert recorded[1][1][NG_FAILURE_CLASS_KEY] == "agent_run_error"
+        assert recorded[2][1]["_ng_failure_http_status"] == 409
+        # The shard holds collection's records all the same.
+        [scored] = self._lines(run_dir / "rollouts-s.jsonl")
+        assert scored[TASK_INDEX_KEY_NAME] == 0 and "_ng_run_id" in scored
+        [failed] = self._lines(run_dir / "rollouts-s_failures.jsonl")
+        assert failed[TASK_INDEX_KEY_NAME] == 1 and "_ng_failure_record" in failed
+
+    @pytest.mark.parametrize("return_plain_results", [False, True])
+    async def test_a_checkpoint_refusal_is_an_omitted_row_not_a_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, return_plain_results: bool
+    ) -> None:
+        from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+        from nemo_gym.rollouts.rollout_store import RolloutStore
+
+        self._scored_failed_and_refused(monkeypatch)
+        run_dir = tmp_path / "run"
+        recorded = await self._pairs(
+            RolloutCollectionHelper().run_examples(
+                self._rows(),
+                route_failures_to_sidecar=True,
+                record_output_dir=run_dir,
+                record_shard="s",
+                record_omitted_rollouts=True,
+                return_plain_results=return_plain_results,
+            )
+        )
+
+        failures = {row[TASK_INDEX_KEY_NAME]: row for row in self._lines(run_dir / "rollouts-s_failures.jsonl")}
+        assert NG_OMITTED_ROLLOUT_KEY not in failures[1]
+        refused = failures[2]
+        assert refused[NG_OMITTED_ROLLOUT_KEY] is True and refused[NG_FAILURE_CLASS_KEY] == "cancelled"
+        assert "_ng_failure_record" not in refused
+        # Readers count the refusal as no attempt, and the failed /run as one.
+        store = RolloutStore.read(run_dir / "rollouts-s.jsonl")
+        assert [row[TASK_INDEX_KEY_NAME] for row in store.failures()] == [1]
+        assert store.attempt_count(refused) == 0 and store.attempt_count(failures[1]) == 1
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row in store.pending(3)) == [1, 2]
+        # The caller is told of the refusal as of any failed /run, so it can send the row again.
+        returned = recorded[2][1]
+        assert isinstance(returned, dict if return_plain_results else RolloutFailureRecord)
+
+    def test_plain_results_need_a_shard_and_routed_failures_and_exclude_enrichment(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="needs record_output_dir"):
+            RolloutCollectionHelper().run_examples(
+                [failing_row()], route_failures_to_sidecar=True, return_plain_results=True
+            )
+        with pytest.raises(ValueError, match="excludes enrich_results"):
+            RolloutCollectionHelper().run_examples(
+                [failing_row()],
+                route_failures_to_sidecar=True,
+                record_output_dir=tmp_path,
+                record_shard="s",
+                enrich_results=True,
+                return_plain_results=True,
+            )
+        with pytest.raises(ValueError, match="needs route_failures_to_sidecar"):
+            RolloutCollectionHelper().run_examples(
+                [failing_row()], record_output_dir=tmp_path, record_shard="s", return_plain_results=True
+            )
+        assert list(tmp_path.iterdir()) == []
+
     def test_a_sink_without_a_shard_is_refused(self) -> None:
         with pytest.raises(ValueError, match="record_sink .* needs record_output_dir"):
             RolloutCollectionHelper().run_examples([failing_row()], record_sink=lambda kind, record: None)
@@ -17224,33 +17338,45 @@ class TestRunRecordWriter:
         expected = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
         assert dispatched_ids == [expected] and maybe_rollout_id_from_run_body(returned) == expected
 
+    @staticmethod
+    def _capture_each_run(monkeypatch: pytest.MonkeyPatch, capture_dir: Path, calls: Iterator[str]) -> None:
+        """Through the real dispatcher: each `/run` captures the next call under its capture key, and scores."""
+
+        async def post(*args, **kwargs):
+            TestEnrichRunResult._store_call(
+                capture_dir, maybe_rollout_id_from_run_body(kwargs["json"]), next(calls), "x"
+            )
+            return FakeResponse(200, {"response": {"output": []}, "reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        setup = RolloutCollectionHelper.setup_server_client
+
+        def with_capture(helper, head_server_config=None):
+            client = setup(helper, head_server_config)
+            client.global_config_dict = {
+                **(client.global_config_dict or {}),
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+            }
+            return client
+
+        monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", with_capture)
+
     @pytest.mark.parametrize("scope_rollout_ids", [True, False])
-    async def test_an_id_dispatched_again_shares_its_capture_only_when_unscoped(
-        self, tmp_path: Path, scope_rollout_ids: bool
+    async def test_an_id_dispatched_again_reads_only_its_own_capture(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_rollout_ids: bool
     ) -> None:
-        capture_dir = tmp_path / "capture"
-        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
-        row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
-        calls = iter(["call1", "call2"])
-
-        class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
-                return SimpleNamespace(global_config_dict=global_config)
-
-            def _run_examples_with_metadata(self, examples, *args, **kwargs):
-                TestEnrichRunResult._store_call(
-                    capture_dir, maybe_rollout_id_from_run_body(examples[0]), next(calls), "x"
-                )
-                future = Future()
-                future.set_result(
-                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
-                )
-                return iter([future])
+        self._capture_each_run(monkeypatch, tmp_path / "capture", iter(["call1", "call2"]))
+        row = failing_row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
 
         for shard in ("s1", "s2"):
             [completion] = list(
-                Helper().run_examples(
-                    [row], record_output_dir=tmp_path / "run", record_shard=shard, scope_rollout_ids=scope_rollout_ids
+                RolloutCollectionHelper().run_examples(
+                    [dict(row)],
+                    route_failures_to_sidecar=True,
+                    record_output_dir=tmp_path / "run",
+                    record_shard=shard,
+                    scope_rollout_ids=scope_rollout_ids,
                 )
             )
             await completion
@@ -17259,9 +17385,63 @@ class TestRunRecordWriter:
             [written] = self._lines(tmp_path / "run" / f"rollouts-{shard}.jsonl")
             return [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]]
 
-        # Unscoped, nothing checks across calls: the second shard reads the first one's capture file too.
+        # Scoped, the second call's id is new; unscoped, the dispatch clears the capture its id already had.
         assert captured("s1") == ["call1"]
-        assert captured("s2") == (["call2"] if scope_rollout_ids else ["call1", "call2"])
+        assert captured("s2") == ["call2"]
+
+    async def test_an_unscoped_row_never_started_keeps_the_capture_its_id_has(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.models.model_call_capture import CaptureStore
+
+        capture_dir = tmp_path / "capture"
+        self._capture_each_run(monkeypatch, capture_dir, iter([]))
+        TestEnrichRunResult._store_call(capture_dir, "gate-7", "earlier", "x")
+        row = failing_row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
+
+        [completion] = list(
+            RolloutCollectionHelper().run_examples(
+                [row],
+                route_failures_to_sidecar=True,
+                record_output_dir=tmp_path / "run",
+                record_shard="s",
+                scope_rollout_ids=False,
+                dispatch_budget_s=0,
+            )
+        )
+        _, result = await completion
+
+        assert result.get(NG_DISPATCH_DRAINED_KEY) is True
+        assert CaptureStore(capture_dir).path_for("gate-7").exists()
+
+    async def test_a_restored_attempt_is_recorded_as_its_rollout_and_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.rollouts.rollout_store import RolloutStore
+
+        self._capture_each_run(monkeypatch, tmp_path / "capture", iter(["call1"]))
+        row = failing_row() | {ROLLOUT_ID_KEY_NAME: "gate-7-a1"}
+        run_dir = tmp_path / "run"
+
+        [completion] = list(
+            RolloutCollectionHelper().run_examples(
+                [row],
+                route_failures_to_sidecar=True,
+                record_output_dir=run_dir,
+                record_shard="s",
+                scope_rollout_ids=False,
+                return_plain_results=True,
+            )
+        )
+        returned_row, result = await completion
+
+        assert returned_row is row and row[ROLLOUT_ID_KEY_NAME] == "gate-7-a1" and result["reward"] == 1.0
+        [record] = self._lines(run_dir / "rollouts-s.jsonl")
+        assert (record[ROLLOUT_ID_KEY_NAME], record[ATTEMPT_INDEX_KEY_NAME]) == ("gate-7", 1)
+        assert maybe_rollout_id_from_run_body(record) == "gate-7-a1"
+        assert [call["model_call_id"] for call in record["ng_model_call_capture"]["calls"]] == ["call1"]
+        store = RolloutStore.read(run_dir / "rollouts-s.jsonl")
+        assert store.disposition(record) == "success" and store.pending(3) == []
 
     def test_rows_that_share_an_id_are_refused_with_or_without_scoping(self, tmp_path: Path) -> None:
         row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
@@ -18156,7 +18336,7 @@ async def test_a_run_that_is_not_a_shard_keeps_its_rollout_ids_and_capture_keys(
     "configured,selected,expected",
     [(None, None, "1.0"), ("2.0", None, "2.0"), ("2.0", "1.0", "1.0"), ("1.0", "2.0", "2.0")],
 )
-@pytest.mark.parametrize("mode", ["raw", "enriched", "recorded"])
+@pytest.mark.parametrize("mode", ["raw", "enriched", "recorded", "plain"])
 @pytest.mark.parametrize("envelope", ["direct", "success", "failure"])
 @pytest.mark.parametrize("collision", [False, True])
 async def test_returned_and_stored_projection_share_one_decision(
@@ -18241,12 +18421,15 @@ async def test_returned_and_stored_projection_share_one_decision(
                         "trajectory": trajectory,
                     }
             future = Future()
-            future.set_result(_CompletedRollout(row=dispatched, result=reply, rollout_latency_ms=1.0))
+            kept = {"reply": deepcopy(reply)} if kwargs.get("keep_replies") else {}
+            future.set_result(_CompletedRollout(row=dispatched, result=reply, rollout_latency_ms=1.0, **kept))
             return iter([future])
 
     options = {"enrich_results": mode == "enriched", "trajectory_schema_version": selected}
-    if mode == "recorded":
+    if mode in ("recorded", "plain"):
         options.update(record_output_dir=tmp_path, record_shard="test")
+    if mode == "plain":
+        options.update(route_failures_to_sidecar=True, return_plain_results=True)
     _, result = await next(Helper().run_examples([row], **options))
     if envelope == "failure":
         container, bundle_key, trajectory_key = result["failure"], "agent_observations", "trajectory"
@@ -18261,7 +18444,9 @@ async def test_returned_and_stored_projection_share_one_decision(
     assert bundle.get("schema_version", "1.0") == expected
     assert observed["tool_call_id"] == expected_call
     assert container[trajectory_key]["invocations"][0]["conversation"][0]["call_id"] == expected_call
-    if mode != "raw":
+    if mode == "plain":
+        assert "ng_model_call_capture" not in result
+    if mode in ("enriched", "recorded"):
         assert result["ng_trajectory"] == container[trajectory_key]
         assert result["ng_trajectory"]["schema_version"] == expected
         assert result["ng_trajectory"]["tool_calls"][0]["tool_call_id"] == expected_call
