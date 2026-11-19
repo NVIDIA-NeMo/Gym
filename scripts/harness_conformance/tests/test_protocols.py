@@ -9,7 +9,8 @@ from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.provider import ANSWER, Probe
+from scripts.harness_conformance.episode import _settings
+from scripts.harness_conformance.probes import ANSWER, PiProbe, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
 
@@ -60,28 +61,6 @@ def test_messages_protocol_keeps_raw_exchanges_and_executes_tools(tmp_path, stre
         }
     else:
         assert all("usage" not in c["response"] for c in captures)
-
-
-def test_auxiliary_title_does_not_consume_retry_sequence_but_is_captured(tmp_path):
-    probe = Probe(SCENARIOS_BY_NAME["retry_429"], tmp_path, harness="claude_code")
-    title = {
-        "model": "probe",
-        "messages": [],
-        "tools": [],
-        "stream": True,
-        "output_config": {"format": {"type": "json_schema", "schema": {"properties": {"title": {"type": "string"}}}}},
-    }
-    policy = {"model": "probe", "messages": [], "tools": [BASH]}
-    with TestClient(probe.model_app()) as client:
-        assert client.post("/ng-rollout/0-0/v1/messages", json=title).status_code == 200
-        assert client.post("/ng-rollout/0-0/v1/messages", json=policy).status_code == 429
-        assert client.post("/ng-rollout/0-0/v1/messages", json=policy).status_code == 429
-        assert client.post("/ng-rollout/0-0/v1/messages", json=policy).status_code == 200
-    witness = json.loads((tmp_path / "witness.json").read_text())
-    assert len(witness["auxiliary_calls"]) == 1
-    assert len(witness["attempts"]) == 3
-    assert len((tmp_path / "capture/0-0.capture.jsonl").read_text().splitlines()) == 4
-    assert not probe.finished and not probe.violations
 
 
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure"])
@@ -156,29 +135,37 @@ def test_messages_compaction_keeps_summary_and_usage_separate_from_policy(tmp_pa
     assert [c["response"] for c in captures] == [a["response"] for a in probe.attempts]
 
 
-def test_terminus_executes_json_commands_and_confirms_completion_twice(tmp_path):
-    probe = Probe(SCENARIOS_BY_NAME["tool_failure"], tmp_path, harness="terminus_2_sandboxed", final_responses=2)
+@pytest.mark.parametrize("scenario_name", ["tool_failure", "context_compaction"])
+def test_terminus_executes_json_commands_and_confirms_completion_twice(tmp_path, scenario_name):
+    scenario = replace(SCENARIOS_BY_NAME[scenario_name], tool_steps=2)
+    settings = _settings("terminus_2_sandboxed", tmp_path, 30, scenario)
+    probe = Probe(scenario, tmp_path, harness="terminus_2_sandboxed", **settings.probe_overrides)
     body = {"model": "probe", "input": [{"role": "user", "content": "Run checks"}]}
     with TestClient(probe.model_app()) as client:
-        for index in range(4):
+        for index, reply in enumerate(probe.responses):
             response = client.post("/v1/responses", json=body)
             assert response.status_code == 200
             message = response.json()["output"][0]
-            instruction = json.loads(message["content"][0]["text"])
             body["input"].append(message)
-            if index < 2:
+            if reply["kind"] == "summary":
+                assert message["content"][0]["text"] == probe.compaction_summary
+                assert not probe.finished
+                continue
+            instruction = json.loads(message["content"][0]["text"])
+            if reply["kind"] == "tool":
                 assert probe.tool_calls[index]["token"] not in instruction["commands"][0]["keystrokes"]
                 execution = subprocess.run(
                     instruction["commands"][0]["keystrokes"], shell=True, capture_output=True, text=True
                 )
-                assert execution.returncode == (7 if index == 0 else 0)
+                assert execution.returncode == (scenario.tool_exit_code if index == 0 else 0)
                 body["input"].append({"role": "user", "content": execution.stdout})
                 assert instruction["task_complete"] is False
             else:
                 assert instruction["task_complete"] is True and not instruction["commands"]
-                assert probe.finished is (index == 3)
+                assert probe.finished is (index == len(probe.responses) - 1)
                 body["input"].append({"role": "user", "content": "Confirm completion"})
     assert not probe.violations
+    assert len(probe.compaction_response_ids) == (3 if scenario.compaction else 0)
     assert all(t["executed"] and t["result_seen"] for t in probe.tool_calls)
 
 
@@ -196,3 +183,50 @@ def test_miniswe_finishes_using_native_submission_sentinel(tmp_path):
     assert execution.returncode == 0
     assert execution.stdout == f"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n{ANSWER}\n"
     assert probe.finished and probe.finish_call["id"] == call["call_id"]
+
+
+def test_pi_overflow_preserves_error_and_resumes_scripted_replies(tmp_path):
+    scenario = replace(SCENARIOS_BY_NAME["context_compaction"], tool_steps=2)
+    settings = _settings("pi", tmp_path, 30, scenario)
+    probe = PiProbe(scenario, tmp_path, harness="pi", **settings.probe_overrides)
+    body = {
+        "model": "probe",
+        "messages": [{"role": "user", "content": "Run checks"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "bash", "parameters": {"properties": {"command": {"type": "string"}}}},
+            }
+        ],
+    }
+    with TestClient(probe.model_app()) as client:
+        for _ in range(scenario.tool_steps):
+            response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+            assert response.status_code == 200
+            message = response.json()["choices"][0]["message"]
+            call = message["tool_calls"][0]
+            execution = subprocess.run(
+                json.loads(call["function"]["arguments"])["command"],
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            assert execution.stdout == "x" * 20000 + probe.tool_calls[-1]["token"]
+            body["messages"].extend(
+                [message, {"role": "tool", "tool_call_id": call["id"], "content": execution.stdout}]
+            )
+        overflow = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+        assert overflow.status_code == 400
+        assert overflow.json()["error"]["code"] == "context_length_exceeded"
+        assert not probe.finished and not probe.compaction_response_ids
+        assert all(t["executed"] and t["result_seen"] for t in probe.tool_calls)
+        summary = client.post("/ng-rollout/0-0/v1/chat/completions", json={**body, "messages": []})
+        assert summary.json()["choices"][0]["message"]["content"] == probe.compaction_summary
+        body["messages"] = [{"role": "user", "content": probe.compaction_summary}]
+        final = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+        assert final.json()["choices"][0]["message"]["content"] == ANSWER
+        assert client.post("/ng-rollout/0-0/v1/chat/completions", json=body).status_code == 409
+    captures = [json.loads(line) for line in (tmp_path / "capture/0-0.capture.jsonl").read_text().splitlines()]
+    assert [c["response"] for c in captures] == [a["response"] for a in probe.attempts]
+    assert [a["status_code"] for a in probe.attempts] == [200, 200, 400, 200, 200, 409]

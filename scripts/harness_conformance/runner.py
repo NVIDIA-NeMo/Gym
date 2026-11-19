@@ -19,6 +19,7 @@ from nemo_gym.rollouts.harness_capabilities import (
     NAMES,
     EvidenceScope,
     PriorityTier,
+    Results,
     digest_file,
     gate_passes,
     inspect_behavior,
@@ -30,7 +31,7 @@ from nemo_gym.rollouts.harness_capabilities import (
     render_matrices,
 )
 
-from .episode import HARNESSES
+from .episode import HARNESSES, _settings
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
 
 
@@ -145,6 +146,25 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     }
 
 
+def _unsupported_result(scenario: Scenario, reason: str) -> dict:
+    """Fail a declared capability requirement without claiming an episode was exercised."""
+    checks = Results()
+    checks.add("scenario.supported", "behavioral", "fail", tier=scenario.tier, reason=reason)
+    return {
+        "scenario": scenario.name,
+        "tier": scenario.tier,
+        "unsupported_reason": reason,
+        "exercised": False,
+        "verdict": "not_fulfilled",
+        "issues": [reason],
+        "checks": checks.dump(),
+        "execution": {"skipped": True},
+        "model_attempts": 0,
+        "evidence": {},
+        "artifact_report": None,
+    }
+
+
 def run_suite(
     *,
     harnesses: list[str],
@@ -186,6 +206,12 @@ def run_suite(
             directory = output / harness / scenario.name
             directory.mkdir(parents=True)
             print(f"{harness}: {scenario.name}", flush=True)
+            if reason := _settings(harness, directory, timeout, scenario).get("unsupported_reason"):
+                print(f"Declared unsupported (not run): {reason}", flush=True)
+                result = _unsupported_result(scenario, reason)
+                (directory / "scenario_result.json").write_text(_json(result))
+                results.append(result)
+                continue
             command = [
                 sys.executable,
                 "-m",

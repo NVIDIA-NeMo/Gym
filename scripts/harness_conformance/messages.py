@@ -41,9 +41,3 @@ def messages_response(
     else:
         response.pop("usage", None)
     return response
-
-
-def is_title_request(body: dict) -> bool:
-    """Recognize Claude's structured auxiliary request without using prompt wording."""
-    schema = body.get("output_config", {}).get("format", {}).get("schema", {})
-    return not body.get("tools") and schema.get("properties") == {"title": {"type": "string"}}
