@@ -11,8 +11,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.agents import AgentSeedSessionRequest
-from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
+from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from responses_api_agents.auto_ontology_agent import a_interact, episode_runner
 from responses_api_agents.auto_ontology_agent import app as agent_app
