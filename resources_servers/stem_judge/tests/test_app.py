@@ -35,6 +35,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.server_runtime import ReverifyMode, verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 from nemo_gym.verification import judge_failsafe
@@ -51,6 +52,7 @@ from resources_servers.stem_judge.app import (
     render_rubric,
     rubric_fraction,
 )
+from resources_servers.stem_judge.task_data import TaskData
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -88,6 +90,12 @@ def _response(*output, truncated: bool = False) -> NeMoGymResponse:
         tools=[],
         **extra,
     )
+
+
+def _failed_response(*output) -> NeMoGymResponse:
+    """A judge reply whose operation failed: status "failed" with an error, as a provider adapter passes it on."""
+    error = {"code": "server_error", "message": "judge failed"}
+    return NeMoGymResponse.model_validate({**_response(*output).model_dump(), "status": "failed", "error": error})
 
 
 def _split(answer: str, **kwargs) -> NeMoGymResponse:
@@ -238,6 +246,13 @@ class TestParsing:
     )
     def test_criteria_unparsed(self, text: str) -> None:
         assert parse_criteria(text, ["r1", "r2"]) is None
+
+    @mark.parametrize(
+        "cid, reply",
+        [("r}", '{"r}": true}'), ("r{", 'Marks: {"r{": true}'), ('a"}', '{"a\\"}": true} done')],
+    )
+    def test_braces_and_quotes_inside_criterion_ids(self, cid: str, reply: str) -> None:
+        assert parse_criteria(reply, [cid]) == {cid: True}
 
     def test_latex_after_the_criteria_does_not_hide_them(self) -> None:
         text = 'Criteria: {"r1": true, "r2": false}' + " $x^{2}$" * 100
@@ -471,6 +486,21 @@ class TestVerify:
     async def test_reverify_mode(self, config: StemJudgeConfig) -> None:
         assert await _server(config).get_reverify_mode() == ReverifyMode.STATELESS
 
+    async def test_rubric_with_a_brace_in_a_criterion_id(self, config: StemJudgeConfig) -> None:
+        server = _server(config, '{"r}": true}')
+        rubric = [{"id": "r}", "points": 1, "criterion": "c"}]
+        res = await server.verify(_request(_split("T"), answer_format="free", rubric=rubric))
+        assert (res.grading_status, res.rubric_score, res.reward) == ("judged", approx(1.0), approx(1.0))
+
+    @mark.parametrize("output", [[], [_msg("Judgement: 'yes'")]])
+    async def test_failed_judge_response_masks_the_row(self, config: StemJudgeConfig, output) -> None:
+        failed = _failed_response(*output)
+        server = _server(config, failed)
+        request = _request(_split("\\boxed{2}"))
+        result = json.loads((await judge_failsafe(server.verify)(request)).body)
+        assert (result["_ng_failure_class"], result["mask_sample"], result["reward"]) == ("judge_failed", True, 0.0)
+        assert result["response"] == request.response.model_dump(mode="json")
+
     async def test_rubric_row_without_a_reference(self, config: StemJudgeConfig) -> None:
         server = _server(config, '{"r1": true, "r2": true, "r3": false}')
         await server.verify(_request(_split("T"), expected=None, answer_format="free", rubric=RUBRIC))
@@ -567,6 +597,13 @@ class TestGradingObservation:
         if outcome == "completed":
             assert operation.result_binding_sha256 == grading_result_binding(result)
 
+    async def test_a_failed_judge_response_is_a_failed_grading(self, config: StemJudgeConfig) -> None:
+        failed = _failed_response()
+        result, invocation = await self._observe(config, _server(config, failed), _request(_split("\\boxed{3}")))
+        assert isinstance(result, BaseException)
+        (operation,) = invocation.grading_operations
+        assert operation.outcome == "failed"
+
     async def test_a_cut_off_reply_stays_unknown(self, config: StemJudgeConfig) -> None:
         cut_off = _response(_msg("Judgement: 'yes'"), truncated=True).model_copy(update={"status": "incomplete"})
         _, invocation = await self._observe(config, _server(config, cut_off), _request(_split("\\boxed{3}")))
@@ -586,3 +623,38 @@ class TestGradingObservation:
     async def test_a_gated_row_records_no_judge_grading(self, config: StemJudgeConfig) -> None:
         _, invocation = await self._observe(config, _server(config), _request(_split("no box")))
         assert not invocation.grading_operations
+
+
+class TestTaskDataSchema:
+    """task_data.TaskData is the row contract; the runtime request inherits it."""
+
+    @mark.parametrize(
+        "row, valid",
+        [
+            ({"expected_answer": "2"}, True),
+            ({"metadata": {"expected_answer": 0}}, True),
+            ({"rubric": RUBRIC, "answer_format": "free"}, True),
+            ({"expected_answer": "2", "id": "row-1", "subject": "physics"}, True),
+            ({}, False),
+            ({"metadata": {"expected_answer": []}}, False),
+            ({"rubric": [RUBRIC[0], RUBRIC[0]]}, False),
+            ({"rubric": [{"id": "r1", "points": float("nan"), "criterion": "c"}]}, False),
+        ],
+    )
+    def test_schema_and_runtime_agree(self, row: dict, valid: bool) -> None:
+        def accepts(build) -> bool:
+            try:
+                build()
+                return True
+            except ValidationError:
+                return False
+
+        assert accepts(lambda: TaskData.model_validate(row)) is valid
+        fields = {k: v for k, v in row.items() if k != "expected_answer"}
+        assert accepts(lambda: _request(_split("x"), expected=row.get("expected_answer"), **fields)) is valid
+
+    def test_example_rows_validate_against_the_schema(self) -> None:
+        adapter = load_task_data_schema(SERVER_DIR)
+        rows = (SERVER_DIR / "data" / "example.jsonl").read_text().splitlines()
+        report = validate_jsonl_rows("stem_judge", adapter, "example.jsonl", rows)
+        assert (report.rows, report.clean) == (5, True), report.summary()

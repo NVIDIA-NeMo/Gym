@@ -64,9 +64,9 @@ import socket
 import threading
 import time
 from contextlib import nullcontext
-from typing import Any, ClassVar, Literal, Optional
+from typing import ClassVar, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -84,7 +84,8 @@ from nemo_gym.server_runtime import (
     observe_llm_judge_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import call_judge, record_parsed_judge_verdict
+from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
+from resources_servers.stem_judge.task_data import RubricCriterion, TaskData, reference_of
 
 
 logger = logging.getLogger(__name__)
@@ -170,59 +171,12 @@ class StemJudgeConfig(BaseResourcesServerConfig):
     generation_log_filename: str = "stem_judge_generations.jsonl"
 
 
-class RubricCriterion(BaseModel):
-    id: str = Field(min_length=1)
-    # Negative points mark a penalty: the criterion describes an error.
-    points: float = Field(allow_inf_nan=False)
-    criterion: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _points_nonzero(self) -> RubricCriterion:
-        if self.points == 0:
-            raise ValueError(f"rubric criterion {self.id!r} has 0 points")
-        return self
-
-
-class StemJudgeRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
-    expected_answer: Optional[str] = None
-    metadata: Optional[dict[str, Any]] = None
-    answer_format: Optional[Literal["boxed", "free"]] = None
-    rubric: Optional[list[RubricCriterion]] = None
-
-    @model_validator(mode="after")
-    def _row_is_gradable(self) -> StemJudgeRunRequest:
-        if self.rubric is None:
-            # Without a reference the judge would grade from its own opinion.
-            if not reference_of(self).strip():
-                raise ValueError("an answer row needs a non-empty expected_answer")
-            return self
-        if not self.rubric:
-            raise ValueError("rubric is an empty list; leave it out for an answer row")
-        ids = [c.id for c in self.rubric]
-        if len(set(ids)) != len(ids):
-            raise ValueError(f"rubric criterion ids are not unique: {ids}")
-        if not any(c.points > 0 for c in self.rubric):
-            raise ValueError("rubric has no criterion with positive points")
-        return self
+class StemJudgeRunRequest(TaskData, BaseRunRequest):
+    """The row contract is ``TaskData`` (task_data.py), shared with dataset tooling."""
 
 
 class StemJudgeVerifyRequest(StemJudgeRunRequest, BaseVerifyRequest):
     pass
-
-
-def reference_of(row: StemJudgeRunRequest) -> str:
-    """The row's reference answer: ``expected_answer``, else a scalar ``metadata["expected_answer"]``.
-
-    Only an absent or null ``expected_answer`` falls back to metadata; a list or other container
-    there counts as no reference.
-    """
-    if row.expected_answer is not None:
-        return row.expected_answer
-    value = (row.metadata or {}).get("expected_answer")
-    return str(value) if isinstance(value, (str, int, float)) else ""
 
 
 class JudgeEvaluation(BaseModel):
@@ -359,34 +313,26 @@ def parse_verdict(text: str) -> Optional[str]:
     return None
 
 
-def _brace_spans(text: str) -> list[tuple[int, int]]:
-    """(start, end) of every balanced {...} span, in order of start."""
-    spans, stack = [], []
-    for index, char in enumerate(text):
-        if char == "{":
-            stack.append(index)
-        elif char == "}" and stack:
-            spans.append((stack.pop(), index))
-    return sorted(spans)
-
-
 MAX_CRITERIA_CANDIDATES = 64
-JSON_OBJECT_START = re.compile(r'\{\s{0,64}["}]')
+# Where a JSON object with at least one key starts: "{", optional whitespace, then a quoted key.
+JSON_OBJECT_START = re.compile(r'\{\s*"')
+_JSON_DECODER = json.JSONDecoder()
 
 
 def parse_criteria(text: str, ids: list[str]) -> Optional[dict[str, bool]]:
     """The judge's marks for every criterion id, from the last JSON object that covers them all.
 
-    Only the text after the judge's own last ``</think>`` counts, and only its last
-    ``MAX_CRITERIA_CANDIDATES`` spans that open like a JSON object are tried, so degenerate nesting
-    stays cheap and LaTeX braces after the object do not crowd it out. A value must be a JSON
+    Only the text after the judge's own last ``</think>`` counts. Objects are decoded with a JSON
+    decoder from each place one starts, so braces inside keys and strings (a criterion id ``r}``)
+    do not matter, and only the last ``MAX_CRITERIA_CANDIDATES`` starts are tried, so degenerate
+    nesting stays cheap and LaTeX braces do not crowd out the object. A value must be a JSON
     boolean or the string "true"/"false". Returns None when no object marks every id.
     """
     text = text.rsplit("</think>", 1)[-1]
-    candidates = [span for span in _brace_spans(text) if JSON_OBJECT_START.match(text, span[0])]
-    for start, end in reversed(candidates[-MAX_CRITERIA_CANDIDATES:]):
+    starts = [match.start() for match in JSON_OBJECT_START.finditer(text)]
+    for start in reversed(starts[-MAX_CRITERIA_CANDIDATES:]):
         try:
-            obj = json.loads(text[start : end + 1])
+            obj, _ = _JSON_DECODER.raw_decode(text, start)
         except (ValueError, RecursionError):
             continue
         if not isinstance(obj, dict):
@@ -602,6 +548,9 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
                 response_model=NeMoGymResponse,
             )
 
+        if judge_response.status == "failed" or judge_response.error is not None:
+            # The judge's own failure, not a verdict on the answer: mask the row (judge_failsafe).
+            raise JudgeError(f"judge response failed: {judge_response.error or judge_response.status}")
         evaluation = JudgeEvaluation(responses_create_params=params, response=judge_response)
         if judge_response.status == "incomplete":
             # A cut-off reply has no final judgement; a verdict-like line in it could be quoted text.
