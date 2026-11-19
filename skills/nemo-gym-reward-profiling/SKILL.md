@@ -40,9 +40,9 @@ Hand off when the main job is different:
 
 ## Prerequisites
 
-- NeMo Gym (`pip install nemo-gym`, on Python 3.13 or newer) for `gym env start`, `gym eval run` and `gym eval profile`.
+- NeMo Gym (`pip install "nemo-gym>=0.7"`) for `gym env start`, `gym eval run` and `gym eval profile`.
 - A model endpoint and its API key, only when rollouts still have to be collected.
-- Python 3.8 or newer for the bundled script. It needs no packages and no Gym checkout.
+- Python for the bundled script. It needs no packages and no Gym checkout.
 
 ## Workflow
 
@@ -187,7 +187,7 @@ Mean reward 0.51 over the 41 measured rollouts only.
 | With `++allow_partial_rollouts=True`: `Reward profile completion: 0/N rollout rows` and an empty profile | Nothing was saved | Fix collection first; there is nothing to profile |
 | `UserWarning: N repeat(s) are missing rollouts for some tasks` | Repeats have different numbers of measured rollouts (missing or masked rollouts) | Expected for a partial or masked run; report coverage as in step 3 |
 | `UserWarning: wandb is not installed, so the histogram/* stats are being skipped` | wandb is optional on the main branch | Harmless: the profile files do not include those statistics anyway |
-| `gym: command not found` | NeMo Gym is not installed in this environment | `pip install nemo-gym` to collect or profile. The summary script works on existing profile files without it |
+| `gym: command not found` | NeMo Gym is not installed in this environment | `pip install "nemo-gym>=0.7"` to collect or profile. The summary script works on existing profile files without it |
 
 ## Limitations
 

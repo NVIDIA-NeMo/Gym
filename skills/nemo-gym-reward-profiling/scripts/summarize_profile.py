@@ -17,7 +17,7 @@
 
 Reads the per-task file that `gym eval profile` writes (`<stem>_reward_profiling.jsonl`) and, when they sit next to
 it, the run's materialized inputs (`<stem>_materialized_inputs.jsonl`) and agent metrics (`<stem>_agent_metrics.json`).
-Prints coverage first, then sorts the tasks by whether their reward changed across repeats. Needs only Python 3.8+.
+Prints coverage first, then sorts the tasks by whether their reward changed across repeats. Needs only the Python standard library.
 
     python3 summarize_profile.py results/rollouts_reward_profiling.jsonl
     python3 summarize_profile.py results/rollouts_reward_profiling.jsonl --json
