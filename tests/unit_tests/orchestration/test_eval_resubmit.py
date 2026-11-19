@@ -26,7 +26,7 @@ import pytest
 import yaml
 from omegaconf import OmegaConf
 
-from nemo_gym.cli.main import COMMANDS, _eval_resubmit
+from nemo_gym.cli.main import COMMANDS, _eval_resubmit, _job_resubmit
 from nemo_gym.orchestration.api import SAVED_CONFIG, ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
 from nemo_gym.orchestration.executors.capabilities import Resubmittable
@@ -47,7 +47,7 @@ from nemo_gym.orchestration.jobs import (
     local_index_dir,
     restore_index_entry,
 )
-from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, resubmit
+from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, inspect_recovery, recover, resubmit
 from tests.helpers.recovery_store_runs import provider_failures_jsonl
 
 
@@ -208,6 +208,77 @@ def test_the_cli_takes_a_gym_job_id_and_a_benchmark(
 
     assert capsys.readouterr().out == "4242\n"
     assert "Slurm" not in COMMANDS["eval resubmit"].summary
+
+
+def _cli_args(job_dir: Path) -> argparse.Namespace:
+    return argparse.Namespace(gym_job_id=job_dir.parent.name, benchmark="gsm8k")
+
+
+def test_gym_job_resubmit_takes_an_id_and_a_benchmark_and_prints_the_new_job_id(
+    tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture
+) -> None:
+    job_dir = _staged_run(tmp_path)
+
+    _job_resubmit(_cli_args(job_dir), [])
+
+    assert capsys.readouterr().out == "4242\n"
+    assert "Slurm" not in COMMANDS["job resubmit"].summary
+
+
+def _option_flags(command: str) -> set[str]:
+    parser = argparse.ArgumentParser()
+    for flag in COMMANDS[command].flags:
+        flag.register(parser)
+    return {option for action in parser._actions for option in action.option_strings} - {"-h", "--help"}
+
+
+def test_gym_job_resubmit_offers_no_recovery_options_and_gym_eval_resubmit_still_does() -> None:
+    assert _option_flags("job resubmit") == set()
+    assert {"--recover", "--inspect", "--repin", "--max-walltime"} <= _option_flags("eval resubmit")
+
+
+def test_gym_job_resubmit_says_in_its_summary_that_it_is_plain_and_where_recovery_is() -> None:
+    summary = COMMANDS["job resubmit"].summary
+
+    assert "no recovery" in summary and "gym eval resubmit --recover" in summary
+    assert len(summary) <= 96, "a summary is one line of the command listing"
+
+
+@pytest.mark.parametrize("entry_point", [resubmit, recover, inspect_recovery])
+def test_the_entry_points_behind_both_resubmit_commands_warn_that_they_are_experimental(
+    entry_point, capsys: pytest.CaptureFixture
+) -> None:
+    with pytest.raises(ValueError):
+        entry_point("gym-job-unknown", "gsm8k")
+
+    assert "is experimental" in capsys.readouterr().err
+
+
+def test_gym_job_resubmit_refuses_a_stray_override_and_lets_the_verbose_one_through(
+    tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture
+) -> None:
+    job_dir = _staged_run(tmp_path)
+
+    _job_resubmit(_cli_args(job_dir), ["+verbose=true"])
+    assert capsys.readouterr().out == "4242\n"
+
+    args = _cli_args(job_dir)
+    args._parser = argparse.ArgumentParser()
+    with pytest.raises(SystemExit):
+        _job_resubmit(args, ["foo=bar"])
+    assert "job resubmit does not accept Hydra overrides" in capsys.readouterr().err
+
+
+def test_gym_job_resubmit_says_when_the_executor_cannot_resubmit(
+    tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture
+) -> None:
+    job_dir = _staged_run(tmp_path, executor=KubernetesExecutor.name)
+
+    with pytest.raises(SystemExit) as stopped:
+        _job_resubmit(_cli_args(job_dir), [])
+
+    assert stopped.value.code == 1
+    assert "kubernetes executor does not support resubmit" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("executor", "supported"), [(SlurmExecutor, True), (KubernetesExecutor, False)])
