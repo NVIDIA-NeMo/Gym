@@ -86,8 +86,18 @@ def continuation_admission(
         )
         collected = CollectedEvidence.model_validate_json(raw.stdout)
         if not collected.managed_store:
-            print(f"{CONTINUATION_REASON_PREFIX}the saved artifacts have no rollout store manifest to continue from")
-            return "stop"
+            driver = _rollout_collection_driver(job)
+            if driver is None:
+                print(
+                    f"{CONTINUATION_REASON_PREFIX}the saved artifacts have no rollout store manifest to continue from"
+                )
+                return "stop"
+            if collected.walltime_state != "ok":
+                print(f"{CONTINUATION_REASON_PREFIX}the chain's accumulated walltime is {collected.walltime_state}")
+                return "stop"
+            # A custom driver keeps its own journal and validates it on resume; only the retry cap bounds the chain.
+            print(f"{CONTINUATION_REASON_PREFIX}rollout_collection_driver {driver} resumes from its own journal")
+            return "retry"
         collected = select_managed_evidence(collected, job)
         # The marker holds this allocation's own provisional line until it queues its follow-up. It says nothing about
         # the run: quoted into a stop, it would read as this allocation dying before its guard, so its sentinel would
@@ -158,6 +168,18 @@ def continuation_admission(
     except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"{CONTINUATION_REASON_PREFIX}saved recovery evidence is unreadable: {type(error).__name__}: {error}")
         return "stop"
+
+
+def _rollout_collection_driver(job: Path) -> str | None:
+    """The custom ``rollout_collection_driver`` the run's saved config names, or None."""
+    import yaml
+
+    try:
+        config = yaml.safe_load((job / "artifacts" / "rollouts_resolved_config.yaml").read_text())
+    except (OSError, yaml.YAMLError):
+        return None
+    driver = config.get("rollout_collection_driver") if isinstance(config, dict) else None
+    return driver if isinstance(driver, str) and driver and "${" not in driver else None
 
 
 def _requeue_continuation(job: Path, max_retries: int, max_walltime_s: float | None) -> str:

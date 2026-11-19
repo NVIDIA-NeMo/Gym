@@ -358,3 +358,45 @@ def test_a_failing_installed_runtime_names_its_first_error_and_stops(tmp_path):
     )
     # The whole installer error still reaches the job log.
     assert "No solution found when resolving dependencies" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "config,retries_used,continues",
+    [
+        ("rollout_collection_driver: benchmarks.x.rollout_driver:run\n", 0, True),
+        ("rollout_collection_driver: benchmarks.x.rollout_driver:run\n", 3, False),
+        ("rollout_collection_driver: null\n", 0, False),
+        ("rollout_collection_driver: ${oc.env:DRIVER}\n", 0, False),
+        ("rollout_collection_driver: [unclosed\n", 0, False),
+        (None, 0, False),
+    ],
+)
+def test_custom_driver_run_resumes_from_its_own_journal_within_the_retry_cap(
+    tmp_path, config, retries_used, continues
+):
+    # A custom driver writes its own journal, never a Store manifest; the follow-up resumes it as an infra retry.
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("{}\n")
+    if config is not None:
+        (artifacts / "rollouts_resolved_config.yaml").write_text(config)
+    if retries_used:
+        (tmp_path / ".gym_infra_retries").write_text(f"{retries_used}\n")
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="1:0")
+    assert ("REACHED_WORK" in result.stdout) is continues, result.stdout + result.stderr
+    if continues:
+        assert "resumes from its own journal" in result.stdout
+        assert (tmp_path / ".gym_infra_retries").read_text().strip() == "1"
+    elif retries_used:
+        assert "Infra retry limit (3) reached" in (tmp_path / ".gym_chain_incomplete").read_text()
+    else:
+        assert "no rollout store manifest" in (tmp_path / ".gym_chain_incomplete").read_text()
+
+
+def test_custom_driver_run_stops_when_its_driver_found_nothing_eligible(tmp_path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_resolved_config.yaml").write_text("rollout_collection_driver: benchmarks.x.d:run\n")
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="76:0")
+    assert "REACHED_WORK" not in result.stdout
+    assert not (tmp_path / ".gym_infra_retries").exists()

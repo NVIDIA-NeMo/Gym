@@ -29,13 +29,18 @@ from resources_servers.agentic_if_realworld.benchmark.core import (
 from resources_servers.agentic_if_realworld.benchmark.registry import private_path
 from resources_servers.agentic_if_realworld.benchmark.runner import run_cell
 from resources_servers.agentic_if_realworld.benchmark.scoring import validate_judge_config
-from resources_servers.agentic_if_realworld.benchmark.transport import delivered, gym_response_completion
+from resources_servers.agentic_if_realworld.benchmark.transport import (
+    RetryableTransportError,
+    delivered,
+    gym_response_completion,
+)
 
 
 LOGGER = logging.getLogger(__name__)
 
 
 async def run_rollout_collection(rollout_collection_config, global_config_dict) -> None:
+    from aiohttp import ClientResponseError
     from omegaconf import OmegaConf
 
     from nemo_gym.client import get_response_json, raise_for_status
@@ -142,7 +147,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
     )
     by_id = {r["task_id"]: r for r in rows}
     output = private_path(Path(config.output_jsonl_fpath))
-    if output.exists() and not config.resume_from_cache:
+    published_before = output.exists()
+    if published_before and not config.resume_from_cache:
         raise ValueError("Existing rollout output requires explicit resume or a new run directory")
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = (directory / ".lock").open("a")
@@ -179,7 +185,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         if not snapshot_path.exists():
             # JSON is valid YAML; reuse the atomic private receipt writer.
             write(snapshot_path, OmegaConf.to_container(snapshot, resolve=True))
-        results, failures, validated_results = [], [], {}
+        # failures halt admission; deferred (receipted transport) failures wait for a resume while other tasks run.
+        results, failures, deferred, validated_results = [], [], [], {}
         writing_failed = False
         # Each task keeps its own journal and receipts, so tasks run concurrently (sequential by default).
         slots = asyncio.Semaphore(config.num_samples_in_parallel or 1)
@@ -295,7 +302,13 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     _max_num_tries=1,
                 )
                 try:
-                    await raise_for_status(response)
+                    try:
+                        await raise_for_status(response)
+                    except ClientResponseError as error:
+                        if error.status != 503:
+                            raise
+                        detail = (getattr(error, "response_content", None) or b"").decode(errors="replace")[:1000]
+                        raise RetryableTransportError(f"/verify returned 503 for {identifier}: {detail}") from error
                     result = await get_response_json(response)
                     result.pop("cached_judge_only", None)
                     result.pop("validate_judge_cache", None)
@@ -351,6 +364,9 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                         except Exception:
                             writing_failed = True
                             raise
+                except RetryableTransportError as error:
+                    LOGGER.error("Task %s deferred to a resume: %r", identifier, error)
+                    deferred.append(error)
                 except (Exception, asyncio.CancelledError) as error:
                     LOGGER.error("Task %s failed: %r", identifier, error)
                     failures.append(error)
@@ -365,8 +381,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
             completed = False
             try:
                 await asyncio.gather(*(collect(row) for row in rows))
-                if failures:
-                    raise failures[0]
+                if failures or deferred:
+                    raise (failures or deferred)[0]
                 write_reports(staged_output, results, dataset)
                 write(
                     staged_output.with_suffix(".run.json"),
@@ -380,8 +396,12 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                 )
                 completed = True
             finally:
+                # A resume that did not reach every task keeps the published rows it would drop; otherwise the
+                # settled rows are published, so one deferred task never hides the rest of the run.
+                keep_published = published_before and len(results) + len(deferred) < len(rows)
+                publish = completed or not (writing_failed or keep_published)
                 try:
-                    if completed or (not config.resume_from_cache and not writing_failed):
+                    if publish:
                         write_reports(staged_output, results, dataset)
                         await write_aggregate_metrics(staged_output, results, client)
                 finally:
@@ -390,8 +410,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                         os.fsync(stream.fileno())
                     finally:
                         stream.close()
-                # A rejected resume preserves published artifacts; fresh interruptions retain settled rows.
-                if completed or (not config.resume_from_cache and not writing_failed):
+                if publish:
                     staged_output.replace(output)
                     for report in Path(pending).glob("*.json"):
                         report.replace(output.parent / report.name)

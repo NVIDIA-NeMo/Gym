@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from benchmarks.agentic_if_realworld import rollout_driver
+from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.rollouts import RolloutCollectionHelper
-from resources_servers.agentic_if_realworld.benchmark.core import judge, write
+from resources_servers.agentic_if_realworld.benchmark.core import digest, judge, write
+from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError
 
 
 TASKS = [f"task-{i}" for i in range(6)]
@@ -27,11 +29,33 @@ class FakeDataset:
 
 
 def collect(
-    tmp_path, monkeypatch, seen, *, parallel, failing=None, failing_write=None, delays=None, judge_override=None
+    tmp_path,
+    monkeypatch,
+    seen,
+    *,
+    parallel,
+    failing=None,
+    failing_write=None,
+    delays=None,
+    judge_override=None,
+    deferring=(),
+    resume=False,
+    client=None,
 ):
     seen.update(active=0, peak=0, started=[], finished=[])
 
-    async def run_cell(dataset, identifier, *, directory, **_):
+    async def run_cell(dataset, identifier, *, directory, verify, validate_only=False, **_):
+        if validate_only:
+            return None
+        if client is not None:
+            receipt = directory / "model" / (identifier + ".json")
+            write(receipt, {"status": "generated"})
+            selected = {
+                "receipt_path": str(receipt),
+                "receipt_sha256": digest(receipt),
+                "rollout": {ATTEMPT_INDEX_KEY_NAME: 0, "responses_create_params": {}, "response": {}},
+            }
+            await verify(selected, None)
         seen["started"].append(identifier)
         seen["active"] += 1
         seen["peak"] = max(seen["peak"], seen["active"])
@@ -39,8 +63,11 @@ def collect(
         seen["active"] -= 1
         if identifier == failing:
             raise ValueError("Ambiguous upstream dispatch")
-        seen["finished"].append(identifier)
+        # A deferred task keeps its journal: its answer is saved and only the judge call waits.
         write(directory / "cells" / (judge.sha(identifier) + ".json"), {"attempts": [{}]})
+        if identifier in deferring:
+            raise RetryableTransportError("Judge transport failed (http_status=500)")
+        seen["finished"].append(identifier)
         return {"item_id": identifier, "scoring_status": "scored"}
 
     def write_reports(output, results, dataset):
@@ -57,7 +84,7 @@ def collect(
     monkeypatch.setattr(rollout_driver, "run_cell", run_cell)
     monkeypatch.setattr(rollout_driver, "write_reports", write_reports)
     monkeypatch.setattr(rollout_driver, "write_aggregate_metrics", write_aggregate_metrics)
-    monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda self: None)
+    monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda self: client)
     monkeypatch.setattr(RolloutCollectionHelper, "preprocess_examples", lambda self, rows, **_: rows)
     config = SimpleNamespace(
         num_repeats=1,
@@ -66,7 +93,7 @@ def collect(
         input_jsonl_fpath=str(tmp_path / "input.jsonl"),
         output_jsonl_fpath=str(tmp_path / "out" / "rollouts.jsonl"),
         limit=None,
-        resume_from_cache=False,
+        resume_from_cache=resume,
         num_samples_in_parallel=parallel,
     )
     resource = {"dataset_dir": "", "synthetic": True, "receipt_dir": str(tmp_path / "receipts")}
@@ -111,6 +138,65 @@ def test_failure_stops_admission_and_lets_started_tasks_settle(tmp_path, monkeyp
     assert seen["started"] == ["task-0", "task-1"]
     assert seen["finished"] == ["task-1"]
     assert seen["aggregated"] == ["task-1"]
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_deferred_transport_failure_lets_every_other_task_run_and_publish(tmp_path, monkeypatch, resume):
+    # An auto-resume chain sets resume_from_cache on its first segment too, before anything is published.
+    seen = {}
+    with pytest.raises(RetryableTransportError, match="http_status=500"):
+        collect(tmp_path, monkeypatch, seen, parallel=2, deferring={"task-0"}, resume=resume)
+    assert seen["started"] == TASKS
+    published = [
+        json.loads(line)["task_id"] for line in (tmp_path / "out" / "rollouts.jsonl").read_text().splitlines()
+    ]
+    assert sorted(published) == sorted(seen["aggregated"]) == TASKS[1:]
+
+
+def test_verify_503_defers_only_its_task(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from aiohttp import ClientResponseError
+
+    from nemo_gym.client import http_client
+    from responses_api_agents.simple_agent.tests.test_app import _mock_response
+
+    async def unavailable(response):
+        error = ClientResponseError(request_info=None, history=(), status=503)
+        error.response_content = b'{"detail": "Judge transport failed (http_status=500, reason=HTTP_500)"}'
+        raise error
+
+    monkeypatch.setattr(http_client, "raise_for_status", unavailable)
+    post = AsyncMock(return_value=_mock_response(status=503))
+    seen = {}
+    with pytest.raises(RetryableTransportError, match="503 for task-0: .*http_status=500"):
+        collect(tmp_path, monkeypatch, seen, parallel=1, client=SimpleNamespace(post=post))
+    # Every task still reached its own /verify after task-0's judge was unavailable.
+    assert post.await_count == len(TASKS)
+
+
+def test_resume_judges_the_deferred_task_again_and_completes(tmp_path, monkeypatch):
+    seen = {}
+    with pytest.raises(RetryableTransportError):
+        collect(tmp_path, monkeypatch, seen, parallel=2, deferring={"task-0"})
+    with pytest.raises(RetryableTransportError):
+        collect(tmp_path, monkeypatch, seen, parallel=2, deferring={"task-0"}, resume=True)
+    output = tmp_path / "out" / "rollouts.jsonl"
+    assert sorted(json.loads(line)["task_id"] for line in output.read_text().splitlines()) == TASKS[1:]
+    collect(tmp_path, monkeypatch, seen, parallel=2, resume=True)
+    assert sorted(json.loads(line)["task_id"] for line in output.read_text().splitlines()) == TASKS
+
+
+def test_halted_resume_keeps_the_published_rows(tmp_path, monkeypatch):
+    seen = {}
+    with pytest.raises(RetryableTransportError):
+        collect(tmp_path, monkeypatch, seen, parallel=1, deferring={"task-5"})
+    output = tmp_path / "out" / "rollouts.jsonl"
+    before = output.read_bytes()
+    with pytest.raises(ValueError, match="Ambiguous upstream dispatch"):
+        collect(tmp_path, monkeypatch, seen, parallel=1, failing="task-0", resume=True)
+    assert seen["started"] == ["task-0"]
+    assert output.read_bytes() == before
 
 
 def test_write_failure_lets_started_tasks_settle(tmp_path, monkeypatch):

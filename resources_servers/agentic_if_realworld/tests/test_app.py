@@ -112,7 +112,9 @@ def test_http_verify_outage_is_an_error_then_recovers_saved_answer(verifier, mon
     saved = {path: path.read_bytes() for path in (verifier.receipt_dir / "model").iterdir()}
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         response = client.post("/verify", json=body)
-        assert response.status_code == 500 and len(calls) == 1
+        # 503, not 500: the driver defers this task to a resume and keeps running the others.
+        assert response.status_code == 503 and len(calls) == 1
+        assert "http_status=401" in response.json()["detail"] and "attempt0.json" in response.json()["detail"]
         assert not list(verifier.receipt_dir.glob("judges/*/result.json"))
         monkeypatch.setenv("SYNTHETIC", "corrected-key")
         response = client.post("/verify", json=body)
