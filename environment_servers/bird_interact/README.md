@@ -15,7 +15,7 @@ grades them. Each episode holds one task:
 
 c-Interact follows the [BIRD-Interact ADK](https://github.com/bird-bench/BIRD-Interact/tree/451fe2c3518ee1cf908d8139e2913483bd519381/BIRD-Interact-ADK)
 (revision `451fe2c`): its protocol, its user simulator and its grading, for the query tasks of Lite and Full that
-auto-ontology-eval runs. [ADK parity](#adk-parity) lists what matches and the one deliberate difference.
+auto-ontology-eval runs. [ADK parity](#adk-parity) lists what matches and the two deliberate differences.
 
 ## Modes
 
@@ -43,9 +43,11 @@ is the task's critical and knowledge ambiguities plus `question_patience` (defau
   question when they apply, and `Budget remaining: 0 bird-coins`, as the ADK's tool does.
 - A turn ends at its submission, with no further model call, as the ADK's callback ends it: the reply carries
   `X-NeMo-Gym-End-Activation: true` (`ToolResult.ends_activation`), and `simple_agent` returns the activation after the
-  model response's tool calls. Another call in that response gets `SQL submitted. Awaiting result.`, and a call once
-  the task is done `Task completed.`, the replies the ADK's agent gets. An agent that ignores the header, such as one
-  over MCP, calls the model again and gets the same replies.
+  model response's tool calls. Another call in that response is not run: it gets `SQL submitted. Awaiting result.`, and
+  a call once the task is done `Task completed.`, the texts the ADK's callback puts in place of the model's next reply.
+  The ADK runs every call of a response, so a second `submit_sql` in it is graded there too (see
+  [ADK parity](#adk-parity)). An agent that ignores the header, such as one over MCP, calls the model again and gets
+  the same replies.
 - After a turn in which the phase did not pass, with a submission or without one, the next turn is the phase's debug
   turn: `Your SQL is not executable: <error>` when the last submission did not run, `Your SQL is not correct. You have
   one more chance.` otherwise. After phase 1 passes, the follow-up question opens phase 2, which has its own debug turn.
@@ -210,9 +212,16 @@ code is Gym's. Two checks back the grading: the tests, and a run of the ADK's ow
 `grading.py` on six Lite databases, where 863 of 863 submissions got the same verdict.
 
 The ADK's agent-side behavior that a Gym harness replaces is not reproduced: its agent stops at 60 model calls in an
-episode, where a Gym harness has its own limit (`simple_agent`'s `max_steps`, for each turn). The one deliberate
-difference is in the simulator: the ADK fills its prompts' placeholders one after another, so a question containing
-`[[GT_SQL]]` would get the solution SQL written into it. Gym fills them in one pass, so it cannot.
+episode, where a Gym harness has its own limit (`simple_agent`'s `max_steps`, for each turn). Two differences are
+deliberate:
+
+- **The simulator:** the ADK fills its prompts' placeholders one after another, so a question containing `[[GT_SQL]]`
+  would get the solution SQL written into it. Gym fills them in one pass, so it cannot.
+- **Calls after a submission:** the ADK runs every tool call of a model response (`google-adk` runs a response's
+  function calls together, and `callbacks_cinteract.py` stops only the next model call), so a response with
+  `submit_sql` and another call runs both, and two `submit_sql` calls are both graded and both count as attempts. Gym
+  runs a turn's calls up to its submission; a later call in the same response gets `SQL submitted. Awaiting result.`,
+  so each turn grades one submission.
 
 ## Not supported yet
 

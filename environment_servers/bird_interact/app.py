@@ -379,9 +379,10 @@ class CInteractTools:
 
     As in the ADK, a turn ends at its submission. The ADK's callback answers the next model call itself; here the
     submission's reply ends the agent's activation (``ToolResult.ends_activation``), so the model is not called again
-    in the turn. Another call in the same model response gets the reply that the ADK's agent gets after a submission,
-    and so does a call once the task is done. Questions are not capped; each answer says how many of the clarification
-    turns remain.
+    in the turn. Another call in the same model response is not run: it gets the text the ADK's callback puts in place
+    of the model's next reply after a submission, and so does a call once the task is done. The ADK runs every call of
+    a response, so this is a deliberate difference (README, "ADK parity"). Questions are not capped; each answer says
+    how many of the clarification turns remain.
     """
 
     def __init__(self, server: "BirdInteractEnvironmentServer", episode: BirdInteractEpisode) -> None:
