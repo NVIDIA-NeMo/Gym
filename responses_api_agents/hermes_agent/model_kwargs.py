@@ -58,13 +58,15 @@ def configure_model_calls(agent: Any, *, preserve_reasoning_history: bool) -> No
         kwargs["stream"] = False
         return kwargs
 
-    transport = agent._get_transport("chat_completions")
-    original_normalize = transport.normalize_response
-
     summary_responses: list[dict[str, Any]] | None = None
 
-    def normalize(response: Any, **kwargs: Any) -> Any:
-        normalized = original_normalize(response, **kwargs)
+    def capture_token_data(original_normalize: Any) -> Any:
+        def normalize(response: Any, **kwargs: Any) -> Any:
+            return attach_token_data(response, original_normalize(response, **kwargs))
+
+        return normalize
+
+    def attach_token_data(response: Any, normalized: Any) -> Any:
         raw = response.choices[0].message
         fields = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
         bundle = {key: value for key in fields if (value := getattr(raw, key, None)) is not None}
@@ -76,7 +78,23 @@ def configure_model_calls(agent: Any, *, preserve_reasoning_history: bool) -> No
             summary_responses.append(bundle)
         return normalized
 
-    transport.normalize_response = normalize
+    original_get_transport = agent._get_transport
+
+    def get_transport(api_mode: str | None = None) -> Any:
+        # Hermes clears its transport cache when it rebuilds the client after transient errors, so wrap every
+        # transport it creates, not only the first cached one, or later turns lose their token IDs.
+        transport = original_get_transport(api_mode)
+        if (
+            (api_mode or agent.api_mode) == "chat_completions"
+            and transport is not None
+            and not getattr(transport, "_gym_token_capture", False)
+        ):
+            transport.normalize_response = capture_token_data(transport.normalize_response)
+            transport._gym_token_capture = True
+        return transport
+
+    agent._get_transport = get_transport
+    get_transport("chat_completions")
 
     def build_message(assistant_message: Any, finish_reason: str) -> dict[str, Any]:
         message = original_build_message(assistant_message, finish_reason)

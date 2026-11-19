@@ -83,3 +83,40 @@ pathlib.Path(sys.argv[4]).write_text(json.dumps([summary, rows, messages[0]]))
     if delegated:
         assert by_id["root"]["status"] == "completed"
         assert by_id["root"]["model_response_ids"] == []
+
+
+def test_token_capture_survives_transport_rebuild(tmp_path):
+    """Hermes clears its transport cache when it rebuilds the client after transient errors; capture must persist."""
+    probe = """
+import json, pathlib, sys
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[1])
+from openai.types.chat import ChatCompletion
+from run_agent import AIAgent
+from model_kwargs import configure_model_calls
+agent = AIAgent(base_url='http://127.0.0.1:9/v1', api_key='gym', model='policy_model', provider='custom',
+    api_mode='chat_completions', quiet_mode=True, enabled_toolsets=[], skip_memory=True,
+    skip_context_files=True, skip_background_review=True, max_iterations=1)
+configure_model_calls(agent, preserve_reasoning_history=False)
+agent._transport_cache.clear()
+response = ChatCompletion.model_validate(json.loads(sys.argv[2]))
+normalized = agent._get_transport().normalize_response(response)
+pathlib.Path(sys.argv[3]).write_text(json.dumps(agent._build_assistant_message(normalized, 'stop')))
+"""
+    completion = _completion(
+        {"content": "done", "prompt_token_ids": [3, 4], "generation_token_ids": [5], "generation_log_probs": [-0.1]}
+    )
+    output = tmp_path / "message.json"
+    completed = subprocess.run(
+        [str(host_python()), "-I", "-c", probe, str(Path(__file__).parents[1]), json.dumps(completion), str(output)],
+        env={**os.environ, "HERMES_HOME": str(tmp_path / "home")},
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    message = json.loads(output.read_text())
+    assert message["prompt_token_ids"] == [3, 4]
+    assert message["generation_token_ids"] == [5]
+    assert message["generation_log_probs"] == [-0.1]
