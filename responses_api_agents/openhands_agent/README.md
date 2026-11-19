@@ -10,7 +10,7 @@ SDK in any benchmark's task sandbox, and the benchmark's Resources Server verifi
 
 | | |
 | --- | --- |
-| Harness | `openhands-sdk` and `openhands-tools` 1.59.0, with every dependency at the version `uv.lock` pins for the Agent Server |
+| Harness | `openhands-sdk` and `openhands-tools` 1.62.0, with every dependency at the version `uv.lock` pins for the Agent Server |
 | Python in the sandbox | Standalone CPython 3.13.14 with the harness installed, built on the Agent Server host and uploaded |
 | Execution | Agent sessions only, in a borrowed task sandbox or an agent-owned one (`sandbox_provider`). No host path, no `/run` |
 | Model API | Chat Completions through the rollout-prefixed Gym Model Server URL |
@@ -135,7 +135,7 @@ result is the tool message the model read: OpenHands adds its own notes to a too
 exit code, the working directory, a no-output timeout or truncation, and the runner records that text.
 OpenHands delivers its final answer through the `finish` tool; that answer is also added as an assistant
 message.
-Status follows OpenHands' own rule at 1.59.0: `conversation.run()` raises only for errors that end the run.
+`conversation.run()` raises only for errors that end the run.
 
 | OpenHands outcome | Response | Verified |
 | --- | --- | --- |
@@ -162,7 +162,7 @@ and the adapter logs the end of that stderr when a run fails.
 Tool errors are returned to the model and do not end the run. A terminal command that exits nonzero is
 recorded as a `failed` tool call. Usage is reported only when every model response the conversation used,
 including condenser summaries, has a usage record; otherwise it stays unknown.
-Cached and reasoning token details stay unknown (`null`), with observation gaps: OpenHands SDK 1.59.0
+Cached and reasoning token details stay unknown (`null`), with observation gaps: OpenHands SDK
 normalizes absent details to zero, so its counters cannot establish complete totals. The raw SDK stats,
 including any positive detail counters, remain in the run result artifact.
 

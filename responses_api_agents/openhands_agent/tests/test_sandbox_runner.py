@@ -18,7 +18,7 @@ from responses_api_agents.openhands_agent.sandbox import RUNNER_SOURCE
 STUB = """
 import json, os, time
 
-__version__ = "1.59.0"
+__version__ = "stub-version"
 LOG = os.environ["STUB_LOG"]
 
 def note(**entry):
@@ -237,7 +237,7 @@ def test_finished_run_records_events_result_and_the_harness_configuration(tmp_pa
     assert (result["status"], result["execution_status"], result["openhands_version"]) == (
         "returned",
         "finished",
-        "1.59.0",
+        "stub-version",
     )
     recorded = events(session)
     assert [event["kind"] for _, event in recorded] == ["MessageEvent", "ActionEvent", "ObservationEvent"]

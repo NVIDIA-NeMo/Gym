@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+import math
 import shlex
 from asyncio import Semaphore
 from collections.abc import Mapping
@@ -79,7 +80,7 @@ from responses_api_agents.openhands_agent.sandbox import (
 
 
 LOG = logging.getLogger(__name__)
-# OpenHands SDK 1.59.0 LLM settings that change only how the harness calls the model. The adapter owns the
+# OpenHands SDK LLM settings that change only how the harness calls the model. The adapter owns the
 # connection (model, base_url, api_key, usage_id, extra_headers) and turns OpenHands' own model retries off, so its
 # retry settings are not offered. Settings that write files (completion logs, tokenizer downloads), call other models
 # (fallbacks), or stream (Gym's Chat Completions route does not) are not offered either. OpenHands silently ignores
@@ -184,7 +185,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
         self.sem = Semaphore(self.config.concurrency)
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Classify the error that ended an OpenHands 1.59.0 run, from the runner's recorded exception chain."""
+        """Classify the error that ended an OpenHands run, from the runner's recorded exception chain."""
         kind, status_code = classify_error(error_chain(dict(native_result)))
         return AgentOutcome(failure_kind=kind, status_code=status_code)
 
@@ -410,7 +411,8 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                     "url": str(access.connection.url),
                     "headers": access.connection.headers,
                     "required": access.required,
-                    "timeout": self.config.mcp_tool_timeout_seconds,
+                    # FastMCP takes integer milliseconds. Zero would disable its deadline.
+                    "timeout": math.ceil(self.config.mcp_tool_timeout_seconds * 1000),
                 }
                 for access in self.effective_tool_accesses(state.request)
                 if isinstance(access, MCPToolAccess)
