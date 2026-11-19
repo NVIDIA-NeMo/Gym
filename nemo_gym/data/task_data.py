@@ -93,11 +93,12 @@ SERVER_DIR_MARKERS = ("requirements.txt", "pyproject.toml", TASK_DATA_MODULE_NAM
 def _looks_like_server_dir(path: Path) -> bool:
     """Whether ``path`` is a server's source directory, not merely a directory of that name.
 
-    ``gym dataset collate`` writes its per-dataset sidecar and prepared file next to the cwd-relative
-    ``jsonl_fpath`` and creates ``<cwd>/<base_folder>/<server>/data/`` to do so, before the schema is
-    looked up. The search roots put the cwd before the install root, so a bare ``is_dir`` check resolved
-    the lookup to that output-only directory from any cwd outside the checkout, found no ``task_data.py``
-    there, and skipped validation silently (NVBug 6900465).
+    The search roots put the cwd before the install root, so a bare ``is_dir`` check resolved the lookup to
+    any ``<cwd>/<base_folder>/<server>/`` directory, found no ``task_data.py`` there, and skipped validation
+    silently (NVBug 6900465). Until #5997 ``gym dataset collate`` created exactly that directory itself from
+    any cwd outside the checkout (it wrote the prepared file next to the cwd-relative ``jsonl_fpath``); the
+    prepared file now goes to the run's output directory, but a directory of that shape still exists
+    wherever an earlier collate ran, or where a dataset is kept under ``<base_folder>/<server>/data/``.
     """
     return path.is_dir() and any((path / marker).is_file() for marker in SERVER_DIR_MARKERS)
 

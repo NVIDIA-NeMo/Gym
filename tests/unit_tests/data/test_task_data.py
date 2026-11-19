@@ -926,10 +926,11 @@ class TestLegacyWrapperLayoutThroughTheProcessor:
 
 
 class TestFindServerDirRejectsOutputOnlyDirs:
-    """A directory that holds only Gym's own collate output must not resolve as the server (NVBug 6900465).
+    """A directory holding only data under the server's name must not resolve as the server (NVBug 6900465).
 
-    ``gym dataset collate`` creates ``<cwd>/<base_folder>/<server>/data/`` for the per-dataset sidecar and
-    prepared file before it looks the schema up, and cwd is searched before the install root.
+    cwd is searched before the install root. Until #5997 ``gym dataset collate`` created
+    ``<cwd>/<base_folder>/<server>/data/`` for its own output before it looked the schema up; such a directory
+    still exists wherever an earlier collate ran, or where a dataset is kept there.
     """
 
     def test_output_only_dir_under_cwd_does_not_shadow_the_server_dir(self, tmp_path, monkeypatch):
@@ -995,8 +996,9 @@ class TestFindServerDirRejectsOutputOnlyDirs:
 class TestExternalCwdThroughTheProcessor:
     """Collating a built-in dataset from a cwd outside the checkout must still validate it (NVBug 6900465).
 
-    The dataset's ``jsonl_fpath`` is repo-relative, so collate writes its artifacts under
-    ``<cwd>/resources_servers/<server>/data/``; that directory must not be mistaken for the server.
+    The dataset's ``jsonl_fpath`` is repo-relative and its rows live under ``<cwd>/resources_servers/<server>/data/``,
+    a data-only directory of the server's name (what collate itself left behind before #5997); it must not be
+    mistaken for the server.
     """
 
     def _processor_and_configs(self, tmp_path, monkeypatch, rows):
@@ -1051,7 +1053,10 @@ class TestExternalCwdThroughTheProcessor:
         assert config.effective_task_data_validation == "error"
         with pytest.raises(ValueError, match=r"(?s)against the `example_session_state_mgmt` schema.*expected_count"):
             processor._collate_samples_single_type(
-                "example", in_scope, task_data_validation=config.effective_task_data_validation
+                "example",
+                in_scope,
+                task_data_validation=config.effective_task_data_validation,
+                output_dir=tmp_path / "prepared",
             )
 
     def test_valid_rows_pass_from_an_external_cwd(self, tmp_path, monkeypatch):
@@ -1059,7 +1064,10 @@ class TestExternalCwdThroughTheProcessor:
             tmp_path, monkeypatch, [self._row(initial_count=3, expected_count=6)]
         )
         paths = processor._collate_samples_single_type(
-            "example", in_scope, task_data_validation=config.effective_task_data_validation
+            "example",
+            in_scope,
+            task_data_validation=config.effective_task_data_validation,
+            output_dir=tmp_path / "prepared",
         )
         assert len(paths) == 1 and len(paths[0].read_text().splitlines()) == 1
 
