@@ -138,7 +138,19 @@ def test_judge_reply_parsing(reply, choice) -> None:
 
 @pytest.mark.parametrize(
     "reply",
-    [None, "", "B", '{"choice": "E"}', '{"choice": ""}', '{"letter": "B"}', '{"choice": "B"', '["B"]', "<think>B"],
+    [
+        None,
+        "",
+        "B",
+        '{"choice": "E"}',
+        '{"choice": ""}',
+        '{"choice": null}',
+        '{"choice": ["B"]}',
+        '{"letter": "B"}',
+        '{"choice": "B"',
+        '["B"]',
+        "<think>B",
+    ],
 )
 def test_a_reply_that_names_no_option_is_unusable(reply) -> None:
     with pytest.raises(ValueError):
@@ -279,13 +291,19 @@ async def test_a_row_without_its_question_and_options_is_refused(tmp_path, missi
     server, rows, calls = make_server(tmp_path, '{"choice": "B"}')
     row = copy.deepcopy(rows[0])
     del row["verifier_metadata"][missing]
-    with pytest.raises(ValidationError, match=missing):
+    with pytest.raises(ValidationError, match="together"):
         request(row, "Answer: B")
     client = TestClient(server.setup_webserver())
     body = {**row, "response": response("Answer: B")}
     assert client.post("/verify", json=body).status_code == 422 and calls == []
     with pytest.raises(ValueError, match="one text per choice"):
         VerifierMetadata(**{**rows[0]["verifier_metadata"], "options": ["Circle", "Square"]})
+    # A row with neither, as rule-scored results were saved before rows carried them, has nothing for the judge.
+    del row["verifier_metadata"]["options" if missing == "question" else "question"]
+    for text in ("Answer: B", ""):
+        with pytest.raises(ValueError, match="question and options"):
+            await server.verify(request(row, text))
+    assert calls == []
 
 
 async def test_a_judged_grade_is_bound_to_the_judges_reply(tmp_path) -> None:
@@ -320,8 +338,9 @@ async def test_a_judge_that_reads_no_option_gives_no_choice(tmp_path) -> None:
     assert result.evaluation_completed and not result.mask_sample
 
 
-async def test_an_unusable_reply_raises_a_judge_failure(tmp_path) -> None:
-    server, rows, _ = make_server(tmp_path, "I cannot tell.")
+@pytest.mark.parametrize("reply", ["I cannot tell.", '{"choice": null}'])
+async def test_an_unusable_reply_raises_a_judge_failure(tmp_path, reply) -> None:
+    server, rows, _ = make_server(tmp_path, reply)
     with pytest.raises(JudgeError, match="Unusable answer-judge reply"):
         await server.verify(request(rows[0], "Answer: B"))
 
@@ -330,7 +349,9 @@ async def test_an_unusable_reply_raises_a_judge_failure(tmp_path) -> None:
 REJECTED = ClientResponseError(MagicMock(), (), status=401, message="Unauthorized")
 
 
-@pytest.mark.parametrize("reply", ["no verdict", REJECTED], ids=["unusable_reply", "failed_call"])
+@pytest.mark.parametrize(
+    "reply", ["no verdict", '{"choice": null}', REJECTED], ids=["unusable_reply", "null_choice", "failed_call"]
+)
 def test_judge_failures_are_masked_rows_for_rejudging_not_wrong_answers(tmp_path, reply) -> None:
     server, rows, calls = make_server(tmp_path, reply)
     client = TestClient(server.setup_webserver())
