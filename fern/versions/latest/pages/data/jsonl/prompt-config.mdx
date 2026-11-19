@@ -144,3 +144,81 @@ See [CLI Commands](/reference/cli-commands) for the full list of `gym eval run -
 2. All rows are checked for conflicts. If any row already has `responses_create_params.input`, an error is raised
 3. For each row, placeholders in `system` and `user` are filled from the row's fields
 4. The resulting messages are set as `responses_create_params.input`
+
+
+## Benchmark dataset configuration
+
+Benchmark datasets can use a prompt file, an inline prompt, or overrides of an
+existing template. Rendering happens during run collation, so a prompt variant
+reuses the prepared questions and reference answers.
+
+### Inline templates
+
+Use `prompt` on a benchmark dataset declaration. `user` is required; `system` is
+optional. The example below shows the dataset block, which belongs under the
+agent server or resources server declaring that dataset:
+
+```yaml
+name: apex_shortlist
+type: benchmark
+jsonl_fpath: benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl
+prepare_script: benchmarks/apex_shortlist/prepare.py
+prompt:
+  system: 'Your final answer must be placed inside \boxed{{}}.'
+  user: |-
+    Please reason step by step to solve the following math problem.
+    {question}
+```
+
+Remove `prompt_config` when setting `prompt`: the two base template sources are
+mutually exclusive. Keep the dataset's other settings when replacing its block;
+configuration composition retains its existing list replacement behavior.
+
+### Override a file template
+
+To change only part of a template, keep `prompt_config` and set
+`prompt_overrides`. Overrides also work with an inline `prompt`.
+
+```yaml
+name: apex_shortlist
+type: benchmark
+jsonl_fpath: benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl
+prepare_script: benchmarks/apex_shortlist/prepare.py
+prompt_config: benchmarks/prompts/generic/math.yaml
+prompt_overrides:
+  system: 'Your final answer must be placed inside \boxed{{}}.'
+  user: |-
+    Please reason step by step to solve the following math problem.
+    {question}
+```
+
+An omitted override field inherits its base value. `system: null` removes the
+system message; `system: ""` emits an empty system message. `user: null`, an
+empty override block, unknown template fields, and overrides without a base
+are configuration errors. Overrides replace entire templates; a prefix or suffix
+can be written around `{question}` without a separate transform language.
+
+### Rendering and saved results
+
+Templates use Python format placeholders for top-level row fields, such as
+`{question}`. Double literal braces as `{{` and `}}`. A question containing braces
+is inserted once and is not interpreted as another template. Missing row fields
+and malformed format strings fail rather than silently changing the prompt.
+
+Prompt rendering rejects rows with existing nonempty
+`responses_create_params.input`; it does not rewrite conversation histories or
+multimodal messages. Tools, generation settings, references and grading fields
+are preserved. Prompt variants change the evaluation protocol, so label them
+separately in result comparisons.
+
+The collated `benchmark_metrics.json` records every declaring server instance,
+dataset, effective template and its SHA-256 digest under `prompts`. The digest
+covers template values and the rendering version; an equivalent inline and file
+template have the same digest. It distinguishes absent and empty system messages.
+Source-dataset metrics remain reusable across prompt changes.
+
+The existing recovery manifest checks the source, rendered inputs and resolved
+configuration before resuming answers. Changed prompts cannot silently reuse
+answers from a different prompt variant. Use a separate output directory for
+such variants; do not bypass identity checks with `allow_unsafe_resume`.
+Changing a file template is observed on the next collation in the same process.

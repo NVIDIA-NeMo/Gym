@@ -1915,3 +1915,102 @@ class TestCollateTypedTaskRows:
         other = self.TASK | {"task_id": {"taskset": "other", "task_id": "a:1"}}
         with raises(ValueError, match="differs from the dataset taskset"):
             self._collate(tmp_path, monkeypatch, [other])
+
+
+class TestBenchmarkPromptConfiguration:
+    def test_collation_uses_run_local_prompt_and_keeps_source_reusable(self, tmp_path):
+        source = tmp_path / "questions.jsonl"
+        row = {"question": r"Find {x}.", "expected_answer": "4", "responses_create_params": {"temperature": 1}}
+        source.write_text(json.dumps(row) + "\n")
+        original = source.read_bytes()
+        template = tmp_path / "prompt.yaml"
+        template.write_text('user: "Original {question}"\n')
+        processor = TrainDataProcessor()
+        rendered = []
+        for label, options in [
+            ("original", {"prompt_config": str(template)}),
+            ("alternate", {"prompt_config": str(template), "prompt_overrides": {"user": "Alternate {question}"}}),
+            ("inline", {"prompt": {"user": "Alternate {question}"}}),
+        ]:
+            dataset = {"name": "math", "type": "benchmark", "jsonl_fpath": str(source), **options}
+            instance = _instance("math_agent", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dataset]})
+            (prepared,) = processor._collate_samples_single_type(
+                "benchmark", [instance], task_data_validation="off", output_dir=tmp_path / label
+            )
+            result = json.loads(prepared.read_text())
+            rendered.append(result)
+            assert result["expected_answer"] == "4"
+            assert result["task_source"] == "math_agent"
+            assert result["responses_create_params"]["temperature"] == 1
+            if label == "original":
+                template.write_text('user: "Changed {question}"\n')
+        assert rendered[0]["responses_create_params"]["input"][0]["content"] == "Original Find {x}."
+        assert rendered[1] == rendered[2]
+        assert rendered[1]["responses_create_params"]["input"][0]["content"] == "Alternate Find {x}."
+        assert source.read_bytes() == original
+        instance = _instance(
+            "math_agent",
+            "responses_api_agents",
+            {
+                "entrypoint": "app.py",
+                "datasets": [
+                    {"name": "math", "type": "benchmark", "jsonl_fpath": str(source), "prompt_config": str(template)}
+                ],
+            },
+        )
+        (prepared,) = processor._collate_samples_single_type(
+            "benchmark", [instance], task_data_validation="off", output_dir=tmp_path / "changed"
+        )
+        assert (
+            json.loads(prepared.read_text())["responses_create_params"]["input"][0]["content"] == "Changed Find {x}."
+        )
+
+    def test_source_metrics_ignore_prompt_changes(self, tmp_path):
+        path = tmp_path / "source_metrics.json"
+        path.write_text(
+            json.dumps(
+                {"name": "math", "prompt": {"user": "Original {question}"}, "prompt_overrides": {"system": "Original"}}
+            )
+        )
+        processor = TrainDataProcessor()
+        current = {
+            "name": "math",
+            "prompt": {"user": "Alternate {question}"},
+            "prompt_overrides": {"system": "Alternate"},
+        }
+        assert processor._validate_aggregate_metrics(current, path, source_metrics=True) is None
+        assert processor._validate_aggregate_metrics(current, path) == path.with_name("source_metrics_conflict.json")
+
+    def test_collation_records_every_effective_prompt(self, tmp_path):
+        from nemo_gym.data.prompt import prompt_config_digest, resolve_prompt_config
+
+        source = tmp_path / "questions.jsonl"
+        source.write_text('{"question":"What is 2+2?","expected_answer":"4"}\n')
+        instances = []
+        for name in ["original", "alternate"]:
+            dataset = {
+                "name": "math",
+                "type": "benchmark",
+                "jsonl_fpath": str(source),
+                "prompt": {"user": name + " {question}"},
+            }
+            instances.append(_instance(name, "responses_api_agents", {"entrypoint": "app.py", "datasets": [dataset]}))
+        output = tmp_path / "out"
+        processor = TrainDataProcessor()
+        processor.collate_samples(
+            TrainDataProcessorConfig(output_dirpath=str(output), mode="train_preparation", task_data_validation="off"),
+            instances,
+            {"benchmark": DatasetMetrics(number_of_examples=2)},
+        )
+        metrics = json.loads((output / "benchmark_metrics.json").read_text())
+        assert [entry["instance"] for entry in metrics["prompts"]] == ["original", "alternate"]
+        for instance, entry in zip(instances, metrics["prompts"]):
+            prompt = resolve_prompt_config(instance.datasets[0])
+            assert entry["template"] == prompt.model_dump()
+            assert entry["sha256"] == prompt_config_digest(prompt)
+        assert metrics["prompts"][0]["sha256"] != metrics["prompts"][1]["sha256"]
+        rows = [json.loads(line) for line in (output / "benchmark.jsonl").read_text().splitlines()]
+        assert [row["responses_create_params"]["input"][0]["content"] for row in rows] == [
+            "original What is 2+2?",
+            "alternate What is 2+2?",
+        ]

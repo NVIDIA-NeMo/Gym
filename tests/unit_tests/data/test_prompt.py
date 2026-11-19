@@ -344,3 +344,80 @@ class TestMaterializePrompts:
         assert json.loads(output_path.read_text())["responses_create_params"]["input"] == [
             {"role": "user", "content": "1+1?"}
         ]
+
+
+class TestConfiguredPrompts:
+    @staticmethod
+    def dataset(**kwargs):
+        from nemo_gym.config.config_types import BenchmarkDatasetConfig
+
+        return BenchmarkDatasetConfig(name="math", type="benchmark", jsonl_fpath="questions.jsonl", **kwargs)
+
+    def test_inline_and_file_overrides_render_identically(self, tmp_path):
+        from nemo_gym.data.prompt import prompt_config_digest, resolve_prompt_config
+
+        path = tmp_path / "prompt.yaml"
+        path.write_text('system: Original instruction\nuser: "{question}"\n')
+        alternate = {"system": r"Answer inside \boxed{{}}.", "user": "Reason step by step. {question}"}
+        file_prompt = resolve_prompt_config(self.dataset(prompt_config=path, prompt_overrides=alternate))
+        inline_prompt = resolve_prompt_config(self.dataset(prompt=alternate))
+        row = {
+            "question": r"What is \{2, 3\}?",
+            "expected_answer": "a set",
+            "responses_create_params": {"temperature": 0.7, "tools": [{"type": "function", "name": "f"}]},
+        }
+        rendered = apply_prompt_to_row(row, file_prompt)
+        assert rendered == apply_prompt_to_row(row, inline_prompt)
+        assert rendered["expected_answer"] == row["expected_answer"]
+        assert rendered["responses_create_params"]["tools"] == row["responses_create_params"]["tools"]
+        assert rendered["responses_create_params"]["temperature"] == 0.7
+        assert rendered["responses_create_params"]["input"] == [
+            {"role": "system", "content": r"Answer inside \boxed{}."},
+            {"role": "user", "content": "Reason step by step. " + row["question"]},
+        ]
+        assert "input" not in row["responses_create_params"]
+        assert prompt_config_digest(file_prompt) == prompt_config_digest(inline_prompt)
+
+    @pytest.mark.parametrize(
+        "override,system", [({"user": "Solve {question}"}, "base"), ({"system": None}, None), ({"system": ""}, "")]
+    )
+    def test_override_omission_and_null(self, override, system):
+        from nemo_gym.data.prompt import resolve_prompt_config
+
+        prompt = resolve_prompt_config(
+            self.dataset(prompt={"system": "base", "user": "{question}"}, prompt_overrides=override)
+        )
+        assert prompt.system == system
+        assert prompt.user == override.get("user", "{question}")
+        messages = fill_prompt(prompt, {"question": "q"})
+        assert len(messages) == (1 if system is None else 2)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"prompt_config": "p.yaml", "prompt": {"user": "{question}"}},
+            {"prompt_overrides": {"system": "s"}},
+            {"prompt": {"user": "{question}"}, "prompt_overrides": {}},
+            {"prompt": {"user": "{question}"}, "prompt_overrides": {"user": None}},
+            {"prompt": {"user": "{question}", "typo": "s"}},
+            {"prompt": {"user": "{question}"}, "prompt_overrides": {"typo": "s"}},
+        ],
+    )
+    def test_invalid_sources_fail_at_config_validation(self, kwargs):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            self.dataset(**kwargs)
+
+    def test_override_preserves_prebuilt_input_and_missing_field_errors(self):
+        from nemo_gym.data.prompt import resolve_prompt_config
+
+        prompt = resolve_prompt_config(
+            self.dataset(prompt={"user": "{question}"}, prompt_overrides={"user": "{missing}"})
+        )
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            validate_prompt_compatibility(
+                [{"responses_create_params": {"input": [{"role": "user", "content": "q"}]}}], prompt
+            )
+        with pytest.raises(KeyError, match="missing"):
+            fill_prompt(prompt, {"question": "q"})

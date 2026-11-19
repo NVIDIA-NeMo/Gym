@@ -2610,3 +2610,32 @@ async def test_a_connection_that_dropped_is_reported_as_possibly_delivered_and_n
     assert len(calls) == 1
     assert (outcome.source, outcome.delivery) == ("collector", "possibly_delivered")
     assert outcome.exception_type == "ServerDisconnectedError"
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_resume_checks_rendered_prompt_configuration(tmp_path, changed):
+    from nemo_gym.config.config_types import BenchmarkDatasetConfig
+    from nemo_gym.data.prompt import apply_prompt_to_row, resolve_prompt_config
+
+    source = tmp_path / "questions.jsonl"
+    source.write_text('{"question":"What is 2+2?"}\n')
+    raw = {"question": "What is 2+2?", "_ng_task_index": 0, "_ng_rollout_index": 0}
+
+    def render(user):
+        dataset = BenchmarkDatasetConfig(name="math", type="benchmark", jsonl_fpath=source, prompt={"user": user})
+        return [apply_prompt_to_row(raw, resolve_prompt_config(dataset))]
+
+    rows = render("Solve {question}")
+    materialized = tmp_path / "materialized.jsonl"
+    materialized.write_text(json.dumps(rows[0]) + "\n")
+    manifest = RunManifest.create(source, rows, {}, {})
+    path = tmp_path / "manifest.json"
+    manifest.write(path)
+    before = {p: p.read_bytes() for p in tmp_path.iterdir()}
+    current = RunManifest.create(source, render("Reason about {question}" if changed else "Solve {question}"), {}, {})
+    if changed:
+        with pytest.raises(ConfigError, match="current materialized inputs"):
+            validate_resume(path, current, materialized)
+        assert all(p.read_bytes() == value for p, value in before.items())
+    else:
+        assert validate_resume(path, current, materialized).run_id == manifest.run_id

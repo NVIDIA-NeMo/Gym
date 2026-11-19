@@ -19,23 +19,23 @@ Prompt templates are mutually exclusive with pre-populated
 sweeps without re-preparing data.
 """
 
+import hashlib
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import Field, ValidationError
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigPathNotFoundError, PromptConfigMalformedError
-
-
-class PromptConfig(BaseModel):
-    """Schema for a prompt YAML file. ``user`` is required, ``system`` is optional."""
-
-    user: str
-    system: Optional[str] = None
+from nemo_gym.config.config_types import (
+    BaseNeMoGymCLIConfig,
+    BenchmarkDatasetConfig,
+    ConfigPathNotFoundError,
+    PromptConfig,
+    PromptConfigMalformedError,
+)
 
 
 @lru_cache(maxsize=64)
@@ -74,6 +74,24 @@ def load_prompt_config(path: str) -> PromptConfig:
             f"Prompt config '{resolved}' must be a mapping with a `user` template string and an optional `system` "
             f"string ({problems})."
         ) from e
+
+
+def resolve_prompt_config(dataset: BenchmarkDatasetConfig) -> PromptConfig | None:
+    """Resolve one dataset's inline or file template and explicitly set overrides."""
+    prompt = dataset.prompt
+    if dataset.prompt_config is not None:
+        prompt = load_prompt_config(str(dataset.prompt_config))
+    if prompt is not None and dataset.prompt_overrides is not None:
+        prompt = PromptConfig.model_validate(
+            prompt.model_dump() | dataset.prompt_overrides.model_dump(exclude_unset=True)
+        )
+    return prompt
+
+
+def prompt_config_digest(prompt: PromptConfig) -> str:
+    """Hash effective template values and their rendering version for provenance."""
+    value = {"version": 1, "template": prompt.model_dump()}
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def fill_prompt(prompt_config: PromptConfig, row: dict) -> List[Dict[str, str]]:

@@ -660,6 +660,30 @@ class DatasetConfig(BaseModel):
         return self
 
 
+class PromptConfig(BaseModel):
+    """A user template and optional system template, rendered with row fields."""
+
+    model_config = ConfigDict(extra="forbid")
+    user: str
+    system: Optional[str] = None
+
+
+class PromptOverrides(BaseModel):
+    """Explicit template replacements; an omitted field inherits its base value."""
+
+    model_config = ConfigDict(extra="forbid")
+    user: Optional[str] = None
+    system: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_replacements(self) -> "PromptOverrides":
+        if not self.model_fields_set:
+            raise ValueError("prompt_overrides must replace user or system")
+        if "user" in self.model_fields_set and self.user is None:
+            raise ValueError("prompt_overrides.user cannot be null")
+        return self
+
+
 class BenchmarkDatasetConfig(BaseModel):
     name: str
     type: Literal["benchmark"]
@@ -674,6 +698,17 @@ class BenchmarkDatasetConfig(BaseModel):
         description="Taskset identifier used to materialize and route this dataset's tasks to an Environment Server.",
     )
     prompt_config: Optional[Path] = None
+    prompt: Optional[PromptConfig] = Field(default=None, exclude_if=lambda value: value is None)
+    prompt_overrides: Optional[PromptOverrides] = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def validate_prompt_source(self) -> "BenchmarkDatasetConfig":
+        if self.prompt_config is not None and self.prompt is not None:
+            raise ValueError("prompt and prompt_config are mutually exclusive")
+        if self.prompt_overrides is not None and self.prompt is None and self.prompt_config is None:
+            raise ValueError("prompt_overrides requires prompt or prompt_config")
+        return self
+
     num_repeats: int = Field(default=1, ge=1)
     # Isolated project containing the committed dependency lock for preparation.
     prepare_project: Optional[Path] = None

@@ -62,7 +62,13 @@ from nemo_gym.data.gitlab_utils import download_jsonl_dataset
 from nemo_gym.data.hf_utils import (
     download_hf_dataset_as_jsonl,
 )
-from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.data.prompt import (
+    apply_prompt_to_row,
+    load_prompt_config,
+    prompt_config_digest,
+    resolve_prompt_config,
+    validate_prompt_compatibility,
+)
 from nemo_gym.data.task_data import (
     TaskDataSchemaError,
     TaskDataValidator,
@@ -872,7 +878,9 @@ class TrainDataProcessor(BaseModel):
                 # Benchmark prompt templates create the input during collation;
                 # count the original task rows before validating rendered inputs.
                 require_responses=dataset_config.taskset is None
-                and not (dataset_config.type == "benchmark" and dataset_config.prompt_config),
+                and not (
+                    dataset_config.type == "benchmark" and (dataset_config.prompt_config or dataset_config.prompt)
+                ),
                 dataset_metrics_hook=dataset_metrics_hook,
             )
 
@@ -965,8 +973,14 @@ class TrainDataProcessor(BaseModel):
         if source_metrics:
             # A rendering template does not describe the original dataset. Keep it
             # significant for collated-output metrics, including existing sidecars.
-            previous_comparison = {k: v for k, v in previous_comparison.items() if k != "prompt_config"}
-            current_comparison = {k: v for k, v in current_comparison.items() if k != "prompt_config"}
+            previous_comparison = {
+                k: v
+                for k, v in previous_comparison.items()
+                if k not in {"prompt_config", "prompt", "prompt_overrides"}
+            }
+            current_comparison = {
+                k: v for k, v in current_comparison.items() if k not in {"prompt_config", "prompt", "prompt_overrides"}
+            }
         diff_values(previous_comparison, current_comparison, path="", diffs=diffs)
 
         if diffs:
@@ -1245,6 +1259,8 @@ This could be due to a change in how metrics are calculated, leading to outdated
         *,
         output_dir: Path,
     ) -> List[Path]:
+        # File templates may have changed between runs in this process.
+        load_prompt_config.cache_clear()
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
         source_task_index = -1
@@ -1253,9 +1269,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 if d.type != type:
                     continue
 
-                prompt_cfg = None
-                if d.type == "benchmark" and d.prompt_config:
-                    prompt_cfg = load_prompt_config(d.prompt_config)
+                prompt_cfg = resolve_prompt_config(d) if isinstance(d, BenchmarkDatasetConfig) else None
 
                 data_path = output_dir / Path(d.jsonl_fpath).name
                 # Per-declaration output: every declaration of a jsonl_fpath gets its own prepared
@@ -1364,6 +1378,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
         server_instance_configs: List[ServerInstanceConfig],
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics],
     ) -> None:
+        load_prompt_config.cache_clear()
         final_fpaths: Dict[DatasetType, Path] = dict()
         conflicting_fpaths: List[str] = []
         for type in config.in_scope_dataset_types:
@@ -1385,6 +1400,23 @@ This could be due to a change in how metrics are calculated, leading to outdated
                     d.model_dump(mode="json", exclude=_sidecar_excluded_dataset_fields(d, preparation=False))
                     | aggregate_metrics_dict
                 )
+
+            prompts = []
+            for instance in server_instance_configs:
+                for dataset in instance.datasets:
+                    if dataset.type == type and isinstance(dataset, BenchmarkDatasetConfig):
+                        prompt = resolve_prompt_config(dataset)
+                        if prompt is not None:
+                            prompts.append(
+                                {
+                                    "instance": instance.name,
+                                    "dataset": dataset.name,
+                                    "template": prompt.model_dump(),
+                                    "sha256": prompt_config_digest(prompt),
+                                }
+                            )
+            if prompts:
+                aggregate_metrics_dict["prompts"] = prompts
 
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True, parents=True)
