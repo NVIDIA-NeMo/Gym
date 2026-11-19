@@ -28,6 +28,7 @@ from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import AgentContext
 from resources_servers.arc_agi_3.app import ATTEMPT_REPORT_KEY
 from responses_api_agents.arc_agi_3_agent import app as agent_app
@@ -407,6 +408,15 @@ class TestSessions:
             asyncio.run(agent.seed_agent_session(http_request({}), seed))
         assert refused.value.status_code == 422
 
+    def test_a_lent_sandbox_is_refused(self, monkeypatch, tmp_path: Path) -> None:
+        agent = make_agent(monkeypatch, tmp_path)
+        access = SandboxAccess(
+            connection=DirectSandboxConnection(provider_config_ref="local", descriptor={}), workdir="/w"
+        )
+        with pytest.raises(HTTPException, match="does not support sandbox access") as refused:
+            asyncio.run(agent.seed_agent_session(http_request({}), seed_request(sandbox_access=access)))
+        assert refused.value.status_code == 422
+
     def test_activation_needs_its_seeded_session(self, monkeypatch, tmp_path: Path) -> None:
         agent = make_agent(monkeypatch, tmp_path)
         with pytest.raises(HTTPException) as refused:
@@ -414,7 +424,7 @@ class TestSessions:
         assert refused.value.status_code == 409
 
 
-def test_post_model_and_aggregate_metrics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_post_model(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     agent = make_agent(monkeypatch, tmp_path)
 
     class Morsel:
@@ -424,17 +434,12 @@ def test_post_model_and_aggregate_metrics(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     async def post(server_name, url_path, json, cookies=None):
         calls.append((server_name, url_path, cookies))
-        if url_path == "/aggregate_metrics":
-            return FakeHttpResponse({"agent_metrics": {"rhae": 12.5}, "key_metrics": {"rhae": 12.5}})
         return FakeHttpResponse({"choices": []}, cookies={"session": Morsel()})
 
     agent.server_client.post = AsyncMock(side_effect=post)
     status, text, cookies = asyncio.run(agent._post_model({"messages": []}, {"session": "old"}))
     assert status == 200 and json.loads(text) == {"choices": []} and cookies == {"session": "abc"}
     assert calls[0] == ("policy_model", "/v1/chat/completions", {"session": "old"})
-    metrics = asyncio.run(agent.aggregate_metrics(MagicMock()))
-    assert calls[1][:2] == ("arc_agi_3_resources_server", "/aggregate_metrics")
-    assert metrics.key_metrics == {"rhae": 12.5}
 
 
 def test_requires_context_error_passthrough(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

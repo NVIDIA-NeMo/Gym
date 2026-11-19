@@ -75,7 +75,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
 from pydantic import Field
@@ -85,8 +85,6 @@ from nemo_gym.agents import BaseResponsesAPIAgentConfig
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.client import request as http_request
 from nemo_gym.config import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
     ModelServerRef,
     ResourcesServerRef,
     get_first_server_config_dict,
@@ -810,14 +808,6 @@ class ArcAgi3OfficialAgent(ArcAgi3GameSessions):
             "agent_call_log": call_log_entries(call_log),
         }
         return self._attempt_response(state, record, report)
-
-    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """The resources server's RHAE metrics (overall, at 1 h / 2 h, counts of invalid results)."""
-        response = await self.server_client.post(
-            server_name=self.config.resources_server.name, url_path="/aggregate_metrics", json=body
-        )
-        await raise_for_status(response)
-        return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def shutdown(self) -> None:
         """Stop every worker (each writes its report; games in play end as cancelled), then wait until every game has

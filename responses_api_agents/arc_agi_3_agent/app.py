@@ -62,8 +62,6 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import get_response_json, raise_for_status, request
 from nemo_gym.config import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
     ModelServerRef,
     ResourcesServerRef,
     get_first_server_config_dict,
@@ -266,9 +264,13 @@ class ArcAgi3GameSessions(SimpleResponsesAPIAgent):
         (``ATTEMPT_REPORT_KEY``) and the play sets ``state.observations``."""
         raise NotImplementedError
 
+    def parse_agent_context(self, request: AgentSeedSessionRequest) -> ArcAgi3AgentContext:
+        # The seed's first check (the base checks the context before the seed hook): a lent sandbox is refused first.
+        if request.sandbox_access is not None:
+            raise AgentSeedRejectedError("This agent does not support sandbox access: the game server plays the game")
+        return super().parse_agent_context(request)
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> ArcAgi3Session:
-        if body.sandbox_access is not None:
-            raise AgentSeedRejectedError("An ARC-AGI-3 game is played on the game server; no sandbox is used")
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise AgentSeedRejectedError("The ARC-AGI-3 harnesses use no external tools")
         # The base refuses a seed whose context lacks the game (422).
@@ -606,14 +608,6 @@ class ArcAgi3Agent(ArcAgi3GameSessions):
             "harness_log": harness_log_entries(call_log),
         }
         return self._attempt_response(state, record, report)
-
-    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """The resources server's RHAE metrics (overall, at 1 h / 2 h, counts of invalid results)."""
-        response = await self.server_client.post(
-            server_name=self.config.resources_server.name, url_path="/aggregate_metrics", json=body
-        )
-        await raise_for_status(response)
-        return AggregateMetrics.model_validate(await get_response_json(response))
 
 
 if __name__ == "__main__":
