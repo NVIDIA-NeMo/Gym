@@ -168,6 +168,9 @@ Set `runner_name` in the agent config or pass an override to `gym env start`.
 See the [agent runtime README](../../responses_api_agents/osworld_agent/README.md#supported-runners)
 for the complete runner registry and prompt/action contracts. Prefer selecting
 the maintained model/agent composition with `prepare.py --profile`.
+See [model isolation, switching, and regression](#model-isolation-switching-and-regression)
+for returning to an older model, running two models concurrently, and adding
+a new generation without replacing existing protocols.
 
 ### Pointer Agent with Opus 4.7
 
@@ -412,6 +415,196 @@ thinking delimiters in action content. They also record the distinct
 fixed-three-image, 100,000-output-token, no-MTP, 128-worker experiment. That
 experiment used the registered runner through a standalone controller; it
 does not establish end-to-end validation of these Gym service wrappers.
+
+### Model isolation, switching, and regression
+
+Model-specific behavior is selected explicitly by the profile and its
+`model_protocol_id`. The model name sent to an HTTP endpoint does not select a
+Gym prompt, parser, history policy, or serving parser automatically. Switching
+from Super 3.5 back to Nano Omni v3 means restoring that model's complete
+configuration and serving recipe.
+
+The following table describes the **checked-in defaults**, not every experiment
+run with these models. In particular, the Super 3.5 R6 experiment used fixed
+three-image history and 100,000 output tokens; those overrides did not replace
+the default profile.
+
+| Setting | Nano Omni v3 | Super 3.5 VL |
+| --- | --- | --- |
+| Preparation profile | `--profile nano_omni` | `--profile super35` |
+| Profile file | [`configs/osworld_agent_nano_omni.yaml`](configs/osworld_agent_nano_omni.yaml) | [`configs/osworld_agent_super35.yaml`](configs/osworld_agent_super35.yaml) |
+| Agent instance | `osworld_nano_omni_agent` | `osworld_super35_agent` |
+| Runner | `nemotron_v3_nano_omni_agent` | `nemotron_super35_agent` |
+| Model protocol ID | `nano-omni-v3-osworld-v1` | `nemotron-super35-tool-xml-v3` |
+| Gym action parser ID | `nemotron-v3-nano-omni-parser-v1` | `nemotron-super35-tool-xml-parser-v1` |
+| Response contract | Markdown Thought/Action/Code; explicit Code section | Function/parameter XML for `exec_py`, `computer.wait`, `computer.terminate` |
+| Assistant history | Thought and Action; previously executed Code is omitted | Thinking, action description and complete tool calls |
+| `truncate_history_thinking` | `true` in the model transport; see the distinction between image-backed turns and text history above | `false`, forwarded with per-request `enable_thinking` |
+| API tool definitions | The Markdown protocol adds none | All three tool schemas, with `tool_choice: none` |
+| XML delimiter preservation | No Super 3.5 request override | `skip_special_tokens: false`; native tool calls rejected |
+| Serving reasoning parser | Pinned `nano_v3` plugin and template from the Nano Omni recipe above | Optional `nemotron_v3_lossless_nonstream` plugin qualified on vLLM 0.32.0; see the serving guide |
+| Screenshot policy | `fixed`, `keep_images: 3`, including current | `sink_window`, `sink: 1`, `low_water: 4`, `high_water: 4`, including current |
+| Step cap | 100 | 100 |
+| Per-step output budget, including thinking | 4096 | 4096 |
+| Temperature / top_p | 0.6 / 0.95 | 0.6 / 0.95 |
+| Post-action delay | 5 seconds | 5 seconds |
+| Per-task timeout | 7200 seconds | 7200 seconds |
+
+The `v3` suffix in `nemotron-super35-tool-xml-v3` is the **third revision of the
+Super 3.5 wire protocol**. It does not select the Nano Omni v3 model. Likewise,
+vLLM's built-in `nemotron_v3` parser name is not a Gym model-selection switch.
+The Super 3.5 plugin registers the distinct name
+`nemotron_v3_lossless_nonstream` with `force=False`; it does not replace that
+built-in parser. Select it explicitly on the Super 3.5 serving process. The
+Nano Omni endpoint retains its own `nano_v3` parser and pinned chat template.
+
+The two Gym adapters share the `OSWorldProtocolAgent` execution loop, model
+transport, history-selection implementation and desktop/evaluator integration.
+Each agent instance selects its own protocol and maintains its own history
+state. Super's API tools, message renderer, raw-response handling and `exec(...)`
+execution convention are enabled through its protocol fields. Consequently,
+adding a separate protocol does not automatically change existing profiles,
+but a change to shared code still requires regression checks across the models
+that consume it. The [runtime extension guide](../../responses_api_agents/osworld_agent/README.md#adding-a-model-protocol)
+describes these boundaries and the required checks.
+
+#### Switch back to Nano Omni v3
+
+For a historical score regression, recover the original checkpoint revision,
+Gym and OSWorld commits, tokenizer/template/parser digests, VM identity, task
+JSONL, sampling, image history, retry budget, output budget, step cap and
+timeouts. Preserve the old run directory. A current profile with a matching
+model name does not establish that the historical recipe has been restored.
+
+Start the Nano Omni endpoint using [Serve the checkpoint](#serve-the-checkpoint).
+Use a fresh run root and `env.yaml` for the client. The following commands run
+from the Gym checkout root and select the current Nano Omni profile with its
+defaults; add only the explicit overrides required by the frozen run you are
+reproducing. `POLICY_API_KEY`, if required, must belong to this endpoint.
+
+```bash
+export GYM_ROOT=/absolute/path/to/Gym
+export OSWORLD_RUN_ROOT=/absolute/runs/nano-v3-regression-001
+export OSWORLD_RUN_ID=nano-v3-regression-001
+export OSWORLD_ENV_FILE="$OSWORLD_RUN_ROOT/config/env.yaml"
+cd "$GYM_ROOT"
+
+python3 benchmarks/osworld/prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_nogdrive.jsonl \
+  --output "$OSWORLD_RUN_ROOT/results/$OSWORLD_RUN_ID/rollouts.jsonl" \
+  --env-file "$OSWORLD_ENV_FILE" \
+  --head-port 11000 \
+  --server-venv-root "$OSWORLD_RUN_ROOT/server-venvs" \
+  --policy-base-url http://NANO_MODEL_HOST:8000/v1 \
+  --policy-model-name SERVED_NANO_OMNI_MODEL
+```
+
+Run the exact `gym env prefetch` and optional-runtime-package installation
+commands printed by preparation. They refer to this run's config directory
+and managed venv. Then, with the same exports, start control:
+
+```bash
+bash "$GYM_ROOT/benchmarks/osworld/tools/start_control.sh" "$OSWORLD_RUN_ROOT"
+```
+
+After control is ready, run eval in a second terminal or supervisor with the
+same `GYM_ROOT`, `OSWORLD_RUN_ROOT`, `OSWORLD_RUN_ID`, `OSWORLD_ENV_FILE` and
+backend environment settings:
+
+```bash
+bash "$GYM_ROOT/benchmarks/osworld/tools/run_eval.sh" "$OSWORLD_RUN_ROOT"
+```
+
+Preparation keeps an existing `env.yaml` unless `--force-env` is supplied.
+Choose a fresh directory instead of forcing an overwrite of an old experiment.
+The wrappers require the basename `env.yaml`; `--env-file` tells preparation
+where to write it, while `OSWORLD_ENV_FILE` tells both wrappers which one to
+read. Supplying the first without the second can launch the default config
+from `benchmarks/osworld/env.yaml`.
+
+The same preparation mechanism supports Super 3.5 with `--profile super35`.
+The execution backend is a separate choice: Docker requires `--vm-path`;
+`gym_agentenv` and `gym_opensandbox` use the selected template or Pool and
+reject that argument. Record the actual guest image identity independently
+of the model profile. The full R6 result qualifies its recorded standalone
+runner/direct-vLLM deployment; it does not qualify every Gym backend or a
+different profile automatically.
+
+#### Run v3 and Super 3.5 concurrently
+
+Use independent control/eval instances with their own configuration. Both
+profiles define the common `policy_model` configuration key, so composing
+both YAML profiles into one `env.yaml` can override one model's transport
+with the other's settings. Prepare one profile per environment file.
+
+For Super 3.5, start its separately configured endpoint using the
+[serving guide](tools/README.md#super-35-reasoning-boundary). In a fresh shell,
+prepare a second client run:
+
+```bash
+export GYM_ROOT=/absolute/path/to/Gym
+export OSWORLD_RUN_ROOT=/absolute/runs/super35-comparison-001
+export OSWORLD_RUN_ID=super35-comparison-001
+export OSWORLD_ENV_FILE="$OSWORLD_RUN_ROOT/config/env.yaml"
+cd "$GYM_ROOT"
+
+python3 benchmarks/osworld/prepare.py \
+  --profile super35 \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_nogdrive.jsonl \
+  --output "$OSWORLD_RUN_ROOT/results/$OSWORLD_RUN_ID/rollouts.jsonl" \
+  --env-file "$OSWORLD_ENV_FILE" \
+  --head-port 11100 \
+  --server-venv-root "$OSWORLD_RUN_ROOT/server-venvs" \
+  --policy-base-url http://SUPER35_MODEL_HOST:8000/v1 \
+  --policy-model-name nemotron-3.5-super-vl
+```
+
+Complete the printed prefetch/package setup and use the same two wrapper
+commands as above with this shell's exports. This example uses the default
+four-image/4096-token Super 3.5 profile. To run R6's fixed-three/100k settings,
+make an explicit new configuration as described in the serving guide and
+freeze it as a separate run.
+
+Keep the following items separate when both models are running:
+
+| Item | Required separation or permitted sharing |
+| --- | --- |
+| Model endpoint | Each model gets its own correctly configured serving instance. If they share a model host, choose distinct ports and GPU assignments. Changing the request's model name does not switch a vLLM process's startup parser/template. |
+| Gym control endpoint | Distinct `--head-port` values; also separate any component ports explicitly pinned by local overrides. |
+| Configuration | Distinct directories containing `env.yaml`; set `OSWORLD_ENV_FILE` in each control and eval supervisor. |
+| Model credentials | Set `POLICY_API_KEY` or the prepared configuration for the selected endpoint in each shell. Preparation's common `POLICY_*` values can override profile-specific defaults. |
+| Run ownership | Distinct `OSWORLD_RUN_ID`; use a distinct `NEMO_GYM_RUN_ID` if explicitly set. |
+| Outputs and evidence | Distinct output JSONL, run roots, task artifacts and model I/O logs. Recheck explicit `OSWORLD_TASK_ARTIFACT_ROOT`, `OSWORLD_RESOURCES_IO_LOG` and `OSWORLD_VM_EXEC_LOG` overrides inherited from a previous shell. |
+| Managed environments | The examples use distinct `--server-venv-root` directories. An already provisioned identical environment may be reused deliberately; do not concurrently rebuild a shared environment or change it during a frozen run. |
+| Source and task assets | The same immutable checkout, canonical task input and verified asset cache may be shared. Do not edit a checkout used by an active frozen run. |
+| Desktop backend | A Docker host, Pool or AgentENV service may be shared if it has combined capacity. Tasks must have separate desktop instances and run attribution. |
+| Comparison task set | Each model runs the complete selected task set. Shard within each model when necessary; do not divide the task set between models and report it as a paired full-suite comparison. |
+
+Independent protocols prevent model-format settings from being selected
+implicitly. They do not reserve GPU, CPU, memory, storage or desktop capacity.
+Set each run's `--concurrency` for the combined capacity and preserve timeout
+and infrastructure-failure records when interpreting simultaneous runs.
+
+#### Add a new model such as v4
+
+There is currently no `--profile v4` or registered v4 protocol. A future v4
+checkpoint must be qualified against its actual prompt and response format.
+Use the [model-protocol extension procedure](../../responses_api_agents/osworld_agent/README.md#adding-a-model-protocol)
+to add a versioned protocol, runner registration and profile. Register new
+identities instead of replacing the v3 or Super 3.5 entries. If the model needs
+a different planning/execution loop, implement a separate runner through the
+existing extension points.
+
+The release check must include the new model and the existing models affected
+by any shared changes. Unit tests for a synthetic registered protocol prove
+the extension mechanism; they do not establish compatibility with a real v4
+checkpoint. A new real-model smoke and raw-output audit are required before
+claiming support. A score requires a separately frozen benchmark run.
 
 ### OpenSandbox Pool backend
 
