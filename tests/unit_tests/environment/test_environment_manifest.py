@@ -755,7 +755,6 @@ def test_load_listed_manifest_returns_the_main_manifest_or_a_listed_config(tmp_p
         (lambda raw: raw["protocols"][0].pop("description"), "description"),
         # Only what can differ may be set: capabilities belong to the benchmark.
         (lambda raw: raw["setups"][0].update(capabilities=["coding"]), "capabilities"),
-        (lambda raw: raw["setups"][0].update(standard_prompt_config="prompts/other.yaml"), "standard_prompt_config"),
         (lambda raw: raw.update(kind="environment", canonical_split=None, standard_prompt_config=None), "protocols"),
     ],
 )

@@ -125,7 +125,9 @@ Apply the checks for the areas the diff touches.
   without requiring unrelated metadata backfilling. A config that runs a
   benchmark with another harness, or under another prompt, tools or scoring,
   is listed in the main manifest's `setups` or `protocols`, sets only what
-  differs, and has no manifest of its own.
+  differs, and has no manifest of its own. A setup that names its own
+  `standard_prompt_config` must keep the benchmark's prompt wording, adapted
+  only in form for its harness, and its `description` must say how.
 - **Agent harnesses (`responses_api_agents/`).** Check multi-turn and
   tool-calling trajectory handling in the Responses API format. Check schema
   presence and drift coverage against the dataset's owner, which is not

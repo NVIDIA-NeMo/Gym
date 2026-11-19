@@ -294,6 +294,14 @@ class _ListedConfig(_ManifestModel):
     rollout_driver: PythonCallable | None = None
     grading_mode: NonEmptyString | None = None
     harbor_target: NonEmptyString | None = None
+    standard_prompt_config: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "The config's own prompt template. A protocol sets it when it prompts under other rules. A setup sets it "
+            "only when its harness needs the benchmark's prompt in another form, such as in the user message because "
+            "the harness owns the system prompt; its description then says how the prompt was adapted."
+        ),
+    )
 
 
 class ManifestSetup(_ListedConfig):
@@ -308,7 +316,6 @@ class ManifestProtocol(_ListedConfig):
     """
 
     description: NonEmptyString = Field(description="How the protocol's prompt, tools or scoring differ.")
-    standard_prompt_config: NonEmptyString | None = None
     setups: list[ManifestSetup] = Field(
         default_factory=list,
         description="Configs that run this protocol's tasks, prompt and scoring with another harness or runtime.",

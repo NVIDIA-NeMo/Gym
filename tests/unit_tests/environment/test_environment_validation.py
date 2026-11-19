@@ -12,7 +12,7 @@ import yaml
 from pydantic import ValidationError
 
 from nemo_gym.config.config_types import AlmostServerError, ConfigInterpolationError
-from nemo_gym.environment.manifest import EnvironmentManifest, ManifestSetup, dump_manifest, load_manifest
+from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
     ResolvedComponent,
@@ -1453,11 +1453,35 @@ def test_a_setup_keeps_the_benchmarks_prompt_template(tmp_path: Path) -> None:
     _listing(tmp_path, name="demo/other", config_name="other.yaml", config_edit=edit, datasets=[dataset])
     with pytest.raises(EnvironmentValidationError, match="another prompt template"):
         validate_environment(main_path, name="demo/other")
-    # Nor can a setup name another standard template: only a protocol may.
-    with pytest.raises(ValidationError, match="standard_prompt_config"):
-        ManifestSetup.model_validate(
-            {"name": "demo/other", "config_path": "other.yaml", "standard_prompt_config": with_system}
-        )
+
+
+def test_a_setup_may_adapt_the_benchmarks_prompt_for_its_harness(tmp_path: Path) -> None:
+    # The harness owns the system prompt, so the setup's template carries the benchmark's prompt in the user message.
+    in_user_message = "benchmarks/demo/prompts/in_user_message.yaml"
+    edit = (
+        "prepare_script: benchmarks/demo/prepare.py",
+        f"prepare_script: benchmarks/demo/prepare.py\n        prompt_config: {in_user_message}",
+    )
+    dataset = {
+        "name": "example",
+        "type": "benchmark",
+        "jsonl_fpath": "benchmarks/demo/data/example.jsonl",
+        "prepare_script": "benchmarks/demo/prepare.py",
+        "prompt_config": in_user_message,
+    }
+    description = "The demo benchmark with its prompt in the user message, because the harness owns the system prompt."
+    main_path = _listing(
+        tmp_path, config_edit=edit, standard_prompt_config=in_user_message, datasets=[dataset], description=description
+    )
+    (tmp_path / in_user_message).write_text("user: '{question}'\n", encoding="utf-8")
+    assert validate_environment(main_path, name="demo/variant").name == "demo/variant"
+
+    # Review checks the adaptation, so the setup has to say what it is.
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    del raw["setups"][0]["description"]
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="names its own prompt template; its description must say"):
+        validate_environment(main_path, name="demo/variant")
 
 
 def _protocol_with_a_setup(tmp_path: Path, *, nested_edit: tuple[str, str] | None = None) -> Path:
