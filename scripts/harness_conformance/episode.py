@@ -194,15 +194,6 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             use_agent_sessions=use_agent_sessions,
             scenario=scenario,
         )
-        if harness == "hermes" and scenario.compaction is not None:
-            agent_config = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
-            # Below a 512K window Hermes compresses at no less than 75% of it, so use an absolute trigger.
-            # Hermes measures the scripted prompt (27,000 + policy index) plus about 62 tokens for the newest
-            # tool result, and after a no-progress attempt it waits 300 s before trying again. This trigger
-            # first fires around the eighth policy call, once there is history to summarize.
-            agent_config.update(
-                compression_enabled=True, compression_threshold_tokens=27070, max_turns=scenario.tool_steps + 4
-            )
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")
         if use_agent_sessions:

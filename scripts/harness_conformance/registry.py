@@ -206,7 +206,6 @@ HARNESSES = {
     ),
     "hermes": HarnessDefinition(
         agent="HermesAgent",
-        runtime_modules=("run_agent", "model_tools"),
         base_settings=lambda directory, timeout: {
             "harness_overrides": {
                 "max_turns": 6,
@@ -224,6 +223,9 @@ HARNESSES = {
                     "compression_enabled": True,
                     "context_length": 32768,
                     "compression_threshold": 0.5,
+                    # Hermes raises windows under 64K to 64K and then triggers at 85%, so only an absolute
+                    # trigger fires here. It sits between the 1,000-token replies and the 27,000-token one.
+                    "compression_threshold_tokens": 26000,
                     "max_turns": scenario.tool_steps + 4,
                 },
                 "probe_overrides": {
