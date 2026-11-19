@@ -18,6 +18,7 @@ from nemo_gym.config.global_config import (
     ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    environment_servers_by_agent,
 )
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile, load_manifest
 from nemo_gym.environment.scaffold import (
@@ -27,7 +28,6 @@ from nemo_gym.environment.scaffold import (
     scaffold_resources_server,
 )
 from nemo_gym.environment.validation import validate_environment
-from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 from nemo_gym.verification.verifier_fixture import exercise_verifier_fixture
 
 
@@ -561,7 +561,7 @@ def test_reuse_supports_a_bundled_default_agent(tmp_path: Path) -> None:
     validate_environment(result.asset_dir / "manifest.yaml")
     # The reused config fronts no agent, so the scaffold declares a fresh server for the renamed one.
     resolved = _resolve_workloads(tmp_path, result.asset_dir)
-    assert _environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
 
 
 @pytest.mark.parametrize(
@@ -593,7 +593,7 @@ def test_reuse_moves_the_bundled_environment_server_with_its_agent(tmp_path: Pat
     validate_environment(result.asset_dir / "manifest.yaml")
     resolved = _resolve_workloads(tmp_path, result.asset_dir)
     # Rollout collection needs exactly one server per agent; the moved agent and server leave no stale names.
-    assert _environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
     assert "shared_agent" not in resolved
     assert "shared_environment_server" not in resolved
 
@@ -619,7 +619,7 @@ def test_reuse_inherits_under_a_catalog_name_when_the_workload_is_named_after_it
     assert "shared_environment_server" not in config
     validate_environment(result.asset_dir / "manifest.yaml")
     resolved = _resolve_workloads(tmp_path, result.asset_dir)
-    assert _environment_servers_by_agent(resolved) == {"shared_catalog_agent": ["shared_catalog_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"shared_catalog_agent": ["shared_catalog_environment_server"]}
 
 
 def test_workloads_reusing_one_scorer_each_keep_their_own_environment_server(tmp_path: Path) -> None:
@@ -639,7 +639,7 @@ def test_workloads_reusing_one_scorer_each_keep_their_own_environment_server(tmp
     # Every config inherits the same scorer server in one run; none may take over another's agent,
     # including the workload named after the scorer.
     resolved = _resolve_workloads(tmp_path, *asset_dirs)
-    assert _environment_servers_by_agent(resolved) == {
+    assert environment_servers_by_agent(resolved) == {
         "shared_catalog_agent": ["shared_catalog_environment_server"],
         "first_agent": ["first_environment_server"],
         "second_agent": ["second_environment_server"],
@@ -682,7 +682,7 @@ def test_reuse_moves_a_server_named_like_the_workload_under_a_catalog_name(tmp_p
     config = yaml.safe_load(result.asset_dir.joinpath("config.yaml").read_text(encoding="utf-8"))
     assert config["reused_catalog_environment_server"]["_inherit_from"] == "reused_environment_server"
     resolved = _resolve_workloads(tmp_path, result.asset_dir)
-    assert _environment_servers_by_agent(resolved) == {"reused_agent": ["reused_catalog_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"reused_agent": ["reused_catalog_environment_server"]}
 
 
 def test_reuse_rejects_a_workload_name_whose_server_names_are_both_taken(tmp_path: Path) -> None:
@@ -792,7 +792,7 @@ def test_reuse_of_a_shipped_scorer_validates_and_routes(tmp_path: Path, scorer: 
     assert config["reused_environment_server"]["_inherit_from"] == f"{scorer}_environment_server"
     validate_environment(result.asset_dir / "manifest.yaml")
     resolved = _resolve_workloads(tmp_path, result.asset_dir)
-    assert _environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
     assert f"{scorer}_simple_agent" not in resolved
     assert f"{scorer}_environment_server" not in resolved
 

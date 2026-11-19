@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
+from nemo_gym.config.global_config import environment_servers_by_agent
 from tests.helpers.agent_environment_migration import (
     AGENT_CONFIG,
     RELAY,
@@ -48,7 +48,7 @@ def test_switch_keeps_a_child_relay_inheriting_its_switched_parent(tmp_path: Pat
         "resources_server": {"type": "resources_servers", "name": "child_resources"},
     }
     resolved = _parse(child, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"child_agent": ["child_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"child_agent": ["child_environment_server"]}
     merged = resolved["child_environment_server"]["environment_servers"]
     assert list(merged) == ["single_agent_turn_legacy"]
     assert merged["single_agent_turn_legacy"]["entrypoint"] == "app.py"
@@ -80,7 +80,7 @@ renamed_agent:
 
     resolved = _parse(base, overlay, strict=True)
 
-    assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["my_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"renamed_agent": ["my_environment_server"]}
     assert list(resolved["my_environment_server"]["environment_servers"]) == ["single_agent_turn_legacy"]
     server = resolved["my_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
     assert server["resources_server"]["name"] == "renamed_resources"
@@ -153,7 +153,7 @@ def test_switch_refuses_rebinding_when_only_one_inherited_destination_is_an_agen
     before = base.read_text(), child.read_text()
     resolved = _parse(child, strict=True)
     assert "responses_api_agents" not in resolved["holder"]
-    assert _environment_servers_by_agent(resolved) == {"child_agent": ["my_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"child_agent": ["my_environment_server"]}
 
     assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 2
 
@@ -199,7 +199,7 @@ def test_switch_preserves_a_string_environment_alias(tmp_path: Path, monkeypatch
 
     assert child.read_text() == before
     resolved = _parse(child, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"child_agent": ["child_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"child_agent": ["child_environment_server"]}
     server = resolved["child_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
     assert server["resources_server"]["name"] == "child_resources"
 

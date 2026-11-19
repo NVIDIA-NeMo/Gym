@@ -69,10 +69,10 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
     )
     from omegaconf import OmegaConf
 
-    from nemo_gym.rollouts.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
+    from nemo_gym.config import environment_server_for_agent, environment_servers_by_agent
 
     assert (
-        _environment_server_for_agent("probe_agent", _environment_servers_by_agent(OmegaConf.create(config)))
+        environment_server_for_agent("probe_agent", environment_servers_by_agent(OmegaConf.create(config)))
         == "probe_environment"
     )
     agent = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]

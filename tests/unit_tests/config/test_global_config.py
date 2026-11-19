@@ -59,13 +59,13 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     _openai_version_matches_nemo_gym_constraint,
+    environment_servers_by_agent,
     find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
     resolve_dataset_agent,
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
-from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 
 
 @fixture(autouse=True)
@@ -2350,7 +2350,7 @@ class TestConfigLoadErrors:
                 }
             }
         }
-        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_environment_server"]}
+        assert environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_environment_server"]}
         assert "DEPRECATED: agents without an environment server: `mcqa_simple_agent`" in caplog.text
         assert "AgentWithoutEnvironmentServerError" in caplog.text
         assert "python scripts/add_legacy_agent_environment_servers.py path/to/config.yaml" in caplog.text
@@ -2392,7 +2392,7 @@ class TestConfigLoadErrors:
             GlobalConfigDictParser()._front_agents_without_environment_server(config)
 
         assert "mcqa_environment_server" not in config
-        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_served"]}
+        assert environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_served"]}
         assert "DEPRECATED" not in caplog.text
 
     def test_generated_relay_name_avoids_existing_entries(self) -> None:
@@ -2402,7 +2402,7 @@ class TestConfigLoadErrors:
         GlobalConfigDictParser()._front_agents_without_environment_server(config)
 
         assert config["mcqa_environment_server"] == {"note": "an unrelated top-level entry"}
-        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_simple_agent_environment_server"]}
+        assert environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_simple_agent_environment_server"]}
 
     def _agent_with_environment_server_config(self, **extra) -> DictConfig:
         return OmegaConf.merge(
@@ -2436,7 +2436,7 @@ class TestConfigLoadErrors:
         )
 
         assert "mcqa_simple_agent" not in resolved
-        assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["mcqa_environment_server"]}
+        assert environment_servers_by_agent(resolved) == {"renamed_agent": ["mcqa_environment_server"]}
         assert resolved.environment_server_routes == {"mcqa_tasks": "mcqa_environment_server"}
         assert resolved.renamed_agent.responses_api_agents.simple_agent.resources_server.name == "mcqa"
 
@@ -2453,7 +2453,7 @@ class TestConfigLoadErrors:
         )
 
         assert "mcqa_simple_agent" in resolved
-        assert _environment_servers_by_agent(resolved) == {
+        assert environment_servers_by_agent(resolved) == {
             "mcqa_simple_agent": ["mcqa_environment_server"],
             "copied_agent": ["copied_environment_server"],
         }
@@ -2474,7 +2474,7 @@ class TestConfigLoadErrors:
 
         assert "mcqa_simple_agent" not in resolved
         assert "responses_api_agents" not in resolved.holder
-        assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["mcqa_environment_server"]}
+        assert environment_servers_by_agent(resolved) == {"renamed_agent": ["mcqa_environment_server"]}
 
     def test_agent_rename_preserves_explicit_environment_server_override(self) -> None:
         config = self._agent_with_environment_server_config(renamed_agent={"_inherit_from": "mcqa_simple_agent"})
@@ -2490,7 +2490,7 @@ class TestConfigLoadErrors:
             )
         )
 
-        assert _environment_servers_by_agent(resolved) == {
+        assert environment_servers_by_agent(resolved) == {
             "other_agent": ["mcqa_environment_server"],
             "renamed_agent": ["renamed_environment_server"],
         }
@@ -2600,7 +2600,7 @@ class TestConfigLoadErrors:
         )
 
         assert "mcqa_simple_agent" not in resolved
-        assert _environment_servers_by_agent(resolved) == {
+        assert environment_servers_by_agent(resolved) == {
             "renamed_agent": ["mcqa_environment_server"],
             "other_renamed_agent": ["other_environment_server"],
         }
@@ -2625,7 +2625,7 @@ class TestConfigLoadErrors:
 
         assert "mcqa_simple_agent" not in resolved
         assert "mcqa_environment_server" not in resolved
-        assert _environment_servers_by_agent(resolved) == {
+        assert environment_servers_by_agent(resolved) == {
             "variant_a": ["variant_a_environment_server"],
             "variant_b": ["variant_b_environment_server"],
         }
@@ -2708,7 +2708,7 @@ class TestConfigLoadErrors:
 
         parser._front_agents_without_environment_server(config)
 
-        assert _environment_servers_by_agent(config) == {
+        assert environment_servers_by_agent(config) == {
             "participant_a": ["multi_agent_environment"],
             "participant_b": ["multi_agent_environment"],
         }
@@ -2750,7 +2750,7 @@ class TestConfigLoadErrors:
         )
 
         assert "participant_b" not in resolved
-        assert _environment_servers_by_agent(resolved) == {
+        assert environment_servers_by_agent(resolved) == {
             "participant_a": ["multi_agent_environment"],
             "renamed_b": ["multi_agent_environment"],
         }

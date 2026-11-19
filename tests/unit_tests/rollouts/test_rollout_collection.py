@@ -8237,10 +8237,10 @@ class TestRolloutCollection:
             lambda *args, **kwargs: mock_server_client,
         )
         build_calls: list[int] = []
-        build_map = nemo_gym.rollouts.rollout_collection._environment_servers_by_agent
+        build_map = nemo_gym.rollouts.rollout_collection.environment_servers_by_agent
         monkeypatch.setattr(
             nemo_gym.rollouts.rollout_collection,
-            "_environment_servers_by_agent",
+            "environment_servers_by_agent",
             lambda config: build_calls.append(1) or build_map(config),
         )
         rows = [

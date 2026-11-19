@@ -49,6 +49,7 @@ from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AlmostServerError,
     AmbiguousAgentRenameError,
+    AmbiguousEnvironmentServerError,
     AmbiguousResourcesRenameError,
     BaseServerConfig,
     ConfigError,
@@ -2447,6 +2448,79 @@ def dataset_agent_pins(global_config_dict: DictConfig, instance_name: str) -> Li
         if isinstance(pin, str) and pin not in pins:
             pins.append(pin)
     return pins
+
+
+def environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
+    """Map each agent name to the environment servers that front it."""
+    servers_by_agent: dict[str, list[str]] = {}
+    for name, instance in global_config_dict.items():
+        if not isinstance(instance, DictConfig):
+            continue
+        servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+        if not isinstance(servers, DictConfig):
+            continue
+        for server in servers.values():
+            if not isinstance(server, DictConfig):
+                continue
+            for agent_name in environment_server_agent_names(server):
+                servers_by_agent.setdefault(agent_name, []).append(str(name))
+    return servers_by_agent
+
+
+def environment_server_for_agent(agent_name: str, servers_by_agent: Mapping[str, list[str]]) -> str:
+    """Return the one environment server that fronts an agent.
+
+    A row routed by its agent cannot choose between several environment servers.
+    Several servers may still front one agent when every row names its server directly.
+    Materialized tasksets name their environment server through ``environment_server_routes``.
+    """
+    servers = servers_by_agent.get(agent_name, [])
+    if len(servers) == 1:
+        return servers[0]
+    if not servers:
+        raise AgentWithoutEnvironmentServerError(
+            f"Agent '{agent_name}' has no environment server, so collection cannot reach it. "
+            "Config validation should have caught this before any server started."
+        )
+    raise AmbiguousEnvironmentServerError(
+        f"Agent '{agent_name}' is fronted by several environment servers: {sorted(servers)}. "
+        "Rows that route by agent cannot choose between them. "
+        "Set environment_routing_mode=legacy with environment_server_name, or route these rows by taskset."
+    )
+
+
+def environment_server_for_row(
+    taskset: str | None,
+    *,
+    routing_mode: str,
+    environment_server_name: str | None,
+    routes: Mapping[str, str],
+) -> str | None:
+    """The environment server instance a row is dispatched to, or None when it routes by its agent.
+
+    ``taskset`` is a task row's ``task_id.taskset``, or None for a flat row.
+    A task row always routes by its taskset's ``environment_server_routes`` entry.
+    It is already an episode request, and no agent ``/run`` accepts it.
+    A flat row follows ``routing_mode``.
+    ``agent`` routes it by its agent (``environment_server_for_agent``), and the function returns None.
+    ``legacy`` sends every flat row to ``environment_server_name``.
+    ``taskset`` refuses flat rows, so a run of task rows cannot silently pick up flat input.
+    Rollout collection and collation both route with this function.
+    Raises ``ValueError`` for a row that cannot be routed.
+    """
+    if taskset is not None:
+        try:
+            return routes[taskset]
+        except KeyError as error:
+            raise ValueError(f"No environment server route is configured for taskset {taskset!r}") from error
+    if routing_mode == "agent":
+        return None
+    if routing_mode == "legacy":
+        return environment_server_name
+    raise ValueError(
+        "taskset routing requires rows containing task_id.taskset and task_input; "
+        "use environment_routing_mode=agent to mix materialized and flat rows in one batch"
+    )
 
 
 def taskset_environment_server_name(global_config_dict: DictConfig, taskset: Optional[str]) -> Optional[str]:

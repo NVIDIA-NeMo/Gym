@@ -63,8 +63,6 @@ from nemo_gym.artifacts.rollout_rows import (
 )
 from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
 from nemo_gym.config.config_types import (
-    AgentWithoutEnvironmentServerError,
-    AmbiguousEnvironmentServerError,
     BaseNeMoGymCLIConfig,
     BaseServerConfig,
     ConfigError,
@@ -92,6 +90,9 @@ from nemo_gym.config.global_config import (
     dataset_agent_pins,
     environment_server_agent_names,
     environment_server_attributed_agent,
+    environment_server_for_agent,
+    environment_server_for_row,
+    environment_servers_by_agent,
     get_first_server_config_dict,
     get_global_config_dict,
     label_runs,
@@ -380,43 +381,9 @@ _NO_RESULT_FAILURE_CLASSES = frozenset(
 )
 
 
-def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
-    """Map each agent name to the environment servers that front it."""
-    servers_by_agent: dict[str, list[str]] = {}
-    for name, instance in global_config_dict.items():
-        if not isinstance(instance, DictConfig):
-            continue
-        servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
-        if not isinstance(servers, DictConfig):
-            continue
-        for server in servers.values():
-            if not isinstance(server, DictConfig):
-                continue
-            for agent_name in environment_server_agent_names(server):
-                servers_by_agent.setdefault(agent_name, []).append(str(name))
-    return servers_by_agent
-
-
-def _environment_server_for_agent(agent_name: str, servers_by_agent: Mapping[str, list[str]]) -> str:
-    """Return the one environment server that fronts an agent.
-
-    A row routed by its agent cannot choose between several environment servers.
-    Several servers may still front one agent when every row names its server directly.
-    Materialized tasksets name their environment server through ``environment_server_routes``.
-    """
-    servers = servers_by_agent.get(agent_name, [])
-    if len(servers) == 1:
-        return servers[0]
-    if not servers:
-        raise AgentWithoutEnvironmentServerError(
-            f"Agent '{agent_name}' has no environment server, so collection cannot reach it. "
-            "Config validation should have caught this before any server started."
-        )
-    raise AmbiguousEnvironmentServerError(
-        f"Agent '{agent_name}' is fronted by several environment servers: {sorted(servers)}. "
-        "Rows that route by agent cannot choose between them. "
-        "Set environment_routing_mode=legacy with environment_server_name, or route these rows by taskset."
-    )
+# The names these routing helpers had before they moved to global_config, for callers that import them from here.
+_environment_servers_by_agent = environment_servers_by_agent
+_environment_server_for_agent = environment_server_for_agent
 
 
 def _materialized_taskset(row: Mapping[str, Any]) -> str | None:
@@ -501,29 +468,15 @@ def _environment_server_routes_of(global_config_dict: Optional[DictConfig]) -> d
 def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> str | None:
     """Pick the environment server a row is dispatched to, or None for today's agent path.
 
-    A materialized task (``task_id.taskset`` plus ``task_input``) always routes by its taskset:
-    it is already an episode request and no agent-server ``/run`` accepts it. A flat row follows
-    ``environment_routing_mode``: ``agent`` keeps today's routing (its agent's environment server
-    is resolved at dispatch), ``legacy`` sends every flat row to ``environment_server_name``, and
-    ``taskset`` refuses flat rows so a run of materialized rows cannot silently pick up legacy input.
-
-    One batch may therefore hold both kinds of rows in ``agent`` and ``legacy`` mode. The chosen
-    server is stamped on the row as ``_ng_environment_server`` and travels with it through the
-    materialized input file, retries, and results.
+    The rule lives in ``environment_server_for_row``, which collation uses too.
+    The chosen server is stamped on the row as ``_ng_environment_server``.
+    It travels with the row through the materialized input file, retries, and results.
     """
-    taskset = _materialized_taskset(row)
-    if taskset is not None:
-        try:
-            return config.environment_server_routes[taskset]
-        except KeyError as error:
-            raise ValueError(f"No environment server route is configured for taskset {taskset!r}") from error
-    if config.environment_routing_mode == "agent":
-        return None
-    if config.environment_routing_mode == "legacy":
-        return config.environment_server_name
-    raise ValueError(
-        "taskset routing requires rows containing task_id.taskset and task_input; "
-        "use environment_routing_mode=agent to mix materialized and flat rows in one batch"
+    return environment_server_for_row(
+        _materialized_taskset(row),
+        routing_mode=config.environment_routing_mode,
+        environment_server_name=config.environment_server_name,
+        routes=config.environment_server_routes,
     )
 
 
@@ -5143,7 +5096,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         )
 
         # Group results by the environment server they ran through.
-        servers_by_agent = _environment_servers_by_agent(global_config_dict)
+        servers_by_agent = environment_servers_by_agent(global_config_dict)
         server_results: Dict[str, List[Dict]] = {}
         server_agents: Dict[str, Optional[str]] = {}
         for row, result in zip(rows, results):
@@ -5152,7 +5105,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             if not isinstance(server_name, str):
                 if not agent_name:
                     continue
-                server_name = _environment_server_for_agent(agent_name, servers_by_agent)
+                server_name = environment_server_for_agent(agent_name, servers_by_agent)
             elif server_name not in available_servers:
                 # Shards aggregated under a config that no longer declares the server that produced them.
                 raise ValueError(
@@ -5608,9 +5561,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # Resolve every agent-routed row before dispatch, so an unroutable agent fails the run instead of one future.
         if interleave_by_agent:
             examples = _round_robin_by_agent(examples)
-        servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
+        servers_by_agent = environment_servers_by_agent(server_client.global_config_dict)
         server_for_agent = {
-            agent_name: _environment_server_for_agent(agent_name, servers_by_agent)
+            agent_name: environment_server_for_agent(agent_name, servers_by_agent)
             for agent_name in {row[AGENT_REF_KEY_NAME]["name"] for row in direct_agent_examples}
         }
         server_types = {
@@ -6561,7 +6514,7 @@ class RolloutAggregationHelper(BaseModel):
             # agent's name does for that: the head server is reached for scoring alone.
             if not (results or config.count_failure_classes_as_zero or config.count_missing_rollouts_as_zero):
                 return {}
-            return _environment_servers_by_agent(helper.setup_server_client().global_config_dict)
+            return environment_servers_by_agent(helper.setup_server_client().global_config_dict)
 
         def group(row: Mapping[str, Any]) -> Optional[str]:
             return _metrics_group(row, servers_by_agent)

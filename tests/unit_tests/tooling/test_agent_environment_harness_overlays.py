@@ -20,8 +20,11 @@ from pathlib import Path
 import pytest
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
+from nemo_gym.config.global_config import (
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    environment_servers_by_agent,
+)
 from tests.helpers.agent_environment_migration import (
     AGENT_CONFIG,
     HARNESS_OVERRIDE,
@@ -125,7 +128,7 @@ def test_a_harness_with_its_own_relay_lets_the_benchmark_switch(
 
     benchmark = _parse(child, strict=True)
     assert list(benchmark["child_environment_server"]["environment_servers"]) == ["single_agent_turn_legacy"]
-    assert _environment_servers_by_agent(_parse(variant, strict=True)) == {
+    assert environment_servers_by_agent(_parse(variant, strict=True)) == {
         "my_harness_agent": ["my_harness_environment_server"]
     }
 
@@ -147,7 +150,7 @@ def test_a_harness_can_override_a_relay_without_changing_its_name(
     monkeypatch.setattr(migration, "repo_config_files", lambda: [variant])
     before = variant.read_text()
     routing = {"my_harness_agent": ["child_environment_server"]}
-    assert _environment_servers_by_agent(_parse(variant, strict=True)) == routing
+    assert environment_servers_by_agent(_parse(variant, strict=True)) == routing
 
     assert migration.main(["--switch-simple-agent", str(base), str(child), str(variant)]) == 0
 
@@ -155,7 +158,7 @@ def test_a_harness_can_override_a_relay_without_changing_its_name(
     benchmark = _parse(child, strict=True)
     assert list(benchmark["child_environment_server"]["environment_servers"]) == ["single_agent_turn_legacy"]
     parsed = _parse(variant, strict=True)
-    assert _environment_servers_by_agent(parsed) == routing
+    assert environment_servers_by_agent(parsed) == routing
     assert list(parsed["child_environment_server"]["environment_servers"]) == ["legacy_agent"]
 
 
@@ -248,7 +251,7 @@ def test_harness_recipes_preserve_routing_and_bindings_across_the_switch(
                 offline=True,
             )
         )
-        assert _environment_servers_by_agent(parsed) == {agent_name: [server_name]}
+        assert environment_servers_by_agent(parsed) == {agent_name: [server_name]}
         assert list(parsed[server_name].environment_servers) == ["legacy_agent"]
         agent = next(iter(parsed[agent_name].responses_api_agents.values()))
         assert agent.resources_server.name == resources_name
