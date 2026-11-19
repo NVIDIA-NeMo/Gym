@@ -21,6 +21,7 @@ from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -137,7 +138,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(409, "Seed an AgentVista agent session before activation")
+            raise AgentSessionConflictError("Seed an AgentVista agent session before activation")
         state = self._require_agent_session(session_id)
         assert isinstance(state, AgentVistaSession)
         legacy = AgentVistaRunRequest(
@@ -146,7 +147,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
             _ng_rollout_id=state.request.episode_id.capture_key,
         )
         if state.activation is not None and not state.activation.done():
-            raise HTTPException(409, "AgentVista session already has an active activation")
+            raise AgentSessionConflictError("AgentVista session already has an active activation")
         state.activation = asyncio.create_task(self._execute(legacy))
         result = await state.activation
         # The worker has no judge credentials and never assigns a measured reward.
@@ -165,8 +166,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
 
         requested_version = body.verifier_metadata.get("harness_version")
         if requested_version and requested_version != HARNESS_VERSION:
-            raise HTTPException(
-                409,
+            raise AgentSessionConflictError(
                 "Prepared dataset targets a different harness version; prepare it again",
             )
         fingerprint = hashlib.sha256(
@@ -181,7 +181,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
         ).hexdigest()
         output = output_path(self.config.output_root) / identity
         if identity in self._fingerprints and self._fingerprints[identity] != fingerprint:
-            raise HTTPException(409, "Rollout ID reused with different request")
+            raise AgentSessionConflictError("Rollout ID reused with different request")
         if identity not in self._inflight:
             self._fingerprints[identity] = fingerprint
             self._inflight[identity] = asyncio.create_task(self._episode(body, output, fingerprint, rollout_id))
@@ -204,11 +204,10 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                     json.dump({"fingerprint": fingerprint, "rollout_id": rollout_id}, stream)
             except FileExistsError:
                 if json.loads(binding.read_text())["fingerprint"] != fingerprint:
-                    raise HTTPException(409, "Rollout ID reused with different request")
+                    raise AgentSessionConflictError("Rollout ID reused with different request")
                 result_path = output / "result.json"
                 if not result_path.exists():
-                    raise HTTPException(
-                        409,
+                    raise AgentSessionConflictError(
                         "Incomplete episode requires inspection; use a new rollout ID to retry",
                     )
                 return json.loads(result_path.read_text())

@@ -564,6 +564,37 @@ Replace `opencode` with `openclaw` for OpenClaw.
 - Change a harness setting with `++gdpval_opencode_agent.responses_api_agents.opencode_agent.<key>=<value>` or
   `++gdpval_openclaw_agent.responses_api_agents.openclaw_agent.<key>=<value>`.
 
+`benchmarks/gdpval/openhands.yaml` runs [OpenHands](../../responses_api_agents/openhands_agent/README.md) (the
+OpenHands Software Agent SDK) the same way:
+
+```bash
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_openhands/deliverables
+gym eval prepare --benchmark gdpval/openhands
+gym eval run \
+    --model-type vllm_model \
+    --benchmark gdpval/openhands \
+    --split benchmark \
+    --output results/gdpval_openhands.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name>
+```
+
+- The rows, the task tools and the deliverables directory work as for Pi. The model sees the task tools as
+  `finish`, `abandon_task_finish`, `web_search` and `fetch_web_page`, next to OpenHands' own `terminal`,
+  `file_editor`, `task_tracker` and `think`.
+- A successful `finish` or `abandon_task_finish` ends the run (`finish_tool_names`), and OpenHands' own `finish` is
+  not offered. A reply without a tool call also ends the run, and so do the `timeout` and `max_iterations` limits.
+  Those endings submit nothing. The files are collected when the run ends.
+- The agent server builds the OpenHands runtime with uv on its own host at the first seed and uploads it, so the task
+  sandbox needs no egress for the install.
+- The request's `temperature`, `top_p` and `max_output_tokens` reach OpenHands (the last as a per-call limit), so
+  `gym eval run` may set them; otherwise the model server's settings apply.
+- OpenHands reports a run that reaches its `timeout` as `stop_reason: timeout`, so GDPVal's `agent_timeout` rule
+  (which requires `wall_time`) does not apply, as for Codex. A timed-out run that reaches verification without
+  submitting is judged as an empty submission, and so is a run that reaches `max_iterations` (250 here).
+- Change a harness setting with `++gdpval_openhands_agent.responses_api_agents.openhands_agent.<key>=<value>`.
+
 ## Multi-judge panel
 
 By default every GDPVal deliverable is graded by a **panel** of frontier LLM

@@ -32,6 +32,7 @@ from responses_api_agents.claude_code_agent.app import ClaudeCodeAgent, ClaudeCo
 from responses_api_agents.claude_code_agent.observability import (
     associate_claude_code_compaction_calls,
     extract_claude_code_observations,
+    read_transcripts,
 )
 from responses_api_agents.claude_code_agent.sandbox import ClaudeCodeArtifacts, ClaudeCodeSandboxSession
 
@@ -486,7 +487,7 @@ async def test_adapter_associates_compaction_before_collection(tmp_path: Path, m
     if execution == "local":
 
         async def run(self, prompt, *, observation_collector, **kwargs):
-            observation_collector(tmp_path, {"status": "completed"})
+            observation_collector(read_transcripts(tmp_path), {"status": "completed"})
             return [], "fixture", {}
 
         monkeypatch.setattr(ClaudeCodeAgent, "_run_claude_code", run)

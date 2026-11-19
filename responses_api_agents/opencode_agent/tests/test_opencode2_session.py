@@ -178,6 +178,16 @@ async def test_sampling_steps_and_a_replaced_prompt_reach_opencode_2(opencode2):
     assert "instructions" not in config
 
 
+async def test_compaction_buffer_reaches_opencode_2(opencode2):
+    """OpenCode 2's name for the compaction buffer passes through unchanged, as OpenCode 1's reserved does."""
+    agent, sandbox = opencode2
+    agent.config.opencode_config = {**agent.config.opencode_config, "compaction": {"auto": True, "buffer": 8000}}
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    assert config["compaction"] == {"auto": True, "buffer": 8000}
+
+
 def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
     agent, sandbox = opencode2
     agent.config.mcp_tool_timeout_seconds = 900
@@ -235,6 +245,13 @@ def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
             {"argv_prompt_quoting": True, "reasoning_effort": "max"},
             "reasoning_effort, argv_prompt_quoting apply only to OpenCode 1",
         ),
+        # OpenCode 1's name for the compaction buffer: the error says to set OpenCode 2's instead. The config refuses it
+        # when it loads; the seed refuses it again in a config changed after that, as here.
+        (
+            {"opencode_config": {"compaction": {"reserved": 8000}}},
+            "remove compaction.reserved and set compaction.buffer (OpenCode 2's name for the buffer)",
+        ),
+        ({"opencode_config": {"compaction": {"buffer": 32000}}}, "compaction.buffer must be below context_window"),
     ],
 )
 def test_settings_opencode_2_cannot_use_refuse_the_seed(opencode2, setting, message):

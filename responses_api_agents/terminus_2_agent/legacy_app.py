@@ -7,6 +7,7 @@ import json
 
 from fastapi import HTTPException, Request
 
+from nemo_gym.agents import AgentSessionConflictError
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -22,7 +23,7 @@ class Terminus2LegacyAgent(Terminus2Agent):
 
     async def run(self, request: Request, body: Terminus2AgentRunRequest) -> Terminus2AgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Use the agent session responses and close routes")
+            raise AgentSessionConflictError("Use the agent session responses and close routes")
         if self.config.resources_server is None:
             raise HTTPException(422, "Terminus 2 /run requires resources_server; use agent sessions instead")
         cookies = request.cookies
