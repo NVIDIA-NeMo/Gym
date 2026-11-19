@@ -16,13 +16,14 @@ import asyncio
 import logging
 from abc import abstractmethod
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from inspect import iscoroutinefunction
 from time import monotonic
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Literal, Optional, TypedDict, TypeVar, get_args
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import (
@@ -174,6 +175,11 @@ class BaseRunRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    omit_unchanged_input: StrictBool = Field(
+        default=False,
+        exclude=True,
+        description="Allow /run to omit unchanged request input from its reply. The caller must retain the input.",
+    )
     capture_rollout_id: Optional[str] = Field(
         default=None,
         alias="_ng_rollout_id",
@@ -200,6 +206,11 @@ class BaseVerifyRequest(BaseRunRequest):
 
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
+    input_omitted: Literal[True] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="The opted-in /run reply omitted unchanged request input; restore it from the request.",
+    )
     failure_outcome_action: OutcomeAction | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -270,6 +281,30 @@ class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
     """
 
     reward_components: dict[str, float]
+
+
+async def omit_unchanged_input_from_reply(body: BaseRunRequest | None, pending: Awaitable[Any]) -> Any:
+    """Omit only the input that the caller retained before the agent ran."""
+    # Copy the input containers, not the whole request. Immutable media strings
+    # stay shared; the snapshot detects agents that mutate input in place.
+    original_input = (
+        deepcopy(body.responses_create_params.input)
+        if isinstance(body, BaseRunRequest) and body.omit_unchanged_input
+        else None
+    )
+    result = await pending
+    if (
+        original_input
+        and isinstance(result, BaseVerifyResponse)
+        and result.responses_create_params.input == original_input
+    ):
+        return result.model_copy(
+            update={
+                "responses_create_params": result.responses_create_params.model_copy(update={"input": []}),
+                "input_omitted": True,
+            }
+        )
+    return result
 
 
 class BaseSeedSessionRequest(BaseModel):
