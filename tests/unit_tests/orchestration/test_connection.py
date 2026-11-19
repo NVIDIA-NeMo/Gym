@@ -308,3 +308,33 @@ def test_a_held_command_whose_descendant_keeps_its_output_open_ends_at_its_time_
         )
 
     assert time.monotonic() - started < 10
+
+
+def test_a_stopped_held_command_is_reaped_and_its_pipes_are_closed_without_delaying_the_error(
+    no_ssh_bounds, monkeypatch: MonkeyPatch
+):
+    opened = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        opened.append(process)
+        return process
+
+    monkeypatch.setattr(connection_module.subprocess, "Popen", recording_popen)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="timed out") as raised:
+        connection_module._checked_holding_input(
+            ["bash", "-c", "exec sleep 30"], input="x" * 1_000_000, context="stalled", timeout_s=0.5
+        )
+    assert time.monotonic() - started < 10  # the error did not wait for the cleanup
+    process = opened[0]
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not all(s.closed for s in (process.stdin, process.stdout, process.stderr)):
+        time.sleep(0.05)
+
+    # The caller still holds the exception, and so the frame and the process; cleanup does not depend on it being freed.
+    assert raised.value is not None
+    assert process.returncode is not None
+    assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))

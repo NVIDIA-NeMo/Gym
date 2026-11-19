@@ -180,9 +180,7 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig", timeout_s
         return
     logger.info("Installing prepare dependencies for %s: %s", benchmark_config.name, " ".join(dependencies))
     try:
-        subprocess.run(
-            ["uv", "pip", "install", "--python", sys.executable, *dependencies], check=True, timeout=timeout_s
-        )
+        _run_checked(["uv", "pip", "install", "--python", sys.executable, *dependencies], timeout_s=timeout_s)
         # An editable install only adds a .pth file, which `site` reads at
         # interpreter startup -- this process would not see it otherwise.
         importlib.invalidate_caches()

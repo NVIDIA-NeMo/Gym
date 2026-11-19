@@ -286,7 +286,7 @@ class BaseModelServerConfig(BaseResponsesAPIModelConfig):
 
     # Optional bounds on a call to the endpoint. Each defaults to None, which keeps the client's unbounded behaviour.
     # request_timeout_seconds limits each HTTP attempt (a timed-out attempt is retried like any other transport
-    # error), max_connection_retries caps how often one call retries a connection error, and
+    # error), max_connection_retries caps connection-error attempts (N allows N, so 1 means no retry), and
     # connection_retry_timeout_s caps the wall-clock time it may spend doing so.
     request_timeout_seconds: Optional[PositiveFloat] = None
     max_connection_retries: Optional[PositiveInt] = None

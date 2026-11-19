@@ -245,9 +245,9 @@ on a model client stays unset by default.
 
 ### Optional Limits on Waits
 
-These settings each bound one wait that has no limit by default. They are off until set, so a run that does not set
-them behaves as before. Set a limit above the longest time the wait can legitimately take, because a limit that is too
-short ends good work and changes what a run measures.
+These settings add bounds without changing existing defaults. When unset, they keep the corresponding client's or
+provider's behavior, including existing finite timeouts. Set a limit above the longest time the wait can legitimately
+take, because a limit that is too short ends good work and changes what a run measures.
 
 | Setting | Where | What it bounds |
 |---|---|---|

@@ -118,6 +118,11 @@ def _wait_for_server(server_address: str, *, interval_seconds: float = 3.0, time
             last_error = error
             remaining = None if deadline is None else deadline - time.monotonic()
             time.sleep(interval_seconds if remaining is None else max(0.0, min(interval_seconds, remaining)))
+    if deadline is not None and time.monotonic() >= deadline:
+        # A connection that completed at or after the deadline is not accepted.
+        raise TimeoutError(
+            f"External judge server at {server_address} did not accept connections within {timeout_s} s"
+        )
     LOG.info("External judge server at %s is ready", server_address)
 
 

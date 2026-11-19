@@ -54,7 +54,9 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     """Total time limit for each HTTP attempt to the provider, not for the whole call. A timed-out attempt is retried
     like any other transport error. None means no limit."""
     max_connection_retries: Optional[PositiveInt] = None
-    """How many times one call retries a connection error before raising it. None retries without limit."""
+    """Connection-error attempts before raising: N allows N attempts, so 1 means no retry.
+    Also caps the timeout/error retry path, not the separate HTTP-status retry loop.
+    None adds no caller-specified cap."""
     connection_retry_timeout_s: Optional[PositiveFloat] = None
     """Wall-clock seconds one call may spend retrying connection errors before raising the first one. Any answer from
     the provider closes the window. None retries without a time limit."""

@@ -33,7 +33,7 @@ class TestPrepareDependencies:
 
     def test_declared_dependencies_are_installed_into_the_running_interpreter(self, monkeypatch) -> None:
         calls = []
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda cmd, **kw: calls.append(cmd))
         monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: None)
 
         benchmark_preparation._install_prepare_dependencies(
@@ -48,7 +48,7 @@ class TestPrepareDependencies:
     def test_an_editable_install_is_made_importable_without_a_restart(self, monkeypatch) -> None:
         """An editable install only drops a .pth file, which `site` reads at startup."""
         added = []
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", lambda cmd, **kw: None)
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda cmd, **kw: None)
         monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: added.append(path))
 
         benchmark_preparation._install_prepare_dependencies(
@@ -59,7 +59,7 @@ class TestPrepareDependencies:
 
     def test_nothing_runs_when_no_dependencies_are_declared(self, monkeypatch) -> None:
         calls = []
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda cmd, **kw: calls.append(cmd))
 
         benchmark_preparation._install_prepare_dependencies(self._benchmark(dependencies=[]))
 
@@ -67,27 +67,43 @@ class TestPrepareDependencies:
 
     def test_the_install_is_given_the_time_limit(self, monkeypatch) -> None:
         seen = []
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", lambda cmd, **kw: seen.append(kw))
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda cmd, **kw: seen.append(kw))
         monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: None)
 
         benchmark_preparation._install_prepare_dependencies(self._benchmark(dependencies=["tqdm"]), 90)
 
-        assert seen == [{"check": True, "timeout": 90}]
+        assert seen == [{"timeout_s": 90}]
 
     def test_an_install_that_outlasts_the_time_limit_is_reported_against_the_dataset(self, monkeypatch) -> None:
         def hang(cmd, **kw):
-            raise benchmark_preparation.subprocess.TimeoutExpired(cmd, kw["timeout"])
+            raise benchmark_preparation.subprocess.TimeoutExpired(cmd, kw["timeout_s"])
 
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", hang)
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", hang)
 
         with pytest.raises(ConfigError, match="prepare_dependencies for dataset 'b' did not finish within 5 s"):
             benchmark_preparation._install_prepare_dependencies(self._benchmark(dependencies=["tqdm"]), 5)
+
+    def test_an_install_that_outlasts_the_time_limit_takes_its_own_subprocesses_with_it(self, tmp_path, monkeypatch):
+        late_output = tmp_path / "late.txt"
+        fake_uv = tmp_path / "bin" / "uv"
+        fake_uv.parent.mkdir()
+        # A `uv` that starts a build subprocess, which would write after the failure is reported, and then hangs.
+        fake_uv.write_text(f"#!/bin/bash\n(sleep 3; echo late > {late_output}) &\nsleep 30\n")
+        fake_uv.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_uv.parent}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: None)
+
+        with pytest.raises(ConfigError, match="did not finish within 1 s"):
+            benchmark_preparation._install_prepare_dependencies(self._benchmark(dependencies=["tqdm"]), 1)
+        time.sleep(4)
+
+        assert not late_output.exists()
 
     def test_a_failed_install_is_reported_against_the_dataset(self, monkeypatch) -> None:
         def boom(cmd, **kw):
             raise benchmark_preparation.subprocess.CalledProcessError(1, cmd)
 
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", boom)
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", boom)
 
         with pytest.raises(ConfigError, match="prepare_dependencies for dataset 'b'"):
             benchmark_preparation._install_prepare_dependencies(self._benchmark(dependencies=["nope"]))
@@ -117,12 +133,12 @@ class TestPrepareDependencies:
     @pytest.mark.parametrize("dependencies", [["tqdm"], ["-e", "benchmarks/automationbench"], ["-r", "deps.txt"]])
     def test_dependency_arguments_retain_install_and_import_behavior(self, dependencies, monkeypatch):
         calls = []
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", lambda *a, **kw: calls.append((a, kw)))
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda *a, **kw: calls.append((a, kw)))
         monkeypatch.setattr(benchmark_preparation.importlib, "invalidate_caches", lambda: calls.append("invalidate"))
         monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: calls.append(("site", path)))
         assert benchmark_preparation._prepare_environment(self._benchmark(dependencies=dependencies)) is None
         assert calls == [
-            ((["uv", "pip", "install", "--python", sys.executable, *dependencies],), {"check": True, "timeout": None}),
+            ((["uv", "pip", "install", "--python", sys.executable, *dependencies],), {"timeout_s": None}),
             "invalidate",
             ("site", benchmark_preparation.sysconfig.get_paths()["purelib"]),
         ]
@@ -164,7 +180,7 @@ class TestPrepareDependencies:
         def fail(*args, **kwargs):
             raise error
 
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", fail)
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", fail)
         monkeypatch.setattr(
             benchmark_preparation.site, "addsitedir", lambda *a: pytest.fail("unexpected import update")
         )
@@ -173,9 +189,7 @@ class TestPrepareDependencies:
         assert exc.value.__cause__ is error
 
     def test_dependency_helper_without_arguments_does_not_install(self, monkeypatch):
-        monkeypatch.setattr(
-            benchmark_preparation.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected install")
-        )
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda *a, **kw: pytest.fail("unexpected install"))
         assert benchmark_preparation._install_prepare_dependencies(self._benchmark()) is None
 
     def test_nothing_runs_without_project(self, monkeypatch):
@@ -401,7 +415,7 @@ class TestPrepareDependencies:
         (tmp_path / "limited_preparer.py").write_text("def prepare():\n    pass\n")
         limits = []
         monkeypatch.setattr(
-            benchmark_preparation.subprocess, "run", lambda cmd, **kwargs: limits.append(kwargs["timeout"])
+            benchmark_preparation, "_run_checked", lambda cmd, **kwargs: limits.append(kwargs["timeout_s"])
         )
         monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: None)
         monkeypatch.setattr(

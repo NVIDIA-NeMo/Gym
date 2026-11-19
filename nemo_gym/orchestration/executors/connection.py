@@ -275,6 +275,25 @@ def _read_stderr_forwarding_progress(stream, output: dict[str, str]) -> None:
     output["stderr"] = "".join(lines)
 
 
+def _reap_in_background(process: subprocess.Popen, threads: list[threading.Thread]) -> None:
+    """Reap a stopped command and close its pipes once the threads using them are done, without delaying the caller.
+
+    Closing a pipe while a thread still reads or writes it would block on that thread, which is the overrun the
+    deadline exists to prevent, so the close waits for each thread (they end because the command was killed)."""
+
+    def reap() -> None:
+        for thread in threads:
+            thread.join()
+        process.wait()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    threading.Thread(target=reap, daemon=True).start()
+
+
 def _checked_holding_input(cmd: list[str], *, input: str, context: str = "", timeout_s: float | None = None) -> str:
     """Like ``_checked``, but stdin stays open until the command exits, so its EOF on the far end means that this
     process or its connection is gone. The commands must end the remote shell themselves (``exit``).
@@ -338,12 +357,13 @@ def _checked_holding_input(cmd: list[str], *, input: str, context: str = "", tim
         returncode = process.wait(timeout=remaining_s())
     except subprocess.TimeoutExpired as exc:
         stop()
+        _reap_in_background(process, threads)
         raise timed_out() from exc
     except BaseException:
         stop()
+        _reap_in_background(process, threads)
         raise
-    # Only a finished command's pipes are closed here. After stop() they are left to the daemon threads, since closing
-    # a pipe that a thread is still reading or writing would block past the deadline.
+    # A finished command's pipes are closed here. A stopped one is closed by _reap_in_background.
     for stream in (process.stdin, process.stdout, process.stderr):
         stream.close()
     if returncode != 0:

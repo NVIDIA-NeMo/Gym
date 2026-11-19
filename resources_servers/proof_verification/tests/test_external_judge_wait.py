@@ -75,6 +75,26 @@ def test_a_server_that_comes_up_only_after_the_deadline_is_not_accepted(monkeypa
     assert connections.attempts == 1
 
 
+@pytest.mark.parametrize(("finished_at", "accepted"), [(0.05, True), (0.2, False)])
+def test_a_connection_that_completes_after_the_deadline_is_not_accepted(
+    monkeypatch: pytest.MonkeyPatch, finished_at: float, accepted: bool
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: now[0])
+
+    def create_connection(address, timeout=None):
+        now[0] = finished_at  # the connection completes this far into the 0.1 s limit
+        return MagicMock(__enter__=lambda self: self, __exit__=lambda *args: False)
+
+    monkeypatch.setattr(app_module.socket, "create_connection", create_connection)
+
+    if accepted:
+        _wait_for_server("judge-node:8000", timeout_s=0.1)
+    else:
+        with pytest.raises(TimeoutError, match="did not accept connections within 0.1 s"):
+            _wait_for_server("judge-node:8000", timeout_s=0.1)
+
+
 def test_a_connection_attempt_is_capped_at_the_time_left(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = []
 
