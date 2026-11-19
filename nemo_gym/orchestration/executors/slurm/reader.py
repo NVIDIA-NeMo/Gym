@@ -39,6 +39,7 @@ from nemo_gym.orchestration.executors.connection import (
     READER_PROGRESS_PREFIX,
     Connection,
 )
+from nemo_gym.orchestration.executors.private_environment import scheduler_command
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
 
 
@@ -265,8 +266,9 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
     name = shlex.quote(f"gym-reader-{token}")
     inside = shlex.quote(f'echo "{_READER_HOST_PREFIX}cpu:$SLURM_JOB_ID"; exec 3<&0 </dev/null; {script}')
     # The step's stderr (the reader's, through srun) goes where the login-host reader's goes.
+    scheduler = scheduler_command("srun", reader=True)
     srun = (
-        f'timeout --kill-after=10s "$(( _gym_bound + {step.wait_s} + 60 ))s" srun {step.args} --ntasks=1 '
+        f'timeout --kill-after=10s "$(( _gym_bound + {step.wait_s} + 60 ))s" {scheduler} {step.args} --ntasks=1 '
         f'--immediate={step.wait_s} -t "$(( (_gym_bound + 119) / 60 ))" -J {name} bash -c {inside} gym-reader '
         f'"$_gym_bound" {stdin} >"$_gym_step_out" 2>>"$_gym_err"'
     )

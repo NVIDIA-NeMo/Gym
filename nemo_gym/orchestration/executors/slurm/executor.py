@@ -54,6 +54,7 @@ from nemo_gym.orchestration.executors.otel import (
     validate_destination,
     validate_gym_telemetry,
 )
+from nemo_gym.orchestration.executors.private_environment import prepare_commands, stage_commands
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
 from nemo_gym.orchestration.executors.slurm.chain import (
     ChainRecovery,
@@ -73,6 +74,7 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
 from nemo_gym.orchestration.executors.slurm.script import (
     _resolve_env,
     build_sbatch_script,
+    task_environments,
 )
 from nemo_gym.orchestration.jobs import (
     ARTIFACTS_DIRNAME,
@@ -146,7 +148,8 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
         cluster = next(iter(config.compute))
-        submission_env = _submission_env_exports(compute) if not dry_run else []
+        if not dry_run:
+            _submission_env_exports(compute)
         benchmark_names = list(config.driver.benchmarks)
         _validate_benchmark_names(benchmark_names)
         # The remote lookup overlaps the other validation, staging, the SSH connect and the mount
@@ -173,11 +176,18 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
             with get_connection(compute.hostname) as conn:
                 _validate_mounts(config, conn)
                 ref_check.result()
+                conn.run([command for name in benchmark_names for command in prepare_commands(remote_run_dir / name)])
                 conn.copy(staging, remote_run_dir)
-                token_export = [f"export {config.otel.token_env}={shlex.quote(token)}"] if token is not None else []
                 output = conn.run(
-                    submission_env
-                    + token_export
+                    [
+                        command
+                        for name in benchmark_names
+                        for command in stage_commands(
+                            config,
+                            task_environments(config, name, compute, remote_run_dir / name),
+                            remote_run_dir / name,
+                        )
+                    ]
                     + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
                 record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)

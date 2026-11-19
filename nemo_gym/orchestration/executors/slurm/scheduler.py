@@ -35,6 +35,7 @@ from nemo_gym.orchestration.executors.otel import (
     resolve_token,
     validate_destination,
 )
+from nemo_gym.orchestration.executors.private_environment import scheduler_command
 from nemo_gym.orchestration.executors.slurm.resume_script import (
     RESUBMIT_LOCK_NAME,
     _walltime_to_seconds,
@@ -152,7 +153,7 @@ def _sbatch_command(benchmark: str, script: Path) -> str:
             "so they can be reported back from the submit script."
         )
     return (
-        f"out=$(sbatch --parsable {shlex.quote(str(script))} 2>&1); rc=$?; "
+        f"out=$({scheduler_command('sbatch --parsable ' + shlex.quote(str(script)))} 2>&1); rc=$?; "
         "out=$(echo \"$out\" | tr '\\n' ' '); "
         f'echo "{_MARKER}{benchmark}:$rc:$out"'
     )
@@ -193,7 +194,7 @@ def _submission_env_exports(compute: SlurmComputeConfig) -> list[str]:
 
 
 def _submission_exports(config: SubmitConfig) -> list[str]:
-    """What `run()` exports ahead of sbatch: the forwarded values, then the telemetry token when it is on."""
+    """Forward values to login-host exporters; never use this before a scheduler client."""
     exports = _submission_env_exports(next(iter(config.compute.values())))
     token = resolve_token(config)
     validate_destination(config)

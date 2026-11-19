@@ -102,7 +102,7 @@ def test_with_a_longer_walltime_the_fresh_restart_is_queued_and_recorded(tmp_pat
     env = _sbatch_env(slurm_bin)
     assert env["GYM_RESUBMIT"] == "1" and "GYM_RESUBMIT_KEEP_BUDGET" not in env
     script = (job_dir / "job.sh").read_text()
-    assert "#SBATCH --time=08:00:00" in script
+    assert '#SBATCH --time="08:00:00"' in script
     # The receipt and the chain-file entry: FRESH-RESTART, why, the old walltime and the new one.
     [entry] = [json.loads(line) for line in (run_dir / WALLTIME_JOURNAL_NAME).read_text().splitlines()]
     assert {key: entry[key] for key in ("plan", "why", "from", "to", "reason")} == {

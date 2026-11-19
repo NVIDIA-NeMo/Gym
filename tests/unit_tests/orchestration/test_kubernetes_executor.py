@@ -250,6 +250,39 @@ def test_dry_run_returns_none_and_never_calls_kubectl(tmp_path, monkeypatch):
     assert result is None
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_driver_container_selection_is_rejected_before_kubectl(tmp_path, monkeypatch, capsys, dry_run):
+    config = _submit_config(tmp_path, ["bench_a"])
+    config.driver.container_env = ["HF_TOKEN"]
+
+    def unexpected_kubectl(*args, **kwargs):
+        raise AssertionError("unsupported container_env must fail before kubectl")
+
+    monkeypatch.setattr(kubernetes_module, "_kubectl", unexpected_kubectl)
+    monkeypatch.setattr(kubernetes_module.shutil, "which", lambda name: "/usr/bin/kubectl")
+    with pytest.raises(ValueError, match="driver.container_env is only supported by the slurm executor"):
+        KubernetesExecutor().run(config, dry_run=dry_run)
+    assert "apiVersion:" not in capsys.readouterr().out
+
+
+def test_empty_driver_container_selection_keeps_manifest_and_host_env(tmp_path, monkeypatch):
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
+
+    monkeypatch.setenv("HF_TOKEN", "fresh-test-token")
+    raw = _submit_config(tmp_path, ["bench_a"]).model_dump(mode="json")
+    raw["driver"]["env"] = {"HF_TOKEN": "host:HF_TOKEN"}
+    config = SubmitConfig.model_validate(raw)
+    benchmark = config.driver.benchmarks["bench_a"]
+    compute = config.compute["cluster"]
+    kwargs = dict(name="gym-test", gym_job_id="gym-job-test", resolved_config="", manifest="")
+    before = build_job_manifest(config, "bench_a", benchmark, compute, tmp_path / "run", **kwargs)
+    config.driver.container_env = []
+    after = build_job_manifest(config, "bench_a", benchmark, compute, tmp_path / "run", **kwargs)
+    assert after == before
+    env = {entry["name"]: entry["value"] for entry in after["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["HF_TOKEN"] == "fresh-test-token"
+
+
 def test_otel_enabled_by_default_is_rejected(tmp_path):
     services = {
         "vllm_model": {

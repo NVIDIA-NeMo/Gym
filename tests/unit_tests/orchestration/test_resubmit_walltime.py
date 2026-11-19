@@ -100,9 +100,9 @@ def test_a_walltime_raise_renders_the_run_again_and_keeps_rows_and_budgets(tmp_p
     out = recover(*_handle(job_dir), max_walltime=raise_to, walltime_reason="slow but healthy policy")
     assert out.dispatched == "resubmit", out.decision.reason
 
-    assert f"#SBATCH --time={raise_to}" in (job_dir / "job.sh").read_text()
+    assert f'#SBATCH --time="{raise_to}"' in (job_dir / "job.sh").read_text()
     [kept_script] = job_dir.glob("job.sh.pre-walltime-*")
-    assert kept_script.read_text() == old_script and "#SBATCH --time=04:00:00" in old_script
+    assert kept_script.read_text() == old_script and '#SBATCH --time="04:00:00"' in old_script
     saved = yaml.safe_load((run_dir / "resolved-config.yaml").read_text())
     assert saved["compute"]["cluster"]["walltime"] == raise_to
     # The chain cap is at least the new segment walltime; every other field is as saved.
@@ -142,7 +142,7 @@ def test_a_walltime_raise_lets_a_chain_that_spent_its_old_cap_plan_again(tmp_pat
     out = recover(*_handle(job_dir), max_walltime="20:00:00", walltime_reason="slow but healthy policy")
     assert out.dispatched == "resubmit", out.decision.reason
     assert out.decision.reason.endswith("; walltime cap raised from 16:00:00 to 20:00:00 for this plan")
-    assert "#SBATCH --time=20:00:00" in (job_dir / "job.sh").read_text()
+    assert '#SBATCH --time="20:00:00"' in (job_dir / "job.sh").read_text()
     # The used walltime is accounted as before and checked against the raised cap: it is not reset.
     assert (job_dir / ".gym_accumulated_walltime").read_text() == "57660\n"
 
@@ -192,7 +192,7 @@ def test_a_repin_and_a_walltime_raise_render_once_and_journal_both(tmp_path, slu
     )
     assert out.dispatched == "resubmit", out.decision.reason
     script = (job_dir / "job.sh").read_text()
-    assert NEW in script and OLD not in script and "#SBATCH --time=12:00:00" in script
+    assert NEW in script and OLD not in script and '#SBATCH --time="12:00:00"' in script
     saved = yaml.safe_load((run_dir / "resolved-config.yaml").read_text())
     assert (saved["driver"]["gym_install"]["ref"], saved["compute"]["cluster"]["walltime"]) == (NEW, "12:00:00")
     assert len(list(job_dir.glob("job.sh.pre-repin-*"))) == len(list(job_dir.glob("job.sh.pre-walltime-*"))) == 1
@@ -261,4 +261,4 @@ def test_a_limit_raise_from_the_pinned_revision_renders_the_run_again(tmp_path, 
     out = recover(*_handle(job_dir), max_walltime="12:00:00", walltime_reason="slow but healthy policy")
 
     assert out.dispatched == "resubmit", out.decision.reason
-    assert "#SBATCH --time=12:00:00" in (job_dir / "job.sh").read_text()
+    assert '#SBATCH --time="12:00:00"' in (job_dir / "job.sh").read_text()

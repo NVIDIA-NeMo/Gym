@@ -49,6 +49,11 @@ from nemo_gym.orchestration.executors.connection import (
     get_connection,
 )
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
+from nemo_gym.orchestration.executors.otel import resolve_token, validate_destination
+from nemo_gym.orchestration.executors.private_environment import (
+    scheduler_environment_check,
+    stage_commands,
+)
 from nemo_gym.orchestration.executors.slurm.judge_profile import (
     JUDGE_POOL_NAME,
     NO_CPU_PARTITION,
@@ -61,9 +66,7 @@ from nemo_gym.orchestration.executors.slurm.judge_profile import (
     served_judge_placement,
     served_judge_profile,
 )
-from nemo_gym.orchestration.executors.slurm.reader import (
-    READER_SRUN_ENV,
-)
+from nemo_gym.orchestration.executors.slurm.reader import READER_SRUN_ENV
 from nemo_gym.orchestration.executors.slurm.resume_script import (
     _walltime_to_seconds,
 )
@@ -73,11 +76,11 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
     _parse_sbatch_results,
     _partition_time_limit,
     _sbatch_command,
-    _submission_exports,
 )
 from nemo_gym.orchestration.executors.slurm.script import (
     _with_default_capture_dir,
     build_sbatch_script,
+    task_environments,
 )
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
@@ -270,6 +273,8 @@ class JudgeJobs:
             )
             driver = config.driver.model_copy(update={"benchmarks": {benchmark: bench}})
             bound = config.model_copy(update={"driver": driver, "compute": {record.cluster: bounded_compute}})
+            resolve_token(bound)
+            validate_destination(bound)
             script = build_sbatch_script(bound, benchmark, bench, bounded_compute, job_dir)
             script = script.replace("#!/bin/bash", "#!/bin/bash\n#SBATCH --no-requeue", 1)
             script_path = job_dir / f"reverify-{nonce}.sh"
@@ -297,7 +302,7 @@ class JudgeJobs:
                 f"if not __import__('math').isfinite(total) or total < 0 or total >= {cap!r}: raise ValueError('spent walltime')\n"
                 "tmp=p.with_suffix('.tmp'); tmp.write_text(str(total)+'\\n'); os.replace(tmp,p)\n"
             )
-            commands = _submission_exports(config) + [
+            commands = [
                 'fail() { echo "Error: $*" >&2; exit 1; }',
                 f"cd {shlex.quote(str(job_dir))} || fail 'job directory unavailable'",
                 f"(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail 'another recovery holds the lock'",
@@ -309,6 +314,8 @@ class JudgeJobs:
                 "trap _gym_release_rejudge_lock EXIT",
                 *_chain_live_check(evidence.job_chain, "an original allocation is still live"),
                 f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(expected))} || fail 'accounting changed or exhausted'",
+                scheduler_environment_check(),
+                *stage_commands(bound, task_environments(bound, benchmark, bounded_compute, job_dir), job_dir),
                 # Only the staged driver script is owner-only. The umask of the rest of the dispatch is the caller's:
                 # sbatch hands it to the job, so the job's output directory and files, and the journals and markers
                 # written below, are readable by the run's other readers like the run's other artifacts.
@@ -469,6 +476,8 @@ class JudgeJobs:
         if repin is not None:
             validate_gym_install_ref(bound)
         bench = bound.driver.benchmarks[benchmark]
+        resolve_token(bound)
+        validate_destination(bound)
         script = build_sbatch_script(bound, benchmark, bench, bound.compute[record.cluster], job_dir)
         script = script.replace("#!/bin/bash", "#!/bin/bash\n#SBATCH --no-requeue", 1)
         script_path = job_dir / f"reverify-{nonce}.sh"
@@ -517,7 +526,7 @@ class JudgeJobs:
             f"python3 -c {shlex.quote(_JOURNAL_JUDGE_JOB)} {shlex.quote(JUDGE_JOB_JOURNAL_NAME)} "
             f"{shlex.quote(json.dumps(entry, sort_keys=True))}"
         )
-        commands = _submission_exports(config) + [
+        commands = [
             'fail() { echo "Error: $*" >&2; exit 1; }',
             f"cd {shlex.quote(str(job_dir))} || fail 'job directory unavailable'",
             f"(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail 'another recovery holds the lock'",
@@ -536,6 +545,10 @@ class JudgeJobs:
             # Only the staged driver script is owner-only. The umask of the rest of the dispatch is the caller's: sbatch
             # hands it to the job, so the job's output directory and files (the reverification folder, its receipt), and
             # the journals written below, are readable by the run's other readers like the run's other artifacts.
+            scheduler_environment_check(),
+            *stage_commands(
+                bound, task_environments(bound, benchmark, bound.compute[record.cluster], job_dir), job_dir
+            ),
             f"(umask 077; printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))}) "
             "|| fail 'cannot stage the judge driver'",
             _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),

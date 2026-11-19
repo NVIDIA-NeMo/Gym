@@ -21,8 +21,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import NodePool, SubmitConfig
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.private_environment import private_directory
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
@@ -142,7 +143,9 @@ class _FakeConnection(LocalConnection):
 
     def run(self, commands):
         self.commands.append(commands)
-        return self._replies.pop(0)
+        if any("__GYM_JOB:" in command for command in commands):
+            return self._replies.pop(0)
+        return super().run(commands)
 
 
 def _install(monkeypatch, conn):
@@ -433,7 +436,7 @@ def test_a_missing_gym_install_ref_fails_before_anything_is_copied_or_queued(tmp
     assert conn.commands == []
 
 
-def test_runtime_credentials_reach_remote_sbatch_without_being_persisted(tmp_path, monkeypatch):
+def test_runtime_credentials_reach_private_store_without_entering_sbatch_or_run_artifacts(tmp_path, monkeypatch):
     import subprocess
 
     secret = "test secret with ' quotes and $(false)"
@@ -442,23 +445,26 @@ def test_runtime_credentials_reach_remote_sbatch_without_being_persisted(tmp_pat
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     config = _submit_config(tmp_path, ["bench_a"])
     config.driver.env = {"JUDGE_KEY": "runtime:SUBMIT_JUDGE_KEY"}
+    config.compute["hsg"].hostname = "login.example.test"
     config.compute["hsg"].forward_env = ["SUBMIT_JUDGE_KEY"]
     conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
     _install(monkeypatch, conn)
 
     record = SlurmExecutor().run(config)
 
-    commands = conn.commands[0]
-    exports = [command for command in commands if command.startswith("export ")]
-    probe = subprocess.run(
+    commands = [command for batch in conn.commands for command in batch]
+    staging = [command for command in commands if "GYM_PRIVATE_ENVIRONMENT" in command]
+    subprocess.run(
         ["bash", "-s"],
-        input="\n".join(exports + ['printf %s "$SUBMIT_JUDGE_KEY"']),
+        input="\n".join(staging),
         text=True,
         capture_output=True,
         check=True,
         env={},
     )
-    assert probe.stdout == secret
+    payload = json.loads((private_directory(Path(record.run_dir) / "bench_a") / "environment.json").read_text())
+    assert payload["forwarded"]["SUBMIT_JUDGE_KEY"] == secret
+    assert not any(command.startswith("export ") for command in commands)
     assert "UNREFERENCED_SECRET" not in "\n".join(commands)
     for path in Path(record.run_dir).rglob("*"):
         if path.is_file():
@@ -480,6 +486,27 @@ def test_missing_forwarded_variable_fails_before_submission(tmp_path, monkeypatc
         SlurmExecutor().run(config)
 
 
+@pytest.mark.parametrize("scope", ["compute", "pool"])
+@pytest.mark.parametrize(
+    "option",
+    ["export", "export-file", "export_file", "get-user-env", "get_user_env", "--get-user-env", "get-u", "export-f"],
+)
+def test_scheduler_environment_overrides_are_refused_before_copy_or_submit(tmp_path, monkeypatch, option, scope):
+    config = _submit_config(tmp_path, ["bench_a"])
+    if scope == "compute":
+        config.compute["hsg"].extra_args = {option: "ALL"}
+    else:
+        config.compute["hsg"].node_pools = {"cpu": NodePool(partition="batch", nodes=1, extra_args={option: "ALL"})}
+    conn = _FakeConnection([])
+    _install(monkeypatch, conn)
+
+    with pytest.raises(ValueError, match="use compute.forward_env"):
+        SlurmExecutor().run(config)
+
+    assert conn.commands == []
+    assert not Path(config.job.output_path).exists()
+
+
 @pytest.mark.parametrize("name", ["BAD;false", "X=Y", "", "1NAME"])
 def test_forwarded_variable_name_is_validated(tmp_path, name):
     raw = _submit_config(tmp_path, ["bench_a"]).model_dump()
@@ -491,7 +518,9 @@ def test_forwarded_variable_name_is_validated(tmp_path, name):
 @pytest.mark.parametrize(
     "enabled,remote,token_present", [(False, True, True), (True, False, True), (True, True, False), (True, True, True)]
 )
-def test_submission_environment_matches_actual_exports(tmp_path, monkeypatch, enabled, remote, token_present):
+def test_submission_environment_matches_private_forwarding(tmp_path, monkeypatch, enabled, remote, token_present):
+    import subprocess
+
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("FORWARDED_KEY", "forwarded-test-value")
     if token_present:
@@ -500,6 +529,7 @@ def test_submission_environment_matches_actual_exports(tmp_path, monkeypatch, en
         monkeypatch.delenv("TEST_TELEMETRY_KEY", raising=False)
     config = _submit_config(tmp_path, ["bench_a"])
     config.compute["hsg"].forward_env = ["FORWARDED_KEY"]
+    config.compute["hsg"].hostname = "login.example.test"
     config.otel.enabled = enabled
     config.otel.remote_export = remote
     config.otel.token_env = "TEST_TELEMETRY_KEY"
@@ -513,12 +543,10 @@ def test_submission_environment_matches_actual_exports(tmp_path, monkeypatch, en
     assert observation.required_env == ["FORWARDED_KEY"]
     expected = ["FORWARDED_KEY"] + (["TEST_TELEMETRY_KEY"] if enabled and remote and token_present else [])
     assert observation.forwarded_env == expected
-    actual_export_names = [
-        command.removeprefix("export ").split("=", 1)[0]
-        for command in conn.commands[0]
-        if command.startswith("export ")
-    ]
-    assert sorted(set(actual_export_names)) == expected
+    staging = [command for batch in conn.commands for command in batch if "GYM_PRIVATE_ENVIRONMENT" in command]
+    subprocess.run(["bash", "-s"], input="\n".join(staging), text=True, capture_output=True, check=True)
+    payload = json.loads((private_directory(Path(record.run_dir) / "bench_a") / "environment.json").read_text())
+    assert sorted(payload["forwarded"]) == expected
     assert observation.telemetry.enabled is enabled
     assert observation.telemetry.remote_export is (remote and (not enabled or token_present))
     assert observation.telemetry.token_env == "TEST_TELEMETRY_KEY"

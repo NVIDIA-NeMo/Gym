@@ -258,7 +258,7 @@ class BaseExecutor(ABC):
 
         def write_resolved_config() -> None:
             # `host:` values are written as their references, so the record is safe for other readers
-            # (e.g. certification under another account). The resolved secrets stay in job.sh only.
+            # (e.g. certification under another account). Resolved task secrets stay in the executor's private delivery store.
             record_config = config.model_dump(mode="json", context={HOST_ENV_REFS: True})
             write_manifest(Path(record.run_dir) / RESOLVED_CONFIG_NAME, yaml.safe_dump(record_config, sort_keys=False))
 

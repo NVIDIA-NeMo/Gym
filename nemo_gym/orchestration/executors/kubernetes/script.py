@@ -277,6 +277,10 @@ def build_job_manifest(
     run_dir_str = str(run_dir)
     manifest_writes = _manifest_write_commands(resolved_config, manifest, run_dir_str)
     _reject_unsupported_mounts(config.driver.mounts)
+    if config.driver.container_env:
+        raise ValueError(
+            "driver.container_env is only supported by the slurm executor; use driver.env with 'host:' for Kubernetes"
+        )
 
     volumes = [
         {"name": SHM_VOLUME_NAME, "emptyDir": {"medium": "Memory", "sizeLimit": SHM_SIZE}},

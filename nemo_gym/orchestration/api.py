@@ -376,8 +376,8 @@ class SlurmComputeConfig(BaseComputeConfig):
     type: Literal["slurm"]
     account: str
     hostname: str | None = None  # None means we're already on the login node; skip SSH.
-    # Submit-side variables explicitly exported before sbatch, without writing values
-    # into job.sh or the resolved config. Runtime-only Slurm variables stay untouched.
+    # Submit-side variables restored privately after srun, without writing values
+    # into scheduler environments, job.sh or the resolved config.
     forward_env: list[str] = []
 
     @field_validator("forward_env")
@@ -580,11 +580,20 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+    # Explicit host selections override image values only inside the driver task.
+    container_env: list[str] = []
 
     @field_validator("env")
     @classmethod
     def _resolve_env_prefixes(cls, v: dict[str, str], info: ValidationInfo) -> dict[str, str]:
         return resolve_env_dict(v, saved_config=bool(info.context and info.context.get(SAVED_CONFIG)))
+
+    @field_validator("container_env")
+    @classmethod
+    def _validate_container_env(cls, values: list[str]) -> list[str]:
+        if any(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None for name in values):
+            raise ValueError("container_env entries must be environment variable names")
+        return values
 
 
 class JobConfig(_StrictModel):

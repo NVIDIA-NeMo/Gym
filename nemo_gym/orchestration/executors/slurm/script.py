@@ -54,6 +54,15 @@ from nemo_gym.orchestration.executors.otel import (
     vllm_traces_env,
     vllm_traces_flag,
 )
+from nemo_gym.orchestration.executors.private_environment import (
+    DRIVER_SELECTION_MARKER,
+    PRIVATE_ENVIRONMENT_MARKER,
+    driver_forwarded_names,
+    forwarded_names,
+    private_directory,
+    task_command,
+    validate_scheduler_environment_options,
+)
 from nemo_gym.orchestration.executors.script_templates import (
     ENSURE_RAY_INSTALLED,
     EVAL_SUCCEEDED_MARKER_ENV,
@@ -93,9 +102,9 @@ _SCRIPT_TEMPLATE = """\
 #!/bin/bash
 {directives}
 
-{resume_prologue}
-
 {ray_prelude}
+
+{resume_prologue}
 
 {service_commands}
 
@@ -107,17 +116,25 @@ _SCRIPT_TEMPLATE = """\
 """
 
 
+def _directive_value(value: str) -> str:
+    """Quote one sbatch argument; its parser handles backslashes even inside quotes."""
+    if any(character in value for character in ("\r", "\n", "\0")):
+        raise ValueError("Slurm directive values must not contain carriage returns, newlines or NUL characters")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path, benchmark_name: str) -> str:
+    validate_scheduler_environment_options(compute.extra_args)
     lines = []
-    lines.append(f"#SBATCH --job-name=gym-{benchmark_name}")
-    lines.append(f"#SBATCH --account={compute.account}")
+    lines.append(f"#SBATCH --job-name={_directive_value('gym-' + benchmark_name)}")
+    lines.append(f"#SBATCH --account={_directive_value(compute.account)}")
     if compute.walltime:
-        lines.append(f"#SBATCH --time={compute.walltime}")
+        lines.append(f"#SBATCH --time={_directive_value(compute.walltime)}")
     # --chdir sets the batch script's cwd on the HOST, so srun --output=logs/... resolves there.
     # Container-side cwd is set separately per step (see driver_workdir_flag).
-    lines.append(f"#SBATCH --chdir={remote_bench_dir}")
+    lines.append(f"#SBATCH --chdir={_directive_value(str(remote_bench_dir))}")
     for key, val in compute.extra_args.items():
-        lines.append(f"#SBATCH --{key}={val}")
+        lines.append(f"#SBATCH --{key}={_directive_value(val)}")
     lines.extend(_render_pool_directives(compute.node_pools))
     return "\n".join(lines)
 
@@ -150,7 +167,7 @@ def _render_pool_directives(pools: dict[str, NodePool]) -> list[str]:
     if not pools:
         return []
     lines = [
-        f"#SBATCH --partition={_pool_directive(pools, 'partition')}",
+        f"#SBATCH --partition={_directive_value(_pool_directive(pools, 'partition'))}",
         f"#SBATCH --nodes={sum(pool.nodes for pool in pools.values())}",
         f"#SBATCH --ntasks-per-node={_pool_directive(pools, 'ntasks_per_node')}",
     ]
@@ -159,13 +176,14 @@ def _render_pool_directives(pools: dict[str, NodePool]) -> list[str]:
         lines.append(f"#SBATCH --gpus-per-node={gpus_per_node}")
     extra_args: dict[str, str] = {}
     for name, pool in pools.items():
+        validate_scheduler_environment_options(pool.extra_args)
         for key, val in pool.extra_args.items():
             if extra_args.setdefault(key, val) != val:
                 raise ValueError(
                     f"Node pool {name!r} sets extra_args[{key!r}]={val!r}, which conflicts with another pool's "
                     f"{extra_args[key]!r}. #SBATCH directives apply to the whole allocation."
                 )
-    lines.extend(f"#SBATCH --{key}={val}" for key, val in extra_args.items())
+    lines.extend(f"#SBATCH --{key}={_directive_value(val)}" for key, val in extra_args.items())
     return lines
 
 
@@ -209,6 +227,8 @@ def _render_service_command(
     nodelist: str | None = None,
     end_step_on_task_exit: bool = True,
     *,
+    private_dir: Path | None = None,
+    private_role: str | None = None,
     account: str | None = None,
 ) -> str:
     var = bash_var(name)
@@ -230,6 +250,17 @@ def _render_service_command(
         # word, so it can't interfere with --container-mounts/-image parsing
         # regardless of what pre_command contains.
         command = f"bash -c {shlex.quote(pre_command + chr(10) + 'exec ' + command)}"
+    if private_dir is not None:
+        command, env_prefix = task_command(
+            command,
+            directory=private_dir,
+            role=private_role or "service:" + name,
+            environment=env or {},
+            shell=False,
+        )
+        if container is not None:
+            mounts = [*(mounts or []), f"{private_dir}:{private_dir}:ro"]
+            mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}"
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
@@ -610,6 +641,8 @@ def _render_ray_service(
     config: SubmitConfig,
     compute: SlurmComputeConfig,
     driver_node: int | None,
+    *,
+    private_dir: Path | None = None,
 ) -> str:
     """A ray service's srun steps: the head beside the driver, then one step per spanned pool's workers.
 
@@ -632,6 +665,8 @@ def _render_ray_service(
             ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
             pre_command=service.pre_command,
             nodelist=_service_nodelist(service, driver_node, total_nodes),
+            private_dir=private_dir,
+            private_role="service:" + name,
             account=compute.account,
         )
     ]
@@ -649,6 +684,8 @@ def _render_ray_service(
                 ntasks=count,
                 pre_command=f"{service.pre_command.rstrip()}\n{wait_for_head}".lstrip(),
                 nodelist=ray_workers_var(name, pool),
+                private_dir=private_dir,
+                private_role="service:" + name,
                 account=compute.account,
             )
         )
@@ -779,6 +816,7 @@ def _render_collector_service(
     *,
     is_multi_node: bool,
     driver_node: int | None = None,
+    private_dir: Path | None = None,
     account: str | None = None,
 ) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
@@ -812,6 +850,8 @@ def _render_collector_service(
         ntasks=1 if driver_node is not None else None,
         # Not watched: losing the collector costs telemetry, not the run, so its step keeps Slurm's defaults.
         end_step_on_task_exit=False,
+        private_dir=private_dir,
+        private_role="collector",
         account=account,
         **container_kwargs,
     )
@@ -1096,6 +1136,42 @@ def _with_resume_flag(run: dict[str, Any], resumable: bool) -> dict[str, Any]:
     return run
 
 
+def task_environments(
+    config: SubmitConfig, benchmark_name: str, compute: SlurmComputeConfig, remote_bench_dir: Path
+) -> dict[str, dict[str, str]]:
+    """The task env mappings kept outside the scheduler's stored script."""
+    total_nodes, _ = _node_totals(compute)
+    driver_node = _driver_node(config, compute) if total_nodes > 1 else None
+    environments = {
+        "service:" + name: dict(_with_vllm_traces(name, service, config, compute, driver_node).env)
+        for name, service in config.deployed_services.items()
+    }
+    driver = dict(config.driver.env)
+    if gym_telemetry_active(config):
+        driver = {
+            **driver_telemetry_env(
+                remote_bench_dir.parent.name, config.otel.gym_span_groups, logs=config.otel.gym_logs
+            ),
+            **driver,
+        }
+    benchmark = config.driver.benchmarks[benchmark_name]
+    if benchmark.command is not None:
+        driver |= _command_env(benchmark, remote_bench_dir)
+    if effective_exports(config, benchmark_name):
+        driver[EVAL_SUCCEEDED_MARKER_ENV] = f"{RUNTIME_ENV_PREFIX}{EVAL_SUCCEEDED_MARKER_ENV}"
+    driver["NEMO_GYM_BENCH_DIR"] = str(remote_bench_dir)
+    environments["driver"] = driver
+    environments["collector"] = {
+        **(
+            {config.otel.token_env: f"{RUNTIME_ENV_PREFIX}{config.otel.token_env}"}
+            if otel_active(config) and config.otel.remote_export
+            else {}
+        ),
+        "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
+    }
+    return environments
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -1104,6 +1180,8 @@ def build_sbatch_script(
     remote_bench_dir: Path,
 ) -> str:
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
+    private_dir = private_directory(remote_bench_dir)
+    environments = task_environments(config, benchmark_name, compute, remote_bench_dir)
 
     resume = benchmark.resume_config
     resume_prologue = render_resume_prologue(resume) if resume else ""
@@ -1139,6 +1217,7 @@ def build_sbatch_script(
                     remote_bench_dir,
                     is_multi_node=is_multi_node,
                     driver_node=driver_node,
+                    private_dir=private_dir,
                     account=compute.account,
                 )
             ]
@@ -1164,6 +1243,7 @@ def build_sbatch_script(
                 nodes=_srun_nodes(service, compute, total_nodes),
                 ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
                 pre_command=_service_pre_command(service),
+                private_dir=private_dir,
                 nodelist=_service_nodelist(service, driver_node, total_nodes),
                 account=compute.account,
             )
@@ -1174,7 +1254,7 @@ def build_sbatch_script(
             if not isinstance(service, RayServiceConfig)
         ]
         + [
-            _render_ray_service(name, service, config, compute, driver_node)
+            _render_ray_service(name, service, config, compute, driver_node, private_dir=private_dir)
             for name, service in config.deployed_services.items()
             if isinstance(service, RayServiceConfig)
         ]
@@ -1223,14 +1303,7 @@ def build_sbatch_script(
     output_path = f"+output_jsonl_fpath={remote_bench_dir}/{ARTIFACTS_DIRNAME}/{ROLLOUTS_FILENAME}"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
-    driver_env = dict(config.driver.env)
-    if instrumented:
-        driver_env = {
-            **driver_telemetry_env(
-                remote_bench_dir.parent.name, config.otel.gym_span_groups, logs=config.otel.gym_logs
-            ),
-            **driver_env,
-        }
+    driver_env = environments["driver"]
     if benchmark.command is None:
         run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
         run_args.setdefault("require_complete", True)
@@ -1299,7 +1372,13 @@ def build_sbatch_script(
         export_tail=export_tail,
     )
     prepare_command = ""
-    driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
+    entrypoint, driver_env_prefix = task_command(
+        entrypoint,
+        directory=private_dir,
+        role="driver",
+        environment=driver_env,
+        shell=False,
+    )
     # Where this allocation's driver leaves the kind of a failure the next segment would repeat (see resume_script).
     failure_file = (
         f'{DRIVER_FAILURE_ENV}={shlex.quote(str(remote_bench_dir / DRIVER_FAILURE_NAME))}."$SLURM_JOB_ID" '
@@ -1318,11 +1397,19 @@ def build_sbatch_script(
     # discarded on exit: no rollouts, no metrics, no preprocessed data, and
     # nothing to say so. Logs survive only because srun resolves `--output` on
     # the host, which is what makes the loss so easy to miss.
-    driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
+    driver_mounts = [
+        *config.driver.mounts,
+        f"{remote_bench_dir}:{remote_bench_dir}",
+        f"{private_dir}:{private_dir}:ro",
+    ]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
+    # Values selected in the caller are restored after Pyxis starts, not exported through Slurm.
+    private_names = driver_forwarded_names(config) | forwarded_names(config)
+    container_env = [name for name in config.driver.container_env if name not in private_names]
+    driver_container_env_flag = f" --container-env={','.join(container_env)}" if container_env else ""
     driver_srun = (
         f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
-        f" --account={shlex.quote(compute.account)} --container-image={shlex.quote(config.driver.container)} "
+        f"{driver_container_env_flag} --account={shlex.quote(compute.account)} --container-image={shlex.quote(config.driver.container)} "
         f"--output={LOGS_DIRNAME}/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
     if resume and benchmark.command is None:
@@ -1351,9 +1438,16 @@ def build_sbatch_script(
             f'{resume.max_retries} {cap} "$GYM_PREVIOUS_EXIT_CODE" "$GYM_PREVIOUS_JOB_ID" "$GYM_PREVIOUS_STATE"'
             + (f" {shlex.quote(json.dumps(policy, sort_keys=True))}" if policy is not None else ""),
         )
+        admission_entrypoint, admission_env_prefix = task_command(
+            admission_entrypoint,
+            directory=private_dir,
+            role="driver",
+            environment=driver_env,
+            shell=False,
+        )
         admission_command = (
-            f'{driver_env_prefix}GYM_PREVIOUS_STATE="$_prev_state" GYM_PREVIOUS_JOB_ID="$_prev_slurm_job_id" GYM_PREVIOUS_EXIT_CODE="$_gym_exit_code" srun --overlap --nodes=1 --ntasks=1 '
-            f"--no-container-mount-home{driver_mounts_flag} --account={shlex.quote(compute.account)} "
+            f'{admission_env_prefix}GYM_PREVIOUS_STATE="$_prev_state" GYM_PREVIOUS_JOB_ID="$_prev_slurm_job_id" GYM_PREVIOUS_EXIT_CODE="$_gym_exit_code" srun --overlap --nodes=1 --ntasks=1 '
+            f"--no-container-mount-home{driver_mounts_flag}{driver_container_env_flag} --account={shlex.quote(compute.account)} "
             f"--container-image={shlex.quote(config.driver.container)} {admission_entrypoint}"
         )
         resume_prologue = render_resume_prologue(resume, admission_command=admission_command)
@@ -1396,11 +1490,11 @@ def build_sbatch_script(
         )
 
     return _SCRIPT_TEMPLATE.format(
-        directives=directives,
+        directives=directives + "\n" + DRIVER_SELECTION_MARKER + json.dumps(sorted(driver_forwarded_names(config))),
         resume_prologue=resume_prologue,
         ray_prelude=ray_prelude,
         service_commands=service_commands,
         health_checks=health_checks,
         prepare_command=prepare_command,
         driver_command=driver_command,
-    )
+    ).replace("#!/bin/bash", "#!/bin/bash\n" + PRIVATE_ENVIRONMENT_MARKER, 1)
