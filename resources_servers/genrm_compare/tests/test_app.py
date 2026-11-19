@@ -1446,6 +1446,28 @@ class TestRunSingleComparison:
         assert all(result.genrm_rubric_parse_failure_rate_per_group == 0 for result in results)
         assert all(result.reward_score_raw == 5.0 for result in results)
 
+    @pytest.mark.parametrize("use_principle", [False, True])
+    async def test_compare_uses_selected_rubric(self, use_principle):
+        server, client = self._make_server(use_principle=use_principle)
+        server.config.score_source = "rubric_mean"
+        server.config.default_rubric_ids = (1,)
+        server.config.genrm_parse_retry_sleep_s = 0
+        answer = {
+            "rubric_evaluations": [{"rubric_id": 2 if use_principle else 1, "score_1": 5, "score_2": 1, "ranking": 2}],
+            "overall": {"score_1": 1, "score_2": 5, "ranking": 6},
+        }
+        client.post.return_value = self._http_response(self._make_response_obj(json.dumps(answer)))
+        result = await server.compare(
+            GenRMCompareRequest(
+                conversation_history=[{"role": "user", "content": "hello"}],
+                response_objs=[self._make_response_obj("a"), self._make_response_obj("b")],
+                principle="Be concise.",
+                expected_rubric_ids=(2,),
+            )
+        )
+        assert result.metrics["genrm_rubric_parse_failure_rate_per_group"] == 0
+        assert {item["score_1"] for item in result.comparison_results} == {5.0}
+
     def test_responses_passed_via_metadata_not_input(self):
         """response_1 and response_2 are sent in metadata, not appended to input."""
         server, mock_client = self._make_server(use_principle=False)
