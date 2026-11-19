@@ -15,28 +15,28 @@ from pathlib import Path
 import pytest
 
 import nemo_gym.orchestration.executors.connection as connection
-import nemo_gym.orchestration.executors.slurm as slurm
 from nemo_gym.cli.main import _raise_keyboard_interrupt_on_sigterm
 from nemo_gym.orchestration.executors.connection import LocalConnection, SSHConnection
+from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
 
 
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(300)"]
 
 
 def test_the_reader_token_is_the_callers_value_or_one_uuid_per_process(monkeypatch) -> None:
-    monkeypatch.setattr(slurm, "_reader_token", None)
+    monkeypatch.setattr(slurm_reader, "_reader_token", None)
     monkeypatch.setenv("GYM_READER_TOKEN", "caller-token")
-    assert slurm.reader_token() == "caller-token"
+    assert slurm_reader.reader_token() == "caller-token"
 
-    monkeypatch.setattr(slurm, "_reader_token", None)
+    monkeypatch.setattr(slurm_reader, "_reader_token", None)
     monkeypatch.delenv("GYM_READER_TOKEN")
-    generated = slurm.reader_token()
-    assert len(generated) == 32 and slurm.reader_token() == generated
+    generated = slurm_reader.reader_token()
+    assert len(generated) == 32 and slurm_reader.reader_token() == generated
 
 
 @pytest.mark.skipif(shutil.which("timeout") is None, reason="coreutils timeout not installed")
 def test_the_reader_runs_with_its_token_in_its_environment(tmp_path: Path) -> None:
-    command = slurm._reader_command(
+    command = slurm_reader._reader_command(
         "printenv GYM_READER_TOKEN", tmp_path, "{}", bound_s=300, factor=1, token="token-in-env"
     )
 
@@ -61,12 +61,12 @@ def test_a_sigterm_during_the_reader_stops_it_by_token_and_unwinds() -> None:
     previous = signal.getsignal(signal.SIGTERM)
     _raise_keyboard_interrupt_on_sigterm()
     try:
-        with pytest.raises(slurm.RemoteReaderInterrupted, match="interrupted by SIGTERM") as raised:
-            slurm._run_reader(FakeConnection(), ["the reader"], "token-on-sigterm")
+        with pytest.raises(slurm_reader.RemoteReaderInterrupted, match="interrupted by SIGTERM") as raised:
+            slurm_reader._run_reader(FakeConnection(), ["the reader"], "token-on-sigterm")
     finally:
         signal.signal(signal.SIGTERM, previous)
 
-    assert calls == [["the reader"], slurm._kill_reader_command("token-on-sigterm")]
+    assert calls == [["the reader"], slurm_reader._kill_reader_command("token-on-sigterm")]
     assert "GYM_READER_TOKEN=token-on-sigterm" in str(raised.value)
     assert "term=1 kill=0" in str(raised.value)
 
@@ -77,7 +77,7 @@ def test_stopping_by_token_kills_only_the_processes_that_carry_it() -> None:
     in_arguments = subprocess.Popen([*SLEEPER, token])
     another = subprocess.Popen(SLEEPER, env={**os.environ, "GYM_READER_TOKEN": "another-token"})
     try:
-        report = LocalConnection().run(slurm._kill_reader_command(token))
+        report = LocalConnection().run(slurm_reader._kill_reader_command(token))
 
         assert in_environment.wait(timeout=15) == -signal.SIGTERM
         assert in_arguments.wait(timeout=15) == -signal.SIGTERM
@@ -130,9 +130,9 @@ def test_an_interrupted_reader_closes_the_ssh_master_and_its_socket_stays_under_
     monkeypatch.setattr(connection, "subprocess", fake)
     monkeypatch.setattr(SSHConnection, "_wait_for_socket", lambda self: None)
 
-    with pytest.raises(slurm.RemoteReaderInterrupted):
+    with pytest.raises(slurm_reader.RemoteReaderInterrupted):
         with SSHConnection("login-host") as conn:
-            raise slurm.RemoteReaderInterrupted("remote Store reader interrupted by SIGTERM")
+            raise slurm_reader.RemoteReaderInterrupted("remote Store reader interrupted by SIGTERM")
 
     assert conn._socket.parent == tmp_path
     assert _closed(fake.calls, conn._socket)
@@ -187,7 +187,7 @@ needs_setsid = pytest.mark.skipif(
 
 @needs_setsid
 def test_the_watched_reader_reports_as_before_over_a_held_input(tmp_path: Path) -> None:
-    command = slurm._reader_command(
+    command = slurm_reader._reader_command(
         "printenv GYM_READER_TOKEN", tmp_path, "{}", bound_s=300, factor=1, token="watched-token", watchdog=True
     )
     result: dict[str, str] = {}
@@ -203,7 +203,7 @@ def test_the_watched_reader_reports_as_before_over_a_held_input(tmp_path: Path) 
 @needs_setsid
 def test_the_watcher_stops_a_sleeping_reader_when_the_shell_input_closes(tmp_path: Path) -> None:
     token = f"token-{uuid.uuid4().hex}"
-    command = slurm._reader_command(
+    command = slurm_reader._reader_command(
         f"{sys.executable} -c 'import time; time.sleep(300)'",
         tmp_path,
         "{}",
@@ -245,5 +245,5 @@ def test_a_connection_that_holds_its_input_runs_the_reader_with_it_held() -> Non
             calls.append("held")
             return "__GYM_READER_RC:0\n"
 
-    assert slurm._run_reader(HeldConnection(), ["the reader"], "token") == "__GYM_READER_RC:0\n"
+    assert slurm_reader._run_reader(HeldConnection(), ["the reader"], "token") == "__GYM_READER_RC:0\n"
     assert calls == ["held"]

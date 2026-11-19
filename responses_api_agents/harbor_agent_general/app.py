@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -59,6 +60,7 @@ from nemo_gym.core import (
 from nemo_gym.metrics import compute_pass_majority_metrics
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.telemetry import init_telemetry
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.utils.exception_inspection import sandbox_failure_prefix
 
 
@@ -664,7 +666,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     usage={
                         "input_tokens": n_input_tokens or 0,
                         "input_tokens_details": {
-                            "cached_tokens": n_cache_tokens or 0,
+                            "cached_tokens": n_cache_tokens,
                             "cache_write_tokens": 0,
                         },
                         "output_tokens": n_output_tokens or 0,
@@ -746,7 +748,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 if not result_path.is_file():
                     continue
 
-                trial_result = TrialResult.model_validate_json(result_path.read_text())
+                result_bytes = result_path.read_bytes()
+                trial_result = TrialResult.model_validate_json(result_bytes)
                 if trial_result.task_name != task_name and Path(trial_result.task_name).name != task_name:
                     continue
 
@@ -763,7 +766,19 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 )
                 if failed is not None:
                     exception_info = failed.exception_info
-                    ## Deleting the trial result forces Harbor to delete the old trial and re-run when Gym retries.
+                    # Keep the exact failure evidence before invalidating Harbor's resume marker.
+                    # Job.create ignores regular files at this level, so the archive survives a retry.
+                    archive = job_dir / f".failed-trial-result-{hashlib.sha256(result_bytes).hexdigest()}.json"
+                    try:
+                        fd = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    except FileExistsError:
+                        if archive.is_symlink() or archive.read_bytes() != result_bytes:
+                            raise RuntimeError("Failed trial result archive differs from the original") from None
+                    else:
+                        with os.fdopen(fd, "wb") as stream:
+                            stream.write(result_bytes)
+                            stream.flush()
+                            os.fsync(stream.fileno())
                     result_path.unlink()
                     environment = getattr(getattr(job_config, "environment", None), "type", None)
                     facts = sandbox_failure_prefix(
@@ -787,3 +802,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarborAgent.run_webserver()  # noqa: F401

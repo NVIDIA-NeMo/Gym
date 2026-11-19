@@ -28,10 +28,10 @@ host in a fresh compose stack, not in the box the model controlled.
     run-seed-then-evaluate.py is not used; see the comment above SEED_SCRIPT.)
   * ``close_session`` stops the sandbox if verify has not, and removes the copied app.
 
-The legacy relay path (``responses_api_agents/vibench_agent``, ``configs/vibench.yaml``) still works: its
-``seed_session`` gets the PRD text and asset directories and starts no sandbox, its agent builds in a sandbox of its
-own, and its ``verify`` names a tarball in the shared ``artifact_dir``, which this server unpacks and grades the
-same way.
+The deprecated legacy relay path (``responses_api_agents/vibench_agent``, ``configs/vibench_legacy_agent.yaml``)
+still works: its ``seed_session`` gets the PRD text and asset directories and starts no sandbox, its agent builds in a
+sandbox of its own, and its ``verify`` names a tarball in the shared ``artifact_dir``, which this server unpacks and
+grades the same way.
 
 Sessions are process-local, so the server runs with one worker. Grading shells into a local
 Docker daemon, so this server needs Docker and ``docker-compose`` on its host.
@@ -58,13 +58,13 @@ from shlex import quote
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional
 
+import anyio
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import VERIFIER_ERROR, EpisodeId, NgFailureEvent, TaskId
-from nemo_gym.core.failure_kinds import PROVIDER_REQUEST_FAILED
+from nemo_gym.core import PROVIDER_REQUEST_FAILED, VERIFIER_ERROR, EpisodeId, NgFailureEvent, TaskId
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -820,7 +820,10 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
     async def _release(self, session: _BuildSession) -> None:
         await self._release_sandbox(session)
-        await asyncio.to_thread(shutil.rmtree, session.scratch_dir, ignore_errors=True)
+        # Shielded like the stop, so a close that a disconnect cancels still removes the scratch files and then,
+        # with no await left, its record and fence.
+        with anyio.CancelScope(shield=True):
+            await asyncio.to_thread(shutil.rmtree, session.scratch_dir, ignore_errors=True)
 
     async def shutdown(self) -> None:
         for session_id, session in list(self._sessions.items()):

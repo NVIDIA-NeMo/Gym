@@ -224,6 +224,13 @@ GitHub-hosted checks such as lint, copyright, secrets, DCO, and the Fern preview
 may still run directly. The trust gate prevents unreviewed contributor code
 from executing on NVIDIA runners.
 
+The same approval also starts the `Suggest Reviewers` workflow
+(`.github/workflows/suggest-reviewers.yml`). It runs on the `pull-request/<n>`
+mirror push and requests reviewers from the `# suggest:` lines in
+`.github/CODEOWNERS`. Suggestions are advisory and not a merge requirement, and
+draft PRs are skipped. To re-run it for an open PR, dispatch
+`gh workflow run suggest-reviewers.yml -f pr_number=<n>`.
+
 Run the checks applicable to your diff before you push:
 
 ```bash
@@ -349,10 +356,15 @@ and requires dataset license fields and a config `domain`. New source files
 need the SPDX header, and the server needs at least one test. New legacy configs
 start with `verified: false`; maintainers change that only after baselining.
 
-The manifest scaffold and the legacy five-row server validator currently use
-different layouts. Do not create duplicate legacy artifacts solely to make a
-manifest workload look like an unmigrated server; report a scaffold/CI mismatch
-on the PR so the underlying validator contract can be corrected.
+A resources server that only manifest workloads use is validated through those
+manifests instead. The same command checks every manifest workload that names
+the server, without downloading its dataset, runs the server's committed
+verifier fixture against each workload's reward contract, and rejects
+`*conflict*` artifacts. This applies when at least one manifest workload names
+the server and `data/` holds neither `example_metrics.json` nor
+`example_rollouts.jsonl`; either file keeps the server on the legacy five-example
+contract above. Do not create legacy artifacts solely to make a manifest
+workload look like an unmigrated server.
 
 ### Periodic and On-Demand Coverage
 

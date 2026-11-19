@@ -50,6 +50,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from pydantic import BaseModel, TypeAdapter
 
 from nemo_gym.core.episode_types import is_materialized_task_row
+from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 
 
 TASK_DATA_MODULE_NAME = "task_data"
@@ -64,10 +65,16 @@ RESERVED_ROW_KEYS = frozenset(
         "responses_create_params",
         # A multi-turn row's requests, one per turn beside ``task_data`` (the Harbor materializer's ``turns``).
         "turns",
+        # Each participant role's agent context, outside the Resources Server's TaskData. Reserving it for schema
+        # projection does not declare support in every environment: each environment validates its own task input
+        # and refuses roles it does not have.
+        AGENT_CONTEXT_KEY_NAME,
         "agent_ref",
         "task_source",
         "_ng_task_index",
         "_ng_rollout_index",
+        "_ng_skip_token_capture",
+        "_rowidx",  # NeMo RL uses this to correlate streamed rows, not as task input.
     }
 )
 
@@ -76,18 +83,40 @@ class TaskDataSchemaError(Exception):
     """A server's ``task_data.py`` exists but does not satisfy the protocol."""
 
 
+# Files that mark ``<base_folder>/<server>/`` as a server's source directory. The CLI accepts a server
+# directory on ``requirements.txt`` / ``pyproject.toml`` (``nemo_gym/cli/env.py::_resolve_server_dir``);
+# the data tooling also accepts the module it is looking for, so a server that ships only a schema (or
+# only a metrics hook) and no installable requirements still resolves.
+SERVER_DIR_MARKERS = ("requirements.txt", "pyproject.toml", TASK_DATA_MODULE_NAME + ".py", "dataset_metrics.py")
+
+
+def _looks_like_server_dir(path: Path) -> bool:
+    """Whether ``path`` is a server's source directory, not merely a directory of that name.
+
+    The search roots put the cwd before the install root, so a bare ``is_dir`` check resolved the lookup to
+    any ``<cwd>/<base_folder>/<server>/`` directory, found no ``task_data.py`` there, and skipped validation
+    silently (NVBug 6900465). Until #5997 ``gym dataset collate`` created exactly that directory itself from
+    any cwd outside the checkout (it wrote the prepared file next to the cwd-relative ``jsonl_fpath``); the
+    prepared file now goes to the run's output directory, but a directory of that shape still exists
+    wherever an earlier collate ran, or where a dataset is kept under ``<base_folder>/<server>/data/``.
+    """
+    return path.is_dir() and any((path / marker).is_file() for marker in SERVER_DIR_MARKERS)
+
+
 def find_server_dir(server_name: str, base_folder: str = "resources_servers") -> Optional[Path]:
     """Locate ``<base_folder>/<server_name>`` via the shared component search roots.
 
     Resolves against ``_resolve_under_cwd_or_install`` (extra plugin roots first, then cwd, then
-    the Gym install root), without the CLI's venv-marker requirement (a schema can exist for a
-    server whose venv was never set up). Self-contained agents (which verify in-process) keep
-    their schemas under ``responses_api_agents/<name>/``.
+    the Gym install root). A candidate counts only when it holds one of ``SERVER_DIR_MARKERS``: a
+    directory that holds only Gym's own collate output never shadows the real server directory. The
+    CLI's venv-marker requirement is not applied (a schema can exist for a server whose venv was never
+    set up). Self-contained agents (which verify in-process) keep their schemas under
+    ``responses_api_agents/<name>/``.
     """
     from nemo_gym import _resolve_under_cwd_or_install
 
-    candidate = _resolve_under_cwd_or_install(Path(base_folder) / server_name, validator=Path.is_dir)
-    return candidate if candidate.is_dir() else None
+    candidate = _resolve_under_cwd_or_install(Path(base_folder) / server_name, validator=_looks_like_server_dir)
+    return candidate if _looks_like_server_dir(candidate) else None
 
 
 def load_task_data_schema(server_dir: Path) -> Optional[TypeAdapter]:
@@ -147,6 +176,9 @@ def normalize_task_fields(row: Dict[str, Any]) -> tuple[Dict[str, Any], List[str
         container = fields.pop(container_key, None)
         if isinstance(container, dict):
             for key, value in container.items():
+                if container_key == TASK_DATA_ROW_KEY and key == AGENT_CONTEXT_KEY_NAME:
+                    # single_agent_turn also accepts the context here; its TaskData excludes it in either place.
+                    continue
                 if key in fields and fields[key] != value:
                     conflicts.append(key)
                     continue

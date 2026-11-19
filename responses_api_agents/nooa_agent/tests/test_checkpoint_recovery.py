@@ -91,7 +91,7 @@ class LocalWorkerSandbox:
         )
         return code
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, **_) -> None:
         self.events.append(("disconnect", ""))
 
 

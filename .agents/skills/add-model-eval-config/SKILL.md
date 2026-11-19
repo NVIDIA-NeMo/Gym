@@ -4,12 +4,13 @@ description: >
   Onboard a model for NeMo Gym evaluations and compose the complete eval config: the vLLM policy
   service, its wiring as the policy, the reasoning toggle, and each benchmark's own config from
   Gym's `benchmarks/<name>/`, then validate and smoke it. Use when a new model or checkpoint has to
-  be evaluated in Gym and no eval config exists yet; once the config is in hand, run it with
-  run-and-babysit-eval. Not for adding a benchmark (use add-benchmark). Triggered by: "add a model",
-  "new checkpoint", "serve this model in Gym", "model config", "vllm config", "enable thinking",
-  "reasoning parser", "tool call parser", "compare two models fairly", "eval config", "where does
-  the benchmark config come from", "run evaluations on model Y on benchmark Z with serving params
-  X".
+  be evaluated in Gym and no eval config exists yet, including a quantized export (NVFP4, FP8) of a
+  model that also runs in BF16. run-and-babysit-eval follows this skill itself when it is asked to
+  run a model that has no config yet, and runs the config this skill writes. Not for adding a
+  benchmark (use add-benchmark). Triggered by: "add a model", "new checkpoint", "serve this model in
+  Gym", "model config", "vllm config", "enable thinking", "reasoning parser", "tool call parser",
+  "compare two models fairly", "eval config", "where does the benchmark config come from", "add an
+  NVFP4 variant", "serve the quantized checkpoint with the BF16 settings".
 ---
 
 # Add a Model Config to Gym
@@ -30,6 +31,24 @@ A model in a Gym evaluation has two parts:
   extraction, `chat_template_kwargs`, `extra_body` and token information.
 
 ## 1. Read the model card first
+
+First list the benchmarks the config will run: several settings depend on them. Each setting has one
+owner:
+
+| Setting | Comes from | Goes to |
+| --- | --- | --- |
+| **From the model card** | | |
+| Sampling (`temperature`, `top_p`, `top_k`, `min_p`, ...) | The card, else the checkpoint's `generation_config.json` | The server default for what a benchmark leaves unset: `--generation-config auto`, or `--override-generation-config` in `extra_args` where the card and the file disagree. Never the client's `sampling_overrides`; the benchmark's own values win (section 3). |
+| Chat template | The checkpoint's own; another only when the card names it | `--chat-template <path>` in `extra_args`, only in that case (section 2). |
+| Reasoning on or off, and the switch's name | The card, and the template (`chat_template.jinja`) | `chat_template_kwargs` on the client, unless the benchmark sets it (section 3). |
+| Output budget | Never the card: the benchmark's | Nothing to set; record the card's value (section 3). |
+| **From the model and the planned benchmarks** | | |
+| Reasoning parser | The model family; needed when it reasons | `--reasoning-parser` in `extra_args`, `uses_reasoning_parser` on the client (sections 2, 3). |
+| Tool-call parser | The template's tool-call format; needed when any planned benchmark uses tools: its dataset rows carry `responses_create_params.tools`, or its `benchmarks/<name>/` config runs a tool-using agent (a coding, terminal or search agent) | `--enable-auto-tool-choice --tool-call-parser <p>` in `extra_args`. Without it, do not run a tool-using benchmark: tool calls come back as plain text and score about zero (and `tool_choice: auto` without `--enable-auto-tool-choice` is rejected). The smoke checks the tool calls (section 6). |
+| Context length | The model's limit (card or `config.json`) and the planned benchmarks' longest prompt plus output budget | `--max-model-len` in `extra_args`: at least what the benchmarks need, at most the model's limit. |
+| Multimodal limits | The planned benchmarks' most images (or other media) per request | vLLM's `--limit-mm-per-prompt` in `extra_args` (check its syntax in the image's vLLM). A text-only model does not run a vision benchmark. |
+| **From whoever deploys the model** | | |
+| Parallelism (tensor, pipeline, expert), `number_of_instances`, `--max-num-seqs`, `--gpu-memory-utilization`, nodes and GPUs per node | Their `services.policy` block or the serving params of the request | Use them as given; ask when none are given. This skill does not choose them, and they do not change the outputs (section 8). |
 
 Collect before writing anything: the context length, the recommended sampling settings, whether
 the model reasons (and which vLLM reasoning parser its family uses), its tool-call format (and the
@@ -113,6 +132,13 @@ otel:
   enabled: false # on by default; it needs the collector in the job's environment
 ```
 
+A deployment derived and validated elsewhere (for example by the team that quantized or serves the
+checkpoint) comes as a `services.policy` block: the model, the container, the parallelism, `extra_args`,
+`env`, `mounts` and `pre_command`. That block is the deployment spec. Use it as it is, add only your
+site's values (the node pool and the cluster), and write the rest of the config around it (sections 3
+and 4). Still read the model card (section 1) for the client settings and as a check: report a flag that
+disagrees with the card to the block's owner instead of changing it.
+
 `driver.gym_install.ref` is the Gym the job installs and scores the run with: the full 40-character
 hash of a commit reachable from public Gym's `main` or a release tag, with your benchmark; never a
 branch, and a tag resolved to its commit. Recovery (`gym eval resubmit --recover`) reads
@@ -193,6 +219,11 @@ What the client sends, and what it leaves to the server:
   `generation_config.json` with `--generation-config auto`, vLLM's defaults otherwise. A product
   deployment's sampling defaults are not evaluation settings. Leave the client's
   `sampling_overrides` unset for evaluation: it replaces the benchmark's sampling on every request.
+- The output budget is the benchmark's. A model card's recommended output length, or a rule derived from
+  it, is not an evaluation setting: record the card's value in your notes and keep the benchmark's budget,
+  so runs of different models stay comparable. Answers the budget cuts off are the model's result under
+  the benchmark's protocol. A benchmark that sets no budget leaves the output bounded by the window:
+  record `--max-model-len` with the results.
 - When the output budget alone exceeds `--max-model-len`, the client lowers it to fit the window
   (`refit_output_budget_to_window`, on by default) and records it in the model call's capture. A
   window that is too short therefore shows up as truncated answers, not as an error.
@@ -267,8 +298,10 @@ replaces a benchmark's `false`. The `run` keys come last, as `+key=value` overri
 files. So the model's settings from section 3 go in the same `run` mapping as the benchmark keys,
 while the benchmark's own settings (prompts, sampling, `num_repeats`, grading) stay as Gym ships them.
 
-Override scalars only, such as a sampling value or `num_repeats`, and record each as part of the run;
-section 8 says which a fair comparison keeps. A `run` key replaces a list as a whole: a key under a
+Override scalars only, and record each as part of the run; section 8 says which a fair comparison keeps.
+Of the benchmark's own settings only `num_repeats` may change, and only upward: more repeats measure the
+same protocol with a smaller standard error, while fewer repeats or a `limit` make the run a smoke
+(run-and-babysit-eval, section 6). A `run` key replaces a list as a whole: a key under a
 benchmark's `datasets` drops the dataset's `jsonl_fpath`, `type` and `prepare_script`. Never override a
 dataset list or a dataset's paths, and keep `split` and `config_paths` as this section sets them.
 
@@ -365,7 +398,11 @@ driver:
         num_repeats: 1
 ```
 
-`limit` counts tasks; the run log prints the tasks and the rows they become. Bound the smoke to
+`limit` counts tasks; the run log prints the tasks and the rows they become. It takes the first tasks of
+the input, which can all come from one part of the benchmark, so a smoke's score is never reported as the
+benchmark's. A score on part of a benchmark needs a named, versioned subset (a list of task ids, or a
+variant the benchmark ships) and is reported under that name; with no such subset, report no benchmark
+score. Bound the smoke to
 one allocation with the walltime and `resumable: {max_retries: 0, max_walltime: <the walltime>}`;
 when it completes, it cancels the chain's pending follow-up and sentinel itself (see run-and-babysit-eval, section 2).
 Then follow the [run-and-babysit-eval](../run-and-babysit-eval/SKILL.md) skill: `gym eval resubmit "$GYM_JOB_ID"
@@ -395,7 +432,7 @@ file may have changed since, and overrides mean nothing without it.
 | --- | --- |
 | The benchmark config: data, split, prompts, task limits. | Tensor, pipeline, data and expert parallelism; `number_of_instances`. |
 | Sampling settings the benchmark sets, and `num_repeats`. | `--max-num-seqs`, `--gpu-memory-utilization`, client concurrency. |
-| Weight quantization, `--dtype` and `--kv-cache-dtype` (or record each difference as part of the model). | |
+| Weight quantization, `--dtype` and `--kv-cache-dtype` (or record each difference as part of the model; a quantized export: section 9). | |
 | The judge model and the grading config. | Ports, container image, node layout. |
 | The benchmark's token budgets and timeouts. | `--max-model-len`, as long as it holds the benchmark's longest prompt plus its output budget. |
 | A reasoning switch the benchmark sets, and the Gym commit that scores the run. | |
@@ -409,6 +446,61 @@ not the deployment: record them with the results, because they change the output
 check treats the same split: a setting named as operational (timeouts, retries, ports,
 concurrency, paths, tracking) resumes with a warning, and any other changed setting refuses the
 resume and is named.
+
+## 9. A quantized variant
+
+A quantized export (NVFP4, FP8 or another format) of a model you also evaluate in BF16 is served with the
+BF16 config, except for the fields quantization requires. Anything else that moves makes the comparison
+with BF16 invalid. The quantization settings belong to the export: they come from its `config.json`, its
+`hf_quant_config.json` and the serving recipe that ships with it (a `vllm serve` command or its release
+notes), and whoever produced the export owns them. A deployment fix goes into the BF16 config, so both
+runs get it; never only into the quantized one.
+
+1. Check that the export came from the BF16 checkpoint before you write anything: `config.json` matches
+   the BF16 one outside `quantization_config`, and a few tensors the export keeps unquantized
+   (`exclude_modules` in `hf_quant_config.json`, such as the embeddings or `lm_head`) are byte-identical
+   to the BF16 checkpoint's. Also compare `generation_config.json`, including whether it exists: with
+   `--generation-config auto` its values are the defaults for every sampling setting a request leaves unset,
+   so a different file changes the sampling too. If the two differ, stop and ask the export's owner to
+   align them; do not override the benchmark's sampling to compensate. Record what you compared.
+2. Copy the BF16 config and change only these fields, each with a comment naming its source:
+   - `model` (and its mount): the export.
+   - `served_model_name`: the model's name without its precision suffix plus the export's actual
+     precision, such as `<model>-nvfp4` or `<model>-fp8`, never `<model>-bf16-nvfp4`, so the two runs never
+     merge.
+   - The KV-cache and state-cache dtypes (`--kv-cache-dtype`, a hybrid model's Mamba cache dtypes), only
+     where the export's serving recipe sets them. With no serving recipe, add none and ask the export's
+     owner for it. Never copy cache flags from another model's config: an uncited flag is a guess.
+3. Keep everything else as in BF16: the benchmark settings (section 8, left column), the parallelism, the
+   parsers, the chat template, `--max-model-len`, `--max-num-seqs`, `--gpu-memory-utilization`, the image,
+   `env`, the client and `driver.gym_install.ref`. Do not add `--quantization`: vLLM detects a quantized
+   export. If the export ships its own chat template, diff it against the BF16 one, serve the BF16 one and
+   report the difference to the export's owner. A slower load raises `health_check.timeout_seconds` in the
+   BF16 config, so both runs keep one limit.
+4. Resolve both (`gym eval submit --config <file> --resolve-only`) and diff them. Only these may differ:
+   the fields of step 2, each benchmark's `run.policy_model_name` (submit derives it from the served name),
+   and the MLflow fields of steps 5 and 6 (the precision tag, the `quantization_run_*` tags and the experiment name).
+   The `pair_id` and every other serving, benchmark and scoring setting stay identical. Run both at the same
+   Gym commit with the same `num_repeats`, and keep the policy timeout on the model (run-and-babysit-eval,
+   section 6). Repeat the diff after any change to the BF16 config.
+5. Tag both runs so they pair in MLflow: `mlflow_run_tags` with the precision and an id the two runs share,
+   for example `{precision: nvfp4, pair_id: <id>}`. The served name is not the pairing tag. Put the tags
+   where the BF16 config already tracks the run: under `driver.benchmarks.<name>.run` for live tracking, or
+   in the MLflow export it runs after the rollouts (`job.export.mlflow`, or a benchmark's
+   `driver.benchmarks.<name>.export.mlflow`). The keys are the same in both places. Merge them into the
+   existing tags and do not add a second exporter. Tags alone do not turn tracking on (it needs the tracking
+   URI, experiment and run name): if the BF16 config does not track, say that the pair is not recorded in
+   MLflow.
+6. Carry the export's provenance. When the quantization run was tracked (an MLflow run, for example) and
+   the requester gives its name, id or URL, add them as the tags `quantization_run_name`,
+   `quantization_run_id` and `quantization_run_url`, in the same place as step 5, and use the experiment
+   the requester names as `mlflow_experiment_name`. The evaluation run stays on your own tracking server and
+   keeps its own run name; the tags only link it to the quantization run. Do not copy that run's tracking URI
+   or experiment id. With no such run, there is nothing to carry.
+
+The smoke (section 6) of the quantized config reads the same fields as the BF16 one: a difference in the
+model's own faults (`evaluation_health.model.kinds`, `failures.response_failures.by_cause`) between the two
+smokes belongs to the export or its serving recipe, and goes to the export's owner.
 
 ## What this skill does not do
 
@@ -426,3 +518,6 @@ resume and is named.
 - [ ] The smoke run completes, and its health and answers look right.
 - [ ] The resolved config shows the intended served name, parallelism, parsers and reasoning switch.
 - [ ] Nothing in the "keep identical" column differs from the run you compare against.
+- [ ] A quantized variant's resolved config differs from the BF16 one only where section 9, step 4
+  allows, and both runs carry the pairing tags on the MLflow route they use (and the `quantization_run_*`
+  tags when the quantization run was tracked).

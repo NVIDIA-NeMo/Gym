@@ -8,5 +8,6 @@ simple_agent_with_compaction:
       model_server:
         type: responses_api_models
         name: policy_model
+      token_id_capture: true
       context_history:
         enabled: true

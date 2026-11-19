@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: 1
+aggregation_level: benchmark
+baseline:
+  mode: optimize
+candidate_experiments: 1
+margin_points: 1.0
+target_power: 0.80
+alpha: 0.05
+expected_delta_points: 0.0
+cells:
+  - model: model-a
+    benchmark: example-benchmark
+    baseline_std_points: 1.0
+    candidate_std_points: 1.0

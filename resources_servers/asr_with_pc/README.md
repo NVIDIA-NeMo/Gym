@@ -44,7 +44,8 @@ The `vllm_model` adapter accepts one of three mutually exclusive fields:
 
 - `audio_data`: a `data:audio/...;base64,...` URI embedded in the row.
 - `audio_path`: one audio file path resolved by the model server.
-- `audio_paths`: multiple audio file paths resolved by the model server.
+- `audio_paths`: multiple audio file paths resolved by the model server, as a
+  list or a JSON-encoded list of nonempty path strings.
 
 The adapter removes the selected metadata field and splices an `audio_url`
 content block into the user message before forwarding it to vLLM Chat

@@ -42,6 +42,7 @@ from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointRequest,
     CommitRequest,
     ForgetRequest,
+    ReleaseRequest,
     RestoreRequest,
     RetireRequest,
     dispatch_control,
@@ -85,7 +86,9 @@ class AgentHooks:
     def __init__(self) -> None:
         self.restored: list[RestoredAgentSession] = []
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: {"key": session_key} for session_key in session_keys}
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -388,6 +391,34 @@ async def test_every_worker_s_restarts_reach_the_coordinator_which_refuses_a_sco
     assert prepared["phase"] == "prepared" and prepared["report"]["restarts"] == ["q-a2", "r"]
 
 
+async def test_every_worker_s_first_seeds_in_flight_are_restarts_of_the_checkpoint(
+    socket_dir: str, tmp_path: Path
+) -> None:
+    def resources_worker() -> tuple[ResourcesParticipant, FastAPI]:
+        return ResourcesParticipant(MagicMock(), "exported"), FastAPI()
+
+    async with coordinated(socket_dir, resources_worker) as deployment:
+        first, second = deployment.links
+        # Each worker is seeding a rollout's first session, and its /seed_session request is in flight.
+        for link, episode_id in ((first, EpisodeId(rollout_id="r")), (second, EpisodeId(rollout_id="q", attempt=2))):
+            link.participant.seed_started(episode_id)
+            link.participant.request_started(None, counted=True)
+        prepared = await deployment.controller.prepare(CheckpointRequest(**control(timeout=2)))
+        with pytest.raises(RestartInScopeError):
+            await deployment.controller.commit(
+                CommitRequest(
+                    **control(checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r", "attempt": 0}])
+                )
+            )
+        await deployment.controller.resume(CheckpointRequest(**control()))
+        after = deployment.participant.readiness()
+
+    # Prepare did not wait for either seed, and the coordinator reports both workers' seeds as restarts.
+    assert prepared["phase"] == "prepared" and prepared["report"]["restarts"] == ["q-a2", "r"]
+    # After resume they are ordinary seeds again.
+    assert after.restarts == []
+
+
 async def test_a_lost_worker_blocks_the_checkpoint_until_resume(socket_dir: str, tmp_path: Path) -> None:
     async with coordinated(socket_dir, environment_worker) as deployment:
         _, second = deployment.links
@@ -420,13 +451,13 @@ async def test_a_worker_lost_between_readiness_and_export_fails_the_commit(socke
         await deployment.controller.prepare(CheckpointRequest(**control()))
         export = participant.export
 
-        async def export_after_the_worker_left(episode_ids: Optional[list[EpisodeId]]) -> list:
+        async def export_after_the_worker_left(episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list:
             # The commit has checked readiness; the worker holding r2 leaves before the export.
             await second.disconnect()
             async with asyncio.timeout(5):
                 while len(participant.workers) > 1:
                     await asyncio.sleep(0.01)
-            return await export(episode_ids)
+            return await export(episode_ids, checkpoint_id=checkpoint_id)
 
         participant.export = export_after_the_worker_left
         request = CommitRequest(
@@ -632,7 +663,7 @@ class SessionStates:
     def __init__(self) -> None:
         self.states: dict[str, JsonValue] = {}
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         return {session_id: self.states[session_id] for session_id in session_ids if session_id in self.states}
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
@@ -650,6 +681,42 @@ def resources_worker(*, routed: bool) -> Callable[[], tuple[ResourcesParticipant
         return ResourcesParticipant(SessionStates(), "exported"), app
 
     return make
+
+
+class LabelledSessionStates(SessionStates):
+    """Records the checkpoint IDs its exports were for and the retention sets its releases were given."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.exported_for: list[str] = []
+        self.released: list[frozenset[str]] = []
+
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
+        self.exported_for.append(checkpoint_id)
+        return await super().export_session_states(session_ids, checkpoint_id=checkpoint_id)
+
+    async def delete_external_state(self, kept: frozenset[str]) -> None:
+        self.released.append(kept)
+
+
+async def test_every_worker_s_export_gets_the_checkpoint_id_and_every_worker_releases(
+    socket_dir: str, tmp_path: Path
+) -> None:
+    def make() -> tuple[ResourcesParticipant, FastAPI]:
+        return ResourcesParticipant(LabelledSessionStates(), "exported"), FastAPI()
+
+    async with coordinated(socket_dir, make) as deployment:
+        for index, link in enumerate(deployment.links):
+            link.participant.hooks.states[f"s{index}"] = index
+            link.participant.seeded(f"s{index}", EpisodeId(rollout_id=f"r{index}"))
+        await commit(deployment, tmp_path / "c7", ["r0", "r1"], checkpoint_id="c7")
+        await deployment.controller.resume(CheckpointRequest(**control("c7")))
+        await deployment.controller.release(ReleaseRequest(**control("c7", kept=["c6", "c7"])))
+        hooks = [link.participant.hooks for link in deployment.links]
+
+    assert [worker.exported_for for worker in hooks] == [["c7"], ["c7"]]
+    assert [worker.released for worker in hooks] == [[frozenset({"c6", "c7"})]] * 2
+    assert sorted(record["session_id"] for record in records(tmp_path / "c7", "resources")) == ["s0", "s1"]
 
 
 async def test_sessions_of_a_single_process_server_are_claimed_by_their_holders_through_later_restores(
@@ -1543,17 +1610,47 @@ async def test_a_stale_restored_agent_session_and_its_live_copy_export_once_and_
     assert retired == ["k"] and not stale_left
 
 
+class _AllAtOnce:
+    """A gate each deletion waits at until all ``expected`` have started, so overlap is shown without timing.
+
+    A deletion that can only start after an earlier one finished leaves that earlier one waiting at the gate
+    until its bounded wait gives up, which makes ``overlapped`` false; the bound keeps that failure from
+    hanging the test.
+    """
+
+    def __init__(self, expected: int) -> None:
+        self.expected = expected
+        self.started = 0
+        self.opened = asyncio.Event()
+        self.gave_up = False
+
+    async def arrive(self) -> None:
+        self.started += 1
+        if self.started == self.expected:
+            self.opened.set()
+        try:
+            await asyncio.wait_for(self.opened.wait(), timeout=10)
+        except TimeoutError:
+            self.gave_up = True
+
+    @property
+    def overlapped(self) -> bool:
+        return self.opened.is_set() and not self.gave_up
+
+
 async def test_stale_copies_on_several_workers_are_deleted_at_once(socket_dir: str, tmp_path: Path) -> None:
+    keys = [f"k{index}" for index in range(6)]
+    gate = _AllAtOnce(len(keys))
+
     class SlowRetire(AgentHooks):
         async def retire_agent_session(self, session_key: str) -> None:
-            await asyncio.sleep(0.3)
+            await gate.arrive()
 
     def slow_agent_worker() -> tuple[AgentSessionParticipant, FastAPI]:
         app = FastAPI()
         app.state.nemo_gym_routing_id = uuid4().hex
         return AgentSessionParticipant(SlowRetire()), app
 
-    keys = [f"k{index}" for index in range(6)]
     async with coordinated(socket_dir, agent_worker) as before:
         for index, key in enumerate(keys):
             before.links[index % 2].participant.open_session(key, EpisodeId(rollout_id=key))
@@ -1566,22 +1663,24 @@ async def test_stale_copies_on_several_workers_are_deleted_at_once(socket_dir: s
             # Every session is seeded again on the worker that does not hold its restored copy.
             [other] = [link for link in after.links if not link.participant.has_session(key)]
             other.participant.open_session(key, EpisodeId(rollout_id=key, attempt=1))
-        started = time.monotonic()
         await commit(after, tmp_path / "ckpt2", [f"{key}-a1" for key in keys], checkpoint_id="c2")
-        elapsed = time.monotonic() - started
         await after.controller.resume(CheckpointRequest(**control("c2")))
 
     assert len(records(tmp_path / "ckpt2", "agent")) == len(keys)
-    # Six deletions of 0.3 s each, three per worker: about one deletion's time, not their sum.
-    assert elapsed < 0.9, elapsed
+    # All six deletions, three per worker, were in progress together rather than one after another.
+    # Serial deletion usually fails earlier, when the gate's wait outlasts the checkpoint deadline.
+    assert gate.overlapped
 
 
 async def test_stale_resources_copies_on_several_workers_are_deleted_at_once(socket_dir: str, tmp_path: Path) -> None:
     """Restored resources sessions seeded again on the other worker: their stale copies go in about one teardown."""
 
+    sessions = [f"s{index}" for index in range(6)]
+    gate = _AllAtOnce(len(sessions))
+
     class SlowTeardownStates(SessionStates):
         async def retire_session_state(self, session_id: str) -> None:
-            await asyncio.sleep(0.3)
+            await gate.arrive()
             await super().retire_session_state(session_id)
 
     def slow_resources_worker() -> tuple[ResourcesParticipant, FastAPI]:
@@ -1589,7 +1688,6 @@ async def test_stale_resources_copies_on_several_workers_are_deleted_at_once(soc
         app.state.nemo_gym_routing_id = uuid4().hex
         return ResourcesParticipant(SlowTeardownStates(), "exported"), app
 
-    sessions = [f"s{index}" for index in range(6)]
     async with coordinated(socket_dir, resources_worker(routed=True)) as before:
         for index, session_id in enumerate(sessions):
             link = before.links[index % 2]
@@ -1605,16 +1703,15 @@ async def test_stale_resources_copies_on_several_workers_are_deleted_at_once(soc
             [other] = [link for link in after.links if session_id not in link.participant.hooks.states]
             other.participant.hooks.states[session_id] = "seeded again"
             other.participant.seeded(session_id, EpisodeId(rollout_id=session_id, attempt=1))
-        started = time.monotonic()
         await commit(after, tmp_path / "ckpt2", [f"{session_id}-a1" for session_id in sessions], checkpoint_id="c2")
-        elapsed = time.monotonic() - started
         await after.controller.resume(CheckpointRequest(**control("c2")))
 
     exported = records(tmp_path / "ckpt2", "resources")
     assert sorted(record["session_id"] for record in exported) == sessions
     assert {record["state"] for record in exported} == {"seeded again"}
-    # Six teardowns of 0.3 s each, three per worker: about one teardown's time, not their sum.
-    assert elapsed < 0.9, elapsed
+    # All six teardowns, three per worker, were in progress together rather than one after another.
+    # Serial teardown usually fails earlier, when the gate's wait outlasts the checkpoint deadline.
+    assert gate.overlapped
 
 
 # -- a cancelled or timed-out message stops the other side's handler -------------------------------
@@ -1629,7 +1726,7 @@ class SlowTeardown:
         self.peak = 0
         self.finished = 0
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, Any]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, Any]:
         return dict.fromkeys(session_ids, {})
 
     async def restore_session_states(self, states: dict[str, Any]) -> None:
@@ -1674,13 +1771,15 @@ async def test_a_slow_export_is_stopped_on_every_worker_before_resume_returns(so
     exporting: list[str] = []
 
     class SlowExport(AgentHooks):
-        async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+        async def export_agent_sessions(
+            self, session_keys: list[str], *, checkpoint_id: str
+        ) -> dict[str, dict[str, JsonValue]]:
             exporting.append("start")
             try:
                 await asyncio.sleep(5)
             finally:
                 exporting.append("stop")
-            return await super().export_agent_sessions(session_keys)
+            return await super().export_agent_sessions(session_keys, checkpoint_id=checkpoint_id)
 
     def slow_agent_worker() -> tuple[AgentSessionParticipant, FastAPI]:
         app = FastAPI()
@@ -1915,9 +2014,8 @@ async def test_status_adds_up_what_every_worker_reports(socket_dir: str) -> None
     assert marked["status_workers"] == 2
 
 
-async def test_status_answers_without_a_worker_that_does_not(socket_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(participant_workers_module, "_STATUS_TIMEOUT_SECONDS", 0.2, raising=False)
-
+async def test_status_answers_without_a_worker_that_does_not(socket_dir: str) -> None:
+    # The real status timeout, so the healthy worker's reply over the socket always arrives within it.
     def resources_worker() -> tuple[ResourcesParticipant, FastAPI]:
         return ResourcesParticipant(AsyncMock(), "exported"), FastAPI()
 
@@ -1936,7 +2034,8 @@ async def test_status_answers_without_a_worker_that_does_not(socket_dir: str, mo
         elapsed = time.monotonic() - started
 
     assert status["status_workers"] == 1 and status["workers"] == 2
-    assert elapsed < 1.0
+    # The stuck worker never answers, so returning at all shows the timeout; the bound only stops a hang.
+    assert elapsed < participant_workers_module._STATUS_TIMEOUT_SECONDS + 8
 
 
 async def test_status_reports_the_checkpoint_mode_when_no_worker_answers(
@@ -1962,6 +2061,21 @@ async def test_status_reports_the_checkpoint_mode_when_no_worker_answers(
 
     assert status["status_workers"] == 0
     assert (status["kind"], status["mode"]) == ("resources", "restart_only")
+
+
+@pytest.mark.parametrize(("hooks_type", "keeps"), [(LabelledSessionStates, True), (SessionStates, False)])
+async def test_status_reports_whether_the_workers_checkpoints_keep_state_outside_gym(
+    socket_dir: str, hooks_type: type[SessionStates], keeps: bool
+) -> None:
+    def make() -> tuple[ResourcesParticipant, FastAPI]:
+        return ResourcesParticipant(hooks_type(), "exported"), FastAPI()
+
+    async with coordinated(socket_dir, make) as deployment:
+        status = await dispatch_control(deployment.controller, "status", None)
+
+    # The coordinator answers for the workers: only where their hooks delete such state must a controller release.
+    assert status["status_workers"] == 2
+    assert status["keeps_external_state"] is keeps
 
 
 async def test_a_large_export_arrives_in_chunks_with_every_record(
@@ -2056,7 +2170,9 @@ class CheckpointedSessionAgent(SimpleResponsesAPIAgent):
         self.closes.append(state.request.agent_session_id)
         return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {key: {"request": self._session_state(key).request.model_dump(mode="json")} for key in session_keys}
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:

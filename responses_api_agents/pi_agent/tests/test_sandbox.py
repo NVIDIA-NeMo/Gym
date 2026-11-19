@@ -343,7 +343,7 @@ async def test_close_during_media_staging_stops_it_before_releasing_the_sandbox(
                 raise
         await upload(source, destination)
 
-    sandbox.disconnect.side_effect = lambda: order.append("sandbox released")
+    sandbox.disconnect.side_effect = lambda **_: order.append("sandbox released")
     with patch.object(sandbox, "upload", side_effect=blocked_media_upload):
         request, session_id, task = await start_image_activation(agent)
         await asyncio.wait_for(staging.wait(), 2)
@@ -610,6 +610,19 @@ def test_session_output_limit_uses_config_default(setup):
         assert client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"}).status_code == 200
         models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
         assert models["providers"]["nemo"]["models"][0]["maxTokens"] == 4096
+
+
+def test_session_remaining_context_policy_drops_the_output_cap(setup):
+    agent, sandbox = setup
+    agent.config.output_token_policy = "remaining_context"
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"}).status_code == 200
+        command = staged(sandbox)["command"]
+        extension = f"{sandbox.directory}/remaining-context.mjs"
+        assert command[command.index("--extension") + 1] == extension
+        assert sandbox.files[extension] == Path(__file__).parents[1].joinpath("remaining-context.mjs").read_text()
+        assert f"{sandbox.directory}/output-limit.mjs" not in command
 
 
 def test_invalid_session_config_output_limit_does_not_consume_activation(setup):
@@ -1211,7 +1224,7 @@ async def test_close_stops_each_activation_upload_before_releasing_the_sandbox(s
             raise
 
     sandbox.upload = stall
-    sandbox.disconnect.side_effect = lambda: events.append("sandbox released")
+    sandbox.disconnect.side_effect = lambda **_: events.append("sandbox released")
     request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
     seeded = await agent.seed_agent_session(request, seed_with_tools(mcp_grant("resources")))
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
@@ -1411,7 +1424,7 @@ async def test_concurrent_closes_share_the_saved_reply(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -2993,8 +3006,8 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, owned):
         await asyncio.Future()
 
     state.execute = pause_after_capture
-    sandbox.stop.side_effect = sandbox.files.clear
-    sandbox.disconnect.side_effect = sandbox.files.clear
+    sandbox.stop.side_effect = lambda **_: sandbox.files.clear()
+    sandbox.disconnect.side_effect = lambda **_: sandbox.files.clear()
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await asyncio.wait_for(captured.wait(), 2)
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id)))

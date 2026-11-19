@@ -187,6 +187,8 @@ def test_oracle_runs_the_solution_the_server_placed_in_the_borrowed_sandbox(monk
     assert payload["metadata"]["oracle"] == "solved"
     assert payload["metadata"]["oracle_return_code"] == "0"
     assert payload["output"][0]["content"][0]["text"] == "Done!\n"
+    # The oracle calls no model, so its zero usage, including cache reads, is a known zero.
+    assert payload["usage"]["input_tokens_details"]["cached_tokens"] == 0
     # The oracle uploads nothing: the environment server put /solution in place before the session opened.
     assert sandbox.uploads == []
     # It looks for the script as the task user, where Harbor's oracle copies the solution.
@@ -698,3 +700,13 @@ def test_concurrent_oracle_traces_name_their_task_and_episode(monkeypatch, caplo
         "world: episode r2-a1: running /solution/solve.sh as the sandbox default user in /app with a 120s budget",
         "world: episode r2-a1: /solution/solve.sh exited 3 (failed)",
     ]
+
+
+def test_several_workers_are_allowed() -> None:
+    """Oracle sessions are agent sessions, which session routing follows by agent_session_id."""
+    from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+
+    config = OracleAgentConfig(host="0.0.0.0", port=8081, entrypoint="", name="harbor_oracle_agent", num_workers=2)
+    agent = OracleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    refuse_unsupported_num_workers(agent)
+    assert agent.routes_sessions_to_owner
