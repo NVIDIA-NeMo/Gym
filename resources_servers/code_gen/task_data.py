@@ -37,7 +37,7 @@ class UnitTests(BaseModel):
 
 
 class AssertionTests(BaseModel):
-    """Assertions run after the candidate's code; mirrors ``AssertionTests`` in app.py."""
+    """Assertions run after the candidate's code; app.py grades with this model too."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -48,7 +48,7 @@ class AssertionTests(BaseModel):
 
 
 class ResourceLimits(BaseModel):
-    """A task's own limits; mirrors ``ResourceLimits`` in app.py."""
+    """A task's own limits; app.py grades with this model too."""
 
     model_config = ConfigDict(extra="forbid")
 
