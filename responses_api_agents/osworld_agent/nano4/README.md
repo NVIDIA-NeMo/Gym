@@ -6,7 +6,7 @@ The direct-library entrypoint requires the shared `model_protocol_agent` runner 
 
 ## Configuration
 
-Supply a local Git checkout of the matching producer. `reference.lock.json` records its commit and the exact source-file and prompt-profile hashes; loading verifies all of them. The producer is not vendored, and no model checkpoint, prompt dataset or serving asset is included here. The deployment must provide its own compatible tokenizer, chat template, reasoning parser and tool parser; this adapter alone does not establish the checkpoint's training protocol.
+Supply a local Git checkout of the matching producer. `reference_lock.py` records its commit and the exact source-file and prompt-profile hashes; loading verifies all of them. The producer is not vendored, and no model checkpoint, prompt dataset or serving asset is included here. The deployment must provide its own compatible tokenizer, chat template, reasoning parser and tool parser; this adapter alone does not establish the checkpoint's training protocol.
 
 ```python
 from responses_api_agents.osworld_agent.nano4.runtime import run_task

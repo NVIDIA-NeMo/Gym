@@ -12,9 +12,9 @@ owned by the pinned dependency rather than a second local implementation.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
-import json
 import os
 import subprocess
 import sys
@@ -23,8 +23,9 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from .reference_lock import REFERENCE_LOCK
 
-LOCK_FILE = Path(__file__).resolve().parent / "reference.lock.json"
+
 _LOAD_LOCK = threading.RLock()
 
 
@@ -36,7 +37,7 @@ class Reference:
     """One immutable producer profile, used directly for live rendering."""
 
     def __init__(self, root: Path | str | None = None) -> None:
-        self.lock = json.loads(LOCK_FILE.read_text())
+        self.lock = copy.deepcopy(REFERENCE_LOCK)
         location = root or os.environ.get("OSWORLD_V4_PROMPT_FORMAT_REPO")
         if not location:
             raise ValueError("Set OSWORLD_V4_PROMPT_FORMAT_REPO to the pinned reference checkout")

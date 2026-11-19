@@ -56,7 +56,6 @@ class ModelProtocol:
             for path in [
                 *sorted(root.glob("*.py")),
                 root / "templates/reference_chatml.jinja",
-                root / "reference.lock.json",
             ]
         }
         return {
