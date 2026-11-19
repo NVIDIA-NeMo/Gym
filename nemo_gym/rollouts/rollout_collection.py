@@ -179,6 +179,7 @@ from nemo_gym.rollouts.rollout_recovery import (
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.rollouts.tool_telemetry import record_tool_telemetry
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
+from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.concurrency import MeteredSemaphore
@@ -860,6 +861,9 @@ def _native_episode_record(row: Dict, response: Any) -> Dict:
         raise InvalidRolloutResult(str(error)) from error
 
 
+_NO_REPLY = object()
+
+
 @dataclass(frozen=True)
 class _CompletedRollout:
     """A finished ``/run`` dispatch, with timing carried alongside (not inside) the raw result."""
@@ -880,6 +884,9 @@ class _CompletedRollout:
     failure_report: Optional[FailureReport] = None
     # A failed `/run` with route_failures_to_sidecar off: the writer keeps evidence of it, then raises this error.
     run_error: Optional[BaseException] = None
+    # With keep_replies, what an untyped dispatch resolves to: the `/run` reply as it arrived (`null` included), or
+    # its failure row. A row never sent has none.
+    reply: Any = _NO_REPLY
 
 
 def _collection_failure_report(exc: BaseException, failure_class: str, headers: Any) -> FailureReport:
@@ -1113,6 +1120,37 @@ def _returned_observation_envelopes(result: Any) -> list[tuple[dict[str, Any], s
     return envelopes
 
 
+def _project_returned_observations(result: Any, schema_version: Callable[[], Optional[str]]) -> None:
+    """Project a raw reply's 2.0 producer observations to 1.0 in place, unless ``schema_version()`` selects 2.0.
+
+    Raw producer evidence stays qualified until the caller-facing boundary; ``schema_version`` is asked only when the
+    reply has some. Malformed evidence is kept intact, as raw dispatch keeps it.
+    """
+    envelopes = _returned_observation_envelopes(result)
+    if not any(
+        isinstance(container.get(key), dict) and container[key].get("schema_version") == "2.0"
+        for container, trajectory_key, bundle_key in envelopes
+        for key in (trajectory_key, bundle_key)
+    ):
+        return
+    if schema_version() == "2.0":
+        return
+    for container, trajectory_key, bundle_key in envelopes:
+        trajectory, bundle = container.get(trajectory_key), container.get(bundle_key)
+        if trajectory is not None and not isinstance(trajectory, dict):
+            continue
+        if bundle is not None and not isinstance(bundle, dict):
+            continue
+        try:
+            projected, projected_bundle = project_result_v1(trajectory or {}, bundle)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        if trajectory_key in container and trajectory is not None:
+            container[trajectory_key] = projected
+        if bundle_key in container and projected_bundle is not None:
+            container[bundle_key] = projected_bundle
+
+
 async def _enrich_returned_result(
     row: dict[str, Any], result: dict[str, Any], rollout_latency_ms: Optional[float], **options: Any
 ) -> dict[str, Any]:
@@ -1261,6 +1299,33 @@ def _shard_record(
     record[RUN_ID_KEY] = run_id
     _record_policy_model_server(record, global_config, agent_name)
     return record
+
+
+def _checkpoint_refusal(completed: "_CompletedRollout") -> Optional[Dict[str, Any]]:
+    """The omitted-rollout marker for a `/run` refused because a checkpoint has admission closed, else None.
+
+    The refusal comes before the rollout starts, so it is not a failure of the rollout: it carries the marker of a row
+    the dispatch budget never started, which every reader skips, so it debits no attempt and a later call that
+    dispatches the row again records its outcome.
+    """
+    diagnostics = completed.diagnostics or {}
+    if diagnostics.get("_ng_failure_http_status") != AdmissionClosedError.status_code:
+        return None
+    body = diagnostics.get("_ng_failure_response_body")
+    try:
+        code = orjson.loads(body)["error"]["code"] if isinstance(body, str) else None
+    except (ValueError, KeyError, TypeError):
+        return None
+    if code != AdmissionClosedError.code:
+        return None
+    return {
+        NG_FAILURE_CLASS_KEY: CANCELLED,
+        NG_NO_PERSIST_KEY: True,
+        NG_DISPATCH_DRAINED_KEY: True,
+        "_ng_failure_message": "not started: a checkpoint has admission closed",
+        "_ng_failure_http_status": AdmissionClosedError.status_code,
+        "_ng_failure_response_body": body,
+    }
 
 
 def _reflect_enrichment(result: Any, record: Dict[str, Any]) -> None:
@@ -3389,13 +3454,14 @@ class _RowResultIterator:
     """Map completion metadata to ``(row, result)`` for the direct collection APIs.
 
     A thin map over the internal completion iterator that keeps its ``aclose()`` reachable, so a
-    direct caller can stop collecting and cancel the rollouts still in flight.
+    direct caller can stop collecting and cancel the rollouts still in flight. ``enrich`` may return the
+    ``(row, result)`` pair to hand out instead of the completion's own.
     """
 
     def __init__(
         self,
         completions: Iterator[Future],
-        enrich: Optional[Callable[["_CompletedRollout"], Awaitable[Any]]] = None,
+        enrich: Optional[Callable[["_CompletedRollout"], Awaitable[Optional[Tuple[Dict, Any]]]]] = None,
         on_close: Optional[Callable[[], None]] = None,
     ):
         self._completions = completions
@@ -3420,7 +3486,9 @@ class _RowResultIterator:
     async def _without_metadata(self, future: Future) -> Tuple[Dict, Dict | RolloutFailureRecord]:
         completed = await future
         if self._enrich is not None:
-            await self._enrich(completed)
+            handed_out = await self._enrich(completed)
+            if handed_out is not None:
+                return handed_out
         return completed.row, completed.result
 
     async def aclose(self) -> None:
@@ -3475,15 +3543,16 @@ class _RowResultIterator:
                 outcome.exception()
             else:
                 result = task.result()
+                handed_out = None
                 if self._enrich is not None:
                     try:
-                        await self._enrich(result)
+                        handed_out = await self._enrich(result)
                     except Exception as enrich_error:
                         outcome.set_exception(enrich_error)
                         outcome.exception()
                         outcomes.append(outcome)
                         continue
-                outcome.set_result((result.row, result.result))
+                outcome.set_result(handed_out or (result.row, result.result))
             outcomes.append(outcome)
         self._finish()
         return outcomes
@@ -5568,6 +5637,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         run_timing: Optional[RunTimingReport] = None,
         record_unrouted_failures: bool = False,
         _connect_grace_s: Optional[float] = None,
+        keep_replies: bool = False,
+        clear_captures_in: Sequence[Path] = (),
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -5575,6 +5646,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``record_unrouted_failures`` returns a failed `/run` that ``route_failures_to_sidecar`` would route as a
         failure row whose ``run_error`` holds the error, so the collection writer can keep evidence of it before it
         raises the error. Other callers keep receiving the exception.
+
+        ``keep_replies`` also sets each completion's ``reply`` to what the same dispatch without ``typed_outcomes``
+        and ``validate_results`` returns: the `/run` reply untouched (validation and translation work on a copy), a
+        reply validation refused included, or the ``_ng_failure_*`` row of a failed `/run`.
+
+        ``clear_captures_in`` clears each row's model-call capture in those directories once the row is admitted, just
+        before its `/run`, so a row never started keeps whatever an earlier dispatch captured under its id.
 
         When ``max_resident_tasks`` is set, at most that many rollout tasks are admitted
         at once. When unset, all examples are scheduled as before. The collection
@@ -5679,6 +5757,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                     )
 
+                if clear_captures_in:
+                    clear_model_call_captures_for_rollouts([row], list(clear_captures_in))
                 if is_global_aiohttp_client_request_debug_enabled():
                     print(
                         "[rollout_collection] /run dispatch "
@@ -5690,6 +5770,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 if run_timing is not None:
                     run_timing.record_start(started)
                 res = None
+                reply = _NO_REPLY
                 stage = "request"
                 attempt_errors: list[Exception] = []
                 succeeded = False
@@ -5735,6 +5816,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     await raise_for_status(res)
                     stage = "response"
                     result = await get_response_json(res)
+                    if keep_replies:
+                        reply, result = result, copy.deepcopy(result)
                     if (typed_outcomes or validate_results) and _materialized_taskset(row) is not None:
                         stage = "result"
                         result = _native_episode_record(row, result)
@@ -5767,6 +5850,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
                         failure_report=FailureHeader.decode(getattr(res, "headers", None)),
+                        reply=reply,
                     )
                 except Exception as e:
                     print(
@@ -5798,6 +5882,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     failure = _agent_request_failure_row(
                         e, status, getattr(e, "headers", None) or getattr(res, "headers", None)
                     )
+                    if keep_replies and not (isinstance(e, InvalidRolloutResult) and reply is not _NO_REPLY):
+                        # Without validation the reply would have come back as it arrived.
+                        reply = dict(failure)
                     if (
                         (typed_outcomes or validate_results)
                         and isinstance(e, (InvalidRolloutResult, orjson.JSONDecodeError))
@@ -5830,6 +5917,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             getattr(e, "headers", None) or getattr(res, "headers", None),
                         ),
                         run_error=None if route_failures_to_sidecar else e,
+                        reply=reply,
                     )
                 finally:
                     # Failed and timed-out tasks inform the adaptive margin too, but only by
@@ -5920,6 +6008,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         record_omitted_rollouts: bool = False,
         scope_rollout_ids: bool = True,
         record_sink: Optional[RecordSink] = None,
+        return_plain_results: bool = False,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -6011,10 +6100,28 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         ``scope_rollout_ids=False`` keeps each row's own id instead, for a caller whose ids are already unique across
         calls (a trainer that tracks rollouts and token capture by the id it dispatched). Rows that would share an id
-        in one call are still refused, but nothing checks across calls: a row dispatched again under an id an earlier
-        call used (a step replayed under the same shard label, or a returned row fed back with its id) shares that
-        call's capture file, and the later shard's records silently carry the earlier shard's model calls. It only
-        applies with ``record_output_dir``: a call that records no shard already dispatches each row under its own id.
+        in one call are still refused. An id naming a restored attempt (``<id>-a<N>``) is recorded as rollout ``<id>``,
+        attempt ``N``, under the same capture key. A row dispatched again under an id an earlier call used (a step
+        replayed under the same shard label, or a row refused at a checkpoint and sent again) has its model-call
+        capture cleared when it is dispatched, just before its `/run`, so the later shard's records carry only their
+        own model calls; a row this call never starts keeps the earlier capture. That takes ids unique across
+        everything sharing the capture directory, and a caller that sends a row again while an earlier `/run` under
+        its id may still be running has the two share the capture. It only applies with ``record_output_dir``: a call
+        that records no shard already dispatches each row under its own id.
+
+        ``return_plain_results`` records the shard as above but hands back what the same call without
+        ``record_output_dir`` returns: the caller's own rows, routed in place (``agent_ref`` resolved from
+        ``task_source``), with each `/run` reply as it arrived (observations projected to the returned schema, as an
+        unrecorded call projects them), and a failed `/run` as its ``_ng_failure_*`` row rather than a
+        ``RolloutFailureRecord``. Nothing is enriched on the returned results; the shard and ``record_sink`` have the
+        enriched records. It is for a caller whose handling of results predates recording, such as a trainer that
+        reads failure rows. It needs ``record_output_dir`` and ``route_failures_to_sidecar``, and excludes
+        ``enrich_results``.
+
+        In a recorded shard, a `/run` refused because a checkpoint has admission closed is kept as a never-started
+        omitted-rollout row (with ``record_omitted_rollouts``), like a row the dispatch budget never started: readers
+        count no attempt or failure for it, so a later call that sends the row again records its outcome. The call
+        still returns the refusal as it returns any failed `/run`.
 
         ``gym eval run`` with
         ``+input_jsonl_fpath=<dir>/rollouts-<shard>_materialized_inputs.jsonl +output_jsonl_fpath=<dir>/rollouts-<shard>.jsonl
@@ -6041,16 +6148,38 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             getattr(record_sink, "__call__", None)
         ):
             raise TypeError("record_sink is called, not awaited: pass a plain function that hands slow work off")
+        if return_plain_results and record_output_dir is None:
+            raise ValueError(
+                "return_plain_results returns plain results beside a recorded shard: it needs record_output_dir"
+            )
+        if return_plain_results and enrich_results:
+            raise ValueError("return_plain_results returns results without enrichment, so it excludes enrich_results")
+        if return_plain_results and not route_failures_to_sidecar:
+            raise ValueError(
+                "return_plain_results needs route_failures_to_sidecar: without it, a reply the shard's validation "
+                "refuses would raise where the unrecorded call returns it"
+            )
         enrich_results = enrich_results or record_output_dir is not None
         if delete_model_call_capture and not include_model_call_payloads:
             raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")
         enrich = None
+        returned_schema = trajectory_schema_version
+
+        def returned_schema_version() -> Optional[str]:
+            """The schema a raw reply's observations are returned in, read from the config once it is needed."""
+            nonlocal returned_schema
+            if returned_schema is None:
+                returned_schema = ModelCallCaptureConfig.model_validate(
+                    self.setup_server_client(head_server_config).global_config_dict.get("model_call_capture") or {}
+                ).trajectory_schema_version
+            return returned_schema
+
         if enrich_results:
             global_config = self.setup_server_client(head_server_config).global_config_dict
             capture_dirs = model_call_capture_dirs_from_config(global_config)
             observability_enabled = observability_enabled_from_config(global_config)
 
-            async def enrich(completed: _CompletedRollout) -> None:
+            async def enrich(completed: _CompletedRollout) -> Optional[Tuple[Dict, Any]]:
                 options = dict(
                     capture_dirs=capture_dirs,
                     observability_enabled=observability_enabled,
@@ -6065,11 +6194,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     await _enrich_returned_result(
                         completed.row, completed.result, completed.rollout_latency_ms, **options
                     )
-                    return
+                    return None
                 # The shard holds what collection would store: the stamped record, or the typed failure row for a
                 # failed /run, with the same enrichment, so the Store and the health check read it like an eval run.
+                stored = completed
+                refusal = _checkpoint_refusal(completed)
+                if refusal is not None:
+                    stored = replace(completed, result=refusal)
                 record = _shard_record(
-                    completed,
+                    stored,
                     run_id=writer.run_id,
                     global_config=global_config,
                     agent_name=self._agent_name_for_row(completed.row, global_config),
@@ -6077,45 +6210,24 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 await enrich_run_result(
                     completed.row, record, rollout_latency_ms=completed.rollout_latency_ms, **options
                 )
-                _reflect_enrichment(completed.result, record)
+                if not return_plain_results:
+                    _reflect_enrichment(completed.result, record)
                 writer.write(record)
+                if return_plain_results:
+                    # The reply was kept apart from the copy the record was built from; a row never sent has none.
+                    if completed.reply is _NO_REPLY:
+                        returned = completed.result
+                    else:
+                        returned = completed.reply
+                        _project_returned_observations(returned, returned_schema_version)
+                    return callers_rows.get(id(completed.row), completed.row), returned
+                return None
 
         else:
-            returned_schema = trajectory_schema_version
 
-            async def enrich(completed: _CompletedRollout) -> None:
-                # Raw producer evidence stays qualified until the caller-facing boundary.
+            async def enrich(completed: _CompletedRollout) -> Optional[Tuple[Dict, Any]]:
                 # Choosing a wire version does not opt into capture reads or enrichment.
-                nonlocal returned_schema
-                envelopes = _returned_observation_envelopes(completed.result)
-                if not any(
-                    isinstance(container.get(key), dict) and container[key].get("schema_version") == "2.0"
-                    for container, trajectory_key, bundle_key in envelopes
-                    for key in (trajectory_key, bundle_key)
-                ):
-                    return
-                if returned_schema is None:
-                    global_config = self.setup_server_client(head_server_config).global_config_dict
-                    returned_schema = ModelCallCaptureConfig.model_validate(
-                        global_config.get("model_call_capture") or {}
-                    ).trajectory_schema_version
-                if returned_schema == "2.0":
-                    return
-                for container, trajectory_key, bundle_key in envelopes:
-                    trajectory, bundle = container.get(trajectory_key), container.get(bundle_key)
-                    if trajectory is not None and not isinstance(trajectory, dict):
-                        continue
-                    if bundle is not None and not isinstance(bundle, dict):
-                        continue
-                    try:
-                        projected, projected_bundle = project_result_v1(trajectory or {}, bundle)
-                    except (AttributeError, KeyError, TypeError, ValueError):
-                        # Keep malformed producer evidence intact, as raw dispatch did.
-                        continue
-                    if trajectory_key in container and trajectory is not None:
-                        container[trajectory_key] = projected
-                    if bundle_key in container and projected_bundle is not None:
-                        container[bundle_key] = projected_bundle
+                _project_returned_observations(completed.result, returned_schema_version)
 
         dispatched = examples
         run_id = None
@@ -6142,18 +6254,26 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 # refused before dispatch and before the shard is replaced.
                 sources: Dict[str, Tuple[int, str]] = {}
                 for index, (row, copy) in enumerate(zip(examples, dispatched)):
-                    scoped = copy[ROLLOUT_ID_KEY_NAME] = (
-                        _shard_rollout_id(row, run_id) if scope_rollout_ids else logical_rollout_id(dict(row))
-                    )
+                    if scope_rollout_ids:
+                        source = logical_rollout_id(dict(row))
+                        scoped = copy[ROLLOUT_ID_KEY_NAME] = _shard_rollout_id(row, run_id)
+                    else:
+                        # A restored attempt's id carries its attempt (`<id>-a<N>`). The record keys the rollout and
+                        # the attempt apart, as collection does; the capture key is unchanged.
+                        source = maybe_rollout_id_from_run_body(row)
+                        episode = EpisodeId.from_capture_key(source)
+                        scoped = copy[ROLLOUT_ID_KEY_NAME] = episode.rollout_id
+                        copy[ATTEMPT_INDEX_KEY_NAME] = episode.attempt
                     check_rollout_id_length(scoped)  # the run-id prefix makes a long id longer
                     if scoped in sources:
-                        first, source = sources[scoped]
+                        first, first_source = sources[scoped]
                         raise ValueError(
-                            f"Recording rows {first} and {index} (rollout ids {source!r} and "
-                            f"{logical_rollout_id(dict(row))!r}) would share one rollout in this shard; give each row "
-                            "its own _ng_rollout_id, or its own task and rollout indices"
+                            f"Recording rows {first} and {index} (rollout ids {first_source!r} and {source!r}) would "
+                            "share one rollout in this shard; give each row its own _ng_rollout_id, or its own task "
+                            "and rollout indices"
                         )
-                    sources[scoped] = (index, logical_rollout_id(dict(row)))
+                    sources[scoped] = (index, source)
+        callers_rows = {id(sent): row for row, sent in zip(examples, dispatched)} if return_plain_results else {}
         completions = self._run_examples_with_metadata(
             dispatched,
             head_server_config=head_server_config,
@@ -6166,7 +6286,20 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             latency_tracker=latency_tracker,
             **({"retry_requests": False} if not retry_requests else {}),
             **({"typed_outcomes": route_failures_to_sidecar, "validate_results": True} if run_id is not None else {}),
+            **({"keep_replies": True} if return_plain_results else {}),
+            # An id an earlier call dispatched would otherwise append to that call's capture.
+            **(
+                {"clear_captures_in": capture_dirs}
+                if run_id is not None and record_output_dir is not None and not scope_rollout_ids
+                else {}
+            ),
         )
+        if return_plain_results:
+            # Routing is resolved on the dispatched copies; an unrecorded call resolves the caller's rows in place.
+            for row, sent in zip(examples, dispatched):
+                for key in (AGENT_REF_KEY_NAME, NG_ENVIRONMENT_SERVER_KEY):
+                    if key in sent:
+                        row[key] = sent[key]
         # Opened last, once the options, the config and the rows are known good, because opening replaces the shard.
         writer = None
         if record_output_dir is not None:
