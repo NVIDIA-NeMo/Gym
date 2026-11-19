@@ -256,16 +256,12 @@ def _start_ticks(pid: int) -> int | None:
 
 
 def _group_has_members(pgid: int) -> bool:
+    """Whether any process is in group ``pgid``, asked with one signal-0 system call."""
     try:
-        entries = os.listdir("/proc")
-    except OSError:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
         return False
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        try:
-            if os.getpgid(int(entry)) == pgid:
-                return True
-        except (ProcessLookupError, PermissionError):
-            continue
-    return False
+    except PermissionError:
+        # A process in the group exists but belongs to another user.
+        return True
+    return True
