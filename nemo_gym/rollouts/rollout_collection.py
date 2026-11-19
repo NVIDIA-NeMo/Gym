@@ -18,6 +18,7 @@ import fcntl
 import functools
 import glob as glob_module
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -1302,6 +1303,10 @@ _SHARD_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs", "_attempts")
 
 
+RecordSink = Callable[[Literal["rollout", "failure", "omitted"], Dict[str, Any]], None]
+"""Receives each record a recorded shard writes, as ``(kind, record)``; see ``run_examples(record_sink=...)``."""
+
+
 class _RunRecordWriter:
     """Writes finished rollouts into a run folder the way ``ng_collect_rollouts`` lays it out, one shard at a time.
 
@@ -1318,7 +1323,9 @@ class _RunRecordWriter:
     and worker); Gym owns the file names. A result goes to the rollouts file, a failed one to the failures sidecar as
     the typed failure row collection writes, with its attempt cap, and an interrupted or never-started try to the
     sidecar as an omitted-rollout row only when ``record_omitted_rollouts`` is set. Opening a shard replaces what an
-    earlier run wrote under the same label, so a replayed step does not duplicate rows.
+    earlier run wrote under the same label, so a replayed step does not duplicate rows. ``sink``, when given, receives
+    each record after it is appended, as ``(kind, record)``: ``kind`` is ``"rollout"``, ``"failure"`` or ``"omitted"``,
+    and ``record`` is the line just written, read back.
     """
 
     def __init__(
@@ -1331,6 +1338,7 @@ class _RunRecordWriter:
         run_id: Optional[str] = None,
         status_rows: Optional[List[Dict[str, Any]]] = None,
         global_config: Any = None,
+        sink: Optional[RecordSink] = None,
     ) -> None:
         if not _SHARD_LABEL.fullmatch(shard):
             raise ValueError(f"shard label {shard!r} must be letters, digits, '_', '.' or '-', starting alnum")
@@ -1343,6 +1351,7 @@ class _RunRecordWriter:
         self.manifest_fpath = manifest_path_for(self.rollouts_fpath)
         self.status_fpath = batch_status_path_for(self.rollouts_fpath)
         self.record_omitted_rollouts = record_omitted_rollouts
+        self.sink = sink
         # The run this shard's typed failure records belong to, named by the shard's run manifest. The rows and
         # records stay untagged, as in an eval run written before run manifests, which the Store imports as well.
         self.run_id = run_id or uuid4().hex
@@ -1466,17 +1475,17 @@ class _RunRecordWriter:
                 if self._status_expected is not None and self._status_written >= self._status_expected:
                     self.flush_status()
                 return None
-            fpath, line = self.failures_fpath, orjson.dumps(omitted_rollout_record(result))
+            kind, fpath, line = "omitted", self.failures_fpath, orjson.dumps(omitted_rollout_record(result))
         elif result.get(NG_FAILURE_CLASS_KEY) is not None:
             # The cap this attempt ran under travels with it, as collection stamps it from the run manifest.
-            fpath = self.failures_fpath
+            kind, fpath = "failure", self.failures_fpath
             line = orjson.dumps(
                 result
                 if NG_FAILURE_MAX_ATTEMPTS_KEY in result
                 else {**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()}
             )
         else:
-            fpath, line = self.rollouts_fpath, orjson.dumps(result)
+            kind, fpath, line = "rollout", self.rollouts_fpath, orjson.dumps(result)
         with self._locked() as lock:
             lock.seek(0)
             if lock.read() != self._writer_token:
@@ -1490,12 +1499,16 @@ class _RunRecordWriter:
             with fpath.open("ab") as f:
                 f.write(line + b"\n")
             # The status follows under the same lock, so a writer superseded meanwhile cannot overwrite the newer
-            # writer's counts.
+            # writer's counts. It reads the line back, as the sink does, so both see exactly what the shard holds.
             if self._status is not None and self._status.enabled:
                 status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
                 (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
                 last = self._status_expected is not None and self._status_written >= self._status_expected
                 self._status.write_status(self._status_completed, self._status_failures, force=last)
+        if self.sink is not None:
+            # A copy of its own: the status keeps its rows until a throttled write, and a sink that edits its record
+            # (renaming a field for its table) must not change them.
+            self.sink(kind, orjson.loads(line))
         return fpath
 
     def flush_status(self) -> None:
@@ -2379,6 +2392,16 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "``dispatch_budget_s`` — a task that cannot finish is pure waste. When unset, the "
             "margin adapts to the run's own observed p75 task duration (after 5 completions), "
             "which needs no per-benchmark tuning. Ignored unless dispatch_budget_s is set."
+        ),
+    )
+
+    dispatch_reservation_interval_s: float = Field(
+        default=1.0,
+        ge=0,
+        description=(
+            "Least number of seconds between the run manifest writes that reserve dispatched attempts. Attempts "
+            "admitted within the interval share one write, so each rollout may wait up to the interval inside its "
+            "concurrency slot before its request is sent. 0 writes once per event-loop turn."
         ),
     )
 
@@ -3542,6 +3565,62 @@ class _RowResultIterator:
         return outcomes
 
 
+class _DispatchReservations:
+    """Persist attempt reservations in batches, each before any of its requests start.
+
+    A reservation after a quiet interval is written on the next event-loop turn. Later ones wait for the interval
+    to pass and share one write, so an admitted request waits at most ``interval_s`` for its reservation.
+    ``drained`` is asked again when the batch is due: a batch the dispatch budget ran out on while it waited is
+    neither reserved nor started.
+    """
+
+    def __init__(
+        self,
+        persist: Callable[[List[Dict]], None],
+        *,
+        interval_s: float,
+        drained: Callable[[], Optional[Dict]] = lambda: None,
+    ):
+        self._persist = persist
+        self._interval_s = interval_s
+        self._drained = drained
+        self._waiters: list[tuple[Dict, Future]] = []
+        self._last_write: Optional[float] = None
+
+    async def reserve(self, row: Dict) -> Optional[Dict]:
+        """None once the row's reservation is durable, else the drained result to return instead of dispatching."""
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        if not self._waiters:
+            delay = 0.0 if self._last_write is None else self._last_write + self._interval_s - time.monotonic()
+            if delay > 0:
+                loop.call_later(delay, self._flush)
+            else:
+                loop.call_soon(self._flush)
+        self._waiters.append((row, waiter))
+        return await waiter
+
+    def _flush(self) -> None:
+        batch = [(row, waiter) for row, waiter in self._waiters if not waiter.cancelled()]
+        self._waiters.clear()
+        if not batch:
+            return
+        drained = self._drained()
+        if drained is not None:
+            for _, waiter in batch:
+                waiter.set_result(dict(drained))
+            return
+        self._last_write = time.monotonic()
+        try:
+            self._persist([row for row, _ in batch])
+        except Exception as error:
+            for _, waiter in batch:
+                waiter.set_exception(error)
+        else:
+            for _, waiter in batch:
+                waiter.set_result(None)
+
+
 class _BoundedCompletionIterator:
     """Completion-order iterator with a bounded set of resident asyncio tasks."""
 
@@ -4668,6 +4747,7 @@ executions → not run again (left to recovery)
                 interleave_by_agent=True,
                 dispatch_budget_s=config.dispatch_budget_s,
                 drain_margin_s=config.drain_margin_s,
+                dispatch_reservation_interval_s=config.dispatch_reservation_interval_s,
                 latency_tracker=latency_tracker,
                 **({"run_timing": run_timing} if run_timing is not None else {}),
             )
@@ -5837,6 +5917,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         interleave_by_agent: bool = False,
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
+        dispatch_reservation_interval_s: float = 0.0,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
         _max_num_tries: Optional[int] = None,
@@ -5858,6 +5939,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
         ``drain_margin_s`` stops sooner for rows that would not have time to finish. A row
         drained this way resolves to a Gym-built ``_dispatch_drained_result``.
+
+        ``dispatch_reservation_interval_s`` spaces the ``on_dispatch_batch`` writes. The default, 0, writes once per
+        event-loop turn; collection passes its configured interval.
 
         Identical contract to ``run_examples``, but each future resolves to a ``_CompletedRollout``
         that carries ``rollout_latency_ms`` alongside the raw ``/run`` result instead of inside it,
@@ -5900,36 +5984,32 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # spent, and must drain rather than disable the check.
         deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s is not None else None
 
-        # Coalesce requests admitted on the same event-loop turn. Only rows that
-        # acquired a slot and passed the drain check enter this batch. Persist the
+        def drained_result() -> Optional[Dict[str, Any]]:
+            # Checked after a row acquires its slot, and again when its delayed reservation is due.
+            if deadline is None:
+                return None
+            remaining = deadline - time.monotonic()
+            margin = tracker.drain_margin(drain_margin_s)
+            if remaining <= 0 or (margin is not None and remaining < margin):
+                return _dispatch_drained_result(remaining, margin)
+            return None
+
+        # Only rows that acquired a slot and are still within the dispatch budget are reserved. Persist the
         # reservations before releasing any request to the server.
-        reservation_waiters: list[tuple[Dict, Future]] = []
+        reservations = (
+            _DispatchReservations(
+                on_dispatch_batch, interval_s=dispatch_reservation_interval_s, drained=drained_result
+            )
+            if on_dispatch_batch is not None
+            else None
+        )
 
-        def flush_reservations() -> None:
-            batch = [(row, waiter) for row, waiter in reservation_waiters if not waiter.cancelled()]
-            reservation_waiters.clear()
-            if not batch:
-                return
-            try:
-                on_dispatch_batch([row for row, _ in batch])
-            except Exception as error:
-                for _, waiter in batch:
-                    waiter.set_exception(error)
-            else:
-                for _, waiter in batch:
-                    waiter.set_result(None)
-
-        async def reserve_dispatch(row: Dict) -> None:
-            if on_dispatch_batch is None:
-                if on_dispatch is not None:
-                    on_dispatch(row)
-                return
-            loop = asyncio.get_running_loop()
-            waiter = loop.create_future()
-            if not reservation_waiters:
-                loop.call_soon(flush_reservations)
-            reservation_waiters.append((row, waiter))
-            await waiter
+        async def reserve_dispatch(row: Dict) -> Optional[Dict[str, Any]]:
+            if reservations is not None:
+                return await reservations.reserve(row)
+            if on_dispatch is not None:
+                on_dispatch(row)
+            return None
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
             server_name = (
@@ -5942,18 +6022,18 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 # Drain check happens *after* acquiring a slot, so it sees the
                 # real remaining time at the moment this task would start rather
                 # than at queueing time.
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    margin = tracker.drain_margin(drain_margin_s)
-                    if remaining <= 0 or (margin is not None and remaining < margin):
-                        tracker.record_drained()
-                        return _CompletedRollout(
-                            row=row,
-                            result=_dispatch_drained_result(remaining, margin),
-                            rollout_latency_ms=None,
-                            environment_server=server_name,
-                            environment_server_type=server_type,
-                        )
+                drained = drained_result()
+                if drained is None:
+                    drained = await reserve_dispatch(row)
+                if drained is not None:
+                    tracker.record_drained()
+                    return _CompletedRollout(
+                        row=row,
+                        result=drained,
+                        rollout_latency_ms=None,
+                        environment_server=server_name,
+                        environment_server_type=server_type,
+                    )
 
                 if is_global_aiohttp_client_request_debug_enabled():
                     print(
@@ -5968,7 +6048,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 res = None
                 stage = "request"
                 attempt_errors: list[Exception] = []
-                await reserve_dispatch(row)
                 succeeded = False
                 dispatch_span_context = None
                 try:
@@ -6196,6 +6275,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         record_shard: Optional[str] = None,
         record_omitted_rollouts: bool = False,
         scope_rollout_ids: bool = True,
+        record_sink: Optional[RecordSink] = None,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -6295,9 +6375,28 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``gym eval run`` with
         ``+input_jsonl_fpath=<dir>/rollouts-<shard>_materialized_inputs.jsonl +output_jsonl_fpath=<dir>/rollouts-<shard>.jsonl
         +resume_from_cache=true`` resumes a shard and runs only what it still lacks.
+
+        ``record_sink`` receives each record the shard writer appends, right after it is written, as ``(kind,
+        record)``: ``kind`` is ``"rollout"`` for the rollouts file, ``"failure"`` for a typed failure row (with the
+        model calls and agent observations captured before the failure, which the returned ``RolloutFailureRecord``
+        leaves out) and ``"omitted"`` for an omitted-rollout row; ``record`` is the line as written, read back. A caller
+        that keeps its own copy of the records (a database, a table store) gets the same lines as the shard. It runs
+        on the event loop before the row's result is returned, so it should hand slow work off; an exception it raises
+        is raised from that row's awaitable, after the record is already in the shard. It is called, not awaited, so a
+        coroutine function is refused. ``kind`` names the file the record is in, not its score: a failure row marked
+        ``_ng_failure_counts_as_zero`` still counts as the model's 0, so a copy that leaves failures out of its scores
+        must keep those. Reopening a shard replaces its files but not what the sink already received: a caller that
+        replays a step under the same label replaces its own copy of that label's records, and each record's
+        ``_ng_run_id`` names the call that wrote it. It needs ``record_output_dir``.
         """
         if record_output_dir is not None and not record_shard:
             raise ValueError("record_output_dir needs a record_shard label naming this call's shard")
+        if record_sink is not None and record_output_dir is None:
+            raise ValueError("record_sink receives the records a shard writes, so it needs record_output_dir")
+        if inspect.iscoroutinefunction(record_sink) or inspect.iscoroutinefunction(
+            getattr(record_sink, "__call__", None)
+        ):
+            raise TypeError("record_sink is called, not awaited: pass a plain function that hands slow work off")
         enrich_results = enrich_results or record_output_dir is not None
         if delete_model_call_capture and not include_model_call_payloads:
             raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")
@@ -6443,6 +6542,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 run_id=run_id,
                 status_rows=status_rows,
                 global_config=global_config,
+                sink=record_sink,
             )
         return _RowResultIterator(completions, enrich=enrich, on_close=writer.flush_status if writer else None)
 

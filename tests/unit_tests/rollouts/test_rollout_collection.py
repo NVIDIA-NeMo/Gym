@@ -421,6 +421,7 @@ class TestRecoveryDriverMetrics:
             disable_health_check=True,
             num_samples_in_parallel=1,
             max_resident_rollout_tasks=max_resident_tasks,
+            dispatch_reservation_interval_s=0.0,
         )
         calls = Counter()
 
@@ -690,6 +691,7 @@ class TestRolloutCollection:
             max_resident_rollout_tasks=max_resident_tasks,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
         dispatched = []
 
@@ -773,6 +775,7 @@ class TestRolloutCollection:
             num_samples_in_parallel=num_samples_in_parallel,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
         states_during_dispatch = []
 
@@ -832,6 +835,7 @@ class TestRolloutCollection:
             route_failures_to_sidecar=route_failures_to_sidecar,
             retain_results_in_memory=retain_results_in_memory,
             max_resident_rollout_tasks=1,
+            dispatch_reservation_interval_s=0.0,
         )
         materialized_rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         if resume_from_cache:
@@ -6685,6 +6689,7 @@ class TestRolloutCollection:
             max_resident_rollout_tasks=window,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
 
         results = await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=10)
@@ -6770,6 +6775,7 @@ class TestRolloutCollection:
             retain_results_in_memory=retain,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
 
         if with_batch_manifest:
@@ -9880,6 +9886,70 @@ class TestDispatchBudget:
         assert tracker.drained == 4
         assert all(result[NG_DISPATCH_DRAINED_KEY] for _row, result in drained)
 
+    @pytest.mark.parametrize(
+        "budget_s, margin_s, history",
+        [(0.5, 0.0, []), (1.5, 1.0, []), (1.5, None, [1.0] * 5)],
+        ids=["deadline", "margin", "adaptive-margin"],
+    )
+    async def test_a_row_the_budget_runs_out_on_while_its_reservation_waits_is_drained_unreserved(
+        self, monkeypatch: pytest.MonkeyPatch, budget_s: float, margin_s: float | None, history: list
+    ) -> None:
+        # Row 0 is reserved at once. Row 1 passes the drain check, then waits 1 s for the next manifest write.
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
+        posted: list = []
+        reserved: list = []
+        tracker = DispatchLatencyTracker()
+        for seconds in history:
+            tracker.record(seconds)
+
+        started = time.monotonic()
+        completions = self._helper(posted)._run_examples_with_metadata(
+            [self._row(0), self._row(1)],
+            semaphore=asyncio.Semaphore(1),
+            on_dispatch_batch=lambda rows: reserved.append([row[TASK_INDEX_KEY_NAME] for row in rows]),
+            dispatch_budget_s=budget_s,
+            drain_margin_s=margin_s,
+            dispatch_reservation_interval_s=1.0,
+            latency_tracker=tracker,
+        )
+        results = [(await future).result for future in completions]
+
+        assert posted == [0]
+        assert reserved == [[0]], "a row drained while waiting must not be reserved"
+        assert tracker.drained == 1
+        drained = [result for result in results if result.get(NG_DISPATCH_DRAINED_KEY)]
+        assert len(drained) == 1 and drained[0][NG_NO_PERSIST_KEY] is True
+        assert time.monotonic() - started >= 0.9, "row 1 must have passed the first check and waited"
+
+    async def test_the_rollout_timer_starts_after_the_reservation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Row 1 waits about 1 s for the next manifest write. That wait is not rollout time.
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
+        posted: list = []
+        reserved: list = []
+        tracker = DispatchLatencyTracker()
+
+        started = time.monotonic()
+        completions = self._helper(posted)._run_examples_with_metadata(
+            [self._row(0), self._row(1)],
+            semaphore=asyncio.Semaphore(1),
+            on_dispatch_batch=lambda rows: reserved.append([row[TASK_INDEX_KEY_NAME] for row in rows]),
+            dispatch_reservation_interval_s=1.0,
+            latency_tracker=tracker,
+        )
+        completed = {done.row[TASK_INDEX_KEY_NAME]: done for done in [await future for future in completions]}
+
+        assert reserved == [[0], [1]]
+        assert time.monotonic() - started >= 0.9, "row 1 must have waited for its reservation"
+        assert completed[1].rollout_latency_ms < 500
+        assert completed[1].elapsed_s < 0.5
+        assert tracker.quantile(1.0) < 0.5, "the drain margin history must not include the wait"
+
     async def test_drain_margin_blocks_a_task_that_cannot_finish(self, monkeypatch: pytest.MonkeyPatch) -> None:
         posted: list = []
         monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
@@ -10199,6 +10269,7 @@ class TestDispatchBudget:
                 count_missing_rollouts_as_zero=True,
                 record_omitted_rollouts=record_omitted,
                 disable_health_check=True,
+                dispatch_reservation_interval_s=0.0,
                 **overrides,
             )
 
@@ -14308,6 +14379,7 @@ class TestEnvironmentServerRouting:
                 route_failures_to_sidecar=route_failures,
                 retain_results_in_memory=retain_results,
                 max_resident_rollout_tasks=1,
+                dispatch_reservation_interval_s=0.0,
             )
 
         await RolloutCollectionHelper().run_from_config(config(resume=False))
@@ -15590,6 +15662,7 @@ class TestUnroutedRunFailure:
         return runs
 
     def _config(self, tmp_path: Path, n: int, **kwargs) -> RolloutCollectionConfig:
+        kwargs.setdefault("dispatch_reservation_interval_s", 0.0)
         return RolloutCollectionConfig(
             input_jsonl_fpath=str(self._input(tmp_path, n)),
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
@@ -15643,7 +15716,9 @@ class TestUnroutedRunFailure:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         self._install(monkeypatch, ClientPayloadError("Response payload is not completed"))
-        config = self._config(tmp_path, 3)
+        # Interval 0 reserves x=2 before the x=1 failure ends the run. At a nonzero interval x=2 may still be waiting
+        # for its reservation then and is never reserved, which is correct: its request was never sent.
+        config = self._config(tmp_path, 3, dispatch_reservation_interval_s=0.0)
         with pytest.raises(ClientPayloadError):
             await RolloutCollectionHelper().run_from_config(config)
 
@@ -16450,6 +16525,209 @@ class TestRunRecordWriter:
         assert len(failures) == (2 if record_omitted else 1)
         if record_omitted:
             assert failures[1][TASK_INDEX_KEY_NAME] == 2 and failures[1][NG_OMITTED_ROLLOUT_KEY] is True
+
+    def test_the_sink_receives_each_record_as_the_shard_holds_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        received: list[tuple[str, dict]] = []
+        writer = _RunRecordWriter(
+            tmp_path, "step_1", record_omitted_rollouts=True, sink=lambda kind, record: received.append((kind, record))
+        )
+        writer.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+        writer.write({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "agent_run_error"})
+        writer.write(
+            {
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "kill_shaped",
+                NG_NO_PERSIST_KEY: True,
+            }
+        )
+
+        assert [kind for kind, _ in received] == ["rollout", "failure", "omitted"]
+        assert [record for _, record in received] == self._lines(writer.rollouts_fpath) + self._lines(
+            writer.failures_fpath
+        )
+
+    def test_the_sink_gets_nothing_the_shard_does_not_keep(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        received: list[str] = []
+        writer = _RunRecordWriter(tmp_path, "step_1", sink=lambda kind, record: received.append(kind))
+        writer.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_NO_PERSIST_KEY: True})
+        superseded = writer
+        _RunRecordWriter(tmp_path, "step_1")
+        with pytest.raises(RuntimeError, match="replaced by another writer"):
+            superseded.write({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+
+        assert received == []
+
+    def test_a_sink_that_raises_leaves_the_record_and_later_records_in_place(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        received: list[dict] = []
+
+        def sink(kind: str, record: dict) -> None:
+            if record[TASK_INDEX_KEY_NAME] == 0:
+                raise OSError("table store unavailable")
+            received.append(record)
+
+        rows = [
+            {TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "a"}}
+            for index in range(2)
+        ]
+        writer = _RunRecordWriter(tmp_path, "step_1", sink=sink, status_rows=rows)
+        with pytest.raises(OSError, match="table store unavailable"):
+            writer.write({**rows[0], "reward": 1.0})
+        writer.write({**rows[1], "reward": 0.0})
+        writer.flush_status()
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in self._lines(writer.rollouts_fpath)] == [0, 1]
+        assert [record[TASK_INDEX_KEY_NAME] for record in received] == [1]
+        status = json.loads(writer.status_fpath.read_text())
+        assert status["members"]["a"]["completed_rollout_count"] == 2
+
+    def test_a_sink_that_edits_its_record_leaves_the_shard_and_its_status_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.rollouts import batch_status
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        # Every write but the last is throttled, so the status still holds the earlier rows when the sink edits them.
+        monkeypatch.setattr(batch_status, "BATCH_STATUS_WRITE_INTERVAL_SECONDS", 3600)
+
+        def sink(kind: str, record: dict) -> None:
+            record[AGENT_REF_KEY_NAME]["name"] = "table-a"
+
+        rows = [
+            {TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "a"}}
+            for index in range(3)
+        ]
+        writer = _RunRecordWriter(tmp_path, "step_1", sink=sink, rows=rows, status_rows=rows)
+        for row in rows:
+            writer.write({**row, "reward": 1.0})
+
+        assert {row[AGENT_REF_KEY_NAME]["name"] for row in self._lines(writer.rollouts_fpath)} == {"a"}
+        status = json.loads(writer.status_fpath.read_text())
+        assert status["tracking"] == "enabled"
+        member = status["members"]["a"]
+        assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (3, 0)
+
+    async def test_a_replayed_label_replaces_the_shard_but_not_what_the_sink_received(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import RUN_ID_KEY
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for row in examples:
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(row=row, result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                    )
+                    futures.append(future)
+                return iter(futures)
+
+        rows = [
+            TestEnrichRunResult._row("g1_g0_a0"),
+            {**TestEnrichRunResult._row("g2_g0_a0"), TASK_INDEX_KEY_NAME: 4, ROLLOUT_INDEX_KEY_NAME: 0},
+        ]
+        received: list[dict] = []
+        run_dir = tmp_path / "run"
+        for _ in range(2):
+            for completion in Helper().run_examples(
+                rows,
+                record_output_dir=run_dir,
+                record_shard="step_1",
+                record_sink=lambda kind, record: received.append(record),
+            ):
+                await completion
+
+        shard = self._lines(run_dir / "rollouts-step_1.jsonl")
+        assert (len(shard), len(received)) == (2, 4)
+        # Each record names the call that wrote it, so the caller keeps the last call's records for the label.
+        replay = shard[0][RUN_ID_KEY]
+        assert {record[RUN_ID_KEY] for record in shard} == {replay}
+        assert len({record[RUN_ID_KEY] for record in received}) == 2
+        assert [record for record in received if record[RUN_ID_KEY] == replay] == shard
+
+    def test_an_async_sink_is_refused(self, tmp_path: Path) -> None:
+        async def sink(kind: str, record: dict) -> None:
+            pass
+
+        class Sink:
+            async def __call__(self, kind: str, record: dict) -> None:
+                pass
+
+        for refused in (sink, Sink()):
+            with pytest.raises(TypeError, match="called, not awaited"):
+                RolloutCollectionHelper().run_examples(
+                    [], record_output_dir=tmp_path, record_shard="s", record_sink=refused
+                )
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_the_sink_gets_a_failure_row_with_the_model_calls_made_before_it_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Through the real dispatcher: the returned typed record leaves the calls out, the sink's failure row has them."""
+        from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        capture_dir = tmp_path / "capture"
+        failure = {
+            NG_FAILURE_CLASS_KEY: "agent_request_failed",
+            "failure_kind": "agent_request_failed",
+            "failure_reason": "tool crashed",
+            "ng_agent_observations": {"source": "agent", "records": []},
+        }
+
+        async def post(*args, **kwargs):
+            TestEnrichRunResult._store_call(
+                capture_dir, maybe_rollout_id_from_run_body(kwargs["json"]), "c1", "before"
+            )
+            return FakeResponse(200, dict(failure))
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        setup = RolloutCollectionHelper.setup_server_client
+
+        def with_capture(helper, head_server_config=None):
+            client = setup(helper, head_server_config)
+            client.global_config_dict = {
+                **(client.global_config_dict or {}),
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+            }
+            return client
+
+        monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", with_capture)
+        received: list[tuple[str, dict]] = []
+        run_dir = tmp_path / "run"
+        [completion] = list(
+            RolloutCollectionHelper().run_examples(
+                [failing_row()],
+                record_output_dir=run_dir,
+                record_shard="s",
+                route_failures_to_sidecar=True,
+                record_sink=lambda kind, record: received.append((kind, record)),
+            )
+        )
+        _, returned = await completion
+
+        assert isinstance(returned, RolloutFailureRecord)
+        [(kind, record)] = received
+        assert kind == "failure" and [record] == self._lines(run_dir / "rollouts-s_failures.jsonl")
+        assert [call["model_call_id"] for call in record["ng_trajectory"]["model_calls"]] == ["c1"]
+        assert record["ng_agent_observations"]["source"] == "agent"
+        assert record["_ng_failure_record"]["failure"]["failure_reason"] == "tool crashed"
+
+    def test_a_sink_without_a_shard_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="record_sink .* needs record_output_dir"):
+            RolloutCollectionHelper().run_examples([failing_row()], record_sink=lambda kind, record: None)
 
     def test_reopening_a_shard_replaces_it(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import _RunRecordWriter

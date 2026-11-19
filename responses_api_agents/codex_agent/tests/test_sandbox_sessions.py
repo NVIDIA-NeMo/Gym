@@ -1386,7 +1386,7 @@ async def test_close_stops_config_staging_before_releasing_the_sandbox(setup):
             raise
 
     sandbox.upload = stall_config
-    sandbox.disconnect.side_effect = lambda: events.append("sandbox released")
+    sandbox.disconnect.side_effect = lambda **_: events.append("sandbox released")
     request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
     # The configuration carries the grant's headers.
     body = AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": [mcp_grant()]})
@@ -1795,7 +1795,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
 
-    async def disconnect():
+    async def disconnect(**_):
         clock[0] = 200.0
 
     sandbox.disconnect.side_effect = disconnect
@@ -1812,7 +1812,7 @@ async def test_concurrent_closes_share_the_saved_reply(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -3254,8 +3254,8 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, owned):
         await asyncio.Future()
 
     state.execute = pause_after_capture
-    sandbox.stop.side_effect = sandbox.files.clear
-    sandbox.disconnect.side_effect = sandbox.files.clear
+    sandbox.stop.side_effect = lambda **_: sandbox.files.clear()
+    sandbox.disconnect.side_effect = lambda **_: sandbox.files.clear()
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await asyncio.wait_for(captured.wait(), 2)
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id)))
@@ -4229,7 +4229,7 @@ async def test_close_cancels_image_staging_before_sandbox_release(setup):
         await upload(source, destination)
 
     sandbox.upload = stall
-    sandbox.disconnect.side_effect = lambda: order.append("sandbox released")
+    sandbox.disconnect.side_effect = lambda **_: order.append("sandbox released")
     request, session_id, task = await start_image_activation(agent)
     await asyncio.wait_for(staging.wait(), 2)
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))

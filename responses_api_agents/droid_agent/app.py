@@ -96,9 +96,9 @@ fi
 """
 # Environment servers keep this many characters of a failed response's error message as the failure reason.
 _FAILURE_REASON_CHARS = 2000
-# The release whose error event messages were observed in scripted probes and real model runs. Another release
-# may word them differently, so its failures are reported as unknown.
-_CLASSIFIED_DROID_VERSION = "1.1.0"
+# Releases whose model-error messages were observed in scripted probes. Droid 1.1.0's repetition stop was
+# also observed in real model runs; other releases keep that outcome unknown until verified.
+_CLASSIFIED_DROID_VERSIONS = frozenset({"1.1.0", "1.12.1"})
 # A rejected model request: the HTTP status, a space, then the message of the response's error body.
 _MODEL_REQUEST_STATUS = re.compile(r"^([45]\d{2}) ")
 # A refused or reset connection to the model server.
@@ -155,15 +155,15 @@ class DroidAgent(SimpleResponsesAPIAgent):
         raise NotImplementedError("Use the single_agent_turn Environment Server")
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Match the error event against the messages Droid 1.1.0 was seen to write; tested on that release only."""
-        if self.config.droid_version != _CLASSIFIED_DROID_VERSION:
+        """Match the error event against the messages Droid 1.1.0 and 1.12.1 were seen to write; tested on those only."""
+        if self.config.droid_version not in _CLASSIFIED_DROID_VERSIONS:
             return AgentOutcome(failure_kind="unknown")
         message = str(native_result.get("error") or "")
         if message == _CONTEXT_LIMIT:
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if message == _TRANSPORT_ERROR:
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
-        if message == _REPETITION_CYCLE:
+        if message == _REPETITION_CYCLE and self.config.droid_version == "1.1.0":
             return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
         match = _MODEL_REQUEST_STATUS.match(message)
         if match:

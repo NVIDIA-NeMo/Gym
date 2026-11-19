@@ -6,7 +6,7 @@ import asyncio
 import json
 
 import pytest
-from aiohttp import ClientSession, web
+from aiohttp import ClientResponse, ClientSession, web
 from aiohttp.test_utils import TestServer
 from fastapi import Body, FastAPI, Response
 from omegaconf import OmegaConf
@@ -50,6 +50,7 @@ class _ProviderModel(_EchoModel):
 async def test_body_failure_survives_actual_simple_agent_environment_store(tmp_path, monkeypatch, legacy, mode):
     hits = []
     observed = []
+    release_body = asyncio.Event()
 
     async def provider(request):
         hits.append(1)
@@ -67,7 +68,7 @@ async def test_body_failure_survives_actual_simple_agent_environment_store(tmp_p
         if mode == "truncated":
             request.transport.close()
         else:
-            await asyncio.sleep(0.12)
+            await release_body.wait()
         return response
 
     app = web.Application()
@@ -91,14 +92,23 @@ async def test_body_failure_survives_actual_simple_agent_environment_store(tmp_p
         config[name] = {kind: {impl: {"host": "127.0.0.1", "port": port}}}
         return port
 
-    async with TestServer(app) as upstream, ClientSession() as session:
+    class BodyTimeoutResponse(ClientResponse):
+        async def read(self) -> bytes:
+            if mode == "timeout" and self.url == upstream.make_url("/v1/responses"):
+                assert self.status == 200
+                # Expire an incomplete body read only after the real headers arrived.
+                # A short total timeout can expire before headers and legitimately retry.
+                async with asyncio.timeout(0):
+                    return await super().read()
+            return await super().read()
+
+    async with TestServer(app) as upstream, ClientSession(response_class=BodyTimeoutResponse) as session:
         monkeypatch.setattr(http_client, "_GLOBAL_AIOHTTP_CLIENT", session)
         try:
             model = _ProviderModel(
                 config=BaseResponsesAPIModelConfig(host="127.0.0.1", port=0, entrypoint="", name="model"),
                 server_client=client(),
                 provider_url=str(upstream.make_url("/v1")),
-                request_timeout_seconds=0.04 if mode == "timeout" else 30,
             )
             await start(model, "model", "responses_api_models", "scripted")
             resource_app = FastAPI()
@@ -246,6 +256,7 @@ async def test_body_failure_survives_actual_simple_agent_environment_store(tmp_p
                 )
             )
         finally:
+            release_body.set()
             for srv, task, _ in reversed(servers):
                 srv.should_exit = True
                 await task
