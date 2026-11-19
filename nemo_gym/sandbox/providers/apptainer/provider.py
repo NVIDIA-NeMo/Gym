@@ -479,6 +479,14 @@ class ApptainerProvider:
         for bind in extra_binds:
             argv += ["--bind", bind]
         start_args = list(self._create_config.extra_start_args)
+        if any(arg in {"--contain", "--containall", "-c", "-C"} for arg in start_args) and not any(
+            arg in {"--workdir", "-W"} or arg.startswith("--workdir=") for arg in start_args
+        ):
+            # Containment must not move large compiler temporaries into Apptainer's small
+            # session tmpfs. Keep /tmp, /var/tmp, and home private and disk-backed instead.
+            private_workdir = staging_dir / ".apptainer-workdir"
+            private_workdir.mkdir(mode=0o700)
+            start_args += ["--workdir", str(private_workdir)]
         resource_limit_flags = _resource_limit_flags(spec.resources)
         if resource_limit_flags and self._create_config.apply_resource_limits:
             if "--fakeroot" in start_args:
