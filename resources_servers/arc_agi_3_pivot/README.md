@@ -19,7 +19,7 @@ sends comes to the window.
   harness therefore re-runs every recorded Python cell and game action itself, and the state at the pivot (game, host
   state, live Python sandbox) is its own. A pivot whose replay leaves the recording is masked
   (`environment_prepare_failed`), never scored.
-- **The window.** From the pivot on, each request the harness sends is the policy's turn: `/seed_session` returns the
+- **The window.** From the pivot on, each request the harness sends is the policy's turn: `/window` returns the
   pivot request, and each `/step` hands the policy's reply to the harness and returns its next request.
 
 What a replay needs from the recording, applied as configuration (the harness's code is not changed):
@@ -51,9 +51,16 @@ recorded value (up to `clock_repasses` times).
 
 | Endpoint | What |
 |---|---|
-| `/seed_session` | Restore the row's pivot and return its request: `messages`, `tools`, `chat_template_kwargs`. A pivot that cannot be restored returns `restore_error` (the rollout is masked). |
+| `/seed_session` | Restore the row's pivot. An environment server's seed (`resources_session_id`) returns the session; a cookie seed returns the window's request, as `/window` does. |
+| `/window` | The window's request: `messages`, `tools`, `chat_template_kwargs`. A pivot that cannot be restored returns `restore_error` (the rollout is masked). |
 | `/step` | One model reply (an assistant chat message) -> the harness's next request (`request_messages`, and `messages`: the part after the reply), `done`, and the call's record (actions, level completed, game over, tool error, oracle distance before and after, why the window ended). |
-| `/verify` | Reward and components, then the window is released. |
+| `/verify` | Reward and components, then the window is released. A retry of the verify returns the same score until the session is closed. |
+| `/close_session` | Release the window (its worker and work directory), also when the episode never reached `/verify`. |
+
+Episodes run through the `single_agent_turn_legacy` environment server (the configs): it seeds the resources session
+and the agent's session with a direct HTTP grant to it, runs the agent's one activation, verifies, and closes both
+sessions on every path. A seed cancelled during the restore is released once the restore has stopped: no harness worker
+outlives its session.
 
 ## Window and reward
 
@@ -129,10 +136,11 @@ these files relative to the pool directory.
 - The default is the committed example pool, [`data/example_pool`](data/example_pool/README.md): 2 games (cn04, ls20),
   5 pivots, rows in `data/example.jsonl`.
 - **Recording**: `record.py` plays a game of the pool from its start in the window's worker, against any
-  OpenAI-compatible endpoint, and writes every request the harness sends (`snap-raw/<attempt>.snap.jsonl`, with the
-  board, action count and each reply's `usage`). It then restores each chosen pivot by replay in a fresh worker, as the
-  server does, and adds its row to a pool split (`po_d0`: the oracle distance there; `restore_ok`: the restored request
-  is the recorded one). Run it from the Gym root with this server's venv (Linux):
+  OpenAI-compatible endpoint, and writes every request the harness sends, with the board, action count and each
+  reply's `usage`, to a new recording (`snap-raw/<attempt>-<uuid>.snap.jsonl`; rows already in a split keep theirs).
+  It then restores each chosen pivot by replay in a fresh worker, as the server does, and adds its row to a pool split
+  (`po_d0`: the oracle distance there; `restore_ok`: the restored request is the recorded one). Run it from the Gym
+  root with this server's venv (Linux):
 
 ```bash
 python -m resources_servers.arc_agi_3_pivot.record <pool_dir> --game cn04-2fe56bfb \

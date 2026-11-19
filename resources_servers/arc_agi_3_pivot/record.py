@@ -15,8 +15,9 @@
 """Record an attempt into a pivot pool and add pivots of it to a pool split.
 
 The harness plays one game of the pool (``games.parquet``) in the window's worker, from the game's start, against an
-OpenAI-compatible chat-completions endpoint; every request it sends is written to ``snap-raw/<attempt>.snap.jsonl``
-with the state it was sent from (``worker.py``'s record mode). Each chosen pivot (a gameplay request, by its index) is
+OpenAI-compatible chat-completions endpoint; every request it sends is written to a new recording,
+``snap-raw/<attempt>-<uuid>.snap.jsonl``, with the state it was sent from (``worker.py``'s record mode). A recording is
+never rewritten: rows of an earlier run of the same attempt keep the bytes their ``snap_sha256`` pins. Each chosen pivot (a gameplay request, by its index) is
 then restored by replay in a fresh worker, as the server restores it: the restored request must be the recorded one,
 and the oracle distance there becomes the row's ``po_d0``. The pivots' rows are added to ``<split>`` (rows of the same
 pivot id are replaced); ``create_dataset.py`` turns the split into Gym rows.
@@ -37,6 +38,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from resources_servers.arc_agi_3_pivot import recording
 from resources_servers.arc_agi_3_pivot.app import (
@@ -129,42 +131,43 @@ def worker_env(spec_env: dict[str, str]) -> dict[str, str]:
 def record(args: argparse.Namespace, spec: dict[str, Any], python: str, snap: Path) -> list[dict[str, Any]]:
     """Play ``args.calls`` model calls and record them. Returns each request's state (gameplay requests only)."""
     api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
-    workdir = tempfile.mkdtemp(prefix="arc3-record-")
-    spec = dict(spec, record=str(snap), workdir=workdir, attempt=args.attempt, harness_revision=HARNESS_COMMIT)
-    spec["source"] = args.source
-    worker = HarnessWorker(python, worker_env(spec["env"]), workdir, args.timeout_s)
     states = []
-    try:
-        out = worker.call("start", spec)
-        for k in range(args.calls):
-            if out["request"] is None:
-                break
-            state = {key: out[key] for key in ("action_count", "level_index", "levels_completed", "frame_sha256")}
-            state.update(n=k, role=out["role"], continuation=out["continuation"], request=out["request"])
-            if out["role"] == "gameplay" and not out["continuation"]:
-                state["distance"] = worker.call("distance", out["level_index"])
-            message, finish_reason, usage = chat(args.model_url, out["request"], api_key, args.timeout_s)
-            state["prompt_tokens"] = (usage or {}).get("prompt_tokens")
-            states.append(state)
-            out = worker.call("reply", message, finish_reason, usage)
-    finally:
-        worker.close()
+    # The worker's work directory goes with it (the worker is stopped first); the recording is outside it.
+    with tempfile.TemporaryDirectory(prefix="arc3-record-", ignore_cleanup_errors=True) as workdir:
+        spec = dict(spec, record=str(snap), workdir=workdir, attempt=args.attempt, harness_revision=HARNESS_COMMIT)
+        spec["source"] = args.source
+        worker = HarnessWorker(python, worker_env(spec["env"]), workdir, args.timeout_s)
+        try:
+            out = worker.call("start", spec)
+            for k in range(args.calls):
+                if out["request"] is None:
+                    break
+                state = {key: out[key] for key in ("action_count", "level_index", "levels_completed", "frame_sha256")}
+                state.update(n=k, role=out["role"], continuation=out["continuation"], request=out["request"])
+                if out["role"] == "gameplay" and not out["continuation"]:
+                    state["distance"] = worker.call("distance", out["level_index"])
+                message, finish_reason, usage = chat(args.model_url, out["request"], api_key, args.timeout_s)
+                state["prompt_tokens"] = (usage or {}).get("prompt_tokens")
+                states.append(state)
+                out = worker.call("reply", message, finish_reason, usage)
+        finally:
+            worker.close()
     return states
 
 
 def restored(spec: dict[str, Any], python: str, snap: Path, k: int, timeout_s: float) -> dict[str, Any] | None:
     """Restore request ``k`` by replay, as the server does: its request and oracle distance, or None (no restore)."""
-    workdir = tempfile.mkdtemp(prefix="arc3-restore-")
-    spec = dict(spec, recording=str(snap), upto=k, workdir=workdir)
-    worker = HarnessWorker(python, worker_env(spec["env"]), workdir, timeout_s)
-    try:
-        out = worker.call("start", spec)
-        return {"request": out["request"], "distance": worker.call("distance", out["level_index"])}
-    except RestoreError as exc:
-        print(f"request {k} does not restore: {getattr(exc, 'info', None) or exc}")
-        return None
-    finally:
-        worker.close()
+    with tempfile.TemporaryDirectory(prefix="arc3-restore-", ignore_cleanup_errors=True) as workdir:
+        spec = dict(spec, recording=str(snap), upto=k, workdir=workdir)
+        worker = HarnessWorker(python, worker_env(spec["env"]), workdir, timeout_s)
+        try:
+            out = worker.call("start", spec)
+            return {"request": out["request"], "distance": worker.call("distance", out["level_index"])}
+        except RestoreError as exc:
+            print(f"request {k} does not restore: {getattr(exc, 'info', None) or exc}")
+            return None
+        finally:
+            worker.close()
 
 
 def pool_rows(args, pool: Path, entry, snap: Path, states, spec, python) -> list[dict[str, Any]]:
@@ -266,7 +269,8 @@ def main(argv: list | None = None) -> None:
     harness_root = args.harness_root or ensure_harness_root(DEFAULT_DEST, source=args.harness_source)
     python = args.worker_python or str(ensure_worker_python(default("worker_python"), DEFAULT_DEST))
     spec = base_spec(args, pool, entry, harness_root)
-    snap = pool / "snap-raw" / f"{args.attempt}.snap.jsonl"
+    # A fresh recording per run: rows already in a split keep pointing at the bytes they pin.
+    snap = pool / "snap-raw" / f"{args.attempt}-{uuid4().hex}.snap.jsonl"
     snap.parent.mkdir(parents=True, exist_ok=True)
     states = record(args, spec, python, snap)
     print(f"recorded {len(states)} calls -> {snap}")

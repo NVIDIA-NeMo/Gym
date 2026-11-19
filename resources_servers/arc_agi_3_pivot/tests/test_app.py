@@ -15,6 +15,7 @@
 """The server against a stand-in worker (the real one needs the harness: ``test_worker_live.py``), and the pieces the
 worker is made of."""
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -33,11 +34,31 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import ENVIRONMENT_SERVER_FAILED, MODEL_CONTEXT_LIMIT, MODEL_REQUEST_ERROR, VERIFIER_ERROR
+from nemo_gym.core import (
+    ENVIRONMENT_SERVER_FAILED,
+    MODEL_CONTEXT_LIMIT,
+    MODEL_REQUEST_ERROR,
+    SESSION_LOST,
+    VERIFIER_ERROR,
+    EpisodeId,
+    TaskId,
+)
 from nemo_gym.core.failure_kinds import ENVIRONMENT_PREPARE_FAILED
+from nemo_gym.data import TaskDataValidator, load_task_data_schema
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from resources_servers.arc_agi_3_pivot import app as app_module
-from resources_servers.arc_agi_3_pivot import create_dataset, oracle, recording, setup_worker
-from resources_servers.arc_agi_3_pivot.app import ArcAgi3PivotConfig, ArcAgi3PivotResourcesServer, RestoreError
+from resources_servers.arc_agi_3_pivot import create_dataset, oracle, record, recording, setup_worker
+from resources_servers.arc_agi_3_pivot.app import (
+    ArcAgi3PivotConfig,
+    ArcAgi3PivotResourcesServer,
+    PivotSeedRequest,
+    RestoreError,
+)
+from resources_servers.arc_agi_3_pivot.task_data import PivotRow, TaskData
 
 
 HERE = Path(__file__).resolve().parents[1]
@@ -66,6 +87,10 @@ class FakeWorker:
     def call(self, op: str, *args: Any) -> Any:
         if op == "start":
             spec = args[0]
+            if spec.get("repass") and not spec.get("clock_overrides"):
+                error = RestoreError("a cell printed the clock")
+                error.info = {"reason": "a cell printed the clock", "clock_overrides": {"3": [1.0, 2.0]}}
+                raise error
             if spec.get("fail"):
                 error = RestoreError("request differs from the recording")
                 error.info = {"reason": "request differs from the recording", "request": 3}
@@ -131,6 +156,8 @@ def worker(monkeypatch):
         return {
             "env": {"ARC3_X": "1"},
             "fail": json.loads(row["pivot_json"]).get("fail", False),
+            "repass": json.loads(row["pivot_json"]).get("repass", False),
+            "clock_overrides": dict(overrides),
             "reasoning_effort": row.get("reasoning_effort") or self.config.reasoning_effort,
         }
 
@@ -283,6 +310,153 @@ def test_restore_error_is_masked_not_scored(worker, tmp_path):
     assert worker[0].closed
     result = client.post("/verify", json=verify_body(meta("p1")), cookies=cookies).json()
     assert result["mask_sample"] is True and result["failure_kind"] == ENVIRONMENT_PREPARE_FAILED
+
+
+def test_a_verify_retry_returns_the_same_score(worker, tmp_path):
+    _, client = make_client(tmp_path, max_calls=1)
+    _, cookies = seed(client, meta("p1"))
+    assert client.post("/step", json={"message": reply("a = 1")}, cookies=cookies).json()["done"] is True
+    first, again = (client.post("/verify", json=verify_body(meta("p1")), cookies=cookies).json() for _ in range(2))
+    assert first["mask_sample"] is False and first["reward"] == 1.0 and again == first
+    assert len(worker) == 1 and worker[0].closed  # scored once: the window was released after the first verify
+
+
+@pytest.mark.parametrize(
+    "pivot,code,kind", [({"fail": True}, None, ENVIRONMENT_PREPARE_FAILED), ({}, "loop", VERIFIER_ERROR)]
+)
+def test_a_verify_retry_keeps_the_mask(worker, tmp_path, pivot, code, kind):
+    _, client = make_client(tmp_path, max_calls=1)
+    _, cookies = seed(client, meta("p1", **pivot))
+    if code:
+        client.post("/step", json={"message": reply(code)}, cookies=cookies)
+    first, again = (client.post("/verify", json=verify_body(meta("p1")), cookies=cookies).json() for _ in range(2))
+    assert first["mask_sample"] is True and first["failure_kind"] == kind and again == first
+
+
+def test_verify_of_an_unknown_session_is_masked(worker, tmp_path):
+    _, client = make_client(tmp_path)
+    result = client.post("/verify", json=verify_body(meta("p1"))).json()
+    assert result["mask_sample"] is True and result["failure_kind"] == SESSION_LOST and result["reward"] == 0.0
+
+
+def episode_seed(session_id: str, m: dict) -> ResourcesSeedSessionRequest:
+    return ResourcesSeedSessionRequest(
+        resources_session_id=session_id,
+        episode_id=EpisodeId(rollout_id=f"rollout-{session_id}", attempt=0),
+        task_id=TaskId(taskset="arc_agi_3_pivot", task_id=m["pivot_id"]),
+        task_data={"verifier_metadata": m},
+    )
+
+
+def test_episode_sessions_follow_the_resources_session_contract(worker, tmp_path):
+    server, _ = make_client(tmp_path)
+    check_resources_session_contract(
+        server.setup_webserver(),
+        episode_seed("contract", meta("p1")),
+        keeps_state=True,
+        holds_state=lambda session_id: session_id in server._windows,
+        verify_body=verify_body(meta("p1")),
+    )
+    assert worker and all(w.closed for w in worker)
+
+
+def test_closing_an_episode_session_releases_its_window_without_verify(worker, tmp_path):
+    """An episode whose agent failed or was cancelled after the seed never verifies: its environment server's close
+    stops the window's worker and removes its work directory. A later close, step or /window finds no window."""
+    server, client = make_client(tmp_path)
+    body = episode_seed("s1", meta("p1"))
+    seeded = client.post("/seed_session", json=body.model_dump(mode="json"))
+    assert seeded.status_code == 200 and seeded.json()["resources_session_id"] == "s1"
+    cookies = seeded.cookies
+    window = client.post("/window", cookies=cookies).json()
+    assert [m["role"] for m in window["messages"]] == ["system", "user"] and window["restore_error"] is None
+    assert client.post("/step", json={"message": reply("a = 1")}, cookies=cookies).json()["done"] is False
+    workdir = Path(server._windows["s1"].workdir)
+    assert workdir.is_dir() and not worker[0].closed
+    close = ResourcesCloseSessionRequest(resources_session_id="s1", episode_id=body.episode_id).model_dump(mode="json")
+    for _ in range(2):  # a repeated close is safe
+        assert client.post("/close_session", json=close).status_code == 200
+    assert worker[0].closed and not workdir.exists() and "s1" not in server._windows
+    assert client.post("/window", cookies=cookies).status_code == 404
+    assert client.post("/step", json={"message": reply("b = 2")}, cookies=cookies).status_code == 404
+    result = client.post("/verify", json=verify_body(meta("p1")), cookies=cookies).json()
+    assert result["mask_sample"] is True and result["failure_kind"] == SESSION_LOST
+
+
+def test_close_invalidates_a_retained_score(worker, tmp_path):
+    _, client = make_client(tmp_path, max_calls=1)
+    body = episode_seed("s1", meta("p1"))
+    cookies = client.post("/seed_session", json=body.model_dump(mode="json")).cookies
+    client.post("/step", json={"message": reply("a = 1")}, cookies=cookies)
+    assert client.post("/verify", json=verify_body(meta("p1")), cookies=cookies).json()["mask_sample"] is False
+    close = ResourcesCloseSessionRequest(resources_session_id="s1", episode_id=body.episode_id).model_dump(mode="json")
+    assert client.post("/close_session", json=close).status_code == 200
+    result = client.post("/verify", json=verify_body(meta("p1")), cookies=cookies).json()
+    assert result["mask_sample"] is True and result["failure_kind"] == SESSION_LOST
+
+
+class BlockingWorker(FakeWorker):
+    """A worker whose launch waits for ``go`` (after announcing it on ``entered``)."""
+
+    entered = threading.Event()
+    go = threading.Event()
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        BlockingWorker.entered.set()
+        assert BlockingWorker.go.wait(10)
+        super().__init__(*args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "blocked,pivot",
+    [
+        ("spec", {}),  # cancelled before the worker's launch
+        ("launch", {}),  # cancelled while the worker launches: it starts after the release
+        ("spec", {"repass": True}),  # cancelled between two replays: the first worker was started
+        ("launch", {"repass": True}),
+    ],
+)
+async def test_a_cancelled_seed_leaves_no_worker_running(worker, tmp_path, monkeypatch, blocked, pivot):
+    """A seed cancelled during the restore: the release waits for the restore thread, which starts no worker after
+    it and closes the one it was starting; the window stays reachable until then."""
+    server, _ = make_client(tmp_path)
+    entered, go = threading.Event(), threading.Event()
+    spec = ArcAgi3PivotResourcesServer._spec
+    calls = []
+
+    def blocking_spec(self, row, workdir, overrides):
+        calls.append(workdir)
+        if blocked == "spec" and len(calls) == (2 if pivot else 1):
+            entered.set()
+            assert go.wait(10)
+        return spec(self, row, workdir, overrides)
+
+    monkeypatch.setattr(ArcAgi3PivotResourcesServer, "_spec", blocking_spec)
+    if blocked == "launch":
+        monkeypatch.setattr(BlockingWorker, "entered", entered)
+        monkeypatch.setattr(BlockingWorker, "go", go)
+        if pivot:  # the first replay's worker launches; the second one waits
+
+            def launch(*args: Any, **kwargs: Any) -> FakeWorker:
+                factory = BlockingWorker if FakeWorker.instances else FakeWorker
+                return factory(*args, **kwargs)
+
+            monkeypatch.setattr(app_module, "HarnessWorker", launch)
+        else:
+            monkeypatch.setattr(app_module, "HarnessWorker", BlockingWorker)
+    body = PivotSeedRequest(verifier_metadata=meta("p1", **pivot))
+    seeding = asyncio.create_task(server._initialize_session("s1", body))
+    assert await asyncio.to_thread(entered.wait, 10)
+    seeding.cancel()
+    await asyncio.sleep(0.2)
+    assert "s1" in server._windows and not seeding.done()  # released only once the restore has stopped
+    go.set()
+    with pytest.raises(asyncio.CancelledError):
+        await seeding
+    assert "s1" not in server._windows
+    # every worker the restore started (the first replay's, and one launched while the seed was cancelled) is closed
+    assert all(w.closed for w in worker) and len(worker) == (blocked == "launch") + bool(pivot)
+    assert calls and not Path(calls[0]).exists()
 
 
 def test_oracle_distance_must_match_the_recording(worker, tmp_path):
@@ -834,6 +1008,133 @@ def test_create_dataset_keeps_restorable_rows(tmp_path):
         create_dataset.gym_row(dict(kept[0], thinking_effort="high"))["verifier_metadata"]["pivot"]["thinking_effort"]
         == "high"
     )
+
+
+def validate_task_data(rows: list[dict]):
+    adapter = load_task_data_schema(HERE)
+    validator = TaskDataValidator(server_name="arc_agi_3_pivot", adapter=adapter, dataset_fpath="rows")
+    for i, row in enumerate(rows):
+        validator.validate_row(i, row)
+    return validator.report
+
+
+def test_task_data_schema_validates_what_the_server_reads():
+    assert validate_task_data(example_rows()).clean
+    m = example_rows()[0]["verifier_metadata"]
+    efforts = dict(m, reasoning_effort="low", pivot=dict(m["pivot"], thinking_effort="high"))
+    assert validate_task_data([{"verifier_metadata": efforts}]).clean
+    no_harness = dict(m, pivot={k: v for k, v in m["pivot"].items() if k != "harness"})
+    for bad in (no_harness, dict(m, pivot="not an object"), dict(m, pivot=dict(m["pivot"], harnes="30d2cc8b"))):
+        assert validate_task_data([{"verifier_metadata": bad}]).error_rows == 1
+        with pytest.raises(ValueError):  # the server refuses (masks) what preparation refuses
+            app_module.pool_row(bad)
+    assert validate_task_data([{"verifier_metadata": dict(m, pivot_idd="x")}]).unknown_keys == {"pivot_idd": 1}
+
+
+def test_task_data_schema_matches_the_producer_and_the_server():
+    assert create_dataset.PIVOT_KEYS == tuple(PivotRow.model_fields)
+    pool = {"pivot_id": "a", "game_id": "g", "level": 1, "po_d0": 4, "pivot_json": "{}", "harness": "30d2cc8b"}
+    pool |= {"harness_env": "env/x.toml", "harness_env_sha256": "e" * 64, "thinking_effort": "high"}
+    m = create_dataset.gym_row(pool, "low")["verifier_metadata"]
+    assert TaskData.model_validate(m).model_extra == {}
+    assert app_module.pool_row(m) == {k: pool[k] for k in PivotRow.model_fields}
+    assert PivotSeedRequest.model_validate({"verifier_metadata": m}).verifier_metadata == m
+
+
+class RecordWorker:
+    """record.py's worker: it writes into its work directory; a spec with "fail" does not restore."""
+
+    workdirs: list[str] = []
+
+    def __init__(self, python: str, env: dict[str, str], cwd: str, timeout_s: float = 3600.0):
+        RecordWorker.workdirs.append(cwd)
+        (Path(cwd) / "harness-output.txt").write_text("x")
+
+    def call(self, op: str, *args: Any) -> Any:
+        if op == "start":
+            if args[0].get("fail"):
+                raise RestoreError("does not restore")
+            state = {"action_count": 0, "level_index": 0, "levels_completed": 0, "frame_sha256": "f"}
+            return {"request": {"messages": []}, "role": "gameplay", "continuation": False, **state}
+        if op == "distance":
+            return 3
+        return {"request": None}  # reply: the game ended
+
+    def close(self) -> None:
+        pass
+
+
+def test_recorder_work_directories_are_removed(tmp_path, monkeypatch):
+    RecordWorker.workdirs = []
+    monkeypatch.setattr(record, "HarnessWorker", RecordWorker)
+    snap = tmp_path / "a1.snap.jsonl"
+    snap.write_text("recorded")
+    assert record.restored({"env": {}}, "py", snap, 2, 1.0) == {"request": {"messages": []}, "distance": 3}
+    assert record.restored({"env": {}, "fail": True}, "py", snap, 2, 1.0) is None
+    args = types.SimpleNamespace(api_key_env=None, attempt="a1", source="t", calls=2, model_url="u", timeout_s=1.0)
+    monkeypatch.setattr(record, "chat", lambda *a: ({"role": "assistant", "content": ""}, "stop", None))
+    assert len(record.record(args, {"env": {}}, "py", snap)) == 1
+
+    def model_down(*a: Any):
+        raise OSError("model down")
+
+    monkeypatch.setattr(record, "chat", model_down)
+    with pytest.raises(OSError):
+        record.record(args, {"env": {}}, "py", snap)
+    assert len(RecordWorker.workdirs) == 4 and not any(Path(w).exists() for w in RecordWorker.workdirs)
+    assert snap.read_text() == "recorded"
+
+
+def test_each_recording_run_writes_its_own_recording(tmp_path, monkeypatch):
+    """Running an attempt again (another pivot, other replies) writes another recording: the rows already in the split
+    keep the bytes their snap_sha256 pins, also when a run fails before the split is written. A pivot id chosen again
+    is replaced."""
+    import shutil
+
+    import pyarrow.parquet as pq
+
+    pool = tmp_path / "pool"
+    pool.mkdir()
+    shutil.copy(POOL / "games.parquet", pool / "games.parquet")
+    runs = []
+
+    def fake_record(args, spec, python, snap):
+        runs.append(snap)
+        snap.write_text(f"run {len(runs)}")
+        if args.calls == 0:
+            raise OSError("model down")
+        return []
+
+    def fake_pool_rows(args, pool, entry, snap, states, spec, python):
+        ref = {"snap_file": str(snap.relative_to(pool)), "snap_sha256": hashlib.sha256(snap.read_bytes()).hexdigest()}
+        return [{"pivot_id": f"{args.attempt}-c{k}", "pivot_json": json.dumps({"snapshot": ref})} for k in args.pivots]
+
+    monkeypatch.setattr(record, "base_spec", lambda *a: {})
+    monkeypatch.setattr(record, "record", fake_record)
+    monkeypatch.setattr(record, "pool_rows", fake_pool_rows)
+    argv = [str(pool), "--game", "cn04-2fe56bfb", "--harness-env", "env/x.toml", "--model-url", "u", "--model", "m"]
+    argv += ["--attempt", "a1", "--harness-root", str(tmp_path), "--worker-python", "py"]
+
+    def split() -> dict[str, dict]:
+        rows = pq.read_table(pool / "example.parquet").to_pylist()
+        refs = {r["pivot_id"]: json.loads(r["pivot_json"])["snapshot"] for r in rows}
+        for ref in refs.values():  # every row's recording has the bytes it pins
+            assert hashlib.sha256((pool / ref["snap_file"]).read_bytes()).hexdigest() == ref["snap_sha256"]
+        return refs
+
+    record.main([*argv, "--pivots", "2"])
+    record.main([*argv, "--pivots", "3"])
+    refs = split()
+    assert list(refs) == ["a1-c2", "a1-c3"] and refs["a1-c2"]["snap_file"] != refs["a1-c3"]["snap_file"]
+    before = (pool / "example.parquet").read_bytes()
+    with pytest.raises(OSError):
+        record.main([*argv, "--pivots", "2", "--calls", "0"])
+    assert (pool / "example.parquet").read_bytes() == before and split() == refs
+    record.main([*argv, "--pivots", "2"])
+    again = split()
+    assert list(again) == ["a1-c3", "a1-c2"] and again["a1-c3"] == refs["a1-c3"]
+    assert again["a1-c2"]["snap_file"] == str(runs[-1].relative_to(pool))
+    assert len(set(runs)) == 4
 
 
 def test_committed_example_is_the_example_pool():

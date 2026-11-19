@@ -23,6 +23,7 @@ counts, which advance the run clock): the harness's next requests must be the re
 continues the recorded game exactly.
 """
 
+import hashlib
 import json
 import os
 from http.cookiejar import CookieJar
@@ -154,11 +155,18 @@ def test_record_then_restore(tmp_path):
     shutil.copy(POOL / "games.parquet", pool / "games.parquet")
     threading.Thread(target=stub_model.serve, args=(18765, str(tmp_path / "stub.jsonl")), daemon=True).start()
     common = ["--harness-env", "env/kit-harness_env.toml", "--model", "stub", "--harness-root", ROOT]
-    record.main(
-        [str(pool), "--game", "cn04-2fe56bfb", "--model-url", "http://127.0.0.1:18765/v1", "--calls", "4"]
-        + ["--pivots", "2", "--attempt", "a1", "--worker-python", PYTHON, *common]
-    )
+    run = [str(pool), "--game", "cn04-2fe56bfb", "--model-url", "http://127.0.0.1:18765/v1", "--calls", "4"]
+    run += ["--attempt", "a1", "--worker-python", PYTHON, *common]
+    record.main([*run, "--pivots", "2"])
     (row,) = pq.read_table(pool / "example.parquet").to_pylist()
     assert row["pivot_id"] == "a1-c2" and row["restore_ok"] is True and row["po_d0"] is not None
-    calls = recording.parse((pool / "snap-raw" / "a1.snap.jsonl").read_bytes())["calls"]
+    calls = recording.parse((pool / row["raw_snap"]).read_bytes())["calls"]
     assert [c["n"] for c in calls] == [0, 1, 2, 3, 4] and json.loads(row["pivot_json"])["call_index"] == 2
+    # The same attempt again, for another pivot: a new recording; the first row keeps the bytes it pins.
+    record.main([*run, "--pivots", "3"])
+    rows = pq.read_table(pool / "example.parquet").to_pylist()
+    assert [r["pivot_id"] for r in rows] == ["a1-c2", "a1-c3"] and rows[0] == row
+    assert rows[0]["raw_snap"] != rows[1]["raw_snap"] and all(r["restore_ok"] for r in rows)
+    for r in rows:
+        snapshot = json.loads(r["pivot_json"])["snapshot"]
+        assert hashlib.sha256((pool / snapshot["snap_file"]).read_bytes()).hexdigest() == snapshot["snap_sha256"]

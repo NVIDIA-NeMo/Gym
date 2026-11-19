@@ -22,12 +22,17 @@ its model is a pipe. Up to the pivot, the worker answers every request with the 
 request, the board and the action count equal the recorded ones, so the harness re-runs the recorded cells and actions
 and the restored state is its own. From the pivot on, each request the harness sends is the policy's turn:
 
-- ``/seed_session``: restore the row's pivot; returns the pivot request (messages, tools, chat template kwargs). A pivot
-  that does not restore exactly returns ``restore_error`` (the rollout is masked).
+- ``/seed_session``: restore the row's pivot. A seed by an environment server (``resources_session_id``) returns the
+  session; a cookie seed returns the pivot request, as ``/window`` does.
+- ``/window``: the window's request (messages, tools, chat template kwargs). A pivot that does not restore exactly
+  returns ``restore_error`` (the rollout is masked).
 - ``/step``: the policy's reply (an assistant message) -> the harness runs its tool calls and sends its next request;
   the response holds that request's messages, ``done``, and the call's record.
 - ``/verify``: reward = ``d0 - d_end``, the oracle distance to completing the level at the pivot minus at the window's
-  end (``d0`` when the level completes). A window without both distances (the oracle found none) is masked.
+  end (``d0`` when the level completes). A window without both distances (the oracle found none) is masked. Verify
+  releases the window; a retry of the same verify returns the same score.
+- ``/close_session``: releases the window (its worker and work directory) on every path, also when the episode never
+  reached verify.
 
 The window ends, at a call boundary, at the first of: the level completed, ``max_actions`` actions, ``max_calls`` calls,
 ``dollar_cap``, or the game's end. A next request that does not extend the previous one plus its reply (the harness
@@ -54,10 +59,10 @@ import threading
 import tomllib
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, ClassVar
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY
@@ -69,7 +74,12 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.arc_agi_3.setup_arc_agi import ensure_flask
@@ -81,6 +91,7 @@ from resources_servers.arc_agi_3_pivot.setup_worker import (
     ensure_worker_python,
     materialize_game,
 )
+from resources_servers.arc_agi_3_pivot.task_data import PivotRow
 from responses_api_agents.arc_agi_3_agent.harness_runtime import (
     GYM_ENGINE_ENV,
     HARNESS_ENV_NAMES,
@@ -91,10 +102,6 @@ from responses_api_agents.arc_agi_3_agent.harness_runtime import (
 
 LOG = logging.getLogger(__name__)
 WORKER = Path(__file__).with_name("worker.py")
-# Pool row columns the env reads (pivot_json; the row's harness revision and recorded harness env file).
-# thinking_effort: the effort the pivot's run was sampled with, when its collector set it past the harness's request
-# (e.g. a proxy that added chat_template_kwargs.thinking_effort to the upstream request only).
-ROW_KEYS = ("pivot_json", "harness", "harness_env", "harness_env_sha256", "thinking_effort")
 # USD per 1M tokens (Alibaba's Qwen3.8-Flash-Next list prices).
 DEFAULT_PRICES = {"in": 0.20, "cached": 0.016, "out": 0.47}
 # Recording-side capture switches of a harness env file, never applied at play.
@@ -130,11 +137,8 @@ def dollars(uncached: float, cached: float, decoded: float, prices: dict[str, fl
 
 
 def pool_row(verifier_metadata: dict[str, Any]) -> dict[str, Any]:
-    row = verifier_metadata.get("pivot") or {}
-    missing = [k for k in ("pivot_json", "harness") if not row.get(k)]
-    if missing:
-        raise ValueError(f"verifier_metadata.pivot lacks {missing}")
-    return {k: row[k] for k in ROW_KEYS if row.get(k) is not None}
+    """The task's pool row (``verifier_metadata.pivot``), parsed with the task-data schema's ``PivotRow``."""
+    return PivotRow.model_validate(verifier_metadata.get("pivot")).model_dump(exclude_none=True)
 
 
 def harness_env_tables(path: Path) -> dict[str, str]:
@@ -320,6 +324,8 @@ class PivotSeedRequest(BaseSeedSessionRequest):
 
 
 class PivotSeedResponse(BaseSeedSessionResponse):
+    """The window's request: a cookie seed's response, and ``/window``'s."""
+
     messages: list[dict[str, Any]] = Field(default_factory=list)
     tools: list[dict[str, Any]] = Field(default_factory=list)
     chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
@@ -348,7 +354,8 @@ class PivotStepResponse(BaseModel):
 class PivotVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
     verifier_metadata: dict[str, Any] = Field(default_factory=dict)
-    # Set by the agent when the window could not be played to its end (a failed model call).
+    # Set by the agent when the window could not be played to its end (a failed model call); an agent session's
+    # activation reports it in its response's metadata.agent_error.
     agent_error: str | None = None
 
 
@@ -370,8 +377,15 @@ class PivotVerifyResponse(BaseMultiRewardVerifyResponse):
     reasoning_effort: str | None = None
 
 
+def _set_event() -> threading.Event:
+    event = threading.Event()
+    event.set()
+    return event
+
+
 @dataclasses.dataclass
 class _Window:
+    # Owned by the window while published here; read and replaced under ``guard`` (the restore runs in a thread).
     worker: HarnessWorker | None = None
     workdir: str | None = None
     request: dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -395,6 +409,34 @@ class _Window:
     # The previous call's prompt + generated tokens (what the engine's prefix cache holds for the next call).
     held_tokens: int | None = None
     lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
+    guard: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    # Set by release: the restore starts no worker after it, and closes one it started before.
+    released: bool = False
+    # Clear while the restore thread runs.
+    restore_done: threading.Event = dataclasses.field(default_factory=_set_event)
+
+    def adopt(self, worker: HarnessWorker) -> bool:
+        """Publish the restore's new worker; False when the window was released (the caller closes the worker)."""
+        with self.guard:
+            if self.released:
+                return False
+            self.worker = worker
+            return True
+
+    def take_worker(self, worker: HarnessWorker | None = None) -> HarnessWorker | None:
+        """Detach the window's worker (only when it is ``worker``, if given); the caller closes what it gets."""
+        with self.guard:
+            if self.worker is None or (worker is not None and self.worker is not worker):
+                return None
+            taken, self.worker = self.worker, None
+            return taken
+
+    def release(self) -> HarnessWorker | None:
+        """Mark the window released and detach its worker (the caller closes it)."""
+        with self.guard:
+            self.released = True
+            taken, self.worker = self.worker, None
+            return taken
 
     def cost(self) -> dict[str, float]:
         return {
@@ -408,6 +450,7 @@ class _Window:
 
 class ArcAgi3PivotResourcesServer(SimpleResourcesServer):
     config: ArcAgi3PivotConfig
+    seed_request_model: ClassVar[type[PivotSeedRequest]] = PivotSeedRequest
     _windows: dict[str, _Window] = PrivateAttr(default_factory=dict)
     _games: dict[tuple, dict[str, Any]] = PrivateAttr(default_factory=dict)
 
@@ -440,6 +483,7 @@ class ArcAgi3PivotResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+        app.post("/window")(self.window)
         app.post("/step")(self.step)
         return app
 
@@ -531,20 +575,34 @@ class ArcAgi3PivotResourcesServer(SimpleResourcesServer):
         return env
 
     def _restore(self, row: dict[str, Any], window: _Window) -> None:
-        """Start the window's worker and replay up to the pivot (again with the recorded clock pinned where needed)."""
+        """Start the window's worker and replay up to the pivot (again with the recorded clock pinned where needed).
+
+        Runs in a thread that a cancelled seed does not stop: once the window is released, it starts no worker and
+        closes the one it started; ``restore_done`` is set when it returns."""
+        try:
+            self._replay(row, window)
+        finally:
+            window.restore_done.set()
+
+    def _replay(self, row: dict[str, Any], window: _Window) -> None:
         pivot = json.loads(row["pivot_json"])
         overrides: dict[int, tuple] = {}
         workdir = window.workdir = tempfile.mkdtemp(prefix="arc3-pivot-")
+        released = RestoreError(f"pivot {pivot.get('pivot_id')}: the session was released during the restore")
         for attempt in range(1 + self.config.clock_repasses):
             spec = self._spec(row, workdir, overrides)
+            if window.released:
+                raise released
             worker = HarnessWorker(self._python, self._worker_env(spec["env"]), workdir, self.config.worker_timeout_s)
-            window.worker = worker  # a session released meanwhile closes it, which interrupts the replay
-            try:
+            if not window.adopt(worker):
+                worker.close()
+                raise released
+            try:  # a release meanwhile closes the worker, which interrupts the replay
                 start = worker.call("start", spec)
                 break
             except RestoreError as exc:
-                worker.close()
-                window.worker = None
+                if window.take_worker(worker) is not None:
+                    worker.close()
                 more = {
                     int(k): tuple(v)
                     for k, v in ((getattr(exc, "info", {}) or {}).get("clock_overrides") or {}).items()
@@ -573,8 +631,8 @@ class ArcAgi3PivotResourcesServer(SimpleResourcesServer):
             }
             window.restore["clock_repasses"] = attempt
         except BaseException:
-            worker.close()
-            window.worker = None
+            if window.take_worker(worker) is not None:
+                worker.close()
             raise
 
     # Session state hooks (the base seeds through them and releases on close / retirement; verify releases too).
@@ -587,22 +645,46 @@ class ArcAgi3PivotResourcesServer(SimpleResourcesServer):
         try:
             row = pool_row(meta)
             row["reasoning_effort"] = meta.get("reasoning_effort")
+            window.restore_done.clear()
             await asyncio.to_thread(self._restore, row, window)
         except Exception as exc:  # a pivot that does not restore exactly, a bad row: never a policy outcome
             window.restore_error = f"{type(exc).__name__}: {exc}"
             LOG.warning("pivot %s not restored: %s", meta.get("pivot_id"), window.restore_error)
 
     async def release_session_state(self, session_id: str) -> None:
-        window = self._windows.pop(session_id, None)
-        if window is not None and window.worker is not None:
-            worker, window.worker = window.worker, None
-            await asyncio.to_thread(worker.close)
-        if window is not None and window.workdir:
+        window = self._windows.get(session_id)
+        if window is None:
+            return
+        worker = window.release()
+        if worker is not None:
+            await asyncio.to_thread(worker.close)  # also interrupts a restore's pending call
+        # A restore still running (its seed was cancelled) stops at its next step and closes what it started; the
+        # window stays here, owned and retryable, until it has.
+        while not window.restore_done.is_set():
+            await asyncio.sleep(0.05)
+        if window.workdir:
             await asyncio.to_thread(shutil.rmtree, window.workdir, True)
+        self._windows.pop(session_id, None)
 
-    async def seed_session(self, request: Request, body: PivotSeedRequest) -> PivotSeedResponse:
-        await super().seed_session(body, request=request)
-        window = self._windows[request.session[SESSION_ID_KEY]]
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest | Annotated[PivotSeedRequest, BeforeValidator(reject_partial_typed_seed)],
+    ) -> ResourcesSeedSessionResponse | PivotSeedResponse:
+        seeded = await super().seed_session(body, request=request)
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return seeded  # the agent reads the window's request from /window
+        return self._request_view(self._windows[request.session[SESSION_ID_KEY]])
+
+    async def window(self, request: Request) -> PivotSeedResponse:
+        """The window's current request (the pivot request until the first step)."""
+        window = self._windows.get(request.session[SESSION_ID_KEY])
+        if window is None:
+            raise ResourcesSessionLostError("no window for this session (not seeded, verified or closed)")
+        return self._request_view(window)
+
+    @staticmethod
+    def _request_view(window: _Window) -> PivotSeedResponse:
         if window.restore_error is not None:
             return PivotSeedResponse(restore_error=window.restore_error)
         return PivotSeedResponse(
@@ -625,16 +707,19 @@ class ArcAgi3PivotResourcesServer(SimpleResourcesServer):
 
     async def step(self, request: Request, body: PivotStepRequest) -> PivotStepResponse:
         window = self._windows.get(request.session[SESSION_ID_KEY])
-        if window is None or window.worker is None:
+        if window is None:
+            raise ResourcesSessionLostError("no window for this session (not seeded, verified or closed)")
+        if window.worker is None:
             raise ValueError("step on a session without a restored window")
         c = self.config
         async with window.lock:
-            if window.done:
+            worker = window.worker
+            if window.done or worker is None:
                 raise ValueError("step after the window ended")
             usage = {"completion_tokens": int(body.gen_tokens or 0), "prompt_tokens": int(body.prompt_tokens or 0)}
             try:
                 out = await asyncio.to_thread(
-                    window.worker.call, "reply", self.harness_reply(body.message), body.finish_reason, usage
+                    worker.call, "reply", self.harness_reply(body.message), body.finish_reason, usage
                 )
             except RestoreError as exc:  # the worker failed or did not answer: the window ends, masked
                 return await self._worker_failed(window, exc)
@@ -657,9 +742,7 @@ class ArcAgi3PivotResourcesServer(SimpleResourcesServer):
             }
             try:
                 window.d = (
-                    0
-                    if level_completed
-                    else await asyncio.to_thread(window.worker.call, "distance", window.level_index)
+                    0 if level_completed else await asyncio.to_thread(worker.call, "distance", window.level_index)
                 )
             except RestoreError as exc:
                 return await self._worker_failed(window, exc)
@@ -705,8 +788,7 @@ class ArcAgi3PivotResourcesServer(SimpleResourcesServer):
                 window.request = out["request"]
             else:  # no next turn: the reply's tool results only
                 new = [m for m in following if m.get("role") == "tool" and m.get("tool_call_id") in ids]
-            if window.done:
-                worker, window.worker = window.worker, None
+            if window.done and (worker := window.take_worker()) is not None:
                 await asyncio.to_thread(worker.close)
         return PivotStepResponse(
             request_messages=None if window.done else window.request["messages"],
@@ -717,23 +799,34 @@ class ArcAgi3PivotResourcesServer(SimpleResourcesServer):
 
     async def _worker_failed(self, window: "_Window", exc: RestoreError) -> PivotStepResponse:
         window.done, window.worker_error = True, str(exc)
-        worker, window.worker = window.worker, None
-        await asyncio.to_thread(worker.close)
+        if (worker := window.take_worker()) is not None:
+            await asyncio.to_thread(worker.close)
         return PivotStepResponse(
             request_messages=None, messages=[], done=True, call={"done_reason": "worker_error", "error": str(exc)}
         )
 
     # ------------------------------------------------------------------ score
     async def verify(self, request: Request, body: PivotVerifyRequest) -> PivotVerifyResponse:
+        """Score the window and release it (its worker exits now, not at session close). The score is retained: a
+        retry of the verify (its first response lost) returns it, until the session is closed."""
         session_id = request.session[SESSION_ID_KEY]
-        try:
-            return self._score(self._windows.get(session_id) or _Window(restore_error="no window was seeded"), body)
-        finally:  # the window's worker exits now, not at session close
-            await self.release_session_state(session_id)
+        payload = body.model_dump()
+        async with self.verifying(session_id) as verification:
+            if verification.is_lost:
+                return PivotVerifyResponse(
+                    **(payload | lost_session_verification("no window for this session (not seeded or closed)")),
+                    reward_components={"progress": 0.0},
+                )
+            if verification.is_live:
+                result = self._score(self._windows[session_id], body)
+                verification.retain({k: v for k, v in result.model_dump().items() if k not in payload})
+                return result
+            return PivotVerifyResponse(**(payload | verification.retained))
 
     def _score(self, window: _Window, body: PivotVerifyRequest) -> PivotVerifyResponse:
         payload = body.model_dump()
         effort = next(iter((window.restore.get("reasoning_effort") or {}).values()), None)
+        agent_error = body.agent_error or (body.response.metadata or {}).get("agent_error")
         masked = None
         if window.restore_error is not None:
             masked = (ENVIRONMENT_PREPARE_FAILED, window.restore_error)
@@ -741,8 +834,8 @@ class ArcAgi3PivotResourcesServer(SimpleResourcesServer):
             masked = (ENVIRONMENT_SERVER_FAILED, f"the window's harness worker failed: {window.worker_error}")
         elif window.discard is not None:
             masked = (MODEL_CONTEXT_LIMIT, f"{window.discard} (discarded, not scored)")
-        elif body.agent_error or not window.done:
-            masked = (MODEL_REQUEST_ERROR, body.agent_error or "the window ended before its termination rule")
+        elif agent_error or not window.done:
+            masked = (MODEL_REQUEST_ERROR, agent_error or "the window ended before its termination rule")
         if masked is not None:
             return PivotVerifyResponse(
                 **payload,
