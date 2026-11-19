@@ -1,12 +1,12 @@
 ---
 name: nemo-gym-reward-profiling
 description: >-
-  Use when deciding which NeMo Gym tasks to train on with RL: profiling rewards
-  over repeated rollouts with gym eval profile, reading per-task pass rates and
-  reward spread, finding tasks that never or always pass, and reporting
-  coverage honestly for partial runs. Not for benchmark scoring runs, comparing
-  runs or explaining score gaps, planning benchmark repeats, or debugging
-  crashed runs.
+  Use when deciding which NeMo Gym tasks to train on with RL: collecting
+  repeated rollouts with gym eval run, profiling their rewards with gym eval
+  profile, reading per-task pass rates and reward spread, finding tasks that
+  never or always pass, and reporting coverage honestly for partial runs. Not
+  for benchmark scoring runs, comparing runs or explaining score gaps, planning
+  benchmark repeats, or debugging crashed runs.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -51,15 +51,17 @@ Hand off when the main job is different:
 
 Skip this step if the user already has a rollouts file and the `<stem>_materialized_inputs.jsonl` written next to it.
 
-Put the model endpoint in `env.yaml` in the working directory, start the servers, wait until every server shows ✓, then collect:
+Put the model endpoint in `env.yaml` in the working directory. If the file already exists, add or update these keys rather than replacing the file:
 
-```bash
-cat > env.yaml <<'EOF'
+```yaml
 policy_base_url: https://integrate.api.nvidia.com/v1
 policy_api_key: <your key>
 policy_model_name: <model id>
-EOF
+```
 
+Then start the servers, wait until every server shows ✓, and collect:
+
+```bash
 # Terminal 1 (or run it in the background). Use --resources-server <name> for an environment shipped with
 # nemo-gym, or --config <file> for your own. vllm_model talks to any OpenAI-compatible chat endpoint
 # (vLLM, NVIDIA API); openai_model needs the OpenAI Responses API.
