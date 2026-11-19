@@ -120,10 +120,35 @@ class ClaudeCodeSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     stderr: str = ""
+    # A continuation session's Claude Code session id: the first activation starts it, later ones resume it.
+    claude_session_id: str | None = None
+    activation_id: int | None = None
+
+    @property
+    def is_continuation(self) -> bool:
+        return self.request.continuation is not None
+
+    async def prepare_activation(self, activation_id: int, *, timeout: float) -> None:
+        """Rearm the supervised execution in a fresh activation directory under the session root.
+
+        Claude Code's configuration and session transcripts stay in the root's ``config/``, so a later activation
+        resumes the same conversation; each activation's runner files, events and stderr are its own.
+        """
+        assert self.is_continuation
+        self.activation_id = activation_id
+        self.runtime_info = None
+        self.stderr = ""
+        directory = f"{self.session.root_dir}/activation-{activation_id}"
+        await self.session.begin_activation(session_dir=directory, timeout=timeout)
+        result = await self.session.sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
+        if result.error_type == "timeout":
+            raise TimeoutError("Claude activation directory preparation timed out")
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"Cannot prepare Claude activation directory: {result.stderr or ''}")
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
-        """Stage runner input using the shared file-transfer utility."""
-        await upload_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}", text=json.dumps(payload))
+        """Stage session-wide input (settings, MCP config) in the session root."""
+        await upload_text(self.session.sandbox, path=f"{self.session.root_dir}/{name}", text=json.dumps(payload))
 
     async def read_text(self, name: str) -> str:
         """Read a session artifact using file transfer."""
@@ -136,7 +161,7 @@ class ClaudeCodeSandboxSession(AgentSessionState):
             await asyncio.to_thread(stage_skills, path, skills)
             for source in sorted(skills.rglob("*")):
                 if source.is_file():
-                    target = f"{self.session.session_dir}/config/skills/{source.relative_to(skills).as_posix()}"
+                    target = f"{self.session.root_dir}/config/skills/{source.relative_to(skills).as_posix()}"
                     await self.session.sandbox.upload(source, target)
 
     async def close(self, timeout: float) -> None:
@@ -187,6 +212,7 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         if skills_path:
             await self.stage_skills(skills_path)
         directory = self.session.session_dir
+        root = self.session.root_dir
         # Regular files avoid waiting for detached task services to close inherited pipes.
         params = {
             "cwd": payload["cwd"],
@@ -197,7 +223,7 @@ class ClaudeCodeSandboxSession(AgentSessionState):
             "stderr": f"{directory}/stderr.log",
         }
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
-        return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
+        return SandboxCommand(argv=["bash", f"{root}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
     async def collect_artifacts(self) -> ClaudeCodeArtifacts:
         """Copy dedicated stdout and transcripts after confirmed harness termination."""
@@ -217,9 +243,11 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         self.runtime_info = parse_runtime_info(runtime)
         transcripts = None
         directory = self.session.session_dir
+        # The session's transcripts so far: a continuation's cumulative conversation, sub-agents included.
+        config = self.session.root_dir + "/config"
         try:
             result = await self.session.sandbox.exec(
-                f"tar -czf {quote(directory + '/transcripts.tar.gz')} -C {quote(directory + '/config')} projects",
+                f"tar -czf {quote(directory + '/transcripts.tar.gz')} -C {quote(config)} projects",
                 timeout_s=30,
             )
             if result.return_code or result.error_type:
