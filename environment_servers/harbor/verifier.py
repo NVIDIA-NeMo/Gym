@@ -1368,12 +1368,13 @@ class HarborVerificationMixin:
         )
 
     def _verifier_env(self, settings: Any) -> dict[str, str]:
-        """The `test.sh` process environment: the task's resolved `[verifier].env`, and nothing else.
+        """The `test.sh` process environment: the task's `[verifier].env` with the run's `verifier_env` over it, resolved.
 
-        Operator secrets reach it only through the `${NAME}` templates the task writes (Harbor's
-        verifier resolves its env the same way), so a task that names none runs test.sh without any.
+        Harbor merges its job-level `verifier.env` over the task's the same way (`override_env`). Operator secrets
+        reach it only through the `${NAME}` templates these variables write (Harbor's verifier resolves its env the
+        same way), so a run whose variables name none runs test.sh without any.
         """
-        return resolve_env_templates(settings.env, self.config.secrets)
+        return resolve_env_templates(settings.env | self.config.verifier_env, self.config.secrets)
 
     async def _upload_trajectory(
         self, sandbox: AsyncSandbox, trajectory: bytes, logs_dir: Path, *, restored: Sequence[str] = ()

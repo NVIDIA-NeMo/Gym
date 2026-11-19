@@ -1845,6 +1845,35 @@ class RecordingShellProvider(ShellProvider):
 
 
 @pytest.mark.asyncio
+async def test_a_services_launch_script_is_readable_by_any_user_whatever_the_umask(tmp_path):
+    """The generated ``run.sh`` is uploaded with the mode of its local file, so a restrictive umask on the server
+    (0027 or 0077) would leave it unreadable to a service that runs as a user other than root, such as Hindsight's
+    image user; it is uploaded 0644 whatever the umask."""
+
+    class ModeRecordingProvider(RecordingShellProvider):
+        def __init__(self):
+            super().__init__()
+            self.script_modes = []
+
+        async def upload_file(self, handle, source_path, target_path):
+            if str(target_path).endswith("/run.sh"):
+                self.script_modes.append(os.stat(source_path).st_mode & 0o777)
+            await super().upload_file(handle, source_path, target_path)
+
+    result = tmp_path / "result"
+    document = {"services": {"api": {"image": "image", "command": ["sh", "-c", f"echo ok > {result}"]}}}
+    provider = ModeRecordingProvider()
+    umask = os.umask(0o077)
+    try:
+        async with make_compose(provider, document, poll_interval_s=0.01) as group:
+            await group._wait("api", "service_completed_successfully")
+    finally:
+        os.umask(umask)
+    assert result.read_text() == "ok\n"
+    assert provider.script_modes == [0o644]
+
+
+@pytest.mark.asyncio
 async def test_uploads_land_in_the_service_before_its_command_runs(tmp_path):
     """M22: a task-folder bind mount, planned as ``x-sandbox.uploads``, is copied into the service after its
     sandbox starts and before the service command, files and folders alike, readable by any user. The chmod is

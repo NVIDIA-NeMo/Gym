@@ -3,7 +3,7 @@
 
 """M30 at the server: the job-level Compose overlay turns an image-only task into a group with the overlay's
 services, its MCP entries reach the harness merged with the task's in the task context and the grant list, the
-prompt template wraps the first turn's instruction, and the merged document stays private."""
+prompt template wraps every turn's instruction, and the merged document stays private."""
 
 import asyncio
 import json
@@ -1140,7 +1140,10 @@ class TestPromptTemplate:
         # The result and the transcript carry what the harness saw.
         assert response.result.responses_create_params.input[0].content == rendered
 
-    async def test_only_the_first_turn_of_a_multi_step_task_is_wrapped(self, tmp_path, monkeypatch):
+    async def test_every_turn_of_a_multi_step_task_is_wrapped(self, tmp_path, monkeypatch):
+        """Harbor's agent renders its prompt template around every instruction it is handed (``with_prompt_template``
+        on ``run``), and a multi-step trial hands it each step's, so a fresh session at every step still reads the
+        memory instructions."""
         server, task, sandbox, _ = multi_turn_server(
             tmp_path, monkeypatch, THREE_STEPS, {"plan": "Plan it.", "build": "Build it.", "check": "Check it."}
         )
@@ -1164,17 +1167,18 @@ class TestPromptTemplate:
             if call[1].endswith("/v1/responses")
         ]
         turns = [body["input"][0]["content"] for body in bodies]
-        assert turns == ["You have a memory server.\n\n## Task Instruction\n\nPlan it.", "Build it.", "Check it."]
+        assert turns == [
+            f"You have a memory server.\n\n## Task Instruction\n\n{instruction}"
+            for instruction in ("Plan it.", "Build it.", "Check it.")
+        ]
         # Each turn reaches the harness as the row wrote it, less the row's step name (the server's bookkeeping,
-        # which the sandbox harnesses would refuse); the rendered first turn differs in its content only (no
-        # default of the params model made explicit by the rendering round trip).
+        # which the sandbox harnesses would refuse); a rendered turn differs in its content only (no default of the
+        # params model made explicit by the rendering round trip).
         sent = [{**row, "metadata": {k: v for k, v in row["metadata"].items() if k != "harbor_step"}} for row in rows]
-        assert bodies == [{**sent[0], "input": [{**sent[0]["input"][0], "content": turns[0]}]}, sent[1], sent[2]]
-        # The multi-turn record keeps the last turn's params, so the rendered first turn is in its own transcript
-        # only (the turn results carry no params; recording them is a follow-up with M34).
-        assert response.result.responses_create_params.input[0].content == "Check it."
+        assert bodies == [{**row, "input": [{**row["input"][0], "content": text}]} for row, text in zip(sent, turns)]
+        # The multi-turn record keeps the last turn's params, rendered.
+        assert response.result.responses_create_params.input[0].content == turns[-1]
         assert [turn.name for turn in response.result.turns] == ["plan", "build", "check"]
-        assert "memory server" not in json.dumps(response.result.model_dump(mode="json")["turns"])
 
     async def test_a_template_that_does_not_render_fails_the_episode_before_any_sandbox(self, tmp_path, monkeypatch):
         # The block compiles its template when it is read (an undefined variable passes then, as Harbor's

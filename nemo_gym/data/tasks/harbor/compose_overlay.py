@@ -76,7 +76,7 @@ class HarborComposeOverlay(BaseModel):
     file (Harbor's ``extra_docker_compose``); ``mcp_servers`` are MCP entries merged by name with the task's
     ``[[environment.mcp_servers]]``, the overlay's winning on a name (Harbor's ``agents[].mcp_servers``);
     ``prompt_template`` is a Jinja template with an ``{{ instruction }}`` variable, rendered around the
-    instruction of the episode's first turn (Harbor's ``prompt_template_path``). Every path must exist when
+    instruction of every turn of the episode (Harbor's ``prompt_template_path``). Every path must exist when
     the block is read: Harbor refuses a missing extra Compose file the same way (``FileNotFoundError`` in
     ``_normalize_extra_docker_compose_paths``), and a template that does not name ``instruction`` or does
     not parse is refused before any episode, as Harbor's ``render_prompt_template`` refuses it. The template

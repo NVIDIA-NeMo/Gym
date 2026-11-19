@@ -631,6 +631,12 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.models.token_capture.store", "0.8.0", "make_token_store"),
         **_names("nemo_gym.server_runtime.request_handling.rollout_context", "0.8.0", "scope_with_routed_path"),
     },
+    "nemo_gym.data.tasks.harbor.build_plan": {
+        # build_plan imported these until it planned each step's verifier folder (verifier_build_contexts).
+        **_names(
+            "nemo_gym.data.tasks.harbor.verifier_env", "0.8.0", "verifier_build_context verifier_build_environment"
+        ),
+    },
     "nemo_gym.chat_streaming": {
         # Split out of chat_streaming.
         **_names("nemo_gym.core.responses_api_types", "0.8.0", "SSE_KEEPALIVE"),
