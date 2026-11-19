@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import MagicMock
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -19,6 +20,7 @@ from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
 from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.server_runtime.base_resources_server import (
+    RESOURCES_SESSIONS,
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -28,6 +30,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesCloseSessionResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_runtime.request_handling.session_routing import install_session_routing
 
 
 AUTH = {"authorization": "Bearer t"}
@@ -102,12 +105,19 @@ class RestartOnlyServer(CounterServer):
     checkpoint_mode: ClassVar[str] = "restart_only"
 
 
-def make_server(server_type: type[CounterServer] = CounterServer) -> tuple[CounterServer, httpx.AsyncClient]:
+def make_server(
+    server_type: type[CounterServer] = CounterServer, *, routed: bool = False
+) -> tuple[CounterServer, httpx.AsyncClient]:
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
     config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="counter")
     server = server_type(config=config, server_client=server_client, counters={})
     app = server.setup_webserver()
+    if routed:
+        cookie = server.get_session_middleware_key()
+        install_session_routing(
+            app, kind=RESOURCES_SESSIONS, socket_dir=None, session_cookie=cookie, secret_key=cookie
+        )
     return server, httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://r")
 
 
@@ -598,6 +608,36 @@ async def test_the_seed_reply_and_status_report_the_verify_step_type(
     assert status["verify"] == expected
 
 
+@pytest.mark.parametrize("server_type", [CounterServer, ReplayVerifyServer, RestartOnlyServer])
+async def test_seed_reports_the_resources_session_id_bound_to_its_cookie(server_type: type[CounterServer]) -> None:
+    server, client = make_server(server_type)
+    async with client:
+        seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
+    [session_id] = server.counters
+    assert seed.status_code == 200
+    assert unquote(seed.headers["x-ng-resources-session-id"]) == session_id
+
+
+async def test_reported_session_id_closes_a_routed_session_without_weakening_mismatch_checks() -> None:
+    server, client = make_server(ReplayVerifyServer, routed=True)
+    async with client:
+        seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
+        assert seed.status_code == 200
+        session_id = unquote(seed.headers["x-ng-resources-session-id"])
+        assert session_id != "run:r"
+        verified = await client.post("/ng-rollout/r/verify", json=VERIFY, headers=CLOSE_FOLLOWS)
+        assert verified.status_code == 200 and server.checkpoint_participant.is_open(session_id)
+        refused = await client.post(
+            "/ng-rollout/r/close_session", json={"resources_session_id": "run:r", "episode_id": {"rollout_id": "r"}}
+        )
+        assert refused.status_code == 409 and server.checkpoint_participant.is_open(session_id)
+        closed = await client.post(
+            "/ng-rollout/r/close_session", json={"resources_session_id": session_id, "episode_id": {"rollout_id": "r"}}
+        )
+    assert closed.status_code == 200 and server.closed == [session_id]
+    assert not server.checkpoint_participant.is_open(session_id)
+
+
 async def test_the_seed_reply_reports_nothing_when_checkpointing_is_off() -> None:
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = DictConfig({})
@@ -608,6 +648,7 @@ async def test_the_seed_reply_reports_nothing_when_checkpointing_is_off() -> Non
 
     assert seed.status_code == 200
     assert "x-ng-checkpoint-verify" not in seed.headers
+    assert "x-ng-resources-session-id" not in seed.headers
 
 
 async def test_a_session_the_server_already_dropped_is_not_exported_and_does_not_fail_the_commit(
@@ -1258,7 +1299,8 @@ class ReplacingSeedServer(CounterServer):
 async def test_a_session_whose_id_the_seed_replaces_is_tracked_under_its_new_id() -> None:
     server, client = make_server(ReplacingSeedServer)
     async with client:
-        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
+        assert seed.headers["x-ng-resources-session-id"] == "caller-session"
         tracked = server._checkpoint.readiness().counts["sessions"]
         await client.post(
             "/ng-rollout/r/close_session",

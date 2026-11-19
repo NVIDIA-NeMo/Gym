@@ -65,6 +65,7 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Optional, Protocol
+from urllib.parse import quote
 
 from pydantic import JsonValue
 
@@ -92,6 +93,7 @@ from nemo_gym.server_runtime._checkpoint.steps import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     CHECKPOINT_RESTART_HEADER,
     CHECKPOINT_VERIFY_HEADER,
+    RESOURCES_SESSION_ID_HEADER,
     StepType,
 )
 
@@ -821,6 +823,11 @@ class ResourcesCheckpointMiddleware:
                     # Tell the caller, before it ever verifies, whether this server's /verify may be replayed,
                     # and whether its episode must start over after a crash.
                     headers = [(CHECKPOINT_VERIFY_HEADER.encode(), self.participant.verify_step_type.encode())]
+                    resources_session_id = seeded_session_id()
+                    if 200 <= message["status"] < 300 and isinstance(resources_session_id, str):
+                        headers.append(
+                            (RESOURCES_SESSION_ID_HEADER.encode(), quote(resources_session_id, safe="").encode())
+                        )
                     if restarts:
                         headers.append((CHECKPOINT_RESTART_HEADER.encode(), b"1"))
                     message = {**message, "headers": [*message.get("headers", []), *headers]}

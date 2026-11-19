@@ -173,7 +173,7 @@ class Harness:
             await self.reply_delivery.wait()
             return Reply(response.model_dump(mode="json"))
         if url_path == "/seed_session":
-            headers = {"x-ng-checkpoint-verify": "replay"}
+            headers = {"x-ng-checkpoint-verify": "replay", "x-ng-resources-session-id": "resource-session-id"}
             if self.restart_resource:
                 headers["x-ng-checkpoint-restart"] = "1"
             return Reply({}, headers=headers, cookies={"session": "resource-session"})
@@ -186,8 +186,9 @@ class Harness:
             verdict = await self.verifier.verify(SingleStepToolUseArgumentComparisonVerifyRequest.model_validate(json))
             return Reply(verdict.model_dump(mode="json"))
         if url_path == "/close_session":
-            self.closes += 1
             assert kwargs["cookies"] == {"session": "resource-session"}
+            assert json["resources_session_id"] == "resource-session-id"
+            self.closes += 1
             return Reply({})
         raise AssertionError((server_name, url_path))
 
@@ -246,6 +247,7 @@ async def test_inflight_model_wait_saves_and_survives_a_second_restore(harnesses
     records = await first.save(tmp_path / "first")
     assert len(records) == 1 and records[0].boundary == {}
     assert records[0].episode["next"] == "model"
+    assert records[0].episode["resources_session_id"] == "resource-session-id"
     assert not first.participant.readiness().restarts
     first.model_release.set()
     await asyncio.sleep(0.02)
