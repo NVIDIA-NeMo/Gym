@@ -262,8 +262,8 @@ class _ListedConfig(_ManifestModel):
 
     name: NonEmptyString = Field(
         description=(
-            "Catalog name of the config: its path under benchmarks/ or environments/ without .yaml, as "
-            "`gym eval run --benchmark` takes it."
+            "ID of the config, as the catalog lists it and `gym eval run --benchmark` takes it. Like a main "
+            "manifest's name, it is unique within its benchmarks/ or environments/ tree and need not match a path."
         )
     )
     config_path: NonEmptyString = Field(description="Config path relative to the main manifest.")
@@ -622,6 +622,10 @@ class EnvironmentManifest(_ManifestModel):
     def listed_configs(self) -> tuple[ManifestSetup | ManifestProtocol, ...]:
         """The setups, then each protocol followed by its own setups, in the order the manifest lists them."""
         return (*self.setups, *(listed for protocol in self.protocols for listed in (protocol, *protocol.setups)))
+
+    def declared_names(self) -> tuple[str, ...]:
+        """The IDs this manifest declares: its own name, then the name of each setup and protocol it lists."""
+        return (self.name, *(listed.name for listed in self.listed_configs()))
 
     def listing_protocol(self, listed: ManifestSetup | ManifestProtocol) -> ManifestProtocol | None:
         """The protocol that lists ``listed`` as one of its setups; ``None`` when the main manifest lists it."""

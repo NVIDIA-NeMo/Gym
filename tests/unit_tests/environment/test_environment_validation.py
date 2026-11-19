@@ -4,6 +4,7 @@
 import ast
 import json
 import logging
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
@@ -1369,31 +1370,51 @@ def test_a_name_the_manifest_does_not_list_is_rejected(tmp_path: Path) -> None:
         validate_environment(_listing(tmp_path), name="demo/missing")
 
 
-def test_a_listed_config_keeps_the_name_the_catalog_gives_its_config(tmp_path: Path) -> None:
-    # Without a manifest the catalog lists benchmarks/demo/variant.yaml as demo/variant, and
-    # `gym eval run --benchmark demo/variant` runs it; a listing under another name would change that name.
-    main_path = _listing(tmp_path, name="demo/renamed")
+def test_a_listed_name_is_an_id_that_need_not_match_its_config_path(tmp_path: Path) -> None:
+    # Like a main manifest's name, a setup's name stays the same when its config moves or is renamed.
+    main_path = _listing(tmp_path, name="variant_id")
 
-    with pytest.raises(EnvironmentValidationError, match="'demo/renamed' must be named 'demo/variant'"):
-        validate_environment(main_path)
-    # Selecting the setup by name runs the same check, as `gym env validate demo/renamed` does.
-    with pytest.raises(EnvironmentValidationError, match="'demo/renamed' must be named 'demo/variant'"):
-        validate_environment(main_path, name="demo/renamed")
+    assert validate_environment(main_path).name == "demo"
+    report = validate_environment(main_path, name="variant_id")
+    assert (report.name, Path(report.config_path).name) == ("variant_id", "variant.yaml")
 
 
-def test_a_listed_config_has_no_manifest_of_its_own(tmp_path: Path) -> None:
+def _other_manifest(main_path: Path, *, name: str, config_path: str) -> Path:
+    """A second main manifest in the demo benchmark's tree, at ``demo/other_folder``."""
+    other = main_path.parent / "other_folder/manifest.yaml"
+    other.parent.mkdir()
+    manifest = load_manifest(main_path).model_copy(update={"name": name, "config_path": config_path, "setups": []})
+    other.write_text(dump_manifest(manifest), encoding="utf-8")
+    return other
+
+
+def test_a_listed_name_cannot_be_another_manifests_name(tmp_path: Path) -> None:
     main_path = _listing(tmp_path)
-    own = main_path.parent / "variant/manifest.yaml"
-    own.parent.mkdir()
-    own.write_text(
-        dump_manifest(load_manifest(main_path).model_copy(update={"name": "demo/variant", "setups": []})),
-        encoding="utf-8",
-    )
+    other = _other_manifest(main_path, name="demo/variant", config_path="config.yaml")
+    shutil.copy(main_path.with_name("config.yaml"), other.with_name("config.yaml"))
 
-    with pytest.raises(EnvironmentValidationError, match="also has a manifest of its own"):
-        validate_environment(main_path)
-    with pytest.raises(EnvironmentValidationError, match="also has a manifest of its own"):
-        validate_environment(main_path, name="demo/variant")
+    for path, name in ((main_path, None), (main_path, "demo/variant"), (other, None)):
+        with pytest.raises(EnvironmentValidationError, match="Name 'demo/variant' is also declared by"):
+            validate_environment(path, name=name)
+
+
+def test_a_listed_config_has_one_id(tmp_path: Path) -> None:
+    # A manifest of its own for the config a main manifest lists would list that config a second time.
+    main_path = _listing(tmp_path)
+    _other_manifest(main_path, name="variant_id", config_path="../variant.yaml")
+
+    for name in (None, "demo/variant"):
+        with pytest.raises(EnvironmentValidationError, match="is also the config of 'variant_id'.*one ID"):
+            validate_environment(main_path, name=name)
+
+
+def test_a_listed_name_cannot_take_another_configs_path(tmp_path: Path) -> None:
+    main_path = _listing(tmp_path, name="demo/other")
+    shutil.copy(main_path.with_name("config.yaml"), main_path.with_name("other.yaml"))
+
+    for name in (None, "demo/other"):
+        with pytest.raises(EnvironmentValidationError, match="Name 'demo/other' is the path of another config"):
+            validate_environment(main_path, name=name)
 
 
 def test_a_listed_config_must_exist(tmp_path: Path) -> None:

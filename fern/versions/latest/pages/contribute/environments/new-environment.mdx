@@ -447,10 +447,10 @@ A named config that runs a benchmark's tasks with another harness, prompt, tools
 
 ### Names
 
-A manifest's `name` is its ID: `gym list environments` lists the manifest under that name, and `--benchmark` and `--environment` take it. The scaffold sets the name to the folder path under `benchmarks/` or `environments/`, such as `aime24` or `indic/frontier_math`. The name does not have to match the folder, so moving the folder does not change the ID. The manifest still sits in a folder of its own, not directly in `benchmarks/` or `environments/`.
+A manifest's `name` is its ID, and so is the `name` of each setup and protocol it lists: `gym list environments` lists each under its name, and `--benchmark` and `--environment` take it. The scaffold sets a manifest's name to the folder path under `benchmarks/` or `environments/`, such as `aime24` or `indic/frontier_math`. The name does not have to match the folder, so moving the folder does not change the ID. The manifest still sits in a folder of its own, not directly in `benchmarks/` or `environments/`.
 
-- Two manifests in the same `benchmarks/` or `environments/` tree cannot declare the same name. A manifest in an earlier search root (`--search-dir`) shadows one of the same name in a later root.
-- `--benchmark` and `--environment` select what the catalog lists under a name: in the first search root that has it, the manifest that declares the name, or else a config the catalog lists under that name that no other manifest claims. Any other config at that path, such as an environment's flavor file `<folder>/<flavor>.yaml`, is selected only when no search root lists the name. A manifest whose name differs from its folder cannot take a name that is already another config's path, because it would hide that config.
+- No two manifests in the same `benchmarks/` or `environments/` tree declare the same name, as their own name or for a setup or protocol they list. No two names point at the same config either. A name in an earlier search root (`--search-dir`) shadows the same name in a later root.
+- `--benchmark` and `--environment` select what the catalog lists under a name: in the first search root that has it, the manifest, setup or protocol of that name, or else a config the catalog lists under that name that no manifest claims. Any other config at that path, such as an environment's flavor file `<folder>/<flavor>.yaml` or a listed config that has another name, is selected only when no search root lists the name. A name other than the manifest's own folder path cannot be another config's path, because it would hide that config.
 
 ### Setups and Protocols
 
@@ -480,7 +480,7 @@ protocols:
   standard_prompt_config: benchmarks/my_benchmark/prompts/with_system.yaml
 ```
 
-- `name` is required. It is the name the catalog gives the config: its path under `benchmarks/` or `environments/` without `.yaml`, which is also what `gym eval run --benchmark` takes.
+- `name` is required. It is the config's ID, which the catalog lists and `gym eval run --benchmark` takes; see [Names](#names). It is usually the config's path under `benchmarks/` or `environments/` without `.yaml`, as in this example, and stays the same if the config moves. It can also say what the config is, as `my_benchmark/harness_neutral` does in the next example.
 - `config_path` is required and relative to the main manifest.
 - An entry may set `description`, `maintainers`, `requirements`, `primary_metric`, `integration_profile`, and `dataset_owner`. A protocol must set `description`, saying how its prompt, tools, or scoring differ, and may also set `standard_prompt_config`. A setup sets `standard_prompt_config` only for a prompt adapted to its harness, and then must set `description`.
 - `requirements` combines field by field: an entry that sets only `network: public` keeps the inherited `gpu`. A list such as `datasets` or `maintainers` replaces the inherited one whole.
@@ -490,7 +490,7 @@ A protocol that several harnesses run lists them as its own `setups`. Such a set
 
 ```yaml
 protocols:
-- name: my_benchmark/opencode
+- name: my_benchmark/harness_neutral
   config_path: opencode.yaml
   description: My benchmark with a prompt that names no harness's tools, run by OpenCode.
   standard_prompt_config: benchmarks/my_benchmark/prompts/harness-neutral.yaml

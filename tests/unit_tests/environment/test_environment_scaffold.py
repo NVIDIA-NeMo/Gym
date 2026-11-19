@@ -24,6 +24,8 @@ from nemo_gym.environment.manifest import (
     IntegrationProfile,
     IntendedUse,
     ManifestRequirements,
+    ManifestSetup,
+    dump_manifest,
     load_manifest,
 )
 from nemo_gym.environment.scaffold import (
@@ -332,6 +334,20 @@ def test_refuses_a_name_that_a_moved_manifest_still_declares(tmp_path: Path) -> 
         scaffold_environment(root=tmp_path, kind="benchmark", name="sample")
 
     assert not (tmp_path / "benchmarks" / "sample").exists()
+
+
+def test_refuses_a_name_that_another_manifest_lists_as_a_setup(tmp_path: Path) -> None:
+    scaffold_environment(root=tmp_path, kind="benchmark", name="sample")
+    manifest_path = tmp_path / "benchmarks" / "sample" / "manifest.yaml"
+    manifest = load_manifest(manifest_path).model_copy(
+        update={"setups": [ManifestSetup(name="sample_codex", config_path="codex.yaml")]}
+    )
+    manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
+
+    with pytest.raises(ScaffoldError, match="already declares the name 'sample_codex'"):
+        scaffold_environment(root=tmp_path, kind="benchmark", name="sample_codex")
+
+    assert not (tmp_path / "benchmarks" / "sample_codex").exists()
 
 
 def test_rejects_unsafe_root_paths(tmp_path: Path) -> None:

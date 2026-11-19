@@ -37,7 +37,6 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.episode_types import MaterializedTask, is_materialized_task_row
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.environment.benchmarks import MANIFEST_FILENAME, _benchmark_config_name
 from nemo_gym.environment.manifest import (
     DatasetKind,
     EnvironmentKind,
@@ -51,7 +50,7 @@ from nemo_gym.environment.manifest import (
     resolve_listed_manifest,
     resolve_manifest_config_path,
 )
-from nemo_gym.environment.registry import declared_manifests
+from nemo_gym.environment.registry import _manifest_configs, declared_manifests
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
@@ -975,31 +974,12 @@ def _validate_manifest_location(manifest_path: Path, manifest: EnvironmentManife
 def _validate_listing(
     manifest_path: Path, main: EnvironmentManifest, selected: ManifestSetup | ManifestProtocol | None = None
 ) -> None:
-    """Check that each setup and protocol a main manifest lists is a config of its catalog with no manifest of its own.
-
-    A listed config is named as the catalog names it without a manifest, so `gym eval run --benchmark` keeps taking
-    the same name. A manifest of its own would make the config a second catalog entry with the same name. With
-    ``selected``, only that setup or protocol is checked.
-    """
-    catalog_directory = _catalog_directory(manifest_path)
+    """Check that the config of each setup and protocol a main manifest lists exists; with ``selected``, of that one."""
     for listed in main.listed_configs() if selected is None else (selected,):
         config_path = resolve_manifest_config_path(manifest_path, resolve_listed_manifest(main, listed))
         if not config_path.is_file():
             raise EnvironmentValidationError(
                 f"{listed.name}: config_path '{listed.config_path}' was not found at {config_path}."
-            )
-        if catalog_directory is None:
-            continue
-        expected_name = _benchmark_config_name(config_path.relative_to(catalog_directory))
-        if listed.name != expected_name:
-            raise EnvironmentValidationError(
-                f"'{listed.name}' must be named '{expected_name}', the catalog name of its config {config_path}."
-            )
-        own_manifest = catalog_directory / listed.name / MANIFEST_FILENAME
-        if own_manifest.is_file():
-            raise EnvironmentValidationError(
-                f"{listed.name} is listed in the manifest of {main.name} and also has a manifest of its own at "
-                f"{own_manifest}; remove that one."
             )
 
 
@@ -1053,35 +1033,49 @@ def _synchronize(
         ) from error
 
 
-def _validate_unique_name(manifest_path: Path, manifest: EnvironmentManifest, config_path: Path) -> None:
-    """Check that a manifest's name identifies only this manifest within its catalog tree.
+def _validate_unique_names(manifest_path: Path, main: EnvironmentManifest, configs: Mapping[str, Path]) -> None:
+    """Check that each name in ``configs`` is the one ID of its config within the catalog tree.
 
-    The name is the environment ID and stays the same when the folder moves, so it need not match the folder path.
-    No other manifest in the tree may declare it. A name that differs from its folder path also may not be the path
-    of another config: the manifest's name would hide that config from the catalog and from ``--benchmark`` and
+    ``configs`` maps the names to check, the main manifest's or those of the setups and protocols it lists, to their
+    configs. A name is an ID and stays the same when folders move, so it need not match a path. No other manifest in
+    the tree may declare it, as its own name or for a setup or protocol it lists, and no other name may point at its
+    config, which would then be listed twice. A name other than the main manifest's folder path also may not be the
+    path of another config: it would hide that config from the catalog and from ``--benchmark`` and
     ``--environment``.
     """
     catalog_directory = _catalog_directory(manifest_path)
     if catalog_directory is None:
         return
     for other_path, other in declared_manifests(catalog_directory):
-        if other.name == manifest.name and other_path.resolve() != manifest_path:
-            raise EnvironmentValidationError(
-                f"Manifest name '{manifest.name}' is also declared by {other_path}. "
-                f"A manifest's name is its ID and must be unique within {catalog_directory.name}/."
-            )
-    if manifest.name == manifest_path.parent.relative_to(catalog_directory).as_posix():
-        return
-    # The paths `asset_config_path` tries for a benchmark or environment name, in its order.
-    path_configs = [catalog_directory / manifest.name / "config.yaml"]
-    if "/" in manifest.name:
-        path_configs.append(catalog_directory / f"{manifest.name}.yaml")
-    for path_config in path_configs:
-        if path_config.is_file() and path_config.resolve() != config_path:
-            raise EnvironmentValidationError(
-                f"Manifest name '{manifest.name}' is the path of another config, {path_config}, which this name "
-                "would hide from the catalog and from --benchmark and --environment. Choose another name."
-            )
+        if other_path.resolve() == manifest_path:
+            continue
+        for name in other.declared_names():
+            if name in configs:
+                raise EnvironmentValidationError(
+                    f"Name '{name}' is also declared by {other_path}. A name is the ID of a manifest, setup or "
+                    f"protocol and must be unique within {catalog_directory.name}/."
+                )
+        for other_name, other_config in _manifest_configs(other_path, other):
+            for name, config_path in configs.items():
+                if config_path == other_config:
+                    raise EnvironmentValidationError(
+                        f"The config of '{name}', {config_path}, is also the config of '{other_name}' in "
+                        f"{other_path}. A config has one ID, so declare it in one place."
+                    )
+    folder_name = manifest_path.parent.relative_to(catalog_directory).as_posix()
+    for name, config_path in configs.items():
+        if name == main.name == folder_name:
+            continue
+        # The paths `asset_config_path` tries for a benchmark or environment name, in its order.
+        path_configs = [catalog_directory / name / "config.yaml"]
+        if "/" in name:
+            path_configs.append(catalog_directory / f"{name}.yaml")
+        for path_config in path_configs:
+            if path_config.is_file() and path_config.resolve() != config_path:
+                raise EnvironmentValidationError(
+                    f"Name '{name}' is the path of another config, {path_config}, which this name would hide from "
+                    "the catalog and from --benchmark and --environment. Choose another name."
+                )
 
 
 def _task_datasets(manifest: EnvironmentManifest) -> tuple[ManifestDataset, ...]:
@@ -1174,7 +1168,14 @@ def validate_environment(
     _validate_listing(resolved_manifest_path, main, listed)
     if not resolved_config_path.is_file():
         raise EnvironmentValidationError(f"Gym config was not found: {resolved_config_path}")
-    _validate_unique_name(resolved_manifest_path, manifest, resolved_config_path)
+    # The names and configs the catalog reads from the manifest; the main manifest's validation checks those of the
+    # setups and protocols it lists too.
+    configs = {
+        name: path
+        for name, path in _manifest_configs(resolved_manifest_path, main)
+        if listed is None or name == listed.name
+    }
+    _validate_unique_names(resolved_manifest_path, main, configs)
 
     composition = _resolve_manifest_composition(resolved_config_path, dataset_owner=manifest.dataset_owner)
     differences = _mirror_differences(manifest, composition)

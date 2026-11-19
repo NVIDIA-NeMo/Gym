@@ -60,6 +60,10 @@ _ENV_CONFIG = """{name}:
 """
 
 
+# A config that the benchmark scan lists under its path when no manifest claims it.
+_BENCHMARK_CONFIG = "agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n"
+
+
 def _manifest(name: str, kind: str = "environment", **updates) -> dict:
     dataset = {
         "name": name,
@@ -488,22 +492,42 @@ class TestEnvironmentCatalog:
         assert (entries[("benchmark", "suite")].setup_of, entries[("benchmark", "suite")].protocol_of) == (None, None)
         assert len([key for key in entries if key[1].startswith("suite")]) == 4
 
-    def test_rejects_a_listed_name_that_is_not_its_configs_catalog_path(self, tmp_path: Path, monkeypatch) -> None:
-        # Named `other`, the setup would take that name from benchmarks/other/config.yaml, which `--benchmark other`
-        # still runs, and leave its own config out of the catalog under `demo/variant`.
-        listing = {"setups": [{"name": "other", "config_path": "variant.yaml"}]}
-        manifest_path = _write_manifest(tmp_path, "benchmarks", "demo", _manifest("demo", "benchmark", **listing))
-        benchmark_config = "agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n"
-        manifest_path.with_name("variant.yaml").write_text(benchmark_config, encoding="utf-8")
-        other = tmp_path / "benchmarks" / "other" / "config.yaml"
-        other.parent.mkdir()
-        other.write_text(benchmark_config, encoding="utf-8")
+    def test_a_listed_name_is_its_id_wherever_its_config_sits(self, tmp_path: Path, monkeypatch) -> None:
+        listing = {"setups": [{"name": "codex_id", "config_path": "codex.yaml", "agent_server": "codex"}]}
+        manifest_path = _write_manifest(tmp_path, "benchmarks", "suite", _manifest("suite", "benchmark", **listing))
+        manifest_path.with_name("codex.yaml").write_text(_BENCHMARK_CONFIG, encoding="utf-8")
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
 
-        with pytest.raises(
-            RegistryError, match="lists 'other', but the catalog path of its config .* requires 'demo/variant'"
-        ):
+        entries = {entry.name: entry for entry in discover_environment_catalog() if entry.kind == "benchmark"}
+
+        # The config is listed once, under its ID, not again under its path `suite/codex`.
+        assert set(entries) == {"suite", "codex_id"}
+        assert entries["codex_id"].config_path == manifest_path.with_name("codex.yaml").resolve()
+
+    def test_a_listed_name_and_another_manifests_name_cannot_be_the_same(self, tmp_path: Path, monkeypatch) -> None:
+        listing = {"setups": [{"name": "alpha", "config_path": "codex.yaml"}]}
+        _write_manifest(tmp_path, "benchmarks", "suite", _manifest("suite", "benchmark", **listing))
+        _write_manifest(tmp_path, "benchmarks", "alpha", _manifest("alpha", "benchmark"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        with pytest.raises(RegistryError, match="both declare name 'alpha'.*manifest, setup or protocol"):
             discover_environment_catalog()
+
+    @pytest.mark.parametrize("shadowed", ["suite", "codex_id"])
+    def test_a_shadowed_setup_still_claims_its_config(self, shadowed: str, tmp_path: Path, monkeypatch) -> None:
+        # An earlier root shadows the whole manifest by its name, or only the setup by the setup's name. Either way
+        # the later root's setup config is not listed again under its path `suite/codex`.
+        high, low = tmp_path / "high", tmp_path / "low"
+        _write_manifest(high, "benchmarks", "elsewhere", _manifest(shadowed, "benchmark"))
+        listing = {"setups": [{"name": "codex_id", "config_path": "codex.yaml"}]}
+        manifest_path = _write_manifest(low, "benchmarks", "suite", _manifest("suite", "benchmark", **listing))
+        manifest_path.with_name("codex.yaml").write_text(_BENCHMARK_CONFIG, encoding="utf-8")
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [high, low])
+
+        names = [entry.name for entry in discover_environment_catalog() if entry.kind == "benchmark"]
+
+        assert "suite/codex" not in names
+        assert sorted(names) == sorted({shadowed, "suite"})
 
     def test_resolution_requires_kind_only_for_cross_kind_collision(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(tmp_path, "environments", "shared", _manifest("shared"))

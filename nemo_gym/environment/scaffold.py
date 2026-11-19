@@ -158,14 +158,14 @@ def scaffold_environment(
 def _require_unclaimed_name(asset_dir: Path, name: str) -> None:
     """Refuse a name that a manifest in another folder of the same catalog tree already declares.
 
-    A manifest's name is its ID and stays the same when its folder moves, so a free folder does not mean a free
-    name. Running the scaffold again for the manifest in ``asset_dir`` itself is still allowed.
+    A name is the ID of a manifest, setup or protocol and stays the same when its folder moves, so a free folder
+    does not mean a free name. Running the scaffold again for the manifest in ``asset_dir`` itself is still allowed.
     """
     for manifest_path, manifest in declared_manifests(asset_dir.parent):
-        if manifest.name == name and manifest_path.parent.resolve() != asset_dir.resolve():
+        if name in manifest.declared_names() and manifest_path.parent.resolve() != asset_dir.resolve():
             raise ScaffoldError(
-                f"{manifest_path} already declares the name '{name}'. A manifest's name is its ID, "
-                "so choose another name."
+                f"{manifest_path} already declares the name '{name}'. A name is the ID of a manifest, setup or "
+                "protocol, so choose another name."
             )
 
 

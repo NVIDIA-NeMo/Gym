@@ -36,24 +36,21 @@ def _path_candidates(tree: Path, value: str) -> list[Path]:
 def _catalog_configs_in_tree(tree: Path, value: str, kind: str) -> tuple[Path | None, Path | None]:
     """The config one catalog tree resolves a name to as a catalog entry, and otherwise by its old path.
 
-    The catalog entry is what the catalog lists under the name: the manifest that declares it, or else a config the
-    catalog lists under that name and no manifest claims. Any other config at that path, such as an environment
-    flavor file, a nested benchmark config or a config that a manifest claims under another name, is returned
-    separately: it is used only when no root has a catalog entry, which keeps such paths working.
+    The catalog entry is what the catalog lists under the name: the manifest, or the setup or protocol a manifest
+    lists, that declares it, or else a config the catalog lists under that name and no manifest claims. Any other
+    config at that path, such as an environment flavor file, a nested benchmark config or a config that a manifest
+    claims under another name, is returned separately: it is used only when no root has a catalog entry, which keeps
+    such paths working.
     """
     # Imported here so that commands that never select a benchmark or environment, such as --help, stay fast.
-    from nemo_gym.environment.manifest import ManifestError, resolve_manifest_config_path
-    from nemo_gym.environment.registry import _legacy_config_name, declared_manifests
+    from nemo_gym.environment.registry import _legacy_config_name, _manifest_configs, declared_manifests
 
     claimed: set[Path] = set()
     for manifest_path, manifest in declared_manifests(tree):
-        try:
-            config_path = resolve_manifest_config_path(manifest_path, manifest)
-        except ManifestError:
-            continue
-        if manifest.name == value:
-            return config_path, None
-        claimed.add(config_path)
+        for name, config_path in _manifest_configs(manifest_path, manifest):
+            if name == value:
+                return config_path, None
+            claimed.add(config_path)
     candidates = [candidate for candidate in _path_candidates(tree, value) if candidate.is_file()]
     for candidate in candidates:
         if candidate.resolve() not in claimed and _legacy_config_name(tree, candidate, kind) == value:
@@ -117,7 +114,7 @@ def asset_config_path(flag: str, value: str) -> str:
             tree = root / parent
             if not tree.is_dir():
                 continue
-            config_names.update(manifest.name for _, manifest in declared_manifests(tree))
+            config_names.update(name for _, manifest in declared_manifests(tree) for name in manifest.declared_names())
             config_names.update(
                 name for name, _ in _legacy_config_paths(tree, "benchmark" if flag == "benchmark" else "environment")
             )

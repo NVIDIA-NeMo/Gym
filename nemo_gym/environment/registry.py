@@ -121,14 +121,6 @@ def _manifest_entries(
     for listed in main.listed_configs():
         manifest = resolve_listed_manifest(main, listed)
         config_path = resolve_manifest_config_path(manifest_path, manifest)
-        # As for the main manifest: under another name, the entry would take that name from the config at its path and
-        # leave its own config out of the catalog.
-        expected_listed_name = _benchmark_config_name(config_path.relative_to(tree_dir.resolve()))
-        if listed.name != expected_listed_name:
-            raise RegistryError(
-                f"Manifest '{manifest_path}' lists '{listed.name}', but the catalog path of its config "
-                f"'{config_path}' requires '{expected_listed_name}'."
-            )
         protocol = main.listing_protocol(listed)
         relation = (
             {"setup_of": main.name if protocol is None else protocol.name}
@@ -369,14 +361,16 @@ def _discover_registry_tree(
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     manifest_configs: set[Path] = set()
     declared_by: Dict[str, Path] = {}
-    # A manifest's name is its ID, wherever its folder sits, so two manifests in one tree cannot share it.
+    # A name is an ID wherever its folder or config sits, so no two manifests in one tree declare the same one, as
+    # their own name or for a setup or protocol they list.
     for manifest_path, manifest in declared_manifests(tree_dir):
-        if manifest.name in declared_by:
-            raise RegistryError(
-                f"Manifests '{declared_by[manifest.name]}' and '{manifest_path}' both declare name "
-                f"'{manifest.name}'. A manifest's name is its ID and must be unique within '{tree_dir}'."
-            )
-        declared_by[manifest.name] = manifest_path
+        for name in manifest.declared_names():
+            if name in declared_by:
+                raise RegistryError(
+                    f"Manifests '{declared_by[name]}' and '{manifest_path}' both declare name '{name}'. A name is "
+                    f"the ID of a manifest, setup or protocol and must be unique within '{tree_dir}'."
+                )
+            declared_by[name] = manifest_path
         if (kind, manifest.name) in claimed:
             # An earlier root shadows this entry, but its configs are still this manifest's: listing one again
             # under its folder path would give it a second, unrelated ID.
@@ -387,13 +381,10 @@ def _discover_registry_tree(
         except ManifestError:
             continue
         for entry in discovered:
-            key = (kind, entry.name)
-            # A config with a manifest of its own and a listing in a main manifest is a validation error; the
-            # catalog keeps whichever it reads first rather than failing discovery.
-            if key in claimed or key in entries:
-                continue
-            entries[key] = entry
+            # An earlier root can also shadow a single setup or protocol by its name; its config stays claimed.
             manifest_configs.add(entry.config_path.resolve())
+            if (kind, entry.name) not in claimed:
+                entries[(kind, entry.name)] = entry
 
     for name, config_path in _legacy_config_paths(tree_dir, kind):
         key = (kind, name)

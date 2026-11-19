@@ -123,6 +123,41 @@ def test_a_nested_benchmark_path_in_an_earlier_root_does_not_shadow_a_declared_n
     assert selected("suite/v1") == config.resolve()
 
 
+def test_a_listed_setup_selects_by_its_id_and_its_config_path_still_selects(roots: tuple[Path, Path]) -> None:
+    # The setup `codex_id` runs `suite/codex.yaml`; the catalog lists that config only under the setup's ID.
+    _, later = roots
+    listing = {"setups": [{"name": "codex_id", "config_path": "codex.yaml"}]}
+    manifest = _write_manifest(later, "benchmarks", "suite", _manifest("suite", "benchmark", **listing))
+    codex = manifest.with_name("codex.yaml")
+    codex.write_text("agent:\n  datasets:\n  - {type: benchmark}\n", encoding="utf-8")
+
+    def selected(name: str) -> Path:
+        return Path(asset_config_path("benchmark", name))
+
+    assert selected("codex_id") == resolve_catalog_entry("codex_id", "benchmark").config_path.resolve()
+    assert selected("codex_id") == codex.resolve()
+    assert selected("suite/codex") == codex.resolve()
+    with pytest.raises(RegistryError, match="Unknown catalog entry"):
+        resolve_catalog_entry("suite/codex", "benchmark")
+
+
+def test_a_listed_name_that_is_another_configs_path_selects_what_the_catalog_lists(roots: tuple[Path, Path]) -> None:
+    # Validation rejects the name `other` here, because it hides benchmarks/other/config.yaml; listing and launching
+    # still pick the same config.
+    _, later = roots
+    listing = {"setups": [{"name": "other", "config_path": "variant.yaml"}]}
+    manifest = _write_manifest(later, "benchmarks", "demo", _manifest("demo", "benchmark", **listing))
+    config = "agent:\n  datasets:\n  - {type: benchmark}\n"
+    manifest.with_name("variant.yaml").write_text(config, encoding="utf-8")
+    other = later / "benchmarks/other/config.yaml"
+    other.parent.mkdir()
+    other.write_text(config, encoding="utf-8")
+
+    selected = Path(asset_config_path("benchmark", "other"))
+    assert selected == resolve_catalog_entry("other", "benchmark").config_path.resolve()
+    assert selected == manifest.with_name("variant.yaml").resolve()
+
+
 @pytest.mark.parametrize("excluded", ["harbor/dataset/task", ".staging/task"])
 def test_a_manifest_discovery_skips_does_not_shadow_a_declared_name(roots: tuple[Path, Path], excluded: str) -> None:
     # Discovery stops at a pulled Harbor dataset (its `manifest.toml`) and skips hidden folders.
@@ -157,6 +192,18 @@ def test_typo_suggestions_include_declared_ids(roots: tuple[Path, Path], kind: s
         asset_config_path(kind, name.removesuffix("id") + "if")
 
     assert f"Did you mean `{name}`?" in str(error.value)
+
+
+@pytest.mark.parametrize("listed_as", ["setups", "protocols"])
+def test_typo_suggestions_include_listed_ids(roots: tuple[Path, Path], listed_as: str) -> None:
+    _, later = roots
+    listed = {"name": "codex_id", "config_path": "codex.yaml", "description": "Codex"}
+    _write_manifest(later, "benchmarks", "suite", _manifest("suite", "benchmark", **{listed_as: [listed]}))
+
+    with pytest.raises(ValueError) as error:
+        asset_config_path("benchmark", "codex_if")
+
+    assert "Did you mean `codex_id`?" in str(error.value)
 
 
 @pytest.mark.parametrize("kind", ["benchmark", "environment"])
