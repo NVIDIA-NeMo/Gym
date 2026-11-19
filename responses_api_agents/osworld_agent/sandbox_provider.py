@@ -147,6 +147,7 @@ class GymSandboxDesktopProvider:
         ready_poll_s: float = 2.0,
         vnc_guest_port: int | None = None,
         cleanup_timeout_s: float = 120.0,
+        attach_descriptor: Mapping[str, Any] | None = None,
     ) -> None:
         if not isinstance(sandbox_provider, Mapping) or len(sandbox_provider) != 1:
             raise ValueError("sandbox_provider must be a single-key Gym Sandbox provider config")
@@ -186,6 +187,9 @@ class GymSandboxDesktopProvider:
         self._ready_timeout_s = float(ready_timeout_s)
         self._ready_poll_s = float(ready_poll_s)
         self._cleanup_timeout_s = float(cleanup_timeout_s)
+        # A sandbox another process created (for example a fork child) that the
+        # first start attaches to instead of creating one; stop still stops it.
+        self._attach_descriptor = dict(attach_descriptor) if attach_descriptor is not None else None
         self._sandbox: Sandbox | None = None
         self._forwarders: list[ThreadingHTTPServer] = []
         self._host: str | None = None
@@ -413,9 +417,13 @@ class GymSandboxDesktopProvider:
         if self._sandbox is not None:
             raise RuntimeError("OSWorld Gym Sandbox emulator is already running")
 
-        sandbox = Sandbox(self._sandbox_provider)
+        attach, self._attach_descriptor = self._attach_descriptor, None
+        sandbox = (
+            Sandbox.connect(self._sandbox_provider, attach) if attach is not None else Sandbox(self._sandbox_provider)
+        )
         try:
-            sandbox.start(self._build_spec(path_to_vm, headless=headless, os_type=os_type))
+            if attach is None:
+                sandbox.start(self._build_spec(path_to_vm, headless=headless, os_type=os_type))
             host, ports = self._resolve_service_endpoints(sandbox)
             self._wait_for_vm_ready(sandbox, host, ports[OSWORLD_SERVER_PORT])
         except BaseException as startup_error:
@@ -473,6 +481,12 @@ class GymSandboxDesktopProvider:
             raise RuntimeError("OSWorld Gym Sandbox emulator has not started")
         host = f"[{self._host}]" if ":" in self._host else self._host
         return f"{host}:{self.server_port}:{self.chromium_port}:{self.vnc_port}:{self.vlc_port}"
+
+    def fork(self, count: int, *, ttl_s: float | None = None) -> list[dict[str, Any]]:
+        """Clone the running guest; each descriptor is an ``attach_descriptor`` the caller owns."""
+        if self._sandbox is None:
+            raise RuntimeError("OSWorld Gym Sandbox emulator has not started")
+        return self._sandbox.fork(count, ttl_s=ttl_s)
 
     def save_state(self, path_to_vm: str, snapshot_name: str) -> None:
         del path_to_vm, snapshot_name

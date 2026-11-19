@@ -2680,3 +2680,208 @@ def test_rollout_timeout_counts_the_agent_loop_and_masks_the_rollout(monkeypatch
     assert "rollout_timeout_s exceeded (1200s)" in (result.error or "")
     assert result.mask_sample is True
     assert 0 < len(result.steps) < 50
+
+
+class FakeForkController(FakeController):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cache_dirs: List[str] = []
+
+    def reset_cache_dir(self, cache_dir: str) -> None:
+        self.cache_dirs.append(cache_dir)
+
+
+class FakeForkableEnv(FakeEnv):
+    """A DesktopEnv whose guest supports fork, with the state ``_reset_forked_env`` binds."""
+
+    forks: List[Dict[str, Any]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.controller = FakeForkController()
+        self.setup_controller = self.controller
+        self._traj_no = 3
+        self._step_no = 7
+        self.action_history = ["stale"]
+        self.enable_proxy = kwargs.get("enable_proxy", False)
+        self.cache_dir = kwargs.get("cache_dir", "cache")
+        self.config: List[Any] = []
+        self.resets: List[Dict[str, Any]] = []
+        self.provider = SimpleNamespace(fork=self._fork)
+
+    def reset(self, task_config: Dict[str, Any]) -> Dict[str, Any]:
+        self.resets.append(task_config)
+        return super().reset(task_config)
+
+    def _set_task_info(self, task_config: Dict[str, Any]) -> None:
+        self.task_config = task_config
+        self.config = task_config.get("config", [])
+
+    def _fork(self, count: int, *, ttl_s: float | None = None) -> List[Dict[str, Any]]:
+        FakeForkableEnv.forks.append({"count": count, "ttl_s": ttl_s})
+        return [{"sandbox_id": f"child-{index}"} for index in range(count)]
+
+
+def test_forked_rollout_attaches_and_binds_the_task_without_rerunning_setup(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    real_load_attr = osworld_client.load_attr
+    monkeypatch.setattr(
+        osworld_client,
+        "load_attr",
+        lambda path: FakeForkableEnv if path == "fake.FakeForkableEnv" else real_load_attr(path),
+    )
+    task = {"id": "task-fork", "instruction": "Finish the task.", "config": [{"type": "launch"}]}
+
+    result = osworld_client.run_osworld_task(
+        task,
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeForkableEnv",
+        sandbox_provider_config={"e2b": {}},
+        sandbox_spec={"image": "osworld-slim"},
+        sandbox_attach_descriptor={"sandbox_id": "child-1"},
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    env = FakeEnv.instances[0]
+    assert env.kwargs["sandbox_attach_descriptor"] == {"sandbox_id": "child-1"}
+    assert env.resets == []
+    assert env.task_config["id"] == "task-fork"
+    assert (env._traj_no, env._step_no, env.action_history, env.is_environment_used) == (4, 0, [], True)
+    assert env.controller.cache_dirs == ["cache"]
+
+
+def test_attach_descriptor_requires_a_sandbox_provider(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    with pytest.raises(ValueError, match="sandbox_attach_descriptor requires sandbox_provider"):
+        osworld_client.run_osworld_task(
+            {"id": "task-fork", "instruction": "Finish the task."},
+            model_fn=lambda *_args: "```DONE```",
+            env_class_path="fake.FakeEnv",
+            sandbox_attach_descriptor={"sandbox_id": "child-1"},
+            task_timeout=10,
+        )
+
+
+def test_prepare_fork_runs_setup_once_settles_forks_and_stops_the_parent(monkeypatch) -> None:
+    FakeEnv.instances.clear()
+    FakeForkableEnv.forks.clear()
+    sleeps: List[float] = []
+    monkeypatch.setattr(
+        osworld_client,
+        "load_attr",
+        lambda path: FakeForkableEnv if path == osworld_client.SANDBOX_DESKTOP_ENV_CLASS else pytest.fail(path),
+    )
+    monkeypatch.setattr(osworld_client, "_patch_chrome_setup_cdp_lifecycle", lambda: None)
+    monkeypatch.setattr(osworld_client.time, "sleep", sleeps.append)
+
+    descriptors = osworld_client.prepare_osworld_fork(
+        {"id": "task-fork", "instruction": "Finish the task.", "config": [{"type": "launch"}]},
+        3,
+        sandbox_provider_config={"e2b": {}},
+        sandbox_spec={"image": "osworld-slim"},
+        sandbox_vnc_guest_port=6901,
+        post_setup_settle_s=20.0,
+        fork_ttl_s=600.0,
+    )
+
+    assert descriptors == [{"sandbox_id": "child-0"}, {"sandbox_id": "child-1"}, {"sandbox_id": "child-2"}]
+    env = FakeEnv.instances[0]
+    assert env.kwargs["sandbox_provider"] == {"e2b": {}}
+    assert env.kwargs["sandbox_vnc_guest_port"] == 6901
+    assert "sandbox_attach_descriptor" not in env.kwargs
+    assert [reset["id"] for reset in env.resets] == ["task-fork"]
+    assert sleeps == [20.0]
+    assert FakeForkableEnv.forks == [{"count": 3, "ttl_s": 600.0}]
+    assert env.closed is True
+
+
+def _spy_frozen_evaluators(monkeypatch) -> List[tuple]:
+    calls: List[tuple] = []
+
+    def register(task_config: Dict[str, Any], root: str) -> List[str]:
+        resets = len(getattr(FakeEnv.instances[-1], "resets", [])) if FakeEnv.instances else 0
+        calls.append(("register", task_config["id"], root, resets))
+        return ["metrics:check_rows"]
+
+    monkeypatch.setattr(osworld_client, "register_frozen_evaluators", register)
+    monkeypatch.setattr(osworld_client, "clear_frozen_evaluators", lambda: calls.append(("clear",)))
+    return calls
+
+
+def test_frozen_evaluators_wrap_the_rollout_and_score_binary_tasks(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    calls = _spy_frozen_evaluators(monkeypatch)
+    monkeypatch.setattr(FakeEnv, "evaluate", lambda self: 0.5)
+    task = {"id": "task-rlvr", "instruction": "Finish the task.", "metadata": {"binary_final_reward": True}}
+
+    result = osworld_client.run_osworld_task(
+        task,
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        frozen_evaluator_root="/snapshot/tmp_funcs",
+    )
+    unscored = osworld_client.run_osworld_task(
+        task, model_fn=lambda *_args: "```DONE```", env_class_path="fake.FakeEnv", sleep_after_execution=0
+    )
+
+    assert calls == [("register", "task-rlvr", "/snapshot/tmp_funcs", 0), ("clear",), ("clear",)]
+    assert result.score == 0.0 and result.error is None
+    assert unscored.score == 0.5
+
+
+def test_frozen_evaluators_refuse_the_remote_resources_path(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    calls = _spy_frozen_evaluators(monkeypatch)
+
+    with pytest.raises(ValueError, match="local resources path"):
+        osworld_client.run_osworld_task(
+            {"id": "task-rlvr", "instruction": "Finish the task."},
+            model_fn=lambda *_args: "```DONE```",
+            provider_name="remote_docker",
+            resources_server_url="http://resources.example",
+            frozen_evaluator_root="/snapshot/tmp_funcs",
+        )
+
+    assert calls == []
+
+
+def test_prepare_fork_registers_frozen_evaluators_before_setup(monkeypatch) -> None:
+    FakeEnv.instances.clear()
+    calls = _spy_frozen_evaluators(monkeypatch)
+    monkeypatch.setattr(osworld_client, "load_attr", lambda _path: FakeForkableEnv)
+    monkeypatch.setattr(osworld_client, "_patch_chrome_setup_cdp_lifecycle", lambda: None)
+
+    osworld_client.prepare_osworld_fork(
+        {"id": "task-rlvr", "instruction": "Finish the task."},
+        2,
+        sandbox_provider_config={"e2b": {}},
+        sandbox_spec={"image": "osworld-slim"},
+        frozen_evaluator_root="/snapshot/tmp_funcs",
+    )
+
+    assert calls == [("register", "task-rlvr", "/snapshot/tmp_funcs", 0), ("clear",)]
+    assert len(FakeEnv.instances[0].resets) == 1
+
+
+def test_prepare_fork_stops_the_parent_when_setup_fails(monkeypatch) -> None:
+    FakeEnv.instances.clear()
+
+    class FailingSetupEnv(FakeForkableEnv):
+        def reset(self, task_config: Dict[str, Any]) -> Dict[str, Any]:
+            raise RuntimeError("setup failed")
+
+    monkeypatch.setattr(osworld_client, "load_attr", lambda _path: FailingSetupEnv)
+    monkeypatch.setattr(osworld_client, "_patch_chrome_setup_cdp_lifecycle", lambda: None)
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        osworld_client.prepare_osworld_fork(
+            {"id": "task-fork", "instruction": "Finish the task."},
+            2,
+            sandbox_provider_config={"e2b": {}},
+            sandbox_spec={"image": "osworld-slim"},
+        )
+
+    assert FakeEnv.instances[0].closed is True

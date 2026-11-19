@@ -641,6 +641,10 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
         raise ValueError("train_invalid_terminal_call requires unterminated_episode_policy='fail'")
     if result.get("mask_context_limit") and options.get("context_overflow_policy") != "stop":
         raise ValueError("mask_context_limit requires context_overflow_policy='stop'")
+    if options.get("canonical_harness") is not None:
+        from responses_api_agents.osworld_agent.canonical_agent import normalize_canonical_harness  # noqa: PLC0415
+
+        result["canonical_harness"] = normalize_canonical_harness(options["canonical_harness"])
     return result
 
 
