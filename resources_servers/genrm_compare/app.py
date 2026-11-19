@@ -354,8 +354,12 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
     group_attempt: int = Field(default=0, alias=GROUP_ATTEMPT_KEY_NAME, ge=0)
     rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME)
     prompt_id: Optional[str] = None  # Optional stable prompt identifier from the caller
-    group_answer_length_penalty_coeff: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
-    group_reasoning_length_penalty_coeff: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    group_answer_length_penalty_coeff: Optional[float] = Field(
+        default=None, ge=0, allow_inf_nan=False, exclude_if=lambda value: value is None
+    )
+    group_reasoning_length_penalty_coeff: Optional[float] = Field(
+        default=None, ge=0, allow_inf_nan=False, exclude_if=lambda value: value is None
+    )
 
     @field_validator("expected_rubric_ids")
     @classmethod
