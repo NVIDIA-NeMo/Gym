@@ -9,8 +9,13 @@ from collections.abc import Callable
 
 from pydantic import ValidationError
 
-from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
+from nemo_gym.agents.agent_outcome import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentOutcome,
+    RunEvidence,
+    decide_outcome,
+    model_http_error_outcome,
+)
 from nemo_gym.models.chat_completions_converter import message_content_to_text
 
 from .checks import BehavioralCheck
@@ -25,6 +30,19 @@ def _objects(value: object) -> list[dict]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
+def _terminal_outcome(status: int) -> AgentOutcome:
+    """The outcome ladder's report of a run whose every model request failed with ``status``.
+
+    The model never replied, so a 4xx other than 408, 425 and 429 is a request the run's setup made invalid
+    (``model_request_rejected``); any other status stays ``model_request_error`` with that status.
+    """
+    decision = decide_outcome(
+        RunEvidence(has_result=False, timed_out=False, model_replied=False, error=model_http_error_outcome(status))
+    )
+    assert decision.outcome is not None
+    return decision.outcome
+
+
 def _terminal_error_reported(attempts: list[dict], responses: list[dict], expected_status: int) -> bool:
     """Compare the scripted provider error with the response received by the EnvironmentServer."""
     if not attempts or any(attempt["status_code"] != expected_status for attempt in attempts):
@@ -36,7 +54,9 @@ def _terminal_error_reported(attempts: list[dict], responses: list[dict], expect
         outcome = AgentOutcome.model_validate_json(raw)
     except ValidationError:
         return False
-    if outcome.failure_kind != MODEL_REQUEST_ERROR or outcome.status_code != expected_status:
+    # Keep the exact upstream-status report valid until every adapter adopts the ladder. This also covers an
+    # adapter that cannot establish whether the policy model replied. Remove with the final migration (#5873).
+    if outcome not in (_terminal_outcome(expected_status), model_http_error_outcome(expected_status)):
         return False
     message = _mapping(_mapping(attempts[-1].get("response")).get("error")).get("message")
     reported = _mapping(responses[0].get("error")).get("message")
@@ -249,8 +269,9 @@ def inspect_behavior(
             tier="P0",
             evidence=("TE-1",),
             location="witness.json",
-            reason="the EnvironmentServer must receive a failed response retaining the model error and "
-            "ng_agent_outcome with model_request_error and the witnessed HTTP status",
+            reason="the EnvironmentServer must receive a failed response retaining the model error and the "
+            "outcome ladder's ng_agent_outcome: model_request_rejected for a 4xx other than 408/425/429 before any "
+            "model reply, else model_request_error with the witnessed HTTP status",
             predicate=lambda: (
                 _terminal_error_reported(attempts, agent_responses, http_errors[-1]) if terminal_error else True
             ),

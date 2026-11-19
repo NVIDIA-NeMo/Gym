@@ -23,7 +23,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import wraps
 from time import monotonic
 from types import UnionType
@@ -33,6 +33,8 @@ from warnings import warn
 
 from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
+from openai.types.responses.response import IncompleteDetails
+from openai.types.responses.response_error import ResponseError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -49,7 +51,14 @@ from nemo_gym.agents.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
-from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, policy_timeout_failure
+from nemo_gym.agents.agent_outcome import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AGENT_STOP_REASON_METADATA_KEY,
+    AgentOutcome,
+    RunEvidence,
+    decide_outcome,
+    policy_timeout_failure,
+)
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
@@ -74,7 +83,7 @@ from nemo_gym.core.episode_context import (
 )
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import FailureStage
-from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.core.model_call_sampling import (
     MODEL_SAMPLING_NULL,
     current_model_sampling_segment,
@@ -1649,6 +1658,78 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             }
         )
 
+    def finish_response(
+        self, response: NeMoGymResponse, evidence: RunEvidence, *, session: SandboxSession | None = None
+    ) -> NeMoGymResponse:
+        """Give a run's response the outcome the shared ladder (``decide_outcome``) decides from ``evidence``.
+
+        The adapter returns the result with HTTP 200, whatever the outcome; a 5xx is left for a crashed adapter or a
+        failed lifecycle step (launch, supervisor, artifacts, provider). This sets the response's ``status``, writes
+        ``ng_agent_outcome`` on a failed response only (and removes it from any other), names the deciding row in
+        ``ng_agent_stop_reason``, and sets ``incomplete_details`` for an output-limit stop. With ``session``, a run
+        whose session expired counts as stopped and gains the ``ng_rollout_stop``
+        marker, as ``report_rollout_stop`` adds it; a run the session's close cancelled (``evidence.stopped`` without
+        an expired session) is stopped without the marker. Output and usage stay the adapter's. A graded response
+        clears ``error``; a failed response without one gets a generic error. Only incomplete responses keep
+        ``incomplete_details``. If the ladder reclassifies a selected failure, an agent event records the decision
+        with the original selection as its cause; an ``unknown`` outcome clears the selection instead, since it is
+        not a canonical failure kind. The original events remain diagnostic evidence.
+        """
+        if session is not None and session.expired and not evidence.stopped:
+            evidence = replace(evidence, stopped=True)
+        decision = decide_outcome(evidence)
+        metadata = {
+            key: value
+            for key, value in (response.metadata or {}).items()
+            if key not in (AGENT_OUTCOME_METADATA_KEY, ROLLOUT_STOP_METADATA_KEY)
+        }
+        metadata[AGENT_STOP_REASON_METADATA_KEY] = decision.stop_reason
+        if decision.outcome is not None:
+            metadata[AGENT_OUTCOME_METADATA_KEY] = decision.outcome.model_dump_json(exclude_none=True)
+        if decision.stop_reason == "stopped" and session is not None and session.expired:
+            # The marker tells a rollout stop apart from a timeout or the close cancelling the run.
+            metadata[ROLLOUT_STOP_METADATA_KEY] = json.dumps({"reason": session.expire_reason}, separators=(",", ":"))
+        update: dict[str, Any] = {"status": decision.status, "metadata": metadata}
+        if decision.stop_reason == "output_limit" and response.incomplete_details is None:
+            update["incomplete_details"] = IncompleteDetails(reason="max_output_tokens")
+        if decision.status == "failed" and response.error is None:
+            update["error"] = ResponseError(code="server_error", message=_FAILED_RUN_MESSAGES[decision.stop_reason])
+        if decision.status != "failed":
+            update["error"] = None
+        if decision.status != "incomplete":
+            update["incomplete_details"] = None
+        if decision.outcome is not None and (response.model_extra or {}).get("failure_report") is not None:
+            try:
+                report = FailureReport.model_validate(response.model_extra["failure_report"])
+            except (ValidationError, TypeError):
+                # Leave malformed evidence for the Environment Server's consistency check.
+                pass
+            else:
+                if report.failure_id is not None and not report.omitted:
+                    selected = report.events[report.failure_id]
+                    outcome = decision.outcome
+                    if selected.failure_kind != outcome.failure_kind or (
+                        selected.http_status is not None and selected.http_status != outcome.status_code
+                    ):
+                        if outcome.failure_kind == "unknown":
+                            # Unknown is an outcome fallback, not a canonical failure kind. Keep the evidence
+                            # without claiming that its selected failure explains this run's decision.
+                            report = report.model_copy(update={"failure_id": None})
+                        else:
+                            event = FailureEvent(
+                                boundary=FailureBoundary.AGENT,
+                                failure_kind=outcome.failure_kind,
+                                http_status=outcome.status_code,
+                                operation="agent.run",
+                                failure_reason=_FAILED_RUN_MESSAGES[decision.stop_reason],
+                                cause_id=report.failure_id,
+                            )
+                            report = FailureReport(
+                                failure_id=event.event_id, events={**report.events, event.event_id: event}
+                            )
+                        update["failure_report"] = report.model_dump(mode="json")
+        return response.model_copy(update=update)
+
     def report_rollout_stop(self, response: NeMoGymResponse, session: SandboxSession) -> NeMoGymResponse:
         """Mark the response of a run that ``POST /rollouts/{rollout_id}/stop`` ended.
 
@@ -1662,6 +1743,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return response.model_copy(
             update={"metadata": {**(response.metadata or {}), ROLLOUT_STOP_METADATA_KEY: marker}}
         )
+
+
+# The ``error`` message ``finish_response`` gives a failed response that has none, by the ladder row that failed it.
+_FAILED_RUN_MESSAGES = {
+    "infra": "The run reached its deadline while a server or provider fault was recorded",
+    "timeout": "The run reached its deadline without an observed model reply",
+    "error": "The run ended on an error",
+    "no_result": "The harness produced no usable result",
+}
 
 
 # Serves the names this module had before token_id_capture was renamed token_capture, with a warning.

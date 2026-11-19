@@ -1811,7 +1811,10 @@ async def test_a_session_reports_the_tools_the_agent_executed_as_run_does(monkey
         ({"failure_kind": "unknown"}, False, True),
         ({"failure_kind": "model_request_error", "status_code": 402}, False, False),
         ({"failure_kind": "model_request_error", "status_code": 409}, False, False),
-        ({"failure_kind": "agent_run_error"}, False, False),
+        # No usable result is retried; a rejected request is neither graded nor retried; a context limit is graded.
+        ({"failure_kind": "agent_run_error"}, False, True),
+        ({"failure_kind": "model_request_rejected"}, False, False),
+        ({"failure_kind": "model_context_limit"}, True, False),
     ],
 )
 async def test_classified_agent_failure_policy(outcome: dict, verifiable: bool, retryable: bool) -> None:
@@ -1855,7 +1858,7 @@ async def test_classified_agent_failure_policy(outcome: dict, verifiable: bool, 
         ({"by_failure_kind": {"unknown": "retry"}}, {"failure_kind": "agent_invalid_output"}, True, False),
         ({"by_failure_kind": {"unknown": "verify"}}, {"failure_kind": "unknown"}, True, False),
         ({"by_failure_kind": {"unknown": "fail"}}, {"failure_kind": "unknown"}, False, False),
-        ({"default_action": "retry"}, {"failure_kind": "agent_run_error"}, False, True),
+        ({"default_action": "retry"}, {"failure_kind": "session_lost"}, False, True),
         ({"by_failure_kind": {}, "by_status_code": {}}, {"failure_kind": "model_transport_error"}, False, True),
     ],
 )

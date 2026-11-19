@@ -603,8 +603,10 @@ def retained_episode(tmp_path):
         "malformed_outcome",
         "unknown_kind",
         "unregistered_kind",
+        "request_error",
         "wrong_status",
         "invalid_status",
+        "rejected_with_status",
     ],
 )
 def test_terminal_model_error_must_be_reported_to_environment(retained_episode, mutation):
@@ -613,9 +615,8 @@ def test_terminal_model_error_must_be_reported_to_environment(retained_episode, 
         {"status_code": 400, "request": {}, "response": {"error": {"message": "controlled model failure"}}}
     ]
     response = {"status": "failed", "error": {"code": "server_error", "message": "HTTP 400: controlled model failure"}}
-    response["metadata"] = {
-        AGENT_OUTCOME_METADATA_KEY: json.dumps({"failure_kind": "model_request_error", "status_code": 400})
-    }
+    # The model never replied, so the ladder reports the 400 as the run's rejected request.
+    response["metadata"] = {AGENT_OUTCOME_METADATA_KEY: json.dumps({"failure_kind": "model_request_rejected"})}
     witness["agent_responses"] = [response]
     if mutation == "missing_response":
         witness["agent_responses"] = []
@@ -634,13 +635,16 @@ def test_terminal_model_error_must_be_reported_to_environment(retained_episode, 
             "malformed_outcome": "{",
             "unknown_kind": json.dumps({"failure_kind": "unknown"}),
             "unregistered_kind": json.dumps({"failure_kind": "invented"}),
+            # A graded request error is what an adapter reported before the outcome ladder.
+            "request_error": json.dumps({"failure_kind": "model_request_error", "status_code": 400}),
             "wrong_status": json.dumps({"failure_kind": "model_request_error", "status_code": 503}),
-            "invalid_status": json.dumps({"failure_kind": "model_request_error", "status_code": "400"}),
+            "invalid_status": json.dumps({"failure_kind": "model_request_error", "status_code": 200}),
+            "rejected_with_status": json.dumps({"failure_kind": "model_request_rejected", "status_code": 400}),
         }[mutation]
     (directory / "witness.json").write_text(json.dumps(witness))
     result = inspect_episode(SCENARIO["model_error"], directory, {"returncode": 0, "timed_out": False})
     check = next(c for c in result["checks"] if c["id"] == "model.terminal_error")
-    assert check["status"] == ("pass" if mutation is None else "fail")
+    assert check["status"] == ("pass" if mutation in (None, "request_error") else "fail")
 
 
 @pytest.mark.parametrize("graded,masked,reward", [(True, False, 0.0), (True, False, 1.0), (False, True, 0.0)])

@@ -52,7 +52,6 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import (
-    AGENT_RUN_ERROR,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
@@ -105,6 +104,7 @@ _SANDBOX_OUTCOMES = {
     "max_iterations": "completed",
     "context_limit": "completed",
     "failed": "failed",
+    "harness_terminated": "failed",
     "wall_time": "timeout",
     "cancelled": "cancelled",
 }
@@ -243,8 +243,8 @@ def _settle_wall_time(output: dict[str, Any], *, deadline_reached: bool, rollout
     """Keep the runner's `wall_time` stop only when it is the run's deadline and some model reply had arrived.
 
     The runner takes any SIGTERM without a close request for its deadline. When the supervisor's receipt shows no
-    timeout, a task command (such as `pkill python3`) stopped the harness, so the run failed. A deadline before any
-    model reply means the Model Server never answered, so the run is a transport failure, which the outcome policy
+    timeout, a task command (such as `pkill python3`) stopped the harness, so its partial work is graded. A deadline
+    before any model reply means the Model Server never answered, so the run is a transport failure, which the outcome policy
     retries, not the model's empty answer; a rollout stop stays a graded stop. Updates the runner's report in place,
     so the close record agrees.
     """
@@ -252,9 +252,8 @@ def _settle_wall_time(output: dict[str, Any], *, deadline_reached: bool, rollout
         return
     if not deadline_reached:
         output.update(
-            status="failed",
-            stop_reason=None,
-            run_error="The DeepAgents runner was stopped by a signal that was not its deadline",
+            status="incomplete",
+            stop_reason="harness_terminated",
             harness_terminated=True,
         )
     elif not rollout_stopped and not output.get("usages"):
@@ -503,8 +502,6 @@ class DeepAgentsAgent(SimpleAgent):
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         if native_result.get("model_transport_error"):
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
-        if native_result.get("harness_terminated"):
-            return AgentOutcome(failure_kind=AGENT_RUN_ERROR)
         return super().classify_outcome(native_result)
 
     async def _run_in_sandbox(

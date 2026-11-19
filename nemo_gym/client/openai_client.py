@@ -295,10 +295,10 @@ def _error_envelope(payload: object) -> Optional[dict]:
 
 def _parsed_error_codes(content: bytes | str) -> list[str]:
     """error.code / error.type tokens from an OpenAI-style error body."""
-    text = _decode_error_text(content)
+    text = _decode_error_text(content).lstrip("\ufeff")
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return []
     envelope = _error_envelope(payload)
     error = envelope.get("error") if envelope is not None else None

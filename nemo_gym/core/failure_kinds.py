@@ -103,6 +103,10 @@ MODEL_POLICY_RESPONSE_TIMEOUT = "model_policy_response_timeout"
 MODEL_SERVER_QUEUE_TIMEOUT = "model_server_queue_timeout"
 # Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
 MODEL_CONTEXT_LIMIT = "model_context_limit"
+# The model endpoint refused the run's first request with a 4xx other than 408, 425 or 429 (a context overflow is
+# reported as ``model_context_limit`` instead): the model never answered, so the run's setup, such as an output limit
+# above the model's cap or a refused credential, is at fault, not the model.
+MODEL_REQUEST_REJECTED = "model_request_rejected"
 
 # --- environment: one episode attempt ------------------------------------------------ #
 ENVIRONMENT_SERVER_FAILED = "environment_server_failed"
@@ -241,6 +245,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         MODEL_POLICY_RESPONSE_TIMEOUT,
         MODEL_SERVER_QUEUE_TIMEOUT,
         MODEL_CONTEXT_LIMIT,
+        MODEL_REQUEST_REJECTED,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,

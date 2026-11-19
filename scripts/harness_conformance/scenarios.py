@@ -69,7 +69,8 @@ SCENARIOS = (
     ),
     Scenario(
         "model_error",
-        "A terminal model HTTP 400 is reported to the EnvironmentServer with its error and retained evidence.",
+        "A model HTTP 400 on every request is reported to the EnvironmentServer as model_request_rejected, or as "
+        "model_request_error with status 400 during migration, with its error and retained evidence.",
         evidence=("TE-1", "TE-2", "TE-4", "TE-7", "TE-8"),
         tool_steps=0,
         http_errors=(400,),

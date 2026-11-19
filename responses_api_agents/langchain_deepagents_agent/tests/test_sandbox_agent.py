@@ -29,7 +29,6 @@ from nemo_gym.agents import (
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
-    AGENT_RUN_ERROR,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     EpisodeId,
@@ -617,8 +616,12 @@ def test_a_run_that_left_no_report_is_cancelled_only_before_it_launched(launched
     assert record.outcome == outcome
 
 
-def test_a_runner_stopped_by_something_other_than_its_supervisor_is_a_run_error():
-    assert _agent().classify_outcome({"harness_terminated": True}).failure_kind == AGENT_RUN_ERROR
+def test_a_runner_stopped_by_a_task_command_is_graded():
+    output = {"status": "incomplete", "stop_reason": "wall_time"}
+    app._settle_wall_time(output, deadline_reached=False, rollout_stopped=False)
+    assert output["status"] == "incomplete"
+    assert output["stop_reason"] == "harness_terminated"
+    assert "run_error" not in output
 
 
 @linux_only
@@ -654,8 +657,9 @@ async def test_a_task_command_that_stops_the_runner_is_not_its_deadline(lent_san
     finally:
         model.close()
 
-    # The supervisor's receipt shows no timeout, so the runner's own `wall_time` is not graded as one.
-    assert response.status == "failed"
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])["failure_kind"] == AGENT_RUN_ERROR
-    assert "not its deadline" in response.error.message
+    # The model killed its runner: grade its partial work instead of resampling the task.
+    assert response.status == "incomplete"
+    assert response.metadata["stop_reason"] == "harness_terminated"
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+    assert response.error is None
     assert _sandbox_record(close).outcome == "failed"

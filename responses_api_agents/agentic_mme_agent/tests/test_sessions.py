@@ -25,6 +25,7 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     OutcomeAction,
     agent_outcome_policy,
+    reported_agent_failure,
 )
 from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON, ServerClient
 from nemo_gym.config import BaseServerConfig
@@ -310,7 +311,7 @@ async def test_a_policy_timeout_keeps_its_cause_and_the_model_servers_report(
     assert set(report.events) <= set(kept.events)
     # The Environment Server finds the timeout as the reply's selected cause, so it applies the timeout's rule (retry,
     # unless a policy says otherwise) instead of failing a reply whose cause it cannot read.
-    cause = SingleAgentTurnLegacyEnvironmentServer._agent_failure(result)
+    cause = reported_agent_failure(result)
     assert cause is not None and cause.failure_kind == failure_kind
 
 
