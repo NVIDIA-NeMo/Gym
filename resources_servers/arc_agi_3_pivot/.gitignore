@@ -1,0 +1,2 @@
+# setup_worker.py: the harness install, the worker venv and the materialized games
+.runtime/
