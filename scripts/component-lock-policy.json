@@ -120,6 +120,13 @@
       "werkzeug"
     ]
   },
+  "responses_api_agents/arc_agi_3_official_agent": {
+    "include-dependencies": [
+      "flask",
+      "blinker",
+      "werkzeug"
+    ]
+  },
   "responses_api_agents/harbor_agent": {
     "override-dependencies": [
       "pathspec"

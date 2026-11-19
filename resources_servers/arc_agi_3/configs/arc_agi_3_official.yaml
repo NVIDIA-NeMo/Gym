@@ -1,0 +1,108 @@
+# ARC-AGI-3 with the official ARC Prize harness (arc-agi-3-benchmarking, pinned in
+# responses_api_agents/arc_agi_3_official_agent/official_harness_manifest.json) instead of the Kaggle kit harness,
+# as either of upstream's two chat-completions harnesses (harness_type: provider | standard).
+# Same resources server, rows, pins, game server (the scorecard authority) and RHAE as arc_agi_3.yaml.
+arc_agi_3_resources_server:
+  resources_servers:
+    arc_agi_3:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: "ARC-AGI-3 interactive games (public25), played with the official ARC Prize harness (arc-agi-3-benchmarking, provider or standard harness); RHAE scoring."
+      value: Evaluate agentic exploration, world-model building and planning in unseen interactive games.
+      environments_dir: resources_servers/arc_agi_3/data/environment_files
+      # Directories put first on the game server's PYTHONPATH: runtimes some games import (param25: its arcgames tree).
+      python_path: []
+      score_hours: [1.0, 2.0]
+      # The official arc_agi game server (the authority): its closed cards and recordings go here.
+      game_server_dir: results/arc_agi_3_game_server
+      game_server_port: null
+      # Idle scorecards are closed after this many minutes; it must exceed play_seconds.
+      scorecard_timeout_min: 240
+      expected_games: null
+
+arc_agi_3_official_agent:
+  responses_api_agents:
+    arc_agi_3_official_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: arc_agi_3_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      environments_dir: resources_servers/arc_agi_3/data/environment_files
+      # First start only: "git" (clone the pinned commit), a directory or a .tar.gz of the repository at that commit.
+      harness_source: git
+      output_dir: results/arc_agi_3_official
+      run_name: null
+      # One run clock: all games at once, each plays until the first start + play_seconds.
+      play_seconds: 7200
+      window_grace_s: 30
+      cancel_drain_s: 30
+      save_every_s: 600
+      save_request_logs: false
+      # The policy model server must pass the engine's context-length 400 through (vllm_model
+      # propagate_context_overflow_errors: true): the harness then compacts its history and retries.
+      require_context_error_passthrough: true
+      # Upstream's harness: provider (Provider Adapter: continuous conversation, earlier reasoning resent, summary
+      # compaction) or standard (manual_rolling: the oldest turns are dropped, no reasoning resent, no summaries).
+      # Select with ++arc_agi_3_official_agent.responses_api_agents.arc_agi_3_official_agent.harness_type=standard.
+      harness_type: provider
+      # One upstream model_configs.yaml entry per harness type. The defaults are settings for a model served with a
+      # 262,144-token window; window sizes are model-specific. The agent fixes the
+      # type's runtime sdk / api / adapter_id / state and the client (its own route); upstream validates the rest.
+      benchmark_configs:
+        provider:
+          id: gym-provider-adapter
+          agent:
+            # Per-level action budget = ceil(human baseline x this); the game stops when a level's budget is spent.
+            MAX_ACTIONS_BASELINE_MULTIPLIER: 5
+            # Tokens: the served context window.
+            MAX_CONTEXT_LENGTH: 262144
+          runtime:
+            state: continuous_conversation
+            # How earlier reasoning is resent: reasoning_content, reasoning or reasoning_aliases.
+            reasoning_replay: reasoning_content
+            compaction:
+              strategy: harness_summary
+              # Summarize the history at 192,000 tokens (upstream's 96k / 131k ratio of the window).
+              trigger_tokens: 192000
+              summary_input_headroom_tokens: 8192
+          request:
+            max_tokens: 12288
+            stream: false
+            # Sampling: unset = the engine's defaults, as upstream. Set temperature / top_p / seed here, top_k in
+            # extra_body.
+            extra_body:
+              chat_template_kwargs:
+                enable_thinking: true
+                preserve_thinking: true
+        standard:
+          id: gym-standard
+          agent:
+            MAX_ACTIONS_BASELINE_MULTIPLIER: 5
+            # Characters (upstream estimates 1 char per token): a 131,072-token window less the output cap (12,288)
+            # and 8,192 of headroom, so a trimmed transcript plus a full reply fits.
+            MAX_CONTEXT_LENGTH: 110592
+          runtime:
+            state: manual_rolling
+          request:
+            max_tokens: 12288
+            stream: false
+            extra_body:
+              chat_template_kwargs:
+                enable_thinking: true
+                preserve_thinking: true
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/arc_agi_3/data/example.jsonl
+
+arc_agi_3_official_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: arc_agi_3_official_agent
