@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Harvey AI
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT
+
+# Original Harvey LAB portions remain under MIT; NVIDIA modifications follow.
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Harvey LAB source (MIT): https://github.com/harveyai/harvey-labs/blob/
+# f46ef86e4788545622db25dcffa3aebb7a139929/harness/agent_loop.py
 """Harbor agent adapter for Legal Agent Bench inside NeMo Gym."""
 
 from __future__ import annotations
@@ -10,11 +17,13 @@ import json
 import logging
 import re
 import shlex
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
+from resources_servers.legal_agent_bench.harness.adapters.base import ModelResponse
+from resources_servers.legal_agent_bench.harness.adapters.openai_compatible import OpenAICompatibleAdapter
+from resources_servers.legal_agent_bench.lab_harbor.tools import CONTAINER_TOOL_RUNNER_PATH, get_all_tool_definitions
 from resources_servers.legal_agent_bench.prepare import (
     DEFAULT_SKILLS_DIR,
     discover_harness_skills,
@@ -24,13 +33,6 @@ from resources_servers.legal_agent_bench.prepare import (
 
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_VENDOR_ROOT = _PACKAGE_DIR / "vendor" / "harvey_labs"
-if str(_VENDOR_ROOT) not in sys.path:
-    sys.path.insert(0, str(_VENDOR_ROOT))
-
-from harness.adapters.base import ModelResponse  # noqa: E402
-from harness.adapters.openai_compatible import OpenAICompatibleAdapter  # noqa: E402
-from lab_harbor.tools import CONTAINER_TOOL_RUNNER_PATH, get_all_tool_definitions  # noqa: E402
 
 
 try:  # pragma: no cover - Harbor is installed in the Harbor agent server venv.
@@ -54,7 +56,7 @@ AGENT_VERSION = "0.1.0"
 INITIAL_USER_PROMPT = "Please begin working on the task described in the system prompt."
 REQUIRED_TASK_KEYS = {"title", "instructions", "criteria"}
 REQUIRED_CRITERION_KEYS = {"id", "title", "match_criteria"}
-SYSTEM_PROMPT_PATH = _VENDOR_ROOT / "harness" / "system-prompt.md"
+SYSTEM_PROMPT_PATH = _PACKAGE_DIR / "harness" / "system-prompt.md"
 SYSTEM_PROMPT_PREAMBLE = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
