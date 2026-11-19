@@ -147,6 +147,66 @@
       "files": []
     },
     {
+      "id": "never-pass-share-from-profile-only",
+      "prompt": "I profiled 8 repeats of my code environment with nemo-gym 0.7.0. The profile is /workspace/input/code_run/code_rollouts_reward_profiling.jsonl. What share of my environment's tasks never pass?",
+      "expected_output": "Says that 2 of the 10 tasks in this file never pass (tasks 3 and 4 score 0 on all 8 repeats), and that this is only the share among tasks with a saved rollout. Explains that gym eval profile in nemo-gym 0.7.0 leaves a task with no saved rollout out of the profile file entirely, and every row here looks complete, so the file alone cannot show whether such tasks exist and the share of all the environment's tasks is unknown from it. Tells the user to check the planned task count in the code_rollouts_materialized_inputs.jsonl written next to the rollouts before quoting the share.",
+      "assertions": [
+        "Names tasks 3 and 4 as the tasks in the file that never pass",
+        "Warns that a task with no saved rollout does not appear in the profile file, so the share of all tasks may differ",
+        "Tells the user to check how many tasks were planned, for example in the materialized inputs, before quoting the share"
+      ],
+      "expected_skill": "nemo-gym-reward-profiling",
+      "expected_script": "scripts/summarize_profile.py",
+      "files": [
+        "evals/files/code_run/code_rollouts_reward_profiling.jsonl"
+      ]
+    },
+    {
+      "id": "headline-mean-from-agent-metrics",
+      "prompt": "The agent metrics from my code environment's reward profile, /workspace/input/code_run/code_rollouts_agent_metrics.json, show mean/reward 0.6. Can I report 60% as the pass rate of my environment?",
+      "expected_output": "Says not from this file alone. Explains that mean/reward is the mean over the rollouts that were measured: rollouts that were never saved, including every rollout of a task with no saved rollout, are not in it, and this file does not say how many of the planned rollouts it covers. Tells the user to check coverage first by comparing the measured rollouts with the planned rollouts in code_rollouts_materialized_inputs.jsonl, and to report the number together with its coverage (measured out of planned rollouts) rather than as the environment's pass rate.",
+      "assertions": [
+        "Explains that mean/reward averages only the measured rollouts and leaves out rollouts that were never saved",
+        "Says that this file alone does not show how many of the planned rollouts were measured",
+        "Advises checking coverage against the planned rollouts before reporting 60% as the environment's pass rate"
+      ],
+      "expected_skill": "nemo-gym-reward-profiling",
+      "files": [
+        "evals/files/code_run/code_rollouts_agent_metrics.json"
+      ]
+    },
+    {
+      "id": "repeat-coverage-from-repeat-metrics",
+      "prompt": "gym eval profile wrote the per-repeat metrics of my code environment's run to /workspace/input/code_run/code_rollouts_repeat_level_metrics.json. Did every repeat cover all of my tasks?",
+      "expected_output": "Explains that this file cannot confirm it. missing_count is 0 in every repeat, but it counts only tasks that were measured in some other repeat, so a task with no saved rollout in any repeat is never counted. Notes that every repeat has sample_count 10, so all 8 repeats covered the same 10 tasks, and tells the user to compare that with the number of planned tasks in code_rollouts_materialized_inputs.jsonl: any planned task beyond those 10 was never measured in any repeat.",
+      "assertions": [
+        "Does not conclude from missing_count being 0 that every task was covered",
+        "Explains that missing_count does not count a task that is missing from every repeat",
+        "Notes that each repeat has sample_count 10 and tells the user to compare it with the number of planned tasks"
+      ],
+      "expected_skill": "nemo-gym-reward-profiling",
+      "files": [
+        "evals/files/code_run/code_rollouts_repeat_level_metrics.json"
+      ]
+    },
+    {
+      "id": "masked-rollouts-choose-tasks",
+      "prompt": "Collection for my sandboxed terminal environment finished, and gym eval profile printed 'Reward profile completion: 64/64 rollout rows (100.00%)'. The reward profile and the materialized inputs are in /workspace/input/tool_run/. Which tasks should I keep for GRPO training?",
+      "expected_output": "Reports coverage first: only 50 of the 64 planned rollouts were measured. Because the completion line counts all 64 as saved, the other 14 were saved but masked by the environment (for example sandbox failures), and gym eval profile leaves masked rollouts out of every statistic: task 5 has no measured rollout and is missing from the profile, task 2 has 4 of 8 measured and task 6 has 6 of 8. Keeps tasks 1, 4, 6 and 7, whose reward varies (task 6 tentatively). Drops task 0, which passes on every repeat; treats task 2, which passed all 4 measured repeats, as a tentative drop until its masked repeats are rerun; and says to check task 3, which never passes, for label or verifier problems before dropping it. Says to fix the cause of the masking and rerun task 5 before deciding on it.",
+      "assertions": [
+        "Reports that only 50 of the 64 planned rollouts were measured",
+        "Explains that the 14 unmeasured rollouts were saved but masked, not missing",
+        "Recommends keeping tasks 1, 4, 6 and 7",
+        "Identifies task 5 as not measured rather than as a failing task"
+      ],
+      "expected_skill": "nemo-gym-reward-profiling",
+      "expected_script": "scripts/summarize_profile.py",
+      "files": [
+        "evals/files/tool_run/tool_rollouts_materialized_inputs.jsonl",
+        "evals/files/tool_run/tool_rollouts_reward_profiling.jsonl"
+      ]
+    },
+    {
       "id": "negative-score-gap-vs-model-card",
       "prompt": "My AIME 2025 score in NeMo Gym is 6 points lower than the number in the model card. What should I check first?",
       "expected_output": "Says to check whether the two numbers are comparable before treating the gap as real: benchmark version and data, prompt and answer extraction, sampling settings such as temperature and maximum output tokens, the grader or judge, the number of repeats and run-to-run noise, and how failed or missing rollouts were counted. This is a results-comparison question, not reward profiling for training.",
