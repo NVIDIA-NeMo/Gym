@@ -3848,6 +3848,84 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
         await state.close(1)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_operation", ["snapshot", "download"])
+async def test_slow_native_snapshot_preserves_collected_cli_events(setup, blocked_operation):
+    agent, sandbox = setup
+    state = await agent._seed_agent_session_state(seed())
+    original_execute = sandbox.execute
+    original_download = sandbox.download
+    cancelled = asyncio.Event()
+    snapshot_budgets = []
+
+    async def block():
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    async def execute(command, **kwargs):
+        if "--snapshot" in command:
+            snapshot_budgets.append(kwargs["timeout_s"])
+            if blocked_operation == "snapshot":
+                await block()
+        return await original_execute(command, **kwargs)
+
+    async def download(source, destination):
+        if source.endswith("/native_session.jsonl"):
+            await block()
+        return await original_download(source, destination)
+
+    sandbox.exec.side_effect = execute
+    sandbox.download = download
+    try:
+        response = await agent._sandbox_response(
+            state, NeMoGymResponseCreateParamsNonStreaming(input="task"), prompt="task", system=""
+        )
+        assert cancelled.is_set()
+        assert 0 < snapshot_budgets[0] < agent.config.session_close_timeout_seconds
+        assert response.output[-1].content[0].text == "Fixed"
+        assert state.observations.records[0].conversation[-1].content[0].text == "Fixed"
+        assert state.session.cleanup_confirmed
+        assert state.session.capture_error is None
+    finally:
+        await state.close(1)
+
+
+@pytest.mark.asyncio
+async def test_native_snapshot_keeps_external_cancellation(setup):
+    agent, sandbox = setup
+    state = await agent._seed_agent_session_state(seed())
+    state.capture_budget_s = 10
+    original_execute = sandbox.execute
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def execute(command, **kwargs):
+        assert "--snapshot" in command
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    sandbox.exec.side_effect = execute
+    with patch.object(state, "read_text", AsyncMock(return_value=events())):
+        capture = asyncio.create_task(state.collect_artifacts())
+        try:
+            async with asyncio.timeout(5):
+                await started.wait()
+                capture.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await capture
+            assert cancelled.is_set()
+        finally:
+            capture.cancel()
+            await asyncio.gather(capture, return_exceptions=True)
+            sandbox.exec.side_effect = original_execute
+            await state.close(1)
+
+
 @pytest.mark.parametrize("transport_error", ["timed out", "IncompleteRead(0 bytes read, 20 more expected)", None])
 def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
     from nemo_gym.agents import OutcomeAction, agent_outcome_policy

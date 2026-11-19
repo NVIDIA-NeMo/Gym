@@ -72,7 +72,7 @@ class CodexSandboxSession(AgentSessionState):
     native_transcript: str | None = None
     model_attempts: list[dict[str, JsonValue]] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
-    # The time SandboxSession allows artifact capture (its close timeout), so the optional copy fits inside it.
+    # The shared capture timeout; optional transcript work and copying must finish inside it.
     capture_budget_s: float | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
@@ -212,22 +212,32 @@ class CodexSandboxSession(AgentSessionState):
         except ValueError:
             runtime_payload = None
         self.runtime_info = parse_runtime_info(runtime_payload)
+        snapshot_budget = 10.0
+        if self.capture_budget_s is not None:
+            # Optional enrichment must end before the shared capture deadline, or its
+            # cancellation would discard the CLI events we have already collected.
+            reserve = min(_ARCHIVE_RESERVE_S, self.capture_budget_s / 2)
+            remaining = started + self.capture_budget_s - time.monotonic()
+            snapshot_budget = min(snapshot_budget, remaining - reserve)
         try:
-            snapshot = await self.session.sandbox.exec(
-                "NODE_OPTIONS= "
-                + shlex.join(
-                    [
-                        f"{self.runtime}/node/bin/node",
-                        f"{self.session.session_dir}/{LAUNCHER_FILE}",
-                        "--snapshot",
-                        self.session.session_dir,
-                    ]
-                ),
-                timeout_s=10,
-            )
-            if snapshot.return_code != 0 or snapshot.error_type:
-                raise RuntimeError("Codex native session snapshot failed")
-            self.native_transcript = await self.read_text("native_session.jsonl")
+            if snapshot_budget <= 0:
+                raise TimeoutError("No capture time left for Codex native session snapshot")
+            async with asyncio.timeout(snapshot_budget):
+                snapshot = await self.session.sandbox.exec(
+                    "NODE_OPTIONS= "
+                    + shlex.join(
+                        [
+                            f"{self.runtime}/node/bin/node",
+                            f"{self.session.session_dir}/{LAUNCHER_FILE}",
+                            "--snapshot",
+                            self.session.session_dir,
+                        ]
+                    ),
+                    timeout_s=snapshot_budget,
+                )
+                if snapshot.return_code != 0 or snapshot.error_type:
+                    raise RuntimeError("Codex native session snapshot failed")
+                self.native_transcript = await self.read_text("native_session.jsonl")
         except Exception:
             LOG.warning("Codex native session transcript unavailable", exc_info=True)
         try:
