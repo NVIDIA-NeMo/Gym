@@ -97,3 +97,24 @@ python resources_servers/swebench_pro/apply_golden_patch.py \
 
 Keep gold-patch, empty-patch and model-driven rollout evidence separate. Inspect all failures;
 a completed control is not a certificate or proof that every upstream task is healthy.
+
+### Control results (2026-11-19, Gym `372383d60`)
+
+Both controls were run against the prepared full set (642 rows, HF revision `2d52cb3d`, upstream `66f92766`,
+images pinned by digest) with the OpenSandbox provider, the command above at `+concurrency=96`, and the empty-patch
+variant with every row's `patch` set to `""`. The HARD-51 numbers are the HARD-51 rows of the same runs.
+
+| Control | Full set (642) | HARD-51 |
+|---|---|---|
+| Gold patch, pass 1 | 641 resolved | 51 resolved |
+| Gold patch, pass 2 | 642 resolved | 51 resolved |
+| Gold patch, pass 3 | 642 resolved | 51 resolved |
+| Empty patch | 0 resolved, 642 completed | 0 resolved, 51 completed |
+
+Every row completed in one verification attempt (no inconclusive verdicts, no test.sh time-outs). Verification took
+51 s per task at the median, 134 s at p90 and 835 s at most. The one task that is not 3/3 is
+`instance_element-hq__element-web-9a31cd0fa849da810b4fac6c6c015145e850b282-vnan`: in pass 1 the Jest case
+`JoinRuleSettings-test.tsx | ... | upgrades room when changing join rule to restricted` failed with the other 137
+required tests passing, and the same gold patch resolved in passes 2 and 3, so the test is nondeterministic rather than
+the task broken. This matches upstream's release gate (reference patch 642/642, empty patch 0/642) up to that flake.
+These are verifier controls only; a model-driven baseline is still required before either preset is marked verified.
