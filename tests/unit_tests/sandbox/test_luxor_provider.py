@@ -89,6 +89,7 @@ class FakeSandbox:
         self.refresh_results: list[Any] = []
         self.close_calls = 0
         self.close_error: Exception | None = None
+        self.close_errors: list[Exception] = []
 
     async def exec(self, *argv: str, **kwargs: Any) -> Any:
         self.exec_calls.append((argv, kwargs))
@@ -110,6 +111,8 @@ class FakeSandbox:
 
     async def close_if_open(self) -> None:
         self.close_calls += 1
+        if self.close_errors:
+            raise self.close_errors.pop(0)
         if self.close_error is not None:
             raise self.close_error
         self.state = "TERMINATING"
@@ -718,6 +721,50 @@ async def test_close_refresh_missing_is_stopped(provider_and_client: tuple[Luxor
     provider, client = provider_and_client
     client.sandbox.refresh_results = [FakeSessionTerminatedError("done")]
     await provider.close(make_handle(client.sandbox))
+
+
+def _transport_error(message: str = "Stream removed (ping timeout)") -> Exception:
+    error = RuntimeError(message)
+    error.retryable = True
+    return error
+
+
+@pytest.mark.asyncio
+async def test_close_retries_retryable_terminate_error(provider_and_client: tuple[LuxorProvider, FakeClient]) -> None:
+    provider, client = provider_and_client
+    provider._operations = LuxorOperationsConfig(close_timeout_s=5, close_poll_interval_s=0.001)
+    client.sandbox.close_errors = [_transport_error(), _transport_error()]
+    await provider.close(make_handle(client.sandbox))
+    assert client.sandbox.close_calls == 3
+    assert client.sandbox.state == "TERMINATED"
+
+
+@pytest.mark.asyncio
+async def test_close_retries_retryable_refresh_error(provider_and_client: tuple[LuxorProvider, FakeClient]) -> None:
+    provider, client = provider_and_client
+    provider._operations = LuxorOperationsConfig(close_timeout_s=5, close_poll_interval_s=0.001)
+    client.sandbox.refresh_results = [_transport_error(), "TERMINATED"]
+    await provider.close(make_handle(client.sandbox))
+    assert client.sandbox.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_close_does_not_retry_other_errors(provider_and_client: tuple[LuxorProvider, FakeClient]) -> None:
+    provider, client = provider_and_client
+    client.sandbox.close_error = RuntimeError("permission denied")
+    with pytest.raises(RuntimeError, match="permission denied"):
+        await provider.close(make_handle(client.sandbox))
+    assert client.sandbox.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_close_retryable_error_stops_at_deadline(provider_and_client: tuple[LuxorProvider, FakeClient]) -> None:
+    provider, client = provider_and_client
+    provider._operations = LuxorOperationsConfig(close_timeout_s=0.02, close_poll_interval_s=0.001)
+    client.sandbox.close_error = _transport_error()
+    with pytest.raises(RuntimeError, match="Stream removed"):
+        await provider.close(make_handle(client.sandbox))
+    assert client.sandbox.close_calls > 1
 
 
 @pytest.mark.asyncio

@@ -319,12 +319,28 @@ class LuxorProvider:
         state = _LuxorSandbox(sdk=sandbox, workdir=workdir)
         return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=state)
 
+    async def _request_termination(self, sandbox: Any, sandbox_id: str) -> bool:
+        """Ask Luxor to terminate, retrying retryable SDK errors; False means it is already gone."""
+        _, _, SessionNotFoundError, SessionTerminatedError = _require_luxor_sdk()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._operations.close_timeout_s
+        while True:
+            try:
+                await asyncio.wait_for(sandbox.close_if_open(), timeout=max(deadline - loop.time(), 0.001))
+                return True
+            except (SessionNotFoundError, SessionTerminatedError):
+                return False
+            except Exception as exc:
+                if not getattr(exc, "retryable", False) or loop.time() >= deadline:
+                    raise
+                LOGGER.warning("Retrying Luxor sandbox termination; sandbox_id=%s; error=%r", sandbox_id, exc)
+            await asyncio.sleep(self._operations.close_poll_interval_s)
+
     async def _terminate_partial(self, sandbox: Any, sandbox_id: str) -> None:
         _, _, SessionNotFoundError, SessionTerminatedError = _require_luxor_sdk()
         try:
-            await asyncio.wait_for(sandbox.close_if_open(), timeout=self._operations.close_timeout_s)
-        except (SessionNotFoundError, SessionTerminatedError):
-            return
+            if not await self._request_termination(sandbox, sandbox_id):
+                return
         except Exception as cleanup_error:
             LOGGER.warning(
                 "Failed to terminate Luxor sandbox after create failure; sandbox_id=%s; error=%r",
@@ -580,9 +596,7 @@ class LuxorProvider:
         """Terminate the sandbox and wait until Luxor reports it stopped."""
         state: _LuxorSandbox = handle.raw
         _, _, SessionNotFoundError, SessionTerminatedError = _require_luxor_sdk()
-        try:
-            await asyncio.wait_for(state.sdk.close_if_open(), timeout=self._operations.close_timeout_s)
-        except (SessionNotFoundError, SessionTerminatedError):
+        if not await self._request_termination(state.sdk, handle.sandbox_id):
             return
 
         loop = asyncio.get_running_loop()
@@ -592,6 +606,11 @@ class LuxorProvider:
                 info = await state.sdk.refresh()
             except (SessionNotFoundError, SessionTerminatedError):
                 return
+            except Exception as exc:
+                if not getattr(exc, "retryable", False) or loop.time() >= deadline:
+                    raise
+                await asyncio.sleep(self._operations.close_poll_interval_s)
+                continue
             if _to_sandbox_status(info.state) is SandboxStatus.STOPPED:
                 return
             if loop.time() >= deadline:
