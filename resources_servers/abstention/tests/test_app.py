@@ -127,6 +127,20 @@ class TestParseJudgeGrade:
     def test_c_in_multiline(self) -> None:
         assert parse_judge_grade("reasoning\nmore reasoning\nC") == "C"
 
+    def test_letter_with_label_is_not_read_as_a(self) -> None:
+        # "NOT_ATTEMPTED" contains a capital A; it must not grade CORRECT.
+        assert parse_judge_grade("C: NOT_ATTEMPTED") == "C"
+        assert parse_judge_grade("Reasoning first.\nC: NOT_ATTEMPTED") == "C"
+
+    def test_label_words(self) -> None:
+        assert parse_judge_grade("NOT_ATTEMPTED") == "C"
+        assert parse_judge_grade("The answer is INCORRECT") == "B"
+        assert parse_judge_grade("This is CORRECT.") == "A"
+
+    def test_article_a_is_not_a_grade(self) -> None:
+        assert parse_judge_grade("A careful reading shows the prediction is INCORRECT") == "B"
+        assert parse_judge_grade("Made a guess without evidence") == "B"
+
 
 class TestExtractTextFromResponse:
     def _make_response(self, text: str) -> NeMoGymResponse:

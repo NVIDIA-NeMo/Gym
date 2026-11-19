@@ -216,24 +216,40 @@ def extract_text_from_response(response: NeMoGymResponse) -> str:
     return ""
 
 
+# The judge is told to answer with a bare "A", "B" or "C" (A: CORRECT, B: INCORRECT, C: NOT_ATTEMPTED). A reply that is
+# not bare is read by explicit forms only. The earlier fallback, `if letter in cleaned` in A, B, C order, matched any
+# capital A anywhere: "C: NOT_ATTEMPTED" (the A inside ATTEMPTED) or "A" used as an article both graded CORRECT.
+_GRADE_LEADING = re.compile(r"^\(?([ABC])\)?(?:\s*[:.)\-]|\s*$)")
+_GRADE_STATED = re.compile(r"\bgrade\s*(?:is|:|=)?\s*\(?([ABC])\b", re.IGNORECASE)
+# Label words, longest first so INCORRECT and NOT_ATTEMPTED are not read as CORRECT.
+_GRADE_LABEL = re.compile(r"\b(NOT_ATTEMPTED|INCORRECT|CORRECT)\b")
+_LABEL_TO_GRADE = {"CORRECT": "A", "INCORRECT": "B", "NOT_ATTEMPTED": "C"}
+
+
 def parse_judge_grade(judge_text: str) -> str:
     """Parse the single-letter grade (A/B/C) from the judge's response.
 
-    Returns "A", "B", or "C". Falls back to "B" (INCORRECT) when the
-    output cannot be reliably parsed.
+    Accepted, in order: the bare letter; a last or first line that starts with the letter ("C", "C: NOT_ATTEMPTED",
+    "(A)"); a stated grade ("The grade is A"); the last label word (CORRECT, INCORRECT, NOT_ATTEMPTED). Anything else
+    falls back to "B" (INCORRECT).
     """
     cleaned = judge_text.strip()
     if cleaned in ("A", "B", "C"):
         return cleaned
 
-    last_line = cleaned.rsplit("\n", 1)[-1].strip()
-    for letter in ("A", "B", "C"):
-        if last_line == letter:
-            return letter
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    for line in (lines[-1:] + lines[:1]) if lines else []:
+        match = _GRADE_LEADING.match(line)
+        if match:
+            return match.group(1)
 
-    for letter in ("A", "B", "C"):
-        if letter in cleaned:
-            return letter
+    stated = _GRADE_STATED.findall(cleaned)
+    if stated:
+        return stated[-1].upper()
+
+    labels = _GRADE_LABEL.findall(cleaned)
+    if labels:
+        return _LABEL_TO_GRADE[labels[-1]]
 
     return "B"
 
@@ -335,6 +351,13 @@ class AbstentionServer(SimpleResourcesServer):
         if norm_extracted == norm_abstention:
             verdict = "abstain"
             reward = self.config.abstention_reward
+            judge_text = None
+        elif not extracted.strip():
+            # No final answer (e.g. a reply that ends right after its reasoning). Judged, it would most likely be graded
+            # NOT_ATTEMPTED and earn the abstention reward, paying for an empty reply as if it were an explicit
+            # abstention (the abstention_token). It is scored as incorrect instead, without a judge call.
+            verdict = "incorrect"
+            reward = self.config.incorrect_reward
             judge_text = None
         else:
             judge_prompt = self.config.judge_prompt_template.format(
