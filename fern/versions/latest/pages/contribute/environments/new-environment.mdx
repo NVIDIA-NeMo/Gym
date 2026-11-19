@@ -476,7 +476,7 @@ Static manifest validation runs without starting the workload. It:
 
 With synchronization enabled, it writes corrected composition mirrors atomically only after every static check passes. Authored metadata remains unchanged.
 
-It does not import components, start services, execute preparation code, call a model, run an evaluation, probe model or resources endpoints, or check evaluation-output writability. Runtime pre-run readiness is a separate validation layer. Component versions and capabilities, profile pinning, and `adopted_from` source resolution are deferred from this initial static validation. Scorer behavior and grading quality require the later validation layers.
+It imports the dependency-light `task_input.py` modules of routed environment servers to check materialized task rows. It does not import their `app.py` entrypoints or other components, start services, execute preparation code, call a model, run an evaluation, probe model or resources endpoints, or check evaluation-output writability. Runtime pre-run readiness is a separate validation layer. Component versions and capabilities, profile pinning, and `adopted_from` source resolution are deferred from this initial static validation. Scorer behavior and grading quality require the later validation layers.
 
 ## Verifier Fixture Contract
 

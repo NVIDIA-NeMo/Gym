@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -19,10 +20,10 @@ from typing import Any
 import orjson
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationResolutionError
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from yaml import YAMLError
 
-from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, _resolve_under_cwd_or_install
 from nemo_gym.config.config_types import AlmostServerError, ConfigError
 from nemo_gym.config.global_config import (
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
@@ -37,6 +38,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.episode_types import MaterializedTask, is_materialized_task_row
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.data.task_input import TaskInputContract, TaskInputModuleError, find_task_input_contract
 from nemo_gym.environment.manifest import (
     DatasetKind,
     EnvironmentKind,
@@ -47,7 +49,6 @@ from nemo_gym.environment.manifest import (
     resolve_manifest_config_path,
 )
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
-from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
 logger = logging.getLogger(__name__)
@@ -147,9 +148,13 @@ def _with_component_root(config_path: Path):
     original = os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
     roots = [str(root), *([original] if original else [])]
     os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = os.pathsep.join(roots)
+    # A task input module imports its resources server's task_data by package name, so the root must be importable.
+    original_sys_path = sys.path[:]
     try:
+        _augment_sys_path()
         yield
     finally:
+        sys.path[:] = original_sys_path
         if original is None:
             os.environ.pop(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, None)
         else:
@@ -771,6 +776,8 @@ def _validate_dataset(
                 ) from error
 
     row_count = 0
+    # Each routed server's contract, looked up once per dataset; keyed by server, which the config bounds.
+    contracts: dict[str, TaskInputContract | None] = {}
     for line_number, row in _iter_dataset_rows(data_path):
         row_count += 1
         if is_materialized_task_row(row):
@@ -781,6 +788,7 @@ def _validate_dataset(
                 prompt_source=prompt_source,
                 templated=prompt is not None,
                 taskset_environment_servers=taskset_environment_servers or {},
+                contracts=contracts,
             )
             continue
         if prompt_source == "prepared" and dataset.type == DatasetKind.BENCHMARK:
@@ -823,14 +831,8 @@ def _validate_dataset(
     )
 
 
-# Environment servers that take single-agent-turn tasks: single_agent_turn_legacy accepts them besides flat rows.
-SINGLE_AGENT_TURN_ENVIRONMENT_SERVERS = frozenset({"single_agent_turn", "single_agent_turn_legacy"})
-
-
-class TaskInputObject(BaseModel):
-    """Any task input object: the input of an environment server whose own input model owns its fields."""
-
-    model_config = ConfigDict(extra="allow")
+# A task row's envelope: a valid TaskId and a task_input object.
+_TASK_ENVELOPE = TypeAdapter(MaterializedTask[dict[str, Any]])
 
 
 def _validate_task_row(
@@ -841,13 +843,15 @@ def _validate_task_row(
     prompt_source: str,
     templated: bool,
     taskset_environment_servers: Mapping[str, str],
+    contracts: dict[str, TaskInputContract | None] | None = None,
 ) -> None:
     """Check a materialized task row (``task_id`` and ``task_input``) as rollout collection dispatches it.
 
-    Rollout collection sends only the row's ``task_id`` and ``task_input`` to the environment server its taskset
-    routes to (``environment_server_routes``). A single-agent-turn server validates them as
-    ``MaterializedTask[SingleAgentTurnTaskInput]``. For any other server, or a taskset with no route, only the
-    envelope is checked here, a valid ``TaskId`` and a ``task_input`` object, because that server owns its input.
+    Rollout collection sends only the row's ``task_id`` and ``task_input`` to the environment server its taskset routes to.
+    That server validates them as ``MaterializedTask[TaskInput]``, with the ``TaskInput`` of its task input module (``nemo_gym/data/task_input.py``).
+    A relay (whose module sets ``TaskInput = None``) passes rows to an agent's ``/run``, which takes flat rows, so a task row routed to one is refused.
+    For a taskset with no route, or a server without a task input module, only the envelope is checked here: a valid ``TaskId`` and a ``task_input`` object.
+    A manifest can be validated without the run config that routes it.
     """
     if templated:
         # Collation and rollout collection apply a template to the row's top level, which a task never reads.
@@ -857,28 +861,37 @@ def _validate_task_row(
         )
     task_input = row.get("task_input")
     environment_server = taskset_environment_servers.get(row["task_id"].get("taskset"))
-    input_model = (
-        SingleAgentTurnTaskInput if environment_server in SINGLE_AGENT_TURN_ENVIRONMENT_SERVERS else TaskInputObject
-    )
-    if input_model is SingleAgentTurnTaskInput and "responses_create_params" in row:
+    contracts = {} if contracts is None else contracts
+    contract = None
+    if environment_server is not None:
+        if environment_server not in contracts:
+            try:
+                contracts[environment_server] = find_task_input_contract(environment_server).contract
+            except TaskInputModuleError as error:
+                raise EnvironmentValidationError(str(error)) from error
+        contract = contracts[environment_server]
+    if contract is not None and contract.is_relay:
         raise EnvironmentValidationError(
-            f"Dataset '{dataset.name}' row {line_number} is not a valid task: "
-            "move top-level responses_create_params into task_input instead of mixing rollout envelopes."
+            f"Dataset '{dataset.name}' row {line_number} is a task row routed to {environment_server}, a relay "
+            "(its task_input.py sets TaskInput = None): it passes flat rows to an agent's /run and takes no task rows."
         )
-    # A prepared prompt is in the task's request, so only an input model that carries one can be checked for it.
-    if (
-        prompt_source == "prepared"
-        and dataset.type == DatasetKind.BENCHMARK
-        and "responses_create_params" in input_model.model_fields
-    ):
-        params = task_input.get("responses_create_params") if isinstance(task_input, dict) else None
-        if not isinstance(params, dict) or not params.get("input"):
+    adapter = _TASK_ENVELOPE if contract is None or contract.task is None else contract.task
+    # The authoring checks apply where every task must carry its model request.
+    if contract is not None and contract.requires_responses_create_params:
+        if "responses_create_params" in row:
             raise EnvironmentValidationError(
-                f"Benchmark dataset '{dataset.name}' row {line_number} declares prepared prompts "
-                "but has no task_input.responses_create_params.input."
+                f"Dataset '{dataset.name}' row {line_number} is not a valid task: "
+                "move top-level responses_create_params into task_input instead of mixing rollout envelopes."
             )
+        if prompt_source == "prepared" and dataset.type == DatasetKind.BENCHMARK:
+            params = task_input.get("responses_create_params") if isinstance(task_input, dict) else None
+            if not isinstance(params, dict) or not params.get("input"):
+                raise EnvironmentValidationError(
+                    f"Benchmark dataset '{dataset.name}' row {line_number} declares prepared prompts "
+                    "but has no task_input.responses_create_params.input."
+                )
     try:
-        MaterializedTask[input_model].model_validate({"task_id": row["task_id"], "task_input": task_input})
+        adapter.validate_python({"task_id": row["task_id"], "task_input": task_input})
     except ValidationError as error:
         issue = error.errors(include_url=False, include_context=False, include_input=False)[0]
         location = ".".join(str(part) for part in issue["loc"]) or "row"
