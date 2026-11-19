@@ -88,8 +88,8 @@ class UnitTests(BaseModel):
 class ResourceLimits(BaseModel):
     """A task's own limits; each one it leaves out falls back to the server's."""
 
-    time_limit_s: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
-    memory_limit_mb: Optional[int] = Field(default=None, gt=0)
+    time_limit_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    memory_limit_mb: int | None = Field(default=None, gt=0)
 
 
 class CompCodingRunRequest(BaseRunRequest):
@@ -108,8 +108,8 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
     unit_tests_time_taken: Optional[float] = None
     reasoning_format_violation_rate: float = 0.0
     difficulty: Optional[str] = None
-    # Limits time and/or memory; a None memory limit is the fixed 4 GB guard.
-    limits: Optional[Dict[str, Any]] = None
+    # The limits applied; a None memory limit is the fixed 4 GB guard.
+    limits: ResourceLimits | None = None
 
 
 # ----------------------------
@@ -232,7 +232,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         )
         # A task's own time limit also bounds compilation; otherwise check_correctness keeps its deadline.
         deadline_s = task_deadline_s(timeout, len(tests.inputs)) if task_limits.time_limit_s is not None else None
-        limits = {"time_limit_s": timeout, "memory_limit_mb": task_limits.memory_limit_mb}
+        limits = ResourceLimits(time_limit_s=timeout, memory_limit_mb=task_limits.memory_limit_mb)
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
