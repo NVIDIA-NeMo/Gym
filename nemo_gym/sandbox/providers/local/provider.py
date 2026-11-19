@@ -113,14 +113,16 @@ class LocalProvider:
         timeout = timeout_s if timeout_s is not None else self._default_timeout_s
         # Each command confirms the groups earlier commands left running, so their records keep trusting them.
         # A group that has ended drops its record.
-        kept = []
-        for group in inst.get("process_groups", []):
-            confirmed = await asyncio.to_thread(group.confirm)
+        # The list is rewritten in place with no await, so a concurrent command's appended record is never lost.
+        # Confirming costs a few system calls and one small write to the node-local record file.
+        groups = inst.setdefault("process_groups", [])
+        for index, group in reversed(list(enumerate(groups))):
+            confirmed = group.confirm()
             if confirmed is None:
                 group.forget()
+                del groups[index]
             else:
-                kept.append(confirmed)
-        inst["process_groups"] = kept
+                groups[index] = confirmed
         async with self._semaphore:
             # The shell waits for one line on stdin, sent once its process group is recorded, then runs the command in
             # place with stdin from /dev/null.
@@ -198,8 +200,10 @@ class LocalProvider:
         """End the processes commands left running in the background, then remove an owned workspace."""
         inst = handle.raw
         groups = inst.get("process_groups", [])
+        # No await between ending a record and removing it, so a record a concurrent command appends is not skipped.
+        # A record whose end raises stays for the next close.
         while groups:
-            await asyncio.to_thread(groups[-1].end)
+            groups[-1].end()
             groups.pop()
         if inst["owned"]:
             await asyncio.to_thread(shutil.rmtree, inst["workspace"], ignore_errors=True)

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import contextlib
 import os
 import shlex
@@ -479,3 +480,41 @@ async def test_a_later_command_drops_the_record_of_a_background_group_that_ended
         assert handle.raw["process_groups"] == []
     finally:
         await provider.close(handle)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
+async def test_a_concurrent_command_never_loses_another_commands_background_group(
+    worker: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = LocalProvider()
+    handle = await provider.create(SandboxSpec())
+    try:
+        await provider.exec(handle, "sleep 300 >/dev/null 2>&1 & echo first")
+        real_confirm = ProcessGroupRecord.confirm
+        calls = 0
+
+        def slow_first_confirm(record: ProcessGroupRecord) -> ProcessGroupRecord | None:
+            # Hold the first command's confirmation long enough for the second command to finish, if the loop let it.
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                time.sleep(0.3)
+            return real_confirm(record)
+
+        monkeypatch.setattr(ProcessGroupRecord, "confirm", slow_first_confirm)
+        # Parallel tool calls on one sandbox: one confirms the first group while the other leaves a second group.
+        await asyncio.gather(
+            provider.exec(handle, "true"),
+            provider.exec(handle, "sleep 300 >/dev/null 2>&1 & echo second"),
+        )
+        groups = [record.pgid for record in handle.raw["process_groups"]]
+        assert len(groups) == 2
+        assert sorted(groups) == sorted(record.pgid for record in recorded_process_groups(ROUTING_ID))
+    finally:
+        await provider.close(handle)
+    for _ in range(500):
+        if not any(worker_resources._processes_in_group(pgid) for pgid in groups):
+            break
+        time.sleep(0.01)
+    assert not any(worker_resources._processes_in_group(pgid) for pgid in groups)
+    assert recorded_process_groups(ROUTING_ID) == []
