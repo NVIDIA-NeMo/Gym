@@ -265,49 +265,50 @@ gym dataset collate \
 | `--mode` | Yes | `example_validation` or `train_preparation` |
 | `--download` | No | Download missing datasets (default: `false`) |
 | `+data_source` | No | `huggingface` (default) or `gitlab` |
+| `+task_data_validation` | No | `error`, `warn` or `off`. Default: `error` in `example_validation`, `warn` in `train_preparation` |
 
 ---
 
 ## Troubleshooting
 
+Collate checks every row twice:
+
+- **Request check.** The row must be JSON and a valid run request: `responses_create_params` in the Responses API
+  format. Servers reject other rows with HTTP 422. A common case is tools in Chat Completions format
+  (`{"type": "function", "function": {"name": ...}}`): Responses API tools carry `name`, `description`,
+  `parameters` and `strict` on the tool itself. A row without `responses_create_params` is not reported, because
+  some agents, such as `toolsandbox_agent`, fill it in. It is left out of the metrics.
+- **`task_data.py` check.** The row's task fields must match the owning server's schema, such as a required
+  `question`. Print a server's schema with `gym env schema --resources-server <name>`. Servers without a
+  `task_data.py` skip this check.
+
+`+task_data_validation` sets what happens to rows that fail either check:
+
+- **`error`** fails collation. Request-check failures list every failing file. The `task_data.py` check stops at
+  the first failing file.
+- **`warn`** prints a report per file and goes on. Rows that fail the request check are still collated, so the
+  run hits the same 422 later. A row that is not JSON or not a JSON object still fails collation.
+- **`off`** skips the `task_data.py` check and both reports.
+
+Rows that fail the request check are left out of the metrics in every mode.
+
+`train_preparation` defaults to `warn`. Pass `+task_data_validation=error` to fail collation when any row is bad.
+Each report gives the number of failing rows and the first five errors, so it stays short on large datasets:
+
+```text
+data/train.jsonl: 5/10 rows failed request validation (servers reject these rows with HTTP 422).
+  row 0: responses_create_params.tools.0.FunctionToolParam.name: Field required (528 validation errors)
+  row 2: responses_create_params.tools.0.FunctionToolParam.name: Field required (528 validation errors)
+  ...
+```
+
 | Issue | Symptom | Fix |
 |-------|---------|-----|
-| Missing `responses_create_params` | Sample silently skipped | Add field with valid `input` |
-| Invalid JSON | Sample skipped | Fix JSON syntax |
-| Invalid role | Sample skipped | Use `user`, `assistant`, `system`, or `developer` |
+| Missing `responses_create_params` | No report; left out of the metrics | Add the field with valid `input` when the receiving agent requires it |
+| Invalid JSON | Request check fails: `not valid JSON` | Fix JSON syntax |
+| Chat Completions tools | Request check fails at `tools.<n>` | Move `name`, `description`, `parameters` out of `function`; add `"strict": false` |
+| Missing task field | `task_data.py` check fails | Add the field the server's schema requires |
 | Missing dataset file | `AssertionError` | Create file or pass `--download` |
-
-<Warning>
-Invalid samples are silently skipped. If metrics show fewer examples than expected, check your data format.
-
-</Warning>
-
-<Accordion title="Find invalid samples">
-
-```python
-import json
-
-def validate_sample(line: str) -> tuple[bool, str]:
-    try:
-        data = json.loads(line)
-    except json.JSONDecodeError as e:
-        return False, f"Invalid JSON: {e}"
-    
-    if "responses_create_params" not in data:
-        return False, "Missing 'responses_create_params'"
-    
-    if "input" not in data["responses_create_params"]:
-        return False, "Missing 'input' in responses_create_params"
-    
-    return True, "OK"
-
-with open("your_data.jsonl") as f:
-    for i, line in enumerate(f, 1):
-        valid, msg = validate_sample(line)
-        if not valid:
-            print(f"Line {i}: {msg}")
-```
-</Accordion>
 
 ---
 
