@@ -360,8 +360,9 @@ class TestPostgresGrading:
             ((Decimal("1.01"),), (Decimal("1.02"),), False),
             # A datetime compares as its date.
             ((datetime.datetime(2024, 1, 2, 15, 30),), (datetime.date(2024, 1, 2),), True),
-            # JSON values compare with sorted keys and their numbers rounded.
-            (({"b": 1, "a": [Decimal("2.499")]},), ({"a": [Decimal("2.50")], "b": 1},), True),
+            # JSON values compare with sorted keys and their numbers rounded. psycopg2 decodes JSON with
+            # `json.loads`, so its numbers are floats.
+            (({"b": 1, "a": [2.499]},), ({"a": [2.5], "b": 1},), True),
         ],
     )
     def test_values_are_normalized_by_the_benchmark_rules(
@@ -378,7 +379,8 @@ class TestPostgresGrading:
 
         def execute(self: PostgresDatabase, sql: str, *, commit: bool, timeout_seconds: float | None) -> QueryResult:
             ran.append((self.name, sql, commit))
-            return QueryResult(rows=[(Decimal("2.50"), datetime.date(2024, 1, 2), "x")])
+            # Typed as psycopg2 types them: numeric, date, text and bytea.
+            return QueryResult(rows=[(Decimal("2.50"), datetime.date(2024, 1, 2), "x", memoryview(b"\x01"))])
 
         monkeypatch.setattr("environment_servers.bird_interact.grading.start_postgres", lambda: started.append(True))
         monkeypatch.setattr(PostgresDatabase, "_execute", execute)
@@ -398,7 +400,7 @@ class TestPostgresGrading:
             ("bookshop_template", "UPDATE books SET price = 1", True),
             ("bookshop_template", "SELECT 1", False),
         ]
-        assert executed["preview"] == ["(2.5, '2024-01-02', 'x')"]
+        assert executed["preview"] == ["(2.5, '2024-01-02', 'x', b'\\x01')"]
 
 
 _POSTGRES = shutil.which("initdb") and shutil.which("pg_ctl")
@@ -424,9 +426,14 @@ class TestPostgresDatabase:
         )
         monkeypatch.setenv("PGHOST", str(socket))
         monkeypatch.setenv("PGUSER", "bird")
-        with psycopg2.connect(dbname="postgres") as connection:
-            connection.autocommit = True
+        # Since psycopg2 2.9, `with connection` opens a transaction even in autocommit, and CREATE DATABASE cannot
+        # run in one.
+        connection = psycopg2.connect(dbname="postgres")
+        connection.autocommit = True
+        try:
             connection.cursor().execute("CREATE DATABASE shop_template")
+        finally:
+            connection.close()
         with psycopg2.connect(dbname="shop_template") as connection, connection.cursor() as cursor:
             cursor.execute("CREATE TABLE sales (amount numeric, sold date)")
             cursor.execute("INSERT INTO sales VALUES (1.005, '2024-01-02'), (2.5, '2024-01-03')")

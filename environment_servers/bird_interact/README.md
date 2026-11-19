@@ -8,7 +8,7 @@ This Environment Server runs both of its modes with no Resources Server. It is a
 which serves the episode's tools. Its `run` seeds the agent session (`agent_session.py`), runs the turns and
 grades them. Each episode holds one task:
 
-- a sandbox with the task's SQLite database, with `preprocess_sql` applied (see [Database sandbox](#database-sandbox));
+- a sandbox with the task's database (SQLite, or PostgreSQL in the sandbox image), with `preprocess_sql` applied (see [Database sandbox](#database-sandbox));
 - the two-stage user simulator, which calls the `user_model` server;
 - the grader, the current phase, the SQL attempts and the reward;
 - in a-Interact, the BIRD-COIN budget and the nine tools.
@@ -17,7 +17,7 @@ grades them. Each episode holds one task:
 
 | `mode` | Turns | Agent's tools | User side |
 |---|---|---|---|
-| `c_interact` | Up to `max_turns`. The agent must resume its session across turns. | None | The reply is the text of the turn's last message. A reply with a ```` ```sql ```` or ```` ```sqlite ```` block is a submission; any other reply is a question. The next user message is the simulator's answer, the debug prompt or the follow-up question. |
+| `c_interact` | Up to `max_turns`. The agent must resume its session across turns. | None | The reply is the text of the turn's last message. A reply with a ```` ```sql ````, ```` ```sqlite ````, ```` ```postgresql ```` or ```` ```postgres ```` block is a submission; any other reply is a question. The next user message is the simulator's answer, the debug prompt or the follow-up question. |
 | `a_interact` | One (`max_turns: 1`). | Nine tools that the server serves for the episode, over each of `tool_transports`: `ask`, `submit`, `execute`, `get_schema`, `get_all_column_meanings`, `get_column_meaning`, `get_all_external_knowledge_names`, `get_knowledge_definition`, `get_all_knowledge_definitions` | `Stop("agent_finished")` |
 
 The first turn's request has the instructions and the user's ambiguous request. In c-Interact it also has the schema,
