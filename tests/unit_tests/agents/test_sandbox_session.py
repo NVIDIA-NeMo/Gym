@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.agents.utils import supervisor_client
+from nemo_gym.agents.utils import sandbox_session, supervisor_client
 from nemo_gym.agents.utils.sandbox_session import (
     ExpiryUnsupportedError,
     SandboxCommand,
@@ -1015,6 +1015,19 @@ async def test_expire_before_launch_works_whatever_the_sandbox_uploads(session, 
 # supervisor from running, and the provider's status polls hang or keep reporting it running.
 GRACE = 0.2
 CLOSE = 0.3
+SUPERVISOR_PID = "/session/supervisor.pid"
+CLEANUP_RECEIPT = "/session/cleanup.json"
+
+
+def _without_receipt(_, *, path):
+    """Reads in a sandbox whose launch has run (its shell wrote the supervisor's PID) but that has no receipt."""
+    if path == SUPERVISOR_PID:
+        return "4242\n"
+    raise FileNotFoundError(path)
+
+
+def _receipt_reads(receipt_reader) -> int:
+    return sum(1 for call in receipt_reader.await_args_list if call.kwargs["path"] == CLEANUP_RECEIPT)
 
 
 def _stalled(session):
@@ -1048,7 +1061,8 @@ async def test_a_stopped_harness_that_outlives_its_supervisor_fails_within_the_g
 ):
     session.owns_sandbox = owned
     launched, cancelled = _stalled(session)
-    receipt_reader.side_effect = FileNotFoundError("cleanup.json") if receipt == "missing" else _hang
+    # A stalled sandbox answers no read: neither the launch check nor the receipt read.
+    receipt_reader.side_effect = _without_receipt if receipt == "missing" else _hang
     collect = AsyncMock(return_value="transcript")
     with rollout_context("rollout-a2"):
         if before_launch:
@@ -1060,8 +1074,9 @@ async def test_a_stopped_harness_that_outlives_its_supervisor_fails_within_the_g
         started = monotonic()
         with pytest.raises(NgFailureEvent) as failure:
             await asyncio.wait_for(activation, 5)
-    # The activation stopped waiting for the command after the grace, plus at most one bounded receipt read.
-    assert monotonic() - started < GRACE + CLOSE + 0.5
+    # The activation stopped waiting for the command after the grace (or a launch check that outlasted it), plus
+    # at most one bounded receipt read.
+    assert monotonic() - started < max(GRACE, CLOSE) + CLOSE + 0.5
     assert is_harness_termination_failure(failure.value) and failure.value is session.termination_error
     assert str(failure.value) == (
         f"test harness termination was not confirmed: it did not end within {GRACE:g} s of its stop, "
@@ -1141,7 +1156,9 @@ async def test_a_sandbox_oom_reported_during_the_overdue_receipt_read_stays_the_
             await killed
         return OK
 
-    async def read_receipt(*_, **__):
+    async def read_receipt(_, *, path):
+        if path == SUPERVISOR_PID:
+            return "4242\n"
         # The provider confirms the sandbox's OOM while the overdue harness's receipt is being read.
         if not killed.done():
             killed.set_exception(error)
@@ -1159,7 +1176,7 @@ async def test_a_sandbox_oom_reported_during_the_overdue_receipt_read_stays_the_
     # The confirmed sandbox death is the failure, not a termination failure inferred from the missing receipt.
     assert caught.value is error and session.execution_oom is error
     assert session.termination_error is None and not is_harness_termination_failure(caught.value)
-    receipt_reader.assert_awaited_once()
+    assert _receipt_reads(receipt_reader) == 1
     collect.assert_not_awaited()
     assert isinstance(session.capture_error, RuntimeError)
     # Close takes the dead-sandbox release path: no in-sandbox cleanup command after the launch.
@@ -1195,6 +1212,106 @@ async def test_a_supervisor_that_ends_the_harness_promptly_is_waited_for(session
     assert session.expired and session.termination_error is None
     assert not [record for record in caplog.records if "no longer waiting" in record.getMessage()]
     await session.close(timeout=1)
+
+
+async def test_a_stop_without_a_grace_waits_the_supervisors_cleanup_bound(session, receipt_reader, monkeypatch):
+    bounds = []
+
+    def cleanup_bound(*, cleanup_timeout):
+        bounds.append(cleanup_timeout)
+        return GRACE
+
+    monkeypatch.setattr(sandbox_session, "cleanup_bound", cleanup_bound)
+    launched, cancelled = _stalled(session)
+    receipt_reader.side_effect = _without_receipt
+    activation = asyncio.create_task(execute(session, timeout=CLOSE))
+    await asyncio.wait_for(launched.wait(), 2)
+    assert await session.expire(timeout=1, reason="budget") is True
+    started = monotonic()
+    with pytest.raises(NgFailureEvent) as failure:
+        await asyncio.wait_for(activation, 5)
+    # With no grace given, the activation waits the bound of its own supervisor's cleanup phases.
+    assert bounds == [supervisor_client.supervision_timeouts(timeout=10, close_timeout=CLOSE)[0]]
+    assert monotonic() - started < GRACE + CLOSE + 0.5
+    assert is_harness_termination_failure(failure.value) and cancelled.is_set()
+    assert f"it did not end within {GRACE:g} s of its stop" in str(failure.value)
+    await asyncio.wait_for(session.close(timeout=CLOSE), 5)
+    assert session.closed
+
+
+async def test_a_launch_the_provider_runs_late_gets_a_whole_grace_from_then(session, receipt_reader):
+    launched, cancelled = _stalled(session)
+    ran = asyncio.Event()
+
+    async def read(sandbox, *, path):
+        if path == SUPERVISOR_PID and not ran.is_set():
+            raise FileNotFoundError(path)  # The provider has not run the launch yet.
+        return _without_receipt(sandbox, path=path)
+
+    receipt_reader.side_effect = read
+    activation = asyncio.create_task(execute(session, timeout=CLOSE))
+    await asyncio.wait_for(launched.wait(), 2)
+    assert await session.expire(timeout=1, reason="budget", grace=GRACE) is True
+    # A queued launch is waited for past any number of graces.
+    await asyncio.sleep(3 * GRACE)
+    assert not activation.done()
+    ran.set()
+    ran_at = monotonic()
+    # Once the launch has run, a supervisor that does not end its harness fails, but only after a whole grace.
+    with pytest.raises(NgFailureEvent) as failure:
+        await asyncio.wait_for(activation, 5)
+    assert GRACE <= monotonic() - ran_at < 2 * GRACE + CLOSE + 0.5
+    assert is_harness_termination_failure(failure.value) and cancelled.is_set()
+    await asyncio.wait_for(session.close(timeout=CLOSE), 5)
+    assert session.closed
+
+
+@pytest.mark.parametrize("reread", ["confirms", "missing"])
+async def test_a_command_that_returns_during_the_overdue_receipt_read_gets_one_more_read(
+    session, receipt_reader, reread
+):
+    launched = asyncio.Event()
+    returned = asyncio.get_running_loop().create_future()
+    reads = []
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            return await returned
+        return OK
+
+    async def read(sandbox, *, path):
+        if path == SUPERVISOR_PID:
+            return _without_receipt(sandbox, path=path)
+        reads.append(path)
+        if len(reads) == 1:
+            # The supervisor writes its receipt and exits after this read began, but before it answers.
+            returned.set_result(SandboxExecResult(stdout="", stderr="", return_code=143))
+            await asyncio.sleep(0.01)
+            raise FileNotFoundError(path)
+        if reread == "missing":
+            raise FileNotFoundError(path)
+        return json.dumps({**RECEIPT, "return_code": 143, "timed_out": True})
+
+    session.sandbox.exec.side_effect = exec_
+    receipt_reader.side_effect = read
+    collect = AsyncMock(return_value="transcript")
+    activation = asyncio.create_task(execute(session, collect=collect, timeout=CLOSE))
+    await asyncio.wait_for(launched.wait(), 2)
+    assert await session.expire(timeout=1, reason="budget", grace=GRACE) is True
+    if reread == "confirms":
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+        assert session.expired and session.expire_reason == "budget" and session.cleanup["return_code"] == 143
+        collect.assert_awaited_once()
+    else:
+        # A command that returned is no evidence by itself that its harness ended.
+        with pytest.raises(NgFailureEvent) as failure:
+            await asyncio.wait_for(activation, 5)
+        assert is_harness_termination_failure(failure.value) and failure.value is session.termination_error
+        collect.assert_not_awaited()
+    assert reads == [CLEANUP_RECEIPT] * 2
+    await asyncio.wait_for(session.close(timeout=CLOSE), 5)
+    assert session.closed and reads == [CLEANUP_RECEIPT] * 2
 
 
 def test_the_default_stop_grace_is_the_supervisors_cleanup_bound():
@@ -1305,6 +1422,59 @@ async def test_expire_reaches_harnesses_that_hold_every_local_exec_slot(tmp_path
             activation.cancel()
             await asyncio.gather(activation, return_exceptions=True)
             await session.close(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="process supervision requires Linux")
+@pytest.mark.parametrize("before_launch", [False, True])
+async def test_a_stop_while_local_queues_the_launch_ends_it_before_the_harness_starts(
+    tmp_path, monkeypatch, before_launch
+):
+    # Another command holds Local's only exec slot, so the provider queues the launch until it frees.
+    monkeypatch.setattr(LocalProvider, "_semaphores", {})
+    provider = LocalProvider(workspace_root=str(tmp_path), concurrency=1)
+    workdir = tmp_path / "task"
+    sandbox = await AsyncSandbox(provider, owns_provider=False).start(SandboxSpec(workdir=str(workdir)))
+    session = SandboxSession(
+        sandbox=sandbox, session_dir=str(workdir / "session"), workdir=str(workdir), harness="test", owns_sandbox=True
+    )
+    started = workdir / "started"
+    holder = asyncio.create_task(sandbox.exec("sleep 30", timeout_s=60))
+    activation = None
+    try:
+        async with asyncio.timeout(5):
+            while not provider._semaphore.locked():
+                await asyncio.sleep(0.01)
+        if before_launch:
+            assert await session.expire(timeout=1, reason="budget", grace=GRACE) is True
+        activation = asyncio.create_task(
+            session.execute(
+                stage_activation=AsyncMock(return_value=SandboxCommand(argv=["touch", str(started)])),
+                collect=AsyncMock(return_value="no transcript"),
+                timeout=60,
+                close_timeout=CLOSE,
+            )
+        )
+        async with asyncio.timeout(5):
+            while not session.launch_started:
+                await asyncio.sleep(0.01)
+        if not before_launch:
+            assert await session.expire(timeout=1, reason="budget", grace=GRACE) is True
+        # The queued launch is not an overdue supervisor: the activation keeps waiting past several graces.
+        await asyncio.sleep(4 * GRACE)
+        assert not activation.done()
+        holder.cancel()
+        # Its supervisor finds the stop as it starts, so the harness never runs and the stop is graded.
+        assert await asyncio.wait_for(activation, 10) == "no transcript"
+        assert session.expired_before_launch and session.expire_reason == "budget"
+        assert session.termination_error is None and not started.exists()
+    finally:
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        if activation is not None:
+            activation.cancel()
+            await asyncio.gather(activation, return_exceptions=True)
+        await session.close(timeout=5)
+    assert session.closed
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")

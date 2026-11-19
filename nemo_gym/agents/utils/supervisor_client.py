@@ -28,7 +28,8 @@ which does not depend on these names.
 
 ``supervisor.pid`` holds the PID that executes the supervisor. When the provider did not
 make the launch shell a process group leader, that process starts the supervisor in a new
-group, passes TERM on to it and exits with its status.
+group, passes TERM on to it and exits with its status. While the file is missing, the
+provider has not run the launch yet (see ``launch_queued``).
 """
 
 import json
@@ -222,6 +223,22 @@ async def read_cleanup_receipt(sandbox: AsyncSandbox, *, session_dir: str, harne
     if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
         return None
     return parse_cleanup_receipt(receipt)
+
+
+async def launch_queued(sandbox: AsyncSandbox, *, session_dir: str) -> bool:
+    """Whether the provider has yet to run the launch, as one that queues commands for a free slot can.
+
+    The launch shell writes ``supervisor.pid`` before it starts the supervisor. So when this returns True, the
+    supervisor has yet to start, and it will find an expiry marker written before the call. Only a missing file
+    counts: a read that fails for another reason cannot tell, and returns False.
+    """
+    try:
+        await read_text(sandbox, path=f"{session_dir}/{SUPERVISOR_PID_FILE}")
+    except FileNotFoundError:
+        return True
+    except Exception:
+        LOG.debug("Could not read %s in %s", SUPERVISOR_PID_FILE, session_dir, exc_info=True)
+    return False
 
 
 async def stop_and_confirm_cleanup(
