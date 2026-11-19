@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import tempfile
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -1033,16 +1033,24 @@ def _synchronize(
         ) from error
 
 
-def _validate_unique_names(manifest_path: Path, main: EnvironmentManifest, configs: Mapping[str, Path]) -> None:
-    """Check that each name in ``configs`` is the one ID of its config within the catalog tree.
+def _validate_unique_names(manifest_path: Path, main: EnvironmentManifest, names: Collection[str]) -> None:
+    """Check that each of ``names`` is the one ID of its config within the catalog tree.
 
-    ``configs`` maps the names to check, the main manifest's or those of the setups and protocols it lists, to their
-    configs. A name is an ID and stays the same when folders move, so it need not match a path. No other manifest in
-    the tree may declare it, as its own name or for a setup or protocol it lists, and no other name may point at its
-    config, which would then be listed twice. A name other than the main manifest's folder path also may not be the
-    path of another config: it would hide that config from the catalog and from ``--benchmark`` and
-    ``--environment``.
+    ``names`` are the main manifest's name or those of the setups and protocols it lists. A name is an ID and stays the
+    same when folders move, so it need not match a path. No other manifest in the tree may declare it, as its own name
+    or for a setup or protocol it lists, and no other name, in this manifest or another, may point at its config,
+    which would then be listed twice. A name other than the main manifest's folder path also may not be the path of
+    another config: it would hide that config from the catalog and from ``--benchmark`` and ``--environment``.
     """
+    own_configs = list(_manifest_configs(manifest_path, main))
+    configs = {name: config_path for name, config_path in own_configs if name in names}
+    for name, config_path in configs.items():
+        for other_name, other_config in own_configs:
+            if other_name != name and other_config == config_path:
+                raise EnvironmentValidationError(
+                    f"The config of '{name}', {config_path}, is also the config of '{other_name}' in this manifest. "
+                    "A config has one ID, so declare it in one place."
+                )
     catalog_directory = _catalog_directory(manifest_path)
     if catalog_directory is None:
         return
@@ -1168,14 +1176,8 @@ def validate_environment(
     _validate_listing(resolved_manifest_path, main, listed)
     if not resolved_config_path.is_file():
         raise EnvironmentValidationError(f"Gym config was not found: {resolved_config_path}")
-    # The names and configs the catalog reads from the manifest; the main manifest's validation checks those of the
-    # setups and protocols it lists too.
-    configs = {
-        name: path
-        for name, path in _manifest_configs(resolved_manifest_path, main)
-        if listed is None or name == listed.name
-    }
-    _validate_unique_names(resolved_manifest_path, main, configs)
+    # The main manifest's validation checks the names of the setups and protocols it lists too.
+    _validate_unique_names(resolved_manifest_path, main, main.declared_names() if listed is None else (listed.name,))
 
     composition = _resolve_manifest_composition(resolved_config_path, dataset_owner=manifest.dataset_owner)
     differences = _mirror_differences(manifest, composition)

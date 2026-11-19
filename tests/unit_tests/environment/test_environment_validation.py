@@ -1408,6 +1408,18 @@ def test_a_listed_config_has_one_id(tmp_path: Path) -> None:
             validate_environment(main_path, name=name)
 
 
+def test_a_config_has_one_id_within_its_manifest(tmp_path: Path) -> None:
+    # `../demo/config.yaml` differs from `config.yaml` as text, but it is the main manifest's config.
+    main_path = _listing(tmp_path)
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    raw["setups"][0]["config_path"] = "../demo/config.yaml"
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+
+    for name, other_name in ((None, "demo/variant"), ("demo/variant", "demo")):
+        with pytest.raises(EnvironmentValidationError, match=f"is also the config of '{other_name}' in this manifest"):
+            validate_environment(main_path, name=name)
+
+
 def test_a_listed_name_cannot_take_another_configs_path(tmp_path: Path) -> None:
     main_path = _listing(tmp_path, name="demo/other")
     shutil.copy(main_path.with_name("config.yaml"), main_path.with_name("other.yaml"))
