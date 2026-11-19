@@ -122,6 +122,10 @@ class PackedTokenIds(Sequence[int]):
             return self._values[index]
         return self._values[index]
 
+    def matches(self, values: Sequence[int]) -> bool:
+        """Require equal token IDs; validated IDs are exact ints, so equal IDs encode identically."""
+        return len(values) == len(self) and all(map(operator.eq, values, self._values))
+
     def prepend(self, prefix: Sequence[int]) -> PackedTokenIds:
         """Pack only the prefix, retaining already validated delta bytes."""
         head = PackedTokenIds(prefix)
@@ -137,15 +141,20 @@ class PackedTokenIds(Sequence[int]):
         return result
 
 
+def check_token_id_types(token_ids: Sequence[int]) -> None:
+    """Reject token IDs that are not exact Python ints, such as bools, floats, and int subclasses."""
+    if not _all_exact_type(token_ids, int):
+        for token_id in token_ids:
+            if type(token_id) is not int:
+                raise ValueError(f"token_id must be an unsigned 64-bit integer, got {token_id!r}")
+
+
 def encode_token_ids(token_ids: Sequence[int]) -> bytes:
     """Encode token IDs as a length followed by unsigned big-endian values."""
     if type(token_ids) is PackedTokenIds:
         return token_ids.encoded
     length = _encode_uint(len(token_ids), field="token_ids length")
-    if not _all_exact_type(token_ids, int):
-        for token_id in token_ids:
-            if type(token_id) is not int:
-                raise ValueError(f"token_id must be an unsigned 64-bit integer, got {token_id!r}")
+    check_token_id_types(token_ids)
     # struct.pack checks every uint64 bound in C after exact-type validation.
     # Pack the column in C rather than allocating and extending once per token.
     # Explicit big-endian widths preserve the v2 wire bytes on every host.

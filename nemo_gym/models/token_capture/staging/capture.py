@@ -14,6 +14,7 @@ from typing import Any
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.models.token_capture.staging.digest import (
     build_staging_delta,
+    check_token_id_types,
     compute_chain_hash,
     hash_token_ids,
 )
@@ -326,6 +327,8 @@ class RolloutTokenCapture:
         Unlike :meth:`complete_call`, this method neither claims nor mutates the call's single-completion state.
         """
         admission = call.admission
+        # The prompt is only compared, never hashed, so check types here; equality would accept True for 1.
+        check_token_id_types(prompt_token_ids)
         if admission.mode == "token_in" and prompt_token_ids[: admission.prev_len] != call.prefix_token_ids:
             raise ValueError("generation prompt does not begin with the gate-authorized token prefix")
         if call.generation_cut is None:

@@ -96,6 +96,7 @@ _BUILD_STAGING_DIGEST = object()
 class _BuildTokenHashes:
     prefix_token_ids: tuple[int, ...]
     parent_chain_hash: str | None
+    token_ids: PackedTokenIds
     token_mask: PackedFloat32Values
     logprobs: PackedFloat32Values
 
@@ -352,7 +353,9 @@ class StagedCallBaseSnapshot(_RolloutIdAlias, _DigestWireModel):
         if isinstance(info.context, _BuildTokenHashes):
             if len(info.context.prefix_token_ids) != self.prev_len:
                 raise ValueError("local hash prefix length does not match prev_len")
-            packed = PackedTokenIds(self.token_ids_delta)
+            packed = info.context.token_ids
+            if not packed.matches(self.token_ids_delta):
+                packed = PackedTokenIds(self.token_ids_delta)
             self.chain_hash = compute_chain_hash(info.context.parent_chain_hash, packed)
             self.cumulative_hash = hash_token_ids(packed.prepend(info.context.prefix_token_ids))
             digest_tokens = packed
@@ -472,6 +475,8 @@ class StagedCallRecord(StagedCallBaseSnapshot):
         The context only derives hashes after normal field validation. It never
         accepts a supplied digest or disables wire integrity verification.
         """
+        # Pack the caller's raw IDs before Pydantic, which would convert int subclasses to plain ints.
+        packed_tokens = PackedTokenIds(token_ids_delta)
         packed_mask = PackedFloat32Values(token_mask_delta, field="token_mask_delta")
         packed_logprobs = PackedFloat32Values(generation_log_probs_delta, field="generation_log_probs_delta")
         return cls.model_validate(
@@ -481,10 +486,10 @@ class StagedCallRecord(StagedCallBaseSnapshot):
                 "parent_call_id": admission.parent_call_id,
                 "mode": admission.mode,
                 "prev_len": admission.prev_len,
-                "delta_len": len(token_ids_delta),
-                "cum_len": admission.prev_len + len(token_ids_delta),
+                "delta_len": len(packed_tokens),
+                "cum_len": admission.prev_len + len(packed_tokens),
                 "weight_version": weight_version,
-                "token_ids_delta": token_ids_delta,
+                "token_ids_delta": packed_tokens[:],
                 "token_mask_delta": packed_mask[:],
                 "generation_log_probs_delta": packed_logprobs[:],
                 "extras": extras,
@@ -496,6 +501,7 @@ class StagedCallRecord(StagedCallBaseSnapshot):
             context=_BuildTokenHashes(
                 tuple(prefix_token_ids),
                 admission.parent_chain_hash,
+                packed_tokens,
                 packed_mask,
                 packed_logprobs,
             ),
