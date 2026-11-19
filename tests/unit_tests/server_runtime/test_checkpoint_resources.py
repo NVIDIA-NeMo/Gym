@@ -1916,12 +1916,16 @@ class PartlyExportedServer(CounterServer):
 
     unexported: bool = False
     seed_error: Any = None
+    # The session ID a seed's handler gives the session, as a server does that names it after its caller's ID.
+    renamed_to: Any = None
 
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         if self.unexported:
-            self._checkpoint.restart_session(request.session[SESSION_ID_KEY])
+            self._checkpoint.restart_session()
         if self.seed_error is not None:
             raise self.seed_error
+        if self.renamed_to is not None:
+            request.session[SESSION_ID_KEY] = self.renamed_to
         return await super().seed_session(request, body)
 
 
@@ -1990,3 +1994,53 @@ async def test_a_session_the_server_cannot_export_is_reported_as_a_restart_only_
     assert seeded.status_code == 200 and during == ["r"]
     assert closed.status_code == 200, closed.text
     assert server._checkpoint._restart_sessions == set() and server._checkpoint.readiness().restarts == []
+
+
+async def test_a_session_whose_seed_gives_it_another_id_is_reported_under_the_id_its_requests_carry(
+    tmp_path: Path,
+) -> None:
+    server, client = make_server(PartlyExportedServer)
+    server.unexported, server.renamed_to = True, "named-by-the-seed"
+    async with client:
+        seeded = await client.post("/ng-rollout/r/seed_session", json=SEED)
+        restarts = server._checkpoint.readiness().restarts
+        exported = await server._checkpoint.export(None, checkpoint_id="c1")
+
+    assert seeded.headers["x-ng-checkpoint-restart"] == "1"
+    assert server._checkpoint._restart_sessions == {"named-by-the-seed"}
+    assert restarts == ["r"] and exported == []
+
+
+@pytest.mark.parametrize("error", [HTTPException(500, "setup failed"), RuntimeError("setup failed"), None])
+async def test_a_later_seed_on_its_cookie_leaves_a_session_the_server_cannot_export_reported(
+    tmp_path: Path, error: Exception | None
+) -> None:
+    """Whether that seed fails, or succeeds without the server reporting the session again."""
+    server, client = make_server(PartlyExportedServer)
+    server.unexported = True
+    async with client:
+        assert (await client.post("/ng-rollout/r/seed_session", json=SEED)).status_code == 200
+        server.unexported, server.seed_error = error is not None, error
+        if isinstance(error, RuntimeError):
+            with pytest.raises(RuntimeError, match="setup failed"):
+                await client.post("/ng-rollout/r/seed_session", json=SEED)
+        else:
+            again = await client.post("/ng-rollout/r/seed_session", json=SEED)
+            assert again.status_code == (500 if error is not None else 200)
+            assert ("x-ng-checkpoint-restart" in again.headers) == (error is None)
+        prepared = (await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)).json()
+        exported = await server._checkpoint.export(None, checkpoint_id="c1")
+        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+
+    assert prepared["phase"] == "prepared" and prepared["report"]["restarts"] == ["r"]
+    assert exported == [] and len(server.counters) == 1
+
+
+async def test_a_report_outside_a_request_that_starts_a_session_reports_nothing() -> None:
+    server, client = make_server(PartlyExportedServer)
+    async with client:
+        server._checkpoint.restart_session()
+        seeded = await client.post("/ng-rollout/r/seed_session", json=SEED)
+
+    assert seeded.status_code == 200 and "x-ng-checkpoint-restart" not in seeded.headers
+    assert server._checkpoint._restart_sessions == set()

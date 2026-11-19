@@ -539,6 +539,22 @@ async def test_a_close_waits_for_a_commit_snapshotting_its_task_sandbox(tmp_path
     assert provider.live() == [] and server._checkpointer().keys == []
 
 
+async def test_a_close_drops_the_session_from_the_checkpointer_without_waiting_for_a_turn(tmp_path: Path) -> None:
+    """A client that disconnects cancels a close at whatever it waits for, once the sandbox has stopped."""
+    provider = FakeSnapshotProvider()
+    server = make_server(provider, checkpointing_config(tmp_path / "state"))
+    server.config.sandbox_checkpoint.parallelism = 1
+    async with _http(server) as http:
+        assert (await _post_seed(http, _seed())).status_code == 200
+        checkpointer = server._checkpointer()
+        path, body = _close_path(_seed())
+        async with checkpointer._semaphore:  # every turn is taken, as while a commit submits its snapshots
+            closed = await asyncio.wait_for(http.post(path, json=body), timeout=10)
+
+    assert closed.status_code == 200, closed.text
+    assert provider.live() == [] and checkpointer.keys == []
+
+
 async def test_a_capture_waits_for_a_commit_snapshotting_its_task_sandbox(tmp_path: Path) -> None:
     provider = FakeSnapshotProvider()
     server = make_server(provider, checkpointing_config(tmp_path / "state"))

@@ -426,6 +426,8 @@ class SandboxSessionCheckpointer:
         self._fork_stops = asyncio.Lock()
         self._background: set[asyncio.Task[Any]] = set()
         self._unreleased_warning_at = _UNRELEASED_CHECKPOINTS_WARNING
+        # The checkpoint whose export last checked the index for checkpoints no release dropped.
+        self._unreleased_checked_for: Optional[str] = None
 
     @classmethod
     def from_config(
@@ -596,21 +598,23 @@ class SandboxSessionCheckpointer:
         outcomes = await asyncio.gather(
             *(self._export_one(key, checkpoint_id) for key in keys), return_exceptions=True
         )
-        await self._warn_of_unreleased_checkpoints()
+        await self._warn_of_unreleased_checkpoints(checkpoint_id)
         failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
         if failures:
             raise failures[0]
         return dict(zip(keys, outcomes))
 
-    async def _warn_of_unreleased_checkpoints(self) -> None:
+    async def _warn_of_unreleased_checkpoints(self, checkpoint_id: str) -> None:
         """Warn when the index keeps growing: nothing but a release deletes a snapshot.
 
         A controller that releases keeps the index at the one or two checkpoints it may restore. One that never
         does leaves the snapshots of every commit on the provider for good, which only shows in the provider's
-        storage unless it is said here.
+        storage unless it is said here. The index is listed once per checkpoint, however many exports the owner
+        makes for it: the index is on a filesystem every node reads.
         """
-        if self._index is None:
+        if self._index is None or checkpoint_id == self._unreleased_checked_for:
             return
+        self._unreleased_checked_for = checkpoint_id
         try:
             count = await asyncio.to_thread(self._index.checkpoint_count)
         except OSError:
@@ -967,14 +971,16 @@ class SandboxSessionCheckpointer:
         entry = self._entries.get(key)
         if entry is None:
             return
-        await self._stop_sandbox(entry.sandbox)
+        if entry.sandbox.started:
+            await self._stop_sandbox(entry.sandbox)
+        # Without a wait for a sandbox its owner already stopped: a caller cancelled there would leave the key
+        # tracked with nothing left to stop.
         self._entries.pop(key, None)
 
     async def discard(self, keys: Iterable[str]) -> None:
         """Give up the sandboxes of ``keys`` and stop them; for the forks of a restore its owner could not install.
 
-        Unlike :meth:`stop`, every key is free at once, so the owner can restore the same keys again whether or not
-        the stops succeed. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is logged and joins the
+        Unlike :meth:`stop`, every key can be restored again at once, whether or not the stops succeed. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is logged and joins the
         forks that :meth:`settle`, the next restore and :meth:`aclose` stop again. A key without a sandbox is skipped.
         """
         for key in keys:

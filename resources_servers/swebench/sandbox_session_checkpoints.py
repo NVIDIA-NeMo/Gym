@@ -17,9 +17,8 @@ With checkpointing on, a server exports its sessions only when its sandbox provi
 ``restart_only``, and its episodes start over after a crash. A server whose grader needs something a snapshot of its
 provider does not keep, such as processes the agent started, declares ``checkpoint_mode = "restart_only"`` itself.
 
-Only a session an episode seed started is exported. A task sandbox started for any other seed, such as the task row
-an agent's ``/run`` sends, is not registered for checkpoints: the seed's reply says its episode starts over after a
-crash, and a commit leaves the session out.
+Only a session an episode seed started is exported. A task sandbox an agent-run seed starts is not registered for
+checkpoints: the seed's reply says its episode starts over after a crash, and a commit leaves the session out.
 
 A subclass starts each task sandbox with ``new_task_sandbox``, which puts it on the provider every session shares and
 registers it for the session and its checkpoints, sets ``task_model`` to the model of its episode seed's
@@ -190,9 +189,9 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
 
         Call it from ``_start_task_sandbox`` before starting the sandbox, so a failed setup still stops it.
 
-        Only the sandbox of a session an episode seed started is registered for checkpoints. One started for any
-        other seed, such as the task row an agent's ``/run`` sends, has no episode seed a restore could install it
-        for: while the server exports sessions, that seed's reply says its episode starts over after a crash.
+        Only the sandbox of a session an episode seed started is registered for checkpoints. One an agent-run seed
+        started has no episode seed a restore could install it for: while the server exports sessions, that seed's
+        reply says its episode starts over after a crash.
         """
         if session_id in self._session_id_to_sandbox:
             raise ValueError(f"{session_id!r} already has a sandbox")
@@ -202,7 +201,7 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
             # Before the session registers it: the checkpointer refuses a key that still has a sandbox.
             self._checkpointer().add(self._sandbox_key(session_id), sandbox, spec)
         elif self._exports_sessions():
-            self._checkpoint.restart_session(session_id)
+            self._checkpoint.restart_session()
         self._session_id_to_sandbox[session_id] = sandbox
         return sandbox
 
@@ -418,7 +417,7 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
     async def _discard_restored_sessions(self, session_ids: list[str]) -> None:
         """Stop the forks of a restore that failed after forking and drop what it installed.
 
-        Every session is free for a retried restore at once. A fork whose stop failed is left to the checkpointer,
+        Every session can be restored again at once. A fork whose stop failed is left to the checkpointer,
         which stops it again at the next restore and at shutdown.
         """
         await self._checkpointer().discard([self._sandbox_key(session_id) for session_id in session_ids])
