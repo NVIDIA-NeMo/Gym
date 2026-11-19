@@ -318,12 +318,14 @@ endpoint must accept the exact dotted tool names `computer.wait` and
 this profile; its HTTP error is an infrastructure failure, not a model score.
 
 Use a compatible Super 3.5 VL model service with reasoning separation and
-automatic tool extraction disabled. The model service must allow at least four
-images. For example, add these arguments to the model's version-pinned serving command:
-
-```bash
---reasoning-parser nemotron_v3 --limit-mm-per-prompt '{"image": 4, "video": 1}'
-```
+automatic tool extraction disabled. The default profile requires at least four
+images. The native vLLM 0.32.0 `nemotron_v3` reasoning engine can omit a repeated
+`</think>` delimiter from action content. The optional
+[`super35_reasoning` serving plugin](../../benchmarks/osworld/tools/README.md#super-35-reasoning-boundary)
+preserves the exact suffix after the first boundary, with CPU regression checks
+and a version-pinned launch command. It runs only in the serving environment;
+Gym's strict action parser remains unchanged. Reasoning-only trailing whitespace
+trimming remains explicit and requires retaining original generations for audit.
 
 Omit `--enable-auto-tool-choice` and `--tool-call-parser`. In vLLM 0.32.0,
 `qwen3_coder` can extract calls whose original XML is missing a delimiter.
@@ -360,6 +362,11 @@ load an external agent repository, change the Nano Omni defaults, or replace
 the scaffold pinned by a published recipe. Treat a change of protocol or
 history policy as a distinct benchmark configuration; existing scores do
 not qualify a different profile automatically.
+
+The R6 experiment used fixed history with three images including the current
+screenshot, a 100,000-token output budget including thinking, no MTP, and 128
+workers. Those settings are documented with the serving plugin; the checked-in
+profile retains its original four-image history and 4,096-token budget.
 
 ### Adding a model protocol
 

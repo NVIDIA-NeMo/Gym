@@ -406,6 +406,13 @@ includes thinking. A changed budget or protocol requires a new run and must not
 overwrite an earlier score. The endpoint must accept the protocol's API tools,
 including dotted function names; qualify this request shape before a full run.
 
+The [Super 3.5 serving checks and R6 settings](tools/README.md#super-35-reasoning-boundary)
+include an optional vLLM 0.32.0 reasoning plugin that preserves repeated
+thinking delimiters in action content. They also record the distinct
+fixed-three-image, 100,000-output-token, no-MTP, 128-worker experiment. That
+experiment used the registered runner through a standalone controller; it
+does not establish end-to-end validation of these Gym service wrappers.
+
 ### OpenSandbox Pool backend
 
 The `gym_opensandbox` backend keeps the same OSWorld agent, task setup, action,
