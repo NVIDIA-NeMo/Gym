@@ -34,7 +34,7 @@ A task with no measured rollout:
 
 - nemo-gym 0.7.0 and earlier write no row for it.
 - Later versions (the main branch today) write a row with only `_ng_task_index` (and `agent_ref` when several agents ran the task), `num_rollouts: 0`, `expected_num_rollouts`, `missing_num_rollouts` and `reward_profile_completion_pct: 0.0`.
-- Either way, a task whose every planned rollout was saved and masked has no row, and when no rollout at all was measured the file is empty.
+- In 0.7.0 and later, a task whose every planned rollout was saved and masked has no row, and when no rollout at all was measured the file is empty.
 
 ## Per-agent entries: `<stem>_agent_metrics.json`
 
