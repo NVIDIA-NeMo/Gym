@@ -377,3 +377,17 @@ class TestSandboxModelUrl:
         base = inspect.signature(OpenCodeSandboxedAgent._create_opencode_config)
         assert list(mine.parameters) == list(base.parameters)
         assert inspect.iscoroutinefunction(VibenchAgent._create_opencode_config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "row", [{"sandbox_uploads": {"/work/a": "/data/a"}}, {"sandbox_provider_options": {"volumes": ["v"]}}]
+)
+async def test_run_rejects_row_sandbox_inputs(tmp_path, row):
+    from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentRunRequest
+
+    agent = make_agent(tmp_path)
+    body = OpenCodeSandboxedAgentRunRequest(responses_create_params={"input": []}, **row)
+    with pytest.raises(ValueError, match="does not apply"):
+        await agent.run(MagicMock(cookies={}), body)
+    agent.server_client.post.assert_not_called()

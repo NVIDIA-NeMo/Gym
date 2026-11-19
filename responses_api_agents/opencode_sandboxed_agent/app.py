@@ -984,7 +984,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         forwards attached images instead of replacing them with "this model does not support image input"
         (``unsupportedParts`` in OpenCode's provider/transform.ts reads ``capabilities.input.image``, which
         provider.ts derives from the model's ``modalities.input``)."""
-        for provider_id, provider in self.config.opencode_config.get("provider", {}).items():
+        for provider_id, provider in (self.config.opencode_config.get("provider") or {}).items():
             if provider_id != self.config.opencode_provider_id:
                 raise ValueError(f"opencode_config.provider.{provider_id} is not opencode_provider_id")
             for model_id in (provider or {}).get("models", {}) or {}:

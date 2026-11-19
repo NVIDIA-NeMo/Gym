@@ -274,6 +274,8 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         # OpenCodeSandboxedAgentRunRequest is extra="allow"; BaseRunRequest is not, and
         # typing body as the latter silently drops the ViBench task fields (app, artifact,
         # prd_files, test_plans) so /seed_session rejects the request as missing 'app'.
+        if body.sandbox_provider_options or body.sandbox_uploads:
+            raise ValueError("vibench_agent does not apply sandbox_provider_options or sandbox_uploads")
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(

@@ -1802,7 +1802,11 @@ class TestBenchmarkLifecycle:
         config.network_access = "model_only"
         config.sandbox_row_option_keys = ["volumes", "network_policy"]
         config.sandbox_config = {
-            "provider_options": {"a": 1, "network_policy": {"egress": [{"action": "allow", "target": "example.org"}]}}
+            "provider_options": {
+                "a": 1,
+                "volumes": ["shared"],
+                "network_policy": {"egress": [{"action": "allow", "target": "example.org"}]},
+            }
         }
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
         await server._start_sandbox(provider_options={"volumes": ["v"]})
@@ -1816,6 +1820,9 @@ class TestBenchmarkLifecycle:
             await server._start_sandbox(provider_options={"network_policy": {"defaultAction": "deny"}})
         with raises(ValueError, match="sandbox_row_option_keys"):
             await server._start_sandbox(provider_options={"privileged": True})
+        config.sandbox_row_option_keys = []
+        with raises(ValueError, match="sandbox_row_option_keys"):
+            await server._start_sandbox(provider_options={"volumes": ["v"]})
         config.sandbox_config = {"provider_options": {"network_policy": {"defaultAction": "allow"}}}
         with raises(ValueError, match="defaultAction: deny"):
             await server._start_sandbox()
@@ -1881,8 +1888,21 @@ class TestBenchmarkLifecycle:
         sandbox = MagicMock(upload=AsyncMock())
         await server._upload_inputs(sandbox, {"/data/a.txt": str(allowed)})
         sandbox.upload.assert_awaited_once_with(allowed, "/data/a.txt")
+        (tmp_path / "root" / "link").symlink_to(outside)
+        (tmp_path / "root2").mkdir()
+        (tmp_path / "root2" / "c.txt").write_text("c")
+        escapes = [
+            outside,
+            tmp_path / "root" / ".." / "b.txt",
+            tmp_path / "root" / "link",
+            tmp_path / "root2" / "c.txt",
+        ]
+        for escape in escapes:
+            with raises(ValueError, match="sandbox_upload_roots"):
+                await server._upload_inputs(sandbox, {"/data/x": str(escape)})
+        config.sandbox_upload_roots = []
         with raises(ValueError, match="sandbox_upload_roots"):
-            await server._upload_inputs(sandbox, {"/data/b.txt": str(outside)})
+            await server._upload_inputs(sandbox, {"/data/a.txt": str(allowed)})
         assert sandbox.upload.await_count == 1
 
     @mark.parametrize("error", [RuntimeError("generation failed"), asyncio.CancelledError()])
