@@ -44,6 +44,7 @@ from nemo_gym.sandbox.providers import (
     SandboxStatus,
     SupportsSandboxBackgroundServices,
     SupportsSandboxEndpoint,
+    SupportsSandboxFork,
     SupportsSandboxIndependentUploads,
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
@@ -940,6 +941,20 @@ class AsyncSandbox:
                 descriptor = {**descriptor, "user": self._spec.user}
         return descriptor
 
+    async def fork(self, count: int, *, ttl_s: float | None = None) -> list[dict[str, Any]]:
+        """Clone this running sandbox ``count`` times, memory and disk included.
+
+        Returns one :meth:`connect` descriptor per child, carrying this sandbox's
+        declared ports and defaults. The caller owns the children and must stop them.
+        """
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxFork) or not isinstance(provider, ConnectableProvider):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support fork")
+        parent = await self.serialize()
+        children = await provider.fork(self._require_handle(), count, ttl_s=ttl_s)
+        return [{**parent, **await provider.serialize_handle(child)} for child in children]
+
     @classmethod
     async def connect(
         cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider, owns_provider: bool = True
@@ -1081,8 +1096,7 @@ class _AsyncLoopRunner:
 class Sandbox:
     """Synchronous wrapper around ``AsyncSandbox``.
 
-    ``pty``, ``serialize`` and ``connect`` are async-only; use ``AsyncSandbox``
-    for those."""
+    ``pty`` and ``serialize`` are async-only; use ``AsyncSandbox`` for those."""
 
     def __init__(
         self,
@@ -1151,6 +1165,29 @@ class Sandbox:
 
     def resume(self) -> None:
         self._runner.run("resume", self._async_sandbox.resume)
+
+    def fork(self, count: int, *, ttl_s: float | None = None) -> list[dict[str, Any]]:
+        """See :meth:`AsyncSandbox.fork`; the descriptors are for :meth:`connect`."""
+        return self._runner.run("fork", lambda: self._async_sandbox.fork(count, ttl_s=ttl_s))
+
+    @classmethod
+    def connect(cls, provider: Mapping[str, Any] | SandboxProvider, descriptor: Mapping[str, Any]) -> "Sandbox":
+        """Attach to a sandbox another process created; :meth:`stop` then stops it."""
+        sandbox = cls.__new__(cls)
+        sandbox._runner = _AsyncLoopRunner()
+        try:
+            sandbox._async_sandbox = sandbox._runner.run(
+                "connect",
+                lambda: AsyncSandbox.connect(
+                    descriptor,
+                    provider=create_provider(provider) if isinstance(provider, Mapping) else provider,
+                ),
+            )
+        except BaseException:
+            sandbox._runner.close()
+            raise
+        sandbox._closed = False
+        return sandbox
 
     def stop(self) -> None:
         if self._closed:
