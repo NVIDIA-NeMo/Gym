@@ -1,0 +1,7 @@
+# create_dataset.py output (rows of a full pivot pool; not committed), except the committed example
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl
+!example_pool/snap-raw/*.jsonl
+# (the root ignores ENV/, which matches env/ on case-insensitive file systems)
+!example_pool/env/
