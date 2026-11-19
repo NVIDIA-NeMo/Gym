@@ -82,7 +82,9 @@ with collection-time sampling flags.
 ## Runtime prerequisites
 
 Every workspace image must retain CadQuery, the CAD renderer, and its graphics
-libraries. The supplied image builds only the OpenCode runtime:
+libraries. The supplied image builds only the OpenCode runtime. It also makes
+`/opt/nemo-gym-nooa` writable by the `cad` user so NOOA's
+native installer can provision its private runtime without root privileges.
 
 ```bash
 docker build --platform linux/amd64 -t deepcad-cadquery:2.8.0 resources_servers/deepcad
