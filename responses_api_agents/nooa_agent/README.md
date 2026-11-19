@@ -29,6 +29,32 @@ sandbox protection. Only injected resource methods are Gym/verifier-observable a
 side effects belong to NOOA and are not reliably visible to verification or replay. The trajectory distinguishes
 the outer `execute_python` call from nested resource calls.
 
+## Atom
+
+Atom (`nooa_atom.gym:AtomHarness`, installed from the same NOOA revision) runs through this adapter in place of the
+bench agent. Three settings on the agent instance select it: the agent class, the invocation adapter
+(`atom_adapter.invoke_atom`, which hands the latest user message to Atom's session and returns its `TaskResult`), and
+Atom's root turn method, `handle_batch` (one agent, unattended) or `handle_orchestrate` (the root may delegate to child
+sessions). `configs/nooa_atom_agent.yaml` sets the three on an agent instance, and `benchmarks/<bench>/atom.yaml`
+(Terminal-Bench 2.1, SWE-bench Pro, GDPval) applies them to that benchmark's NOOA binding, so a run is one config:
+
+```bash
+gym eval run --config benchmarks/terminal_bench_2_1/atom.yaml
+```
+
+The same three settings as command-line overrides, on a binding whose agent instance is named `agent`:
+
+```bash
+gym eval run --config benchmarks/terminal_bench_2_1/nooa.yaml \
+  ++agent.responses_api_agents.nooa_agent.nooa.agent_class=nooa_atom.gym:AtomHarness \
+  ++agent.responses_api_agents.nooa_agent.nooa.invocation_adapter=responses_api_agents.nooa_agent.atom_adapter:invoke_atom \
+  ++agent.responses_api_agents.nooa_agent.nooa.init_kwargs.turn_method=handle_batch
+```
+
+Atom's session wraps a strategy failure in `TurnFailedError`; the adapter re-raises the wrapped error so the runner's
+termination policy sees the same CodeAct stops and model rejections it sees from any other NOOA agent. Gym resource
+tools are bound on the harness class, not on Atom's session agent.
+
 ## Sandboxed execution
 
 `nooa.execution_mode: sandboxed` runs the complete NOOA agent in the task sandbox supplied by Resources.

@@ -397,6 +397,15 @@ class GymResponsesLLM(UnifiedLLM):
     ) -> LLMResponse:
         raise RuntimeError("GymResponsesLLM supports async NOOA entrypoints only")
 
+    def _call_once(
+        self,
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+        tools: list[Tool] | None = None,
+        output_model: type[BaseModel] | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        return self.call(messages, tools, output_model, **kwargs)
+
     async def acall(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -404,10 +413,12 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
+        # Overrides NOOA's media-recovery template: this adapter applies the media policy itself in
+        # _acall_once, and one rollout's requests are serialized here.
         async with self._lock:
-            return await self._acall(messages, tools, output_model, **kwargs)
+            return await self._acall_once(messages, tools, output_model, **kwargs)
 
-    async def _acall(
+    async def _acall_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,

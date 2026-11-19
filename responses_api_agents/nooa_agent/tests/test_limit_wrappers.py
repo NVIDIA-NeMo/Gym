@@ -89,7 +89,7 @@ async def test_actual_codeact_limit_wrappers_remain_gradable(
     result = await runner.run(_request())
 
     assert len(raised) == 1
-    assert type(raised[0]) is GenerationError
+    assert isinstance(raised[0], GenerationError)  # NOOA names this stop as a GenerationError subclass
     assert type(raised[0].__cause__) is cause_type
     assert result.termination_reason is reason
     if reason is NOOATerminationReason.POLICY_BUDGET_EXCEEDED:
