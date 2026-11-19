@@ -486,3 +486,45 @@ def test_the_backoff_is_full_jitter_exponential_and_capped(monkeypatch):
         (0, 30.0),
         (0, 30.0),
     ]
+
+
+@pytest.mark.parametrize("attempts", [None, 1])
+async def test_judge_transport_limit_preserves_logical_retry_policy(attempts):
+    from aiohttp import ClientConnectionError
+
+    client = _client(status=200, body=b'{"verdict": "CORRECT"}')
+    reply = client.post.return_value
+    client.post.side_effect = [ClientConnectionError("synthetic disconnect"), reply]
+    result = await call_judge(
+        client,
+        server_name="judge",
+        url_path="/v1/responses",
+        json={},
+        response_model=_Verdict,
+        max_attempts=2,
+        transport_max_attempts=attempts,
+    )
+    assert result.verdict == "CORRECT"
+    assert client.post.await_count == 2
+    for call in client.post.await_args_list:
+        if attempts == 1:
+            assert call.kwargs["_max_num_tries"] == 1
+            assert call.kwargs["_resend_after_disconnect"] is False
+        else:
+            assert "_max_num_tries" not in call.kwargs
+            assert "_resend_after_disconnect" not in call.kwargs
+
+
+@pytest.mark.parametrize("attempts", [True, False, 0, 2, 1.0, "1"])
+async def test_judge_rejects_invalid_transport_limits_before_dispatch(attempts):
+    client = _client(status=200, body=b'{"verdict": "CORRECT"}')
+    with pytest.raises(ValueError, match="transport_max_attempts"):
+        await call_judge(
+            client,
+            server_name="judge",
+            url_path="/v1/responses",
+            json={},
+            response_model=_Verdict,
+            transport_max_attempts=attempts,
+        )
+    client.post.assert_not_awaited()

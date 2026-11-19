@@ -1514,6 +1514,13 @@ class SharedRolloutCollectionConfig(
     RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, RunHealthConfig, BaseNeMoGymCLIConfig
 ):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    run_request_max_transport_attempts: int | None = Field(
+        default=None,
+        strict=True,
+        ge=1,
+        le=1,
+        description="Opt in to one /run transport attempt without replay; unset preserves the two-attempt policy.",
+    )
     batch_manifest_fpath: Optional[str] = Field(
         default=None,
         description=(
@@ -2336,8 +2343,9 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "Seconds during which collection keeps resending a /run whose every connection attempt was "
             "refused. Such a request was never delivered, so resending it cannot start a second episode; "
             "it covers an Environment Server that is restarting or not yet listening. A connection that "
-            "was made and then dropped may have delivered the request and keeps the strict two-attempt "
-            "limit. 0 disables the grace period."
+            "was made and then dropped may have delivered the request and keeps the configured attempt "
+            "limit (two by default). "
+            "0 disables the grace period."
         ),
     )
     dispatch_budget_s: Optional[float] = Field(
@@ -4506,10 +4514,11 @@ executions → not run again (left to recovery)
                 semaphore=semaphore,
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
                 record_unrouted_failures=True,
-                # A /run whose connection dropped before any reply may have been delivered: it gets one bounded
-                # resend. One whose every connection was refused was never delivered, and is resent within the
-                # connect grace period. Other failures belong to the persisted attempt and the recovery selector.
-                _max_num_tries=2,
+                # By default a /run dropped before any reply gets one bounded resend; the one-attempt opt-in
+                # disables replay. One whose every connection was refused was never delivered and is resent within
+                # the connect grace period. Other failures belong to the persisted attempt and the recovery selector.
+                _max_num_tries=config.run_request_max_transport_attempts or 2,
+                **({"retry_requests": False} if config.run_request_max_transport_attempts == 1 else {}),
                 _connect_grace_s=config.dispatch_connect_grace_s,
                 typed_outcomes=config.route_failures_to_sidecar,
                 validate_results=True,

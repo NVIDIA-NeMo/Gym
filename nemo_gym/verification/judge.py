@@ -46,7 +46,7 @@ import re
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Type, TypeVar
+from typing import Any, Awaitable, Callable, Literal, Type, TypeVar
 
 from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout
 from fastapi.encoders import jsonable_encoder
@@ -282,6 +282,7 @@ async def call_judge(
     response_model: Type[ResponseT],
     timeout: ClientTimeout | None = None,
     max_attempts: int = JUDGE_CALL_MAX_ATTEMPTS,
+    transport_max_attempts: Literal[1] | None = None,
 ) -> ResponseT:
     """POST to a judge model server and parse the reply; report failure as a ``judge_failed`` event.
 
@@ -289,6 +290,8 @@ async def call_judge(
     ``/v1/chat/completions``), paired with the matching ``response_model``. The
     status check comes before parsing so an auth or server error reports the HTTP
     failure itself, not a validation error against the error body.
+    ``transport_max_attempts=1`` also bounds this hop's internal HTTP transport
+    to one attempt without replay after a disconnect; unset preserves its defaults.
     The enclosing verify execution supplies the invocation identity; all its judge
     calls and retries share that identity. Standalone calls do not invent a verifier execution.
 
@@ -301,6 +304,9 @@ async def call_judge(
     final failure masked both keep every attempt.
     """
 
+    if transport_max_attempts is not None and (type(transport_max_attempts) is not int or transport_max_attempts != 1):
+        raise ValueError("transport_max_attempts must be the integer 1 or None")
+
     async def _call() -> ResponseT:
         invocation_id = current_verifier_invocation_id()
         note_verifier_model_request(server_name)
@@ -309,6 +315,7 @@ async def call_judge(
             url_path=url_path,
             json=json,
             **({"timeout": timeout} if timeout is not None else {}),
+            **({"_max_num_tries": 1, "_resend_after_disconnect": False} if transport_max_attempts == 1 else {}),
             **({"headers": {VERIFIER_INVOCATION_HEADER: invocation_id}} if invocation_id else {}),
         )
         await raise_for_status(http_response)

@@ -402,9 +402,10 @@ def driver_metric_reader(monkeypatch: pytest.MonkeyPatch):
 
 
 class TestRecoveryDriverMetrics:
+    @pytest.mark.parametrize("transport_attempts", [None, 1])
     @pytest.mark.parametrize("max_resident_tasks", [None, 2])
     async def test_only_new_persisted_outcomes_are_measured_on_resume(
-        self, tmp_path, monkeypatch, empty_global_config, driver_metric_reader, max_resident_tasks
+        self, tmp_path, monkeypatch, empty_global_config, driver_metric_reader, max_resident_tasks, transport_attempts
     ):
         from nemo_gym.telemetry import observer
 
@@ -420,6 +421,7 @@ class TestRecoveryDriverMetrics:
             disable_health_check=True,
             num_samples_in_parallel=1,
             max_resident_rollout_tasks=max_resident_tasks,
+            run_request_max_transport_attempts=transport_attempts,
         )
         calls = Counter()
 
@@ -434,7 +436,8 @@ class TestRecoveryDriverMetrics:
             _on_transport_failure,
         ):
             # One bounded resend of a connection lost before any reply; every other failure is raised at once.
-            assert (_resend_after_disconnect, _max_num_tries, _retry_other_errors) == (True, 2, False)
+            expected = (True, 2, False) if transport_attempts is None else (False, 1, False)
+            assert (_resend_after_disconnect, _max_num_tries, _retry_other_errors) == expected
             index = json[TASK_INDEX_KEY_NAME]
             calls[index] += 1
             if index == 1 and calls[index] == 1:
