@@ -246,9 +246,43 @@ class SSHConnection(Connection):
                 self._master.wait()
 
 
+def _run_stopping_group_on_timeout(
+    cmd: list[str], *, input: str | None, timeout_s: float
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run(capture_output=True, text=True, timeout=timeout_s)``, but an expiry kills the command's whole
+    process group, so what it started (an ssh ProxyCommand, an rsync helper) does not outlive the error."""
+    with subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if input is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(input, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                process.kill()
+            try:
+                process.communicate(timeout=5)  # Reap the child and collect what the pipes still hold.
+            except subprocess.TimeoutExpired:
+                pass  # A process outside the group holds the pipes; the caller's error must not wait for it.
+            raise
+        except BaseException:
+            process.kill()
+            raise
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+
+
 def _checked(cmd: list[str], *, input: str | None = None, context: str = "", timeout_s: float | None = None) -> str:
     try:
-        result = subprocess.run(cmd, input=input, text=True, capture_output=True, timeout=timeout_s)
+        if timeout_s is None:
+            result = subprocess.run(cmd, input=input, text=True, capture_output=True)
+        else:
+            result = _run_stopping_group_on_timeout(cmd, input=input, timeout_s=timeout_s)
     except subprocess.TimeoutExpired as exc:
         label = f" ({context})" if context else ""
         raise RuntimeError(f"Command timed out after {timeout_s} s{label}:\n  {' '.join(cmd)}") from exc

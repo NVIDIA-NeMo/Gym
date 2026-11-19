@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -135,27 +136,61 @@ class TestApp:
 
         assert timeouts == [1]  # the poll was limited to the budget that remained, not its usual 5 s
 
-    def test_the_config_request_carries_the_limit_and_no_limit_means_none(self, monkeypatch) -> None:
-        for limit in (None, 30):
-            server = self._setup_server(**({} if limit is None else {"model_server_wait_timeout_seconds": limit}))
-            server.server_client.poll_for_status.side_effect = ["success"]
-            server.server_client.global_config_dict = {}
-            monkeypatch.setattr(
-                responses_api_models.local_vllm_model_proxy.app, "get_first_server_config_dict", MagicMock()
-            )
-            reply = MagicMock()
-            reply.json.return_value = {
-                "base_url": ["abcd"],
-                "api_key": "key",
-                "model": "m",
-            }  # pragma: allowlist secret
-            requests_mock = MagicMock()
-            requests_mock.get.return_value = reply
-            monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "requests", requests_mock)
+    def _config_reply(self, chunks: list[bytes], on_chunk=None) -> MagicMock:
+        reply = MagicMock(ok=True)
+        reply.json.return_value = json.loads(b"".join(chunks))
+        reply.__enter__.return_value = reply
 
+        def iter_content(chunk_size):
+            for chunk in chunks:
+                if on_chunk is not None:
+                    on_chunk()
+                yield chunk
+
+        reply.iter_content = iter_content
+        return reply
+
+    def _serve_config(self, monkeypatch, reply: MagicMock, **overrides):
+        server = self._setup_server(**overrides)
+        server.server_client.poll_for_status.side_effect = ["success"]
+        server.server_client.global_config_dict = {}
+        monkeypatch.setattr(
+            responses_api_models.local_vllm_model_proxy.app, "get_first_server_config_dict", MagicMock()
+        )
+        requests_mock = MagicMock()
+        requests_mock.get.return_value = reply
+        monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "requests", requests_mock)
+        return server, requests_mock
+
+    BODY = [b'{"base_url": ["abcd"], "api_key": "key", ', b'"model": "m"}']  # pragma: allowlist secret
+
+    def test_without_a_limit_the_config_request_has_no_time_limit(self, monkeypatch) -> None:
+        server, requests_mock = self._serve_config(monkeypatch, self._config_reply(self.BODY))
+
+        server.setup_webserver()
+
+        assert requests_mock.get.call_args.kwargs["timeout"] is None
+        assert server.config.model == "m"
+
+    def test_the_config_request_is_read_within_the_limit(self, monkeypatch) -> None:
+        server, requests_mock = self._serve_config(
+            monkeypatch, self._config_reply(self.BODY), model_server_wait_timeout_seconds=30
+        )
+
+        server.setup_webserver()
+
+        assert 0 < requests_mock.get.call_args.kwargs["timeout"] <= 30
+        assert server.config.model == "m"
+
+    def test_a_config_response_that_keeps_arriving_past_the_deadline_is_not_accepted(self, monkeypatch) -> None:
+        now = [0.0]
+        monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "monotonic", lambda: now[0])
+        # Every chunk arrives inside the per-read timeout, but together they take 5 s of the 1 s limit.
+        reply = self._config_reply(self.BODY, on_chunk=lambda: now.__setitem__(0, now[0] + 2.5))
+        server, _ = self._serve_config(monkeypatch, reply, model_server_wait_timeout_seconds=1)
+
+        with pytest.raises(TimeoutError, match="was not received within 1"):
             server.setup_webserver()
-
-            assert requests_mock.get.call_args.kwargs["timeout"] == limit
 
     def test_a_wait_limit_of_zero_is_rejected(self) -> None:
         with pytest.raises(ValueError):

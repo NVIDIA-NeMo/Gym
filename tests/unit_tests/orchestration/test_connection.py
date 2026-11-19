@@ -338,3 +338,19 @@ def test_a_stopped_held_command_is_reaped_and_its_pipes_are_closed_without_delay
     assert raised.value is not None
     assert process.returncode is not None
     assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+
+
+def test_a_command_that_outlasts_its_time_limit_takes_its_own_subprocesses_with_it(no_ssh_bounds, tmp_path):
+    late_output = tmp_path / "late.txt"
+    # The shell starts a background process that would write after the error, then waits on it.
+    script = f"(sleep 3; echo late > {late_output}) & sleep 30"
+
+    with pytest.raises(RuntimeError, match=r"timed out after 0.5 s \(slow rsync\)"):
+        connection_module._checked(["bash", "-c", script], context="slow rsync", timeout_s=0.5)
+    time.sleep(4)
+
+    assert not late_output.exists()
+
+
+def test_a_command_with_input_inside_its_time_limit_returns_its_output(no_ssh_bounds):
+    assert connection_module._checked(["cat"], input="hello", timeout_s=30) == "hello"
