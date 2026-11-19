@@ -12,45 +12,61 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Multi-turn tool-calling loop for finance research benchmarks.
+
+One loop serves all benchmark profiles. Everything that differs between them is a
+config value, not a branch in this file: the nudge injected on a prose-only
+turn, whether the run is bounded by turns or by wall clock, and which tool
+errors abort a rollout instead of being handed back to the model. Those three
+fields are required, so a config states its policy rather than inheriting a
+default that happens to suit another benchmark. Additional policies select
+whether prose ends a rollout and whether a tool-call batch runs concurrently.
+
+The values the Vals profiles use are pinned against the upstream package by tests
+in ``resources_servers/finance_agent_v2/tests``, which is where that package is
+installed.
+"""
+
 import asyncio
 import json
 import logging
 import re
-from typing import Any, List, Optional
+import time
+from enum import Enum
+from typing import Any, List, Literal, Optional, Tuple
 
+from aiohttp import ClientError
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NgFailureEvent,
+    accumulate_response_usage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
 
 _MODEL_OUTPUT_TYPES = frozenset({"reasoning", "function_call"})
 
-# Regex that matches common vLLM / OpenAI context-length error messages.
-# Mirrors the detection used by the upstream finance-agent benchmark.
+# The model is reached over HTTP, so a context-window rejection arrives as error
+# text rather than a typed exception and has to be recognised by shape.
 _CONTEXT_OVERFLOW_RE = re.compile(
     r"maximum context length is \d+ tokens|"
     r"context length is (?:only )?\d+ tokens|"
@@ -76,15 +92,117 @@ _CONTEXT_OVERFLOW_RE = re.compile(
 )
 
 
+def _decoded_object(raw: str) -> Optional[dict]:
+    """JSON-decode *raw*, returning None unless it decodes to an object."""
+    try:
+        value = json.loads(raw)
+    except (ValueError, RecursionError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+_RETRYABLE_RESOURCES_STATUSES = frozenset({502, 503, 504})
+
+
+class StopReason(str, Enum):
+    """Why the loop ended.
+
+    Recorded on the rollout so a zero from "never submitted" is distinguishable
+    from a zero from "judged wrong".
+    """
+
+    DONE_TOOL = "done_tool"
+    ASSISTANT_MESSAGE = "assistant_message"
+    MAX_TURNS = "max_turns"
+    MAX_TIME = "max_time"
+    MAX_OUTPUT_TOKENS = "max_output_tokens"
+    TEXT_ONLY = "text_only"
+    ERROR = "error"
+
+
+class ErrorCause(str, Enum):
+    """Why a loop that ended with ``StopReason.ERROR`` failed, recorded as ``error_cause``."""
+
+    MODEL_CALL_FAILED = "model_call_failed"
+    CONTEXT_OVERFLOW = "context_overflow"
+    TOOL_ABORTED = "tool_aborted"
+
+
 class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    max_steps: Optional[int] = None
+    no_tool_call_nudge: str = Field(
+        ...,
+        description="Injected as a user message when a turn produces prose and "
+        "no tool call, so the loop continues instead of stopping.",
+    )
+    prose_only_behavior: Literal["nudge", "finish"] = Field(
+        default="nudge",
+        description="What to do when a turn contains no tool call. "
+        "'nudge' injects no_tool_call_nudge after assistant prose and continues; "
+        "'finish' ends the run even when the response has no text. "
+        "continue_if_not_tool_call=False takes precedence over this policy.",
+    )
+    tool_call_execution: Literal["sequential", "concurrent"] = Field(
+        default="sequential",
+        description="Whether tool calls emitted in one model turn execute in "
+        "model order or concurrently. Concurrent results are still appended "
+        "in the original call order.",
+    )
+    tool_error_observation: Literal["json", "error_prefix"] = Field(
+        default="json",
+        description="How failed tool calls are shown to the model. 'json' keeps "
+        "the shared loop's legacy JSON payload; 'error_prefix' renders the "
+        "'[ERROR] <message>' observation.",
+    )
+    raise_on_tool_http_error: bool = Field(
+        default=False,
+        description="Convert unsuccessful tool HTTP responses to error observations. "
+        "False preserves the legacy behavior of forwarding their response bodies.",
+    )
+    done_tool_requires_success: bool = Field(
+        default=False,
+        description="Require a successful terminal tool result before ending either execution mode. "
+        "False preserves termination whenever a terminal tool is invoked.",
+    )
+    max_time_seconds: Optional[float] = Field(
+        ...,
+        description="Wall-clock budget for the loop, checked before each model "
+        "call, or null for no budget. This is the agent's hard stop; a resource "
+        "server's max_rollout_time_seconds is a softer budget that only makes "
+        "tools return an error asking the model to submit.",
+    )
+    abort_on_tool_error_types: List[str] = Field(
+        ...,
+        description="Exception type names in a tool's error payload that abort "
+        "the whole rollout instead of being fed back to the model. Empty means "
+        "every tool error is fed back and the run continues.",
+    )
+    max_steps: Optional[int] = Field(
+        default=None,
+        description="Maximum model turns, or null for no turn cap.",
+    )
+    resources_server_retries: int = Field(
+        default=0,
+        ge=0,
+        description="Extra attempts at seed_session and verify when the resources server answers "
+        "502, 503 or 504, as a multi-worker server's session routing does when it cannot reach the "
+        "worker holding the session. Both calls must be safe to repeat on that server. "
+        "0 fails the rollout on the first such answer.",
+    )
+    keep_response_on_verify_failure: bool = Field(
+        default=False,
+        description="When verify fails after its retries, or its reply cannot be read or parsed, return "
+        "the generated rollout as a masked zero (masked_verify_failure), instead of failing the run, "
+        "whose empty error response a trainer cannot use. Also retries a reply lost in transport "
+        "against a STATELESS verifier (verify_with_transport_retry).",
+    )
     done_tools: List[str] = Field(
-        default=["submit_final_result"],
+        default_factory=lambda: ["submit_final_result"],
         description="Tool names that signal the agent loop should terminate. "
-        "When any tool call in a batch matches, remaining calls are skipped "
-        "and the loop exits.",
+        "Sequential execution skips later calls when a terminal tool is "
+        "invoked; concurrent execution finishes the full batch. "
+        "done_tool_requires_success controls whether a failed terminal call can end either mode.",
     )
     model_call_timeout: Optional[float] = Field(
         default=None,
@@ -99,6 +217,13 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
         description="When True, drop the oldest exchange on context-overflow "
         "errors and retry. Intended for eval only — during training the full "
         "trajectory must be preserved so reward assignment is accurate.",
+    )
+    continue_if_not_tool_call: bool = Field(
+        default=True,
+        description="When True (Gym eval default), a turn with assistant text and "
+        "no tool call injects no_tool_call_nudge and the loop continues. When False "
+        "(GRPO overlay), that turn ends the episode so a synthetic user message "
+        "cannot break NeMo-RL monotonic trajectories.",
     )
 
 
@@ -155,6 +280,118 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
         return outputs[i:]
 
+    @staticmethod
+    def _tool_error_message(tool_output: str, *, is_error: Optional[bool] = None) -> Optional[str]:
+        """Use explicit tool status when available, falling back to the legacy payload.
+
+        Two shapes arrive here. A reply from the resource server is wrapped as
+        ``{"results": "<payload>"}`` where the payload is itself a JSON string,
+        so an error is double-encoded and the inner object must be decoded
+        separately. A tool call that never reached the server (timeout,
+        transport failure) is rendered locally as a flat ``{"error": ...}``.
+
+        Explicit status takes precedence over the payload, so successful tool
+        text can contain an ``error`` field without being classified as a failure.
+        """
+        if is_error is not None:
+            return tool_output if is_error else None
+        payload = _decoded_object(tool_output)
+        if payload is None:
+            return None
+
+        results = payload.get("results")
+        if isinstance(results, str):
+            inner = _decoded_object(results)
+            if inner is not None and isinstance(inner.get("error"), str):
+                return inner["error"]
+
+        error = payload.get("error")
+        return error if isinstance(error, str) else None
+
+    def _aborting_error_type(self, tool_output: str, *, is_error: Optional[bool] = None) -> Optional[str]:
+        """Return the abort-worthy exception type named in *tool_output*, if any."""
+        if not self.config.abort_on_tool_error_types:
+            return None
+        error = self._tool_error_message(tool_output, is_error=is_error)
+        if error is None:
+            return None
+        return next(
+            (name for name in self.config.abort_on_tool_error_types if error.startswith(f"{name}:")),
+            None,
+        )
+
+    def _render_tool_observation(self, tool_output: str, *, is_error: Optional[bool] = None) -> str:
+        """Render an error for the selected harness without changing success output."""
+        if self.config.tool_error_observation != "error_prefix":
+            return tool_output
+        error = self._tool_error_message(tool_output, is_error=is_error)
+        if error is not None:
+            return f"[ERROR] {error}"
+        return tool_output
+
+    async def _execute_tool_call(
+        self,
+        output_function_call: NeMoGymResponseFunctionToolCall,
+        cookies: Any,
+    ) -> Tuple[str, Any, Optional[bool]]:
+        """Execute one tool call and render failures as tool outputs."""
+        response_cookies = None
+        is_error = None
+        try:
+            coro = self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path=f"/{output_function_call.name}",
+                json=json.loads(output_function_call.arguments),
+                cookies=cookies,
+            )
+            api_response = await asyncio.wait_for(coro, timeout=self.config.tool_call_timeout)
+            response_cookies = api_response.cookies
+            if self.config.raise_on_tool_http_error:
+                await raise_for_status(api_response)
+            tool_output = (await api_response.content.read()).decode()
+            error_header = api_response.headers.get("x-nemo-gym-tool-error")
+            if error_header in ("true", "false"):
+                is_error = error_header == "true"
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Tool call '%s' timed out after %ss",
+                output_function_call.name,
+                self.config.tool_call_timeout,
+            )
+            error = (
+                f"Tool call timed out after {self.config.tool_call_timeout}s. "
+                "Please try a different approach or submit your final answer."
+            )
+            tool_output = (
+                error if self.config.tool_error_observation == "error_prefix" else json.dumps({"error": error})
+            )
+            is_error = True if self.config.tool_error_observation == "error_prefix" else None
+        except Exception as e:
+            logger.error(
+                "Tool call '%s' failed: %s: %s",
+                output_function_call.name,
+                type(e).__name__,
+                e,
+            )
+            error = (
+                f"Tool call failed: {type(e).__name__}: {e}. "
+                "Please try a different approach or submit your final answer."
+            )
+            tool_output = (
+                error if self.config.tool_error_observation == "error_prefix" else json.dumps({"error": error})
+            )
+            is_error = True if self.config.tool_error_observation == "error_prefix" else None
+        return tool_output, response_cookies, is_error
+
+    @staticmethod
+    def _merge_cookies(cookies: Any, updates: List[Any]) -> Any:
+        """Merge concurrent response cookies deterministically in call order."""
+        merged = dict(cookies.items())
+        for update in updates:
+            if update is not None:
+                merged.update(update.items())
+        return merged
+
     async def responses(
         self,
         request: Request,
@@ -167,6 +404,8 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         new_outputs: List[Any] = []
+        tool_call_error_status: dict[str, bool] = {}
+        final_model_turn_start = 0
         usage = None
         step = 0
         last_model_response: Optional[NeMoGymResponse] = None
@@ -175,16 +414,34 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
         done_tools_set = set(self.config.done_tools)
         max_steps = self.config.max_steps
+        max_time_seconds = self.config.max_time_seconds
+        started_at = time.monotonic()
+        stop_reason = StopReason.ERROR
+        error_cause: Optional[ErrorCause] = None
 
         # Check max_steps at the TOP so we never start a turn past the limit.
         while max_steps is None or step < max_steps:
+            # Checked before the turn's query, so an exhausted budget ends the
+            # run rather than paying for one more call.
+            if max_time_seconds is not None:
+                elapsed = time.monotonic() - started_at
+                if elapsed >= max_time_seconds:
+                    logger.warning(
+                        "Time budget exhausted (%.0fs / %.0fs) after %d steps — terminating agent loop",
+                        elapsed,
+                        max_time_seconds,
+                        step,
+                    )
+                    stop_reason = StopReason.MAX_TIME
+                    break
+
             step += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
 
             try:
                 coro = self.server_client.post(
                     server_name=self.config.model_server.name,
-                    url_path="/v1/responses",
+                    url_path=self.url_path_for_request("/v1/responses", request),
                     json=new_body,
                     cookies=model_server_cookies,
                 )
@@ -200,6 +457,8 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                     self.config.model_call_timeout,
                     step,
                 )
+                stop_reason = StopReason.ERROR
+                error_cause = ErrorCause.MODEL_CALL_FAILED
                 break
             except Exception as e:
                 if self.config.truncate_on_overflow and self._is_context_overflow_error(e):
@@ -214,26 +473,21 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                         new_outputs = truncated
                         continue
                 logger.error("Model call failed on step %d: %s: %s", step, type(e).__name__, e)
+                stop_reason = StopReason.ERROR
+                error_cause = (
+                    ErrorCause.CONTEXT_OVERFLOW if self._is_context_overflow_error(e) else ErrorCause.MODEL_CALL_FAILED
+                )
                 break
 
             output = model_response.output
             last_model_response = model_response
+            final_model_turn_start = len(new_outputs)
             new_outputs.extend(output)
 
-            if not usage:
-                usage = model_response.usage
-                model_response.usage = None
-
-            if usage and model_response.usage:
-                usage.input_tokens += model_response.usage.input_tokens
-                usage.output_tokens += model_response.usage.output_tokens
-                usage.total_tokens += model_response.usage.total_tokens
-
-                # TODO support more advanced token details
-                usage.input_tokens_details.cached_tokens = 0
-                usage.output_tokens_details.reasoning_tokens = 0
+            usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                stop_reason = StopReason.MAX_OUTPUT_TOKENS
                 break
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
@@ -241,71 +495,121 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
 
+            if not all_fn_calls:
+                if all_output_messages and not self.config.continue_if_not_tool_call:
+                    logger.info(
+                        "Text-only turn on step %d with continue_if_not_tool_call=false — terminating agent loop",
+                        step,
+                    )
+                    stop_reason = StopReason.TEXT_ONLY
+                    break
+                if self.config.prose_only_behavior == "finish":
+                    stop_reason = StopReason.ASSISTANT_MESSAGE
+                    break
             if not all_fn_calls and all_output_messages:
-                # Match vals-ai/finance-agent eval (get_agent.py _before_query +
-                # _should_stop=False): inject "Continue." instead of breaking so
-                # the model keeps looping until submit_final_result or max_steps.
-                new_outputs.append(NeMoGymEasyInputMessage(role="user", content="Continue."))
+                logger.info(
+                    "Text-only turn on step %d — injecting no-tool-call nudge",
+                    step,
+                )
+                new_outputs.append(NeMoGymEasyInputMessage(role="user", content=self.config.no_tool_call_nudge))
                 continue
 
             done = False
+            aborted = False
+            if self.config.tool_call_execution == "concurrent":
+                results = await asyncio.gather(
+                    *(self._execute_tool_call(call, resources_server_cookies) for call in all_fn_calls)
+                )
+                resources_server_cookies = self._merge_cookies(
+                    resources_server_cookies,
+                    [cookies for _, cookies, _ in results],
+                )
+                for output_function_call, (tool_output, _, is_error) in zip(all_fn_calls, results):
+                    if is_error is not None:
+                        tool_call_error_status[output_function_call.call_id] = is_error
+                    new_outputs.append(
+                        NeMoGymFunctionCallOutput(
+                            type="function_call_output",
+                            call_id=output_function_call.call_id,
+                            output=self._render_tool_observation(tool_output, is_error=is_error),
+                        )
+                    )
+
+                # All calls in a concurrent batch run. An accepted terminal
+                # call takes precedence over other failures in that same batch.
+                done = any(
+                    call.name in done_tools_set
+                    and (
+                        not self.config.done_tool_requires_success
+                        or self._tool_error_message(tool_output, is_error=is_error) is None
+                    )
+                    for call, (tool_output, _, is_error) in zip(all_fn_calls, results)
+                )
+                if done:
+                    stop_reason = StopReason.DONE_TOOL
+                else:
+                    aborted = any(
+                        self._aborting_error_type(tool_output, is_error=is_error)
+                        for tool_output, _, is_error in results
+                    )
+                    if aborted:
+                        stop_reason = StopReason.ERROR
+                        error_cause = ErrorCause.TOOL_ABORTED
+
+                if done or aborted:
+                    break
+                continue
+
             for output_function_call in all_fn_calls:
-                try:
-                    coro = self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path=f"/{output_function_call.name}",
-                        json=json.loads(output_function_call.arguments),
-                        cookies=resources_server_cookies,
-                    )
-                    api_response = await asyncio.wait_for(coro, timeout=self.config.tool_call_timeout)
-                    resources_server_cookies = api_response.cookies
-                    tool_output = (await api_response.content.read()).decode()
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Tool call '%s' timed out after %ss",
-                        output_function_call.name,
-                        self.config.tool_call_timeout,
-                    )
-                    tool_output = json.dumps(
-                        {
-                            "error": f"Tool call timed out after {self.config.tool_call_timeout}s. "
-                            "Please try a different approach or submit your final answer."
-                        }
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Tool call '%s' failed: %s: %s",
-                        output_function_call.name,
-                        type(e).__name__,
-                        e,
-                    )
-                    tool_output = json.dumps(
-                        {
-                            "error": f"Tool call failed: {type(e).__name__}: {e}. "
-                            "Please try a different approach or submit your final answer."
-                        }
-                    )
+                tool_output, response_cookies, is_error = await self._execute_tool_call(
+                    output_function_call,
+                    resources_server_cookies,
+                )
+                if response_cookies is not None:
+                    resources_server_cookies = response_cookies
+                if is_error is not None:
+                    tool_call_error_status[output_function_call.call_id] = is_error
 
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=output_function_call.call_id,
-                    output=tool_output,
+                    output=self._render_tool_observation(tool_output, is_error=is_error),
                 )
                 new_outputs.append(tool_response)
 
-                if output_function_call.name in done_tools_set:
+                if output_function_call.name in done_tools_set and (
+                    not self.config.done_tool_requires_success
+                    or self._tool_error_message(tool_output, is_error=is_error) is None
+                ):
                     logger.info(
                         "Tool '%s' signaled done — terminating agent loop",
                         output_function_call.name,
                     )
                     done = True
+                    stop_reason = StopReason.DONE_TOOL
                     break
 
-            if done:
-                break
+                if error_type := self._aborting_error_type(tool_output, is_error=is_error):
+                    logger.error(
+                        "Tool '%s' raised %s — aborting rollout",
+                        output_function_call.name,
+                        error_type,
+                    )
+                    aborted = True
+                    stop_reason = StopReason.ERROR
+                    error_cause = ErrorCause.TOOL_ABORTED
+                    break
 
-        if max_steps is not None and step >= max_steps:
+            if done or aborted:
+                break
+        else:
+            if max_steps is not None:
+                stop_reason = StopReason.MAX_TURNS
+
+        if stop_reason is StopReason.MAX_TURNS:
             logger.warning("Reached max_steps=%d — terminating agent loop", max_steps)
+
+        logger.info("Agent loop finished after %d steps: stop_reason=%s", step, stop_reason.value)
 
         if last_model_response is None:
             logger.error("Agent loop terminated without any successful model response")
@@ -328,6 +632,24 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
         last_model_response.output = new_outputs
         last_model_response.usage = usage
+        # Carry why the loop ended into the rollout. Without this the stop reason
+        # exists only in the agent's log, so a results file cannot distinguish an
+        # answer the model chose to submit from one cut short by the time budget or
+        # a tool abort. ``metadata`` is the Responses API's own string-keyed side
+        # channel, so it survives verify() untouched.
+        last_model_response.metadata = {
+            **(last_model_response.metadata or {}),
+            "stop_reason": stop_reason.value,
+            "steps": str(step),
+        }
+        if error_cause is not None:
+            last_model_response.metadata["error_cause"] = error_cause.value
+        if tool_call_error_status:
+            # Keep explicit provenance for stateless reverification without
+            # adding fields to the shared Responses API tool-output type.
+            last_model_response.metadata["tool_call_error_status"] = json.dumps(tool_call_error_status)
+        if stop_reason is StopReason.ASSISTANT_MESSAGE:
+            last_model_response.metadata["final_model_turn_start"] = str(final_model_turn_start)
         return last_model_response
 
     async def run(self, request: Request, body: FinanceAgentRunRequest) -> FinanceAgentVerifyResponse:
@@ -344,6 +666,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 tools=[],
                 parallel_tool_calls=False,
                 tool_choice="auto",
+                metadata={"stop_reason": StopReason.ERROR.value},
             )
             return FinanceAgentVerifyResponse(
                 responses_create_params=body.responses_create_params,
@@ -351,21 +674,44 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 reward=0.0,
             )
 
+    async def _post_resources_server(self, url_path: str, json: Any, cookies: Any) -> Any:
+        """POST to the resources server, retrying the gateway statuses up to resources_server_retries times."""
+        attempts = self.config.resources_server_retries + 1
+        for attempt in range(1, attempts + 1):
+            response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path=url_path,
+                json=json,
+                cookies=cookies,
+            )
+            if response.ok or response.status not in _RETRYABLE_RESOURCES_STATUSES or attempt == attempts:
+                await raise_for_status(response)
+                return response
+            try:
+                content = await response.content.read()
+            except (ClientError, TimeoutError) as error:
+                content = f"<error body unavailable: {type(error).__name__}: {error}>".encode()
+            delay = min(2.0 ** (attempt - 1), 10.0)
+            logger.warning(
+                "%s returned %s (attempt %d/%d), retrying in %.0fs: %s",
+                url_path,
+                response.status,
+                attempt,
+                attempts,
+                delay,
+                content[:1000].decode(errors="replace"),
+            )
+            await asyncio.sleep(delay)
+
     async def _run_inner(self, request: Request, body: FinanceAgentRunRequest) -> FinanceAgentVerifyResponse:
         cookies = request.cookies
 
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
+        seed_session_response = await self._post_resources_server("/seed_session", body.model_dump(), cookies)
         cookies = seed_session_response.cookies
 
         response = await self.server_client.post(
             server_name=self.config.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_run("/v1/responses", body),
             json=body.responses_create_params,
             cookies=cookies,
         )
@@ -376,14 +722,25 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             body.model_dump() | {"response": await get_response_json(response)}
         )
 
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        return FinanceAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        verify_request_data = verify_request.model_dump()
+
+        async def verify() -> FinanceAgentVerifyResponse:
+            verify_response = await self._post_resources_server("/verify", verify_request_data, cookies)
+            return FinanceAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+
+        if not self.config.keep_response_on_verify_failure:
+            return await verify()
+        try:
+            return await verify_with_transport_retry(
+                verify, server_client=self.server_client, server_name=self.config.resources_server.name
+            )
+        except NgFailureEvent as failure:
+            cause = failure.__cause__
+            logger.error("verify failed — keeping the rollout masked: %s: %s", type(cause).__name__, cause)
+            result = masked_verify_failure(verify_request_data, failure)
+            # NeMo RL versions that predate the top-level field read instance_config.
+            result["instance_config"] = {**(result.get("instance_config") or {}), "mask_sample": True}
+            return FinanceAgentVerifyResponse.model_validate(result)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
@@ -398,3 +755,6 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     FinanceAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = FinanceAgent.run_webserver()  # noqa: F401

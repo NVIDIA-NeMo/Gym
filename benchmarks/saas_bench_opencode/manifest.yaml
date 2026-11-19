@@ -1,0 +1,30 @@
+name: saas_bench_opencode
+version: 0.2.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: Native SaaS Bench evaluation using opencode
+modality: text, image
+licensing: CC-BY-4.0
+authors:
+- SaaS-Bench Authors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+agent_server: saas_bench_agent
+resources_server: null
+datasets:
+- name: saas_bench_opencode
+  type: benchmark
+  jsonl_fpath: benchmarks/saas_bench_opencode/data/saas_bench_opencode_benchmark.jsonl
+  prompt_config: null
+  prepare_script: benchmarks/saas_bench/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

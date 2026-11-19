@@ -21,11 +21,15 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shlex
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from benchmarks.osworld.assets import DEFAULT_SETUP_CACHE, ensure_osworld_assets
+from responses_api_agents.osworld_agent.runtime_dependencies import managed_agent_venv_path
+from responses_api_agents.osworld_agent.sandbox_provider import AGENTENV_TEMPLATE_VM_PATH
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
@@ -34,33 +38,92 @@ DEFAULT_CONFIG = BENCHMARK_DIR / "config.yaml"
 DEFAULT_INPUT = BENCHMARK_DIR / "data" / "example.jsonl"
 DEFAULT_OUTPUT = REPO_ROOT / "results" / "osworld" / "rollouts.jsonl"
 DEFAULT_ENV = BENCHMARK_DIR / "env.yaml"
+OSWORLD_RUNTIME_DEPS_INSTALLER = (
+    REPO_ROOT / "responses_api_agents" / "osworld_agent" / "install_optional_runtime_deps.sh"
+)
 
 BASE_AGENT_CONFIG = REPO_ROOT / "responses_api_agents" / "osworld_agent" / "configs" / "osworld_agent.yaml"
 OPENAI_MODEL_CONFIG = REPO_ROOT / "responses_api_models" / "openai_model" / "configs" / "openai_model.yaml"
 POINTER_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_pointer.yaml"
 NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_nano_omni.yaml"
+SUPER35_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_super35.yaml"
 OSWORLD_PROVIDER_CONFIG = BENCHMARK_DIR / "configs" / "osworld_docker_pinned.yaml"
+OPENSANDBOX_CONFIG = BENCHMARK_DIR / "configs" / "osworld_opensandbox.yaml"
+AGENTENV_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agentenv.yaml"
+OPENSANDBOX_VM_SENTINEL = "/opensandbox/Ubuntu.qcow2"
+OPENSANDBOX_COMPAT_IMAGE = "busybox:1.36"
 
 PROFILE_CONFIGS: dict[str, tuple[Path, ...]] = {
     "default": (DEFAULT_CONFIG,),
     "pointer": (BASE_AGENT_CONFIG, POINTER_AGENT_CONFIG, OPENAI_MODEL_CONFIG),
     "nano_omni": (NANO_OMNI_AGENT_CONFIG,),
+    "super35": (SUPER35_AGENT_CONFIG,),
 }
 PROFILE_AGENT_NAMES = {
     "default": "osworld_simple_agent",
     "pointer": "osworld_simple_agent",
     "nano_omni": "osworld_nano_omni_agent",
+    "super35": "osworld_super35_agent",
 }
 BACKEND_CONFIGS: dict[str, Path | None] = {
     # The reusable OSWorld agent config defines the Docker Sandbox provider;
     # env.yaml activates it for this backend.
     "gym_sandbox": None,
+    "gym_opensandbox": OPENSANDBOX_CONFIG,
+    # AgentENV speaks the E2B control-plane API, so it is driven through Gym's
+    # e2b provider rather than one of its own.
+    "gym_agentenv": AGENTENV_CONFIG,
     "osworld_provider": OSWORLD_PROVIDER_CONFIG,
 }
 
 PINNED_OSWORLD_IMAGE = (
     "docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9"
 )
+
+
+def _setup_command_texts(task: dict[str, Any]) -> tuple[str, ...]:
+    """Return commands that OSWorld will execute during the task setup."""
+
+    config = task.get("config")
+    if not isinstance(config, list):
+        return ()
+
+    commands: list[str] = []
+    for setup_item in config:
+        if not isinstance(setup_item, dict):
+            continue
+        parameters = setup_item.get("parameters")
+        if not isinstance(parameters, dict):
+            continue
+        command = parameters.get("command")
+        if isinstance(command, str):
+            commands.append(command)
+        elif isinstance(command, list):
+            commands.append(" ".join(str(argument) for argument in command))
+    return tuple(commands)
+
+
+def _validate_chrome_cdp_relay(task: dict[str, Any], *, line_number: int) -> None:
+    """Require OSWorld's guest relay when task setup starts Chrome CDP."""
+
+    commands = _setup_command_texts(task)
+    starts_chrome_cdp = any(
+        re.search(r"--remote-debugging-port(?:=|\s+)1337(?!\d)", command, flags=re.IGNORECASE) for command in commands
+    )
+    has_cdp_relay = any(
+        re.search(r"\bsocat\b", command, flags=re.IGNORECASE)
+        and re.search(r"\blisten:9222(?!\d)", command, flags=re.IGNORECASE)
+        and re.search(r"\b(?:localhost|127\.0\.0\.1):1337(?!\d)", command, flags=re.IGNORECASE)
+        for command in commands
+    )
+    if starts_chrome_cdp and not has_cdp_relay:
+        task_id = str(task.get("id") or "<unknown>")
+        raise ValueError(
+            f"OSWorld row {line_number} task {task_id!r} starts Chrome CDP on guest port 1337 "
+            "but verifier_metadata.osworld_task.config does not launch the required guest relay. "
+            "Add ['socat', 'tcp-listen:9222,fork', 'tcp:localhost:1337']; Gym publishes and "
+            "forwards port 9222 but does not start this task-owned process."
+        )
 
 
 def prepare(input_jsonl: Path = DEFAULT_INPUT) -> Path:
@@ -84,6 +147,7 @@ def prepare(input_jsonl: Path = DEFAULT_INPUT) -> Path:
             metadata = row.get("verifier_metadata")
             if not isinstance(metadata, dict) or not isinstance(metadata.get("osworld_task"), dict):
                 raise ValueError(f"OSWorld row {line_number} must contain verifier_metadata.osworld_task")
+            _validate_chrome_cdp_relay(metadata["osworld_task"], line_number=line_number)
             row_count += 1
 
     if row_count == 0:
@@ -254,8 +318,8 @@ def write_env(
     setup_cache_dir: Path = DEFAULT_SETUP_CACHE,
     asset_input_jsonl: Path | None = None,
     num_samples_in_parallel: int = 1,
-    max_output_tokens: int = 1500,
-    temperature: float = 1.0,
+    max_output_tokens: int | None = None,
+    temperature: float | None = None,
     top_p: float | None = None,
     agent_name: str = "osworld_simple_agent",
     execution_backend: str = "osworld_provider",
@@ -264,6 +328,7 @@ def write_env(
     head_port: int = 11000,
     server_venv_root: Path | None = None,
     max_steps: int | None = None,
+    task_timeout: int | None = None,
     force: bool = False,
 ) -> bool:
     """Create a private env.yaml; return False when an existing file is kept."""
@@ -290,6 +355,29 @@ def write_env(
     resolved_vm_path = vm_path.expanduser().resolve() if vm_path else None
     if execution_backend == "gym_sandbox" and resolved_vm_path is None:
         raise ValueError("gym_sandbox execution requires an explicit vm_path")
+    if execution_backend == "gym_opensandbox" and resolved_vm_path is not None:
+        raise ValueError("gym_opensandbox uses the server-side Pool image and does not accept vm_path")
+    if execution_backend == "gym_agentenv" and resolved_vm_path is not None:
+        raise ValueError("gym_agentenv restores a prebuilt AgentENV template and does not accept vm_path")
+    sandbox_provider_name = {
+        "gym_sandbox": "osworld_sandbox",
+        "gym_opensandbox": "osworld_opensandbox",
+        "gym_agentenv": "osworld_agentenv",
+    }.get(execution_backend)
+    emitted_vm_path: str | Path | None = (
+        OPENSANDBOX_VM_SENTINEL if execution_backend == "gym_opensandbox" else resolved_vm_path
+    )
+    # Collection applies responses_create_params over every row and the agent config, so only
+    # explicit values are written. A fixed default here would replace the profile's own sampling.
+    sampling_overrides = {
+        name: value
+        for name, value in (
+            ("max_output_tokens", max_output_tokens),
+            ("temperature", temperature),
+            ("top_p", top_p),
+        )
+        if value is not None
+    }
     contents = "\n".join(
         [
             "# Generated by benchmarks/osworld/prepare.py. This file is gitignored.",
@@ -311,11 +399,15 @@ def write_env(
             f"output_jsonl_fpath: {_yaml_string(output_jsonl)}",
             "num_repeats: 1",
             f"num_samples_in_parallel: {num_samples_in_parallel}",
-            "upload_rollouts_to_wandb: false",
-            "responses_create_params:",
-            f"  max_output_tokens: {max_output_tokens}",
-            f"  temperature: {temperature}",
-            *([] if top_p is None else [f"  top_p: {top_p}"]),
+            "upload_rollouts: false",
+            *(
+                []
+                if not sampling_overrides
+                else [
+                    "responses_create_params:",
+                    *(f"  {name}: {value}" for name, value in sampling_overrides.items()),
+                ]
+            ),
             f"policy_base_url: {_yaml_string(policy_base_url)}",
             f"policy_api_key: {_yaml_string(policy_api_key)}  # pragma: allowlist secret",
             f"policy_model_name: {_yaml_string(policy_model_name)}",
@@ -325,9 +417,58 @@ def write_env(
             f"      concurrency: {num_samples_in_parallel}",
             f"      setup_cache_dir: {_yaml_string(setup_cache_dir.resolve())}",
             f"      asset_input_jsonl: {_yaml_string((asset_input_jsonl or input_jsonl).resolve())}",
-            f"      sandbox_provider: {'osworld_sandbox' if execution_backend == 'gym_sandbox' else 'null'}",
-            *([] if resolved_vm_path is None else [f"      vm_path: {_yaml_string(resolved_vm_path)}"]),
+            f"      sandbox_provider: {sandbox_provider_name or 'null'}",
+            *([] if emitted_vm_path is None else [f"      vm_path: {_yaml_string(emitted_vm_path)}"]),
+            *(
+                []
+                if execution_backend != "gym_opensandbox"
+                else [
+                    "      sandbox_require_kvm: false",
+                    "      sandbox_ready_timeout_s: 600.0",
+                    "      sandbox_spec:",
+                    "        # Required by the SDK; poolRef supplies the actual OSWorld VM.",
+                    f"        image: ${{oc.env:OPENSANDBOX_COMPAT_IMAGE,{OPENSANDBOX_COMPAT_IMAGE}}}",
+                    "        ttl_s: 14400",
+                    "        ready_timeout_s: 1200",
+                    "        provider_options:",
+                    "          skip_health_check: true",
+                    "          extensions:",
+                    "            poolRef: ${oc.env:OPENSANDBOX_POOL_REF,osworld-kvm}",
+                ]
+            ),
+            *(
+                []
+                if execution_backend != "gym_agentenv"
+                else [
+                    # No qcow2 to mount and no inner QEMU: the sandbox restores a
+                    # template snapshot. osworld-slim serves noVNC on 6901, not
+                    # the Docker image's 8006.
+                    "      sandbox_require_kvm: false",
+                    "      sandbox_ready_timeout_s: 900.0",
+                    "      sandbox_vnc_guest_port: 6901",
+                    # A sentinel, not a file: DesktopEnv would otherwise ask
+                    # DockerVMManager to resolve an empty path, which downloads
+                    # OSWorld's ~11 GB qcow2 once per task. The template already
+                    # holds the guest.
+                    f"      vm_path: {_yaml_string(AGENTENV_TEMPLATE_VM_PATH)}",
+                    "      sandbox_spec:",
+                    "        # An AgentENV template name or ID, not an OCI reference.",
+                    "        image: ${oc.env:AGENTENV_TEMPLATE}",
+                    "        ttl_s: 14400",
+                    "        ready_timeout_s: 900",
+                    "        entrypoint: null",
+                    "        env: {}",
+                    "        resources: {}",
+                    "        provider_options: {}",
+                ]
+            ),
             *([] if max_steps is None else [f"      max_steps: {max_steps}"]),
+            # The end-to-end attempt deadline covers VM create/setup, every agent
+            # step and the evaluation, so it has to grow with max_steps and with any
+            # per-step cost the backend adds -- a remote sandbox pays a round trip
+            # per screenshot. Tripping it masks the rollout and retries it, so a
+            # merely tight value burns environments rather than failing honestly.
+            *([] if task_timeout is None else [f"      task_timeout: {task_timeout}"]),
             "",
         ]
     )
@@ -377,16 +518,25 @@ def main() -> None:
         help="Model/agent composition written to env.yaml",
     )
     parser.add_argument(
+        "--task-timeout",
+        type=int,
+        default=None,
+        help="End-to-end per-attempt deadline in seconds; defaults to the agent config value",
+    )
+    parser.add_argument(
         "--execution-backend",
         choices=tuple(BACKEND_CONFIGS),
         default="osworld_provider",
-        help="VM lifecycle owner; both choices still execute through Gym env",
+        help="VM lifecycle owner; every choice still executes through Gym env",
     )
     parser.add_argument(
         "--vm-path",
         type=Path,
         default=None,
-        help="Explicit qcow2 base; required for gym_sandbox and recommended for reproducible native runs",
+        help=(
+            "Explicit qcow2 base; required for gym_sandbox, unsupported for "
+            "gym_opensandbox, and recommended for reproducible native runs"
+        ),
     )
     parser.add_argument(
         "--expected-vm-sha256",
@@ -409,10 +559,25 @@ def main() -> None:
         default=1,
         help="Concurrent eval requests and OSWorld DesktopEnv instances written to env.yaml",
     )
-    parser.add_argument("--max-output-tokens", type=int, default=1500, help="Per-step model output limit")
+    parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=None,
+        help="Per-step model output limit override; defaults to the profile's agent config",
+    )
     parser.add_argument("--max-steps", type=int, default=None, help="Optional rollout step cap override")
-    parser.add_argument("--temperature", type=float, default=1.0, help="Model sampling temperature")
-    parser.add_argument("--top-p", type=float, default=None, help="Optional nucleus-sampling top-p")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature override; defaults to the profile's agent config",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Nucleus-sampling top-p override; defaults to the profile's agent config",
+    )
     parser.add_argument("--head-host", default="127.0.0.1", help="Gym head-server bind/connect host")
     parser.add_argument("--head-port", type=int, default=11000, help="Gym head-server port")
     parser.add_argument(
@@ -483,6 +648,8 @@ def main() -> None:
     vm_path = args.vm_path.expanduser().resolve() if args.vm_path else None
     if args.execution_backend == "gym_sandbox" and vm_path is None:
         parser.error("--execution-backend gym_sandbox requires --vm-path")
+    if args.execution_backend == "gym_opensandbox" and vm_path is not None:
+        parser.error("--execution-backend gym_opensandbox uses the Pool image and rejects --vm-path")
     if args.expected_vm_sha256 and vm_path is None:
         parser.error("--expected-vm-sha256 requires --vm-path")
     if vm_path is not None:
@@ -515,11 +682,25 @@ def main() -> None:
             head_port=args.head_port,
             server_venv_root=args.server_venv_root,
             max_steps=args.max_steps,
+            task_timeout=args.task_timeout,
             force=args.force_env,
         )
 
-    print("\nNext steps:")
-    print(f"  cd {args.env_file.expanduser().resolve().parent}")
+    agent_venv = managed_agent_venv_path(REPO_ROOT, args.server_venv_root)
+    env_dir = args.env_file.expanduser().resolve().parent
+    print("\nNext steps (the OSWorld runtime package install is an explicit opt-in):")
+    print(f"  cd {shlex.quote(str(env_dir))}")
+    print("  gym env prefetch")
+    print(
+        "  "
+        + shlex.join(
+            [
+                "bash",
+                str(OSWORLD_RUNTIME_DEPS_INSTALLER),
+                str(agent_venv),
+            ]
+        )
+    )
     print("  gym env start")
     print("  gym eval run --no-serve")
 

@@ -29,7 +29,7 @@ You'll also need:
 - ✅ Access to Slurm cluster with enroot/pyxis container support
 - ✅ Access to NeMo RL container: `nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano`
 - ✅ Understanding of Ray distributed computing framework
-- ✅ Sufficient storage space (~110GB for model, data, and cache; checkpoints and logs accumulate with each run)
+- ✅ At least 200GB of free storage. The container (~15GB) and model (~59GB) account for about 75GB; the rest is data, the Hugging Face cache, and checkpoints and logs, which accumulate with each run.
 
 ---
 
@@ -37,7 +37,7 @@ You'll also need:
 
 ### 1.1 Set Workspace Directory
 
-Choose a location with sufficient space (~110GB minimum):
+Choose a location with at least 200GB free:
 
 ```bash
 # Set workspace directory (adjust to your cluster's large storage)
@@ -537,7 +537,7 @@ $HOME/
 │   ├── data/
 │   │   ├── train-split.jsonl       # Training data
 │   │   └── val-split.jsonl         # Validation data
-│   ├── model/                       # Nemotron 3 Nano 30B model (~63GB)
+│   ├── model/                       # Nemotron 3 Nano 30B model (~59GB)
 │   ├── examples/nemo_gym/
 │   │   ├── grpo_nanov3.yaml        # Training config
 │   │   └── run_grpo_nemo_gym.py    # Training script

@@ -56,3 +56,11 @@ mini_swe_agent_2:
       eval_timeout: 1800
       skip_if_exists: false
       step_limit: 250
+
+mini_swe_agent_2_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: mini_swe_agent_2

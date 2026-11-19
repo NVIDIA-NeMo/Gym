@@ -1,1 +1,2 @@
 *.jsonl
+**/data/*_metrics.json

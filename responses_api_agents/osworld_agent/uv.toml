@@ -1,0 +1,68 @@
+# Keep this server's resolver independent from any enclosing checkout. In the
+# complete training image Gym is a member of /opt/nemo-rl's uv workspace, whose
+# trainer dependencies are intentionally incompatible with this CPU agent venv.
+# The component is an independent uv project, synced from its committed uv.lock.
+required-version = ">=0.13.4"
+constraint-dependencies = [
+    "grpcio>=1.84.1,!=1.85.0rc1",
+    "certifi>=2026.10.19",
+    "msgpack>=1.2.1",
+    "pyarrow>=25.0.1",
+    "transformers>=5.17.0",
+]
+
+# Mirror Gym's public resolver policy because an explicit config file does not
+# inherit the checkout's [tool.uv] table. The separately locked opt-in runtime
+# project also selects CPU torch and torchvision wheels, without inheriting
+# these exclusions of the optional runtime packages.
+override-dependencies = [
+    "spacy>=3.8.13",
+    "opencv-python-headless; sys_platform == 'never'",
+    "pynvvideocodec; sys_platform == 'never'",
+    "torchcodec; sys_platform == 'never'",
+    "torchvision; sys_platform == 'never'",
+    "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
+    "wcwidth; sys_platform == 'never'",
+    "gprof2dot; sys_platform == 'never'",
+    "pathspec; sys_platform == 'never'",
+    "grpcio-status==1.71.2",
+    "protobuf==5.29.6",
+    "torch==2.11.0",
+    "matplotlib==3.10.6",
+    "pillow==12.3.0",
+    "opencv-python; sys_platform == 'never'",
+    "opencv-contrib-python; sys_platform == 'never'",
+    "transformers>=5.17.0,<6",
+]
+exclude-dependencies = [
+    "agp-client",
+    "fasttext-wheel",
+    "alembic",
+    "blinker",
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "prettytable",
+    "skops",
+    "sqlalchemy",
+    "werkzeug",
+    "waitress",
+    "diskcache",
+    "azure-identity",
+    "azure-mgmt-compute",
+    "azure-mgmt-network",
+    "alibabacloud-ecs20140526",
+    "alibabacloud-tea-openapi",
+    "alibabacloud-tea-util",
+    "volcengine-python-sdk",
+    "paddleocr",
+    "paddlepaddle",
+]
+
+[pip]
+torch-backend = "cpu"

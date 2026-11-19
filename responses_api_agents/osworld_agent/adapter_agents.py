@@ -4,8 +4,9 @@
 
 The adapter owns model-specific prompting, history, parsing, and coordinate
 projection while OSWorld continues to own ``DesktopEnv`` and task evaluation.
-``NemotronV3NanoOmniAgent`` supports both image-history and single-image
-endpoints through configuration.
+``OSWorldProtocolAgent`` shares rollout behavior across registered model
+protocols. The existing ``NemotronV3NanoOmniAgent`` entrypoint keeps the Nano
+Omni defaults; other runners select their own model protocol.
 
 This module is intentionally named ``adapter_agents`` because the model-specific
 scaffold is implemented by the Gym adapter rather than upstream OSWorld's
@@ -22,6 +23,15 @@ import os
 import re
 import time
 from typing import Any, Dict, List, Mapping, Tuple
+
+from responses_api_agents.osworld_agent.history_policy import (
+    HistoryPolicySpec,
+    HistoryPolicyState,
+    plan_history,
+)
+from responses_api_agents.osworld_agent.model_protocol import OSWorldModelProtocol, ProtocolMessageContext
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
+from responses_api_agents.osworld_agent.super35_protocol import SUPER35_PROTOCOL, SUPER35_PROTOCOL_ID
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.adapter_agents")
@@ -132,6 +142,71 @@ _XY_POSITIONAL_METHODS = {
 
 def _encode_image(image_content: bytes) -> str:
     return base64.b64encode(image_content).decode("utf-8")
+
+
+# A rejected request and a malformed sample are different defects with
+# different remedies, and the old code funnelled both into one bucket named
+# after only one of them.  Classify explicitly so telemetry can tell a server
+# 4xx apart from the model emitting a stop token mid-string.
+_CONTEXT_OVERFLOW_MARKERS = (
+    "maximum context length",
+    "context_length_exceeded",
+    "exceeds model",
+    "reduce the length",
+    "input length",
+    "prompt is too long",
+    "please reduce",
+)
+
+# One bucket named "model_response_invalid" made a server 4xx and a
+# malformed sample indistinguishable in telemetry. Keep the family name for
+# consumers that aggregate, but report the specific defect.
+MODEL_FAILURE_OUTCOMES = {
+    "context_overflow": "model_context_overflow",
+    "transport_error": "model_call_failed",
+    "output_truncated": "model_output_truncated",
+    "empty_response": "model_response_empty",
+    "unparseable": "model_response_unparseable",
+}
+
+MODEL_FAILURE_KINDS = (
+    "context_overflow",
+    "transport_error",
+    "output_truncated",
+    "empty_response",
+    "unparseable",
+)
+
+
+def _failure_status_code(exc: BaseException) -> int | None:
+    for holder in (exc, getattr(exc, "response", None)):
+        code = getattr(holder, "status_code", None)
+        if isinstance(code, int):
+            return code
+    code = getattr(exc, "code", None)
+    return code if isinstance(code, int) else None
+
+
+def classify_model_failure(exc: BaseException, *, model_call_completed: bool) -> str:
+    """Name the defect behind one failed sampling attempt.
+
+    ``context_overflow`` is the only kind a retry cannot fix on its own: the
+    request is deterministically rejected, so resending it unchanged burns the
+    whole retry budget. Callers are expected to shrink the prompt instead.
+    """
+
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if any(marker in text for marker in _CONTEXT_OVERFLOW_MARKERS):
+        return "context_overflow"
+    if not model_call_completed:
+        return "transport_error"
+    if "finish_reason=" in text and "length" in text:
+        # The finish-reason guard runs before the parser, so this is the only
+        # kind that really means "the sampler hit its token budget".
+        return "output_truncated"
+    if "has no content" in text:
+        return "empty_response"
+    return "unparseable"
 
 
 def _response_parts(response: Any) -> tuple[str, str]:
@@ -373,19 +448,19 @@ def parse_nemotron_response(
     code_section = _extract_markdown_section(content, "Code")
     if code_section is None:
         error = "<Error>: no explicit ## Code section found"
-        return error, ["FAIL"], sections
+        return error, [], sections
     code_blocks = _CODE_BLOCK_RE.findall(code_section)
     if code_blocks:
         raw_code = code_blocks[-1].strip()
     else:
         if code_section.startswith("```"):
             error = "<Error>: unsupported or unterminated Code fence"
-            return error, ["FAIL"], sections
+            return error, [], sections
         raw_code = code_section
     original_code = normalize_python_code_newlines(raw_code).strip()
     if not original_code:
         error = "<Error>: the ## Code section is empty"
-        return error, ["FAIL"], sections
+        return error, [], sections
     if original_code != raw_code:
         sections["raw_code"] = raw_code
     sections["original_code"] = original_code
@@ -401,7 +476,7 @@ def parse_nemotron_response(
         )
         if not status_match:
             error = "<Error>: computer.terminate is missing a success/failure status"
-            return error, ["FAIL"], sections
+            return error, [], sections
         terminal = "DONE" if status_match.group(1).lower() == "success" else "FAIL"
         sections["code"] = terminal
         return action or original_code, [terminal], sections
@@ -415,7 +490,7 @@ def parse_nemotron_response(
     sections["code"] = projected
     if not projected:
         error = "<Error>: the ## Code section is empty"
-        return error, ["FAIL"], sections
+        return error, [], sections
     # Action and Thought are descriptive metadata; a missing description must
     # not discard an explicit, validated Code section. Keep the inference
     # visible in parser logs and textual history.
@@ -438,14 +513,92 @@ def _validate_python_actions(actions: List[str]) -> None:
             raise ValueError(f"Invalid Python action: {exc.msg} (line {exc.lineno}, offset {exc.offset})") from exc
 
 
-class NemotronV3NanoOmniAgent:
-    """Nemotron Nano Omni scaffold with a Gym-injected model transport."""
+DEFAULT_NEMOTRON_PROTOCOL_ID = "nano-omni-v3-osworld-v1"
+NEMOTRON_AGENT_OPTION_DEFAULTS: Dict[str, Any] = {
+    "coordinate_type": "relative",
+    "thinking": True,
+    "parse_retries": 5,
+    "parse_error_feedback": False,
+    "parse_retry_temperature": None,
+    "pre_done_checklist": False,
+    "repeated_action_warning_threshold": 0,
+    "repeated_action_window": 12,
+}
+
+
+def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, Any]:
+    """Apply the constructor's behavioral defaults and normalizations once."""
+
+    normalized = dict(NEMOTRON_AGENT_OPTION_DEFAULTS)
+    normalized.update({field: options[field] for field in normalized if field in options})
+    coordinate_type = normalized["coordinate_type"]
+    if coordinate_type not in {"relative", "absolute", "qwen25"}:
+        raise ValueError(f"Unsupported coordinate_type: {coordinate_type}")
+    retry_temperature = normalized["parse_retry_temperature"]
+    return {
+        "coordinate_type": coordinate_type,
+        "thinking": bool(normalized["thinking"]),
+        "parse_retries": max(1, int(normalized["parse_retries"])),
+        "parse_error_feedback": bool(normalized["parse_error_feedback"]),
+        "parse_retry_temperature": (None if retry_temperature is None else max(0.0, float(retry_temperature))),
+        "pre_done_checklist": bool(normalized["pre_done_checklist"]),
+        "repeated_action_warning_threshold": max(0, int(normalized["repeated_action_warning_threshold"])),
+        "repeated_action_window": max(1, int(normalized["repeated_action_window"])),
+    }
+
+
+# Preserve the existing public name for callers which define Markdown protocols.
+NemotronModelProtocol = OSWorldModelProtocol
+
+
+MODEL_PROTOCOL_REGISTRY: Dict[str, OSWorldModelProtocol] = {
+    DEFAULT_NEMOTRON_PROTOCOL_ID: NemotronModelProtocol(
+        protocol_id=DEFAULT_NEMOTRON_PROTOCOL_ID,
+        parser_id="nemotron-v3-nano-omni-parser-v1",
+        instruction_template=INSTRUCTION_TEMPLATE,
+        step_template=STEP_TEMPLATE,
+        text_history_template=TEXT_HISTORY_TEMPLATE,
+        system_prompt_thinking=SYSTEM_PROMPT_THINKING,
+        system_prompt_non_thinking=SYSTEM_PROMPT_NON_THINKING,
+        assistant_history_template_thinking=ASSISTANT_HISTORY_TEMPLATE_THINKING,
+        assistant_history_template_non_thinking=ASSISTANT_HISTORY_TEMPLATE_NON_THINKING,
+        parser=parse_nemotron_response,
+    ),
+    SUPER35_PROTOCOL_ID: SUPER35_PROTOCOL,
+}
+
+
+NEMOTRON_PROTOCOL_REGISTRY = MODEL_PROTOCOL_REGISTRY
+
+
+def resolve_model_protocol(protocol_id: str | None = None) -> OSWorldModelProtocol:
+    """Resolve a named model protocol and fail closed on unknown identities."""
+
+    resolved_id = protocol_id or DEFAULT_NEMOTRON_PROTOCOL_ID
+    try:
+        return MODEL_PROTOCOL_REGISTRY[resolved_id]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(MODEL_PROTOCOL_REGISTRY))
+        raise ValueError(f"Unknown model_protocol_id={resolved_id!r}. Allowed: {allowed}") from exc
+
+
+def resolve_nemotron_protocol(protocol_id: str | None = None) -> OSWorldModelProtocol:
+    """Compatibility name for the model protocol registry."""
+
+    return resolve_model_protocol(protocol_id)
+
+
+class OSWorldProtocolAgent:
+    """Shared screenshot agent loop with a registered model-facing protocol."""
 
     def __init__(
         self,
         model: str,
         max_steps: int,
-        max_image_history_length: int = 3,
+        max_image_history_length: int | None = None,
+        max_live_images: int | None = None,
+        history_policy: Mapping[str, Any] | HistoryPolicySpec | None = None,
+        model_protocol_id: str | None = None,
         platform: str = "ubuntu",
         max_tokens: int = 16384,
         top_p: float | None = 0.95,
@@ -465,12 +618,22 @@ class NemotronV3NanoOmniAgent:
         log_context: Mapping[str, Any] | None = None,
         **_kwargs: Any,
     ) -> None:
-        if coordinate_type not in {"relative", "absolute", "qwen25"}:
-            raise ValueError(f"Unsupported coordinate_type: {coordinate_type}")
+        behavior_options = normalize_nemotron_agent_options(
+            {
+                "coordinate_type": coordinate_type,
+                "thinking": thinking,
+                "parse_retries": parse_retries,
+                "parse_error_feedback": parse_error_feedback,
+                "parse_retry_temperature": parse_retry_temperature,
+                "pre_done_checklist": pre_done_checklist,
+                "repeated_action_warning_threshold": repeated_action_warning_threshold,
+                "repeated_action_window": repeated_action_window,
+            }
+        )
         if action_space != "pyautogui":
-            raise ValueError("NemotronV3NanoOmniAgent only supports pyautogui")
+            raise ValueError("OSWorldProtocolAgent only supports pyautogui")
         if observation_type != "screenshot":
-            raise ValueError("NemotronV3NanoOmniAgent only supports screenshot observations")
+            raise ValueError("OSWorldProtocolAgent only supports screenshot observations")
 
         self.model = model
         self.platform = platform
@@ -479,28 +642,53 @@ class NemotronV3NanoOmniAgent:
         self.temperature = temperature
         self.action_space = action_space
         self.observation_type = observation_type
-        self.coordinate_type = coordinate_type
+        self.coordinate_type = behavior_options["coordinate_type"]
         self.screen_size = screen_size
-        self.max_image_history_length = max(1, max_image_history_length)
+        if history_policy is not None:
+            if max_image_history_length is not None or max_live_images is not None:
+                raise ValueError(
+                    "history_policy cannot be combined with legacy max_image_history_length/max_live_images"
+                )
+            self.history_policy = (
+                history_policy
+                if isinstance(history_policy, HistoryPolicySpec)
+                else HistoryPolicySpec.from_mapping(history_policy)
+            )
+        else:
+            self.history_policy = HistoryPolicySpec.from_legacy(
+                keep_images=3 if max_image_history_length is None else max_image_history_length,
+                max_live_images=max_live_images,
+            )
+        # Compatibility aliases remain observable for callers which inspected
+        # these attributes, but the policy object is now the authority.
+        self.max_image_history_length = self.history_policy.low_water
+        self.max_live_images = self.history_policy.high_water
+        self.model_protocol = resolve_model_protocol(model_protocol_id)
+        self.model_protocol.check_coordinate_type(self.coordinate_type)
+        self.model_protocol_id = self.model_protocol.protocol_id
         self.max_steps = max_steps
         self.client_password = client_password
-        self.thinking = thinking
-        self.parse_retries = max(1, parse_retries)
-        self.parse_error_feedback = bool(parse_error_feedback)
-        self.parse_retry_temperature = (
-            None if parse_retry_temperature is None else max(0.0, float(parse_retry_temperature))
-        )
-        self.pre_done_checklist = bool(pre_done_checklist)
-        self.repeated_action_warning_threshold = max(0, int(repeated_action_warning_threshold))
-        self.repeated_action_window = max(1, int(repeated_action_window))
+        self.thinking = behavior_options["thinking"]
+        self.parse_retries = behavior_options["parse_retries"]
+        removed_options = sorted(option for option in ("training_mode", "training_turn_strategy") if option in _kwargs)
+        if removed_options:
+            raise ValueError(
+                "OSWorld no longer accepts training-specific agent switches: " + ", ".join(removed_options)
+            )
+        self.parse_error_feedback = behavior_options["parse_error_feedback"]
+        self.parse_retry_temperature = behavior_options["parse_retry_temperature"]
+        self.pre_done_checklist = behavior_options["pre_done_checklist"]
+        self.repeated_action_warning_threshold = behavior_options["repeated_action_warning_threshold"]
+        self.repeated_action_window = behavior_options["repeated_action_window"]
+        self.behavior_options = behavior_options
         self.log_context = {
             str(key): value for key, value in dict(log_context or {}).items() if value is not None and value != ""
         }
-        prompt = SYSTEM_PROMPT_THINKING if thinking else SYSTEM_PROMPT_NON_THINKING
-        self.system_prompt = prompt.replace("{password}", client_password)
-        self.assistant_history_template = (
-            ASSISTANT_HISTORY_TEMPLATE_THINKING if thinking else ASSISTANT_HISTORY_TEMPLATE_NON_THINKING
+        self.system_prompt = self.model_protocol.system_prompt(
+            thinking=self.thinking,
+            password=client_password,
         )
+        self.assistant_history_template = self.model_protocol.assistant_history_template(thinking=self.thinking)
         self.reset()
 
     def reset(self, _logger: logging.Logger | None = None, **_kwargs: Any) -> None:
@@ -508,11 +696,41 @@ class NemotronV3NanoOmniAgent:
         self.observations: List[Dict[str, Any]] = []
         self.actions: List[str] = []
         self.cots: List[Dict[str, Any]] = []
+        self.history_policy_state = HistoryPolicyState()
+        # Turns folded into the text summary. Replaces the former
+        # ``compacted_before`` scalar, which assumed the live images were one
+        # contiguous suffix and is meaningless once a policy keeps a sink.
+        self.compacted_turns: tuple[int, ...] = ()
+        self.snapshot_window: Dict[str, Any] = {
+            "prompt_snapshot_count": 0,
+            "snapshot_window_start": 0,
+            "snapshot_image_intervals": [],
+            "snapshot_sink_size": self.history_policy.sink,
+            "snapshot_image_budget_clamped": False,
+            "snapshot_compaction_triggered": False,
+            "snapshot_window_min": self.max_image_history_length,
+            "snapshot_window_max": self.max_live_images,
+            "history_policy_id": self.history_policy.policy_id,
+            "history_policy_name": self.history_policy.name,
+            "history_policy_schema_version": self.history_policy.schema_version,
+            "history_policy_compaction_epoch": 0,
+        }
+
+    @property
+    def agent_contract(self) -> Dict[str, Any]:
+        """Observed model/history contract used by this agent instance."""
+
+        return {
+            "schema_version": 1,
+            "model_protocol": self.model_protocol.to_contract(thinking=self.thinking),
+            "history_policy": self.history_policy.to_contract(),
+            "agent_options": dict(self.behavior_options),
+        }
 
     def call_llm(self, payload: Dict[str, Any], _model: str | None = None) -> Any:
         """Injected by ``client.run_osworld_task`` before the first prediction."""
 
-        raise RuntimeError("NemotronV3NanoOmniAgent requires an injected Gym model transport")
+        raise RuntimeError("OSWorldProtocolAgent requires an injected Gym model transport")
 
     def _log_event_context(self, *, step: int, parse_attempt: int) -> Dict[str, Any]:
         context = dict(self.log_context)
@@ -520,10 +738,7 @@ class NemotronV3NanoOmniAgent:
         return context
 
     def _assistant_history(self, cot: Dict[str, Any]) -> str:
-        return self.assistant_history_template.format(
-            thought=cot.get("thought", ""),
-            action=cot.get("action", ""),
-        )
+        return self.assistant_history_template.format_map({"thought": "", "action": "", **cot})
 
     def _parse_retry_messages(
         self,
@@ -538,7 +753,12 @@ class NemotronV3NanoOmniAgent:
         return [
             *messages,
             {"role": "assistant", "content": invalid_response},
-            {"role": "user", "content": PARSE_RETRY_TEMPLATE.format(error=error[-2000:])},
+            {
+                "role": "user",
+                "content": (self.model_protocol.parse_retry_template or PARSE_RETRY_TEMPLATE).format(
+                    error=error[-2000:]
+                ),
+            },
         ]
 
     @staticmethod
@@ -581,29 +801,71 @@ class NemotronV3NanoOmniAgent:
             guidance.append(PRE_DONE_CHECKLIST)
         return "\n\n".join(guidance)
 
-    def _messages(self, instruction: str, obs: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _messages(
+        self,
+        instruction: str,
+        obs: Dict[str, Any],
+        *,
+        max_images: int | None = None,
+    ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
-        instruction_prompt = INSTRUCTION_TEMPLATE.format(instruction=instruction)
-        image_history = min(len(self.actions), self.max_image_history_length - 1)
-        image_window_start = len(self.actions) - image_history
-
-        text_history = ""
-        if image_window_start > 0:
-            history_parts = []
-            for index in range(image_window_start):
-                history_parts.append(
-                    STEP_TEMPLATE.format(step_num=index + 1)
-                    + TEXT_HISTORY_TEMPLATE.format(
-                        thought=self.cots[index].get("thought", ""),
-                        action=self.cots[index].get("action", ""),
-                    )
+        instruction_prompt = self.model_protocol.instruction_template.format(instruction=instruction)
+        action_count = len(self.actions)
+        plan = plan_history(
+            self.history_policy,
+            self.history_policy_state,
+            completed_turns=action_count,
+            max_images=max_images,
+        )
+        self.history_policy_state = plan.next_state
+        self.compacted_turns = plan.text_turns
+        self.snapshot_window = plan.telemetry()
+        if self.model_protocol.message_renderer is not None:
+            return self.model_protocol.message_renderer(
+                ProtocolMessageContext(
+                    instruction=instruction,
+                    system_prompt=self.system_prompt,
+                    observations=self.observations,
+                    assistant_history=[self._assistant_history(cot) for cot in self.cots],
+                    current_observation=obs,
+                    image_turns=frozenset(plan.image_turns),
+                    guidance=self._step_guidance(),
                 )
-            text_history = "# Previous History Actions:\n" + "\n".join(history_parts)
+            )
 
-        for index in range(image_window_start, len(self.actions)):
-            user_text = instruction_prompt
-            if index == image_window_start and text_history:
-                user_text += text_history + "\n"
+        # Walk the plan in turn order and flush a text block whenever a run of
+        # folded turns ends.  For a single leading text run -- every policy
+        # shipped before sink_window -- this reproduces the previous rendering
+        # byte for byte.  It is also the only ordering that stays correct once
+        # a policy keeps a sink, because there the summary of the folded middle
+        # must land *after* the sink images and *before* the recent window,
+        # not attached to whichever image happens to come first.
+        pending_text: List[int] = []
+
+        def _flush_text() -> str:
+            if not pending_text:
+                return ""
+            history_parts = [
+                self.model_protocol.step_template.format(step_num=index + 1)
+                + self.model_protocol.text_history_template.format(
+                    thought=self.cots[index].get("thought", ""),
+                    action=self.cots[index].get("action", ""),
+                )
+                for index in pending_text
+            ]
+            pending_text.clear()
+            return "# Previous History Actions:\n" + "\n".join(history_parts) + "\n"
+
+        image_history = 0
+        for decision in plan.decisions:
+            index = decision.turn_index
+            if index >= action_count:
+                break
+            if decision.disposition != "live_image":
+                pending_text.append(index)
+                continue
+            image_history += 1
+            user_text = instruction_prompt + _flush_text()
             user_text += f"You are currently on Step {index + 1}.\n"
             messages.append(
                 {
@@ -621,9 +883,7 @@ class NemotronV3NanoOmniAgent:
             )
             messages.append({"role": "assistant", "content": self._assistant_history(self.cots[index])})
 
-        current_text = instruction_prompt
-        if image_history == 0 and text_history:
-            current_text += text_history + "\n"
+        current_text = instruction_prompt + _flush_text()
         current_text += f"You are currently on Step {len(self.actions) + 1}.\n"
         guidance = self._step_guidance()
         if guidance:
@@ -649,14 +909,27 @@ class NemotronV3NanoOmniAgent:
         return pattern.sub(lambda match: f"{match.group(1)}{int(match.group(2)) * factor})", code)
 
     def predict(self, instruction: str, obs: Dict[str, Any], **_kwargs: Any) -> tuple[str, List[str], Dict[str, Any]]:
+        # Re-planning after a context overflow must start from the same policy
+        # state as the first attempt, otherwise the window would advance once
+        # per retry and the trajectory would stop being replayable.
+        entry_policy_state = self.history_policy_state
+        image_budget: int | None = None
         messages = self._messages(instruction, obs)
         request_messages = messages
         repeated_action_warning = bool(self._repeated_action_guidance())
         last_error = "No response"
-        parsed_info: Dict[str, Any] = {}
+        last_error_type = "RuntimeError"
+        last_failure_stage = "model_call"
+        last_failure_kind = "transport_error"
+        failure_kind_counts: Dict[str, int] = {}
+        prompt_shrink_events: List[Dict[str, Any]] = []
+        completed_model_calls = 0
+        model_calls: List[Dict[str, Any]] = []
+        parsed_info: Dict[str, Any] = {"model_calls": model_calls}
 
         for attempt in range(self.parse_retries):
             response: Any = None
+            attempt_actions: List[str] = []
             step_number = len(self.actions) + 1
             parse_attempt = attempt + 1
             call_log_context = self._log_event_context(step=step_number, parse_attempt=parse_attempt)
@@ -665,6 +938,7 @@ class NemotronV3NanoOmniAgent:
                     "parse_feedback_injected": request_messages is not messages,
                     "pre_done_checklist_injected": self.pre_done_checklist,
                     "repeated_action_warning_injected": repeated_action_warning,
+                    **self.snapshot_window,
                 }
             )
             retry_temperature = (
@@ -681,20 +955,59 @@ class NemotronV3NanoOmniAgent:
             }
             if self.top_p is not None:
                 payload["top_p"] = self.top_p
+            template_kwargs = self.model_protocol.chat_template_kwargs(thinking=self.thinking)
+            if template_kwargs is not None:
+                payload["chat_template_kwargs"] = template_kwargs
+            tools = self.model_protocol.request_tools()
+            if tools is not None:
+                payload["tools"] = tools
+                payload["tool_choice"] = self.model_protocol.tool_choice
+            if self.model_protocol.skip_special_tokens is not None:
+                payload["skip_special_tokens"] = self.model_protocol.skip_special_tokens
+            if self.model_protocol.preserve_response:
+                payload["_nemo_gym_preserve_response"] = True
+            model_call_record: Dict[str, Any] = {
+                "parse_attempt": parse_attempt,
+                "prompt_messages": _jsonable(request_messages),
+                "response": None,
+                "accepted": False,
+                "parse_error": None,
+                "parsed_actions": [],
+                **self.snapshot_window,
+            }
+            model_call_completed = False
             try:
                 response = self.call_llm(payload, self.model)
+                model_call_completed = True
+                completed_model_calls += 1
+                model_call_record["response"] = _jsonable(response)
+                finish_reason = response.get("finish_reason") if isinstance(response, Mapping) else None
+                if finish_reason is not None and finish_reason not in {"stop", "tool_calls"}:
+                    raise ValueError(f"Model response did not finish cleanly: finish_reason={finish_reason!r}")
                 content, _reasoning = _response_parts(response)
-                if not content:
+                tool_calls = (
+                    response.get("tool_calls")
+                    if isinstance(response, Mapping)
+                    else getattr(response, "tool_calls", None)
+                )
+                if self.model_protocol.tool_choice == "none" and tool_calls:
+                    raise ValueError("The endpoint returned parsed tool_calls when raw response content was requested")
+                if not content and not tool_calls:
                     raise ValueError("model response has no content")
-                low_level, actions, parsed_info = parse_nemotron_response(
+                low_level, actions, response_info = self.model_protocol.parser(
                     response,
                     screen_size=self.screen_size,
                     coordinate_type=self.coordinate_type,
                     thinking=self.thinking,
                 )
+                attempt_actions = list(actions)
+                parsed_info.update(response_info)
                 if low_level.startswith("<Error>"):
                     raise ValueError(low_level)
                 _validate_python_actions(actions)
+                model_call_record["accepted"] = True
+                model_call_record["parsed_actions"] = attempt_actions
+                model_calls.append(model_call_record)
                 if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
                     _append_agent_io(
                         {
@@ -713,10 +1026,57 @@ class NemotronV3NanoOmniAgent:
                         }
                     )
                 break
+            except OSWorldModelTimeoutError:
+                # Transport deadlines are runner/runtime facts, not malformed
+                # model output. Do not turn one timed-out call into N parser
+                # retries or a synthetic policy outcome.
+                raise
             except Exception as exc:  # noqa: BLE001 - malformed model output is retryable.
                 last_error = str(exc)
+                last_error_type = type(exc).__name__
+                last_failure_stage = "response_parse" if model_call_completed else "model_call"
+                last_failure_kind = classify_model_failure(exc, model_call_completed=model_call_completed)
+                failure_kind_counts[last_failure_kind] = failure_kind_counts.get(last_failure_kind, 0) + 1
+                model_call_record["failure_stage"] = last_failure_stage
+                model_call_record["failure_kind"] = last_failure_kind
+                model_call_record["parse_error"] = last_error
+                model_call_record["parsed_actions"] = attempt_actions
+                model_calls.append(model_call_record)
                 will_retry = attempt + 1 < self.parse_retries
-                feedback_next = self.parse_error_feedback and will_retry
+                if last_failure_kind == "context_overflow" and will_retry:
+                    # Resending an over-long prompt cannot succeed; parse
+                    # feedback would only make it longer. Shrink the live-image
+                    # set and rebuild instead, replanning from the entry state.
+                    previous_images = int(self.snapshot_window.get("prompt_snapshot_count") or 1)
+                    minimum_images = self.history_policy.sink + 1
+                    next_budget = max(minimum_images, previous_images - 1)
+                    if next_budget < previous_images:
+                        image_budget = next_budget
+                        self.history_policy_state = entry_policy_state
+                        messages = self._messages(instruction, obs, max_images=image_budget)
+                        request_messages = messages
+                        prompt_shrink_events.append(
+                            {
+                                "parse_attempt": parse_attempt,
+                                "from_images": previous_images,
+                                "to_images": int(self.snapshot_window.get("prompt_snapshot_count") or 0),
+                                "reason": "context_overflow",
+                            }
+                        )
+                        self.logger.warning(
+                            "Context overflow at step %d attempt %d: shrinking live images %d -> %d",
+                            step_number,
+                            parse_attempt,
+                            previous_images,
+                            self.snapshot_window.get("prompt_snapshot_count"),
+                        )
+                    else:
+                        # The sink and current observation cannot be removed.
+                        # An unchanged rejected request cannot recover by retrying.
+                        will_retry = False
+                    feedback_next = False
+                else:
+                    feedback_next = self.parse_error_feedback and will_retry
                 if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
                     _append_agent_io(
                         {
@@ -744,15 +1104,56 @@ class NemotronV3NanoOmniAgent:
                 )
                 if feedback_next:
                     request_messages = self._parse_retry_messages(messages, response, last_error)
-        else:
-            return last_error, ["FAIL"], parsed_info
+                if not will_retry:
+                    break
+
+        if not model_calls[-1].get("accepted"):
+            # Report facts only.  The runner owns rollout termination and the
+            # runtime-admission policy decides whether the result is masked.
+            # In particular, do not turn malformed sampled output into a
+            # synthetic model-authored FAIL action.
+            parsed_info.update(
+                {
+                    "agent_outcome": MODEL_FAILURE_OUTCOMES[last_failure_kind],
+                    "agent_outcome_family": "model_response_invalid",
+                    "stop_rollout": True,
+                    # Admission needs the terminal attempt's fact. An earlier
+                    # malformed sample must not hide a later transport failure.
+                    "model_call_completed": model_call_completed,
+                    "parse_failure": {
+                        "attempt_count": len(model_calls),
+                        "completed_model_call_count": completed_model_calls,
+                        "last_failure_stage": last_failure_stage,
+                        "last_failure_kind": last_failure_kind,
+                        "failure_kind_counts": dict(failure_kind_counts),
+                        "prompt_shrink_events": list(prompt_shrink_events),
+                        "last_error_type": last_error_type,
+                        "last_error": last_error,
+                    },
+                }
+            )
+            return last_error, [], parsed_info
+
+        # A step that recovered after shrinking its prompt still consumed extra
+        # sampling and rendered a smaller history than the policy asked for.
+        # Record that on the successful step too, otherwise the only trace of a
+        # server rejection would be on rollouts that died -- which is exactly
+        # how twenty HTTP 400s went missing from a whole benchmark release.
+        # Emitted only when non-empty, so the clean path keeps its byte shape.
+        if prompt_shrink_events:
+            parsed_info["prompt_shrink_events"] = list(prompt_shrink_events)
+        if failure_kind_counts:
+            parsed_info["failure_kind_counts"] = dict(failure_kind_counts)
 
         actions = [self._scale_windows_scroll(action) for action in actions]
         self.observations.append(obs)
         self.actions.append(low_level)
-        self.cots.append(parsed_info)
+        # The returned evidence may contain several full prompts and images.
+        # Keep only parser semantics in the agent's rolling text history.
+        self.cots.append({key: value for key, value in parsed_info.items() if key != "model_calls"})
 
-        if len(self.actions) >= self.max_steps and not any(action in {"DONE", "FAIL"} for action in actions):
-            parsed_info["code"] = "FAIL"
-            return content, ["FAIL"], parsed_info
         return content, actions, parsed_info
+
+
+class NemotronV3NanoOmniAgent(OSWorldProtocolAgent):
+    """Compatibility entrypoint for the unchanged Nano Omni Markdown protocol."""

@@ -1,0 +1,55 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/deepswe/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 296.6,
+        "Min": 146.0,
+        "Max": 469.0,
+        "Standard deviation": 123.58
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "image": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "split": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "subset": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "task_id": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}

@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 import re
 import sys
 from asyncio import Semaphore
@@ -26,24 +27,28 @@ import ray
 from fastapi import Body, FastAPI
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.config import (
+    ModelServerRef,
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class HarborDatasetSourceConfig(BaseModel):
@@ -55,6 +60,11 @@ class HarborDatasetSourceConfig(BaseModel):
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: int
+
+    # CPUs Ray reserves per Harbor job. Jobs are I/O-bound, so a fractional
+    # value runs far more of them than Ray's default of 1 CPU/task, which caps
+    # concurrency at the driver's CPU count.
+    harbor_ray_task_num_cpus: Optional[float] = None
 
     # --- Harbor agent settings ---
     # Name of a built-in Harbor agent (e.g. "terminus-2", "claude-code", "aider").
@@ -118,6 +128,15 @@ class HarborRunRequest(BaseRunRequest):
 
 class HarborVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+class HarborVerifierSetupError(RuntimeError):
+    """Harbor could not move the verifier's files to or from the sandbox, so the trial was never measured.
+
+    ``/run`` fails with it instead of returning a reward of 0: the collector then records the rollout as a failed
+    ``/run`` (a failures-sidecar row with ``route_failures_to_sidecar``, otherwise the end of the run), so an
+    infrastructure failure is not scored as a model failure.
+    """
 
 
 def _find_trial_dir_with_result(job_dir: Path) -> Optional[Path]:
@@ -209,12 +228,18 @@ def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
 
 
 class HarborAgent(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: HarborAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        LOGGER.warning(
+            "responses_api_agents/harbor_agent is deprecated. The built-in benchmarks that use it will be migrated to "
+            "the harbor environment server (environment_servers/harbor, see its README.md); no action is needed "
+            "from you yet. New work should use the harbor environment server."
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -236,7 +261,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             global_config_dict = get_global_config_dict()
 
             policy_model_name = global_config_dict["policy_model_name"]
-            base_url = self._resolve_model_base_url(global_config_dict)
+            base_url = self._resolve_model_base_url(global_config_dict, body)
             run_timestamp = datetime.now(timezone.utc)
             run_id = self._build_run_id(run_timestamp)
 
@@ -266,27 +291,27 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 params = dict(
                     job_config_dict=job_config_dict,
                 )
-                future = runner_ray_remote.remote(_run_harbor_job_sync, params)
-                trial_dir_path = await asyncio.to_thread(ray.get, future)
+                runner = runner_ray_remote
+                if self.config.harbor_ray_task_num_cpus is not None:
+                    runner = runner_ray_remote.options(num_cpus=self.config.harbor_ray_task_num_cpus)
+                future = runner.remote(_run_harbor_job_sync, params)
+                # Await the ObjectRef directly; to_thread(ray.get, ...) would pin
+                # one executor thread per in-flight trial, so completed trials
+                # would queue behind long-running ones.
+                trial_dir_path = await future
                 trial_dir = Path(trial_dir_path)
 
-                # Read the trial result (summary: reward, agent_result, verifier_result)
-                with open(trial_dir / "result.json", "r") as f:
-                    trial_result = json.load(f)
+                def _read_trial_files():
+                    traj_path = trial_dir / "agent" / "trajectory.json"
+                    flags_path = trial_dir / "agent" / "agent_error_flags.json"
+                    return (
+                        json.loads((trial_dir / "result.json").read_text()),
+                        json.loads(traj_path.read_text()) if traj_path.exists() else None,
+                        json.loads(flags_path.read_text()) if flags_path.exists() else {},
+                    )
 
-                # Read the ATIF trajectory (full conversation with per-token logprobs)
-                trajectory = None
-                trajectory_path = trial_dir / "agent" / "trajectory.json"
-                if trajectory_path.exists():
-                    with open(trajectory_path, "r") as f:
-                        trajectory = json.load(f)
-
-                # Read agent error flags written by the agent
-                agent_error_flags = {}
-                agent_error_flags_path = trial_dir / "agent" / "agent_error_flags.json"
-                if agent_error_flags_path.exists():
-                    with open(agent_error_flags_path, "r") as f:
-                        agent_error_flags = json.load(f)
+                # Trajectories can be many MB; parse off the event loop.
+                trial_result, trajectory, agent_error_flags = await asyncio.to_thread(_read_trial_files)
 
                 # Extract reward from verifier result
                 verifier_result = trial_result.get("verifier_result")
@@ -311,6 +336,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 input_messages = []
                 usage = None
                 reward = 0.0
+
+            setup_failure = HarborAgentUtils.verifier_setup_failure(trial_result)
+            if setup_failure is not None:
+                raise HarborVerifierSetupError(f"{instance_id}: {setup_failure}")
 
             response = HarborAgentUtils.get_default_response_object()
             response["model"] = policy_model_name
@@ -398,14 +427,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
         sanitized = sanitized.strip("._")
         return sanitized or "unknown"
 
-    def _resolve_model_base_url(self, global_config_dict: Any) -> str:
-        """Resolve model base URL from required model_server reference."""
+    def _resolve_model_base_url(self, global_config_dict: Any, body: HarborRunRequest) -> str:
+        """Resolve the model base URL from the required model_server reference, with this run's URL segments."""
         server_name = self.config.model_server.name
         model_server_config = get_first_server_config_dict(
             global_config_dict,
             server_name,
         )
-        return f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+        base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+        return f"{self.base_url_for_run(base_url, body)}/v1"
 
     def _build_job_config(
         self,
@@ -535,3 +565,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarborAgent.run_webserver()  # noqa: F401

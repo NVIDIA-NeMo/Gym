@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
@@ -26,6 +26,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
+
+
+# Harbor's verifier raises these when uploading the tests to the sandbox, or downloading the verifier's output from
+# it, fails; the verifier then reports no result.
+VERIFIER_SETUP_EXCEPTIONS = frozenset({"AddTestsDirError", "DownloadVerifierDirError"})
 
 
 @dataclass
@@ -77,7 +82,8 @@ class HarborAgentUtils:
             "truncation": "disabled",
             "usage": {
                 "input_tokens": 0,
-                "input_tokens_details": {"cached_tokens": 0},
+                # Replaced by extract_usage when the trial produced results; otherwise cache reads are unknown.
+                "input_tokens_details": {"cached_tokens": None, "cache_write_tokens": 0},
                 "output_tokens": 0,
                 "output_tokens_details": {"reasoning_tokens": 0},
                 "total_tokens": 0,
@@ -87,6 +93,22 @@ class HarborAgentUtils:
             "safety_identifier": None,
             "store": True,
         }
+
+    @staticmethod
+    def verifier_setup_failure(trial_result: Optional[Dict[str, Any]]) -> Optional[str]:
+        """``"<exception type>: <message>"`` when Harbor could not move the verifier's files to or from the
+        sandbox (``harbor.verifier.verifier``) and the trial has no verifier result, else ``None``.
+
+        Such a trial was never measured, so its missing reward is not a 0 the model earned. A verifier that ran and
+        failed (a timeout, no reward file) and an agent timeout are not setup failures and stay scored zeros.
+        """
+        if not trial_result or trial_result.get("verifier_result") is not None:
+            return None
+        exception_info = trial_result.get("exception_info") or {}
+        exception_type = exception_info.get("exception_type")
+        if exception_type not in VERIFIER_SETUP_EXCEPTIONS:
+            return None
+        return f"{exception_type}: {exception_info.get('exception_message') or ''}"
 
     @staticmethod
     def extract_reward(verifier_result: Optional[Dict[str, Any]]) -> float:
@@ -162,29 +184,32 @@ class HarborAgentUtils:
         """Build the ``usage`` dict for the NeMo Gym response.
 
         Prefers ATIF ``final_metrics`` (exact totals from the trajectory) and
-        falls back to ``agent_result`` token counts from ``result.json``.
+        falls back to ``agent_result`` token counts from ``result.json``. Cache reads Harbor did not
+        report stay unknown (None).
         """
         input_tokens = 0
         output_tokens = 0
-        cached_tokens = 0
+        cached_tokens = None
 
         # Try trajectory final_metrics first
         if trajectory:
             fm = trajectory.get("final_metrics", {})
             input_tokens = fm.get("total_prompt_tokens", 0)
             output_tokens = fm.get("total_completion_tokens", 0)
-            cached_tokens = fm.get("total_cached_tokens", 0)
+            cached_tokens = fm.get("total_cached_tokens")
 
         # Fall back to trial result agent_result
         if input_tokens == 0 and output_tokens == 0:
             agent_result = trial_result.get("agent_result") or {}
             input_tokens = agent_result.get("n_input_tokens", 0) or 0
             output_tokens = agent_result.get("n_output_tokens", 0) or 0
-            cached_tokens = agent_result.get("n_cache_tokens", 0) or 0
+            cached_tokens = agent_result.get("n_cache_tokens")
 
         return {
             "input_tokens": input_tokens,
-            "input_tokens_details": {"cached_tokens": cached_tokens},
+            # cache_write_tokens is required by openai>=2.40 InputTokensDetails;
+            # vLLM backends do not report cache writes.
+            "input_tokens_details": {"cached_tokens": cached_tokens, "cache_write_tokens": 0},
             "output_tokens": output_tokens,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": input_tokens + output_tokens,

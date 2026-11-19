@@ -1,0 +1,126 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/swe_internal_v1/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 251.8,
+        "Min": 75.0,
+        "Max": 622.0,
+        "Standard deviation": 214.86
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "instance_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "delivery": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "language": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "repo": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "workdir": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "image_ref": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "nydus_ref": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "base_commit": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "solution_commit": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "patch": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "test_patch": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "problem_statement": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "run_script": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "parsing_script": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "test_files": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "test_patch_checkout_cmd": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "test_framework": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "FAIL_TO_PASS": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "PASS_TO_PASS": {
+        "unique_count": 12,
+        "total_count": 12
+    },
+    "original_issue_url": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "issue_specificity": {
+        "unique_count": 1,
+        "total_count": 5
+    }
+}

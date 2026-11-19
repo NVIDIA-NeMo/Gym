@@ -3,6 +3,9 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GYM_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+GYM_BIN=${GYM_BIN:-${GYM_ROOT}/.venv/bin/gym}
+GYM_PYTHON=${GYM_PYTHON:-$(dirname "${GYM_BIN}")/python}
+OPENSANDBOX_CLEANUP=${SCRIPT_DIR}/cleanup_opensandbox_run.py
 RUN_ROOT=${1:-${OSWORLD_RUN_ROOT:-${GYM_ROOT}}}
 RUN_ID=${OSWORLD_RUN_ID:?set OSWORLD_RUN_ID}
 STATE_DIR=${RUN_ROOT}/run/osworld/${RUN_ID}
@@ -84,6 +87,19 @@ stop_role() {
 # Stop new work before removing an orphaned run-owned Sandbox.
 stop_role eval "eval run"
 stop_role control "env start"
+
+if [[ -n "${OPENSANDBOX_BASE_URL:-}" || -n "${OPENSANDBOX_API_KEY:-}" ]]; then
+    if [[ -z "${OPENSANDBOX_BASE_URL:-}" || -z "${OPENSANDBOX_API_KEY:-}" ]]; then
+        echo "Set both OPENSANDBOX_BASE_URL and OPENSANDBOX_API_KEY for OpenSandbox cleanup" >&2
+        exit 2
+    fi
+    if [[ ! -x "${GYM_PYTHON}" ]]; then
+        echo "Gym Python is not executable: ${GYM_PYTHON}" >&2
+        echo "Set GYM_BIN or GYM_PYTHON to the environment installed with the sandbox extra" >&2
+        exit 2
+    fi
+    "${GYM_PYTHON}" "${OPENSANDBOX_CLEANUP}" --run-id "${RUN_ID}" --reap
+fi
 
 if command -v docker >/dev/null 2>&1; then
     container_ids=$(docker ps -aq \

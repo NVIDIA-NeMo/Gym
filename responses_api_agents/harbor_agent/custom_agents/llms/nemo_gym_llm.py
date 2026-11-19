@@ -31,7 +31,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 _RoutedExperts = list[list[list[int]]] | str
@@ -70,6 +70,18 @@ class NemoGymLLM(BaseLLM):
         self._collect_rollout_details = collect_rollout_details
         self._model_info = model_info or {}
         self._timeout_sec = timeout_sec
+
+        # Persistent HTTP client, reused across every turn of the episode. The Gym
+        # vllm_model server pins a session to one vLLM engine via a cookie-based
+        # SessionMiddleware (responses_api_models/vllm_model/app.py); a fresh client
+        # per call drops that cookie, so the server mints a NEW session_id each turn
+        # and round-robins it to a (usually different) engine. With many DP engines
+        # that means the growing conversation prefix is almost never warm in the engine
+        # handling the next turn -> prefix-cache miss -> the full context is re-prefilled
+        # every turn. Reusing one client keeps the session cookie, so the whole episode
+        # lands on the same engine and prefix caching only prefills the new tokens each
+        # turn. Lazily created on first use.
+        self._http_client: httpx.AsyncClient | None = None
 
         # Accumulated token IDs from the most recent turn, used for
         # on-policy correction via _replace_prefix_tokens in vLLM.
@@ -264,8 +276,12 @@ class NemoGymLLM(BaseLLM):
     ) -> dict[str, Any]:
         endpoint = self._chat_completions_endpoint()
         timeout = timeout_sec if timeout_sec is not None else self._timeout_sec
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(endpoint, json=payload)
+        # Reuse the persistent client so the session cookie (and thus the engine the
+        # session is pinned to) carries across turns. The timeout is applied per-request,
+        # so the optional per-call override is preserved regardless of the client's default.
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=timeout)
+        response = await self._http_client.post(endpoint, json=payload, timeout=timeout)
 
         if response.status_code >= 400:
             error_text = response.text.lower()
@@ -275,6 +291,16 @@ class NemoGymLLM(BaseLLM):
             response.raise_for_status()
 
         return response.json()
+
+    async def aclose(self) -> None:
+        """Close the persistent HTTP client. Called at episode end; best-effort
+        (the per-trial process exits anyway, but this avoids leaked connections /
+        'client was not closed' warnings when many episodes run in one process)."""
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            finally:
+                self._http_client = None
 
     def _chat_completions_endpoint(self) -> str:
         if self._api_base.endswith("/v1"):
@@ -301,13 +327,13 @@ class NemoGymLLM(BaseLLM):
         if not responses_create_params:
             return {}
 
-        from responses_api_models.vllm_model.app import VLLMConverter
+        from nemo_gym.models import ChatCompletionsConverter
 
         params_for_conversion = {key: value for key, value in responses_create_params.items() if key != "input"}
         params_for_conversion["input"] = []
         responses_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_for_conversion)
 
-        converter = VLLMConverter(
+        converter = ChatCompletionsConverter(
             return_token_id_information=self._collect_rollout_details,
         )
         chat_params = converter.responses_to_chat_completion_create_params(responses_params).model_dump(
@@ -409,9 +435,10 @@ class NemoGymLLM(BaseLLM):
         prompt_tokens = usage.get("prompt_tokens", 0) or 0
         completion_tokens = usage.get("completion_tokens", 0) or 0
         prompt_tokens_details = usage.get("prompt_tokens_details") or {}
-        cache_tokens = (
-            prompt_tokens_details.get("cached_tokens", 0) if isinstance(prompt_tokens_details, dict) else 0
-        ) or 0
+        cached = prompt_tokens_details.get("cached_tokens") if isinstance(prompt_tokens_details, dict) else None
+        # Harbor's UsageInfo.cache_tokens is a required int, so a count the backend did not report reaches
+        # Harbor's totals as 0; Gym cannot keep it unknown here.
+        cache_tokens = cached or 0
 
         return UsageInfo(
             prompt_tokens=int(prompt_tokens),

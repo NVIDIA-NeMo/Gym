@@ -17,21 +17,23 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
 import orjson
+from fastapi.testclient import TestClient
 from pytest import approx, fixture
 
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
+from resources_servers.tavily_search import app as tavily_search_app
 
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.tavily_search.app import (
     FindInPageRequest,
     ScrollPageRequest,
@@ -145,7 +147,7 @@ class TestApp:
         assert "raw content" not in joined
 
     def test_postprocess_search_results_with_answer(self, server: TavilySearchResourcesServer) -> None:
-        """Test that _postprocess_search_results returns just the answer when present."""
+        """Aggregate answers cannot be attributed to allowed URLs and must be discarded."""
         raw_results = {
             "answer": "The capital of France is Paris.",
             "results": [
@@ -154,10 +156,9 @@ class TestApp:
         }
         formatted = server._postprocess_search_results(raw_results)
         joined = "".join(formatted)
-        assert "Search Answer" in joined
-        assert "The capital of France is Paris." in joined
-        # Individual results should NOT be shown
-        assert "[1]" not in joined
+        assert "Search Answer" not in joined
+        assert "The capital of France is Paris." not in joined
+        assert "[1]" in joined
 
     # ---- web_search ----
 
@@ -187,6 +188,8 @@ class TestApp:
             max_results=10,
             exclude_domains=["blacklisteddomain.com"],
             search_depth="advanced",
+            include_answer=False,
+            include_raw_content=False,
         )
         assert expected_call_args == actual_call_args
 
@@ -397,3 +400,21 @@ class TestApp:
         expected_metrics_length = 5
         actual_metrics_length = len(server._session_id_to_metrics["abcd"].async_tavily_calls)
         assert expected_metrics_length == actual_metrics_length
+
+    def test_each_worker_dumps_its_own_session_metrics_on_exit(
+        self, config: TavilySearchResourcesServerConfig, tmp_path, monkeypatch
+    ) -> None:
+        """With several workers, each holds only its own sessions, so a shared file would keep only the last dump."""
+        monkeypatch.setattr(tavily_search_app, "__file__", str(tmp_path / "app.py"))
+        monkeypatch.setattr(tavily_search_app, "is_nemo_gym_fastapi_worker", lambda: True)
+        config.dump_session_id_to_metrics_on_exit = True
+        server = TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._session_id_to_metrics["abcd"]
+
+        with TestClient(server.setup_webserver()):
+            pass
+
+        assert not (tmp_path / "session_id_metrics.json").exists()
+        assert list(
+            orjson.loads((tmp_path / f"session_id_metrics.{os.getppid()}.{os.getpid()}.json").read_bytes())
+        ) == ["abcd"]

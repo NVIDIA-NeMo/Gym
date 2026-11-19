@@ -14,6 +14,7 @@ The wrapper supports two agent harnesses, selected by the `agent_framework` conf
 ## Table of Contents
 
 - [Architecture at a glance](#architecture-at-a-glance)
+- [Artifact locations and cleanup](#artifact-locations-and-cleanup)
 - [Agent flow per instance](#agent-flow-per-instance)
 - [Supported datasets and harnesses](#supported-datasets-and-harnesses)
 - [OpenHands integration](#openhands-integration)
@@ -72,6 +73,22 @@ Concurrency across instances is bounded by `concurrency` (default 256) via an as
 
 ---
 
+## Artifact locations and cleanup
+
+This server keeps three kinds of state, anchored differently (see the global `results_dir` / `cache_dir` keys in the [configuration reference](https://docs.nvidia.com/nemo/gym/latest/reference/configuration)):
+
+| State | Location | Lifecycle |
+|-------|----------|-----------|
+| Packaged read-only assets (setup scripts, prompts, configs) | next to the code (`responses_api_agents/swe_agents/`) | ships with the install |
+| Setup trees (harness clones, venvs, toolchains; multi-GB) | `<cache_dir>/swe_agents/swe_*_setup` | reused across runs; safe to delete when no run is active |
+| Per-run results | `<results_dir>/swebench_results_<run_session_id>` | one per server process per run; never deleted automatically |
+
+Per-instance work is scheduled across the cluster (Ray `SPREAD`), and the generated agent/eval commands embed the setup-tree and results paths as host paths executed from **other nodes**. Both roots must therefore resolve to the same content at the same path on every node that runs rollout workers: a shared filesystem, or trees pre-staged identically per node (e.g. baked into the container image). A `cache_dir` populated only on the head node breaks remote rollouts.
+
+Two compatibility notes: setup trees pre-staged next to the package (the layout before `cache_dir` existed, e.g. baked into container images at build time) are used only while `cache_dir` is left at its default — explicitly configuring `cache_dir` opts out, and removing the pre-staged trees migrates a default-config deployment. And OpenHands resolves `agent_framework_commit` to a full commit SHA against the configured repository at startup (`git ls-remote` for branches/`HEAD`; full 40-hex SHAs pass through), then keys its cache tree by repository identity plus that SHA (`swe_openhands_setup/<repo>-<hash>/<sha>`), so runs configured with different refs or forks never reset each other's checkout; old per-SHA trees are not garbage-collected — prune them when disk fills.
+
+---
+
 ## Agent flow per instance
 
 Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_patch_verification` for the verify-only path):
@@ -89,7 +106,7 @@ Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_pa
 5. **Wait for the eval container** to finish or hit `swebench_tests_timeout` (default 30 min). It produces a `report.json` whose location is dataset-specific.
 6. **Postprocess** the report (per-dataset; e.g. SWE-rebench / NV-internal / SWE-bench-Ext do their parsing host-side because the eval images may not have python3).
 7. **Decide `mask_sample`** (GRPO) — see [GRPO masking and failure modes](#grpo-masking-and-failure-modes).
-8. **Build the response** — convert the OpenHands chat-completions trajectory to Responses-API items via `VLLMConverter`, attach the tool list, return reward = `1.0 if resolved else 0.0` and metrics.
+8. **Build the response** — convert the OpenHands chat-completions trajectory to Responses-API items via `ChatCompletionsConverter`, attach the tool list, return reward = `1.0 if resolved else 0.0` and metrics.
 
 If `verify_golden_patch=true`, step 2–4 are skipped: the dataset's golden patch (`instance_dict["patch"]`) is written directly as the prediction and the eval container is the only thing that runs. This is a sanity check that a dataset sample's golden patch actually resolves under our local eval. Supported for `swe-bench-ext`, the SWE-bench / SWE-bench_Multilingual families (e.g. `princeton-nlp/SWE-bench_Verified`, `SWE-bench/SWE-bench_Multilingual`), and `SWE-rebench`. See [Golden-patch validation](#golden-patch-validation).
 
@@ -303,7 +320,7 @@ The OpenHands harness supports resuming a partial trajectory: the request's `bod
 
 **How it's plumbed.** In `SWEBenchWrapper._setup_params`:
 
-1. `_maybe_build_replay_messages(body)` scans `body.input` for any `function_call` / `function_call_output` items. If none are present, the request is treated as a normal seed and replay support is a no-op. If any are present, the input is converted to OpenAI chat-completion message format via the shared `VLLMConverter` and stashed on `problem_info["replay_messages"]` as a JSON string (metadata is typed `Dict[str, str]`).
+1. `_maybe_build_replay_messages(body)` scans `body.input` for any `function_call` / `function_call_output` items. If none are present, the request is treated as a normal seed and replay support is a no-op. If any are present, the input is converted to OpenAI chat-completion message format via the shared `ChatCompletionsConverter` and stashed on `problem_info["replay_messages"]` as a JSON string (metadata is typed `Dict[str, str]`).
 2. `OpenHandsHarnessProcessor.get_run_command` writes the JSON to `<persistent_dir>/replay_messages.json`, bind-mounts it into the agent container, and forwards the mounted path as positional arg #18 (`REPLAY_MESSAGES_PATH`) to `run_infer.sh`. Positional args 13..17 are emitted as empty-string placeholders so the right shift index lands.
 3. The replay's own system message is extracted and written to `<persistent_dir>/replay_system_prompt.j2`, then pinned as `resolved_system_prompt_template` so the standard mount logic bind-mounts it over OpenHands' `system_prompt.j2`. This is **unconditional** — it overrides any `agent_prompt_overrides` selection. Reason: OpenHands' `replay_utils.messages_to_replay_events()` drops system messages, so without this the resumed run would render OpenHands' own `system_prompt.j2` and drift from the recorded conversation.
 
@@ -392,7 +409,7 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `apptainer_memory_limit_mb`        | `65536` (64 GiB)                                  | Cumulative tree-RSS limit enforced by the gym-side memory watchdog (no cgroups in the enroot sandbox — see [Memory watchdog](#memory-watchdog-oom-handling)). `<= 0` disables it. |
 | `memory_watchdog_enabled`          | `true`                                            | Enable the RSS memory watchdog for the agent and eval containers.       |
 | `memory_watchdog_poll_interval_s`  | `1.0`                                             | Watchdog poll interval (seconds); bounds worst-case RSS overshoot of a fast allocator. |
-| `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container.               |
+| `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container. Exported as both `COMMAND_EXEC_TIMEOUT` (caps explicit per-action timeouts) and `SANDBOX_TIMEOUT` (default for actions without one; requires an OpenHands checkout whose eval sandbox config reads `SANDBOX_TIMEOUT`). |
 | `concurrency`                      | `256`                                             | Server-side asyncio semaphore for concurrent instances.                 |
 | `dataset_path`                     | `null`                                            | Optional default dataset JSONL.                                         |
 | `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families. See [Golden-patch validation](#golden-patch-validation). |
@@ -650,13 +667,21 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 
 ## GRPO masking and failure modes
 
-`SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when:
+`SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when one of these happens. The verify response carries `mask_sample` too, with a `failure_kind` and `failure_reason` for the first match in this order:
 
-1. The patch resolved the tests **but** the agent terminated in a `max_iteration` or `context_window` error — the reward is accidental.
-2. The eval container hit `swebench_tests_timeout` — reward is unreliable.
-3. The agent hit `swebench_agent_timeout` (wall-clock) regardless of `resolved`.
-4. The memory watchdog killed the **agent** container (OOM).
-5. The memory watchdog killed the **eval** container (OOM).
+| Condition | `failure_kind` |
+|---|---|
+| The evaluator failed before its startup marker, so no reward was measured | `provider_unavailable` |
+| The memory watchdog killed the **agent** container (OOM) | `provider_oom_killed` |
+| The memory watchdog killed the **eval** container (OOM) | `provider_oom_killed` |
+| The eval container hit `swebench_tests_timeout` | `swe_agents:eval_timeout` |
+| The agent hit `swebench_agent_timeout` (wall-clock) | `agent_timeout` |
+| The agent ended in a `max_iteration` error | `agent_limit` |
+| The agent ended in a `context_window` error | `model_context_limit` |
+
+Each condition masks regardless of `resolved`. A patch that resolves the tests after the agent hit its iteration limit or context window is accidental.
+
+Failures that leave the reward unmeasured come first, so a run that also hit an agent limit is not reported as a measured policy failure. An eval timeout gets its own `swe_agents:` name because the model's patch can make the tests hang, and so can a slow host.
 
 Agent error strings are bucketed by `_classify_agent_error`:
 

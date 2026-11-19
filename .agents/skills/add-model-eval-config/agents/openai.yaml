@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Add Model Config"
+  short_description: "Serve a new model for Gym evaluations, validate and smoke it, and keep comparisons fair"
+  default_prompt: "Use $add-model-eval-config to add this model's serving config to Gym and validate it."

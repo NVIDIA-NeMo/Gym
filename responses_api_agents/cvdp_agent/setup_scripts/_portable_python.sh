@@ -5,9 +5,15 @@ set -euo pipefail
 # Keep pip from satisfying deps from the host user site.
 export PYTHONNOUSERSITE=1
 
-PYTHON_VERSION="${PYTHON_VERSION:-3.12.8}"
-PBS_RELEASE="${PBS_RELEASE:-20241219}"
-ARCH="${ARCH:-x86_64-unknown-linux-gnu}"
+# Keep this aligned with the repo's pyproject.toml requires-python floor.
+PYTHON_VERSION="${PYTHON_VERSION:-3.13.15}"
+PBS_RELEASE="${PBS_RELEASE:-20260807}"
+case "$(uname -m)" in
+    x86_64) DEFAULT_ARCH="x86_64-unknown-linux-gnu" ;;
+    aarch64 | arm64) DEFAULT_ARCH="aarch64-unknown-linux-gnu" ;;
+    *) echo "unsupported portable python architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+ARCH="${ARCH:-$DEFAULT_ARCH}"
 
 install_portable_python() {
     if [ -x "$DEPS_DIR/bin/python3" ]; then
@@ -22,7 +28,11 @@ install_portable_python() {
 }
 
 install_nemo_gym_deps() {
-    # Install NeMo-Gym runtime deps; live source is mounted separately.
-    echo "Installing NeMo-Gym deps from $NEMO_GYM_ROOT"
-    "$DEPS_DIR/bin/python3" -m pip install "$NEMO_GYM_ROOT"
+    if [ -n "${NEMO_GYM_WHEEL:-}" ]; then
+        echo "Installing NeMo-Gym deps from wheel $NEMO_GYM_WHEEL"
+        "$DEPS_DIR/bin/python3" -m pip install "$NEMO_GYM_WHEEL"
+    else
+        echo "Installing NeMo-Gym deps from $NEMO_GYM_ROOT"
+        "$DEPS_DIR/bin/python3" -m pip install "$NEMO_GYM_ROOT"
+    fi
 }

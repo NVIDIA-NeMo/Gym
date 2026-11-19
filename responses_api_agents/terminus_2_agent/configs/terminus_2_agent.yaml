@@ -1,0 +1,45 @@
+terminus_2_agent:
+  responses_api_agents:
+    terminus_2_agent:
+      entrypoint: app.py
+      # Agent sessions get their task from the environment server.
+      # For host /run, set entrypoint: legacy_app.py and resources_server.
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Bounds concurrent runs: agent session activations, or host runs without a session.
+      concurrency: 32
+      model: null
+      workspace_root: null
+      system_prompt: null
+      max_turns: null
+      parser_name: json
+      temperature: 0.7
+      reasoning_effort: null
+      collect_rollout_details: false
+      enable_summarize: true
+      proactive_summarization_threshold: 8000
+      max_thinking_tokens: null
+      model_info:
+        max_input_tokens: 262144
+        max_output_tokens: 81920
+        input_cost_per_token: 0.0
+        output_cost_per_token: 0.0
+      trajectory_config:
+        raw_content: false
+      tmux_pane_width: 160
+      tmux_pane_height: 40
+      store_all_messages: false
+      record_terminal_session: false
+      interleaved_thinking: false
+      model_timeout_sec: 2400
+      command_timeout_sec: 1800
+      timeout: 10800
+      keep_logs: false
+      logs_root: outputs/terminus_2_agent/runs
+      # Agent sessions without sandbox_access start their own sandbox from this provider block.
+      sandbox_provider: null
+      sandbox_config: {}
+      sandbox_install_timeout_seconds: 900
+      session_close_timeout_seconds: 30

@@ -1,0 +1,252 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Guards the ``nemo_gym`` public API surface.
+
+Environments are expected to import base classes and core types from ``nemo_gym``.
+These tests pin that contract.
+Every advertised name resolves to the same object as its defining module.
+Importing ``nemo_gym`` does not eagerly import the server stack.
+"""
+
+import importlib
+import inspect
+import subprocess
+import sys
+import types
+
+import pytest
+
+import nemo_gym
+from nemo_gym import _LAZY_EXPORTS
+from nemo_gym._moved_paths import MOVED_MODULES
+
+
+EXPECTED_LAZY_EXPORTS = {
+    "AggregateMetrics",
+    "AggregateMetricsRequest",
+    "BaseMultiRewardVerifyResponse",
+    "BaseResourcesServerConfig",
+    "BaseResponsesAPIAgentConfig",
+    "BaseResponsesAPIModelConfig",
+    "BaseRunRequest",
+    "BaseRunServerInstanceConfig",
+    "BaseSeedSessionRequest",
+    "BaseSeedSessionResponse",
+    "BaseServerConfig",
+    "BaseVerifyRequest",
+    "BaseVerifyResponse",
+    "Domain",
+    "ModelServerRef",
+    "NeMoGymAsyncOpenAI",
+    "NeMoGymChatCompletion",
+    "NeMoGymChatCompletionCreateParamsNonStreaming",
+    "NeMoGymResponse",
+    "NeMoGymResponseCreateParamsNonStreaming",
+    "ReverifyMode",
+    "SESSION_ID_KEY",
+    "ServerClient",
+    "SimpleResourcesServer",
+    "SimpleResponsesAPIAgent",
+    "SimpleResponsesAPIModel",
+    "get_response_json",
+    "raise_for_status",
+}
+
+EXPECTED_EAGER_EXPORTS = {
+    "CACHE_DIR",
+    "PARENT_DIR",
+    "RESULTS_DIR",
+    "ROOT_DIR",
+    "WORKING_DIR",
+    "__package_name__",
+    "__version__",
+}
+
+_POSITIONAL = inspect.Parameter.POSITIONAL_OR_KEYWORD
+_KEYWORD = inspect.Parameter.KEYWORD_ONLY
+_REQUIRED = inspect.Parameter.empty
+
+# nemo_gym.environment.in_process: plan a benchmark in one call, then run single tasks against running servers.
+# The API is experimental and may change without a deprecation period. This list makes a change deliberate:
+# update it in the same change.
+EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
+    "plan_benchmark": [
+        ("benchmark", _POSITIONAL, _REQUIRED),
+        ("task_ids", _KEYWORD, None),
+        ("overrides", _KEYWORD, None),
+        ("work_dir", _KEYWORD, None),
+    ],
+    "TaskRunner.__init__": [
+        ("self", _POSITIONAL, _REQUIRED),
+        ("rows", _POSITIONAL, _REQUIRED),
+        ("registry_server", _KEYWORD, _REQUIRED),
+    ],
+    "TaskRunner.run_task": [
+        ("self", _POSITIONAL, _REQUIRED),
+        ("task_id", _POSITIONAL, _REQUIRED),
+        ("rollout_id", _KEYWORD, None),
+    ],
+    "TaskRunner.task_ids": [("self", _POSITIONAL, _REQUIRED)],
+    "serve_benchmark": [
+        ("benchmark", _POSITIONAL, _REQUIRED),
+        ("model_type", _KEYWORD, "openai_model"),
+        ("overrides", _KEYWORD, None),
+        ("registry_port", _KEYWORD, None),
+    ],
+    "PlannedBenchmark.task_ids": [("self", _POSITIONAL, _REQUIRED)],
+    "PlannedBenchmark.task_digests": [("self", _POSITIONAL, _REQUIRED)],
+    "PlannedBenchmark.to_json": [("self", _POSITIONAL, _REQUIRED)],
+    "PlannedBenchmark.from_json": [("text", _POSITIONAL, _REQUIRED)],
+}
+
+# The fields of the result types. The API is experimental, so a change is allowed; update this list in the same change.
+EXPECTED_IN_PROCESS_RESULT_FIELDS = {
+    "PlannedBenchmark": ["plan", "rows"],
+    "RolloutOutcome": ["reward", "failure", "masked", "prompt", "output", "raw"],
+    "TaskFailure": [
+        "kind",
+        "source",
+        "delivery",
+        "stage",
+        "terminal",
+        "reason",
+        "http_status",
+        "exception_type",
+    ],
+}
+
+
+@pytest.mark.parametrize("qualified_name", sorted(EXPECTED_IN_PROCESS_TASK_SIGNATURES))
+def test_in_process_task_api_keeps_its_signature(qualified_name: str):
+    from nemo_gym.environment import in_process
+
+    target = in_process
+    for part in qualified_name.split("."):
+        target = getattr(target, part)
+    parameters = inspect.signature(target).parameters.values()
+    actual = [(parameter.name, parameter.kind, parameter.default) for parameter in parameters]
+    assert actual == EXPECTED_IN_PROCESS_TASK_SIGNATURES[qualified_name]
+
+
+@pytest.mark.parametrize("type_name", sorted(EXPECTED_IN_PROCESS_RESULT_FIELDS))
+def test_in_process_result_types_keep_their_fields(type_name: str):
+    import dataclasses
+
+    from nemo_gym.environment import in_process
+
+    fields = [field.name for field in dataclasses.fields(getattr(in_process, type_name))]
+    assert fields == EXPECTED_IN_PROCESS_RESULT_FIELDS[type_name]
+
+
+def test_everything_an_external_caller_needs_is_exported_from_the_environment_package():
+    import nemo_gym.environment as environment
+
+    for name in (
+        "plan_benchmark",
+        "serve_benchmark",
+        "TaskRunner",
+        "PlannedBenchmark",
+        "RolloutOutcome",
+        "TaskFailure",
+        "EvalPlan",
+    ):
+        assert name in environment.__all__
+        assert getattr(environment, name) is not None
+
+
+def test_public_api_contract_is_explicit():
+    assert set(_LAZY_EXPORTS) == EXPECTED_LAZY_EXPORTS
+    assert set(nemo_gym.__all__) == EXPECTED_EAGER_EXPORTS | EXPECTED_LAZY_EXPORTS
+
+
+@pytest.mark.parametrize("name", sorted(_LAZY_EXPORTS))
+def test_public_symbol_is_accessible(name: str):
+    assert getattr(nemo_gym, name) is not None
+
+
+@pytest.mark.parametrize("name, module_name", sorted(_LAZY_EXPORTS.items()))
+def test_public_symbol_matches_deep_import(name: str, module_name: str):
+    """The top-level re-export must be the identical object exposed by the internal module.
+
+    This lets downstream code migrate without behavior changes.
+    It preserves ``isinstance`` and subclass checks across both import styles.
+    """
+    module = importlib.import_module(f"nemo_gym.{module_name}")
+    assert getattr(nemo_gym, name) is getattr(module, name)
+
+
+def _defining_module_problem(name: str, module_name: str) -> str | None:
+    """Why a `_LAZY_EXPORTS` entry does not name the module that defines `name`, or None if it does.
+
+    An entry that names an old path, or a module that only imports the name, still serves the same object,
+    so the identity check above cannot catch it.
+    """
+    module_path = f"nemo_gym.{module_name}"
+    if module_path in MOVED_MODULES:
+        return f"{module_path} is an old path"
+    namespace = vars(importlib.import_module(module_path))
+    if name not in namespace:
+        return f"{module_path} does not bind {name}"
+    value = namespace[name]
+    if (inspect.isclass(value) or inspect.isfunction(value)) and value.__module__ != module_path:
+        return f"{name} is defined in {value.__module__}, not {module_path}"
+    return None
+
+
+@pytest.mark.parametrize("name, module_name", sorted(_LAZY_EXPORTS.items()))
+def test_lazy_export_names_its_defining_module(name: str, module_name: str):
+    assert _defining_module_problem(name, module_name) is None
+
+
+def test_defining_module_check_refuses_old_paths_and_reexports(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setitem(MOVED_MODULES, "nemo_gym._old_path_for_test", None)
+    assert "is an old path" in _defining_module_problem("anything", "_old_path_for_test")
+
+    reexporting = types.ModuleType("nemo_gym._reexporting_for_test")
+    reexporting.helper = _defining_module_problem
+    monkeypatch.setitem(sys.modules, reexporting.__name__, reexporting)
+    assert "is defined in" in _defining_module_problem("helper", "_reexporting_for_test")
+    assert "does not bind" in _defining_module_problem("missing", "_reexporting_for_test")
+
+
+def test_all_is_sorted():
+    assert nemo_gym.__all__ == sorted(nemo_gym.__all__)
+
+
+def test_dir_includes_lazy_exports():
+    listed = dir(nemo_gym)
+    assert set(_LAZY_EXPORTS).issubset(listed)
+
+
+def test_unknown_attribute_raises_attribute_error():
+    with pytest.raises(AttributeError):
+        _ = nemo_gym.DefinitelyNotARealSymbol
+
+
+def test_top_level_import_is_lazy():
+    """Importing ``nemo_gym`` must not eagerly import the heavy submodules.
+
+    Run in a fresh interpreter to avoid modules loaded by other tests.
+    Accessing a symbol should import its backing module on demand.
+    """
+    script = (
+        "import sys\n"
+        "import nemo_gym\n"
+        "assert 'nemo_gym.server_runtime.base_resources_server' not in sys.modules, 'import was not lazy'\n"
+        "assert nemo_gym.SimpleResourcesServer is not None\n"
+        "assert 'nemo_gym.server_runtime.base_resources_server' in sys.modules, 'access did not import module'\n"
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

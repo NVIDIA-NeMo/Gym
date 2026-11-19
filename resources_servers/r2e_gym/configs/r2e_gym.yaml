@@ -1,0 +1,72 @@
+# Resources server for R2E-Gym/R2E-Gym-Subset (https://huggingface.co/datasets/R2E-Gym/R2E-Gym-Subset).
+#
+# 4,578 synthetic-issue Python tasks over real commits in ten repos. Every row names its own prebuilt
+# image (docker.io/namanjain12/<repo>_final:<commit>) with the repo at /testbed, its venv on PATH, the
+# held-out tests at /r2e_tests and their runner at /testbed/run_tests.sh. Grading is R2E-Gym's own
+# rule: the observed per-test statuses must equal the row's expected_output_json exactly.
+r2e_gym_resources_server:
+  resources_servers:
+    r2e_gym:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 1800
+      is_verifying_golden_patch: false
+      # seed_session always deletes /r2e_tests, the runner and the R2E sidecar JSON from the agent's
+      # sandbox; this additionally scrubs git history (the image's origin/master reaches the fix commit).
+      # Never turn this off for runs whose rewards are used for training.
+      apply_anti_cheating: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        # Limits are the BURST ceiling; requests are the guaranteed floor. cpu_cap_env sizes BLAS and
+        # xdist to the limit; numpy / pandas suites are the heavy end of this set.
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: r2e-gym
+
+# Golden-patch validation: grade the dataset's own patch instead of an agent's. A row whose golden
+# patch does not reproduce expected_output_json is a broken row, and scoring an agent against it
+# measures noise. Run it with resources_servers/r2e_gym/apply_golden_patch.py (3 passes, then
+# aggregate_golden_patch.py).
+r2e_gym_golden_patch_resources_server:
+  resources_servers:
+    r2e_gym:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 1800
+      is_verifying_golden_patch: true
+
+      # A full-set sweep runs hundreds of verifications concurrently against this one server; the
+      # per-task log parse and result encode are real CPU, so spread them over workers.
+      num_workers: 8
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: r2e-gym-golden-patch

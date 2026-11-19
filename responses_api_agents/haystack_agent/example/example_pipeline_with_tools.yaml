@@ -1,0 +1,69 @@
+components:
+  agent:
+    init_parameters:
+      chat_generator:
+        init_parameters:
+          generation_kwargs: {}
+          server_name: policy_model
+        type: responses_api_agents.haystack_agent.chat_generator.NeMoGymResponsesChatGenerator
+      exit_conditions:
+      - text
+      hooks: null
+      max_agent_steps: 20
+      raise_on_tool_invocation_failure: false
+      required_variables: '*'
+      state_schema: {}
+      streaming_callback: null
+      system_prompt: null
+      tool_concurrency_limit: 4
+      tool_streaming_callback_passthrough: false
+      tools:
+      - data:
+          api_key: null
+          description: Search the web. Returns the top results, each with title, exact
+            URL and a content snippet. Cite the exact URLs verbatim.
+          name: wiki_search
+          search_params:
+            description: Search Wikipedia for information
+            include_domains:
+            - wikipedia.org
+            name: wiki_search
+          top_k: 1
+        type: haystack_integrations.tools.tavily.websearch_tool.TavilyWebSearchTool
+      - data:
+          async_function: null
+          description: Perform arithmetic on two numbers.
+          function: responses_api_agents.haystack_agent.example.example_tools.calculator
+          inputs_from_state: null
+          name: calculator
+          outputs_to_state: null
+          outputs_to_string: null
+          parameters:
+            properties:
+              a:
+                description: First operand
+                type: number
+              b:
+                description: Second operand
+                type: number
+              operation:
+                description: Operation to perform
+                enum:
+                - add
+                - subtract
+                - multiply
+                - divide
+                - power
+                type: string
+            required:
+            - operation
+            - a
+            - b
+            type: object
+        type: haystack.tools.tool.Tool
+      user_prompt: null
+    type: haystack.components.agents.agent.Agent
+connection_type_validation: true
+connections: []
+max_runs_per_component: 100
+metadata: {}

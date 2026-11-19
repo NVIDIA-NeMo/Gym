@@ -1,0 +1,59 @@
+# AutomationBench scored with the Artificial Analysis headline metric, run with simple_agent through the
+# single_agent_turn Environment Server. See README.md.
+#
+#   gym eval prepare --benchmark automationbench
+#   gym eval run --benchmark automationbench --split benchmark --output <rollouts.jsonl> ...
+#
+# The verifiers_agent recipe behind the legacy_agent relay is config_legacy_agent.yaml (deprecated).
+config_paths:
+  - resources_servers/automationbench/configs/automationbench.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# The sampling config_legacy_agent.yaml sends from its agent config. Run-level, so it reaches every row of a run that
+# loads this file; `++responses_create_params.temperature=...` replaces it. Rows carry none, because verifiers_agent
+# would let a row's value win over its own config.
+responses_create_params:
+  temperature: 1.0
+  top_p: 1.0
+
+automationbench:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      # verifiers' max_turns is 50 model calls, but it never runs the 50th call's tool calls, and the score reads only
+      # the final world. simple_agent runs a call's tool calls before it checks max_steps, so 49 caps both at 49 rounds.
+      max_steps: 49
+      # Sessions take tool access from the Environment Server's grant; dataset tooling finds the task schema here.
+      resources_server:
+        type: resources_servers
+        name: automationbench_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: benchmarks/automationbench/data/example.jsonl
+          license: MIT
+        - name: automationbench
+          type: benchmark
+          jsonl_fpath: benchmarks/automationbench/data/automationbench-600.jsonl
+          prepare_script: benchmarks/automationbench/prepare.py
+          # prepare() imports automationbench_env from this directory's own
+          # package, which is not a Gym dependency.
+          prepare_project: benchmarks/automationbench
+          num_repeats: 1
+          license: MIT
+
+automationbench_environment_server:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: automationbench_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: automationbench
+      resources_tool_transports:
+        - direct_http

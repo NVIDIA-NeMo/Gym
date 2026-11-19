@@ -106,6 +106,11 @@ def test_nano_omni_runner_overlay() -> None:
 
     server_config = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
     assert server_config["runner_name"] == "nemotron_v3_nano_omni_agent"
+    assert server_config["model_protocol_id"] == "nano-omni-v3-osworld-v1"
+    assert server_config["history_policy"] == {
+        "name": "fixed",
+        "params": {"keep_images": 3},
+    }
     assert server_config["max_steps"] == 100
     assert server_config["max_tokens"] == 4096
     assert server_config["task_timeout"] == 7200
@@ -121,6 +126,16 @@ def test_nano_omni_profile_includes_model_transport_and_sandbox() -> None:
     assert server_config["runner_name"] == "nemotron_v3_nano_omni_agent"
     assert server_config["sandbox_provider"] == "osworld_sandbox"
     assert server_config["max_trajectory_length"] == 3
+
+
+def test_nano_omni_profile_pins_truncated_history_reasoning() -> None:
+    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_nano_omni.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    model_config = config["policy_model"]["responses_api_models"]["vllm_model"]
+    # Every reference score was measured with the template rendering earlier
+    # assistant turns without their reasoning.
+    assert model_config["chat_template_kwargs"] == {"truncate_history_thinking": True}
 
 
 @pytest.mark.parametrize(

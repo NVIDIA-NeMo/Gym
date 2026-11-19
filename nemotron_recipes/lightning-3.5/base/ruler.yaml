@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+#
+# RULER (long-context) for the Nemotron 3.5 Lightning 30B A3B Base model, run against an
+# EXISTING OpenAI-compatible endpoint. Nothing is deployed by this config.
+#
+# ─── YOUR ENDPOINT MUST BE SERVED FOR LONG CONTEXT ───────────────────────────
+#
+# This is a separate config from the short-context suite because RULER needs a different
+# serving configuration. A normal deployment of this model will NOT do: the checkpoint
+# declares max_position_embeddings 262144, so anything past 256k is refused unless the
+# server was started to allow it.
+#
+# Serve the endpoint you point this at with:
+#
+#   VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+#   vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16 \
+#     --tensor-parallel-size=4 --port 8000 \
+#     --served-model-name nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16 \
+#     --trust-remote-code --gpu-memory-utilization 0.9 --max-num-seqs 512 \
+#     --max-model-len 1100000 --mamba-cache-mode align \
+#     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
+#     --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'
+#
+# Container: vllm/vllm-openai:v0.19.1-cu130. A 1.1M-token context costs a great deal of
+# KV cache, which is why you would not serve the short-context suite this way.
+#
+# How to use:
+#
+# 1. copy this file locally or clone the repository
+# 2. serve the model as above, then fill in target.api_endpoint.url and model_id
+# 3. pre-generate the RULER data and mount it at /ruler_data (see README, "RULER")
+# 4. export POLICY_API_KEY and HF_TOKEN
+# 5. run `nemo-evaluator-launcher run --config path/to/ruler.yaml`
+#
+# ⚠️  Long-context results from this config are PROVISIONAL — see the "RULER" section
+#     of the README for the open discrepancy against the reference numbers.
+defaults:
+  - execution: local
+  - deployment: none
+  - _self_
+
+execution:
+  output_dir: NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16-ruler
+  # RULER needs the pre-generated dataset mounted into the evaluation container.
+  extra_docker_args: >-
+    -v /path/to/your/ruler_data:/ruler_data
+
+# The model under test. Serve it for long context first (see the header), then fill in.
+target:
+  api_endpoint:
+    url: https://<your-long-context-endpoint>/v1/completions
+    model_id: <your-model-id>
+    api_key_name: POLICY_API_KEY  # pragma: allowlist secret
+    type: completions
+
+evaluation:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+    POLICY_API_KEY: host:POLICY_API_KEY  # pragma: allowlist secret
+    TRUST_REMOTE_CODE: lit:1
+  nemo_evaluator_config:
+    config:
+      required_capabilities: []
+      params:
+        max_retries: 5
+        parallelism: 512
+        request_timeout: 3600
+        temperature: 0.00001
+        top_p: 0.99
+        max_new_tokens: 128
+        extra:
+          tokenizer: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16
+          tokenizer_backend: huggingface
+          model_trust_remote_code: true
+
+  tasks:
+    - name: ns_ruler_64k
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.05.1
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              ruler:
+                tokenizer_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16
+                data_dir: /ruler_data
+                setup: nanonext_64k_100
+    - name: ns_ruler_128k
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.05.1
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              ruler:
+                tokenizer_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16
+                data_dir: /ruler_data
+                setup: nanonext_128k_100
+    - name: ns_ruler_256k
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.05.1
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              ruler:
+                tokenizer_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16
+                data_dir: /ruler_data
+                setup: nanonext_256k_100
+    - name: ns_ruler_512k
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.05.1
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              ruler:
+                tokenizer_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16
+                data_dir: /ruler_data
+                setup: nanonext_512k_100
+    - name: ns_ruler_1m
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.05.1
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              ruler:
+                tokenizer_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16
+                data_dir: /ruler_data
+                setup: nanonext_1m_100

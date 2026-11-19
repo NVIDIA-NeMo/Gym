@@ -56,12 +56,14 @@ small NVIDIA integration patch:
 | `task_timeout_s` | per-task exec timeout |
 | `openclaw_provider_timeout_seconds` | optional OpenClaw model idle/request timeout in seconds; written to both the provider timeout and agent timeout ceiling so values above OpenClaw's 120s default are effective |
 | `model_base_url` / `model_api_key` / `model_name` | policy model OpenClaw runs against |
+| `model_server` | optional Gym Model Server reference for correlated policy calls; otherwise `model_base_url` is used directly |
 | `judge_model` / `judge_base_url` / `judge_api_key` | judge for hybrid / `llm_judge` tasks |
+| `judge_model_server` | optional Gym Model Server reference for correlated judge calls; otherwise `judge_base_url` is used directly |
 | `max_tokens`, `context_window`, `max_concurrent`, `timeout_multiplier` | run tuning |
 
-> **Model wiring:** OpenClaw must point at a **streaming-capable** endpoint directly — *not* a Gym
-> model server, which is non-streaming (`stream: Literal[False]`) and would 422 OpenClaw's streamed
-> requests. So the policy/judge endpoints are passed straight through to OpenClaw.
+> **Model wiring:** Set `model_server` and `judge_model_server` to route calls through correlated Gym
+> Model Servers. Gym supplies the streaming SSE envelope OpenClaw expects. Leave either reference unset
+> to use its configured direct endpoint instead.
 
 ## Setup
 

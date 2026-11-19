@@ -191,7 +191,8 @@ def count_lowercase_words(response: str) -> int:
 
 def keyword_frequency(response: str, keyword: str) -> int:
     """Count frequency of a keyword in response, ensuring it's a full word or phrase."""
-    _TOKEN_VALID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9'-]*[A-Za-z0-9])?$")
+    # Python's Unicode \w includes letters and digits; exclude underscore as before.
+    _TOKEN_VALID_RE = re.compile(r"[^\W_](?:(?:[^\W_]|['-])*[^\W_])?$")
 
     keyword = keyword.strip()
     for token in keyword.split():

@@ -19,3 +19,13 @@ livecodebench_v6_code_gen_simple_agent:
         prompt_config: benchmarks/prompts/eval/livecodebench/default_reasoning.yaml
         prepare_script: benchmarks/livecodebench/v6_2408_2505/prepare.py
         num_repeats: 3
+
+livecodebench_v6_code_gen_environment_server:
+  _inherit_from: code_gen_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: livecodebench_v6_code_gen_resources_server
+      agent_server:
+        name: livecodebench_v6_code_gen_simple_agent

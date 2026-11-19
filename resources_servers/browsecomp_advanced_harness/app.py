@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import functools
 import json
+import logging
 import os
 import re
 import shutil
@@ -21,36 +23,93 @@ import threading
 from asyncio import sleep
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from pathlib import Path
-from time import time
+from contextvars import ContextVar
+from pathlib import Path, PurePosixPath
+from time import monotonic, time
 from typing import Any, ClassVar, Dict, List, Optional
 from urllib.parse import urlparse
+from uuid import uuid4
 
+from aiohttp import ClientTimeout
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pocketshell import run as pocketshell_run
+from pydantic import BaseModel, Field, JsonValue, PrivateAttr, ValidationError, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.agents import SandboxSession
+from nemo_gym.client import RATE_LIMIT_ERROR_CODES, RETRY_ERROR_CODES, SESSION_ID_KEY, raise_for_status, request
+from nemo_gym.config import ModelServerRef, get_global_config_dict
+from nemo_gym.core import (
+    PROVIDER_UNAVAILABLE,
+    EpisodeId,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    TaskId,
+)
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
+    BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
-    RATE_LIMIT_ERROR_CODES,
-    RETRY_ERROR_CODES,
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
+from resources_servers.browsecomp_advanced_harness.rollout_context import (
+    format_phase_totals,
+    peek_phase_totals,
+    pop_phase_totals,
+    reset_rollout_id,
+    set_rollout_id,
+)
+from resources_servers.browsecomp_advanced_harness.sandbox import (
+    BrowsecompShellSandbox,
+    SandboxIsolationError,
+    ShellCommandTimedOut,
+    shell_source_files,
+)
+from resources_servers.browsecomp_advanced_harness.search_cache import SearchCache
+from resources_servers.browsecomp_advanced_harness.shell_output import format_shell_output
+
+
+LOG = logging.getLogger(__name__)
+
+
+# Exa /search "type" values. The deep variants run Exa's multi-step research path:
+# they also return a per-result `summary` and, when an outputSchema is supplied, a
+# top-level `output.content` synthesis — so the deep request asks for both.
+# Default stays "auto". On an internal eval of a reasoning model, deep scored
+# 77.8% vs a 74.3% auto reference — NOT significant, 9 samples of 397 — at +36.7% search
+# spend, because $0.012/deep vs $0.007/auto is a 71% premium against only 21% fewer calls.
+_EXA_DEEP_TYPES = ("deep-lite", "deep", "deep-reasoning")
+_EXA_SEARCH_TYPES = ("instant", "fast", "auto") + _EXA_DEEP_TYPES
+
+# Fraction of a query's render budget the [Deep Answer] block may take. Without a
+# cap a long synthesis crowds out the per-URL entries the model needs to browse.
+_EXA_DEEP_ANSWER_MAX_FRACTION = 0.5
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
@@ -60,22 +119,81 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     tavily_api_key: str | List[str] | None = None
     exa_api_key: str | List[str] | None = None
     exclude_domains_file_path: str
+    # Bounds on one search/browse provider call (both providers). Rate limits (429, 502, 503, 504, 520) are waited
+    # out without spending the retry attempts, but only for this long per call; past it they count as attempts and the
+    # call fails after the last one. 0 spends attempts from the first rate limit.
+    provider_rate_limit_wait_seconds: float = Field(default=600.0, ge=0, allow_inf_nan=False)
+    # Total time for one HTTP attempt to the provider, including a body that stalls. Applies to every attempt.
+    provider_request_timeout_seconds: float = Field(default=120.0, gt=0, allow_inf_nan=False)
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     debug: bool = False
     dump_session_id_to_metrics_on_exit: bool = False
+    # Per-CALL phase lines for every cache get and put. Off by default: cache gets
+    # run several per turn, so this is the one knob that can multiply driver-log size.
+    verbose_phase_log: bool = False
     # Terminal/disk mode: "none" = inline content (original behavior);
     # "per_session" = search/browse write pages to a per-session disk workspace
     # and a read-only bash_command tool is exposed for the model to grep/read them.
     workspace: str = "none"
     workspace_root: Optional[str] = None  # default: $BROWSECOMP_WS_ROOT or /tmp/browsecomp_ws
-    bash_timeout_s: float = 60.0  # match bc_frankie's _BASH_MAX_DURATION_S
+    bash_timeout_s: float = 60.0  # match the reference harness's _BASH_MAX_DURATION_S
     bash_max_concurrency: int = 64
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, JsonValue] = Field(
+        default_factory=lambda: {"image": "python:3.13-slim", "workdir": "/workspace", "ttl_s": 7200}
+    )
+    sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
+    sandbox_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Development-only opt-in. Never selected after a sandbox setup/execution failure.
+    allow_host_execution: bool = False
     max_page_bytes: int = 2_000_000  # cap per-page bytes written to disk
-    # Results returned per search query (both providers). The bc_frankie Exa
+    # Results returned per search query (both providers). The reference Exa
     # reference uses 10; its Tavily path (and this harness historically) uses 5.
     max_results: int = 5
+    # Total characters one `search` call may return, split evenly across the queries
+    # in that call (max_total_length // len(queries)). This — not max_results — is what
+    # actually binds: measured on a reference run, 64% of query blocks already return fewer
+    # than 5 results because the per-query slice runs out first, and search output is
+    # 92.5% of all tool-output characters. The tool schema does not expose the field, so
+    # this config value applies to every real call; an explicit request value still wins.
+    search_max_total_length: int = 30000
+    # When true (and workspace="per_session"), exa search asks for full text alongside
+    # highlights, writes each result to pages/, and returns a [Saved to] path — the same
+    # shape the tavily disk path returns, and the shape the `search` tool description and
+    # the system prompt already promise the model.
+    # Default true so the harness honours that promise. While it defaulted false the exa
+    # path silently broke the contract: zero of 1,239 exa search outputs in a reference
+    # run contained "[Saved to]", so the workspace/bash_command affordance covered
+    # `browse` only, and a run had to know to opt in to get the documented behaviour.
+    # MEASURED 2026-09-02, live against the exa API: this is NOT a dollar cost. Exa
+    # reports costDollars per response and it is identical with and without text —
+    # {"total": 0.007, "search": {"neural": 0.007}} either way, with no `contents` line
+    # item, because exa bills per QUERY not per result. The real cost is latency and
+    # response size: ~243k characters per 10-result query versus ~19k for highlights
+    # alone. Full text is 2.9-12.9x the highlight text and is genuine extra page content,
+    # not the same snippet with markup left in. Set false to get the smaller response.
+    exa_search_writes_pages: bool = True
+    # Exa /search "type". "auto" is the reference default. The deep variants run
+    # Exa's multi-step research + synthesis path; see _EXA_DEEP_TYPES for what that
+    # changes in the request/response. Validated at config load so a typo dies at
+    # startup rather than 400-ing every live query mid-run.
+    exa_search_type: str = "auto"
+    # Shared flat-file search/browse cache (network layer only: raw provider
+    # responses in, format-on-read out). Entries are shared across providers and
+    # runs, so enabling it changes what the agent retrieves; keep it off for
+    # baselines. None/"" disables. A relative path resolves against this server's dir.
+    search_cache_dir: Optional[str] = None
+    # SEARCH-only fuzzy matching over the cache's norms index: on an exact miss,
+    # the best token_sort_ratio match >= this (0, 1] threshold is served (serve-only;
+    # never re-written under the new key). It can serve another query's results.
+    # None = exact only. Browse stays exact. Requires search_cache_dir.
+    search_cache_fuzzy_threshold: Optional[float] = Field(default=None, gt=0, le=1, allow_inf_nan=False)
+    # Serve from search_cache_dir but never write to it. Set this when the root
+    # belongs to another user: it is world-readable but not world-writable, and a
+    # writable cache on it is refused at startup. Requires search_cache_dir.
+    search_cache_read_only: bool = False
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
@@ -85,12 +203,22 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError("exa_api_key is required when search_provider='exa'")
         if self.search_provider not in ("tavily", "exa"):
             raise ValueError(f"search_provider must be 'tavily' or 'exa', got {self.search_provider!r}")
+        if self.exa_search_type not in _EXA_SEARCH_TYPES:
+            raise ValueError(
+                f"exa_search_type must be one of {sorted(_EXA_SEARCH_TYPES)}, got {self.exa_search_type!r}"
+            )
+        if not self.search_cache_dir and (
+            self.search_cache_fuzzy_threshold is not None or self.search_cache_read_only
+        ):
+            raise ValueError("search_cache_fuzzy_threshold and search_cache_read_only require search_cache_dir")
         return self
 
 
 class TavilySearchRequest(BaseModel):
     queries: Optional[List[str]] = None  # Make optional to handle missing args gracefully
-    max_total_length: int = 30000
+    # None = fall back to the server's search_max_total_length (30000 unless configured).
+    # Kept settable so a programmatic caller or a test can still pin the budget per call.
+    max_total_length: Optional[int] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -173,6 +301,13 @@ class TavilySearchVerifyRequest(TavilySearchRunRequest, BaseVerifyRequest):
     pass
 
 
+class BrowsecompTaskData(BaseModel):
+    """The task fields /verify reads, checked when an Environment Server seeds the session."""
+
+    question: str
+    ground_truth: str
+
+
 class JudgeEvaluation(BaseModel):
     judge_response_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     reasoning: str
@@ -188,6 +323,19 @@ class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
     start_time: float
     end_time: float
     time_taken: Optional[float] = None
+    # Retry counts for THIS provider request: true 429s exactly (the reference harness
+    # parity: status == 429), everything else retryable (500/502/503/504/520)
+    # separately — never conflated.
+    num_429_retries: int = 0
+    num_other_retries: int = 0
+    # Per-query search yield. None = not applicable / never reached (a failed call, or a
+    # browse record) — deliberately NOT 0, which would read as "the provider had nothing".
+    # These separate the three cases the old records conflated: provider returned nothing,
+    # the character budget dropped results, and everything asked for came back.
+    num_results_offered: Optional[int] = None  # results the provider handed us
+    num_results_returned: Optional[int] = None  # results that fit the budget
+    num_results_truncated: Optional[int] = None  # offered - returned
+    chars_returned: Optional[int] = None  # size of the block handed to the model
 
     @model_validator(mode="after")
     def compute_time_taken(self):
@@ -199,15 +347,192 @@ class TavilySearchMetrics(BaseModel):
     async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
 
 
-class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+class TavilySearchVerifyResponse(TavilySearchVerifyRequest, BaseVerifyResponse, JudgeEvaluation):
     num_tool_calls: int
     reset_count: int = 0
     metrics: TavilySearchMetrics
+    # Top-level ints so Gym's aggregate_other_metrics reports them alongside
+    # reward in <split>_metrics.json (nested metrics.* records are not recursed).
+    num_provider_429s: int = 0
+    num_provider_other_retries: int = 0
+    # 1 when the agent stopped at its rollout_timeout_s, so the mean is the share of samples it stopped.
+    timed_out: int = 0
+
+
+# Task-local accumulator for provider retry counts. The client retry loops
+# increment it; _record_call moves it into the per-call metrics record and
+# resets it. A ContextVar (not client state) because clients are shared
+# round-robin across concurrent sessions — attribution must follow the asyncio
+# task making the call (per-query gather children each set their own).
+_PROVIDER_RETRY_COUNTS: ContextVar[Optional[Dict[str, int]]] = ContextVar("_PROVIDER_RETRY_COUNTS", default=None)
+
+
+def _count_provider_retry(status: int) -> None:
+    """Count one retried provider response: true 429s exactly, all other
+    retryable statuses (500/502/503/504/520) in a separate bucket."""
+    counts = _PROVIDER_RETRY_COUNTS.get()
+    if counts is None:
+        counts = {"num_429_retries": 0, "num_other_retries": 0}
+        _PROVIDER_RETRY_COUNTS.set(counts)
+    counts["num_429_retries" if status == 429 else "num_other_retries"] += 1
+
+
+# Attempts per provider call, and the connection-error retries within one attempt.
+_PROVIDER_MAX_ATTEMPTS = 3
+_PROVIDER_RETRY_SLEEP_S = 0.5
+
+
+def _may_wait_out_rate_limit(started_at: float, wait_budget_s: float) -> bool:
+    """Whether a rate-limited response may be retried without spending an attempt.
+
+    Waiting is bounded by wall-clock time since the call started, so a provider that rate-limits or fails
+    for a long stretch ends the call instead of retrying forever.
+    """
+    return monotonic() - started_at < wait_budget_s
+
+
+# ---- benchmark-contamination guard -----------------------------------------
+#
+# A provider result that quotes the benchmark itself -- a dataset mirror, a
+# leaderboard, the simple-evals repo -- hands the model the answer key. Training
+# on those rollouts teaches retrieval of the answer rather than research, and it
+# shows up later as an unearned score on the very benchmark being measured.
+#
+# Substring, case-insensitive. "browsecomp" already subsumes the org-prefixed
+# forms (openai/browsecomp), and "simple-eval" subsumes "simple-evals"; the other
+# entries are spellings a bare "browsecomp" genuinely misses.
+#
+# WIDENED 2026-09-09 after an audit that measured the
+# original three against five full 400-sample runs. That list caught 2,023 of 2,594
+# mirror-URL result blocks and MISSED 571 (22%) across 34 URLs -- dominated by
+# huggingface.co/datasets/Nithish2410/benchmark-bcplus, a mirror whose name never contains
+# "browsecomp" and which serves test.jsonl directly. The base model queried that one repo
+# 146 times on sample 10 and read the stored answer out of it. Cost of "bcplus": ~7 false
+# positives (a Go package CmdrVasquess/bcplus, a courier firm) against 571 true hits.
+#
+# NOT added, because the same audit measured them and said no: "deep-research"/"deepresearch"
+# (legitimate subject matter, +4..+12 samples/arm) and "GAIA"/"HLE" (false positives dominate,
+# +17..+33 samples/arm). Keep this list narrow and evidence-backed.
+CONTAMINATION_PATTERNS = [
+    "browsecomp",
+    "browse_comp",
+    "browse-comp",
+    "simple-eval",
+    "bcplus",
+    "bc-plus",
+    "bc_plus",
+]
+
+# Checked against the result's `url` FIELD ONLY -- never the page text. A dataset-viewer page
+# is never a legitimate primary source for a BrowseComp question, and HuggingFace hosts 2,163
+# of the leaked blocks: every long-tail mirror that matches no name pattern (RUC-AIBOX/Evo-Bench,
+# Halcyon-Zhang/BrowseComp-V3, Forival/LiveBrowseComp, OpenResearcher/web-bench, ...).
+# Folding these into CONTAMINATION_PATTERNS instead would drop any page that merely LINKS to a
+# HuggingFace dataset, which is a much larger blast radius than intended. (User call 2026-09-09.)
+CONTAMINATED_URL_SUBSTRINGS = [
+    "huggingface.co/datasets",
+    "datasets-server.huggingface.co",
+]
+
+# Dropping is per ITEM: one poisoned hit out of five costs that hit, not the whole tool
+# call. When EVERY result was dropped the call is rendered exactly like a provider that
+# returned nothing (search: the bare "[Search Query]" header; browse: "No content
+# extracted."). There is deliberately NO dedicated message: telling the model that its
+# results "referenced the benchmark" tells it the answer key exists and is nearby.
+# (User call 2026-09-09, replacing the decontam arm's CONTAMINATED_MESSAGE.)
+
+
+def _is_contaminated(*texts: Optional[str]) -> bool:
+    """True if any pattern appears in any of `texts` (case-insensitive)."""
+    hay = " ".join(t for t in texts if t).lower()
+    return any(p in hay for p in CONTAMINATION_PATTERNS)
+
+
+def _is_contaminated_url(url: Optional[str]) -> bool:
+    """True if the URL points at a dataset host that only ever mirrors the benchmark.
+
+    Field-scoped on purpose: see the CONTAMINATED_URL_SUBSTRINGS comment.
+    """
+    if not url:
+        return False
+    u = url.lower()
+    return any(s in u for s in CONTAMINATED_URL_SUBSTRINGS)
+
+
+def _drop_contaminated(result_list: List[dict]) -> tuple[List[dict], int]:
+    """Split a provider result list into (kept, n_dropped).
+
+    Two independent tests, either of which drops the item:
+      1. TEXT   -- scans the WHOLE serialized result, not a field whitelist, because exa
+                   carries its text in a `highlights` LIST that a title/url/content check
+                   would miss entirely.
+      2. URL    -- the `url` field only, against CONTAMINATED_URL_SUBSTRINGS.
+    The cost is one lower() over the raw page text per result -- a few ms against a ~17s
+    generation call, and it buys not having to enumerate provider schemas.
+    """
+    kept = [
+        r
+        for r in result_list
+        if not (_is_contaminated(json.dumps(r, default=str)) or _is_contaminated_url(r.get("url")))
+    ]
+    return kept, len(result_list) - len(kept)
+
+
+def _filter_results(result_list: List[dict], fn: str, provider: str) -> tuple[List[dict], int]:
+    """_drop_contaminated plus telemetry, so the drop rate is measurable per leg
+    rather than silent."""
+    kept, dropped = _drop_contaminated(result_list)
+    if dropped:
+        print(
+            f"[browsecomp][contamination] fn={fn} provider={provider} dropped={dropped} kept={len(kept)}",
+            flush=True,
+        )
+    return kept, dropped
+
+
+def _sum_provider_retry_counts(metrics: "TavilySearchMetrics") -> tuple:
+    """(total true 429s, total other retried statuses) across a session's calls."""
+    n429 = sum(c.num_429_retries for c in metrics.async_tavily_calls)
+    n_other = sum(c.num_other_retries for c in metrics.async_tavily_calls)
+    return n429, n_other
+
+
+# A 403 either refuses one request on content-safety grounds or rejects the account. Exa says which in the body's
+# `tag` (https://docs.exa.ai/reference/error-codes): PROHIBITED_CONTENT and CONTENT_FILTER_ERROR refuse one request,
+# while TEAM_BLOCKED and FEATURE_DISABLED reject the account. A body without a tag counts as a refusal only with Exa's
+# refusal wording ("Sorry, we've detected unsafe content and can't ..."); Tavily documents no refusal. A refusal must
+# fail only that tool call, and an account rejection must still abort the run.
+_CONTENT_REFUSAL_TAGS = frozenset({"PROHIBITED_CONTENT", "CONTENT_FILTER_ERROR"})
+_CONTENT_REFUSAL = re.compile(r"unsafe content", re.IGNORECASE)
+
+
+class SearchProviderRefusal(Exception):
+    """The search provider refused one request; the API key is fine."""
+
+
+def _is_content_refusal(body: str) -> bool:
+    """Whether a 403 body refuses one request rather than rejecting the account."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        parsed = None
+    tag = parsed.get("tag") if isinstance(parsed, dict) else None
+    if tag is not None:
+        return tag in _CONTENT_REFUSAL_TAGS
+    return _CONTENT_REFUSAL.search(body) is not None
+
+
+def _check_auth_failure(provider: str, status: int, body: str) -> None:
+    """A 401/403: raise SearchProviderRefusal for a content refusal, otherwise abort as a bad key."""
+    if status == 403 and _is_content_refusal(body):
+        print(f"[browsecomp][tool_fail][{provider}_refused] HTTP {status}: {body[:300]}", flush=True)
+        raise SearchProviderRefusal(f"{provider} refused this request: {body[:200]}")
+    _abort_on_invalid_api_key(provider, status, body)
 
 
 def _abort_on_invalid_api_key(provider: str, status: int, body: str) -> None:
-    """A 401/403 from the search provider means the API key is bad — every search in the
-    run would silently degrade, so kill the benchmark instead of producing a garbage score."""
+    """A 401, or a 403 that is not a content refusal, means the API key is bad: every search in
+    the run would silently degrade, so kill the benchmark instead of producing a garbage score."""
     print(
         f"[browsecomp][fatal][{provider}_invalid_api_key] HTTP {status}: search-provider API key "
         f"rejected — aborting benchmark. body={body[:300]}",
@@ -229,34 +554,39 @@ class TavilySearchAIOHTTPClient(BaseModel):
     base_url: str
 
     debug: bool
+    rate_limit_wait_seconds: float = 600.0
+    request_timeout_seconds: float = 120.0
 
     async def post(self, endpoint: str, content: str, timeout: float) -> TavilySearchAIOHTTPClientResponse:
         """
         endpoint: str e.g. "/search" or "/extract"
-        timeout: float is not used
+        timeout: float is not used; request_timeout_seconds bounds each attempt
         """
         request_kwargs = {
             "method": "POST",
             "headers": self.headers,
             "url": f"{self.base_url}{endpoint}",
             "data": content,
+            "timeout": ClientTimeout(total=self.request_timeout_seconds),
+            "_max_connection_retries": _PROVIDER_MAX_ATTEMPTS,
         }
 
-        MAX_NUM_TRIES = 3  # Hardcode for now
-        max_num_tries = MAX_NUM_TRIES
+        max_num_tries = _PROVIDER_MAX_ATTEMPTS
+        started_at = monotonic()
         tries = 0
         while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
 
             if response.status in (401, 403):
-                _abort_on_invalid_api_key("tavily", response.status, (await response.content.read()).decode())
+                _check_auth_failure("tavily", response.status, (await response.content.read()).decode())
 
             if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
+                # A rate limit does not spend an attempt, but only while the wait budget lasts.
                 rate_limited = response.status in RATE_LIMIT_ERROR_CODES
-                if rate_limited:
+                if rate_limited and _may_wait_out_rate_limit(started_at, self.rate_limit_wait_seconds):
                     max_num_tries += 1
+                _count_provider_retry(response.status)
 
                 content = (await response.content.read()).decode()
                 tag = "tavily_rate_limit" if rate_limited else "tavily_retry"
@@ -265,7 +595,7 @@ class TavilySearchAIOHTTPClient(BaseModel):
                     f"try={tries} body={content[:300]}",
                     flush=True,
                 )
-                await sleep(0.5)
+                await sleep(_PROVIDER_RETRY_SLEEP_S)
                 continue
             else:
                 tavily_response = TavilySearchAIOHTTPClientResponse(
@@ -281,11 +611,20 @@ class TavilySearchAIOHTTPClient(BaseModel):
         await raise_for_status(response)
 
     @classmethod
-    def from_httpx_AsyncClient(cls, client: AsyncClient, debug: bool) -> "TavilySearchAIOHTTPClient":
+    def from_httpx_AsyncClient(
+        cls,
+        client: AsyncClient,
+        debug: bool,
+        *,
+        rate_limit_wait_seconds: float = 600.0,
+        request_timeout_seconds: float = 120.0,
+    ) -> "TavilySearchAIOHTTPClient":
         return cls(
             headers=client.headers,
             base_url=str(client.base_url),
             debug=debug,
+            rate_limit_wait_seconds=rate_limit_wait_seconds,
+            request_timeout_seconds=request_timeout_seconds,
         )
 
 
@@ -300,6 +639,8 @@ class ExaAIOHTTPClient(BaseModel):
     headers: Dict[str, str]
     base_url: str = "https://api.exa.ai"
     debug: bool = False
+    rate_limit_wait_seconds: float = 600.0
+    request_timeout_seconds: float = 120.0
 
     async def _post(self, endpoint: str, body: Dict[str, Any]) -> Dict[str, Any]:
         request_kwargs = {
@@ -307,23 +648,26 @@ class ExaAIOHTTPClient(BaseModel):
             "headers": self.headers,
             "url": f"{self.base_url}{endpoint}",
             "data": json.dumps(body),
+            "timeout": ClientTimeout(total=self.request_timeout_seconds),
+            "_max_connection_retries": _PROVIDER_MAX_ATTEMPTS,
         }
 
-        MAX_NUM_TRIES = 3  # mirror the Tavily client
-        max_num_tries = MAX_NUM_TRIES
+        max_num_tries = _PROVIDER_MAX_ATTEMPTS
+        started_at = monotonic()
         tries = 0
         while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
 
             if response.status in (401, 403):
-                _abort_on_invalid_api_key("exa", response.status, (await response.content.read()).decode())
+                _check_auth_failure("exa", response.status, (await response.content.read()).decode())
 
             if response.status in RETRY_ERROR_CODES:
                 rate_limited = response.status in RATE_LIMIT_ERROR_CODES
-                if rate_limited:
-                    # don't let rate limits burn the retry budget
+                if rate_limited and _may_wait_out_rate_limit(started_at, self.rate_limit_wait_seconds):
+                    # within the wait budget, rate limits do not burn the attempts
                     max_num_tries += 1
+                _count_provider_retry(response.status)
                 content = (await response.content.read()).decode()
                 tag = "exa_rate_limit" if rate_limited else "exa_retry"
                 print(
@@ -331,7 +675,7 @@ class ExaAIOHTTPClient(BaseModel):
                     f"try={tries} body={content[:300]}",
                     flush=True,
                 )
-                await sleep(0.5)
+                await sleep(_PROVIDER_RETRY_SLEEP_S)
                 continue
 
             data = await response.json()
@@ -342,14 +686,30 @@ class ExaAIOHTTPClient(BaseModel):
         await raise_for_status(response)
 
     async def search(
-        self, query: str, num_results: int, exclude_domains: Optional[List[str]] = None
+        self,
+        query: str,
+        num_results: int,
+        exclude_domains: Optional[List[str]] = None,
+        include_text: bool = False,
+        search_type: str = "auto",
     ) -> Dict[str, Any]:
+        contents: Dict[str, Any] = {"highlights": True}
+        if include_text:
+            # Full page text per result, so search hits can be written to pages/ the way
+            # the tavily disk path writes raw_content. Opt-in for response size and
+            # latency, not for price: exa bills per query, and costDollars is unchanged
+            # by this field (measured 2026-09-02).
+            contents["text"] = True
         body: Dict[str, Any] = {
             "query": query,
             "numResults": num_results,
-            "type": "auto",
-            "contents": {"highlights": True},
+            "type": search_type,
+            "contents": contents,
         }
+        if search_type in _EXA_DEEP_TYPES:
+            # Deep search only pays off if we ask for what it synthesizes.
+            contents["summary"] = True
+            body["outputSchema"] = {"type": "text"}
         if exclude_domains:
             body["excludeDomains"] = list(exclude_domains)
         return await self._post("/search", body)
@@ -361,13 +721,10 @@ class ExaAIOHTTPClient(BaseModel):
 
 # ---------------------------------------------------------------------------
 # Terminal/disk mode: per-session page workspace (pages/ + manifest.tsv) and a
-# read-only bash tool. Ported from the bc_frankie harness.
+# read-only bash tool. Ported from the reference harness.
 # ---------------------------------------------------------------------------
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _URL_RE = re.compile(r"https?://([^/]+)(/.*)?")
-
-_BASH_HEAD_BYTES = 8192
-_BASH_TAIL_BYTES = 4096
 
 
 def _slugify(text: str, max_len: int = 40) -> str:
@@ -386,19 +743,8 @@ def _slug_from_url(url: str) -> str:
     return _slugify(f"{host} {tail}")
 
 
-def _bash_truncate(s: str) -> str:
-    if len(s) <= _BASH_HEAD_BYTES + _BASH_TAIL_BYTES + 64:
-        return s
-    omitted = len(s) - _BASH_HEAD_BYTES - _BASH_TAIL_BYTES
-    return (
-        f"{s[:_BASH_HEAD_BYTES]}\n"
-        f"[...truncated {omitted} bytes; head shown above, tail follows...]\n"
-        f"{s[-_BASH_TAIL_BYTES:]}"
-    )
-
-
-# --- bash_command guards (ported byte-for-byte from the bc_frankie_bash_tool
-# harness @ ee72d54: _bash_denylisted + _bash_allowlisted). Layered deny-first,
+# --- bash_command guards (ported byte-for-byte from an internal reference
+# harness: _bash_denylisted + _bash_allowlisted). Layered deny-first,
 # then default-deny allow-list. NOT a security boundary (the ulimit -f 0 in
 # _run_bash_readonly is the kernel backstop); these block destructive/network/
 # interpreter commands + command/process substitution + find -exec / sed -i. ---
@@ -675,11 +1021,46 @@ class _PageWriter:
         return f"pages/{fname}"
 
 
+# An episode seed's resources_session_id names its workspace directory, so it must be one plain path component.
+_WORKSPACE_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# What the model reads when the tool sandbox fails; the provider's detail stays in the server log.
+_SHELL_FAILURE_OUTPUT = "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
+
+
+def _entry_has_page_text(entry: dict) -> bool:
+    """Whether a cached search entry can save pages: a tavily entry always holds raw content, an exa
+    entry only when it was fetched with page text."""
+    if entry.get("provider", "tavily") != "exa":
+        return True
+    return any(isinstance(r, dict) and r.get("text") for r in entry["results"])
+
+
+def _remove_workspace(workspace: Path) -> None:
+    """Remove a session workspace, raising on any failure other than the directory already being gone."""
+
+    def ignore_missing(function, path, error: BaseException) -> None:
+        if not isinstance(error, FileNotFoundError):
+            raise error
+
+    shutil.rmtree(workspace, onexc=ignore_missing)
+
+
+# Judge retry backoff cap. The 2026-07-15 inference-api 529 outage outlasted the old
+# 10-attempt/30s-cap schedule (~2.9 min total) and falsely zeroed 25 samples in one
+# full-400 run; 15 attempts capped at 120s gives ~18 min of cumulative window.
+JUDGE_BACKOFF_CAP_S = 120
+
+
+def _judge_backoff_s(attempt: int) -> int:
+    """Exponential backoff for judge-call retries: 1, 2, 4, ... capped at JUDGE_BACKOFF_CAP_S."""
+    return min(2**attempt, JUDGE_BACKOFF_CAP_S)
+
+
 def _last_assistant_text(response) -> str:
     """Text of the LAST assistant message item in response.output (the model's final answer).
     Replaces Response.output_text, which CONCATENATES every assistant message item — wrong when
     the model emits text alongside tool calls mid-trajectory (~49% of BrowseComp samples). Also
-    aligns with bc_frankie, which grades only the final message."""
+    aligns with the reference harness, which grades only the final message."""
     text = ""
     for item in response.output:
         if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
@@ -701,11 +1082,19 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
     _session_workspaces: Dict[str, "_PageWriter"] = PrivateAttr(default_factory=dict)
+    # Episode sessions by resources_session_id, with the episode and task each was seeded for.
+    _episode_sessions: Dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
+    _fences: Optional[ResourcesSessionFences[EpisodeId]] = PrivateAttr(default=None)
     _bash_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
     _workspace_root: Optional[str] = PrivateAttr(default=None)
+    _search_cache: SearchCache = PrivateAttr()
+    _shell_sessions: dict[str, BrowsecompShellSandbox] = PrivateAttr(default_factory=dict)
+    # Why the session's tool sandbox failed, if it did: /verify masks that sample instead of scoring it.
+    _shell_failures: dict[str, str] = PrivateAttr(default_factory=dict)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
-    JUDGE_MAX_ATTEMPTS: int = 10
+    JUDGE_MAX_ATTEMPTS: ClassVar[int] = 15
 
     def model_post_init(self, __context) -> None:
         # Tavily clients (built only when a Tavily key is configured).
@@ -713,7 +1102,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if isinstance(tavily_api_keys, str):
             tavily_api_keys = [tavily_api_keys]
 
-        # Optional Tavily client-source identity header (matches bc_frankie's
+        # Optional Tavily client-source identity header (matches the reference harness's
         # x-client-source). Value comes ONLY from the env (TAVILY_CLIENT_SOURCE);
         # not hardcoded. Empty/unset => header not sent.
         client_source = os.environ.get("TAVILY_CLIENT_SOURCE", "")
@@ -721,7 +1110,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
             for async_tavily_client in self._async_tavily_clients:
                 async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
-                    async_tavily_client._client, self.config.debug
+                    async_tavily_client._client,
+                    self.config.debug,
+                    rate_limit_wait_seconds=self.config.provider_rate_limit_wait_seconds,
+                    request_timeout_seconds=self.config.provider_request_timeout_seconds,
                 )
                 if client_source:
                     async_tavily_client._client.headers["x-client-source"] = client_source
@@ -736,15 +1128,39 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 ExaAIOHTTPClient(
                     headers={"x-api-key": k, "Content-Type": "application/json"},
                     debug=self.config.debug,
+                    rate_limit_wait_seconds=self.config.provider_rate_limit_wait_seconds,
+                    request_timeout_seconds=self.config.provider_request_timeout_seconds,
                 )
                 for k in exa_api_keys
             ]
             print(f"Search provider: exa ({len(self._exa_clients)} key(s))")
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
 
         self._exclude_domains = self._parse_exclude_domains()
-        self._page_cache: dict[str, str] = {}
+
+        # Shared flat-file provider cache (replaces the never-used in-memory
+        # _page_cache). Only raw provider responses are stored — never
+        # model-authored text — so a rollout cannot plant results for siblings.
+        cache_dir = self.config.search_cache_dir
+        if cache_dir and not Path(cache_dir).is_absolute():
+            cache_dir = str(Path(__file__).parent / cache_dir)
+        self._search_cache = SearchCache(
+            cache_dir,
+            fuzzy_threshold=self.config.search_cache_fuzzy_threshold,
+            verbose_phase_log=self.config.verbose_phase_log,
+            read_only=self.config.search_cache_read_only,
+        )
+        if self._search_cache.enabled:
+            LOG.info(
+                "Search cache enabled at %s (fuzzy=%s, read_only=%s, index norms=%s)",
+                cache_dir,
+                self.config.search_cache_fuzzy_threshold or "off",
+                self._search_cache.read_only,
+                self._search_cache.index_size,
+            )
+
         print(f"Excluded domains: {self._exclude_domains}")
 
         # Terminal/disk mode setup
@@ -768,26 +1184,213 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         @asynccontextmanager
         async def lifespan_wrapper(app):
-            async with main_app_lifespan(app) as maybe_state:
-                yield maybe_state
+            async def close_shell(sid: str) -> None:
+                # Best effort. Five close timeouts leave room for a running tool's cleanup under the lock and for
+                # the release's phases, each bounded by one close timeout. gym env kills this process one second
+                # after its interrupt unless server_shutdown_timeout_seconds is raised, and Enroot ignores ttl_s, so
+                # a sandbox left behind there needs `enroot remove`.
+                try:
+                    async with asyncio.timeout(self.config.sandbox_close_timeout_seconds * 5):
+                        async with self._locks.locked(sid):
+                            await self._release_session(sid)
+                except Exception:
+                    LOG.exception("Could not release BrowseComp shell session %s at shutdown", sid)
 
-            if self.config.dump_session_id_to_metrics_on_exit:
-                out_file = Path(__file__).parent / "session_id_metrics.json"
-                print(f"Dumping session_id metrics to {out_file}")
+            try:
+                async with main_app_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await asyncio.gather(*(close_shell(sid) for sid in list(self._shell_sessions)))
+                if self.config.dump_session_id_to_metrics_on_exit:
+                    out_file = Path(__file__).parent / "session_id_metrics.json"
+                    if is_nemo_gym_fastapi_worker():
+                        # With num_workers > 1, each worker holds only the sessions it served.
+                        # Each writes its own file, so one worker's dump does not overwrite another's.
+                        # The name starts with the server's main process ID, so one run's files share a prefix.
+                        out_file = out_file.with_name(f"session_id_metrics.{os.getppid()}.{os.getpid()}.json")
+                    print(f"Dumping session_id metrics to {out_file}")
 
-                to_dump = {k: v.model_dump(mode="json") for k, v in self._session_id_to_metrics.items()}
-                with out_file.open("w") as f:
-                    json.dump(to_dump, f)
+                    to_dump = {k: v.model_dump(mode="json") for k, v in self._session_id_to_metrics.items()}
+                    with out_file.open("w") as f:
+                        json.dump(to_dump, f)
 
         app.router.lifespan_context = lifespan_wrapper
 
         return app
 
-    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Open a session's workspace and, for an episode session, its tool sandbox.
+
+        An episode seed is keyed by ``resources_session_id`` and validates ``task_data``. With ``workspace: per_session``
+        it also starts the tool sandbox. A repeat for the same episode and task reuses the session, and another
+        episode or a closed session answers 409. A flat ``/run`` seed is keyed by the cookie, replaces earlier state
+        for it, and defers the sandbox to the first ``bash_command``. A missing or invalid sandbox configuration
+        answers 422, and so does an episode seed whose provider cannot be created or whose sandbox shares the host's PID
+        namespace.
+        """
         if self.config.workspace == "per_session":
+            self._validate_shell_config()
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            # An agent's /run seeds with its row; /verify owns its eventual cleanup. Such an agent can end a run
+            # without /verify (after a timeout, for example), so its sandbox starts with the first bash_command: only
+            # a run that used the shell can leave one behind, and a failed start cannot strand this seed's workspace.
             sid = request.session[SESSION_ID_KEY]
-            self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
-        return BaseSeedSessionResponse()
+            async with self._locks.locked(sid):
+                if self.config.workspace == "per_session":
+                    await self._release_session(sid)
+                    self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
+            return BaseSeedSessionResponse()
+
+        sid = body.resources_session_id
+        async with self._locks.locked(sid):
+            self._fences.raise_if_fenced(sid)
+            identity = self._episode_sessions.get(sid)
+            if identity is None:
+                try:
+                    BrowsecompTaskData.model_validate(body.task_data)
+                except ValidationError as error:
+                    raise ResourcesSeedRejectedError(f"task_data is not a BrowseComp task: {error}") from error
+                if self.config.workspace == "per_session":
+                    if not _WORKSPACE_SESSION_ID_RE.fullmatch(sid):
+                        raise ResourcesSeedRejectedError(
+                            f"resources_session_id {sid!r} cannot name a workspace directory"
+                        )
+                    self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
+                self._episode_sessions[sid] = (body.episode_id, body.task_id)
+            elif identity != (body.episode_id, body.task_id):
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            if self.config.workspace == "per_session":
+                await self._ensure_shell(sid)
+        # Tool calls and /verify find the session by the cookie. A served app's session router already names it
+        # resources_session_id; an app without one (a test's) does not.
+        request.session[SESSION_ID_KEY] = sid
+        return ResourcesSeedSessionResponse(resources_session_id=sid)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        # Sessions are keyed by resources_session_id, so a close without the seed's cookie releases the same one.
+        sid = body.resources_session_id
+        async with self._locks.locked(sid):
+            fenced_episode = self._fences.get(sid)
+            if fenced_episode is None:
+                identity = self._episode_sessions.get(sid)
+                if identity is not None and identity[0] != body.episode_id:
+                    raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+                await self._release_session(sid)
+                self._episode_sessions.pop(sid, None)
+                self._fences.fence(sid, body.episode_id)
+            elif fenced_episode != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+        return ResourcesCloseSessionResponse(resources_session_id=sid)
+
+    async def _release_session(self, sid: str) -> None:
+        """Remove the session's workspace and metrics. A failed removal raises and keeps the workspace for a retry."""
+        shell = self._shell_sessions.get(sid)
+        if shell is not None:
+            await shell.close(timeout=self.config.sandbox_close_timeout_seconds)
+            self._shell_sessions.pop(sid, None)
+        if self.config.workspace == "per_session":
+            await asyncio.to_thread(self._cleanup_workspace, sid)
+        self._release_metrics(sid)
+        self._shell_failures.pop(sid, None)
+        pop_phase_totals(sid)
+
+    def _validate_shell_config(self) -> None:
+        """Refuse a missing isolation boundary before creating a workspace or provider."""
+        if self.config.sandbox_provider is None:
+            if not self.config.allow_host_execution:
+                raise ResourcesSeedRejectedError(
+                    "BrowseComp workspace tools require sandbox_provider; "
+                    "allow_host_execution=true is only for development"
+                )
+            return
+        try:
+            provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+            SandboxSpec(**self.config.sandbox_config)
+        except (TypeError, ValueError) as error:
+            # A missing provider block or an unknown sandbox_config key fails every seed alike, so no retry can help.
+            raise ResourcesSeedRejectedError(f"BrowseComp sandbox configuration is invalid: {error}") from error
+        if "local" in provider_config and not self.config.allow_host_execution:
+            raise ResourcesSeedRejectedError("The local provider does not isolate BrowseComp workspace tools")
+        workdir = self.config.sandbox_config.get("workdir", "/workspace")
+        if not isinstance(workdir, str) or not PurePosixPath(workdir).is_absolute() or workdir == "/":
+            raise ResourcesSeedRejectedError(
+                "BrowseComp sandbox_config.workdir must be an absolute non-root directory"
+            )
+
+    async def _ensure_shell(self, sid: str) -> BrowsecompShellSandbox | None:
+        """Create the Resources-owned tool sandbox once; retain failed cleanup for close."""
+        self._validate_shell_config()
+        if self.config.sandbox_provider is None:
+            return None
+        shell = self._shell_sessions.get(sid)
+        if shell is not None:
+            if not shell.ready or shell.session.closing:
+                raise RuntimeError("BrowseComp shell setup/close is incomplete; close this resources session")
+            return shell
+        global_config = get_global_config_dict()
+        try:
+            provider = create_provider(resolve_provider_config(self.config.sandbox_provider, global_config))
+        except (TypeError, ValueError) as error:
+            # An unknown provider name or option fails every seed alike, so no retry can help.
+            raise ResourcesSeedRejectedError(f"BrowseComp sandbox provider cannot be created: {error}") from error
+        sandbox = AsyncSandbox(provider)
+        config = {"image": "python:3.13-slim", "workdir": "/workspace", "ttl_s": 7200, **self.config.sandbox_config}
+        config["metadata"] = (
+            resolve_provider_metadata(self.config.sandbox_provider, global_config)
+            | (config.get("metadata") or {})
+            | {"nemo_gym_resources": self.config.name[:63], "resources_session_id": sid[:63]}
+        )
+        config["files"] = (config.get("files") or {}) | shell_source_files()
+        shell = BrowsecompShellSandbox(
+            resources_session_id=sid,
+            session=SandboxSession(
+                sandbox=sandbox,
+                session_dir=f"/tmp/nemo-gym-browsecomp-shell/{uuid4().hex}",
+                workdir=config["workdir"],
+                harness="BrowseComp read-only shell",
+                owns_sandbox=True,
+            ),
+        )
+        # Store ownership before the first await, including a partially completed start.
+        self._shell_sessions[sid] = shell
+        try:
+            started = monotonic()
+            await sandbox.start(SandboxSpec(**config))
+            shell.started_at = monotonic()
+            LOG.info(
+                "[browsecomp][sandbox_start] role=resources session=%s provider=%s id=%s start_s=%.3f",
+                sid,
+                sandbox.provider_name,
+                sandbox.sandbox_id,
+                shell.started_at - started,
+            )
+            await shell.install(timeout=self.config.sandbox_install_timeout_seconds)
+        except BaseException as error:
+            try:
+                await shell.close(timeout=self.config.sandbox_close_timeout_seconds)
+            except BaseException:
+                LOG.exception("BrowseComp shell setup cleanup failed for %s; retaining it for close", sid)
+            else:
+                self._shell_sessions.pop(sid, None)
+                if isinstance(error, SandboxIsolationError):
+                    # Every sandbox from this provider shares the host's namespace, so no retry can help.
+                    raise ResourcesSeedRejectedError(str(error)) from error
+            raise
+        return shell
+
+    def _release_metrics(self, sid: str) -> None:
+        # With the dump on, the entries are kept for it; otherwise one entry per rollout would accumulate.
+        if not self.config.dump_session_id_to_metrics_on_exit:
+            self._session_id_to_metrics.pop(sid, None)
+
+    def _open_session_id(self, request: Request) -> str:
+        """The request's session, refusing a closed one so a late tool call cannot recreate its workspace."""
+        sid = request.session[SESSION_ID_KEY]
+        if self._fences.get(sid) is not None:
+            raise ResourcesSessionLostError(f"Resources session {sid} is closed")
+        return sid
 
     def _get_page_writer(self, sid: str) -> Optional["_PageWriter"]:
         if self.config.workspace != "per_session":
@@ -799,68 +1402,102 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return pw
 
     def _cleanup_workspace(self, sid: str) -> None:
-        pw = self._session_workspaces.pop(sid, None)
+        pw = self._session_workspaces.get(sid)
         if pw is not None:
-            shutil.rmtree(pw.workspace, ignore_errors=True)
+            _remove_workspace(pw.workspace)
+            self._session_workspaces.pop(sid, None)
 
     async def bash_command(self, request: Request, body: BashCommandRequest) -> BashCommandResponse:
-        sid = request.session[SESSION_ID_KEY]
-        page_writer = self._get_page_writer(sid)
-        if page_writer is None:
-            return BashCommandResponse(
-                results_string="[bash error: terminal workspace is not enabled for this server]"
-            )
-        duration = max(1.0, min(self.config.bash_timeout_s, float(body.duration or 10)))
-        out = await self._run_bash_readonly(body.keystrokes or "", duration, str(page_writer.workspace))
-        return BashCommandResponse(results_string=out)
+        """Run one read-only shell command over this session's retrieved pages.
+
+        Serialized with the session's other tool calls, verify and close. A command the guard blocks answers
+        ``[exit_code=-3]`` without starting a sandbox. Otherwise it runs in the session's Resources-owned sandbox,
+        started at seed for an episode session and on the first unblocked command for an agent's
+        ``/run``; with no ``sandbox_provider`` and ``allow_host_execution`` it runs in-process. A command the
+        supervisor ends at its deadline answers ``[exit_code=-1]``. A sandbox that cannot start or run it answers
+        ``[exit_code=-2]`` and marks the session so ``/verify`` masks the sample (``provider_unavailable``); after a
+        failed start, later commands get the same answer without another start. A closed session answers 404.
+        """
+        sid = self._open_session_id(request)
+        async with self._locks.locked(sid):
+            self._open_session_id(request)
+            page_writer = self._get_page_writer(sid)
+            if page_writer is None:
+                return BashCommandResponse(
+                    results_string="[bash error: terminal workspace is not enabled for this server]"
+                )
+            command = body.keystrokes or ""
+            # A blocked command needs no sandbox, so it neither starts one nor waits for one.
+            blocked = _bash_denylisted(command) or _bash_allowlisted(command)
+            if blocked is not None:
+                return BashCommandResponse(results_string=f"[blocked: {blocked}]\n[exit_code=-3]")
+            if sid in self._shell_failures and sid not in self._shell_sessions:
+                # The start already failed and the sample is masked; another start would only repeat the failure.
+                return BashCommandResponse(results_string=_SHELL_FAILURE_OUTPUT)
+            duration = max(1.0, min(self.config.bash_timeout_s, float(body.duration or 10)))
+            try:
+                shell = await self._ensure_shell(sid)
+            except Exception:
+                return BashCommandResponse(results_string=self._shell_failure(sid, "start"))
+            if shell is None:
+                out = await self._run_bash_readonly(command, duration, str(page_writer.workspace))
+            else:
+                async with self._bash_semaphore:
+                    try:
+                        out = await shell.execute(
+                            command=command,
+                            duration=duration,
+                            workspace=page_writer.workspace,
+                            close_timeout=self.config.sandbox_close_timeout_seconds,
+                        )
+                    except ShellCommandTimedOut:
+                        # The supervisor deadline passed without output: answer as the host interpreter did. Any
+                        # other timeout (an upload, the provider's exec, a read) is the sandbox's, not the model's.
+                        LOG.warning("BrowseComp shell command timed out in session %s: %r", sid, command[:160])
+                        out = f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
+                    except Exception:
+                        out = self._shell_failure(sid, "run a command")
+            return BashCommandResponse(results_string=out)
+
+    def _shell_failure(self, sid: str, action: str) -> str:
+        """Log the current sandbox error, mark the session's sample for masking, and return the model's envelope."""
+        LOG.exception("BrowseComp shell sandbox could not %s in session %s", action, sid)
+        self._shell_failures.setdefault(sid, f"The BrowseComp tool sandbox could not {action}")
+        return _SHELL_FAILURE_OUTPUT
 
     async def _run_bash_readonly(self, keystrokes: str, duration: float, cwd: str) -> str:
-        # Layered guard (ported from bc_frankie @ ee72d54): deny-list first
-        # (specific reason), then default-deny read-only allow-list. Either one
-        # blocking returns [blocked: ...] and skips execution.
+        """Development-only pocketshell execution; HTTP routes require explicit host opt-in.
+
+        Production routes use a Resources-owned sandbox, with the same interpreter and output format.
+        """
+        if not self.config.allow_host_execution:
+            raise RuntimeError("BrowseComp host shell execution requires allow_host_execution=true")
         blocked = _bash_denylisted(keystrokes) or _bash_allowlisted(keystrokes)
         if blocked is not None:
             print(f"[browsecomp][bash][blocked] {blocked}: {(keystrokes or '')[:160]!r}", flush=True)
             return f"[blocked: {blocked}]\n[exit_code=-3]"
-        # Read-only enforcement backstop: `ulimit -f 0` sets RLIMIT_FSIZE=0 so the
-        # command cannot write/grow ANY file; reads + pipes still work. cwd is
-        # pinned to the session workspace; env is minimal (no inherited secrets).
-        wrapped = f"ulimit -c 0 2>/dev/null; ulimit -f 0 2>/dev/null; {keystrokes}"
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": cwd, "LC_ALL": "C.UTF-8"}
-        async with self._bash_semaphore:
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "bash",
-                    "-c",
-                    wrapped,
-                    cwd=cwd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=env,
-                )
-            except Exception as e:
-                return f"[bash error: {e}]\n[exit_code=-2]"
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=duration)
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except ProcessLookupError:
-                    pass
-                return f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
 
-        stdout = _bash_truncate(stdout_b.decode(errors="replace"))
-        stderr = _bash_truncate(stderr_b.decode(errors="replace"))
-        truncated = len(stdout_b) + len(stderr_b) > (_BASH_HEAD_BYTES + _BASH_TAIL_BYTES) * 2
-        parts = []
-        if stdout:
-            parts.append(stdout)
-        if stderr:
-            parts.append("--- stderr ---")
-            parts.append(stderr)
-        parts.append(f"[exit_code={proc.returncode}{' truncated' if truncated else ''}]")
-        return "\n".join(parts)
+        loop = asyncio.get_running_loop()
+        try:
+            # pocketshell is pure-Python and CPU-bound; keep the event loop free.
+            # A run_in_executor thread cannot be cancelled, so pocketshell enforces
+            # its own deadline internally (including a per-match regex timeout --
+            # Python backtracks where GNU grep's DFA does not). asyncio.wait_for is
+            # a belt-and-braces outer bound so a wedged thread can never stall the
+            # sample; the semaphore keeps the shared pool from being swamped.
+            async with self._bash_semaphore:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, functools.partial(pocketshell_run, keystrokes or "", cwd, duration)),
+                    timeout=duration + 30,
+                )
+        except asyncio.TimeoutError:
+            print(f"[browsecomp][bash] timeout: {(keystrokes or '')[:160]!r}", flush=True)
+            return f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"🚨 [browsecomp][bash] pocketshell error: {e!r}", flush=True)
+            return f"[bash error: {e}]\n[exit_code=-2]"
+
+        return format_shell_output(result.stdout, result.stderr, result.exit_code)
 
     def _select_tavily_client(self) -> AsyncTavilyClient:
         client = self._async_tavily_clients[self._num_requests % len(self._async_tavily_clients)]
@@ -873,51 +1510,250 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return client
 
     def _record_call(
-        self, metrics: "TavilySearchMetrics", function: str, provider: str, status: str, start: float
+        self,
+        metrics: "TavilySearchMetrics",
+        function: str,
+        provider: str,
+        status: str,
+        start: float,
+        num_results_offered: Optional[int] = None,
+        num_results_returned: Optional[int] = None,
+        chars_returned: Optional[int] = None,
     ) -> None:
         """Append one per-API-call metering record (provider, function, latency).
-        One record per provider HTTP request: per query for search, per call for browse."""
+        One record per provider HTTP request: per query for search, per call for browse.
+
+        The yield arguments are optional and default to None, which means "not applicable
+        or never reached" — a failed call or a browse record. They must NOT default to 0,
+        because 0 offered is a real and different observation: the provider had nothing."""
+        retry_counts = _PROVIDER_RETRY_COUNTS.get() or {}
+        _PROVIDER_RETRY_COUNTS.set(None)  # next call in this task starts from zero
+        truncated = (
+            num_results_offered - num_results_returned
+            if num_results_offered is not None and num_results_returned is not None
+            else None
+        )
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
-                function=function, provider=provider, status=status, start_time=start, end_time=time()
+                function=function,
+                provider=provider,
+                status=status,
+                start_time=start,
+                end_time=time(),
+                num_429_retries=retry_counts.get("num_429_retries", 0),
+                num_other_retries=retry_counts.get("num_other_retries", 0),
+                num_results_offered=num_results_offered,
+                num_results_returned=num_results_returned,
+                num_results_truncated=truncated,
+                chars_returned=chars_returned,
             )
         )
 
-    async def _exa_search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
-        """Exa search: highlight snippets returned INLINE (never written to pages/, even in
-        terminal mode). Mirrors the bc_frankie Exa harness formatting exactly."""
+    # ---- shared flat-file cache plumbing ----------------------------------
+    # Lustre metadata ops can stall for tens of ms; keep them off the event loop.
+
+    # Cache writes never raise: SearchCache logs and counts a failed write, and the
+    # caller returns the provider's result either way.
+
+    async def _cache_get_search(self, query: str, accept: Optional[Any] = None) -> Optional[dict]:
+        if not self._search_cache.enabled:
+            return None
+        return await asyncio.to_thread(self._search_cache.get_search_entry, query, accept=accept)
+
+    async def _cache_put_search(
+        self, query: str, results: List[dict], provider: str, extra: Optional[dict] = None
+    ) -> None:
+        # Empties are never cached so a transient provider failure can't poison the cache.
+        if self._search_cache.enabled and results:
+            await asyncio.to_thread(self._search_cache.put_search, query, results, provider, extra=extra)
+
+    async def _cache_get_extract(self, url: str, min_characters: Optional[int] = None) -> Optional[tuple]:
+        if not self._search_cache.enabled:
+            return None
+        return await asyncio.to_thread(self._search_cache.get_extract, url, min_characters=min_characters)
+
+    async def _cache_put_extract(
+        self, url: str, content: str, provider: str, max_characters: Optional[int] = None
+    ) -> None:
+        if self._search_cache.enabled and content:
+            await asyncio.to_thread(
+                self._search_cache.put_extract, url, content, provider, max_characters=max_characters
+            )
+
+    def _exa_entry_fits(self, entry: dict, write_pages: bool) -> bool:
+        """Whether a cached entry can answer this exa request as a live call would.
+
+        Entries from the other provider are shared by design and always fit. An exa
+        entry must come from the same search type (deep types add summaries and a
+        synthesis) and carry page text when this request writes pages. Entries
+        without a recorded search type were written by the reference harness and
+        fit only a non-deep request."""
+        if entry.get("provider", "tavily") != "exa":
+            return True
+        request = entry.get("exa_request")
+        search_type = request.get("search_type") if isinstance(request, dict) else None
+        if search_type is None:
+            if self.config.exa_search_type in _EXA_DEEP_TYPES:
+                return False
+        elif search_type != self.config.exa_search_type:
+            return False
+        return not write_pages or _entry_has_page_text(entry)
+
+    def _format_search_hit(
+        self, entry: dict, query: str, max_length: int, page_writer: Optional["_PageWriter"]
+    ) -> str:
+        """Format a cached search entry per its STORED provider. Exa entries are
+        formatted inline (highlights; pages only if the entry holds full text); tavily
+        entries follow the workspace mode (disk pages in terminal mode, inline otherwise).
+
+        The entry may have been written by a run with another exclude list or a larger
+        max_results, so both are applied here as the live request would apply them."""
+        provider = entry.get("provider", "tavily")
+        stored = [r for r in entry["results"] if isinstance(r, dict)]
+        result_list = [r for r in stored if not self._is_url_excluded(str(r.get("url") or ""))]
+        if len(result_list) < len(stored):
+            print(
+                f"[browsecomp][cache_excluded] provider={provider} dropped={len(stored) - len(result_list)}",
+                flush=True,
+            )
+        result_list = result_list[: self.config.max_results]
+        if provider == "exa":
+            response: dict = {"results": result_list}
+            # A live tavily search returns no synthesis, so only an exa run keeps a stored deep answer.
+            if entry.get("output") is not None and self.config.search_provider == "exa":
+                response["output"] = entry["output"]
+            return self._format_exa_search(query, response, max_length, page_writer)[0]
+        if page_writer is not None:
+            return self._format_tavily_search_disk(query, result_list, page_writer, max_length)
+        return self._postprocess_search_results(query, {"results": result_list}, max_length)
+
+    async def _exa_search_one(
+        self, query: str, max_length: int, metrics: "TavilySearchMetrics", page_writer: Optional["_PageWriter"] = None
+    ) -> str:
+        """Exa search: highlight snippets returned INLINE. Mirrors the reference Exa
+        harness formatting exactly.
+
+        When exa_search_writes_pages is on AND a page_writer is available, each result's
+        full text is also written to pages/ and the entry carries a [Saved to] path — the
+        shape the tool description and system prompt already promise. Snippets stay inline
+        either way; the page is additional, never a substitute."""
         if len(query) > 400:
             return "Query is too long"
+
+        write_pages = self.config.exa_search_writes_pages and page_writer is not None
+        cached = await self._cache_get_search(query, lambda entry: self._exa_entry_fits(entry, write_pages))
+        if cached is not None:
+            self._record_call(metrics, "search", cached.get("provider", "tavily"), "cache_hit", time())
+            return self._format_search_hit(cached, query, max_length, page_writer)
 
         client = self._select_exa_client()
         call_start = time()
         try:
             results = await client.search(
-                query, num_results=self.config.max_results, exclude_domains=self._exclude_domains
+                query,
+                num_results=self.config.max_results,
+                exclude_domains=self._exclude_domains,
+                include_text=write_pages,
+                search_type=self.config.exa_search_type,
             )
         except Exception as e:
             self._record_call(metrics, "search", "exa", "error", call_start)
             print(f"[browsecomp][tool_fail][exa_search] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
-        self._record_call(metrics, "search", "exa", "success", call_start)
+        extra = {"exa_request": {"search_type": self.config.exa_search_type, "include_text": write_pages}}
+        if results.get("output") is not None:
+            extra["output"] = results["output"]  # the deep-search synthesis behind [Deep Answer]
+        await self._cache_put_search(query, results.get("results", []) or [], "exa", extra)
+        results_string, n_offered, returned = self._format_exa_search(query, results, max_length, page_writer)
+        # Recorded AFTER the block is built so the yield counters are real. Nothing awaits
+        # in between, so the retry contextvar _record_call reads is still this call's.
+        self._record_call(
+            metrics,
+            "search",
+            "exa",
+            "success",
+            call_start,
+            num_results_offered=n_offered,
+            num_results_returned=returned,
+            chars_returned=len(results_string),
+        )
+        if returned < n_offered:
+            print(
+                f"[browsecomp][search_truncated][exa] query={query[:120]!r} "
+                f"returned={returned}/{n_offered} budget={max_length}",
+                flush=True,
+            )
+        elif not n_offered:
+            print(f"[browsecomp][search_empty][exa] query={query[:120]!r} provider returned 0 results", flush=True)
+        return results_string
 
+    def _format_exa_search(
+        self, query: str, results: dict, max_length: int, page_writer: Optional["_PageWriter"]
+    ) -> tuple[str, int, int]:
+        """Format one exa result set. Returns (results_string, num offered, num returned).
+        Shared by the live path and a cache hit, so a hit is formatted as its miss was."""
+        write_pages = self.config.exa_search_writes_pages and page_writer is not None
+        # Contamination guard. Filtering at each formatting site rather than at the
+        # provider call is deliberate: a result reaches the model by exactly four
+        # routes, and every one of them formats here or in one of the three sites
+        # below, so this is where all of them can be covered. Applied ABOVE the
+        # pages/ write in the loop, so a contaminated page is never written to disk.
+        offered, _ = _filter_results(results.get("results", []) or [], "search", "exa")
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
-        for result in results.get("results", []):
+        returned = 0
+
+        # Deep-search synthesis (outputSchema), when present. Rendered FIRST — it is the
+        # highest-value part — but capped so the per-URL entries still fit; the model
+        # needs those URLs for browse/bash follow-up. Deliberately NOT counted in the
+        # yield counters below: it is a synthesis, not a result. A synthesis that quotes
+        # the benchmark is dropped like any other contaminated result.
+        answer = (results.get("output") or {}).get("content")
+        if answer is not None and not isinstance(answer, str):
+            answer = json.dumps(answer, ensure_ascii=False)
+        if answer and _is_contaminated(answer):
+            print("[browsecomp][contamination] fn=search provider=exa dropped=deep_answer", flush=True)
+            answer = None
+        if answer:
+            cap = int(max_length * _EXA_DEEP_ANSWER_MAX_FRACTION)
+            if len(answer) > cap:
+                answer = f"{answer[:cap]}\n[...deep answer truncated...]"
+            entry = f"[Deep Answer]: {answer}\n"
+            if running_len + len(entry) <= max_length:
+                blocks.append(entry)
+                running_len += len(entry)
+        for ri, result in enumerate(offered, start=1):
             title = result.get("title", "") or ""
             url = result.get("url", "") or ""
             highlights = result.get("highlights") or []
             snippet = " ... ".join(h for h in highlights if h)
-            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n"
+            saved_line = ""
+            if write_pages:
+                text = result.get("text") or ""
+                if text:
+                    if len(text) > self.config.max_page_bytes:
+                        text = text[: self.config.max_page_bytes]
+                    saved = page_writer.write_search_result(query, ri, title, url, text)
+                    saved_line = f"[Saved to]: {saved} ({len(text)} bytes)\n"
+            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n{saved_line}"
+            summary = result.get("summary") or ""
+            if summary:
+                entry += f"[Summary]: {summary}\n"
             if running_len + len(entry) > max_length:
                 break
             blocks.append(entry)
             running_len += len(entry)
-        return "\n".join(blocks)
+            returned += 1
+        return "\n".join(blocks), len(offered), returned
 
     async def _search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
         if len(query) > 400:
             return "Query is too long"
+
+        cached = await self._cache_get_search(query)
+        if cached is not None:
+            self._record_call(metrics, "search", cached.get("provider", "tavily"), "cache_hit", time())
+            return self._format_search_hit(cached, query, max_length, None)
 
         client = self._select_tavily_client()
         print(f"[tavily_call_begin function=search query={query[:80]!r}]", flush=True)
@@ -934,6 +1770,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
+        except SearchProviderRefusal as e:
+            self._record_call(metrics, "search", "tavily", "error", call_start)
+            print(f"[browsecomp][tool_fail][tavily_search] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
         except Exception as e:
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(
@@ -947,6 +1787,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             f"[tavily_call function=search status=success duration_s={time() - call_start:.2f} query={query[:80]!r} n_results={len(results.get('results', []))}]",
             flush=True,
         )
+        await self._cache_put_search(query, results.get("results", []), "tavily")
         postprocessed_results = self._postprocess_search_results(query, results, max_length)
         return postprocessed_results
 
@@ -954,8 +1795,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self, query: str, page_writer: "_PageWriter", max_per_query: int, metrics: "TavilySearchMetrics"
     ) -> str:
         """Terminal mode: run one search, write each result's raw content to disk, return
-        title/url/snippet/[Saved to] metadata. Mirrors the bc_frankie harness tavily_search
+        title/url/snippet/[Saved to] metadata. Mirrors the reference harness tavily_search
         (disk mode) formatting exactly."""
+        # A live call here saves every page, so an exa entry without page text is a miss.
+        cached = await self._cache_get_search(query, _entry_has_page_text)
+        if cached is not None:
+            self._record_call(metrics, "search", cached.get("provider", "tavily"), "cache_hit", time())
+            return self._format_search_hit(cached, query, max_per_query, page_writer)
+
         client = self._select_tavily_client()
         call_start = time()
         try:
@@ -970,11 +1817,29 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
+        except SearchProviderRefusal as e:
+            self._record_call(metrics, "search", "tavily", "error", call_start)
+            print(f"[browsecomp][tool_fail][tavily_search] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
         self._record_call(metrics, "search", "tavily", "success", call_start)
+
+        result_list = results.get("results", [])
+        await self._cache_put_search(query, result_list, "tavily")
+        return self._format_tavily_search_disk(query, result_list, page_writer, max_per_query)
+
+    def _format_tavily_search_disk(
+        self, query: str, result_list: List[dict], page_writer: "_PageWriter", max_per_query: int
+    ) -> str:
+        # THE important one. In terminal mode the raw page is written to pages/*.txt
+        # and the model reads it later with grep/cat through the bash tool, so
+        # filtering only the returned string would leave the contamination on disk
+        # and fully readable. Filtering here, ABOVE the write loop, means the page is
+        # never written at all.
+        result_list, _ = _filter_results(result_list, "search", "tavily")
 
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
-        for ri, result in enumerate(results.get("results", []), start=1):
+        for ri, result in enumerate(result_list, start=1):
             title = result.get("title", "") or ""
             url = result.get("url", "") or ""
             snippet = (result.get("content") or "")[:500]
@@ -994,7 +1859,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return "\n".join(blocks)
 
     async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
-        sid = request.session[SESSION_ID_KEY]
+        async with self._locks.locked(request.session[SESSION_ID_KEY]):
+            self._open_session_id(request)
+            sid = request.session[SESSION_ID_KEY]
+            token = set_rollout_id(sid)
+            try:
+                return await self._search(request, body)
+            finally:
+                reset_rollout_id(token)
+
+    async def _search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
+        sid = self._open_session_id(request)
         metrics = self._session_id_to_metrics[sid]
 
         if self.config.debug:
@@ -1003,11 +1878,19 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if body.queries is None or len(body.queries) == 0:
             return TavilySearchResponse(results_string="Query is none or empty")
 
-        max_per_query_length = body.max_total_length // len(body.queries)
+        # The tool schema does not expose max_total_length, so body.max_total_length is
+        # None on every real model call and the configured budget applies.
+        total_length = (
+            body.max_total_length if body.max_total_length is not None else self.config.search_max_total_length
+        )
+        max_per_query_length = total_length // len(body.queries)
         if self.config.search_provider == "exa":
-            # Exa: highlights-only, always inline (no disk pages, even in terminal mode).
+            # Exa: highlight snippets inline. Pages are written only when
+            # exa_search_writes_pages is on and the session has a workspace; otherwise the
+            # historical highlights-only behaviour is unchanged.
+            exa_page_writer = self._get_page_writer(sid) if self.config.exa_search_writes_pages else None
             results = await asyncio.gather(
-                *[self._exa_search_one(q, max_per_query_length, metrics) for q in body.queries]
+                *[self._exa_search_one(q, max_per_query_length, metrics, exa_page_writer) for q in body.queries]
             )
         else:
             page_writer = self._get_page_writer(sid)
@@ -1025,7 +1908,18 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return TavilySearchResponse(results_string="\n\n".join(results))
 
     async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+        async with self._locks.locked(request.session[SESSION_ID_KEY]):
+            self._open_session_id(request)
+            sid = request.session[SESSION_ID_KEY]
+            token = set_rollout_id(sid)
+            try:
+                return await self._browse(request, body)
+            finally:
+                reset_rollout_id(token)
+
+    async def _browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
+        sid = self._open_session_id(request)
+        metrics = self._session_id_to_metrics[sid]
 
         if self.config.debug:
             print("\n\n browse urls: ", body.urls)
@@ -1039,26 +1933,58 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # set max length per url
         max_per_url_length = body.max_total_length // len(urls)
 
+        # cache: serve hits from the shared flat-file cache, send ONLY the
+        # missed URLs to the provider. Hits keep input order and come first.
+        # A hit must be as long as this run's live call would keep: exa cuts each page to
+        # max_per_url_length; tavily returns the whole page, which the workspace keeps up to
+        # max_page_bytes and inline mode cuts past max_per_url_length with a truncation marker.
+        # A page stored under a smaller cap misses, and an exa run cuts a longer hit to what
+        # its miss would return.
+        cached_entries: List[dict] = []
+        fetch_urls = urls
+        if self._search_cache.enabled:
+            if self.config.search_provider == "exa":
+                min_characters = max_per_url_length
+            elif self.config.workspace == "per_session":
+                min_characters = self.config.max_page_bytes
+            else:
+                min_characters = max_per_url_length + 1
+            fetch_urls = []
+            for u in urls:
+                hit = await self._cache_get_extract(u, min_characters=min_characters)
+                if hit is not None:
+                    hit_provider, content = hit
+                    if self.config.search_provider == "exa":
+                        content = content[:max_per_url_length]
+                    self._record_call(metrics, "browse", hit_provider, "cache_hit", time())
+                    cached_entries.append({"url": u, "raw_content": content})
+                else:
+                    fetch_urls.append(u)
+
         # fetch full page content (provider-specific); normalize to a list of
         # {url, raw_content} so the shared disk/inline formatting below is provider-agnostic.
         start_time = time()
-        if self.config.search_provider == "exa":
+        result_list: List[dict] = []
+        if fetch_urls and self.config.search_provider == "exa":
             exa_client = self._select_exa_client()
-            print(f"[exa_call_begin function=browse n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]", flush=True)
+            print(
+                f"[exa_call_begin function=browse n_urls={len(fetch_urls)} goal={(body.goal or '')[:80]!r}]",
+                flush=True,
+            )
             try:
-                raw = await exa_client.get_contents(urls=urls, max_characters=max_per_url_length)
+                raw = await exa_client.get_contents(urls=fetch_urls, max_characters=max_per_url_length)
             except Exception as e:
                 self._record_call(metrics, "browse", "exa", "error", start_time)
-                print(f"[browsecomp][tool_fail][exa_extract] urls={urls} error={e}", flush=True)
+                print(f"[browsecomp][tool_fail][exa_extract] urls={fetch_urls} error={e}", flush=True)
                 return BrowseResponse(results_string=f"Failed to extract content: {e}")
             self._record_call(metrics, "browse", "exa", "success", start_time)
             result_list = [
                 {"url": r.get("url", "") or "", "raw_content": r.get("text", "") or ""} for r in raw.get("results", [])
             ]
-        else:
+        elif fetch_urls:
             async_tavily_client = self._select_tavily_client()
             print(
-                f"[tavily_call_begin function=extract n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]",
+                f"[tavily_call_begin function=extract n_urls={len(fetch_urls)} goal={(body.goal or '')[:80]!r}]",
                 flush=True,
             )
             try:
@@ -1066,26 +1992,43 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 # Passing a query triggers relevance-focused extraction that returns far less
                 # (e.g. ~2k vs ~15k bytes for the same URL). `goal` stays a tool-schema field
                 # for the model to state intent, but is not sent to Tavily (matches the harness).
-                results = await async_tavily_client.extract(urls=urls)
+                results = await async_tavily_client.extract(urls=fetch_urls)
             except Exception as e:
                 self._record_call(metrics, "browse", "tavily", "error", start_time)
-                print(f"[browsecomp][tool_fail][tavily_extract] urls={urls} error={e}", flush=True)
+                print(f"[browsecomp][tool_fail][tavily_extract] urls={fetch_urls} error={e}", flush=True)
                 return BrowseResponse(results_string=f"Failed to extract content: {e}")
             self._record_call(metrics, "browse", "tavily", "success", start_time)
             print(
-                f"[tavily_call function=extract status=success duration_s={time() - start_time:.2f} n_urls={len(urls)} n_results={len(results.get('results', []))}]",
+                f"[tavily_call function=extract status=success duration_s={time() - start_time:.2f} n_urls={len(fetch_urls)} n_results={len(results.get('results', []))}]",
                 flush=True,
             )
             result_list = results.get("results", [])
+
+        capped_at = max_per_url_length if self.config.search_provider == "exa" else None
+        for fetched in result_list:
+            await self._cache_put_extract(
+                fetched.get("url", "") or "",
+                fetched.get("raw_content", "") or "",
+                self.config.search_provider,
+                capped_at,
+            )
+        result_list = cached_entries + result_list
 
         # return if no results
         if not result_list:
             return BrowseResponse(results_string="No content extracted.")
 
-        page_writer = self._get_page_writer(request.session[SESSION_ID_KEY])
+        # Contamination guard for the browse/extract path, which has its own write
+        # loop and does not route through any of the three search sites above.
+        # Applied ABOVE the page writes, so a contaminated page never lands on disk.
+        result_list, _ = _filter_results(result_list, "browse", self.config.search_provider)
+        if not result_list:
+            return BrowseResponse(results_string="No content extracted.")
+
+        page_writer = self._get_page_writer(sid)
         if page_writer is not None:
             # terminal mode: write each page to disk, return metadata + preview.
-            # Mirrors the bc_frankie harness tavily_extract (disk mode) formatting exactly.
+            # Mirrors the reference harness tavily_extract (disk mode) formatting exactly.
             blocks = []
             for result in result_list:
                 url = result.get("url", "") or ""
@@ -1113,38 +2056,99 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return BrowseResponse(results_string=results_string)
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
-        question = body.question
-        ground_truth = body.ground_truth
-        last_assistant_response = _last_assistant_text(body.response)
+        """Grade the final answer and report the session's provider metrics.
 
-        judge_error = None
-        if self.config.use_judge:
-            judge_evaluation, judge_error = await self._verify_answer_with_judge(
-                question, ground_truth, last_assistant_response
-            )
-        else:
-            judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
+        Masks the sample when the session's tool sandbox failed (``provider_unavailable``), even if the judge could
+        not be reached, or when the session is already closed (``session_lost``). A judge failure on an unmasked
+        sample raises. For an agent's ``/run``, which sends no close, verify then releases the session's sandbox,
+        workspace and metrics; an episode session is released by ``/close_session``.
+        """
+        async with self._locks.locked(request.session[SESSION_ID_KEY]):
+            sid = request.session[SESSION_ID_KEY]
+            token = set_rollout_id(sid)
+            try:
+                return await self._verify(request, body)
+            finally:
+                reset_rollout_id(token)
 
+    async def _verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
         # num_tool_calls now comes from the agent loop (counts ALL tool calls,
         # including those made before context resets). Fall back to the old
         # final-output count only if the agent didn't surface it.
         agent_num_tool_calls = getattr(body.response, "num_tool_calls", None)
         if agent_num_tool_calls is None:
             agent_num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
+        reset_count = getattr(body.response, "reset_count", 0) or 0
+        # browsecomp_agent marks a rollout it stopped at rollout_timeout_s.
+        timed_out = bool(getattr(body.response, "timed_out", False))
+        sid = request.session[SESSION_ID_KEY]
+        if self._fences.get(sid) is not None:
+            # Masked although the score reads only the response, so every server under the resources session contract
+            # treats a closed session alike. single_agent_turn verifies before it closes, so only an out-of-order verify
+            # lands here. A session the fence never closed, such as an agent's /run, is graded as usual.
+            lost = lost_session_verification("This browsecomp_advanced_harness session is already closed")
+            return TavilySearchVerifyResponse(
+                **(body.model_dump() | lost),
+                reasoning="",
+                extracted_final_answer="",
+                num_tool_calls=agent_num_tool_calls,
+                reset_count=reset_count,
+                metrics=TavilySearchMetrics(),
+                timed_out=int(timed_out),
+            )
+
+        question = body.question
+        ground_truth = body.ground_truth
+        last_assistant_response = _last_assistant_text(body.response)
+
+        judge_error = None
+        if timed_out:
+            # Wrong by construction: the agent's /run scores it 0 without a verify, and an Environment Server's
+            # verify does the same without calling the judge.
+            judge_evaluation = JudgeEvaluation(
+                reasoning="The rollout reached its time limit.", extracted_final_answer="", reward=0.0
+            )
+        elif self.config.use_judge:
+            judge_evaluation, judge_error = await self._verify_answer_with_judge(
+                question, ground_truth, last_assistant_response
+            )
+        else:
+            judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
+
+        session_metrics = self._session_id_to_metrics[sid]
+        num_provider_429s, num_provider_other_retries = _sum_provider_retry_counts(session_metrics)
         verify_response = TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
             num_tool_calls=agent_num_tool_calls,
-            reset_count=getattr(body.response, "reset_count", 0) or 0,
-            metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
+            reset_count=reset_count,
+            metrics=session_metrics,
+            num_provider_429s=num_provider_429s,
+            num_provider_other_retries=num_provider_other_retries,
+            timed_out=int(timed_out),
         )
 
-        # terminal mode: clean up this session's disk workspace
-        if self.config.workspace == "per_session":
-            self._cleanup_workspace(request.session[SESSION_ID_KEY])
+        shell_failure = self._shell_failures.get(sid)
+        if shell_failure is not None:
+            # The model lost its shell to the sandbox, not to its own commands, so the reward does not measure it.
+            verify_response = verify_response.model_copy(
+                update={"mask_sample": True, "failure_kind": PROVIDER_UNAVAILABLE, "failure_reason": shell_failure}
+            )
 
-        if judge_error is not None:
-            raise JudgeError(judge_error)
+        # Verification may be retried; close owns releasing episode-session totals.
+        if self._search_cache.enabled:
+            LOG.info("[browsecomp][phases] rid=%s t=%.3f %s", sid, time(), format_phase_totals(peek_phase_totals(sid)))
+            LOG.info("[cache] %s", self._search_cache.summary_str())
+
+        if sid not in self._episode_sessions:
+            # An agent's /run sends no close, so its verify releases the session. An episode session is
+            # released by its close, so a re-sent or retried verify still finds the shell failure and the metrics.
+            await self._release_session(sid)
+
+        # A masked sample does not need the judge's verdict, and a retry after the judge error may no longer find
+        # the shell failure (a /run session is released above; a reverify has a new session).
+        if judge_error is not None and shell_failure is None:
+            raise judge_error
         return verify_response
 
     ###### UTILITY FUNCTIONS ######
@@ -1155,10 +2159,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return any(hostname == domain or hostname.endswith("." + domain) for domain in self._exclude_domains)
 
     def _postprocess_search_results(self, query: str, results: dict, max_length: int) -> str:
+        result_list, _ = _filter_results(results["results"], "search", "tavily")
+
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
 
-        for result in results["results"]:
+        for result in result_list:
             title = result.get("title", "")
             url = result.get("url", "")
             content = result.get("raw_content") or result.get("content", "")
@@ -1202,7 +2208,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     async def _verify_answer_with_judge(
         self, question: str, ground_truth: str, response: str
-    ) -> tuple[JudgeEvaluation, Optional[str]]:
+    ) -> tuple[JudgeEvaluation, Optional[Exception]]:
         response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
 
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
@@ -1210,13 +2216,18 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
 
         judge_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
-        judge_create_params.max_output_tokens = 2048
+        # Budget covers reasoning + final message combined (the reasoning parser splits
+        # post-hoc). 2048 made reasoning judges burn the whole budget
+        # thinking on ~2.7% of calls — no final message emitted, so output[-1] is the
+        # reasoning item and parsing fails until a retry samples a shorter think.
+        judge_create_params.max_output_tokens = 10240
         judge_create_params.input = [
             NeMoGymEasyInputMessage(role="user", content=judge_prompt),
         ]
 
         judge_response = None
         last_error: Optional[str] = None
+        last_failure: Optional[Exception] = None
         for attempt in range(self.JUDGE_MAX_ATTEMPTS):
             judge_call_start = time()
             # Judge samples at temperature 1.0 on every attempt; parse-error retries simply
@@ -1228,9 +2239,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
             try:
                 judge_response, text = await self._call_judge(judge_create_params)
-            except JudgeError as e:
+            except JUDGE_FAILURES as e:
+                if not is_judge_failure(e):
+                    raise
                 last_error = str(e)
-                sleep_s = min(2**attempt, 30)
+                last_failure = e
+                sleep_s = _judge_backoff_s(attempt)
                 print(
                     f"[judge_call attempt={attempt + 1} status=error duration_s={time() - judge_call_start:.2f} error={last_error[:200]} backoff_s={sleep_s}]",
                     flush=True,
@@ -1278,7 +2292,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             ),
             None
             if judge_response is not None
-            else (last_error or f"judge exhausted after {self.JUDGE_MAX_ATTEMPTS} attempts"),
+            else (
+                last_failure or JudgeError(last_error or f"judge exhausted after {self.JUDGE_MAX_ATTEMPTS} attempts")
+            ),
         )
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:
@@ -1321,5 +2337,20 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return is_correct, extracted, True
 
 
+def _configure_logging() -> None:
+    """Show this server's INFO diagnostics (sandbox lifecycle, cache and phase lines) by default.
+
+    Root stays at WARNING: at INFO the HTTP client logs a line per call. NEMO_GYM_LOG_LEVEL overrides
+    the level of this server's own loggers, for example WARNING to silence the diagnostics."""
+    logging.basicConfig(level=logging.WARNING)
+    for logger_name in (__name__, "resources_servers.browsecomp_advanced_harness"):
+        logging.getLogger(logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
+
+
 if __name__ == "__main__":
+    _configure_logging()
     TavilySearchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    _configure_logging()
+    app = TavilySearchResourcesServer.run_webserver()  # noqa: F401

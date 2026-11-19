@@ -1,0 +1,31 @@
+name: hle/config_vision
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: HLE text and image questions with prepared multimodal inputs and LLM-as-a-judge
+  grading.
+modality: text, image
+licensing: unknown
+authors:
+- fsiino-nvidia
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../config_vision.yaml
+resources_server: equivalence_llm_judge
+agent_server: simple_agent
+datasets:
+- name: hle_vision
+  type: benchmark
+  jsonl_fpath: benchmarks/hle/data/hle_benchmark_vision.jsonl
+  prepare_script: benchmarks/hle/prepare_vision.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Use GDPval's existing preparation, task tools, sandbox sessions, and grading.
+config_paths:
+  - benchmarks/gdpval/config.yaml
+  - responses_api_agents/nooa_agent/configs/nooa_agent.yaml
+
+# The GDPval environment below owns the session pairing.
+gdpval_stirrup_agent: null
+nooa_environment_server: null
+
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      datasets:
+        - name: gdpval
+          type: benchmark
+          jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
+          prompt_config: benchmarks/gdpval/prompts/harness-neutral.yaml
+          prepare_script: benchmarks/gdpval/prepare.py
+          num_repeats: 1
+
+gdpval_nooa_agent:
+  _inherit_from: nooa_agent
+  responses_api_agents:
+    nooa_agent:
+      resources_server:
+        type: resources_servers
+        name: gdpval_resources_server
+      nooa:
+        execution_mode: sandboxed
+
+gdpval_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        type: responses_api_agents
+        name: gdpval_nooa_agent

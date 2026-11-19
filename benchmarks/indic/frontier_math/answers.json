@@ -1,0 +1,93 @@
+{
+  "version": "public-sample-2026-09-24",
+  "source_url": "https://epoch.ai/frontiermath/tiers-1-4/benchmark-problems",
+  "source_author": "Epoch AI",
+  "retrieved_on": "2026-09-24",
+  "protocol": "Locally implemented exact boxed-text grading; not Epoch verification code.",
+  "answers": [
+    {
+      "row_id": "frontiermath-tier4-an-optimization-problem-in-bmo-space",
+      "tier": 4,
+      "answer_type": "expression",
+      "expected_answer": "\\frac{\\sqrt{3}}{36}+\\frac{\\sqrt{3}}{6}e^{-20\\sqrt{3}-\\frac{1}{6}}",
+      "english_problem_sha256": "aa35f31323bea5cedab64c6aab8db81f151c08765fbff0068d10469bd0c73d56"
+    },
+    {
+      "row_id": "frontiermath-tier4-elliptic-curves-and-higher-galois-theory",
+      "tier": 4,
+      "answer_type": "integer",
+      "expected_answer": "73948492097301691765464030714938921180352979774791349212169829996615700482",
+      "english_problem_sha256": "e637b0461713b4bdef80602d18eeed74cab2b6cb23f7ec39b1524dd9d7b8c09e"
+    },
+    {
+      "row_id": "frontiermath-tier3-combinatorics-in-the-tsirelson-space",
+      "tier": 3,
+      "answer_type": "integer",
+      "expected_answer": "402653211",
+      "english_problem_sha256": "b639542645b3616a67d516e77c6e53917bacca1cbc643803015ac958e016b71b"
+    },
+    {
+      "row_id": "frontiermath-tier3-enumerative-geometry-over-finite-fields",
+      "tier": 3,
+      "answer_type": "integer",
+      "expected_answer": "866",
+      "english_problem_sha256": "c6ad3f272aebbc50f56982ea9522ab1da5885ad293c1df632f11ade4e15b9d19"
+    },
+    {
+      "row_id": "frontiermath-tier3-testing-artin-s-primitive-root-conjecture",
+      "tier": 3,
+      "answer_type": "integer",
+      "expected_answer": "367707",
+      "english_problem_sha256": "082d68b70686de31920cd56ec77ebb245a88b2c7463d33c9a2450545239708b2"
+    },
+    {
+      "row_id": "frontiermath-tier2-a-recursive-construction-on-large-permutations",
+      "tier": 2,
+      "answer_type": "integer",
+      "expected_answer": "499999999972",
+      "english_problem_sha256": "9cd928c98894a806f2141523b7764b2a3a236f8043741b0173c06050333a5534"
+    },
+    {
+      "row_id": "frontiermath-tier2-asymptotics-of-solutions-of-a-5-variable-equation",
+      "tier": 2,
+      "answer_type": "integer",
+      "expected_answer": "214",
+      "english_problem_sha256": "a6d8f95ef671f29436925f4efe4a475ad98128126d189c5f058a84a893fcfb8a"
+    },
+    {
+      "row_id": "frontiermath-tier2-find-the-degree-19-polynomial",
+      "tier": 2,
+      "answer_type": "integer",
+      "expected_answer": "1876572071974094803391179",
+      "english_problem_sha256": "4d26b63c652990c1139bd7c58bf761601ba8ce906623bb94faca466122fe1f75"
+    },
+    {
+      "row_id": "frontiermath-tier2-prime-field-continuous-extensions",
+      "tier": 2,
+      "answer_type": "integer",
+      "expected_answer": "9811",
+      "english_problem_sha256": "d22d9d7a074ddf1385f4d1094744b1534fd75c6d3f0a00d35c5b3ecf10301909"
+    },
+    {
+      "row_id": "frontiermath-tier1-counting-nonzero-solutions-of-homogeneous-equations",
+      "tier": 1,
+      "answer_type": "integer",
+      "expected_answer": "3814708984376",
+      "english_problem_sha256": "956ba7ea581a80ec339709aa27cd8c86ffcb90b40cc30ef239e43ff7278ff04d"
+    },
+    {
+      "row_id": "frontiermath-tier1-expected-perimeter-enclosing-the-center-of-a-101-gon",
+      "tier": 1,
+      "answer_type": "integer",
+      "expected_answer": "4771880153",
+      "english_problem_sha256": "3d41d100d921423f0e2176252581fabbfa046cb2d6e9009c1dcbb7988570d884"
+    },
+    {
+      "row_id": "frontiermath-tier1-orbit-counting-of-matrix-tuples",
+      "tier": 1,
+      "answer_type": "integer",
+      "expected_answer": "625243878951",
+      "english_problem_sha256": "5d3dd1ea2440e35cbd3b8a62bf0a7bfac101b663385fd24adede18e508d8edda"
+    }
+  ]
+}

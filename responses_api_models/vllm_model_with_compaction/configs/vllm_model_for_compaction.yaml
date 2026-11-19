@@ -1,0 +1,12 @@
+policy_model_for_compaction:
+  responses_api_models:
+    vllm_model_with_compaction:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: true
+      # Compaction training must use IDs from the generation request itself.
+      # Retokenizing cannot reconstruct a prompt whose physical prefix changed.
+      request_prompt_and_generation_token_ids: true
+      uses_reasoning_parser: true

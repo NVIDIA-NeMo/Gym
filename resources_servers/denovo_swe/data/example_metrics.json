@@ -1,0 +1,106 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/denovo_swe/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 2004.6,
+        "Min": 1884.0,
+        "Max": 2151.0,
+        "Standard deviation": 99.57
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "instance_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "repo": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "github_url": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "language": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "workdir": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "image_ref": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "base_commit": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "patch": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "test_patch": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "document": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "problem_statement": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "pypi_name": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "import_names": {
+        "unique_count": 4,
+        "total_count": 4
+    },
+    "passed_ptp": {
+        "unique_count": 18,
+        "total_count": 18
+    },
+    "test_binary_archive_b64": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "expected_coverage_percent": {
+        "Total # non-null values": 5,
+        "Average": 92.39,
+        "Min": 77.78,
+        "Max": 100.0,
+        "Standard deviation": 9.27
+    }
+}

@@ -17,11 +17,8 @@ import json
 import sys
 from typing import Dict, Iterable, Optional
 
-
-def did_you_mean(value: str, candidates: Iterable[str]) -> str:
-    """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
-    matches = difflib.get_close_matches(value, list(candidates), n=1)
-    return f" Did you mean `{matches[0]}`?" if matches else ""
+from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.utils.text import did_you_mean
 
 
 def exit_unknown_component(name: str, candidates: Iterable[str], type_label: str) -> None:
@@ -116,22 +113,22 @@ def fuzzy_matches(query: str, *fields: str) -> bool:
 
 
 def print_rich_table(table) -> None:
-    """Print a Rich table without the 80-col truncation Rich applies when stdout is piped.
+    """Print a Rich table without truncating cells when standard output is piped.
 
-    On a TTY, Rich sizes the console to the terminal. When stdout is redirected (e.g.
-    `gym list benchmarks | cat`), Rich falls back to an 80-column console and truncates cells
-    with an ellipsis, silently losing data. We measure the table's natural width and render at
-    that width so piped output is lossless, while leaving interactive terminal output unchanged.
+    Rich normally renders redirected output with an 80-column console.
+    `FORCE_COLOR` can also make Rich report a pipe as a terminal.
+    Use the stream's actual TTY status so redirected output preserves every cell.
     """
 
     from rich.console import Console
 
     console = Console()
-    if not console.is_terminal:
-        # Rich clamps `measure()` to the measuring console's own width so we need to
-        # measure against an unbounded console to get the table's true natural width
-        natural_width = Console(width=10**6).measure(table).maximum
-        console = Console(width=natural_width)
+    if not console.file.isatty():
+        # Rich clamps measurements to the console width.
+        # An explicit height prevents TERM=dumb from replacing the requested width with 80.
+        height = console.height
+        natural_width = Console(width=10**6, height=height).measure(table).maximum
+        console = Console(width=natural_width, height=height)
     console.print(table)
 
 
@@ -140,7 +137,8 @@ def exit_cleanly_on_config_error(fn):
 
     Config mistakes (missing/typo'd config_paths, malformed config_paths, nothing configured to
     run) should fail fast with an actionable message, not a Python traceback. Unexpected errors
-    still propagate normally.
+    still propagate normally. An error that carries a registered ``failure_kind`` is also recorded
+    for the guard of an orchestrated job's next segment (see ``record_failure_kind``).
     """
     from functools import wraps
 
@@ -149,13 +147,49 @@ def exit_cleanly_on_config_error(fn):
         import rich
         from rich.markup import escape
 
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
         try:
             return fn(*args, **kwargs)
-        except ConfigError as e:
-            # escape() so '[...]' in the message (e.g. config_paths examples) isn't eaten as rich markup.
-            rich.print(f"[red]Error:[/red] {escape(str(e))}")
+        except BaseException as e:
+            if getattr(e, "failure_kind", None) is not None:
+                # The driver step of a resumable job hands the kind to the guard of its next segment.
+                from nemo_gym.eval.recovery.markers import record_failure_kind
+
+                record_failure_kind(e)
+            if isinstance(e, IncompleteEvaluationError):
+                rich.print(f"[yellow]Evaluation incomplete:[/yellow] {escape(str(e))}")
+                raise SystemExit(e.exit_code) from None
+            if isinstance(e, ConfigError):
+                # escape() so '[...]' in the message (e.g. config_paths examples) isn't eaten as rich markup.
+                rich.print(f"[red]Error:[/red] {escape(str(e))}")
+                raise SystemExit(1)
+            code = getattr(e, "stop_exit_code", None) if isinstance(e, RuntimeError) else None
+            if code is None:
+                raise
+            # A typed stop (for example a head server that never answered): exit with its code, not a traceback.
+            rich.print(f"[red]Stopped:[/red] {escape(str(e))}")
+            raise SystemExit(code) from None
+
+    return wrapper
+
+
+def exit_cleanly_on_job_error(fn):
+    """Decorator: turn a `gym job` command's expected failure (unknown id, unreachable scheduler, missing log)
+    into a message on stderr and a non-zero exit, so stdout stays clean for `--json`."""
+    from functools import wraps
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ValueError, RuntimeError, FileNotFoundError) as e:
+            print(f"Error: {e}", file=sys.stderr)
             raise SystemExit(1)
 
     return wrapper
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)

@@ -23,13 +23,12 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from nemo_gym.config_types import AggregateMetricsRequest, ModelServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ServerClient
 
 
 try:
@@ -47,6 +46,7 @@ except ModuleNotFoundError as exc:
 
 from responses_api_agents.mini_swe_agent_2 import app as mini_swe_app_module
 from responses_api_agents.mini_swe_agent_2.app import (
+    E2B_API_KEY_ENV,
     OPENSANDBOX_API_KEY_ENV,
     MiniSWEAgent,
     MiniSWEAgentConfig,
@@ -56,6 +56,7 @@ from responses_api_agents.mini_swe_agent_2.app import (
     _json_dict_from_metadata,
     _message_content_to_text,
     _responses_create_params_to_model_kwargs,
+    _restore_sandbox_provider_secrets,
     _run_mini_swe_v2,
     _sandbox_provider_for_config_dump,
     _sandbox_runtime_env,
@@ -150,11 +151,8 @@ def create_test_config(
     )
 
 
-def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
-    mock_server_client_instance = MagicMock()
-    mock_server_client_instance.global_config_dict = {"policy_model_name": "test_model"}
-    mock_load_from_global_config.return_value = mock_server_client_instance
-
+def setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict):
+    mock_server_client.global_config_dict = {"policy_model_name": "test_model"}
     mock_get_first_server_config_dict.return_value = {
         "host": "0.0.0.0",
         "port": 8080,
@@ -375,6 +373,35 @@ class TestApp:
             OPENSANDBOX_API_KEY_ENV: "fixture-value"  # pragma: allowlist secret
         }
 
+    def test_e2b_sandbox_provider_secret_is_kept_out_of_config_dump(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        headers = {"Authorization": "Bearer header-value"}  # pragma: allowlist secret
+        api_headers = {"X-Gateway-Key": "api-header-value"}  # pragma: allowlist secret
+        provider = {
+            "e2b": {
+                "connection": {
+                    "api_url": "https://gateway.example",
+                    "api_key": "fixture-value",  # pragma: allowlist secret
+                    "headers": headers,
+                    "api_headers": api_headers,
+                }
+            }
+        }
+
+        provider_for_disk = _sandbox_provider_for_config_dump(provider)
+        connection_for_disk = provider_for_disk["e2b"]["connection"]
+        assert connection_for_disk == {"api_url": "https://gateway.example"}
+        assert provider["e2b"]["connection"]["api_key"] == "fixture-value"  # pragma: allowlist secret
+        runtime_env = _sandbox_runtime_env(provider)
+        assert runtime_env["env_vars"][E2B_API_KEY_ENV] == "fixture-value"  # pragma: allowlist secret
+
+        config = {"environment": {"provider": provider_for_disk}}
+        for name, value in runtime_env["env_vars"].items():
+            monkeypatch.setenv(name, value)
+        _restore_sandbox_provider_secrets(config)
+        assert "api_key" not in connection_for_disk
+        assert connection_for_disk["headers"] == headers
+        assert connection_for_disk["api_headers"] == api_headers
+
     def test_split_trajectory_and_resolution_helpers_cover_edge_cases(self) -> None:
         input_messages, output_items, raw_responses = _split_trajectory_for_responses(
             [
@@ -566,7 +593,7 @@ class TestApp:
 
         def get_model(config: dict[str, Any]) -> SimpleNamespace:
             holder["model_config"] = config
-            return SimpleNamespace(config=config)
+            return SimpleNamespace(config=config, query=MagicMock())
 
         module_specs = {
             "swebench": ModuleType("swebench"),
@@ -710,7 +737,58 @@ class TestApp:
         with pytest.raises(ValueError, match="instance_dict"):
             _run_mini_swe_v2(**(params | {"instance_dict": None}))
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
+    def test_run_mini_swe_v2_keeps_policy_api_key_out_of_trajectory(self, monkeypatch, tmp_path) -> None:
+        pytest.importorskip("minisweagent.agents.default")
+        litellm = pytest.importorskip("litellm")
+        import minisweagent.environments
+
+        policy_api_key = "policy-fixture-value"  # pragma: allowlist secret
+        completion_kwargs: list[dict[str, Any]] = []
+
+        def completion(**kwargs: Any) -> Any:
+            completion_kwargs.append(kwargs)
+            return litellm.ModelResponse(choices=[{"message": {"role": "assistant", "content": "no tool call"}}])
+
+        class FakeEnv:
+            def get_template_vars(self) -> dict[str, Any]:
+                return {}
+
+            def serialize(self) -> dict[str, Any]:
+                return {}
+
+        config_path = tmp_path / "swebench.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"agent": {"system_template": "sys", "instance_template": "{{ task }}"}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(litellm, "completion", completion)
+        monkeypatch.setattr(minisweagent.environments, "get_environment", lambda _config: FakeEnv())
+        monkeypatch.setattr(mini_swe_app_module, "get_config_path", lambda _config: config_path)
+        monkeypatch.setattr(mini_swe_app_module, "_run_eval_v2", lambda **_kwargs: {})
+
+        _run_mini_swe_v2(
+            instance_dict={"instance_id": "django__django-123", "problem_statement": "Fix the bug"},
+            output=str(tmp_path / "out"),
+            config="swebench",
+            model="hosted_vllm/model",
+            api_key=policy_api_key,
+            base_url="http://model/v1",
+            subset="verified",
+            step_timeout=30,
+            eval_timeout=60,
+            step_limit=1,
+            run_golden=False,
+        )
+
+        assert [kwargs["api_key"] for kwargs in completion_kwargs] == [policy_api_key]
+        trajectories = list((tmp_path / "out").rglob("*.traj.json"))
+        assert len(trajectories) == 1
+        trajectory = json.loads(trajectories[0].read_text())
+        assert trajectory["info"]["config"]["model"]["model_kwargs"]["base_url"] == "http://model/v1"
+        for path in (tmp_path / "out").rglob("*"):
+            if path.is_file():
+                assert policy_api_key not in path.read_text(), path
+
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
@@ -719,17 +797,16 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         """Test successful execution of the run method with mocked run_mini_swe."""
 
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
-        # The rollout prefix is only applied when model-call capture is enabled.
-        mock_server_client.global_config_dict = {"observability_enabled": True}
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
+        # The rollout prefix is only applied when model-call capture is enabled.
+        mock_server_client.global_config_dict["observability_enabled"] = True
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_runner_ray_remote)
 
@@ -744,7 +821,6 @@ class TestApp:
         assert_run_mini_swe_called(mock_runner_ray_remote)
         assert mock_runner_ray_remote.remote.call_args.args[1]["base_url"] == ("http://0.0.0.0:8080/ng-rollout/2-1/v1")
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
@@ -753,7 +829,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
         tmp_path,
         monkeypatch,
     ) -> None:
@@ -771,7 +846,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_runner_ray_remote)
 
@@ -807,7 +882,44 @@ class TestApp:
             "chat_template_kwargs": {"enable_thinking": True},
         }
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
+    @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
+    async def test_run_keeps_e2b_api_key_out_of_worker_config(
+        self,
+        mock_runner_ray_remote,
+        mock_get_config_path,
+        mock_get_first_server_config_dict,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = create_test_config()
+        config.sandbox_provider = {
+            "e2b": {
+                "connection": {
+                    "api_url": "https://gateway.example",
+                    "api_key": "fixture-value",  # pragma: allowlist secret
+                },
+                "create": {"template": "base"},
+            }
+        }
+        mock_server_client = MagicMock(spec=ServerClient)
+        server = MiniSWEAgent(config=config, server_client=mock_server_client)
+
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
+        setup_config_path_mock(mock_get_config_path)
+        setup_run_mini_swe_mock(mock_runner_ray_remote)
+
+        await server.run(create_run_request())
+
+        runtime_env = mock_runner_ray_remote.options.call_args.kwargs["runtime_env"]
+        assert runtime_env["env_vars"] == {E2B_API_KEY_ENV: "fixture-value"}  # pragma: allowlist secret
+        params = mock_runner_ray_remote.options.return_value.remote.call_args.args[1]
+        generated_provider = yaml.safe_load(Path(params["config"]).read_text())["environment"]["provider"]
+        assert generated_provider["e2b"]["connection"] == {"api_url": "https://gateway.example"}
+        assert generated_provider["e2b"]["create"] == {"template": "base"}
+
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
@@ -816,7 +928,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
         tmp_path,
         monkeypatch,
     ) -> None:
@@ -826,8 +937,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        mock_server_client_instance = MagicMock()
-        mock_server_client_instance.global_config_dict = {
+        mock_server_client.global_config_dict = {
             "policy_model_name": "test_model",
             "sandbox": {
                 "default_metadata": {"sandbox-api": "opensandbox-sdk"},
@@ -839,7 +949,6 @@ class TestApp:
                 },
             },
         }
-        mock_load_from_global_config.return_value = mock_server_client_instance
         mock_get_first_server_config_dict.return_value = {"host": "0.0.0.0", "port": 8080}
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_runner_ray_remote)
@@ -857,7 +966,6 @@ class TestApp:
         # Provider default_metadata flows into the sandbox spec metadata.
         assert generated_config["environment"]["spec"]["metadata"]["sandbox-api"] == "opensandbox-sdk"
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
@@ -866,7 +974,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         """Test run method when run_mini_swe fails."""
 
@@ -874,7 +981,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
         # Awaiting the Ray result raises, standing in for a failed rollout task.
@@ -894,7 +1001,6 @@ class TestApp:
 
         assert_run_mini_swe_called(mock_runner_ray_remote, instance_id="test_instance_456")
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
@@ -903,13 +1009,12 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
         mock_runner_ray_remote.remote.return_value = FakeObjectRef(error=FileNotFoundError("run_mini_swe not found"))

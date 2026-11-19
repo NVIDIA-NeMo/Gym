@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Cline borrows SandboxAccess from the Environment Server. The run configuration binds the
+# independent benchmark and agent; this config selects only the harness and model. For the host
+# CLI path behind /run, use cline_local_agent.yaml.
+cline_agent:
+  responses_api_agents:
+    cline_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      # Caps the Cline runs this agent server has in flight at once, across task sandboxes.
+      concurrency: 32
+      # Sessions need an exact version whose platform checksums the adapter pins (see README).
+      cline_version: 3.0.55
+      # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
+      sandbox_provider: null
+      sandbox_config: {}
+      # model_only is opt-in for agent-owned OpenSandbox sandboxes; see README for image prerequisites.
+      network_access: inherit
+      sandbox_install_timeout_seconds: 600
+      # Per-episode budget in seconds, enforced by the sandbox's process supervisor.
+      timeout: 900
+      session_close_timeout_seconds: 60

@@ -11,10 +11,8 @@ Generate synthetic training data for multi-step tool-calling agents using [NeMo 
 
 ```bash
 # From this directory
-uv pip install -r requirements.txt
-
-# Or with pip
-pip install -r requirements.txt
+uv sync --locked
+source .venv/bin/activate
 ```
 
 ## Usage

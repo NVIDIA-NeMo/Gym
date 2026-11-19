@@ -1,0 +1,565 @@
+# Finance Agent v2 (FABv2) Resource Server
+
+A NeMo Gym integration of the official [Vals Finance Agent Benchmark v2](https://github.com/vals-ai/finance-agent-v2)
+that **reuses Vals's own tool code directly** (tools-only wrap) instead of
+reimplementing it. The upstream `finance_agent.tools.*` classes are imported and
+exposed as HTTP endpoints; the shared `responses_api_agents/finance_agent` loop
+drives them, configured to Vals's v2 harness policy in
+`configs/finance_agent_v2.yaml`. The public release ships no grader, so scoring is
+our own per-criterion rubric judge — see [Verification](#verification).
+
+`tests/test_upstream_parity.py` checks that configured policy against the
+installed upstream package, so a pin bump that changes the harness fails here.
+
+## Tools (imported from `finance_agent.tools`)
+
+| Tool | Description | Requires |
+|------|-------------|----------|
+| `web_search` | Tavily web search (`TavilyWebSearch`) | `tavily_api_key` |
+| `edgar_search` | sec-api.io full-text EDGAR search (`EDGARSearch`), or a local index | `sec_api_key`, or `local_edgar_index_path` |
+| `price_history` | Tiingo daily OHLC for equity/etf/crypto/fx (`PriceHistory`), or local daily records | `pricing_data_api_key`, or `local_pricing_dir` |
+| `parse_html_page` | Fetch + parse a page to text, store under a key (`ParseHtmlPage`) | — |
+| `retrieve_information` | LLM over stored docs via `{{key}}` prompts (`RetrieveInformation`) | `retrieval_model_server` |
+| `calculator` | Safe arithmetic via simpleeval (`Calculator`) | — |
+| `submit_final_result` | Submit the final answer; ends the loop (`SubmitFinalResult`) | — |
+
+`parse_html_page` and `retrieve_information` share a per-session data storage
+(`state`) dict, scoped by the HTTP session cookie. `edgar_search` is the only
+way to find filing URLs, so its source must be configured or the server fails at
+startup. Any other tool whose required key or model is not configured is
+registered as unavailable and its endpoint returns a clear error, so the agent
+can route around it.
+
+### Where SEC data comes from
+
+`edgar_search_mode` (required) selects the source for `edgar_search`.
+
+| `edgar_search_mode` | `edgar_search` | SEC `parse_html_page` | Needs |
+|---|---|---|---|
+| `local` | Local SQLite index | Cache, then the filing corpus, then sec.gov | `local_edgar_index_path`; `sec_dump_path` for corpus reads |
+| `live` | sec-api.io | Cache, then sec.gov | `sec_api_key` |
+
+The benchmark config sets `live`. Asking for `local` without an index fails at
+startup. The
+mode in use, and in local mode the date range the index covers, is logged at
+startup; `NEMO_GYM_LOG_LEVEL=WARNING` silences that.
+
+Local mode subclasses the upstream tools rather than replacing them, so the
+name, description and parameter schema the model sees are unchanged and a
+sample written against the live benchmark runs either way. Only the fetch
+differs. Corpus reads need the index to map a filing URL to its file, which is
+why they are local-mode only. Parsed corpus text is written to the cache when
+`use_cache` is on, so each filing is parsed once. `parse_html_page` still
+resolves URLs the corpus does not hold, through the same cached fetch live mode
+uses, and logs its reads by source
+(`sec-corpus`, `cache`, `live`) so a corpus that is missing most of what is
+asked for is visible rather than just slow.
+
+A search whose date range falls outside the indexed span returns an error
+naming that span, rather than the empty result that would send the model
+looking for a better query. Live mode has no equivalent, since sec-api.io
+serves the whole of EDGAR.
+
+See [`resources_servers/sec_local_index/README.md`](../sec_local_index/README.md)
+for the shared library behind both modes and how it is kept aligned with
+upstream.
+
+### Where prices come from
+
+`price_history_mode` selects the source for `price_history`. It defaults to `live`.
+
+| `price_history_mode` | `price_history` | Needs |
+|---|---|---|
+| `live` | Tiingo, through the cache when `use_cache` is on | `pricing_data_api_key` |
+| `local` | `<local_pricing_dir>/equity/<TICKER>.jsonl`; never the network | `local_pricing_dir` |
+
+Each local file holds one JSON record per line, for example
+`{"date": "2024-01-02T00:00:00.000Z", "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5}`.
+Records may carry any column upstream prints (`adjClose`, `volume`, ...);
+upstream drops columns no record in the response populates, so a store of raw
+prices prints only `date,open,high,low,close`.
+
+#### Building a local store
+
+Local mode needs a daily price dataset that you are licensed to use for your
+purpose; none is shipped here. It could be an export from a market data
+vendor, exchange historical data, or a dataset your organization already
+holds. The steps below turn it into the store.
+
+**1. Shape it as one long table.** One row per ticker and trading day, saved as
+Parquet or CSV (one file or a directory of files):
+
+```text
+date,ticker,open,high,low,close,volume
+2024-01-02,AAA,10.00,10.50,9.80,10.20,120000
+2024-01-03,AAA,10.20,10.40,9.90,10.05,98000
+2024-01-02,BBB-B,41.10,41.60,40.90,41.35,5300
+```
+
+| Column | Required | Meaning |
+|---|---|---|
+| `date` | yes | Trading day: a `YYYY-MM-DD` string, date or timestamp |
+| `ticker` | yes | Symbol as the model will ask for it; share classes as `BRK-B` or `BRK.B` |
+| `open`, `high`, `low`, `close` | at least one price column | As-traded (unadjusted) prices |
+| `adjOpen`, `adjHigh`, `adjLow`, `adjClose` | | Split- and dividend-adjusted prices |
+| `volume`, `adjVolume`, `divCash`, `splitFactor` | | Shares traded, adjusted volume, cash dividend, split ratio |
+
+The tool's description tells the model that `open`..`close` are raw and
+`adj*` are adjusted, so put each series in the matching column. If your source
+has adjusted prices only, use the `adj*` columns and leave out `close`. Other
+columns are ignored, and the model sees only the columns your data has.
+
+Most sources need only a rename, or a reshape from one file per ticker:
+
+```python
+import pandas as pd
+from pathlib import Path
+
+# A vendor export with its own column names
+df = pd.read_csv("export.csv").rename(columns={"Date": "date", "Symbol": "ticker", "Close": "close"})
+
+# Or one file per ticker, named <TICKER>.csv
+df = pd.concat(pd.read_csv(p).assign(ticker=p.stem) for p in Path("per_ticker").glob("*.csv"))
+
+df.to_parquet("daily_prices.parquet", index=False)
+```
+
+**2. Check it.** The script rejects duplicate rows and unusable symbols. It
+can't know whether your prices are right, so check these first:
+
+```python
+df = pd.read_parquet("daily_prices.parquet")
+df["date"] = pd.to_datetime(df["date"])
+assert not df.duplicated(["ticker", "date"]).any(), "one row per ticker and day"
+price = "close" if "close" in df else "adjClose"
+assert df[price].gt(0).all(), "no missing or non-positive prices"
+assert (df["date"].dt.dayofweek < 5).all(), "trading days only"
+print(df["date"].min(), df["date"].max(), df["ticker"].nunique())
+```
+
+- Dates after upstream's `MAX_END_DATE` (2026-03-01) are never served.
+- In raw prices, a split shows up as a one-day jump. If your answers are
+  computed from raw closes, avoid windows that contain one.
+- Make sure every ticker your tasks ask about is present.
+
+**3. Build the store and point local mode at it:**
+
+```bash
+python resources_servers/finance_agent_v2/scripts/build_local_prices.py \
+    daily_prices.parquet --output /data/local_prices --drop-columns volume
+```
+
+```yaml
+price_history_mode: local
+local_pricing_dir: /data/local_prices
+```
+
+The script writes one file per ticker in ascending date order. It fails if a
+ticker has two rows for the same date, and skips symbols the tool would reject.
+Use `--drop-columns` for columns the model shouldn't see, for example `volume`
+if your source covers only part of the market.
+
+**4. Spot-check what the model will see**, from the server's venv at the
+repository root:
+
+```bash
+python -c "
+import asyncio, logging
+from resources_servers.finance_agent_v2.local_tools import LocalPriceHistory
+args = {'ticker': 'AAA', 'start_date': '2024-01-02', 'end_date': '2024-01-05', 'asset_class': 'equity'}
+print(asyncio.run(LocalPriceHistory('/data/local_prices').execute(args, {}, logging.getLogger())).output)
+"
+```
+
+Prices differ slightly between providers, so compare scores only between runs
+that use the same store. When you generate training answers from your own
+dataset, serve that same dataset here so a correct reading of the tool always
+matches the answer.
+
+Files are read on first use and at most 2 million daily records stay in memory
+(about 1-3 GB, depending on the price columns), so startup loads no prices and
+memory stays bounded however long the histories are.
+
+Local mode behaves like live mode where it can:
+
+- The upstream `MAX_END_DATE` clamp and argument validation still apply.
+- `etf` reads the same store as `equity`.
+- A dash share class (`BRK-B`) also finds a dot file (`BRK.B.jsonl`).
+- A ticker the store lacks returns upstream's "No pricing data returned" message.
+- `crypto` and `fx` return an error.
+
+Use local mode when the data used to label answers is the same data the tool
+serves, so a correct reading of the tool always matches the label.
+
+## Dependencies
+
+Both upstream pins are exact so the benchmark stays reproducible:
+
+```
+-e nemo-gym[dev] @ ../../
+model-library==0.1.25
+finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@<pinned-sha>
+```
+
+`model-library` declares `openai[aiohttp]>=2.28.0`, which cannot resolve against
+the vllm-compatible `openai` that Gym pins. The upstream code runs fine on the
+older client, so only the declared floor is the problem, and `overrides.txt` drops
+it with `openai[aiohttp]<=2.7.2`. That line must mirror the cap in the root
+`pyproject.toml`, because `uv --override` replaces *every* declared constraint on a
+package, Gym's included; a test asserts the two stay in sync.
+
+`finance-agent` publishes no tags and is not on PyPI, so it is pinned to a commit.
+nemo-gym requires Python >=3.13.14, the binding floor here.
+
+## Setup (`env.yaml`)
+
+Run this environment with **two configs**: this environment config
+(`configs/finance_agent_v2.yaml`) plus a model config
+(`responses_api_models/openai_model/configs/openai_model.yaml`, or
+`vllm_model.yaml` for a self-hosted endpoint).
+
+Set endpoints and credential references in the repo-root, gitignored `env.yaml`.
+`sec_api_key` is required when `edgar_search_mode` is `live`. The other tool keys
+are optional at startup; missing keys make those tools unavailable. Live runs need policy/retrieval model access, and `/verify` needs judge-model access.
+
+```yaml
+# env.yaml
+policy_base_url: https://api.openai.com/v1
+policy_api_key: ${oc.env:OPENAI_API_KEY}
+policy_model_name: gpt-5-mini
+
+# Judge model used by /verify. Kept separate from the policy on purpose, so that
+# models evaluated on this benchmark are all graded by the same judge.
+search_judge_model_base_url: https://api.openai.com/v1
+search_judge_model_api_key: ${oc.env:OPENAI_API_KEY}
+search_judge_model_name: gpt-5-mini
+
+# Required: live (sec-api.io) or local (see "Where SEC data comes from").
+edgar_search_mode: live
+
+sec_api_key: ${oc.env:SEC_API_KEY,null}                 # edgar_search (sec-api.io); required in live mode
+
+# Optional for startup; both are needed for full-tool benchmark coverage.
+tavily_api_key: ${oc.env:TAVILY_API_KEY,null}           # web_search (Tavily)
+pricing_data_api_key: ${oc.env:TIINGO_API_KEY,null}     # price_history (Tiingo)
+
+# Optional: live (Tiingo, default) or local (see "Where prices come from").
+price_history_mode: live
+local_pricing_dir: null
+
+# Persistent, shared cache root (survives across jobs; served on cache hits):
+finance_agent_v2_cache_dir: /shared/cache/finance_agent_v2
+```
+
+`${oc.env:VAR,null}` preserves optional-tool behavior when a variable is absent.
+Set `OPENAI_API_KEY` for both model endpoints in this example; policy and judge
+keys can be configured independently. For an authenticated judge endpoint,
+replace the shipped `unset` placeholder with its credential.
+
+Tool-key and cache settings resolve as config key → environment variable → default.
+You can omit them from `env.yaml` and export `SEC_API_KEY`, `TAVILY_API_KEY`,
+`TIINGO_API_KEY`, and `FINANCE_AGENT_V2_CACHE_DIR` instead. Explicit config values
+take precedence. The `policy_*` keys have no default. Resolved configurations may
+contain secrets; redact credentials before sharing or logging them.
+
+Full-tool benchmark coverage requires all three service keys and network access
+to the tools, fetched pages, and model endpoints. Record missing-tool limitations
+with results. Grading also needs judge connectivity, including internet access
+for the hosted endpoint above.
+
+## Run
+
+The public benchmark recipe (dataset + `prepare.py` + config) lives in
+`benchmarks/finance_agent_v2/`; the server code and its `gym env test` fixtures
+stay here. There is deliberately no `environments/finance_agent_v2/` entry:
+training runs this same resources server on externally generated SDG data.
+
+```bash
+# Unit tests + example-data validation for this resources server
+gym env test --resources-server finance_agent_v2
+
+# Build the public 27Q benchmark JSONL (downloads the Vals CSV if absent)
+gym eval prepare --benchmark finance_agent_v2
+
+# End-to-end (prepare + start servers + collect rollouts) on the benchmark set
+gym eval run --benchmark finance_agent_v2 \
+  --config responses_api_models/openai_model/configs/openai_model.yaml
+```
+
+Add `--limit 3 --concurrency 3` for a smoke run. `gym eval run` writes the scored
+rollouts plus `<output>_aggregate_metrics.json`.
+
+Each prepared sample carries the upstream prompts and tool JSON schemas, read at
+prepare time from `benchmarks/finance_agent_v2/upstream_spec.json` — a generated
+snapshot, because `finance_agent` is installed in this server's venv only while
+`gym eval prepare` runs in the repo-root venv. To bump the pin, update the exact
+`finance-agent` Git commit in this server's `pyproject.toml` and `_UPSTREAM_SHA` in
+`benchmarks/finance_agent_v2/prepare.py` together. Regenerate and commit this
+server's `uv.lock`, sync that lock, then regenerate the snapshot from the server
+venv and re-run `gym eval prepare`:
+
+```bash
+cd resources_servers/finance_agent_v2
+uv lock
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --locked
+.venv/bin/python scripts/export_upstream_spec.py
+```
+
+Commit `pyproject.toml`, `uv.lock`, the benchmark pin, and the regenerated
+`benchmarks/finance_agent_v2/upstream_spec.json` together. Do not edit the snapshot
+by hand; the exporter reads the exact commit from the direct project dependency.
+
+`tests/test_upstream_spec.py` fails if the snapshot drifts from the installed
+package, and `prepare.py` refuses to run when the two shas disagree.
+
+## Caching
+
+Tiingo and SEC calls are rate-limited and, within the pinned window, return
+immutable data, so the server caches them to disk. Each `Cached*` class subclasses
+the upstream tool, overrides only its network method, and stores the **raw upstream
+response**, which untouched upstream code then re-serializes. A hit is therefore
+byte-identical to a live call and survives an upstream formatting bump.
+
+| Source | Cached unit |
+|--------|-------------|
+| `price_history` (Tiingo) | per-`(endpoint, ticker)` master of raw records, sliced on read by the upstream `_records_to_csv` |
+| `edgar_search` (sec-api.io) | raw `filings` list keyed by the normalized request |
+| `parse_html_page` on sec.gov filing URLs | parsed text at `filings/<cik>/<accession>/<document>.txt` (document path percent-encoded, shared with `finance_sec_search`); general web is not cached |
+
+Caching is on by default. Point `cache_dir` at a shared absolute path so it
+survives across jobs:
+
+```yaml
+use_cache: true                            # true = read+write, false = off
+cache_dir: /shared/cache/finance_agent_v2  # null -> ~/.cache/nemo_gym/finance_agent_v2
+```
+
+Cache files are written `0664` and new cache directories `2775`, so users in
+the cache root's group can read and extend a shared cache. Create the root
+yourself with group write and the setgid bit (`chmod 2775`) before sharing it.
+
+`cache_dir` also reads `FINANCE_AGENT_V2_CACHE_DIR`. Tiingo responses are cached
+verbatim and never re-derived, and extending a window keeps already-cached rows, so
+an adjusted price level cannot drift with the fetch date between re-runs.
+
+To populate the cache ahead of an offline eval:
+
+```bash
+python resources_servers/finance_agent_v2/scripts/prefetch_prices.py \
+  --cache-dir /shared/cache/finance_agent_v2 \
+  --tickers AAPL MSFT NVDA --asset-class equity
+```
+
+## Verification
+
+Each criterion in the dataset's `rubric` is judged separately against the answer
+the agent passed to `submit_final_result`. Per criterion the judge returns a binary
+verdict as JSON; calls repeat until `judge_required_successes` (default 3) replies
+parse, capped at `judge_max_attempts` (default 10). Errors and unparseable replies
+consume an attempt and are retried; only a reply that ran out of output budget
+escalates that budget. The criterion's score is the majority of those verdicts, so
+an odd count cannot tie.
+
+Reward is **Partial Credit**: the severity-weighted pass fraction, forced to `0.0`
+if any `must_pass` dealbreaker failed. Weights come from each criterion's
+`modifiers` in the dataset and are applied after judging — the judge never sees
+them, so a criterion cannot be graded more harshly for being expensive to fail.
+Criteria without `modifiers` default to severity 1.0 and non-gating, so an
+unweighted dataset scores as a plain pass fraction.
+
+| Field | Meaning |
+|---|---|
+| `reward` | Partial Credit — the weighted pass fraction, zeroed by any failed dealbreaker |
+| `rubric_partial_credit` | the same number under Vals's name for it |
+| `rubric_weighted_fraction` | Partial Credit *before* gating; the gap is what the dealbreakers cost |
+| `rubric_all_pass` | `true` only when every criterion resolved and passed — Vals's All-Pass |
+| `rubric_fraction` | criteria passed / total, unweighted |
+| `rubric_dealbreakers_failed` / `rubric_dealbreakers_total` | how many `must_pass` criteria there were, and how many failed |
+| `rubric_unresolved` | criteria that never got enough parsable verdicts |
+| `rubric_judgements[]` | per-criterion votes, evidence, weights used, and sampled failed replies |
+| `judge_error` | set when scoring could not complete — **filter these out rather than reading them as zeros** |
+
+A criterion the judge never resolved is a judge failure, not a miss, so it scores
+`null` rather than `0` and flags the row via `judge_error`. It still weighs as
+not-passed, because treating an absent verdict as a pass would inflate exactly the
+runs whose judging broke. A row with no rubric at all scores 0 with `judge_error`
+set, so the agent and tools can be validated before labels exist.
+
+The agent records why its loop ended in `response.metadata.stop_reason`
+(`done_tool`, `max_turns`, `max_time`, `max_output_tokens`, `error`). Under
+dealbreaker gating a truncated trajectory scores the same as a confidently wrong
+one, so check this before reading a low score as a capability result.
+
+Because both the judge model and its prompt are ours, scores are **not** comparable
+to Vals's published numbers. The prompt lives in
+`prompt_templates/finance_agent_v2_rubric_judge.yaml`.
+
+`verify` is a pure function of the request body plus this server's config, so the
+server declares `REVERIFY_MODE = STATELESS`: after changing the judge prompt or
+parameters you can rescore stored rollouts without re-running the policy.
+
+```bash
+gym eval reverify --benchmark finance_agent_v2 --model-type openai_model \
+  --inputs results/<run>_materialized_inputs.jsonl \
+  --rollouts results/<run>.jsonl \
+  --output results/<run>_rejudged.jsonl --concurrency 4
+```
+
+Select the **same** config the rollouts were collected with: reverify routes each
+row by the agent name stored on it. `--model-type` is required either way, because
+the `retrieval_model_server` reference must resolve even though reverify only calls
+`/verify`.
+
+## FrontierFinance
+
+`configs/frontier_finance.yaml` runs
+[FrontierFinance](https://huggingface.co/datasets/samaya-ai/FrontierFinance)
+investor-research queries on the same tools and grades them with the official
+[FrontierFinance grader](https://github.com/samaya-ai/frontier-finance). The
+benchmark recipe lives in [`benchmarks/frontier_finance`](../../benchmarks/frontier_finance/README.md).
+Each query asks an open-ended question "as of" a date and carries expert-written
+rubrics: atomic criteria a good answer should satisfy. The reward is the share of a
+query's rubrics the answer satisfies.
+
+The config turns on three server options, all off by default:
+
+| Option | Effect |
+|---|---|
+| a row's `as_of_date` | Caps `end_date` (and `start_date`) on every `web_search`, `edgar_search` and `price_history` call at that date. A call without an `end_date` gets `as_of_date`. The tool schemas the model sees are unchanged. |
+| `max_tool_calls`, `max_tool_time_seconds` | Past either limit, every tool except `submit_final_result` returns an error telling the model to submit. Tool time is the wall-clock time during which at least one tool call is running. It includes `retrieve_information`'s call to the policy model, upstream retry backoff and cache misses, so a slow policy endpoint or a cold cache uses the budget faster. |
+| `frontier_finance_grader` | `/verify` grades the row's `rubrics` with the official grader and judge panel instead of grading `rubric` with `judge_model_server`. |
+
+### The "as of" date
+
+The system prompt tells the model that `as_of_date` is the current date. Two sources
+can still return later information:
+
+- `parse_html_page` fetches the live version of a page. SEC filings do not change,
+  but company websites and news pages may have been updated since the date, and SEC
+  search and quote pages list filings and prices published after it.
+- Tavily filters by its own publish date for each page, which can be earlier than the
+  page's latest edit.
+
+### Tool limits
+
+The FrontierFinance paper's Finance Agent v2 harness allows 200 tool calls and 300
+seconds of tool calling per question and states both in the system prompt; the config
+uses the same values (`max_tool_calls: 200`, `max_tool_time_seconds: 300`) and
+disables `max_rollout_time_seconds`. Neither limit stops the rollout; the model still
+gets to submit an answer. The agent's `max_steps` and `max_time_seconds` are hard
+stops that end the rollout with no answer, so they are set well above the server
+limits. The prompt values come from `benchmarks/frontier_finance/prepare.py`; change
+them there and in the config together.
+
+### Grading
+
+The `frontier-finance` package is installed from a pinned commit (see
+`pyproject.toml`) and used directly: its judge prompt, reply parser, batching,
+majority vote and metrics. Only the transport differs: each judge is a Gym model
+server instead of a provider SDK.
+
+For each query, every judge in `judge_panel` receives the query, its date, the
+submitted answer and up to `max_rubrics_per_call` (30) rubrics per call, and returns
+a true/false label per rubric. An unparseable reply is retried once with a format
+reminder; a rubric the reply omits counts as not met.
+
+- **Panel vote:** each rubric is decided by majority vote of the judges that
+  succeeded on the query. On a tie, the earliest of them in `judge_panel` wins, so
+  keep the panel odd.
+- **Judge failures:** a judge that errors on any batch, or returns the wrong number
+  of labels, is left out of that query's vote and counted in
+  `failed_checks_by_judge`. If every judge fails, the sample is masked
+  (`mask_sample: true`, `failure_kind: judge_failed`) and left out of all scores.
+  A judge call is retried on a timeout, a lost connection or a 408, 429 or 5xx
+  reply; any other error reply (a rejected API key, say) drops the judge at once.
+  Watch `frontier_finance/failed_checks/<judge>` in the key metrics: a judge that
+  fails on every query leaves the rest of the panel to grade without it.
+- **No answer:** if the agent stops without executing `submit_final_result`, the
+  query scores 0 (`grading_failure: no_response`) and counts against the "all
+  queries" metrics. Only the first submission the agent executed is graded. The
+  same holds for context overflow, `max_steps`, `max_time_seconds` and
+  `max_output_tokens`.
+- **Outages:** if the agent stopped because the policy model call failed
+  (`error_cause: model_call_failed`) or a tool exhausted its retries
+  (`error_cause: tool_aborted`), the sample is masked (`failure_kind:
+  model_request_error` or `environment_server_failed`) rather than scored 0.
+
+The default panel is the one the FrontierFinance authors recommend for comparable
+results: Claude Sonnet 4.6, Gemini 3.1 Pro (low thinking) and GPT-5.4, at
+temperature 0 with a 32k output budget.
+
+| Field | Meaning |
+|---|---|
+| `reward` | Rubrics met / total rubrics for the query |
+| `rubric_labels` | Final per-rubric labels, aligned with `rubrics` |
+| `judge_labels` | Each judge's labels, or `null` if that judge failed |
+| `judge_replies` | Raw judge replies, for auditing |
+| `num_must_have`, `num_must_have_qualified` | The essential-rubric subset |
+| `grading_failure` | `no_response`, `judge_error`, or `null` |
+| `tool_calls_used`, `tool_seconds_used` | Tool calls and wall-clock tool seconds the rollout used |
+| `tool_limit_hit` | `max_tool_calls`, `max_tool_time_seconds`, or `null` |
+
+Aggregate metrics are computed by the package's own `MetricsReport` and reported
+under `frontier_finance/`: macro (mean of per-query rates) and micro (total met /
+total rubrics) qualification rates over graded queries (`_on_success_queries`) and
+over all queries (`_on_all_queries`), the same four for `must_have` rubrics only,
+micro rates by `rubric_type`, `data_source_type` and `use_case`, and
+`num_records`, `num_failed_queries` and failed checks per judge. The server adds
+the share of queries that hit each tool limit (`tool_limit_hit_rate/<limit>`) and
+the share that ended with each agent stop reason (`stop_reason/<reason>`). With
+`--num-repeats`, the headline rates are also reported per repeat.
+
+### Setup
+
+Judge endpoints default to each provider's OpenAI-compatible API, with keys from
+`ANTHROPIC_API_KEY`, `GEMINI_API_KEY` and `OPENAI_API_KEY`. To route all three
+through one OpenAI-compatible gateway, set the shared base URL and key, and each
+judge's model name as the gateway knows it:
+
+```yaml
+# env.yaml additions for FrontierFinance
+frontier_finance_judge_base_url: https://my-gateway.example.com/v1
+frontier_finance_judge_api_key: ${oc.env:GATEWAY_API_KEY}
+frontier_finance_judge_claude_model: anthropic/claude-sonnet-4-6
+frontier_finance_judge_gemini_model: google/gemini-3.1-pro-preview
+frontier_finance_judge_gpt_model: openai/gpt-5.4
+frontier_finance_cache_dir: /shared/cache/frontier_finance
+```
+
+Each judge also accepts its own `frontier_finance_judge_<claude|gemini|gpt>_base_url`
+and `_api_key`. Tool keys are set as above. `edgar_search_mode` defaults to `live`
+in this config.
+
+`data/frontier_finance_example.jsonl` holds five single-fact SEC filing lookups,
+each with one rubric that restates the expected answer. Any capable model should
+score close to 1.0 on them, so a low score points to a broken setup (tools, date cap
+or judges) rather than a weak model. They are not from the dataset.
+
+## Licensing
+
+**This environment's code** (everything under `resources_servers/finance_agent_v2/`
+and `benchmarks/finance_agent_v2/`) is licensed under **Apache-2.0**, consistent
+with NeMo Gym and the SPDX headers in each source file.
+
+**Upstream dependencies** (imported, not vendored — see `pyproject.toml`):
+
+| Package | Source | License |
+|---------|--------|---------|
+| `finance-agent` (`finance_agent.tools` / `finance_agent.prompt`; also the source of the benchmark's `upstream_spec.json`) | [vals-ai/finance-agent-v2](https://github.com/vals-ai/finance-agent-v2) | MIT |
+| `model-library` (`model_library.*`) | [vals-ai/model-library](https://github.com/vals-ai/model-library)@`0.1.25`, from PyPI | MIT |
+| `frontier-finance` (`frontier_finance.*`, the FrontierFinance grader) | [samaya-ai/frontier-finance](https://github.com/samaya-ai/frontier-finance) | Apache-2.0 |
+
+We import these packages at install time and do not copy their source into this
+repo, so their upstream licenses listed above apply to that code as distributed upstream.
+
+**Dataset.** The `example.jsonl` fixtures here and the prepared benchmark JSONL
+derive from the **public** Vals Finance Agent Benchmark v2 release; use is subject
+to that project's terms. The public release ships no official grader.
+
+**Grading is our own.** Vals's private grader was obtained under a separate license
+and is **deliberately not reproduced** here; the judge prompt was written from
+scratch, so scores are not directly comparable to Vals's published numbers.
+
+**FrontierFinance.** The dataset is CC-BY-4.0, gated on Hugging Face, and may not be
+reshared outside a gated repository; it is downloaded at prepare time and never
+committed. The queries in `data/frontier_finance_example.jsonl` are not from it.
