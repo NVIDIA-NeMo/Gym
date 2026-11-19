@@ -39,7 +39,7 @@ from uuid import uuid4
 from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field, FilePath
+from pydantic import ConfigDict, Field, FilePath, model_validator
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -112,6 +112,7 @@ from responses_api_agents.opencode_agent.observability import (
     opencode_tool_outcome,
     scope_opencode_trajectory,
 )
+from responses_api_agents.opencode_agent.pinned import STAGE_EXECUTABLE
 from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
     OPENCODE_VERSION,
@@ -141,8 +142,8 @@ def _warn_deprecated_once() -> None:
         LOGGER.warning(DEPRECATION_WARNING)
 
 
-_RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
-_RIPGREP_UPLOAD_MAX_CONCURRENT = 2
+_BINARY_UPLOAD_MAX_ATTEMPTS = 2
+_BINARY_UPLOAD_MAX_CONCURRENT = 2
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
 # Written by stable-date.js once it pins a date; must match its MARKER.
@@ -565,6 +566,11 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_binary_path: Optional[str] = None
     remote_opencode_musl_binary_path: Optional[str] = None
     local_ripgrep_binary_path: FilePath | None = None
+    # A host-local OpenCode executable uploaded into each sandbox instead of downloading one there,
+    # for sandboxes without internet access. Its SHA-256 is checked here at startup and again in
+    # the sandbox after the upload.
+    local_opencode_binary_path: FilePath | None = None
+    local_opencode_binary_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
     concurrency: Optional[int] = Field(default=None)
@@ -623,6 +629,34 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 
     debug: bool = False
 
+    @model_validator(mode="after")
+    def _check_local_opencode_binary(self) -> "OpenCodeSandboxedAgentConfig":
+        if self.local_opencode_binary_path is None:
+            if self.local_opencode_binary_sha256 is not None:
+                raise ValueError("local_opencode_binary_sha256 needs local_opencode_binary_path")
+            return self
+        if self.local_opencode_binary_sha256 is None:
+            raise ValueError("local_opencode_binary_path needs local_opencode_binary_sha256")
+        if (
+            self.preinstalled_opencode
+            or self.remote_opencode_binary_path
+            or self.remote_opencode_musl_binary_path
+            or self.remote_opencode_install_script_path
+        ):
+            raise ValueError(
+                "Set one way to install OpenCode: local_opencode_binary_path, the remote_opencode_* paths "
+                "or preinstalled_opencode"
+            )
+        self.local_opencode_binary_sha256 = self.local_opencode_binary_sha256.lower()
+        with self.local_opencode_binary_path.open("rb") as file:
+            digest = hashlib.file_digest(file, "sha256").hexdigest()
+        if digest != self.local_opencode_binary_sha256:
+            raise ValueError(
+                f"local_opencode_binary_path {self.local_opencode_binary_path} has SHA-256 {digest}, "
+                f"not local_opencode_binary_sha256 {self.local_opencode_binary_sha256}"
+            )
+        return self
+
 
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
@@ -640,6 +674,15 @@ def _build_remote_opencode_install_command(
         f"--glibc-binary {quote(binary_path)} "
         f"--musl-binary {quote(musl_binary_path)}"
     )
+
+
+def _then_remove_upload(command: str, upload_path: str) -> str:
+    """Run ``command``, then remove the uploaded ``upload_path`` whatever the outcome, keeping the command's status.
+
+    Some providers put an absolute upload path in the host's /tmp and never clean it up, so the copy is removed here.
+    A failed removal is ignored: a root-owned upload in a sticky /tmp cannot be removed by a non-root user.
+    """
+    return f'{{ {command}; status=$?; rm -f -- {quote(upload_path)} 2>/dev/null; (exit "$status"); }}'
 
 
 def _extract_opencode_session_id(session_list_stdout: str) -> str:
@@ -752,7 +795,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
         # Uvicorn workers have separate agent instances, so this bounds each process.
-        self._ripgrep_upload_sem = Semaphore(_RIPGREP_UPLOAD_MAX_CONCURRENT)
+        self._binary_upload_sem = Semaphore(_BINARY_UPLOAD_MAX_CONCURRENT)
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
@@ -813,18 +856,21 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         return sandbox
 
-    async def _stage_ripgrep(self, sandbox: AsyncSandbox, source_path: Path) -> str:
-        """Retry an ambiguous upload timeout without reusing its remote path."""
+    async def _stage_binary(self, sandbox: AsyncSandbox, source_path: Path, *, name: str) -> str:
+        """Upload a host-local executable to a fresh ``/tmp/nemo-gym-<name>-*`` path and return that path.
+
+        An ambiguous upload timeout is retried at a new path, never the one that may hold a partial write.
+        """
         size_bytes = source_path.stat().st_size
         sandbox_id = sandbox.sandbox_id
         budget = asyncio.timeout(self.config.sandbox_timeout)
         try:
             async with budget:
-                for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
-                    remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
+                for attempt in range(1, _BINARY_UPLOAD_MAX_ATTEMPTS + 1):
+                    remote_path = f"/tmp/nemo-gym-{name}-{uuid4().hex}"
                     started = monotonic()
                     try:
-                        async with self._ripgrep_upload_sem:
+                        async with self._binary_upload_sem:
                             await sandbox.upload(source_path, remote_path)
                     except (TimeoutError, NgFailureEvent) as error:
                         if isinstance(error, NgFailureEvent) and (
@@ -834,37 +880,39 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         if isinstance(error, NgFailureEvent):
                             observe_failure(error)
                         LOGGER.warning(
-                            "OpenCode ripgrep upload timed out; sandbox_id=%s remote_path=%s "
+                            "OpenCode %s upload timed out; sandbox_id=%s remote_path=%s "
                             "attempt=%d/%d size_bytes=%d duration_s=%.1f",
+                            name,
                             sandbox_id,
                             remote_path,
                             attempt,
-                            _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                            _BINARY_UPLOAD_MAX_ATTEMPTS,
                             size_bytes,
                             monotonic() - started,
                         )
-                        if attempt == _RIPGREP_UPLOAD_MAX_ATTEMPTS:
+                        if attempt == _BINARY_UPLOAD_MAX_ATTEMPTS:
                             raise
                         await asyncio.sleep(uniform(15.0, 30.0))
                     else:
                         LOGGER.info(
-                            "OpenCode ripgrep upload completed; sandbox_id=%s remote_path=%s "
+                            "OpenCode %s upload completed; sandbox_id=%s remote_path=%s "
                             "attempt=%d/%d size_bytes=%d duration_s=%.1f",
+                            name,
                             sandbox_id,
                             remote_path,
                             attempt,
-                            _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                            _BINARY_UPLOAD_MAX_ATTEMPTS,
                             size_bytes,
                             monotonic() - started,
                         )
                         return remote_path
 
-                raise RuntimeError("OpenCode ripgrep upload retry loop did not run")
+                raise RuntimeError(f"OpenCode {name} upload retry loop did not run")
         except TimeoutError as error:
             reason = (
-                "OpenCode ripgrep staging exceeded its setup budget"
+                f"OpenCode {name} staging exceeded its setup budget"
                 if budget.expired()
-                else "OpenCode ripgrep upload exhausted its timeout retries"
+                else f"OpenCode {name} upload exhausted its timeout retries"
             )
             raise NgFailureEvent(
                 boundary="harness",
@@ -1262,7 +1310,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         opencode_thinking_str = "--thinking"
 
         install_str = ":"
-        if not self.config.preinstalled_opencode:
+        if self.config.local_opencode_binary_path is not None:
+            opencode_remote_path = await self._stage_binary(
+                sandbox, self.config.local_opencode_binary_path, name="opencode-binary"
+            )
+            # Copies the upload, keeps it only if its SHA-256 matches and it answers --version, then installs it.
+            # The staging name is unique because rollouts may share $HOME on some providers.
+            install_str = _then_remove_upload(
+                f"sh -c {quote(STAGE_EXECUTABLE)} sh {quote(opencode_remote_path)} "
+                f"{quote(self.config.local_opencode_binary_sha256)} "
+                f'"$HOME/.opencode/bin/.opencode-staging-{uuid4().hex}" "$HOME/.opencode/bin/opencode"',
+                opencode_remote_path,
+            )
+        elif not self.config.preinstalled_opencode:
             if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
                 if self.config.remote_opencode_musl_binary_path:
                     install_str = _build_remote_opencode_install_command(
@@ -1326,13 +1386,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         ripgrep_remote_path = None
         ripgrep_install_str = ""
         if self.config.local_ripgrep_binary_path is not None:
-            ripgrep_remote_path = await self._stage_ripgrep(sandbox, self.config.local_ripgrep_binary_path)
-            # Uploads may be root-owned: copy as the execution user; teardown removes the source.
-            ripgrep_install_str = (
-                '&& mkdir -p "$HOME/.opencode/bin" '
+            ripgrep_remote_path = await self._stage_binary(
+                sandbox, self.config.local_ripgrep_binary_path, name="ripgrep"
+            )
+            # Uploads may be root-owned: copy as the execution user, then remove the upload.
+            ripgrep_copy = (
+                'mkdir -p "$HOME/.opencode/bin" '
                 f'&& cp {quote(ripgrep_remote_path)} "$HOME/.opencode/bin/rg" '
-                '&& chmod 0755 "$HOME/.opencode/bin/rg" '
-                '&& "$HOME/.opencode/bin/rg" --version'
+                '&& chmod 0755 "$HOME/.opencode/bin/rg"'
+            )
+            ripgrep_install_str = (
+                f'&& {_then_remove_upload(ripgrep_copy, ripgrep_remote_path)} && "$HOME/.opencode/bin/rg" --version'
             )
 
         extra_env_str = " ".join(f"{k}={quote(v)}" for k, v in sorted(self._resolve_opencode_env(query).items()))
