@@ -10,6 +10,9 @@ from starlette.testclient import TestClient
 from nemo_gym.server_runtime.request_handling.request_gzip import GzipRequestMiddleware
 
 
+MAX_DECODED_BYTES = 64
+
+
 @pytest.fixture
 def client():
     app = FastAPI()
@@ -18,7 +21,7 @@ def client():
     async def echo(request: Request):
         return {"body": (await request.body()).decode(), "headers": dict(request.headers)}
 
-    app.add_middleware(GzipRequestMiddleware)
+    app.add_middleware(GzipRequestMiddleware, max_decoded_bytes=MAX_DECODED_BYTES)
     with TestClient(app) as client:
         yield client
 
@@ -40,8 +43,8 @@ def test_gzip_body_is_decoded_and_headers_describe_the_decoded_request(client):
     assert "transfer-encoding" not in headers
 
 
-@pytest.mark.parametrize("encoding", [None, "identity"])
-def test_uncompressed_requests_pass_through_without_decoding(client, encoding):
+@pytest.mark.parametrize("encoding", [None, "", "identity", "br", "gzip, br"])
+def test_requests_without_a_single_gzip_encoding_pass_through(client, encoding):
     headers = {} if encoding is None else {"Content-Encoding": encoding}
     response = client.post("/v1/responses", content=b'{"input":"plain"}', headers=headers)
 
@@ -59,15 +62,45 @@ def test_malformed_gzip_returns_400(client, body):
     response = client.post("/v1/responses", content=body, headers={"Content-Encoding": "gzip"})
 
     assert response.status_code == 400
-    assert response.json() == {"error": "Invalid gzip request body"}
+    assert response.json() == {
+        "error": {
+            "message": "Invalid gzip request body.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": None,
+        }
+    }
 
 
-@pytest.mark.parametrize("encoding", ["br", "gzip, br"])
-def test_unsupported_content_encoding_returns_415(client, encoding):
-    response = client.post("/v1/responses", content=b"body", headers={"Content-Encoding": encoding})
+def test_gzip_body_at_the_decoded_size_limit_is_accepted(client):
+    body = b"a" * MAX_DECODED_BYTES
+    response = client.post("/v1/responses", content=gzip.compress(body), headers={"Content-Encoding": "gzip"})
 
-    assert response.status_code == 415
-    assert response.json() == {"error": "Unsupported Content-Encoding"}
+    assert response.status_code == 200
+    assert response.json()["body"] == body.decode()
+
+
+def test_gzip_body_above_the_decoded_size_limit_returns_413(client):
+    body = b"a" * (MAX_DECODED_BYTES + 1)
+    response = client.post("/v1/responses", content=gzip.compress(body), headers={"Content-Encoding": "gzip"})
+
+    assert response.status_code == 413
+    assert response.json() == {
+        "error": {
+            "message": "Decoded gzip request body exceeds 64 bytes.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": None,
+        }
+    }
+
+
+def test_decoded_size_limit_does_not_apply_to_plain_bodies(client):
+    body = b"a" * (MAX_DECODED_BYTES + 1)
+    response = client.post("/v1/responses", content=body)
+
+    assert response.status_code == 200
+    assert response.json()["body"] == body.decode()
 
 
 async def test_non_http_events_pass_through_untouched():
@@ -87,5 +120,5 @@ async def test_non_http_events_pass_through_untouched():
         assert await actual_receive() == {"type": "lifespan.startup"}
         await actual_send({"type": "lifespan.startup.complete"})
 
-    await GzipRequestMiddleware(app)(scope, receive, send)
+    await GzipRequestMiddleware(app, max_decoded_bytes=MAX_DECODED_BYTES)(scope, receive, send)
     assert events == [{"type": "lifespan.startup.complete"}]

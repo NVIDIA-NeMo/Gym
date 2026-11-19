@@ -929,60 +929,35 @@ Duplicate config paths:
         reference = OmegaConf.select(server_config, "model_server")
         return reference if isinstance(reference, DictConfig) else None
 
-    def raise_on_gzip_mismatch(self, global_config_dict: DictConfig) -> None:
-        """Require gzip senders and receivers to be enabled on connected servers."""
+    def raise_on_invalid_gzip_configuration(self, global_config_dict: DictConfig) -> None:
+        """Require gzip to be configured on a supported agent pointing to a model server."""
         boolean = TypeAdapter(bool)
-
-        def gzip_enabled(server_config: DictConfig, setting: str) -> bool:
-            try:
-                return boolean.validate_python(server_config.get("gzip_requests_enabled", False))
-            except ValidationError as error:
-                raise ConfigError(f"'{setting}' must be a boolean or a value accepted as a boolean.") from error
-
-        models = {
-            instance.name: instance.get_inner_run_server_config_dict()
-            for instance in self.filter_for_server_instance_configs(global_config_dict)
-            if instance.SERVER_TYPE == MODEL_SERVER_TYPE_KEY_NAME
-        }
-        model_gzip_enabled: Dict[str, bool] = {}
-        for model_name, model_config in models.items():
-            model_type = model_type_for(global_config_dict, model_name)
-            if model_type == "dummy_model":
-                continue
-            setting = f"{model_name}.{MODEL_SERVER_TYPE_KEY_NAME}.{model_type}.gzip_requests_enabled"
-            model_gzip_enabled[model_name] = gzip_enabled(model_config, setting)
-        models_with_compressing_agents: Set[str] = set()
+        supported_agent_types = {"codex_agent", "hermes_agent", "opencode_agent", "pi_agent"}
+        key = "gzip_requests_enabled"
         errors: List[str] = []
         for agent in self._agent_instances(global_config_dict):
-            agent_setting = f"{agent.name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent.agent_type}.gzip_requests_enabled"
-            if not gzip_enabled(agent.server_config, agent_setting):
+            if key not in agent.server_config:
                 continue
+            setting = f"{agent.name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent.agent_type}.{key}"
+            if agent.agent_type not in supported_agent_types:
+                errors.append(f"'{setting}' is not supported by this agent type. Remove the setting.")
+                continue
+            try:
+                gzip_enabled = boolean.validate_python(agent.server_config[key])
+            except ValidationError:
+                errors.append(f"'{setting}' must be a boolean or a value accepted as a boolean.")
+                continue
+            if not gzip_enabled:
+                continue
+
             reference = self._model_server_reference(agent.server_config)
             if reference is None or reference.get("type") != MODEL_SERVER_TYPE_KEY_NAME:
                 errors.append(
-                    f"{agent_setting}=true requires a model_server reference to a configured Gym model "
-                    "with gzip_requests_enabled=true; its receiver cannot otherwise be validated."
-                )
-                continue
-            model_name = reference["name"]
-            # Preparation and planning inject a placeholder without a runtime receiver.
-            if model_type_for(global_config_dict, model_name) == "dummy_model":
-                continue
-            models_with_compressing_agents.add(model_name)
-            if not model_gzip_enabled[model_name]:
-                errors.append(
-                    f"{agent_setting}=true but model '{model_name}' has gzip_requests_enabled=false. "
-                    "Enable gzip_requests_enabled on that model or disable it on the harness."
-                )
-        for model_name, enabled in model_gzip_enabled.items():
-            if enabled and model_name not in models_with_compressing_agents:
-                errors.append(
-                    f"Model '{model_name}' has gzip_requests_enabled=true, but no connected harness enables gzip. "
-                    "Enable gzip_requests_enabled on at least one harness referencing this model, "
-                    "or disable it on the model."
+                    f"{setting}=true requires a model_server reference to a NeMo Gym model server "
+                    f"of type '{MODEL_SERVER_TYPE_KEY_NAME}'."
                 )
         if errors:
-            raise ConfigError("Gzip configuration mismatch:\n" + "\n".join(errors))
+            raise ConfigError("Invalid gzip configuration:\n" + "\n".join(errors))
 
     def raise_on_unsupported_model_pairings(self, global_config_dict: DictConfig) -> None:
         """Reject resource/model bindings that explicitly disallow the selected model adapter.
@@ -2035,7 +2010,7 @@ Set the keys individually, in a config or as overrides, e.g.:
             probe_ports=not parse_config.offline,
             host_by_server_type=host_by_server_type,
         )
-        self.raise_on_gzip_mismatch(global_config_dict)
+        self.raise_on_invalid_gzip_configuration(global_config_dict)
 
         with open_dict(global_config_dict):
             # Head server defaults, filled per key so a config may pin just one.
