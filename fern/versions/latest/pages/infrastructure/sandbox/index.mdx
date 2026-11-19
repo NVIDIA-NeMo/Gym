@@ -363,19 +363,19 @@ sandbox = fake_sandbox()
 sandbox.provider.on_close.side_effect = RuntimeError("provider unreachable")
 ```
 
-### Worker Labels and Closing by Label
+### The Worker Label and Closing by Label
 
-`AsyncSandbox.start()` adds three labels to every sandbox's `metadata`, after the spec's own keys, so a spec cannot replace them:
+`AsyncSandbox.start()` adds one label to every sandbox's `metadata`, after the spec's own keys, so a spec cannot replace it:
 
 | Label | Value |
 | --- | --- |
-| `nemo-gym-server` | The server instance that created the sandbox. It is left out when the process was not started by the `gym` CLI. |
-| `nemo-gym-run` | The run: `NEMO_GYM_RUN_ID`, or an ID generated once per process. |
-| `nemo-gym-worker` | The worker's routing ID. With several workers, session routing sets it; otherwise it is generated once per process. |
+| `nemo-gym.nvidia.com/worker` | The routing ID of the worker that created the sandbox. With several workers, session routing sets it; otherwise it is generated once per process. |
 
-With these labels, a live worker can stop the sandboxes of a worker that died, instead of leaving them to the provider's `ttl_s`. `close_by_metadata(provider, labels)` lists the provider's sandboxes that carry every label, re-reads each one's labels, and closes it only if they still match. It returns the sandbox IDs it closed, refused because their labels changed, failed to close, and found already gone. Docker, OpenSandbox, OpenShell, E2B and Daytona support it. On OpenShell, closed means the delete was handed to its delete workers. Local, Apptainer, Enroot and ECS Fargate do not support it, and `close_by_metadata` raises `NotImplementedError` for them.
+The key is fixed. It is written on every provider, whatever the provider block's `attribution.key_prefix` says and even with `attribution.enabled: false`, because a worker that reaps a dead peer must find every sandbox that peer created. The attribution labels (`team`, `user`, `workload`, `run`) are unchanged and still follow both settings. A deployment with a custom `key_prefix` therefore sees the worker key under the default prefix, next to its attribution keys under the custom one.
 
-Every sandbox that carries all the given labels is closed. Label values must be valid Kubernetes label values, which every provider stores unchanged; `close_by_metadata` refuses any other value. A run or server label alone therefore also stops live workers' sandboxes; include `nemo-gym-worker` to end one worker's sandboxes.
+With this label, a live worker can stop the sandboxes of a worker that died, instead of leaving them to the provider's `ttl_s`. `close_by_metadata(provider, labels)` lists the provider's sandboxes that carry every label, re-reads each one's labels, and closes it only if they still match. It returns the sandbox IDs it closed, refused because their labels changed, failed to close, and found already gone. Docker, OpenSandbox, OpenShell, E2B and Daytona support it. On OpenShell, closed means the delete was handed to its delete workers. Local, Apptainer, Enroot and ECS Fargate do not support it, and `close_by_metadata` raises `NotImplementedError` for them.
+
+Every sandbox that carries all the given labels is closed. Label values must be valid Kubernetes label values, which every provider stores unchanged; `close_by_metadata` refuses any other value. A run or workload label alone therefore also stops live workers' sandboxes; include `nemo-gym.nvidia.com/worker` to end one worker's sandboxes.
 
 A worker also groups what it creates on the host under its routing ID, in `<root>/<routing ID>/`. The root is `NEMO_GYM_WORKSPACE_ROOT`, or `nemo-gym-workspaces-<uid>` in the system temporary directory. The root must be on a node-local filesystem, not a shared one such as Lustre: process group records name processes of the node that wrote them, and each local command writes and removes one. The worker directory, and the default root, must be directories this user owns that nobody else can write; a worker refuses a symbolic link or one another user controls. A worker that exits removes its directory once it is empty. The directory holds:
 

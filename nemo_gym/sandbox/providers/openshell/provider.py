@@ -1039,7 +1039,7 @@ class OpenShellProvider:
         """Delete this worker's orphaned sandboxes: ones it no longer tracks.
 
         An example is a create cancelled after the gateway committed it.
-        They are selected by this worker's ``nemo-gym-worker`` label, which every create sets.
+        They are selected by this worker's ``nemo-gym.nvidia.com/worker`` label, which every create sets.
         """
         selector = f"{WORKER_LABEL}={worker_routing_id()},{SANDBOX_LABEL}=1"
         workspace = self._connection.workspace

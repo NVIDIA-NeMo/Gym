@@ -428,7 +428,7 @@ async def test_create_adds_attribution_labels_with_spec_keys_winning(
         "nemo-gym.nvidia.com/user": "alice",
         "nemo-gym.nvidia.com/workload": "bench",
         "nemo-gym.nvidia.com/run": "run-1",
-        "nemo-gym-worker": worker_routing_id(),
+        "nemo-gym.nvidia.com/worker": worker_routing_id(),
         "task": "demo",
         SANDBOX_LABEL: "1",
     }
@@ -440,7 +440,11 @@ async def test_create_attribution_disabled_adds_only_the_worker_and_marker_label
     monkeypatch.setenv("NEMO_GYM_TEAM", "team-a")
     provider = make_provider(attribution={"enabled": False})
     await provider.create(SandboxSpec(metadata={"task": "demo"}))
-    assert _create_labels(fake_client) == {"task": "demo", "nemo-gym-worker": worker_routing_id(), SANDBOX_LABEL: "1"}
+    assert _create_labels(fake_client) == {
+        "task": "demo",
+        "nemo-gym.nvidia.com/worker": worker_routing_id(),
+        SANDBOX_LABEL: "1",
+    }
 
 
 async def test_create_attribution_custom_prefix_and_run_key_present(
@@ -492,7 +496,7 @@ async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) 
     assert call["name"].startswith(SANDBOX_NAME_PREFIX)
     assert len(call["name"]) <= MAX_SANDBOX_NAME_LENGTH
     # The marker label is applied last, so user metadata cannot clobber it.
-    assert call["labels"] == {"task": "demo", "nemo-gym-worker": worker_routing_id(), SANDBOX_LABEL: "1"}
+    assert call["labels"] == {"task": "demo", "nemo-gym.nvidia.com/worker": worker_routing_id(), SANDBOX_LABEL: "1"}
     pb_spec = call["spec"]
     assert pb_spec.template.image == "python:3.12-slim"
     assert dict(pb_spec.environment) == {"FOO": "bar"}
@@ -1255,7 +1259,7 @@ async def test_aclose_reaps_orphaned_sandboxes_of_this_process(make_provider, fa
     assert fake_client.list_calls == [
         {
             "workspace": "default",
-            "label_selector": f"nemo-gym-worker={worker_routing_id()},{SANDBOX_LABEL}=1",
+            "label_selector": f"nemo-gym.nvidia.com/worker={worker_routing_id()},{SANDBOX_LABEL}=1",
         }
     ]
     assert [call["name"] for call in fake_client.delete_calls] == ["orphan"]
@@ -1272,8 +1276,8 @@ async def test_reap_never_deletes_another_workers_sandboxes_of_the_same_run(
     provider = make_provider()
     prefix = "nemo-gym.nvidia.com/"
     fake_client.gateway_labels = {
-        "a-orphan": {f"{prefix}run": "shared-run", "nemo-gym-worker": "worker-a", SANDBOX_LABEL: "1"},
-        "b-live": {f"{prefix}run": "shared-run", "nemo-gym-worker": "worker-b", SANDBOX_LABEL: "1"},
+        "a-orphan": {f"{prefix}run": "shared-run", "nemo-gym.nvidia.com/worker": "worker-a", SANDBOX_LABEL: "1"},
+        "b-live": {f"{prefix}run": "shared-run", "nemo-gym.nvidia.com/worker": "worker-b", SANDBOX_LABEL: "1"},
         "unlabeled": {},
     }
     await provider.aclose()
@@ -1311,11 +1315,14 @@ async def test_create_labels_the_worker_and_the_sweep_runs_without_attribution(
 ) -> None:
     provider = make_provider(attribution={"enabled": False})
     await provider.create(SandboxSpec())
-    assert _create_labels(fake_client) == {"nemo-gym-worker": worker_routing_id(), SANDBOX_LABEL: "1"}
+    assert _create_labels(fake_client) == {"nemo-gym.nvidia.com/worker": worker_routing_id(), SANDBOX_LABEL: "1"}
     openshell_provider._LIVE_SANDBOXES.clear()
     await provider.aclose()
     assert fake_client.list_calls == [
-        {"workspace": "default", "label_selector": f"nemo-gym-worker={worker_routing_id()},{SANDBOX_LABEL}=1"}
+        {
+            "workspace": "default",
+            "label_selector": f"nemo-gym.nvidia.com/worker={worker_routing_id()},{SANDBOX_LABEL}=1",
+        }
     ]
 
 
@@ -1330,7 +1337,7 @@ async def test_reap_list_failure_is_logged_not_raised(make_provider, fake_client
 @pytest.mark.parametrize(
     "metadata",
     [
-        {"nemo-gym-worker": "mine", "nemo-gym.nvidia.com/run": "task-run"},
+        {"nemo-gym.nvidia.com/worker": "mine", "nemo-gym.nvidia.com/run": "task-run"},
         {SANDBOX_LABEL: "0"},
     ],
 )
@@ -1340,7 +1347,7 @@ async def test_caller_metadata_cannot_replace_the_worker_or_marker_label(
     provider = make_provider()
     await provider.create(SandboxSpec(metadata=metadata))
     labels = _create_labels(fake_client)
-    assert labels["nemo-gym-worker"] == worker_routing_id()
+    assert labels["nemo-gym.nvidia.com/worker"] == worker_routing_id()
     assert labels[SANDBOX_LABEL] == "1"
     assert labels["nemo-gym.nvidia.com/run"] == metadata.get(
         "nemo-gym.nvidia.com/run", labels["nemo-gym.nvidia.com/run"]
@@ -1494,12 +1501,14 @@ async def test_list_by_metadata_selects_gym_sandboxes_carrying_every_label(
     fake_client.list_results = [[_labeled_ref("a", {})]]
     provider = make_provider()
 
-    handles = await provider.list_by_metadata({"nemo-gym-worker": "w1", "nemo-gym-server": "my/server"})
+    handles = await provider.list_by_metadata(
+        {"nemo-gym.nvidia.com/worker": "w1", "nemo-gym.nvidia.com/run": "my/run"}
+    )
 
     assert fake_client.list_calls == [
         {
             "workspace": "default",
-            "label_selector": f"nemo-gym-worker=w1,nemo-gym-server=my_server,{SANDBOX_LABEL}=1",
+            "label_selector": f"nemo-gym.nvidia.com/worker=w1,nemo-gym.nvidia.com/run=my_run,{SANDBOX_LABEL}=1",
         }
     ]
     assert [(h.sandbox_id, h.raw.name, h.raw.workspace) for h in handles] == [("id-a", "a", "default")]
@@ -1516,8 +1525,8 @@ async def test_list_by_metadata_refuses_a_key_that_would_split_the_selector(make
 
 async def test_metadata_of_reads_fresh_labels_and_none_once_gone(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider()
-    fake_client.get_results = [_labeled_ref("a", {"nemo-gym-worker": "w1"})]
-    assert await provider.metadata_of(_make_handle(name="a")) == {"nemo-gym-worker": "w1"}
+    fake_client.get_results = [_labeled_ref("a", {"nemo-gym.nvidia.com/worker": "w1"})]
+    assert await provider.metadata_of(_make_handle(name="a")) == {"nemo-gym.nvidia.com/worker": "w1"}
 
     fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
     assert await provider.metadata_of(_make_handle(name="a")) is None
@@ -1531,9 +1540,12 @@ async def test_metadata_of_reads_fresh_labels_and_none_once_gone(make_provider, 
 async def test_close_by_metadata_closes_matching_and_refuses_relabeled(make_provider, fake_client: FakeClient) -> None:
     from nemo_gym.sandbox.worker_labels import close_by_metadata
 
-    labels = {"nemo-gym-worker": "w1"}
+    labels = {"nemo-gym.nvidia.com/worker": "w1"}
     fake_client.list_results = [[_labeled_ref("kept", labels), _labeled_ref("moved", labels)]]
-    current = {"kept": {**labels, SANDBOX_LABEL: "1"}, "moved": {"nemo-gym-worker": "w2", SANDBOX_LABEL: "1"}}
+    current = {
+        "kept": {**labels, SANDBOX_LABEL: "1"},
+        "moved": {"nemo-gym.nvidia.com/worker": "w2", SANDBOX_LABEL: "1"},
+    }
 
     def get(sandbox_name: str, *, workspace: str) -> SandboxRef:
         fake_client.get_calls.append({"name": sandbox_name, "workspace": workspace})

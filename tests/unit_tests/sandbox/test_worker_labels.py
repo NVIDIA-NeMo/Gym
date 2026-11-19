@@ -19,8 +19,6 @@ import pytest
 from nemo_gym.core import worker_resources
 from nemo_gym.sandbox.providers.base import SandboxHandle
 from nemo_gym.sandbox.worker_labels import (
-    RUN_LABEL,
-    SERVER_LABEL,
     WORKER_LABEL,
     CloseByMetadataResult,
     close_by_metadata,
@@ -52,19 +50,13 @@ class _Provider:
         self.closed.append(handle.sandbox_id)
 
 
-def test_worker_labels_name_the_server_run_and_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NEMO_GYM_CONFIG_PATH", "a server/with spaces")
-    monkeypatch.setenv("NEMO_GYM_RUN_ID", "run 1")
+def test_the_worker_label_names_this_worker_under_a_fixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(worker_resources, "_routing_id", None)
     worker_resources.set_worker_routing_id("d" * 32)
 
-    assert worker_labels() == {SERVER_LABEL: "a_server_with_spaces", RUN_LABEL: "run_1", WORKER_LABEL: "d" * 32}
-
-
-def test_worker_labels_leave_out_the_server_outside_the_gym_cli(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("NEMO_GYM_CONFIG_PATH", raising=False)
-
-    assert set(worker_labels()) == {RUN_LABEL, WORKER_LABEL}
+    # The key does not follow attribution.key_prefix: a reap must find the label whatever a provider block sets.
+    assert WORKER_LABEL == "nemo-gym.nvidia.com/worker"
+    assert worker_labels() == {WORKER_LABEL: "d" * 32}
 
 
 async def test_close_by_metadata_rechecks_every_listed_sandbox_before_closing_it() -> None:

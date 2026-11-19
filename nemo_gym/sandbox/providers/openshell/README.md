@@ -103,7 +103,7 @@ Unknown `provider_options` keys raise `ValueError`; wrong-typed values raise `Ty
     the last episodes of a run are lost. Raise `server_shutdown_timeout_seconds` to cover the delete budget when
     you use OpenShell.
   - At `aclose()`, when this process has no sandbox live or being created, it reaps this worker's orphaned
-    sandboxes: it lists the gateway sandboxes labelled `nemo-gym-worker=<this worker's routing ID>` and
+    sandboxes: it lists the gateway sandboxes labelled `nemo-gym.nvidia.com/worker=<this worker's routing ID>` and
     `nemo-gym.sandbox=1` and deletes those it does not track, for example a
     create that was cancelled after the gateway committed it. A create's name is tracked before the RPC is
     issued, so the reap never takes a sandbox another episode is still creating, and a create cancelled

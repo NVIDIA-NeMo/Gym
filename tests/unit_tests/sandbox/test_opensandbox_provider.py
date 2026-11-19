@@ -5914,12 +5914,12 @@ class PagedLabelService(FakeLifecycleService):
         self.current.pop(sandbox_id, None)
 
 
-WORKER = {"nemo-gym-worker": "dead", "nemo-gym-run": "run1"}
+WORKER = {"nemo-gym.nvidia.com/worker": "dead", "nemo-gym.nvidia.com/run": "run1"}
 
 
 async def test_list_by_metadata_reads_every_page(monkeypatch: pytest.MonkeyPatch) -> None:
     service = PagedLabelService(
-        sandboxes=[orphan("a", WORKER), orphan("b", {"nemo-gym-worker": "live"}), orphan("c", WORKER)]
+        sandboxes=[orphan("a", WORKER), orphan("b", {"nemo-gym.nvidia.com/worker": "live"}), orphan("c", WORKER)]
     )
     install_lifecycle(monkeypatch, service)
     provider = opensandbox_provider.OpenSandboxProvider()
@@ -5978,8 +5978,8 @@ async def test_metadata_of_reads_fresh_and_is_none_once_gone(monkeypatch: pytest
     (handle,) = await provider.list_by_metadata(WORKER)
 
     assert await provider.metadata_of(handle) == WORKER
-    service.current["a"] = orphan("a", {"nemo-gym-worker": "other"})
-    assert await provider.metadata_of(handle) == {"nemo-gym-worker": "other"}
+    service.current["a"] = orphan("a", {"nemo-gym.nvidia.com/worker": "other"})
+    assert await provider.metadata_of(handle) == {"nemo-gym.nvidia.com/worker": "other"}
     del service.current["a"]
     with RequestFailureLog.capture() as log:
         assert await provider.metadata_of(handle) is None
@@ -5997,7 +5997,7 @@ async def test_close_by_metadata_closes_matches_and_refuses_relabeled(monkeypatc
     async def list_then_relabel(labels: Any) -> list[Any]:
         handles = await real_list(labels)
         # Between the listing and the stop, a live worker took this sandbox over.
-        service.current["relabeled"] = orphan("relabeled", {**WORKER, "nemo-gym-worker": "live"})
+        service.current["relabeled"] = orphan("relabeled", {**WORKER, "nemo-gym.nvidia.com/worker": "live"})
         return handles
 
     monkeypatch.setattr(provider, "list_by_metadata", list_then_relabel)

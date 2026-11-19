@@ -634,7 +634,7 @@ class AsyncSandbox:
         requested_spec = spec if spec is not None else self._spec
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
-        # The worker labels go last, so a spec cannot name another worker.
+        # The worker label goes last, so a spec cannot name another worker.
         # That worker's reap would otherwise stop this sandbox.
         requested_spec = replace(requested_spec, metadata={**requested_spec.metadata, **worker_labels()})
         if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):

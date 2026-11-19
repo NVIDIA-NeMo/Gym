@@ -23,6 +23,7 @@ import re
 import sys
 import tomllib
 import types
+import urllib.parse
 from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -31,6 +32,7 @@ import pytest
 from packaging.requirements import Requirement
 
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.core.worker_resources import worker_routing_id
 from nemo_gym.package_info import __version__ as nemo_gym_version
 from nemo_gym.sandbox import attribution
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
@@ -1714,7 +1716,7 @@ async def test_real_sdk_status_only_reads_control_plane(
 
 
 class TestCloseByMetadata:
-    LABELS = {"nemo-gym-worker": "w1", "nemo-gym-run": "r1"}
+    LABELS = {"nemo-gym.nvidia.com/worker": "w1", "nemo-gym.nvidia.com/run": "r1"}
 
     @pytest.fixture
     def control_plane(self, monkeypatch: pytest.MonkeyPatch) -> dict:
@@ -1744,7 +1746,8 @@ class TestCloseByMetadata:
             plane["requests"].append((request.method, request.url.path, dict(request.url.params)))
             sandboxes = plane["sandboxes"]
             if request.method == "GET" and request.url.path == "/v2/sandboxes":
-                wanted = dict(pair.split("=", 1) for pair in request.url.params.get("metadata", "").split("&") if pair)
+                # The SDK URL-encodes the metadata query, including the "/" in prefixed keys.
+                wanted = dict(urllib.parse.parse_qsl(request.url.params.get("metadata", "")))
                 matching = [
                     sandbox_id
                     for sandbox_id, metadata in sandboxes.items()
@@ -1786,7 +1789,7 @@ class TestCloseByMetadata:
 
     async def test_lists_by_the_metadata_query_across_pages(self, control_plane: dict) -> None:
         control_plane["sandboxes"].update(
-            {"a": {**self.LABELS, "x": "1"}, "b": dict(self.LABELS), "other": {"nemo-gym-worker": "w2"}}
+            {"a": {**self.LABELS, "x": "1"}, "b": dict(self.LABELS), "other": {"nemo-gym.nvidia.com/worker": "w2"}}
         )
 
         handles = await self._provider().list_by_metadata(self.LABELS)
@@ -1794,7 +1797,7 @@ class TestCloseByMetadata:
         assert sorted(handle.sandbox_id for handle in handles) == ["a", "b"]
         lists = [params for method, path, params in control_plane["requests"] if path == "/v2/sandboxes"]
         assert len(lists) == 2  # One page per sandbox: the second request follows the next token.
-        assert all(params["metadata"] == "nemo-gym-worker=w1&nemo-gym-run=r1" for params in lists)
+        assert all(dict(urllib.parse.parse_qsl(params["metadata"])) == self.LABELS for params in lists)
         assert "nextToken" not in lists[0] and lists[1]["nextToken"] == "1"
 
     async def test_metadata_of_reads_fresh_and_is_none_once_gone(self, control_plane: dict) -> None:
@@ -1802,8 +1805,8 @@ class TestCloseByMetadata:
         provider = self._provider()
         [handle] = await provider.list_by_metadata(self.LABELS)
 
-        control_plane["sandboxes"]["a"] = {"nemo-gym-worker": "w2"}
-        assert await provider.metadata_of(handle) == {"nemo-gym-worker": "w2"}
+        control_plane["sandboxes"]["a"] = {"nemo-gym.nvidia.com/worker": "w2"}
+        assert await provider.metadata_of(handle) == {"nemo-gym.nvidia.com/worker": "w2"}
         del control_plane["sandboxes"]["a"]
         assert await provider.metadata_of(handle) is None
 
@@ -1812,7 +1815,7 @@ class TestCloseByMetadata:
 
         control_plane["sandboxes"].update({"keep": dict(self.LABELS), "stop": dict(self.LABELS)})
         control_plane["page_size"] = 10
-        control_plane["relabel_on_list"] = {"keep": {**self.LABELS, "nemo-gym-worker": "w2"}}
+        control_plane["relabel_on_list"] = {"keep": {**self.LABELS, "nemo-gym.nvidia.com/worker": "w2"}}
 
         result = await close_by_metadata(self._provider(), self.LABELS)
 
@@ -1825,13 +1828,12 @@ class TestCloseByMetadata:
         assert not any(path.endswith("/connect") for _, path, _ in control_plane["requests"])
 
 
-async def test_worker_labels_reach_the_e2b_create_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NEMO_GYM_CONFIG_PATH", "my_server")
+async def test_the_worker_label_reaches_the_e2b_create_call() -> None:
+    # The worker label is written even with attribution off, under its fixed key.
     sandbox = AsyncSandbox(E2BProvider(create={"template": "base"}, attribution={"enabled": False}))
     await sandbox.start(_spec(metadata={"task": "t1"}))
 
     metadata = FakeSandbox.instances[-1].create_kwargs["metadata"]
     assert metadata["task"] == "t1"
-    assert metadata["nemo-gym-server"] == "my_server"
-    assert metadata["nemo-gym-worker"] and metadata["nemo-gym-run"]
+    assert metadata["nemo-gym.nvidia.com/worker"] == worker_routing_id()
     await sandbox.stop()

@@ -1015,7 +1015,7 @@ class LabeledDaytonaClient:
 
 async def test_list_by_metadata_sends_the_label_filter_and_reads_every_page(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(daytona_provider, "_require_list_query", lambda: FakeListQuery)
-    worker = {"nemo-gym-worker": "a" * 32, "nemo-gym-run": "run1"}
+    worker = {"nemo-gym.nvidia.com/worker": "a" * 32, "nemo-gym.nvidia.com/run": "run1"}
     client = LabeledDaytonaClient(
         [
             [SimpleNamespace(id="sandbox-1", labels=worker)],
@@ -1055,12 +1055,12 @@ async def test_close_by_metadata_closes_matching_sandboxes_and_refuses_relabeled
     from nemo_gym.sandbox.worker_labels import close_by_metadata
 
     monkeypatch.setattr(daytona_provider, "_require_list_query", lambda: FakeListQuery)
-    worker = {"nemo-gym-worker": "b" * 32}
+    worker = {"nemo-gym.nvidia.com/worker": "b" * 32}
     client = LabeledDaytonaClient(
         [[SimpleNamespace(id="sandbox-match", labels=worker), SimpleNamespace(id="sandbox-moved", labels=worker)]]
     )
     # Relabeled between the listing and the stop: it now belongs to another worker.
-    client.labels["sandbox-moved"] = {"nemo-gym-worker": "c" * 32}
+    client.labels["sandbox-moved"] = {"nemo-gym.nvidia.com/worker": "c" * 32}
     provider = daytona_provider.DaytonaProvider(operations={"retries": 0})
     monkeypatch.setattr(provider, "_client", lambda: client)
 

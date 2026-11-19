@@ -1199,37 +1199,35 @@ async def test_create_passes_metadata_as_labels_without_replacing_the_marker(
     provider, rec = _make_provider(monkeypatch, _LabeledContainers({}))
 
     await provider.create(
-        SandboxSpec(image="img", metadata={"nemo-gym-worker": "w1", docker_provider.SANDBOX_LABEL: "0"})
+        SandboxSpec(image="img", metadata={"nemo-gym.nvidia.com/worker": "w1", docker_provider.SANDBOX_LABEL: "0"})
     )
 
     run_argv = rec.calls[0]["argv"]
-    assert _contains_seq(run_argv, ["--label", "nemo-gym-worker=w1"])
+    assert _contains_seq(run_argv, ["--label", "nemo-gym.nvidia.com/worker=w1"])
     assert [run_argv[i + 1] for i, arg in enumerate(run_argv) if arg == "--label"] == [
         f"{docker_provider.SANDBOX_LABEL}=1",
-        "nemo-gym-worker=w1",
+        "nemo-gym.nvidia.com/worker=w1",
     ]
 
 
 async def test_async_sandbox_start_labels_the_container_with_this_worker(
     fake_binary: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("NEMO_GYM_CONFIG_PATH", "my_resources_server")
-    monkeypatch.setenv("NEMO_GYM_RUN_ID", "run-7")
     monkeypatch.setattr(worker_resources, "_routing_id", None)
     worker_resources.set_worker_routing_id("a" * 32)
     provider, rec = _make_provider(monkeypatch, _LabeledContainers({}))
 
     # A spec cannot claim another worker's label: its sandbox would then be stopped by that worker's reap.
-    sandbox = AsyncSandbox(provider, SandboxSpec(image="img", metadata={"nemo-gym-worker": "other", "task": "t1"}))
+    sandbox = AsyncSandbox(
+        provider, SandboxSpec(image="img", metadata={"nemo-gym.nvidia.com/worker": "other", "task": "t1"})
+    )
     await sandbox.start()
 
     labels = [arg for i, arg in enumerate(rec.calls[0]["argv"]) if i and rec.calls[0]["argv"][i - 1] == "--label"]
     assert set(labels) == {
         f"{docker_provider.SANDBOX_LABEL}=1",
         "task=t1",
-        "nemo-gym-server=my_resources_server",
-        "nemo-gym-run=run-7",
-        f"nemo-gym-worker={'a' * 32}",
+        f"nemo-gym.nvidia.com/worker={'a' * 32}",
     }
 
 
@@ -1239,21 +1237,21 @@ async def test_close_by_metadata_closes_only_containers_that_still_carry_the_lab
     marker = {docker_provider.SANDBOX_LABEL: "1"}
     daemon = _LabeledContainers(
         {
-            "dead-1": {**marker, "nemo-gym-worker": "dead"},
-            "dead-2": {**marker, "nemo-gym-worker": "dead"},
-            "relabeled": {**marker, "nemo-gym-worker": "dead"},
-            "live": {**marker, "nemo-gym-worker": "live"},
-            "not-ours": {"nemo-gym-worker": "dead"},
+            "dead-1": {**marker, "nemo-gym.nvidia.com/worker": "dead"},
+            "dead-2": {**marker, "nemo-gym.nvidia.com/worker": "dead"},
+            "relabeled": {**marker, "nemo-gym.nvidia.com/worker": "dead"},
+            "live": {**marker, "nemo-gym.nvidia.com/worker": "live"},
+            "not-ours": {"nemo-gym.nvidia.com/worker": "dead"},
         }
     )
-    daemon.relabel_on_inspect["relabeled"] = {**marker, "nemo-gym-worker": "live"}
+    daemon.relabel_on_inspect["relabeled"] = {**marker, "nemo-gym.nvidia.com/worker": "live"}
     provider, rec = _make_provider(monkeypatch, daemon)
 
-    result = await close_by_metadata(provider, {"nemo-gym-worker": "dead"})
+    result = await close_by_metadata(provider, {"nemo-gym.nvidia.com/worker": "dead"})
 
     ps_argv = rec.calls[0]["argv"]
     assert _contains_seq(ps_argv, ["--filter", f"label={docker_provider.SANDBOX_LABEL}=1"])
-    assert _contains_seq(ps_argv, ["--filter", "label=nemo-gym-worker=dead"])
+    assert _contains_seq(ps_argv, ["--filter", "label=nemo-gym.nvidia.com/worker=dead"])
     assert sorted(result.closed) == ["dead-1", "dead-2"]
     assert result.refused == ("relabeled",)
     assert result.failed == ()
@@ -1270,13 +1268,13 @@ async def test_metadata_of_a_removed_container_is_none(fake_binary: str, monkeyp
 async def test_close_by_metadata_skips_a_container_removed_after_the_listing(
     fake_binary: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    daemon = _LabeledContainers({"gone": {docker_provider.SANDBOX_LABEL: "1", "nemo-gym-worker": "dead"}})
+    daemon = _LabeledContainers({"gone": {docker_provider.SANDBOX_LABEL: "1", "nemo-gym.nvidia.com/worker": "dead"}})
     provider, _rec = _make_provider(monkeypatch, daemon)
-    handles = await provider.list_by_metadata({"nemo-gym-worker": "dead"})
+    handles = await provider.list_by_metadata({"nemo-gym.nvidia.com/worker": "dead"})
     daemon.containers.clear()
     monkeypatch.setattr(provider, "list_by_metadata", AsyncMock(return_value=handles))
 
-    result = await close_by_metadata(provider, {"nemo-gym-worker": "dead"})
+    result = await close_by_metadata(provider, {"nemo-gym.nvidia.com/worker": "dead"})
 
     assert result == CloseByMetadataResult(gone=("gone",))
     assert daemon.removed == []

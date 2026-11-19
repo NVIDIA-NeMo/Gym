@@ -12,48 +12,39 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The server, run and worker labels on every sandbox, and closing every sandbox that carries given labels.
+"""The worker label on every sandbox, and closing every sandbox that carries given labels.
 
-``AsyncSandbox.start`` adds the labels to every sandbox it creates.
-With them, a live worker can stop the sandboxes of a worker that died, by its routing ID.
+``AsyncSandbox.start`` adds the worker label to every sandbox it creates.
+With it, a live worker can stop the sandboxes of a worker that died, by its routing ID.
 Otherwise they would run until the provider's TTL.
 """
 
 import asyncio
 import logging
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from nemo_gym.core.worker_resources import worker_routing_id
-from nemo_gym.sandbox.attribution import resolve_run_id, sanitize_label_value
+from nemo_gym.sandbox.attribution import DEFAULT_ATTRIBUTION_KEY_PREFIX, sanitize_label_value
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxProvider, SupportsSandboxCloseByMetadata
 
 
 LOGGER = logging.getLogger(__name__)
 
-SERVER_LABEL = "nemo-gym-server"
-RUN_LABEL = "nemo-gym-run"
-WORKER_LABEL = "nemo-gym-worker"
+# A fixed key, independent of ``attribution.key_prefix`` and ``attribution.enabled``.
+# A reap must find every sandbox of a gone worker, so the key cannot depend on a provider block's settings.
+WORKER_LABEL = f"{DEFAULT_ATTRIBUTION_KEY_PREFIX}worker"
 
-# The gym CLI sets it on every server process to the server instance's name.
-# It is nemo_gym.config.global_config.NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
-# not imported here to keep the sandbox package free of the config package.
-_SERVER_NAME_ENV_VAR = "NEMO_GYM_CONFIG_PATH"
 _CLOSE_CONCURRENCY = 16
 
 
 def worker_labels() -> dict[str, str]:
-    """The labels of a sandbox this worker creates: run and worker always, server when the gym CLI started it.
+    """The label of a sandbox this worker creates: ``WORKER_LABEL`` set to the worker's routing ID.
 
-    Values are valid Kubernetes label values already, so every provider stores them unchanged.
-    A later ``close_by_metadata`` with the same values therefore matches.
+    The routing ID is a valid Kubernetes label value, so every provider stores it unchanged.
+    A later ``close_by_metadata`` with the same value therefore matches.
     """
-    labels = {RUN_LABEL: sanitize_label_value(resolve_run_id()), WORKER_LABEL: worker_routing_id()}
-    server = os.environ.get(_SERVER_NAME_ENV_VAR, "").strip()
-    if server:
-        labels[SERVER_LABEL] = sanitize_label_value(server)
-    return labels
+    return {WORKER_LABEL: worker_routing_id()}
 
 
 @dataclass(frozen=True)
@@ -84,7 +75,8 @@ async def close_by_metadata(provider: SandboxProvider, labels: Mapping[str, str]
     A provider's listing may be stale or its filter advisory, and a stop is not undone.
 
     Every sandbox that carries all of ``labels`` is closed.
-    Labels that name no worker, such as a run or a server alone, therefore also stop the sandboxes of live workers.
+    Labels that name no worker, such as an attribution run or workload alone, select every worker's sandboxes.
+    They therefore also stop the sandboxes of live workers.
     To end one dead worker's sandboxes, include ``WORKER_LABEL``.
 
     Raises:
