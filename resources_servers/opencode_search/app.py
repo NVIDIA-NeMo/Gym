@@ -51,7 +51,6 @@ from time import time
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
 import aiohttp
-import anyio
 from fastapi import FastAPI, Request, Response
 from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
@@ -91,7 +90,6 @@ from nemo_gym.sandbox import (
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SHUTDOWN_STOP_CONCURRENCY,
-    STOP_TIMEOUT_S,
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionRequest,
@@ -721,17 +719,6 @@ def _training_mask(body: SearchVerifyRequest, unmeasured: bool) -> Dict[str, Any
     return {"instance_config": {**(instance_config if isinstance(instance_config, dict) else {}), "mask_sample": True}}
 
 
-async def _stop(sandbox: AsyncSandbox) -> None:
-    """Stop an agent run's sandbox within STOP_TIMEOUT_S, the bound LentSandboxes applies to the sandboxes it lends,
-    even while the request that stops it is being cancelled.
-
-    A client that disconnects cancels its request handler and every later await in it, so an unshielded stop would
-    never run and the sandbox would outlive every reference to it.
-    """
-    with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
-        await sandbox.stop()
-
-
 class SearchResourcesServer(SimpleResourcesServer):
     config: SearchResourcesServerConfig
 
@@ -840,7 +827,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         self._sandbox_access.pop(session_id, None)
         sandbox = self._agent_run_sandboxes.get(session_id)
         if sandbox is not None:
-            await _stop(sandbox)
+            await sandbox.stop()
             self._agent_run_sandboxes.pop(session_id, None)
 
     async def seed_session(
@@ -928,7 +915,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         async def stop(session_id: str, sandbox: AsyncSandbox) -> None:
             async with stopping:
                 try:
-                    await _stop(sandbox)
+                    await sandbox.stop()
                 except Exception:
                     LOGGER.exception("Failed to stop the sandbox of agent run %s at shutdown", session_id)
 

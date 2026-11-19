@@ -345,6 +345,24 @@ finally:
     await sandbox.stop()
 ```
 
+`stop()` finishes even when the request that calls it is cancelled, for example when a client disconnects: it is shielded from anyio cancellation. It is bounded in time by `timeout_s`, `STOP_TIMEOUT_S` (120 seconds) by default:
+
+- A stop that does not finish in time raises `TimeoutError`, and one whose provider call fails raises that error. Either way a later `stop()` tries again:
+  - If the provider had not yet torn the sandbox down, the later `stop()` tears it down.
+  - If it had, the sandbox stays stopped, and the later `stop()` retries only the release of the provider's client.
+- Pass your own limit as `stop(timeout_s=...)`, or `None` for no limit. Do not wrap `stop()` in `asyncio.timeout` or `asyncio.wait_for`: that cancels the stop natively, and the stop's own default still applies inside it.
+- `disconnect()`, which releases a client without ending the sandbox, is shielded and bounded the same way.
+- `AsyncSandboxCompose.stop()` stops each member with its own limit and has no limit for the group unless you pass one.
+
+To test code that starts, stops or borrows sandboxes, run a real `AsyncSandbox` over `FakeSandboxProvider` from `nemo_gym.sandbox.testing`, and script the provider rather than the sandbox. `fake_sandbox()` builds a started sandbox on one:
+
+```python
+from nemo_gym.sandbox.testing import fake_sandbox
+
+sandbox = fake_sandbox()
+sandbox.provider.on_close.side_effect = RuntimeError("provider unreachable")
+```
+
 ## Image Rewrites
 
 Use `rewrite_image()` when a benchmark's upstream image needs to run through an internal registry mirror.

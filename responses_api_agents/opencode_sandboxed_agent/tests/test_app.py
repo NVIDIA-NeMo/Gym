@@ -57,6 +57,7 @@ from nemo_gym.core import (
     SandboxFailureDetails,
 )
 from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxHandle
+from nemo_gym.sandbox.testing import fake_sandbox
 from nemo_gym.trajectory import (
     NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentInvocation,
@@ -1666,14 +1667,13 @@ class TestOpenCodeSandboxedAgent:
         server_client.post = AsyncMock(return_value=Response())
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
 
-        stopped = anyio.Event()
+        sandbox = fake_sandbox()
 
-        async def stop() -> None:
+        async def slow_close() -> None:
+            # A close that has to await, so a stop the cancelled handler reaches would never finish.
             await anyio.sleep(0)
-            stopped.set()
 
-        sandbox = MagicMock()
-        sandbox.stop = stop
+        sandbox.provider.on_close.side_effect = slow_close
         server._start_sandbox = AsyncMock(return_value=sandbox)
         rollout_started = anyio.Event()
 
@@ -1692,7 +1692,7 @@ class TestOpenCodeSandboxedAgent:
             await rollout_started.wait()
             task_group.cancel_scope.cancel()
 
-        assert stopped.is_set(), "the pod was left running"
+        assert sandbox.provider.closed == ["fake-1"], "the pod was left running"
         assert server._sandbox_id_to_sandbox == {}
         assert server._sandbox_id_to_run_result == {}
 
