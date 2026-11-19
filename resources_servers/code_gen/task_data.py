@@ -37,7 +37,7 @@ class UnitTests(BaseModel):
 
 
 class ResourceLimits(BaseModel):
-    """A task's own limits; mirrors ``ResourceLimits`` in app.py."""
+    """A task's own limits; app.py grades with this model too."""
 
     model_config = ConfigDict(extra="forbid")
 

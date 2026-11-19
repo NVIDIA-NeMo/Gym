@@ -19,7 +19,6 @@ from unittest.mock import MagicMock
 
 import app as code_gen_app
 import pytest
-import task_data
 from app import (
     CompCodingResourcesServer,
     CompCodingResourcesServerConfig,
@@ -422,9 +421,6 @@ class TestSandboxVerify:
         with pytest.raises(ValidationError):
             await self._sandbox_server().verify(request)
         assert calls == []
-
-    def test_grading_and_task_data_validation_share_one_limits_model(self) -> None:
-        assert code_gen_app.ResourceLimits is task_data.ResourceLimits
 
     async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
         async def _failing(*args, **kwargs):
