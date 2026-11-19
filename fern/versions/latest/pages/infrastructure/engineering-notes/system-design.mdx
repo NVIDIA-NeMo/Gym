@@ -94,7 +94,9 @@ flowchart TB
    - Each runs uvicorn with a FastAPI application listening on `http://{host}:{port}`.
    - The global config is passed via environment variable `NEMO_GYM_CONFIG_DICT`. A config over 120 KiB, near the
      length Linux refuses in one environment variable, is written to a file that only the user can read, and
-     `NEMO_GYM_CONFIG_DICT_FILE` names it.
+     `NEMO_GYM_CONFIG_DICT_FILE` names it. A venv reused with `skip_venv_if_present` can hold a Gym that reads only
+     the variable: the config then stays in the variable for every server, and the run stops before any server
+     starts when the operating system does not accept it there.
    - The specific server identity is passed via `NEMO_GYM_CONFIG_PATH`.
    - Server URLs are registered in the global config, allowing other servers to discover and call them.
 

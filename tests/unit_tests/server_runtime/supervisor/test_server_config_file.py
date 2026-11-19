@@ -1,24 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A config too long for an environment variable reaches a server in a file."""
+"""A config too long for an environment variable reaches a server in a file, when the server's Gym reads files."""
 
 import errno
 import os
 import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from pathlib import Path
 
 import pytest
 
 import nemo_gym.server_runtime.supervisor.server_supervisor as server_supervisor
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     MAX_CONFIG_DICT_ENV_BYTES,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME,
+    SKIP_VENV_IF_PRESENT_KEY_NAME,
+    UV_VENV_DIR_KEY_NAME,
 )
+from nemo_gym.server_runtime.supervisor.server_venv import get_venv_path
+from nemo_gym.utils.venv_setup import SETUP_COMPLETE_MARKER
+from tests.unit_tests.config.test_global_config import TestGlobalConfig as _TestGlobalConfig
 
 
 # What a server does first: read the config its parent gave it.
@@ -26,6 +33,20 @@ _COUNT_TASKS = (
     "from nemo_gym.config.global_config import maybe_get_global_config_dict; "
     "print(len(maybe_get_global_config_dict().tasks))"
 )
+
+# The config module of a Gym from before servers could read the config from a file: it reads the variable only.
+_GYM_THAT_READS_THE_VARIABLE_ONLY = """\
+import os
+
+from omegaconf import OmegaConf
+
+NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
+
+
+def maybe_get_global_config_dict():
+    config = os.getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
+    return OmegaConf.create(config) if config else None
+"""
 
 
 def _supervisor() -> server_supervisor.ServerSupervisor:
@@ -42,18 +63,56 @@ def _config_with_tasks(min_bytes: int) -> tuple[str, int]:
     return "tasks:\n" + "".join(line.format(index=index) for index in range(count)), count
 
 
-def _tasks_a_server_reads(env: dict[str, str]) -> int:
+def _tasks_a_server_reads(env: dict[str, str], python: Path | str = sys.executable, cwd: Path | None = None) -> int:
     child = subprocess.run(
-        [sys.executable, "-c", _COUNT_TASKS], env=os.environ | env, capture_output=True, text=True, check=True
+        [str(python), "-c", _COUNT_TASKS], env=os.environ | env, cwd=cwd, capture_output=True, text=True, check=True
     )
     return int(child.stdout)
 
 
-def test_a_short_config_stays_in_the_variable() -> None:
+def _server(
+    tmp_path: Path, reused_venv_gym: str | None = None, name: str = "sample"
+) -> tuple[server_supervisor._ConfiguredServer, dict]:
+    """A configured server and its global config.
+
+    Without `reused_venv_gym` the server's venv is set up in the run. With it, `skip_venv_if_present` reuses a
+    complete venv whose Gym is this checkout's ("reads the file") or an earlier one ("reads the variable only").
+    """
+    server_dir = tmp_path / "resources_servers" / name
+    server_dir.mkdir(parents=True)
+    server = server_supervisor._ConfiguredServer(name, "resources_servers", name, {}, Path("app.py"), server_dir)
+    config = _TestGlobalConfig._default_global_config_dict_values.fget(None) | {
+        UV_VENV_DIR_KEY_NAME: str(tmp_path / "venvs"),
+        SKIP_VENV_IF_PRESENT_KEY_NAME: reused_venv_gym is not None,
+    }
+    if reused_venv_gym is None:
+        return server, config
+
+    venv = get_venv_path(server_dir, config)
+    (venv / "bin").mkdir(parents=True)
+    python = f'exec "{sys.executable}" "$@"'
+    if reused_venv_gym == "reads the variable only":
+        gym_config = venv / "earlier_gym" / "nemo_gym" / "config"
+        gym_config.mkdir(parents=True)
+        (gym_config.parent / "__init__.py").touch()
+        (gym_config / "__init__.py").touch()
+        (gym_config / "global_config.py").write_text(_GYM_THAT_READS_THE_VARIABLE_ONLY)
+        # Without `site`, so that an editable install of this checkout cannot come before the earlier Gym.
+        packages = sysconfig.get_paths()["purelib"]
+        python = f'PYTHONPATH="{venv / "earlier_gym"}:{packages}" exec "{sys.executable}" -S "$@"'
+    (venv / "bin" / "python").write_text(f"#!/bin/sh\n{python}\n")
+    (venv / "bin" / "python").chmod(0o755)
+    (venv / "bin" / "activate").touch()
+    (venv / SETUP_COMPLETE_MARKER).touch()
+    return server, config
+
+
+def test_a_short_config_stays_in_the_variable(tmp_path: Path) -> None:
     supervisor = _supervisor()
+    server, global_config = _server(tmp_path)
     config = "tasks:\n  task-000000: digest\n"
 
-    env = supervisor._config_dict_env(config)
+    env = supervisor._config_dict_env(config, [server], global_config)
 
     assert env == {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config, NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME: ""}
     assert supervisor._config_dict_file is None
@@ -63,9 +122,10 @@ def test_a_short_config_stays_in_the_variable() -> None:
 def test_a_long_config_reaches_the_server_in_a_private_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     supervisor = _supervisor()
+    server, global_config = _server(tmp_path)
     config, count = _config_with_tasks(MAX_CONFIG_DICT_ENV_BYTES)
 
-    env = supervisor._config_dict_env(config)
+    env = supervisor._config_dict_env(config, [server], global_config)
 
     config_file = Path(env[NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME])
     assert env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME] == ""
@@ -84,6 +144,7 @@ def test_a_config_the_operating_system_refuses_as_a_variable_starts_a_server(
 ) -> None:
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     supervisor = _supervisor()
+    server, global_config = _server(tmp_path)
     # Linux refuses one environment variable over 32 memory pages.
     config, count = _config_with_tasks(32 * os.sysconf("SC_PAGE_SIZE"))
     with pytest.raises(OSError) as refused:
@@ -91,6 +152,72 @@ def test_a_config_the_operating_system_refuses_as_a_variable_starts_a_server(
     assert refused.value.errno == errno.E2BIG
 
     try:
-        assert _tasks_a_server_reads(supervisor._config_dict_env(config)) == count
+        assert _tasks_a_server_reads(supervisor._config_dict_env(config, [server], global_config)) == count
     finally:
         supervisor.shutdown()
+
+
+def test_a_long_config_reaches_a_reused_venv_whose_gym_reads_files_in_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    supervisor = _supervisor()
+    server, global_config = _server(tmp_path, reused_venv_gym="reads the file")
+    config, count = _config_with_tasks(MAX_CONFIG_DICT_ENV_BYTES)
+
+    env = supervisor._config_dict_env(config, [server], global_config)
+
+    try:
+        assert env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME] == ""
+        assert Path(env[NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME]).read_text(encoding="utf-8") == config
+        assert _tasks_a_server_reads(env) == count
+    finally:
+        supervisor.shutdown()
+
+
+def test_a_long_config_stays_in_the_variable_for_a_reused_venv_whose_gym_reads_no_file(tmp_path: Path) -> None:
+    supervisor = _supervisor()
+    server, global_config = _server(tmp_path, reused_venv_gym="reads the variable only")
+    venv = get_venv_path(server.dir_path, global_config)
+    venv_files = sorted(venv.rglob("*"))
+    # Over 120 KiB, and short enough for one environment variable on every Linux host.
+    config, count = _config_with_tasks(MAX_CONFIG_DICT_ENV_BYTES)
+
+    env = supervisor._config_dict_env(config, [server], global_config)
+
+    assert env == {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config, NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME: ""}
+    assert supervisor._config_dict_file is None
+    # Asking the venv's Gym changed nothing in the venv, and that Gym receives the whole config. It starts in the
+    # server's directory, like a server: from this checkout `python -c` would import the checkout's Gym.
+    assert sorted(venv.rglob("*")) == venv_files
+    assert _tasks_a_server_reads(env, python=venv / "bin" / "python", cwd=server.dir_path) == count
+
+
+def test_one_reused_venv_whose_gym_reads_no_file_keeps_the_variable_for_every_server(tmp_path: Path) -> None:
+    supervisor = _supervisor()
+    set_up_in_the_run, _ = _server(tmp_path, name="set_up_in_the_run")
+    reused, global_config = _server(tmp_path, reused_venv_gym="reads the variable only", name="reused")
+    config, _ = _config_with_tasks(MAX_CONFIG_DICT_ENV_BYTES)
+
+    env = supervisor._config_dict_env(config, [set_up_in_the_run, reused], global_config)
+
+    assert env == {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config, NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME: ""}
+    assert supervisor._config_dict_file is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the limit on one environment variable is Linux's")
+def test_a_config_no_transport_can_carry_to_a_reused_venv_stops_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "config_files"))
+    (tmp_path / "config_files").mkdir()
+    supervisor = _supervisor()
+    server, global_config = _server(tmp_path, reused_venv_gym="reads the variable only")
+    config, _ = _config_with_tasks(32 * os.sysconf("SC_PAGE_SIZE"))
+
+    with pytest.raises(ConfigError) as stopped:
+        supervisor._config_dict_env(config, [server], global_config)
+
+    message = str(stopped.value)
+    assert "sample" in message and "Upgrade nemo-gym" in message and "++skip_venv_if_present=false" in message
+    assert not list((tmp_path / "config_files").iterdir())
