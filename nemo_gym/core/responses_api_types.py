@@ -1408,7 +1408,7 @@ NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
 
 # Outer tool-call keys that agents replay from a model response but that carry no meaning in a request:
 # - "name" duplicates the nested function.name or custom.name.
-# - "index" is a streaming delta position, which some providers (OpenRouter) also return on non-streaming tool calls.
+# - "index" is a position in a streamed response, which some providers also return on non-streaming tool calls.
 _REDUNDANT_OUTER_TOOL_CALL_KEYS = ("name", "index")
 
 

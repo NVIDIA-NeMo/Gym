@@ -1167,7 +1167,7 @@ class TestNeMoGymChatCompletionSchemas:
         ],
     )
     def test_tool_call_strips_the_outer_index_without_mutating_input(self, tool_call: dict[str, Any]) -> None:
-        # OpenRouter returns index on non-streaming tool calls, and agents replay the assistant message unchanged.
+        # Some providers return index on non-streaming tool calls, and agents replay the assistant message unchanged.
         payload = {
             "messages": [
                 {"role": "user", "content": "hi"},
