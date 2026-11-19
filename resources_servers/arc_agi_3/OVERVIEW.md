@@ -14,6 +14,9 @@ games of it, with two harness families.
 - **The game server is the authority.** The resources server runs `arc_agi`'s own game server on the pinned game files.
   Every harness plays through it with one scorecard per rollout, and `/verify` scores the card and checks the agent's
   own report against it.
+- **One episode per row.** The configs pair each agent with the `single_agent_turn_legacy` environment server: it seeds
+  an agent session with the row's pinned game (`agent_context`), activates it (the whole game), closes it (the game's
+  model-call observations), then verifies the agent's report of the game on the resources server.
 - **Two harness families**, the same rows, game server and scoring:
   - **Kaggle kit harness** (`arc_agi_3_agent`): the harness of the ARC-AGI-3 Kaggle kit, installed from its public
     Kaggle datasets (`kaggle:eladsarafian/arc3-c237-j30vfh-20261102`) and checked file by file. It runs unmodified

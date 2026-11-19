@@ -22,7 +22,8 @@ The game files are not committed. Get them one of two ways:
 - any existing ``environment_files`` directory (``--environments-dir``).
 
 Every row records the game's version, its baselines and the sha256 of its files. The 25 versions are pinned in
-``PUBLIC25_VERSIONS``; ``--check <jsonl>`` refuses a directory whose files differ from a dataset's sha256.
+``PUBLIC25_VERSIONS``; ``--check <jsonl>`` refuses a directory whose files differ from a dataset's sha256. The row's
+``agent_context`` gives the agent session the same pinned game (``AGENT_GAME_KEYS`` of ``verifier_metadata``).
 
     python resources_servers/arc_agi_3/create_dataset.py --environments-dir <dir> \
         --output resources_servers/arc_agi_3/data/public25.jsonl
@@ -38,6 +39,8 @@ from typing import Any
 
 
 COMPETITION = "arc-prize-2026-arc-agi-3"
+# The pins an ARC-AGI-3 agent session receives in its agent_context ("game"): what it plays and checks before playing.
+AGENT_GAME_KEYS = ("game_id", "full_game_id", "version", "files_sha256", "dispatch_index")
 KAGGLE_API = "https://www.kaggle.com/api/v1"
 # Kaggle answers 404 to urllib's default User-Agent (Python-urllib/x.y), even with a valid token.
 KAGGLE_USER_AGENT = "nemo-gym-arc-agi-3"
@@ -158,26 +161,25 @@ def build_rows(environments_dir: Path, games: list[str] | None = None) -> list[d
         game_dir = versions[PUBLIC25_VERSIONS[game]] if game in PUBLIC25_VERSIONS else next(iter(versions.values()))
         meta = json.loads((game_dir / "metadata.json").read_text())
         baseline = [int(x) for x in meta["baseline_actions"]]
+        pins = {
+            "game_id": game,
+            "full_game_id": meta["game_id"],
+            "version": game_dir.name,
+            "number_of_levels": len(baseline),
+            "baseline_actions": baseline,
+            "tags": meta.get("tags") or [],
+            "files_sha256": _files_sha256(game_dir),
+            "dispatch_index": index,
+        }
         rows.append(
             {
                 "responses_create_params": {
                     "input": [
-                        {
-                            "role": "user",
-                            "content": f"Play the ARC-AGI-3 game {game} ({meta.get('title', game)}).",
-                        }
+                        {"role": "user", "content": f"Play the ARC-AGI-3 game {game} ({meta.get('title', game)})."}
                     ]
                 },
-                "verifier_metadata": {
-                    "game_id": game,
-                    "full_game_id": meta["game_id"],
-                    "version": game_dir.name,
-                    "number_of_levels": len(baseline),
-                    "baseline_actions": baseline,
-                    "tags": meta.get("tags") or [],
-                    "files_sha256": _files_sha256(game_dir),
-                    "dispatch_index": index,
-                },
+                "verifier_metadata": pins,
+                "agent_context": {"agent": {"values": {"game": {k: pins[k] for k in AGENT_GAME_KEYS}}}},
             }
         )
     return rows

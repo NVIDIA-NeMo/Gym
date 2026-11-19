@@ -12,11 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""ARC-AGI-3 agent with the official ARC Prize harness (arc-agi-3-benchmarking, pinned; MIT): one game per ``/run``.
+"""ARC-AGI-3 agent with the official ARC Prize harness (arc-agi-3-benchmarking, pinned; MIT): one game per agent session.
 
-An option next to ``arc_agi_3_agent`` (the Kaggle kit's harness, the default). The same ``arc_agi_3`` resources
-server scores the games: same rows and pins, the official game server's scorecard as the authority (reward = score /
-100) and RHAE@T from the server's own action times.
+An option next to ``arc_agi_3_agent`` (the Kaggle kit's harness, the default), with the same agent sessions
+(``ArcAgi3GameSessions``: the seed binds the row's pinned game, the one activation plays it, the close stops a game
+still in play and returns its observations). The same ``arc_agi_3`` resources server scores the games: same rows and
+pins, the official game server's scorecard as the authority (reward = score / 100) and RHAE@T from the server's own
+action times.
 
 - The harness runs unmodified in its own venv (its openai / anthropic pins conflict with Gym's), one worker process
   per game (``worker.py``). It plays as upstream's own ``Swarm`` does: an ONLINE ``arc_agi.Arcade`` on the official
@@ -28,9 +30,9 @@ server scores the games: same rows and pins, the official game server's scorecar
   ``reasoning_content``.
 - The worker tags every model call with the game's step and level when it was sent and its role (``gameplay``, or
   ``helper`` / ``harness-summary`` for upstream's compaction summary), in request headers (``worker.CALL_HEADERS``).
-  The route records each call in the game's call log (``arc_agi_3_agent.call_log``), returned as
-  ``ng_agent_observations`` (the accepted gameplay calls in order, one record per compaction) and ``agent_call_log``
-  (every call sent: role, history id, step, level, error).
+  The route records each call in the game's call log (``arc_agi_3_agent.call_log``), returned as the session close's
+  observations (the accepted gameplay calls in order, one record per compaction) and, in the activation's report,
+  ``agent_call_log`` (every call sent: role, history id, step, level, error).
 - The worker reports the game (guid, levels, final state, the actions the server answered); the verifier checks that
   report against the scorecard and fails loudly on a mismatch. The rollout's ``stop_reason`` says why the game ended
   (``STOP_REASONS``: e.g. ``level_action_budget`` or ``total_action_budget`` versus ``play_window``, which share the
@@ -76,10 +78,10 @@ from uuid import uuid4
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
-from pydantic import ConfigDict, Field
+from pydantic import Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents import BaseResponsesAPIAgentConfig
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.client import request as http_request
 from nemo_gym.config import (
@@ -91,13 +93,12 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from resources_servers.arc_agi_3.app import ATTEMPT_REPORT_KEY
 from resources_servers.arc_agi_3.setup_arc_agi import ensure_flask
-from responses_api_agents.arc_agi_3_agent.app import redact, reject_row_controls
+from responses_api_agents.arc_agi_3_agent.app import ArcAgi3GameSessions, ArcAgi3Session, redact
 from responses_api_agents.arc_agi_3_agent.call_log import (
     GAMEPLAY_ROLE,
     GameCallLog,
@@ -275,16 +276,6 @@ class ArcAgi3OfficialAgentConfig(BaseResponsesAPIAgentConfig):
     reasoning_effort_kwarg: str = "reasoning_effort"
 
 
-class ArcAgi3OfficialRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-    verifier_metadata: dict[str, Any]
-
-
-class ArcAgi3OfficialVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-
-
 @dataclass
 class Attempt:
     """A game in play: its route key, model-server session cookies and model calls in flight, the model server's URL
@@ -320,7 +311,7 @@ class WorkerOutcome:
     window_stopped: bool = False
 
 
-class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
+class ArcAgi3OfficialAgent(ArcAgi3GameSessions):
     config: ArcAgi3OfficialAgentConfig
 
     def model_post_init(self, context: Any) -> None:
@@ -646,9 +637,11 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
             stop_reason = STOP_REASONS.get(exit_reason, "harness_end")
         return "gave_up", f"harness exit: {exit_reason}", stop_reason
 
-    def _attempt_response(self, body: ArcAgi3OfficialRunRequest, record: dict[str, Any] | None) -> NeMoGymResponse:
+    def _attempt_response(
+        self, state: ArcAgi3Session, record: dict[str, Any] | None, report: dict[str, Any]
+    ) -> NeMoGymResponse:
         summary = {
-            "game_id": body.verifier_metadata.get("game_id"),
+            "game_id": state.game.get("game_id"),
             "state": (record or {}).get("state", "not_started"),
             "levels_completed": (record or {}).get("levels_completed", 0),
             "actions": (record or {}).get("actions", 0),
@@ -656,7 +649,7 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
             "harness": f"arc-agi-3-benchmarking@{self._manifest['provenance']['commit'][:8]}",
             "harness_type": self.config.harness_type,
         }
-        params = body.responses_create_params
+        params = state.activation
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time.time()),
@@ -671,13 +664,18 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
             tool_choice=params.tool_choice if params.tool_choice is not None else "auto",
             tools=params.tools or [],
             parallel_tool_calls=params.parallel_tool_calls if params.parallel_tool_calls is not None else True,
+            **{ATTEMPT_REPORT_KEY: report},
         )
 
     async def play_game(
-        self, verifier_metadata: dict[str, Any], index: int, url_path: str = "/v1/chat/completions"
+        self,
+        verifier_metadata: dict[str, Any],
+        index: int,
+        url_path: str = "/v1/chat/completions",
+        call_log: GameCallLog | None = None,
     ) -> dict[str, Any]:
-        """Play one attempt, its model calls on the model server's ``url_path``; return the worker's report as a
-        record, the scorecard id, the game's guid and the call log. Raises GameStartError when it cannot start, and
+        """Play one attempt, its model calls on the model server's ``url_path`` and recorded in ``call_log``; return
+        the worker's report as a record, the scorecard id, the game's guid and the call log. Raises GameStartError when it cannot start, and
         RuntimeError when the worker died without a report (the scorecard then cannot be checked) or the server began
         shutting down before the worker started.
 
@@ -701,7 +699,7 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
         if self._passes[key] > 1:  # a repeat of the row: its own route, game directory and scorecard
             key = f"{key}-p{self._passes[key] - 1}"
         # Registered before the first suspension, so a shutdown from here on cancels it and waits for its end.
-        attempt = Attempt(key, url_path=url_path, deadline=deadline)
+        attempt = Attempt(key, url_path=url_path, deadline=deadline, calls=call_log or GameCallLog())
         self._attempts[key] = attempt
         in_play = asyncio.get_running_loop().create_future()
         self._in_play.add(in_play)
@@ -764,32 +762,35 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
             "clock_origin": clock_origin,
         }
 
-    async def run(self, request: Request, body: ArcAgi3OfficialRunRequest) -> ArcAgi3OfficialVerifyResponse:
-        reject_row_controls(body.responses_create_params)
-        meta = body.verifier_metadata
+    async def _play_session(self, state: ArcAgi3Session, url_path: str) -> NeMoGymResponse:
+        game = state.game
         record, agent_error, solver_note, scorecard_id, guid, clock_origin = None, None, None, None, None, None
-        index = int(meta.get("dispatch_index", 0))
-        invocation_id, call_log = f"{index}-{meta.get('full_game_id') or meta.get('game_id')}", GameCallLog()
+        index = int(game.get("dispatch_index", 0))
+        invocation_id, call_log = f"{index}-{game.get('full_game_id') or game.get('game_id')}", GameCallLog()
+        model_error, ended = None, False
         try:
-            result = await self.play_game(meta, index, url_path=self.url_path_for_run("/v1/chat/completions", body))
-            record, solver_note = result["record"], result["solver_note"]
-            scorecard_id, guid = result["scorecard_id"], result["guid"]
-            invocation_id, call_log, clock_origin = result["key"], result["call_log"], result["clock_origin"]
-        except GameStartError as exc:
-            LOG.error("ARC-AGI-3 game %s could not start: %s", meta.get("game_id"), exc)
-            agent_error = f"GameStartError: {exc}"
-        model_error = model_unavailable(call_log)
-        bundle = observations(
-            call_log,
-            invocation_id=invocation_id,
-            model_ref=ModelServerRef(type="responses_api_models", name=self.config.model_server.name),
-            status="failed" if agent_error or model_error else ("completed" if record is not None else "unknown"),
-            stop_reason=(record or {}).get("state"),
-            source="arc_agi_3_official_agent",
-        )
+            try:
+                result = await self.play_game(game, index, url_path=url_path, call_log=call_log)
+                record, solver_note = result["record"], result["solver_note"]
+                scorecard_id, guid = result["scorecard_id"], result["guid"]
+                invocation_id, clock_origin = result["key"], result["clock_origin"]
+            except GameStartError as exc:
+                LOG.error("ARC-AGI-3 game %s could not start: %s", game.get("game_id"), exc)
+                agent_error = f"GameStartError: {exc}"
+            ended = True
+        finally:  # also when the close stops the game: its observations go with the close
+            model_error = model_unavailable(call_log)
+            failed = not ended or agent_error or model_error
+            state.observations = observations(
+                call_log,
+                invocation_id=invocation_id,
+                model_ref=ModelServerRef(type="responses_api_models", name=self.config.model_server.name),
+                status="failed" if failed else ("completed" if record is not None else "unknown"),
+                stop_reason=(record or {}).get("state"),
+                source="arc_agi_3_official_agent",
+            )
         run = self._run
-        verify_body = body.model_dump() | {
-            "response": self._attempt_response(body, record).model_dump(),
+        report = {
             "game_record": record,
             "scorecard_id": scorecard_id,
             "game_guid": guid,
@@ -800,33 +801,15 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
             "stop_reason": (record or {}).get("stop_reason"),
             # RHAE@T's origin: the run clock's (shared) or the game's own start (per_game)
             "benchmark_start_time": clock_origin,
+            "run_dir": str(run.run_dir) if run else None,
+            "run_config_sha256": run.run_config_sha256 if run else None,
+            "harness": "official",
+            "harness_type": self.config.harness_type,
+            "harness_revision": self.harness_revision(),
+            "sampling": self.sampling(),
+            "agent_call_log": call_log_entries(call_log),
         }
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_body,
-            cookies=request.cookies,
-        )
-        await raise_for_status(verify_response)
-        result = await get_response_json(verify_response)
-        result["run_dir"] = str(run.run_dir) if run else None
-        result["run_config_sha256"] = run.run_config_sha256 if run else None
-        result["harness"] = "official"
-        result["harness_type"] = self.config.harness_type
-        result["harness_revision"] = self.harness_revision()
-        result["sampling"] = self.sampling()
-        result["ng_agent_observations"] = bundle.model_dump(mode="json")
-        result["agent_call_log"] = call_log_entries(call_log)
-        return ArcAgi3OfficialVerifyResponse.model_validate(result)
-
-    async def responses(
-        self, request: Request, response: Response, body: NeMoGymResponseCreateParamsNonStreaming = Body()
-    ) -> NeMoGymResponse:
-        model_response = await self.server_client.post(
-            server_name=self.config.model_server.name, url_path="/v1/responses", json=body, cookies=request.cookies
-        )
-        await raise_for_status(model_response)
-        return NeMoGymResponse.model_validate(await get_response_json(model_response))
+        return self._attempt_response(state, record, report)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """The resources server's RHAE metrics (overall, at 1 h / 2 h, counts of invalid results)."""

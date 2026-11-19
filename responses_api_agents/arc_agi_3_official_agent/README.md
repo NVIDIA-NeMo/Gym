@@ -4,7 +4,9 @@ Overview of all the ARC-AGI-3 environments and agents, with a smoke run: [`resou
 
 This agent plays ARC-AGI-3 games with the **official ARC Prize harness**,
 [arc-agi-3-benchmarking](https://github.com/arcprize/arc-agi-3-benchmarking), as either of upstream's two harnesses for
-chat-completions models (`harness_type`):
+chat-completions models (`harness_type`). It implements the same agent sessions as `arc_agi_3_agent` (one game per
+session, driven by the `single_agent_turn_legacy` environment server; a close stops the worker of a game still in play
+and closes its scorecard):
 
 | `harness_type` | Upstream harness | History |
 |---|---|---|
@@ -42,7 +44,7 @@ action times.
   - There is no `benchmark.json`: the verifier's rows (`rollouts.jsonl`) hold the scores, with RHAE@T on the server's
     clock.
 - **Model calls:** the harness's own OpenAI client calls this agent's route `/official/<game>/v1/chat/completions`.
-  The route sends the call to the Gym model server on the rollout's own path (`url_path_for_run`), so Gym's capture
+  The route sends the call to the Gym model server on the rollout's own path (the activation's, `url_path_for_request`), so Gym's capture
   (`model_call_capture_dir`, token capture) attributes every call to its rollout.
   - The worker tags each call with request headers (`worker.CALL_HEADERS`): the game's step (actions answered + 1) and
     level (levels completed + 1) when it was sent, and its role: `gameplay` / `main`, or `helper` / `harness-summary`
@@ -150,7 +152,7 @@ gym eval run --no-serve "${COMMON[@]}" --agent arc_agi_3_official_agent \
 
 Each rollout row also carries `harness: official`, `harness_type`, `harness_revision` (upstream's repository and
 pinned commit), `sampling` (the type's upstream `request` settings and the effort the route adds), and the game's
-call log, as `arc_agi_3_agent` reports it: `ng_agent_observations` (the accepted gameplay calls in order, one
+call log, as `arc_agi_3_agent` reports it: `ng_agent_observations` (from the session close: the accepted gameplay calls in order, one
 `context_compaction` per summary with its `harness-summary` helper calls) and `agent_call_log` (every call sent:
 role, history id, status, response id, error, step, level, times). Repeats of one row get their own route key,
 game directory and scorecard (`<index>-<game>-p<n>`).

@@ -19,6 +19,9 @@ its game through it, one scorecard per rollout. At ``/verify`` this server close
 harness has not), takes ``reward = score / 100`` from it, and fails loudly (``ValueError``) when the agent's own report
 (guid, levels, won or not, action count) differs from the card. RHAE@T comes from the server's own per-action
 timestamps (its recordings) on the run clock.
+
+The agent's report of the game travels in the response it verifies: the activation reply of an ARC-AGI-3 agent session
+carries it under ``ATTEMPT_REPORT_KEY`` (see ``ArcAgi3VerifyRequest``).
 """
 
 import asyncio
@@ -55,6 +58,10 @@ from resources_servers.arc_agi_3.setup_arc_agi import ensure_flask
 
 
 LOG = logging.getLogger(__name__)
+# The field of an ARC-AGI-3 agent's activation reply (the response verified) that holds its report of the game: the
+# ArcAgi3VerifyRequest fields below (game_record, scorecard_id, ...) and the rollout's harness fields (harness,
+# harness_revision, sampling, agent_call_log, ...), which the verify response keeps.
+ATTEMPT_REPORT_KEY = "arc_agi_3_attempt"
 
 
 class ArcAgi3ResourcesServerConfig(BaseResourcesServerConfig):
@@ -87,6 +94,7 @@ class ArcAgi3RunRequest(BaseRunRequest):
 
 
 class ArcAgi3VerifyRequest(ArcAgi3RunRequest, BaseVerifyRequest):
+    # These fields come from the response's ATTEMPT_REPORT_KEY (with_attempt_report).
     # The agent's own report of the attempt: a taaf GameRun.to_json_dict() (Kaggle kit harness) or the same fields with an
     # "actions" count instead of a history (official harness). None when the game could not start.
     game_record: dict[str, Any] | None = None
@@ -140,6 +148,18 @@ class ArcAgi3VerifyResponse(BaseVerifyResponse):
     # the game-wide action number (1-based) at which each cleared level was first cleared.
     actions_per_level: list[int] | None = None
     level_clear_steps: list[int] | None = None
+
+
+def with_attempt_report(body: ArcAgi3VerifyRequest) -> ArcAgi3VerifyRequest:
+    """The request with the agent's report (the response's ``ATTEMPT_REPORT_KEY``) as its own fields, and the response
+    without it. The report cannot replace the task's own fields."""
+    response = body.response.model_dump(mode="json") if body.response is not None else {}
+    report = response.pop(ATTEMPT_REPORT_KEY, None)
+    if report is None:
+        return body
+    task_fields = ("verifier_metadata", "responses_create_params", "response")
+    report = {k: v for k, v in report.items() if k not in task_fields}
+    return ArcAgi3VerifyRequest.model_validate(body.model_dump(mode="json") | report | {"response": response})
 
 
 def hour_key(hours: float) -> str:
@@ -287,6 +307,7 @@ class ArcAgi3ResourcesServer(SimpleResourcesServer):
         return meta
 
     async def verify(self, body: ArcAgi3VerifyRequest) -> ArcAgi3VerifyResponse:
+        body = with_attempt_report(body)
         meta = body.verifier_metadata
         game_id = str(meta["game_id"])
         if not meta.get("full_game_id"):

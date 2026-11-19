@@ -23,6 +23,9 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import AgentContext
 from responses_api_agents.arc_agi_3_official_agent import app as official_app
 from responses_api_agents.arc_agi_3_official_agent.app import ArcAgi3OfficialAgent
 
@@ -273,3 +276,39 @@ def test_no_game_after_the_window(monkeypatch, tmp_path: Path, meta: dict) -> No
     time.sleep(0.05)
     with pytest.raises(GameStartError, match="window has ended"):
         asyncio.run(agent.play_game(meta, 0))
+
+
+def test_close_after_an_abandoned_activation_releases_worker_and_card(monkeypatch, tmp_path: Path, meta: dict) -> None:
+    """The session contract with a real worker: a repeated seed starts nothing, and the close of a session whose
+    activation the environment server gave up on stops the worker and closes the card."""
+    from .test_official_unit import GAME, PARAMS, http_request
+
+    agent = agent_with_worker(monkeypatch, tmp_path, "time.sleep(600)")
+    game = {**meta, "dispatch_index": GAME["dispatch_index"]}
+
+    async def main():
+        session: dict = {}
+        episode = EpisodeId(rollout_id="9-1")
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-1",
+            episode_id=episode,
+            task_id=TaskId(taskset="arc_agi_3", task_id="ls20"),
+            agent_context=AgentContext(values={"game": game}),
+        )
+        await agent.seed_agent_session(http_request(session), seed)
+        await agent.seed_agent_session(http_request(session), seed)
+        activation = asyncio.ensure_future(agent.responses(http_request(session), PARAMS))
+        for _ in range(500):
+            if agent._workers:
+                break
+            await asyncio.sleep(0.01)
+        (process,) = agent._workers
+        activation.cancel()
+        closed = await agent.close_agent_session(
+            http_request(session), AgentCloseSessionRequest(agent_session_id="agent-1", episode_id=episode)
+        )
+        return process, closed
+
+    process, closed = asyncio.run(main())
+    assert process.returncode is not None and not agent._workers and not agent._attempts
+    assert agent._closed_cards == ["card-0-ls20-v1"] and closed.cleanup_confirmed

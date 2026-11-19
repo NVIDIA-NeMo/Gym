@@ -21,10 +21,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
+from starlette.requests import Request
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.server_runtime import AgentContext
+from resources_servers.arc_agi_3.app import ATTEMPT_REPORT_KEY
 from responses_api_agents.arc_agi_3_official_agent import app as official_app
 from responses_api_agents.arc_agi_3_official_agent.app import (
     API_KEY_ENV,
@@ -342,17 +347,57 @@ def test_route_logs_every_call_with_its_tags_on_the_rollout_path(
     assert entries[2]["error"] == "OSError: refused"
 
 
-def test_run_returns_the_call_log_revision_and_sampling(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+GAME = {"game_id": "ls20", "full_game_id": "ls20-v1", "version": "v1", "dispatch_index": 0}
+PARAMS = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Play ls20"}])
+
+
+def http_request(session: dict, path: str = "/ng-rollout/9-1/v1/responses") -> Request:
+    """An agent-server request carrying the session cookie's contents (``session``) on the activation's path."""
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "scheme": "http",
+            "server": ("agent", 80),
+            "root_path": "",
+            "path": path,
+            "query_string": b"",
+            "headers": [],
+            "path_params": {"rollout_id": "9-1"},
+            "session": session,
+        }
+    )
+
+
+async def play(agent: ArcAgi3OfficialAgent, params=PARAMS):
+    """Seed, activate (the game) and close one session; returns the activation's reply, its report and the close."""
+    session: dict = {}
+    episode = EpisodeId(rollout_id="9-1")
+    seed = AgentSeedSessionRequest(
+        agent_session_id="agent-1",
+        episode_id=episode,
+        task_id=TaskId(taskset="arc_agi_3", task_id="ls20"),
+        agent_context=AgentContext(values={"game": GAME}),
+    )
+    await agent.seed_agent_session(http_request(session), seed)
+    response = await agent.responses(http_request(session), params)
+    closed = await agent.close_agent_session(
+        http_request(session), AgentCloseSessionRequest(agent_session_id="agent-1", episode_id=episode)
+    )
+    return response, response.model_extra[ATTEMPT_REPORT_KEY], closed
+
+
+def test_activation_returns_the_call_log_revision_and_sampling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from responses_api_agents.arc_agi_3_agent.call_log import GameCallLog
-    from responses_api_agents.arc_agi_3_official_agent.app import ArcAgi3OfficialRunRequest
 
     agent = make_agent(monkeypatch, tmp_path, reasoning_effort="max")
-    monkeypatch.setattr(ArcAgi3OfficialAgent, "url_path_for_run", lambda self, path, body: f"/ng-rollout/9-1{path}")
     seen = {}
 
-    async def play_game(self, meta, index, url_path="/v1/chat/completions"):
-        seen["url_path"] = url_path
-        log = GameCallLog()
+    async def play_game(self, meta, index, url_path="/v1/chat/completions", call_log=None):
+        seen.update(url_path=url_path, meta=meta)
+        log = call_log if call_log is not None else GameCallLog()
         log.add(role="gameplay", history_id="main", messages=[], status=200, response={"id": "r0"}, step=1, level=1)
         log.add(role="helper", history_id="harness-summary", messages=[], status=200, response={"id": "s0"})
         record = {"state": "gave_up", "levels_completed": 0, "actions": 1, "stop_reason": "level_action_budget"}
@@ -367,39 +412,34 @@ def test_run_returns_the_call_log_revision_and_sampling(monkeypatch: pytest.Monk
         }
 
     monkeypatch.setattr(ArcAgi3OfficialAgent, "play_game", play_game)
-
-    async def post(server_name, url_path, json, cookies=None):
-        return FakeHttpResponse({**json, "reward": 0.0})
-
-    agent.server_client.post = post
-    body = ArcAgi3OfficialRunRequest(
-        responses_create_params={"input": [{"role": "user", "content": "Play ls20"}]},
-        verifier_metadata={"game_id": "ls20", "full_game_id": "ls20-v1", "dispatch_index": 0},
-    )
-    result = asyncio.run(agent.run(MagicMock(cookies={}), body))
-    assert seen["url_path"] == "/ng-rollout/9-1/v1/chat/completions"
-    assert result.stop_reason == "level_action_budget"  # sent to /verify, which keeps it in the rollout
-    assert result.model_error is None  # a call was answered
-    assert result.benchmark_start_time == "2026-11-19T10:00:00+00:00"  # the game's clock origin, RHAE@T's
-    (invocation,) = result.ng_agent_observations["records"]
-    assert invocation["invocation_id"] == "0-ls20-v1" and [c["response_id"] for c in invocation["model_calls"]] == [
-        "r0"
-    ]
-    assert result.ng_agent_observations["source"] == "arc_agi_3_official_agent"
-    assert [(c["role"], c["history_id"]) for c in result.agent_call_log] == [
+    agent.server_client.post = AsyncMock(side_effect=AssertionError("the environment server verifies"))
+    response, report, closed = asyncio.run(play(agent))
+    assert seen["url_path"] == "/ng-rollout/9-1/v1/chat/completions" and seen["meta"] == GAME
+    assert report["stop_reason"] == "level_action_budget"  # the verifier keeps it in the rollout
+    assert report["model_error"] is None  # a call was answered
+    assert report["benchmark_start_time"] == "2026-11-19T10:00:00+00:00"  # the game's clock origin, RHAE@T's
+    assert report["scorecard_id"] == "c" and report["game_guid"] == "g"
+    assert report["scorecard_api_key"] == agent._game_api_key
+    (invocation,) = closed.agent_observations.records
+    assert invocation.invocation_id == "0-ls20-v1" and [c.response_id for c in invocation.model_calls] == ["r0"]
+    assert closed.agent_observations.source == "arc_agi_3_official_agent"
+    assert [(c["role"], c["history_id"]) for c in report["agent_call_log"]] == [
         ("gameplay", "main"),
         ("helper", "harness-summary"),
     ]
-    assert result.harness_revision == {
+    assert report["harness"] == "official" and report["harness_type"] == "provider"
+    assert report["harness_revision"] == {
         "name": "arc-agi-3-benchmarking",
         "repository": "https://github.com/arcprize/arc-agi-3-benchmarking",
         "commit": "27f3d03de3f2f6fa1b8c1e01cd7a9d7d77e830f0",  # pragma: allowlist secret
     }
     shipped = shipped_benchmark_config("provider")["request"]
-    assert result.sampling["reasoning_effort"] == "max" and "model" not in result.sampling
-    assert {k: result.sampling[k] for k in shipped if k not in ("model", "stream")} == {
+    sampling = report["sampling"]
+    assert sampling["reasoning_effort"] == "max" and "model" not in sampling
+    assert {k: sampling[k] for k in shipped if k not in ("model", "stream")} == {
         k: v for k, v in shipped.items() if k not in ("model", "stream")
     }
+    assert json.loads(response.output[0].content[0].text)["harness_type"] == "provider"
 
 
 def test_worker_tags_model_calls_and_summaries() -> None:
@@ -522,16 +562,12 @@ def test_verify_tree_reports_changed_missing_and_extra_files(tmp_path: Path) -> 
     assert "sha256 differs: a.py" in message and "missing LICENSE" in message and "unpinned file extra.py" in message
 
 
-def test_run_reports_a_model_that_never_answered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from responses_api_agents.arc_agi_3_agent.call_log import GameCallLog
-    from responses_api_agents.arc_agi_3_official_agent.app import ArcAgi3OfficialRunRequest
-
+def test_activation_reports_a_model_that_never_answered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     agent = make_agent(monkeypatch, tmp_path)
 
-    async def play_game(self, meta, index, url_path="/v1/chat/completions"):
-        log = GameCallLog()
-        log.add(role="gameplay", history_id="main", messages=[], status=404, response=None)
-        log.add(role="gameplay", history_id="main", messages=[], status=0, response=None, error="TimeoutError: ")
+    async def play_game(self, meta, index, url_path="/v1/chat/completions", call_log=None):
+        call_log.add(role="gameplay", history_id="main", messages=[], status=404, response=None)
+        call_log.add(role="gameplay", history_id="main", messages=[], status=0, response=None, error="TimeoutError: ")
         record = {"state": "gave_up", "levels_completed": 0, "actions": 0, "stop_reason": "harness_end"}
         return {
             "record": record,
@@ -539,46 +575,72 @@ def test_run_reports_a_model_that_never_answered(monkeypatch: pytest.MonkeyPatch
             "guid": "g",
             "solver_note": None,
             "key": "0-ls20-v1",
-            "call_log": log,
+            "call_log": call_log,
             "clock_origin": None,
         }
 
     monkeypatch.setattr(ArcAgi3OfficialAgent, "play_game", play_game)
-    sent = {}
-
-    async def post(server_name, url_path, json, cookies=None):
-        sent.update(json)
-        return FakeHttpResponse({**json, "reward": 0.0})
-
-    agent.server_client.post = post
-    body = ArcAgi3OfficialRunRequest(
-        responses_create_params={"input": [{"role": "user", "content": "Play ls20"}]},
-        verifier_metadata={"game_id": "ls20", "full_game_id": "ls20-v1", "dispatch_index": 0},
-    )
-    asyncio.run(agent.run(MagicMock(cookies={}), body))
-    assert sent["model_error"] == "every model call of the game failed (2 calls; last: TimeoutError: )"
+    _, report, closed = asyncio.run(play(agent))
+    assert report["model_error"] == "every model call of the game failed (2 calls; last: TimeoutError: )"
+    assert closed.agent_observations.records[0].status == "failed"
 
 
 @pytest.mark.parametrize("control", [{"temperature": 0.0}, {"top_p": 0.5}, {"max_output_tokens": 64}])
 def test_row_level_generation_controls_are_rejected(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, control: dict
 ) -> None:
-    """The harness's request settings are the agent's configuration: a row asking for other values gets a 422 before
-    any game starts or model or verifier traffic."""
+    """The harness's request settings are the agent's configuration: an activation asking for other values gets a 422
+    before any game starts or any model traffic."""
     from fastapi import HTTPException
-
-    from responses_api_agents.arc_agi_3_official_agent.app import ArcAgi3OfficialRunRequest
 
     agent = make_agent(monkeypatch, tmp_path)
     monkeypatch.setattr(ArcAgi3OfficialAgent, "play_game", AsyncMock(side_effect=AssertionError("no game")))
     agent.server_client.post = AsyncMock(side_effect=AssertionError("no traffic"))
-    body = ArcAgi3OfficialRunRequest(
-        responses_create_params={"input": [{"role": "user", "content": "Play ls20"}], **control},
-        verifier_metadata={"game_id": "ls20", "full_game_id": "ls20-v1", "dispatch_index": 0},
-    )
     with pytest.raises(HTTPException) as raised:
-        asyncio.run(agent.run(MagicMock(cookies={}), body))
+        asyncio.run(play(agent, params=PARAMS.model_copy(update=control)))
     assert raised.value.status_code == 422 and next(iter(control)) in raised.value.detail
+
+
+def test_close_stops_a_game_in_play_and_releases_its_card(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A close after a failed or abandoned activation stops the game: play_game's own cleanup stops the worker and
+    closes the card (test_official_lifecycle); the close waits for it and keeps the observations."""
+    agent = make_agent(monkeypatch, tmp_path)
+    events = []
+
+    async def play_game(self, meta, index, url_path="/v1/chat/completions", call_log=None):
+        events.append("started")
+        try:
+            await asyncio.sleep(600)
+        except asyncio.CancelledError:
+            events.append("released")
+            raise
+
+    monkeypatch.setattr(ArcAgi3OfficialAgent, "play_game", play_game)
+
+    async def main():
+        session: dict = {}
+        episode = EpisodeId(rollout_id="9-1")
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-1",
+            episode_id=episode,
+            task_id=TaskId(taskset="arc_agi_3", task_id="ls20"),
+            agent_context=AgentContext(values={"game": GAME}),
+        )
+        await agent.seed_agent_session(http_request(session), seed)
+        await agent.seed_agent_session(http_request(session), seed)  # a retried seed starts nothing
+        activation = asyncio.ensure_future(agent.responses(http_request(session), PARAMS))
+        for _ in range(100):
+            if events:
+                break
+            await asyncio.sleep(0.01)
+        activation.cancel()
+        closed = await agent.close_agent_session(
+            http_request(session), AgentCloseSessionRequest(agent_session_id="agent-1", episode_id=episode)
+        )
+        assert closed.cleanup_confirmed and closed.agent_observations.records[0].status == "failed"
+
+    asyncio.run(main())
+    assert events == ["started", "released"]
 
 
 def test_close_card_of_an_aborted_attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

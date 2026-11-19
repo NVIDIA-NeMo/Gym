@@ -42,7 +42,7 @@ The server and the agent read the games from `data/environment_files` (config `e
 - `data/example.jsonl` (committed): Gym's five example rows over the 2 committed games, cn04 (keyboard and click) and ls20 (keyboard), alternating (each row its own attempt). It runs with no download.
 - `data/public25.jsonl` (generated): all 25 games, one row per game.
 
-Each row's `verifier_metadata` has the game id, version, baselines, number of levels, the sha256 of the game files and the harness dispatch index (rows are in sorted game-id order).
+Each row's `verifier_metadata` has the game id, version, baselines, number of levels, the sha256 of the game files and the harness dispatch index (rows are in sorted game-id order). Its `agent_context` gives the agent session the same pinned game (game id, full id, version, file sha256, dispatch index).
 
 **Game names.** A game is `<game>-<version>` (`full_game_id`, e.g. `ls20-9607627b`), its files are in `<game>/<version>/`, and the server, the agents and `summarize_rhae.py` key games by that full id. One `environments_dir` can hold several versions of a game name: the synthetic game sets have them (e.g. `sg0005-aee9edbb` and `sg0005-2b3d7198`), and each version is its own game with its own pins. The public25 games have one version each. Asked by full id (`/api/games/<game>-<version>`, RESET with that id), the game server serves exactly that version.
 

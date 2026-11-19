@@ -12,18 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""ARC-AGI-3 agent: plays one game per ``/run`` with the ARC-AGI-3 Kaggle kit's harness.
+"""ARC-AGI-3 agent: plays one game per agent session with the ARC-AGI-3 Kaggle kit's harness.
 
 The harness is the pinned, unmodified harness of the Kaggle kit's public datasets (see ``harness_manifest.json`` and
-``setup_harness.py``). Its model calls go to the Gym model server
-(``gym_transport.py``), on the run's rollout path (``url_path_for_run``), so token capture applies to every call. Each
-``/run`` plays the row's game for up to ``play_seconds`` and sends the taaf game record to the ``arc_agi_3`` resources
-server, which scores it (RHAE). The result carries ``ng_agent_observations`` (``call_log.py``): the game's accepted
-gameplay calls in order and one compaction record per history drain; ``agent_call_log``: every model call sent, with
-its role, history id, the game's step and level when it was sent, and its error if it failed; ``harness_log``: the
-warnings the harness logged while it played the game (e.g. a summary it rejected), with the game's level then;
-``harness_revision``
-(the pinned harness's Kaggle datasets and source commit) and ``sampling`` (the effective sampling and thinking effort).
+``setup_harness.py``). Its model calls go to the Gym model server (``gym_transport.py``), on the activation's rollout
+path (``url_path_for_request``), so token capture applies to every call.
+
+An environment server drives each game (``ArcAgi3GameSessions``): the seed binds the session to the row's pinned game
+(its ``agent_context``), the one activation plays that game for up to ``play_seconds``, and the close stops a game still
+in play and returns its model-call observations. The activation's reply carries the agent's report of the game
+(``ATTEMPT_REPORT_KEY``: the taaf game record and its scorecard), which the ``arc_agi_3`` resources server verifies
+(RHAE) and keeps in the rollout with ``agent_call_log``: every model call sent, with its role, history id, the game's
+step and level when it was sent, and its error if it failed; ``harness_log``: the warnings the harness logged while it
+played the game (e.g. a summary it rejected), with the game's level then; ``harness_revision`` (the pinned harness's
+Kaggle datasets and source commit) and ``sampling`` (the effective sampling and thinking effort). The close's
+observations (``call_log.py``) list the game's accepted gameplay calls in order and one compaction record per history
+drain.
 
 All harness settings are process-wide (the harness reads them once from the environment), so one agent server is one
 hyperparameter configuration. Run the rows of one evaluation concurrently (concurrency >= rows) so that every game
@@ -36,17 +40,26 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from time import time
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, HTTPException, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Request
 from omegaconf import OmegaConf
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents import (
+    AgentCloseSessionResponse,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionConflictError,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.client import get_response_json, raise_for_status, request
 from nemo_gym.config import (
     AggregateMetrics,
@@ -61,7 +74,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import AgentObservationBundle
+from resources_servers.arc_agi_3.app import ATTEMPT_REPORT_KEY
 from resources_servers.arc_agi_3.setup_arc_agi import ensure_flask
 from responses_api_agents.arc_agi_3_agent.call_log import (
     GameCallLog,
@@ -217,17 +231,84 @@ class ArcAgi3AgentConfig(BaseResponsesAPIAgentConfig):
     save_every_s: float = 600.0
 
 
-class ArcAgi3AgentRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
+class ArcAgi3AgentContext(BaseModel):
+    """An ARC-AGI-3 agent session's context: the row's pinned game (``create_dataset.py`` ``AGENT_GAME_KEYS``:
+    game_id, full_game_id, version, files_sha256, dispatch_index), checked against the files before it is played."""
 
-    verifier_metadata: dict[str, Any]
+    model_config = ConfigDict(extra="forbid")
+
+    game: dict[str, Any]
 
 
-class ArcAgi3AgentVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
+@dataclass
+class ArcAgi3Session(AgentSessionState):
+    """One game: its pins, its one activation (the whole game), and the observations the activation leaves for the
+    close."""
+
+    game: dict[str, Any]
+    activation: NeMoGymResponseCreateParamsNonStreaming | None = None
+    task: "asyncio.Task[NeMoGymResponse] | None" = None
+    observations: AgentObservationBundle | None = None
 
 
-class ArcAgi3Agent(SimpleResponsesAPIAgent):
+class ArcAgi3GameSessions(SimpleResponsesAPIAgent):
+    """Agent sessions that each play one ARC-AGI-3 game (both ARC-AGI-3 agents).
+
+    The seed binds the row's pinned game (``agent_context``). The first activation starts the game; a retry of the same
+    activation waits for and returns the same game, and a seed repeated for the session starts nothing. The close
+    stops a game still in play (its harness stops and its scorecard is released) and returns its observations.
+    """
+
+    agent_context_model = ArcAgi3AgentContext
+
+    async def _play_session(self, state: ArcAgi3Session, url_path: str) -> NeMoGymResponse:
+        """Play the session's game, its model calls on the model server's ``url_path``; the reply carries the report
+        (``ATTEMPT_REPORT_KEY``) and the play sets ``state.observations``."""
+        raise NotImplementedError
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> ArcAgi3Session:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("An ARC-AGI-3 game is played on the game server; no sandbox is used")
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise AgentSeedRejectedError("The ARC-AGI-3 harnesses use no external tools")
+        # The base refuses a seed whose context lacks the game (422).
+        return ArcAgi3Session(request=body.model_copy(deep=True), game=dict(self.parse_agent_context(body).game))
+
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        """The session's one activation: play its game."""
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            raise AgentSessionConflictError("An ARC-AGI-3 game is played in a seeded agent session")
+        state = self._require_agent_session(session_id)
+        rollout_id = request.path_params.get("rollout_id")
+        if rollout_id is not None and rollout_id != state.request.episode_id.capture_key:
+            raise AgentSessionConflictError("The activation's rollout differs from the seeded session's")
+        if state.task is None:
+            reject_row_controls(body)
+            state.activation = body.model_copy(deep=True)
+            state.task = asyncio.ensure_future(
+                self._play_session(state, self.url_path_for_request("/v1/chat/completions", request))
+            )
+        elif state.activation != body:
+            raise AgentSessionConflictError("An ARC-AGI-3 session plays one game; retry the same activation")
+        return (await asyncio.shield(state.task)).model_copy(deep=True)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        assert isinstance(state, ArcAgi3Session)
+        if state.task is not None:
+            if not state.task.done():
+                state.task.cancel()
+            await asyncio.gather(state.task, return_exceptions=True)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=state.observations,
+            cleanup_confirmed=True,
+        )
+
+
+class ArcAgi3Agent(ArcAgi3GameSessions):
     config: ArcAgi3AgentConfig
 
     def model_post_init(self, context: Any) -> None:
@@ -445,16 +526,19 @@ class ArcAgi3Agent(SimpleResponsesAPIAgent):
         self._transport, self._runtime = transport, runtime
         return runtime
 
-    def _attempt_response(self, body: ArcAgi3AgentRunRequest, record: dict[str, Any] | None) -> NeMoGymResponse:
-        """A one-message Responses API record of the attempt (the full transcript is in the run directory)."""
+    def _attempt_response(
+        self, state: ArcAgi3Session, record: dict[str, Any] | None, report: dict[str, Any]
+    ) -> NeMoGymResponse:
+        """A one-message Responses API record of the attempt (the full transcript is in the run directory), with the
+        agent's report of it for the verifier."""
         summary = {
-            "game_id": body.verifier_metadata.get("game_id"),
+            "game_id": state.game.get("game_id"),
             "state": (record or {}).get("state", "not_started"),
             "levels_completed": (record or {}).get("levels_completed", 0),
             "actions": len((record or {}).get("history") or []),
             "run_dir": str(self._runtime.run_dir) if self._runtime else None,
         }
-        params = body.responses_create_params
+        params = state.activation
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -469,50 +553,41 @@ class ArcAgi3Agent(SimpleResponsesAPIAgent):
             tool_choice=params.tool_choice if params.tool_choice is not None else "auto",
             tools=params.tools or [],
             parallel_tool_calls=params.parallel_tool_calls if params.parallel_tool_calls is not None else True,
+            **{ATTEMPT_REPORT_KEY: report},
         )
 
-    async def responses(
-        self, request: Request, response: Response, body: NeMoGymResponseCreateParamsNonStreaming = Body()
-    ) -> NeMoGymResponse:
-        model_response = await self.server_client.post(
-            server_name=self.config.model_server.name,
-            url_path="/v1/responses",
-            json=body,
-            cookies=request.cookies,
-        )
-        await raise_for_status(model_response)
-        return NeMoGymResponse.model_validate(await get_response_json(model_response))
-
-    async def run(self, request: Request, body: ArcAgi3AgentRunRequest) -> ArcAgi3AgentVerifyResponse:
-        reject_row_controls(body.responses_create_params)
+    async def _play_session(self, state: ArcAgi3Session, url_path: str) -> NeMoGymResponse:
         runtime = await self._ensure_runtime()
-        meta = body.verifier_metadata
+        game = state.game
         record, agent_error, persistence_error, solver_note = None, None, None, None
-        scorecard_id, guid, started_at = None, None, None
-        index = int(meta.get("dispatch_index", 0))
-        game_key = f"{index}:{meta.get('full_game_id') or meta.get('game_id')}:{uuid4().hex[:12]}"
-        self._game_url_paths[game_key] = self.url_path_for_run("/v1/chat/completions", body)
+        scorecard_id, guid, started_at, model_error = None, None, None, None
+        index = int(game.get("dispatch_index", 0))
+        game_key = f"{index}:{game.get('full_game_id') or game.get('game_id')}:{uuid4().hex[:12]}"
+        self._game_url_paths[game_key] = url_path
+        ended = False
         try:
-            attempt = await runtime.play_game(meta, index, self._transport, game_key=game_key)
-            record, agent_error = attempt.record, attempt.play_error
-            persistence_error, solver_note = attempt.persistence_error, attempt.solver_note
-            scorecard_id, guid, started_at = attempt.scorecard_id, attempt.guid, attempt.started_at_utc
-        except GameStartError as exc:  # never started: no record, scored as not started
-            LOG.error("ARC-AGI-3 game %s could not start: %s", meta.get("game_id"), exc)
-            agent_error = f"GameStartError: {exc}"
-        finally:
+            try:
+                attempt = await runtime.play_game(game, index, self._transport, game_key=game_key)
+                record, agent_error = attempt.record, attempt.play_error
+                persistence_error, solver_note = attempt.persistence_error, attempt.solver_note
+                scorecard_id, guid, started_at = attempt.scorecard_id, attempt.guid, attempt.started_at_utc
+            except GameStartError as exc:  # never started: no record, scored as not started
+                LOG.error("ARC-AGI-3 game %s could not start: %s", game.get("game_id"), exc)
+                agent_error = f"GameStartError: {exc}"
+            ended = True
+        finally:  # also when the close stops the game: its observations go with the close
             self._game_url_paths.pop(game_key, None)
-        call_log = self._transport.take_call_log(game_key) if self._transport is not None else GameCallLog()
-        model_error = model_unavailable(call_log)
-        bundle = observations(
-            call_log,
-            invocation_id=game_key,
-            model_ref=ModelServerRef(type="responses_api_models", name=self.config.model_server.name),
-            status="failed" if agent_error or model_error else ("completed" if record is not None else "unknown"),
-            stop_reason=(record or {}).get("state"),
-        )
-        verify_body = body.model_dump() | {
-            "response": self._attempt_response(body, record).model_dump(),
+            call_log = self._transport.take_call_log(game_key) if self._transport is not None else GameCallLog()
+            model_error = model_unavailable(call_log)
+            failed = not ended or agent_error or model_error
+            state.observations = observations(
+                call_log,
+                invocation_id=game_key,
+                model_ref=ModelServerRef(type="responses_api_models", name=self.config.model_server.name),
+                status="failed" if failed else ("completed" if record is not None else "unknown"),
+                stop_reason=(record or {}).get("state"),
+            )
+        report = {
             "game_record": record,
             "scorecard_id": scorecard_id,
             "game_guid": guid,
@@ -522,24 +597,15 @@ class ArcAgi3Agent(SimpleResponsesAPIAgent):
             "persistence_error": persistence_error,
             "solver_note": solver_note,
             "benchmark_start_time": runtime.start_time_utc if self.config.run_clock == "shared" else started_at,
+            "run_dir": str(runtime.run_dir),
+            "run_config_sha256": runtime.run_config_sha256,
+            "harness": HARNESS_NAME,
+            "harness_revision": self.harness_revision(),
+            "sampling": redact(self.sampling(getattr(runtime, "env", None) or {})),
+            "agent_call_log": call_log_entries(call_log),
+            "harness_log": harness_log_entries(call_log),
         }
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_body,
-            cookies=request.cookies,
-        )
-        await raise_for_status(verify_response)
-        result = await get_response_json(verify_response)
-        result["run_dir"] = str(runtime.run_dir)
-        result["run_config_sha256"] = runtime.run_config_sha256
-        result["harness"] = HARNESS_NAME
-        result["harness_revision"] = self.harness_revision()
-        result["sampling"] = redact(self.sampling(getattr(runtime, "env", None) or {}))
-        result["ng_agent_observations"] = bundle.model_dump(mode="json")
-        result["agent_call_log"] = call_log_entries(call_log)
-        result["harness_log"] = harness_log_entries(call_log)
-        return ArcAgi3AgentVerifyResponse.model_validate(result)
+        return self._attempt_response(state, record, report)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """The resources server's RHAE metrics (overall, at 1 h / 2 h, counts of invalid results)."""

@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """The official harness end to end on CPU: the pinned upstream worker plays the two committed example games (both
-harness types) through this agent.
+harness types) through this agent, each game one episode of the configs' environment server.
 
+    environment server (single_agent_turn_legacy) --HTTP--> agent sessions: seed, activation (the game), close
     upstream worker (its own venv) --HTTP--> agent route --> real Gym vLLM model server (TestClient) --> stub vLLM
-    upstream worker --HTTP (ONLINE Arcade)--> the real official game server --> scorecard --> real verify
+    upstream worker --HTTP (ONLINE Arcade)--> the real official game server --> scorecard
+    environment server --> the real resources server's verify
 
 Checks that, with the provider harness, every request reaching "vLLM" resends the reasoning of every earlier reply
 (none stripped), also after a compaction; with the standard harness, that earlier replies go back as text only and the
@@ -33,16 +35,37 @@ import socket
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 import uvicorn
 from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
+from pydantic import BaseModel, ConfigDict
 
+from environment_servers.single_agent_turn_legacy.app import (
+    SingleAgentTurnLegacyEnvironmentServer,
+    SingleAgentTurnLegacyEnvironmentServerConfig,
+)
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import ServerClient
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from resources_servers.arc_agi_3.app import ArcAgi3ResourcesServer, ArcAgi3ResourcesServerConfig, ArcAgi3VerifyRequest
+from nemo_gym.config import (
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    AgentServerRef,
+    BaseServerConfig,
+    ModelServerRef,
+    ResourcesServerRef,
+)
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from resources_servers.arc_agi_3.app import (
+    ATTEMPT_REPORT_KEY,
+    ArcAgi3ResourcesServer,
+    ArcAgi3ResourcesServerConfig,
+    ArcAgi3VerifyRequest,
+)
 from responses_api_agents.arc_agi_3_official_agent.app import (
     ArcAgi3OfficialAgent,
     ArcAgi3OfficialAgentConfig,
@@ -70,14 +93,47 @@ ROWS = [
 
 
 class FakeHttpResponse:
-    def __init__(self, text: str, status: int = 200):
+    def __init__(self, text: str, status: int = 200, cookies: dict | None = None):
         self._text = text
         self.status = status
         self.ok = status < 400
-        self.cookies = {}
+        self.cookies = {name: SimpleNamespace(value=value) for name, value in (cookies or {}).items()}
+        self.headers = {}
 
     async def read(self) -> bytes:
         return self._text.encode()
+
+
+class StackClient(ServerClient):
+    """The environment server's client: the resources server in process, the agent server over HTTP."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    agent_url: str
+    resources: ArcAgi3ResourcesServer
+
+    async def post(self, server_name, url_path, json=None, cookies=None, headers=None, **kwargs):
+        body = json.model_dump(mode="json", exclude_unset=True) if isinstance(json, BaseModel) else json
+        if server_name == "arc_agi_3_resources_server":
+            if url_path == "/seed_session":
+                result = await self.resources.seed_session(ResourcesSeedSessionRequest.model_validate(body))
+                # The resources server's session middleware answers every seed with its session cookie.
+                return FakeHttpResponse(result.model_dump_json(), cookies={"session": body["resources_session_id"]})
+            if url_path == "/verify":
+                result = await self.resources.verify(ArcAgi3VerifyRequest.model_validate(body))
+            elif url_path == "/close_session":
+                result = await self.resources.close_resources_session(
+                    ResourcesCloseSessionRequest.model_validate(body)
+                )
+            else:
+                raise AssertionError(f"unexpected call {server_name} {url_path}")
+            return FakeHttpResponse(result.model_dump_json())
+        assert server_name == "arc_agi_3_official_agent", server_name
+        reply = await asyncio.to_thread(
+            requests.post, self.agent_url + url_path, json=body, cookies=cookies, headers=headers, timeout=900
+        )
+        assert reply.status_code < 400, f"{url_path}: {reply.status_code} {reply.text[:2000]}"
+        return FakeHttpResponse(reply.text, reply.status_code, reply.cookies.get_dict())
 
 
 def free_port() -> int:
@@ -88,7 +144,14 @@ def free_port() -> int:
 
 def row(game: str, index: int) -> dict:
     data = next(r for r in ROWS if r["verifier_metadata"]["game_id"] == game)
-    return {**data, "verifier_metadata": {**data["verifier_metadata"], "dispatch_index": index}}
+    pins = data["agent_context"]["agent"]["values"]["game"]
+    return {
+        **data,
+        "verifier_metadata": {**data["verifier_metadata"], "dispatch_index": index},
+        "agent_context": {"agent": {"values": {"game": {**pins, "dispatch_index": index}}}},
+        TASK_INDEX_KEY_NAME: index,
+        ROLLOUT_INDEX_KEY_NAME: 0,
+    }
 
 
 def plain_aiohttp_clients(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -161,10 +224,7 @@ def start_stack(
         if server_name == "policy_model":
             response = await asyncio.to_thread(call_model, url_path, json)
             return FakeHttpResponse(response.text, response.status_code)
-        if server_name == "arc_agi_3_resources_server" and url_path == "/verify":
-            result = await resources.verify(ArcAgi3VerifyRequest.model_validate(json))
-            return FakeHttpResponse(result.model_dump_json())
-        raise AssertionError(f"unexpected call {server_name} {url_path}")
+        raise AssertionError(f"unexpected call {server_name} {url_path}")  # the environment server verifies
 
     port = free_port()
     config = ArcAgi3OfficialAgentConfig(
@@ -213,20 +273,42 @@ def start_stack(
     return stub, agent, server, thread, port, resources
 
 
-def run_games(port: int, rows: list) -> list:
-    import requests
+def run_games(port: int, resources: ArcAgi3ResourcesServer, rows: list) -> list:
+    """Each row one episode of the configs' environment server, all at once, as rollout collection sends them."""
+    client = StackClient(
+        head_server_config=BaseServerConfig(host="127.0.0.1", port=1),
+        global_config_dict=OmegaConf.create(
+            {
+                "arc_agi_3_resources_server": {
+                    "resources_servers": {"arc_agi_3": {"host": "127.0.0.1", "port": 0, "entrypoint": "app.py"}}
+                },
+                "arc_agi_3_official_agent": {
+                    "responses_api_agents": {
+                        "arc_agi_3_official_agent": {"host": "127.0.0.1", "port": port, "entrypoint": "app.py"}
+                    }
+                },
+            }
+        ),
+        agent_url=f"http://127.0.0.1:{port}",
+        resources=resources,
+    )
+    environment = SingleAgentTurnLegacyEnvironmentServer(
+        config=SingleAgentTurnLegacyEnvironmentServerConfig(
+            name="arc_agi_3_official_agent_environment_server",
+            host="127.0.0.1",
+            port=0,
+            entrypoint="app.py",
+            resources_server=ResourcesServerRef(type="resources_servers", name="arc_agi_3_resources_server"),
+            agent_server=AgentServerRef(type="responses_api_agents", name="arc_agi_3_official_agent"),
+            tool_servers=[],
+        ),
+        server_client=client,
+    )
 
-    results = [None] * len(rows)
+    async def main():
+        return await asyncio.gather(*(environment.run_legacy(r) for r in rows))
 
-    def one(i):
-        results[i] = requests.post(f"http://127.0.0.1:{port}/run", json=rows[i], timeout=600)
-
-    threads = [threading.Thread(target=one, args=(i,)) for i in range(len(rows))]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return results
+    return asyncio.run(main())
 
 
 def assistant_turns(body: dict) -> list:
@@ -254,14 +336,17 @@ def play_two_games(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, benchmark_co
         monkeypatch, tmp_path, play_seconds=120, benchmark_config=benchmark_config, harness_type=harness_type
     )
     try:
-        results = run_games(port, [row("ls20", 0), row("cn04", 1)])
+        results = run_games(port, resources, [row("ls20", 0), row("cn04", 1)])
+        sessions = list(agent._fenced_session_records.values())
     finally:
         server.should_exit = True
         thread.join(timeout=30)
         resources.game_server.stop()
-    for response in results:
-        assert response.status_code == 200, response.text[:2000]
-        result = response.json()
+    # Each episode's session was closed by its environment server (the close fences it).
+    assert len(sessions) == 2 and all(record.close_response is not None for record in sessions)
+    for result in results:
+        assert "_ng_failure_class" not in result, result
+        assert ATTEMPT_REPORT_KEY not in result["response"]  # the report became the verified row's own fields
         assert result["harness"] == "official" and result["harness_type"] == harness_type
         assert result["agent_state"] in ("gave_up", "won"), result
         assert result["result_valid"] is True and result["timing_valid"] is True, result
@@ -295,7 +380,7 @@ def test_standard_harness_rolls_its_history_without_reasoning_and_verifies(
     # Each game plays 100+ turns; a rolled transcript keeps only the latest few.
     assert len(stub.requests) > 200
     assert max(len(assistant_turns(b)) for b in stub.requests) < 50
-    assert all(c["role"] == "gameplay" for r in results for c in r.json()["agent_call_log"])
+    assert all(c["role"] == "gameplay" for r in results for c in r["agent_call_log"])
     config = json.loads((tmp_path / "stack" / "run_config.json").read_text())
     assert config["agent"]["harness_type"] == "standard"
     assert config["benchmark_config"]["runtime"]["state"] == "manual_rolling"
@@ -321,12 +406,12 @@ def test_two_games_keep_all_earlier_reasoning_and_verify(monkeypatch: pytest.Mon
     for body in summary_requests:
         assert assistant_turns(body), "the summary request sees the history with its reasoning"
     # Upstream's summary calls are the call logs' helper calls, and each starts a compaction record.
-    helpers = [c for r in results for c in r.json()["agent_call_log"] if c["role"] == "helper"]
+    helpers = [c for r in results for c in r["agent_call_log"] if c["role"] == "helper"]
     assert len(helpers) == len(summary_requests) and {c["history_id"] for c in helpers} == {"harness-summary"}
     compactions = [
         record
         for r in results
-        for record in r.json()["ng_agent_observations"]["records"]
+        for record in r["ng_agent_observations"]["records"]
         if record["kind"] == "context_compaction"
     ]
     assert compactions and all(c["model_calls"] for c in compactions)
@@ -345,8 +430,8 @@ def test_two_games_keep_all_earlier_reasoning_and_verify(monkeypatch: pytest.Mon
     cards = list((resources.game_server.out_dir / "cards").glob("*.json"))
     assert len(cards) == 2  # closed by the verifier, kept by the server's hook
     stops = 0
-    for response, game_dir in zip(results, games):
-        result, report = response.json(), json.loads((game_dir / "result.json").read_text())
+    for result, game_dir in zip(results, games):
+        report = json.loads((game_dir / "result.json").read_text())
         assert result["stop_reason"] == (
             "level_action_budget" if report["exit_reason"] == "ACTION_BUDGET" else "play_window"
         )

@@ -28,6 +28,7 @@ from nemo_gym.data import load_task_data_schema, validate_jsonl_rows
 from resources_servers.arc_agi_3 import create_dataset
 from resources_servers.arc_agi_3 import game_server as game_server_module
 from resources_servers.arc_agi_3.app import (
+    ATTEMPT_REPORT_KEY,
     ArcAgi3ResourcesServer,
     ArcAgi3ResourcesServerConfig,
     ArcAgi3VerifyRequest,
@@ -301,6 +302,36 @@ class TestVerify:
         fake_play(server, played)
         valid = asyncio.run(server.verify(verify_request(tmp_path, "fake", played)))
         assert valid.result_valid and not valid.mask_sample and valid.failure_kind is None
+
+    def test_the_report_comes_in_the_agents_response(self, tmp_path: Path) -> None:
+        # An agent-session episode: the environment server verifies the activation's reply, which carries the agent's
+        # report of the game; the report's harness fields stay in the rollout, and the reply loses the report.
+        write_fake_game(tmp_path, "fake", "0001", [10])
+        server = make_server(tmp_path)
+        record = record_for([3], 0, [10], [1.0, 2.0, 3.0])
+        fake_play(server, record)
+        plain = verify_request(tmp_path, "fake", record)
+        report = {
+            **{
+                k: getattr(plain, k)
+                for k in ("scorecard_id", "game_guid", "scorecard_api_key", "benchmark_start_time")
+            },
+            "game_record": record,
+            "harness": "arc3-kaggle-kit",
+            "agent_call_log": [{"index": 0}],
+            "verifier_metadata": {"game_id": "other"},  # a report cannot replace the task's own fields
+        }
+        request = ArcAgi3VerifyRequest(
+            responses_create_params=plain.responses_create_params,
+            response={**response_stub(), ATTEMPT_REPORT_KEY: report},
+            verifier_metadata=plain.verifier_metadata,
+        )
+        result = asyncio.run(server.verify(request))
+        assert result.result_valid and result.actions == 3 and result.scorecard_id == "card-1"
+        assert result.harness == "arc3-kaggle-kit" and result.agent_call_log == [{"index": 0}]
+        assert result.verifier_metadata == plain.verifier_metadata
+        assert ATTEMPT_REPORT_KEY not in result.response.model_dump()
+        assert "scorecard_api_key" not in result.model_dump() and "game_record" not in result.model_dump()
 
     def test_cancelled_attempt_is_not_a_valid_result(self, tmp_path: Path) -> None:
         write_fake_game(tmp_path, "fake", "0001", [10])
@@ -695,6 +726,11 @@ class TestDataset:
         assert [r["verifier_metadata"]["game_id"] for r in rows] == ["aa11", "bb22"]
         assert rows[1]["verifier_metadata"]["dispatch_index"] == 1
         assert rows[0]["verifier_metadata"]["number_of_levels"] == 2
+        # the agent session's context: the same pinned game
+        meta = rows[1]["verifier_metadata"]
+        assert rows[1]["agent_context"] == {
+            "agent": {"values": {"game": {k: meta[k] for k in create_dataset.AGENT_GAME_KEYS}}}
+        }
         out = tmp_path / "out.jsonl"
         create_dataset.write_jsonl(rows, out)
         create_dataset.check_rows(tmp_path, out)
@@ -715,6 +751,9 @@ class TestDataset:
             meta = row["verifier_metadata"]
             assert create_dataset.PUBLIC25_VERSIONS[meta["game_id"]] == meta["version"]
             assert meta["number_of_levels"] == len(meta["baseline_actions"])
+            assert row["agent_context"]["agent"]["values"]["game"] == {
+                k: meta[k] for k in create_dataset.AGENT_GAME_KEYS
+            }
         # The committed example games are the pinned files.
         create_dataset.check_rows(HERE.parent / "data" / "environment_files", HERE.parent / "data" / "example.jsonl")
 

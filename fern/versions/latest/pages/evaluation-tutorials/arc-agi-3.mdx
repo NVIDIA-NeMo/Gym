@@ -16,7 +16,7 @@ position: 9
 | Dataset | `resources_servers/arc_agi_3/data/example.jsonl`: rows over the 2 committed games, cn04 and ls20 |
 | Reward | the scorecard's score / 100 (RHAE), plus RHAE at 1 h and 2 h on the game server's clock |
 
-Both agents send every model call through the Gym model server, and the verifier checks each agent's report against the authoritative scorecard.
+Each row is one episode of the `single_agent_turn_legacy` environment server: it seeds an agent session with the row's pinned game, activates it to play the whole game, closes it, and verifies the agent's report against the authoritative scorecard. Both agents send every model call through the Gym model server.
 
 ## Run a Smoke
 

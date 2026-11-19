@@ -2,7 +2,7 @@
 
 Overview of all the ARC-AGI-3 environments and agents, with a smoke run: [`resources_servers/arc_agi_3/OVERVIEW.md`](../../resources_servers/arc_agi_3/OVERVIEW.md).
 
-This agent plays ARC-AGI-3 games with the harness of the ARC-AGI-3 Kaggle kit (public Kaggle datasets, 2026-11-02), against any model behind a NeMo Gym model server. Each `/run` plays one game (one row of [`resources_servers/arc_agi_3`](../../resources_servers/arc_agi_3/README.md)) for `play_seconds` and sends the game record to the `arc_agi_3` resources server, which scores it (RHAE).
+This agent plays ARC-AGI-3 games with the harness of the ARC-AGI-3 Kaggle kit (public Kaggle datasets, 2026-11-02), against any model behind a NeMo Gym model server. Each agent session plays one game (one row of [`resources_servers/arc_agi_3`](../../resources_servers/arc_agi_3/README.md)) for `play_seconds`. The configs pair the agent with the `single_agent_turn_legacy` environment server, which runs each row as one episode: it seeds the agent session with the row's pinned game (the row's `agent_context`), activates it (the whole game), closes it, then sends the activation's reply, which carries the game record and its scorecard, to the `arc_agi_3` resources server, which scores it (RHAE). A repeated seed starts nothing; the close stops a game still in play.
 
 ## What runs
 
@@ -37,7 +37,8 @@ The harness files are used byte-for-byte; `setup_harness.py` refuses any differe
 5. **Attempt lifecycle.**
    - A game that cannot start (pin mismatch, engine refusal) is scored as `not_started` with `agent_error`.
    - Once a game starts, its record is always scored. A failed snapshot save is reported as `persistence_error`, and an exception outside the harness as `agent_error`.
-   - Cancelling a `/run` stops only that game: it ends as `cancelled` and its pending model call is abandoned.
+   - Closing a session whose game is still in play (its activation was cancelled or failed) stops only that game: it ends as `cancelled` and its pending model call is abandoned.
+   - The harness's sampling is the agent's configuration: an activation that sets `temperature`, `top_p` or `max_output_tokens` (e.g. the CLI's `--temperature`) is refused with a 422.
    - A game in which no model call got an answer (an unreachable or failing endpoint) is reported to the verifier as `model_error`: its result is invalid and the rollout masked, not scored as a 0-action game.
    - Server shutdown stops every game, drains them within 60 s, finishes them as `cancelled`, writes the last snapshot and closes the solver.
    - The harness start belongs to the agent, not to the request that triggered it: a request cancelled during the start leaves it running, the next request waits for the same start, and shutdown waits for it and then closes it. A start that fails tears down what it built; the next request starts again. The start has no time limit of its own: shutdown waits for it however long it takes.
@@ -80,7 +81,7 @@ drains included. Set `run_clock: per_game` (rollouts start whenever the trainer 
 (`play_seconds`, `max_actions_per_game`); repeats of one game (a GRPO group) play side by side, each with its own
 files (`<game>_p<n>`).
 
-- **Model calls.** Every harness call goes to the model server on the run's rollout path (`url_path_for_run`), so
+- **Model calls.** Every harness call goes to the model server on the activation's rollout path (`url_path_for_request`), so
   Gym token capture applies to all of them. Enable it with `token_id_capture: true` on the agent and the run-wide
   `token_id_capture` settings ([external agent harnesses](../../fern/versions/latest/pages/training-tutorials/external-agent-harnesses.mdx)).
 - **Several context chains per rollout.** A history drain drops old turns (and, with `ARC3_TURN_COMPACTION_MODE=drainsum`,
@@ -89,7 +90,7 @@ files (`<game>_p<n>`).
   chain per rollout; train on all of them with framework-owned reconstruction (`parent_resolution: source_history`,
   `external_staging: true`, `rebuild_response: false`, see
   [context compaction](../../fern/versions/latest/pages/model-server/model-call-capture.mdx)).
-- **What the rollout reports** (`ng_agent_observations`, `call_log.py`):
+- **What the rollout reports** (`ng_agent_observations`, from the session close; `call_log.py`):
   - one `agent_invocation` whose `model_calls` are the gameplay calls in order: the accepted calls, as references
     (model server + response id) to the captured calls;
   - one `context_compaction` per drain: the gameplay call before and after it, the helper calls that wrote the
