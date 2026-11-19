@@ -44,6 +44,7 @@ from nemo_gym.eval.recovery.gate import (
 from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import SchedulerRefusedError
+from nemo_gym.orchestration.executors.capabilities import Resubmittable, require
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm.reader import reader_token
@@ -83,7 +84,7 @@ def resubmit(gym_job_id: str, benchmark: str) -> BenchmarkJob:
     executor_cls = _EXECUTORS_BY_NAME.get(record.executor)
     if executor_cls is None:
         raise ValueError(f"Submission {gym_job_id} was made by unknown executor {record.executor!r}.")
-    return executor_cls().resubmit(record, benchmark)
+    return require(executor_cls(), Resubmittable, "resubmit").resubmit(record, benchmark)
 
 
 @experimental
@@ -643,7 +644,7 @@ def _recover(
     if decision.action == RecoveryAction.RESUBMIT:
         operator = decision.operator_continuation
         try:
-            job = executor.resubmit(
+            job = require(executor, Resubmittable, "resubmit").resubmit(
                 record,
                 benchmark,
                 keep_budget=True,
@@ -702,7 +703,7 @@ def _recover(
         if repin is not None or extend_retries or extend_attempts:
             raise ValueError("a fresh restart takes only --max-walltime and --walltime-reason")
         try:
-            job = executor.resubmit(
+            job = require(executor, Resubmittable, "resubmit").resubmit(
                 record,
                 benchmark,
                 fresh_restart=True,

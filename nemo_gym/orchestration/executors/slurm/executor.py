@@ -40,6 +40,7 @@ from nemo_gym.orchestration.api import (
     VllmPDServiceConfig,
 )
 from nemo_gym.orchestration.executors.base import BaseExecutor
+from nemo_gym.orchestration.executors.capabilities import Resubmittable
 from nemo_gym.orchestration.executors.connection import (
     Connection,
     get_connection,
@@ -73,12 +74,14 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
 from nemo_gym.orchestration.executors.slurm.script import (
     _resolve_env,
     build_sbatch_script,
+    planned_log_sources,
 )
 from nemo_gym.orchestration.jobs import (
     ARTIFACTS_DIRNAME,
     LOGS_DIRNAME,
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
+    LogSource,
     SubmissionRecord,
     new_gym_job_id,
     utc_now,
@@ -132,7 +135,7 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
         raise ValueError(f"Mount src paths do not exist:\n{details}")
 
 
-class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
+class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
     Every service and the driver are launched via `srun --container-image` so they
@@ -180,7 +183,16 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
                     + token_export
                     + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
-                record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)
+                record = self._build_record(
+                    cluster,
+                    compute,
+                    gym_job_id,
+                    now,
+                    remote_run_dir,
+                    benchmark_names,
+                    output,
+                    planned_log_sources(config, compute),
+                )
                 record.environment = self.submission_environment(
                     config,
                     required_env=compute.forward_env,
@@ -289,6 +301,7 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
         remote_run_dir: Path,
         benchmark_names: list[str],
         output: str,
+        log_sources: list[LogSource],
     ) -> SubmissionRecord:
         results = _parse_sbatch_results(output)
         benchmarks = []
@@ -303,6 +316,7 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
                     job_dir=str(remote_run_dir / name),
                     job_id=job_id,
                     error=error,
+                    log_sources=log_sources,
                 )
             )
         return SubmissionRecord(
