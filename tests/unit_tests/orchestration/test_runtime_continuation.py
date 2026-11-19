@@ -361,25 +361,34 @@ def test_a_failing_installed_runtime_names_its_first_error_and_stops(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "config,retries_used,continues",
+    "driver,marker_job,kind,inventory,retries_used,continues",
     [
-        ("rollout_collection_driver: benchmarks.x.rollout_driver:run\n", 0, True),
-        ("rollout_collection_driver: benchmarks.x.rollout_driver:run\n", 3, False),
-        ("rollout_collection_driver: null\n", 0, False),
-        ("rollout_collection_driver: ${oc.env:DRIVER}\n", 0, False),
-        ("rollout_collection_driver: [unclosed\n", 0, False),
-        (None, 0, False),
+        ("agentic", "100", "judge_failed", True, 0, True),
+        ("agentic", "100", "judge_failed", True, 3, False),
+        ("agentic", "100", "judge_failed", False, 0, False),
+        ("agentic", "99", "judge_failed", True, 0, False),
+        ("agentic", "100", "other_error", True, 0, False),
+        ("agentic", None, None, True, 0, False),
+        ("missing_driver:run", "100", "judge_failed", True, 0, False),
+        ("null", "100", "judge_failed", True, 0, False),
+        ("${oc.env:DRIVER}", "100", "judge_failed", True, 0, False),
+        ("[unclosed", "100", "judge_failed", True, 0, False),
+        (None, "100", "judge_failed", True, 0, False),
     ],
 )
-def test_custom_driver_run_resumes_from_its_own_journal_within_the_retry_cap(
-    tmp_path, config, retries_used, continues
+def test_custom_driver_requires_deferred_judge_from_previous_job(
+    tmp_path, driver, marker_job, kind, inventory, retries_used, continues
 ):
-    # A custom driver writes its own journal, never a Store manifest; the follow-up resumes it as an infra retry.
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
-    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("{}\n")
-    if config is not None:
-        (artifacts / "rollouts_resolved_config.yaml").write_text(config)
+    if inventory:
+        (artifacts / "rollouts_materialized_inputs.jsonl").write_text("{}\n")
+    if driver == "agentic":
+        driver = "benchmarks.agentic_if_realworld.rollout_driver:run_rollout_collection"
+    if driver is not None:
+        (artifacts / "rollouts_resolved_config.yaml").write_text(f"rollout_collection_driver: {driver}\n")
+    if marker_job:
+        (tmp_path / f".gym_driver_failure.{marker_job}").write_text(kind + "\n")
     if retries_used:
         (tmp_path / ".gym_infra_retries").write_text(f"{retries_used}\n")
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="1:0")

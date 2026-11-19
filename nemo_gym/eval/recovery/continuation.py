@@ -19,6 +19,7 @@ accounting of a chain's allocations, including requeued ones.
 import os
 from pathlib import Path
 
+from nemo_gym.core.failure_kinds import JUDGE_FAILED
 from nemo_gym.eval.recovery.decision import (
     ALLOCATION_ENDED_STATES,
     IdentityState,
@@ -36,6 +37,7 @@ from nemo_gym.eval.recovery.markers import (
     ACCOUNTED_WALLTIME_PREFIX,
     CHAIN_ACCOUNTING_ENV,
     CONTINUATION_REASON_PREFIX,
+    DRIVER_FAILURE_NAME,
     PROVISIONAL_MARKER_PREFIX,
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
@@ -87,7 +89,15 @@ def continuation_admission(
         collected = CollectedEvidence.model_validate_json(raw.stdout)
         if not collected.managed_store:
             driver = _rollout_collection_driver(job)
-            if driver is None:
+            marker = job / f"{DRIVER_FAILURE_NAME}.{previous_job_id}"
+            if not (
+                previous_state == "FAILED"
+                and driver == "benchmarks.agentic_if_realworld.rollout_driver:run_rollout_collection"
+                and previous_job_id.isdecimal()
+                and marker.is_file()
+                and marker.read_text().strip() == JUDGE_FAILED
+                and (job / "artifacts" / "rollouts_materialized_inputs.jsonl").is_file()
+            ):
                 print(
                     f"{CONTINUATION_REASON_PREFIX}the saved artifacts have no rollout store manifest to continue from"
                 )
@@ -95,7 +105,7 @@ def continuation_admission(
             if collected.walltime_state != "ok":
                 print(f"{CONTINUATION_REASON_PREFIX}the chain's accumulated walltime is {collected.walltime_state}")
                 return "stop"
-            # A custom driver keeps its own journal and validates it on resume; only the retry cap bounds the chain.
+            # This allocation deferred a journaled answer and the driver revalidates it on resume.
             print(f"{CONTINUATION_REASON_PREFIX}rollout_collection_driver {driver} resumes from its own journal")
             return "retry"
         collected = select_managed_evidence(collected, job)

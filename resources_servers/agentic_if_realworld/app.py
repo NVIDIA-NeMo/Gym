@@ -86,6 +86,8 @@ class ResourcesServer(SimpleResourcesServer):
         try:
             return await verifier.verify(body)
         except RetryableTransportError as error:
+            if error.http_status in (401, 403):
+                raise HTTPException(status_code=error.http_status, detail=str(error)) from error
             # 503 tells the driver this task alone waits for a resume; other verify errors stay 500.
             raise HTTPException(status_code=503, detail=str(error)) from error
 

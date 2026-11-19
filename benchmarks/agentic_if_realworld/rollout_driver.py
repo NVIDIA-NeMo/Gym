@@ -14,7 +14,9 @@ from pathlib import Path
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.core.failure_kinds import JUDGE_FAILED, PROVIDER_CREDENTIALS_REJECTED
 from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
+from nemo_gym.verification.judge import judge_provider_stopped
 from resources_servers.agentic_if_realworld.benchmark.core import (
     Dataset,
     digest,
@@ -37,6 +39,12 @@ from resources_servers.agentic_if_realworld.benchmark.transport import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class DeferredJudgeError(RetryableTransportError):
+    """The selected answer is journaled and its judge request can be retried."""
+
+    failure_kind = JUDGE_FAILED
 
 
 async def run_rollout_collection(rollout_collection_config, global_config_dict) -> None:
@@ -305,10 +313,16 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     try:
                         await raise_for_status(response)
                     except ClientResponseError as error:
-                        if error.status != 503:
+                        if error.status in (401, 403):
+                            raise judge_provider_stopped(
+                                f"Judge credentials rejected (HTTP {error.status}) for {identifier}",
+                                failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+                                operation="/verify",
+                            ) from error
+                        if error.status != 503 or cached_only or validate_only:
                             raise
                         detail = (getattr(error, "response_content", None) or b"").decode(errors="replace")[:1000]
-                        raise RetryableTransportError(f"/verify returned 503 for {identifier}: {detail}") from error
+                        raise DeferredJudgeError(f"/verify returned 503 for {identifier}: {detail}") from error
                     result = await get_response_json(response)
                     result.pop("cached_judge_only", None)
                     result.pop("validate_judge_cache", None)
@@ -364,7 +378,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                         except Exception:
                             writing_failed = True
                             raise
-                except RetryableTransportError as error:
+                except DeferredJudgeError as error:
                     LOGGER.error("Task %s deferred to a resume: %r", identifier, error)
                     deferred.append(error)
                 except (Exception, asyncio.CancelledError) as error:

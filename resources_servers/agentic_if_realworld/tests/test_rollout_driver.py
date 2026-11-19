@@ -66,7 +66,7 @@ def collect(
         # A deferred task keeps its journal: its answer is saved and only the judge call waits.
         write(directory / "cells" / (judge.sha(identifier) + ".json"), {"attempts": [{}]})
         if identifier in deferring:
-            raise RetryableTransportError("Judge transport failed (http_status=500)")
+            raise rollout_driver.DeferredJudgeError("Judge transport failed (http_status=500)")
         seen["finished"].append(identifier)
         return {"item_id": identifier, "scoring_status": "scored"}
 
@@ -153,25 +153,42 @@ def test_deferred_transport_failure_lets_every_other_task_run_and_publish(tmp_pa
     assert sorted(published) == sorted(seen["aggregated"]) == TASKS[1:]
 
 
-def test_verify_503_defers_only_its_task(tmp_path, monkeypatch):
+@pytest.mark.parametrize("status", [401, 403, 503])
+def test_verify_failure_admission(tmp_path, monkeypatch, status):
     from unittest.mock import AsyncMock
 
     from aiohttp import ClientResponseError
 
+    from nemo_gym.cli.utils import exit_cleanly_on_config_error
     from nemo_gym.client import http_client
     from responses_api_agents.simple_agent.tests.test_app import _mock_response
 
     async def unavailable(response):
-        error = ClientResponseError(request_info=None, history=(), status=503)
+        error = ClientResponseError(request_info=None, history=(), status=status)
         error.response_content = b'{"detail": "Judge transport failed (http_status=500, reason=HTTP_500)"}'
         raise error
 
     monkeypatch.setattr(http_client, "raise_for_status", unavailable)
-    post = AsyncMock(return_value=_mock_response(status=503))
+    post = AsyncMock(return_value=_mock_response(status=status))
     seen = {}
-    with pytest.raises(RetryableTransportError, match="503 for task-0: .*http_status=500"):
-        collect(tmp_path, monkeypatch, seen, parallel=1, client=SimpleNamespace(post=post))
+
+    marker = tmp_path / ".gym_driver_failure.100"
+    monkeypatch.setenv("GYM_DRIVER_FAILURE_FILE", str(marker))
+    run = exit_cleanly_on_config_error(collect)
+    if status in (401, 403):
+        from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
+        from nemo_gym.core.typed_exceptions import NgFailureEvent
+
+        with pytest.raises(NgFailureEvent, match="Judge credentials rejected") as caught:
+            run(tmp_path, monkeypatch, seen, parallel=1, client=SimpleNamespace(post=post))
+        assert caught.value.failure_kind == PROVIDER_CREDENTIALS_REJECTED
+        assert marker.read_text().strip() == PROVIDER_CREDENTIALS_REJECTED
+        assert post.await_count == 1
+        return
+    with pytest.raises(rollout_driver.DeferredJudgeError, match="503 for task-0: .*http_status=500") as caught:
+        run(tmp_path, monkeypatch, seen, parallel=1, client=SimpleNamespace(post=post))
     # Every task still reached its own /verify after task-0's judge was unavailable.
+    assert marker.read_text().strip() == caught.value.failure_kind == "judge_failed"
     assert post.await_count == len(TASKS)
 
 

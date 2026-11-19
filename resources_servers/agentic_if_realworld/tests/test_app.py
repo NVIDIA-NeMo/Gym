@@ -80,7 +80,8 @@ def test_judge_startup_requires_key_only_when_serving(monkeypatch):
         server.setup_webserver()
 
 
-def test_http_verify_outage_is_an_error_then_recovers_saved_answer(verifier, monkeypatch):
+@pytest.mark.parametrize("status", [401, 403])
+def test_http_verify_rejected_credentials_preserves_saved_answer(verifier, monkeypatch, status):
     from resources_servers.agentic_if_realworld.tests.test_transport import Response
 
     calls = []
@@ -88,7 +89,7 @@ def test_http_verify_outage_is_an_error_then_recovers_saved_answer(verifier, mon
     async def request(*args, **kwargs):
         calls.append(1)
         if len(calls) == 1:
-            return Response(401, {"error": "bad credentials"})
+            return Response(status, {"error": "bad credentials"})
         payload = json.loads(kwargs["json"]["messages"][0]["content"].split("UNTRUSTED_EVALUATION_PAYLOAD:\n", 1)[1])
         return Response(
             200, {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(review(payload))}}]}
@@ -112,9 +113,8 @@ def test_http_verify_outage_is_an_error_then_recovers_saved_answer(verifier, mon
     saved = {path: path.read_bytes() for path in (verifier.receipt_dir / "model").iterdir()}
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         response = client.post("/verify", json=body)
-        # 503, not 500: the driver defers this task to a resume and keeps running the others.
-        assert response.status_code == 503 and len(calls) == 1
-        assert "http_status=401" in response.json()["detail"] and "attempt0.json" in response.json()["detail"]
+        assert response.status_code == status and len(calls) == 1
+        assert f"http_status={status}" in response.json()["detail"] and "attempt0.json" in response.json()["detail"]
         assert not list(verifier.receipt_dir.glob("judges/*/result.json"))
         monkeypatch.setenv("SYNTHETIC", "corrected-key")
         response = client.post("/verify", json=body)

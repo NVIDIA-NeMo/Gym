@@ -206,7 +206,8 @@ async def score(
                     raise RetryableTransportError(
                         f"Judge transport failed (http_status={receipt.get('http_status')}, "
                         f"reason={receipt.get('reason')}, receipt={receipt_path.name}); "
-                        "fix the service or credentials and explicitly resume the saved answer"
+                        "fix the service or credentials and explicitly resume the saved answer",
+                        http_status=status,
                     )
                 continue
             delivered_reviews += 1
