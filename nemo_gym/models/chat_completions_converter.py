@@ -1381,8 +1381,6 @@ class ChatCompletionsConverter(BaseModel):
     @staticmethod
     def _chat_tool_content_part_to_responses(part: Dict[str, Any]) -> Dict[str, Any]:
         """A Chat tool message's text or image part as the matching ``function_call_output`` part."""
-        if part["type"] in {"input_text", "input_image", "input_file"}:
-            return part
         if part["type"] == "image_url":
             image_url = part["image_url"]
             return {"type": "input_image", "image_url": image_url["url"], "detail": image_url.get("detail", "auto")}
@@ -1396,16 +1394,8 @@ class ChatCompletionsConverter(BaseModel):
         for message in messages:
             role = message["role"]
             if role in ("user", "system", "developer"):
-                message = dict(message)
                 if message["content"] is None:
                     message["content"] = ""
-                elif isinstance(message["content"], list):
-                    message["content"] = [
-                        self._chat_tool_content_part_to_responses(part)
-                        if part.get("type") in {"text", "image_url"}
-                        else part
-                        for part in message["content"]
-                    ]
                 output_items.append(NeMoGymEasyInputMessage.model_validate(message))
             elif role == "assistant":
                 output_items.extend(self.postprocess_assistant_message_dict(message))

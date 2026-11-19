@@ -73,7 +73,6 @@ deepcad_opencode_environment_server:
       resources_server: {type: resources_servers, name: deepcad_opencode}
       agent_server: {type: responses_api_agents, name: deepcad_opencode_agent}
       resources_tool_transports: []
-      max_model_calls: 10
       max_concurrent_episodes: 4
       queue_timeout_seconds: 1800
       default_episode_timeout_seconds: 2100
@@ -97,8 +96,6 @@ deepcad_policy_model:
   _copy: policy_model
   responses_api_models:
     vllm_model:
-      # Set a unique directory for each independent run; share it across model workers.
-      generation_budget_state_dir: ${oc.env:CAD_BUDGET_DIR}
       inline_tool_output_images: true
       supply_prefix_token_ids: true
       return_token_id_information: true

@@ -32,7 +32,6 @@ from resources_servers.deepcad.tests.test_opencode_manifest import CONFIG, prepa
 def test_mixed_config_routes_file_input_to_stock_session_boundary(
     tmp_path, monkeypatch, harness, class_name, boundary, validate_boundary
 ):
-    monkeypatch.setenv("CAD_BUDGET_DIR", str(tmp_path / "budget"))
     root = CONFIG.parents[3]
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
@@ -74,10 +73,6 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
     assert row["agent_ref"]["name"] == env.agent_server.name
     assert env.resources_server.name == "deepcad_opencode"
     assert env.resources_tool_transports == []
-    assert env.max_model_calls == 10
-    assert config.deepcad_policy_model.responses_api_models.vllm_model.generation_budget_state_dir == str(
-        tmp_path / "budget"
-    )
     assert (
         len([key for key, value in config.items() if isinstance(value, DictConfig) and "environment_servers" in value])
         == 7
@@ -92,8 +87,7 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
     assert env.agent_server.name == f"deepcad_{harness}_agent"
     if harness == "hermes":
         hermes = config.deepcad_hermes_agent.responses_api_agents.hermes_agent
-        assert hermes.image_input is True
-        assert hermes.enabled_toolsets == ["terminal", "file", "vision"]
+        assert hermes.enabled_toolsets == ["terminal", "file"]
     assert "required_model_servers" not in config.get("model_call_sampling", {})
     params = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
     assert len(params.input) == 1
@@ -126,8 +120,7 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
     if harness in {"opencode", "pi", "openclaw"}:
         assert agent_config.max_output_tokens == 32768
     if harness == "hermes":
-        assert agent_config.image_input is True
-        assert agent_config.enabled_toolsets == ["terminal", "file", "vision"]
+        assert agent_config.enabled_toolsets == ["terminal", "file"]
         assert agent_config.max_tokens == 32768 and not agent_config.compression_enabled
     if harness in {"pi", "openclaw"}:
         assert agent_config.image_input
@@ -159,7 +152,6 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
 def test_cad_blend_does_not_override_other_benchmark_agent(
     tmp_path, monkeypatch, other_recipe, other_agent, harness, cad_first
 ):
-    monkeypatch.setenv("CAD_BUDGET_DIR", str(tmp_path / "budget"))
     root = CONFIG.parents[3]
 
     def resolve(recipes):
@@ -198,7 +190,6 @@ def test_cad_blend_does_not_override_other_benchmark_agent(
     )
     stock_model = combined.policy_model.responses_api_models.vllm_model
     cad_model = combined.deepcad_policy_model.responses_api_models.vllm_model
-    assert stock_model.get("rollout_generation_budget") is None
     assert not stock_model.get("inline_tool_output_images", False)
     assert (cad_model.base_url, cad_model.model, cad_model.api_key) == (
         stock_model.base_url,
@@ -215,5 +206,4 @@ def test_cad_blend_does_not_override_other_benchmark_agent(
     )
     for name in ["opencode", "pi", "hermes", "codex", "claude_code", "openclaw", "nooa"]:
         env = combined[f"deepcad_{name}_environment_server"].environment_servers.single_agent_turn_legacy
-        assert env.max_model_calls == 10
         assert env.agent_server.name == f"deepcad_{name}_agent"

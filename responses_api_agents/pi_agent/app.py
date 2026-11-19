@@ -908,9 +908,6 @@ class PiAgent(SimpleResponsesAPIAgent):
             raise
         return state
 
-    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
-        return state.session if isinstance(state, PiSandboxSession) else None
-
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Stop Pi-owned work before verification, retaining the borrowed sandbox."""
         assert isinstance(state, PiSandboxSession)
@@ -1315,11 +1312,9 @@ class PiAgent(SimpleResponsesAPIAgent):
             assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
             if not execution_error and _reported_model_error(assistant, cleanup, will_retry=retrying):
                 # Classify a failed compaction call, not the overflow it was recovering from.
-                return self.report_rollout_stop(
-                    self.report_outcome(response, compaction_failure or assistant), state.session
-                )
+                return self.report_outcome(response, compaction_failure or assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
-        return self.report_rollout_stop(response, state.session)
+        return response
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)

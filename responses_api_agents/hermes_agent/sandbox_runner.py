@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import functools
-import inspect
 import json
 import os
 import signal
@@ -27,7 +26,7 @@ _MODEL_API_KEY = "gym"
 _COMPRESSION_CONFIG_KEY = "compression"
 
 
-def _use_model_server(base_url: str, *, image_model: str | None = None) -> None:
+def _use_model_server(base_url: str) -> None:
     """Point every model client Hermes builds in this process at the Gym Model Server.
 
     The root agent and its iteration-limit summary share one client, delegated children inherit the
@@ -36,11 +35,6 @@ def _use_model_server(base_url: str, *, image_model: str | None = None) -> None:
     os.environ["OPENAI_BASE_URL"] = base_url
     os.environ["OPENAI_API_KEY"] = _MODEL_API_KEY
 
-    if image_model is not None:
-        from agent.auxiliary_client import set_runtime_main
-
-        set_runtime_main("custom", image_model, base_url=base_url, api_key=_MODEL_API_KEY, api_mode="chat_completions")
-
     from run_agent import AIAgent
 
     # The Model Server answers only whole responses, so no agent may stream, including the children Hermes builds.
@@ -48,11 +42,7 @@ def _use_model_server(base_url: str, *, image_model: str | None = None) -> None:
 
     @functools.wraps(initialize)
     def initialize_without_streaming(agent: AIAgent, *args: Any, **kwargs: Any) -> None:
-        if "use_streaming" in inspect.signature(initialize).parameters:
-            initialize(agent, *args, **{**kwargs, "use_streaming": False})
-        else:
-            initialize(agent, *args, **kwargs)
-            agent._disable_streaming = True
+        initialize(agent, *args, **{**kwargs, "use_streaming": False})
 
     AIAgent.__init__ = initialize_without_streaming
 
@@ -86,10 +76,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     os.environ["HERMES_HOME"] = str(hermes_home)
     os.environ["TERMINAL_ENV"] = "local"
     os.environ["TERMINAL_TIMEOUT"] = str(payload["terminal_timeout"])
-    _use_model_server(
-        payload["model_base_url"],
-        image_model=payload["model"] if config.get("agent", {}).get("image_input_mode") == "native" else None,
-    )
+    _use_model_server(payload["model_base_url"])
 
     try:
         from .model_kwargs import _model_api_kwargs, install_summary_compat
@@ -102,7 +89,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     if payload["mcp_servers"]:
         _connect_mcp_servers(payload["required_mcp_servers"])
 
-    arguments = dict(
+    agent = AIAgent(
         base_url=payload["model_base_url"],
         api_key=_MODEL_API_KEY,
         model=payload["model"],
@@ -118,15 +105,6 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
         persist_session=False,
         save_trajectories=False,
     )
-    if "temperature" not in inspect.signature(AIAgent).parameters:
-        temperature = arguments.pop("temperature")
-        del arguments["insert_reasoning"], arguments["persist_session"]
-        arguments.update(
-            provider="custom",
-            api_mode="chat_completions",
-            request_overrides={"temperature": temperature} if temperature is not None else {},
-        )
-    agent = AIAgent(**arguments)
     observer = SandboxHermesObserver().instrument(agent)
 
     original_build_api_kwargs = agent._build_api_kwargs

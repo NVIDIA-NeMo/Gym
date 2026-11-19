@@ -10,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from nemo_gym.agents import ROLLOUT_STOP_METADATA_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
@@ -207,31 +206,6 @@ def test_incomplete_agent_is_unmasked_zero_without_collecting_file(runtime, stat
     workspace.download.assert_not_awaited()
 
 
-@pytest.mark.parametrize(
-    ("status", "marker"),
-    [
-        ("incomplete", "not-json"),
-        ("incomplete", "null"),
-        ("incomplete", "[]"),
-        ("incomplete", "{}"),
-        ("incomplete", '{"reason":"timeout"}'),
-        ("incomplete", '{"reason":10}'),
-        ("failed", '{"reason":"model_call_budget_exhausted"}'),
-    ],
-)
-def test_only_incomplete_native_budget_stop_can_collect_file(runtime, status, marker):
-    start(runtime)
-    workspace = runtime.workspaces["cad-session"]
-    body = verify_body(status)
-    body["response"]["metadata"] = {ROLLOUT_STOP_METADATA_KEY: marker}
-    result = runtime.client.post("/verify", json=body)
-    assert result.status_code == 200, result.text
-    assert result.json()["reward"] == 0
-    assert result.json()["final_file_status"] == "agent_incomplete"
-    workspace.download.assert_not_awaited()
-    runtime.evaluate.assert_not_awaited()
-
-
 @pytest.mark.parametrize("source", [b"\xff", b"x" * 65537])
 def test_invalid_final_source_is_zero(runtime, source):
     start(runtime)
@@ -253,27 +227,18 @@ def test_provider_collection_failure_is_masked_and_released(runtime):
     runtime.evaluate.assert_not_awaited()
 
 
-@pytest.mark.parametrize("budget_stopped", [False, True])
-def test_verify_retry_uses_frozen_source_after_workspace_is_gone(runtime, budget_stopped):
+def test_verify_retry_uses_frozen_source_after_workspace_is_gone(runtime):
     start(runtime)
     workspace = runtime.workspaces["cad-session"]
     runtime.evaluate.side_effect = [
         {"reward": 0, "mask_sample": True, "failure_kind": "deepcad:infrastructure"},
         {"reward": 0.75},
     ]
-    body = verify_body("incomplete" if budget_stopped else "completed")
-    if budget_stopped:
-        body["response"]["metadata"] = {ROLLOUT_STOP_METADATA_KEY: '{"reason":"model_call_budget_exhausted"}'}
-        body["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
-    assert runtime.client.post("/verify", json=body).json()["mask_sample"]
-    assert not runtime.workspaces
+    assert runtime.client.post("/verify", json=verify_body()).json()["mask_sample"]
     workspace.source = b"changed after collection"
-    retried = runtime.client.post("/verify", json=body)
+    retried = runtime.client.post("/verify", json=verify_body())
     assert retried.status_code == 200, retried.text
     assert retried.json()["reward"] == 0.75
-    assert retried.json()["response"]["status"] == body["response"]["status"]
-    if budget_stopped:
-        assert retried.json()["response"]["metadata"] == body["response"]["metadata"]
     assert all(call.args[0] == CODE for call in runtime.evaluate.await_args_list)
     assert workspace.download.await_count == 1
 

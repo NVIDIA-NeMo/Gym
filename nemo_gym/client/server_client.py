@@ -54,7 +54,6 @@ from nemo_gym.core.episode_context import (
     maybe_rollout_id_from_run_body,
     note_verifier_model_request,
 )
-from nemo_gym.core.generation_budget import current_generation_budget, with_generation_budget
 from nemo_gym.core.model_call_sampling import (
     current_model_sampling_segment,
     model_sampling_path_segment,
@@ -256,8 +255,6 @@ class ServerClient(BaseModel):
             # a model call, and a call to an agent (such as an agent's call to its own /v1/responses), whose model
             # calls then carry it too.
             url_path = with_model_sampling_segment(url_path, current_model_sampling_segment())
-            if url_path.split("?")[0].endswith(("/v1/responses", "/v1/chat/completions", "/v1/messages")):
-                url_path = with_generation_budget(url_path, current_generation_budget())
 
         return await request(
             method=method,
@@ -418,10 +415,6 @@ def apply_rollout_prefix(
     # An explicit segment always applies; the current request's only to a URL built for this rollout.
     current = current_model_sampling_segment() if trace_context else None
     prefix += model_sampling_path_segment(model_sampling if model_sampling is not None else current)
-    if trace_context and rollout_id:
-        budget = current_generation_budget()
-        if budget is not None:
-            prefix += f"/ng-generation-budget/{budget.segment()}"
     if trace_context:
         prefix += trace_context_path_segment()
     if not prefix:

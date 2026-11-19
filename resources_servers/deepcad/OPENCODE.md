@@ -20,12 +20,7 @@ On close, the resource collects the final regular UTF-8 `model.py`, retains it
 for verification retries, stops the workspace, and calls the existing isolated
 verifier. Prose, code fences, preview geometry, and caller-provided `final_code`
 are not graded. Missing/invalid files, failed runs, and ordinary incomplete runs
-score zero. An incomplete response carrying the native `ng_rollout_stop` JSON
-marker with reason `model_call_budget_exhausted` is the sole exception: the
-resource collects and grades the saved file, without changing response status.
-This enables grading the artifact when the shared ten-call budget stops the
-agent; it changes the earlier completed-only eligibility rule. Malformed markers
-and other stop reasons remain ineligible. Workspace collection failures are masked. Cleanup failure retains ownership for retry.
+score zero. Workspace collection failures are masked. Cleanup failure retains ownership for retry.
 The stateful Resources Server requires one worker.
 
 ## Prepare and route inputs
@@ -65,7 +60,7 @@ In particular, placing CAD after HLE resets HLE's Pi version, model and timeout;
 that ordering is not supported.
 
 `deepcad_policy_model` copies the selected `policy_model` backend while keeping
-CAD's generation budget, tool-image handling and token-capture options off the
+CAD's tool-image handling and token-capture options off the
 shared model instance. Training integrations must route CAD calls to this alias
 and include it in any explicitly required model-sampling list.
 
@@ -112,12 +107,7 @@ must be checked before a model run, including native shell environment behavior.
 
 ## Start and collect
 
-Choose an existing shared run directory and create a **new** budget directory for
-each independent run. All policy-model workers in that run must see the same path.
-Do not reuse another run's counters or give each worker an independent directory.
-
 ```bash
-export CAD_BUDGET_DIR="$(mktemp -d "${CAD_RUN_ROOT:?set a shared run directory}/cad-budget.XXXXXXXX")"
 gym env resolve --config deployment.yaml \
   --config resources_servers/deepcad/configs/multiharness.yaml
 gym env validate --config deployment.yaml \
@@ -125,7 +115,7 @@ gym env validate --config deployment.yaml \
   --server-types resources_servers,responses_api_agents,responses_api_models,environment_servers
 gym env start --config deployment.yaml \
   --config resources_servers/deepcad/configs/multiharness.yaml
-# In another terminal, with the same CAD_BUDGET_DIR and configuration:
+# In another terminal, with the same configuration:
 gym eval run --no-serve \
   --config deployment.yaml --config resources_servers/deepcad/configs/multiharness.yaml \
   --input mixed.jsonl --output rollouts.jsonl
@@ -153,11 +143,14 @@ sandbox_plugin_dependencies_sha256: 12ce5f79b27aa8886b64082c1f5d23ab4bc7410e193b
 
 ## Limits and validation boundary
 
-- Each CAD environment server sets `max_model_calls: 10`: at most **ten generation admissions
-  across all retries of one logical rollout**, including auxiliary calls carrying its budget.
-  The next call stops the explicit owning agent. Uncapped episodes on the same model server are unaffected.
-  This is not ten tool actions or a guarantee of ten successful model responses.
-  No shared-budget final prompt or forced final tool choice is configured.
+- There is no Gym-level model-call cap. The original CAD limit of 10 is OpenCode's own
+  `max_steps`; a harness's own turn limit and the episode's `agent_timeout_sec` bound each run.
+  Codex, Pi, and OpenClaw have no native turn limit, so only the timeout bounds them.
+- Image delivery uses each harness's existing support on main; this recipe adds none.
+  OpenCode, Pi, and OpenClaw take `image_input: true`, and Codex sends `input_image`.
+  Hermes, NOOA, and Claude Code have no such option, so the target and preview PNGs are
+  only files in the workspace for them. Those three are not qualified for this vision
+  task until their adapters accept images; a score from them is not comparable.
 - The row's output cap is an upper bound: the model middleware uses the smaller
   of that cap and the native request's cap. It does not raise a client's smaller
   output limit. Missing source caps leave native/backend defaults in effect. This
@@ -185,7 +178,7 @@ file-input recipe. No new cross-harness quality or training parity is claimed.
 ## Validation
 
 The following results validate the upstream standalone OpenCode recipe from #5950,
-not this seven-harness file-input recipe or its ten-admission stopping rule.
+not this seven-harness file-input recipe.
 
 Automated tests cover resource sessions, final-file authority, retained source,
 cleanup/retries, prompt/image preservation, and stock-harness input/config compatibility.

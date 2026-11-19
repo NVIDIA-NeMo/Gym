@@ -810,9 +810,6 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             raise
         return state
 
-    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
-        return state.session if isinstance(state, OpenClawSandboxSession) else None
-
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Confirm teardown and return observations without destroying the borrowed sandbox."""
         assert isinstance(state, OpenClawSandboxSession)
@@ -1375,8 +1372,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # owns verify/retry/fail policy for the preserved model response.
             # An idle watchdog abort is a model failure; the supervisor's whole-run
             # deadline and unrelated aborts must not be classified as transport errors.
-            response = self.report_outcome(response, terminal_result)
-        return self.report_rollout_stop(response, state.session)
+            return self.report_outcome(response, terminal_result)
+        return response
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)

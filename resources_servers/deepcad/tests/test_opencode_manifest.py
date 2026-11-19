@@ -126,7 +126,6 @@ def test_cannot_overwrite_source_manifest(tmp_path):
 
 
 def test_composed_config_resolves_offline_without_a_legacy_agent_relay(tmp_path, monkeypatch):
-    monkeypatch.setenv("CAD_BUDGET_DIR", str(tmp_path / "budget"))
     root = CONFIG.parents[3]
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
@@ -254,7 +253,6 @@ def test_empty_sampling_routes_through_native_episode_request(tmp_path, existing
 
 
 def test_lazy_preparation_defers_rendering_and_applies_workspace_prompt_after_materialization(tmp_path, monkeypatch):
-    monkeypatch.setenv("CAD_BUDGET_DIR", str(tmp_path / "budget"))
     from unittest.mock import patch
 
     from resources_servers.deepcad.dataset import lazy_inputs
@@ -302,7 +300,6 @@ def test_lazy_preparation_defers_rendering_and_applies_workspace_prompt_after_ma
 
 
 def test_real_environment_task_conversion_keeps_resource_seed_images(tmp_path, monkeypatch):
-    monkeypatch.setenv("CAD_BUDGET_DIR", str(tmp_path / "budget"))
     from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
     from resources_servers.deepcad.opencode_app import WorkspaceSeedRequest
 

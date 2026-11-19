@@ -113,7 +113,6 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
-from nemo_gym.server_runtime.request_handling.generation_budget import GenerationBudgetMiddleware
 from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
 from nemo_gym.server_runtime.tool_access import ToolAccess
@@ -965,7 +964,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         # Outermost, so the session and checkpoint middleware route an activation without its sampling segment.
         app.add_middleware(ModelSamplingContextMiddleware)
-        app.add_middleware(GenerationBudgetMiddleware)
         return app
 
     @asynccontextmanager

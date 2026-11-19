@@ -43,8 +43,7 @@ deepcad_hermes_agent:
       context_length: 131072
       compression_enabled: false
       temperature: null
-      image_input: true
-      enabled_toolsets: [terminal, file, vision]
+      enabled_toolsets: [terminal, file]
 
 deepcad_hermes_environment_server:
   _copy: deepcad_opencode_environment_server

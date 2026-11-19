@@ -29,7 +29,6 @@ from nemo_gym.agents import (
     AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
-    SandboxSession,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.core import (
@@ -208,22 +207,13 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             if is_transient_infrastructure_error(error):
                 raise HTTPException(503, "NOOA dependency request failed") from error
             raise
-        response = self.report_outcome(
+        return self.report_outcome(
             finalize_run_result(state.result)[0],
             {
                 "termination_reason": state.result.termination_reason,
                 "model_status_code": state.result.model_status_code,
             },
         )
-
-        if isinstance(state.runner, SandboxNOOARunner):
-            response = self.report_rollout_stop(response, state.runner.session)
-        return response
-
-    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
-        if isinstance(state, NOOASessionState) and isinstance(state.runner, SandboxNOOARunner):
-            return state.runner.session
-        return None
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         assert isinstance(state, NOOASessionState)

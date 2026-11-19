@@ -69,7 +69,6 @@ Resources servers and agent servers keep per-episode state in sessions. Use thes
 | Term | Definition | Not |
 | --- | --- | --- |
 | **Resources session** / **agent session** | The per-episode state a resources server or an agent server holds, named by `resources_session_id` or `agent_session_id`. | Resources Server session |
-| **Episode generation budget** | A limit on generation admissions shared by every retry of one `EpisodeId.rollout_id`; its owning agent is stopped through the existing rollout-stop route when no admission remains. | per-model cap, tool-action limit |
 | **Episode session** / **episode seed** | A session an environment server seeds through `/seed_session` or `/v1/agent_sessions`, and that seed. | typed session, typed seed, Environment Server session |
 | **Agent-run seed** | The seed an agent's own `/run` sends to a resources server. | untyped seed |
 | **Lock** | Makes a session's seed and close run one at a time: `ResourcesSessionLocks.locked()`. | fence (for the lock) |
@@ -126,23 +125,3 @@ Other features use some of these words in their own senses and keep them:
 | **Preference pairs** | DPO data: same task, high-reward vs low-reward rollouts (preferred vs dispreferred). |
 
 Responses API and Chat Completions are listed in the mapping table above; see [Architecture](/about/architecture) and [Model Server](/model-server).
-
-### Episode generation budgets
-
-`single_agent_turn` and `single_agent_turn_legacy` accept optional `max_model_calls` (unset by default).
-The environment server carries that limit, the explicit agent server name, and the logical rollout ID
-in `/ng-generation-budget/<values>` alongside the existing correlation and sampling segments.
-Retries share the logical rollout's counter; different samples must retain their distinct rollout IDs.
-The current attempt's capture key still identifies the agent to stop. A task ID is not a budget identity.
-
-Model servers receiving capped episodes must configure `generation_budget_state_dir` to the same fresh,
-run-specific shared directory. This setting supplies storage, not a cap: an episode without the segment
-is unaffected, even on the same model server. Keep the directory until the run and all late requests
-are retired. Failed backend dispatches consume admissions, because a failed transport cannot prove that
-no generation occurred. A budgeted request must ask for only one completion.
-
-The agent must implement the existing rollout-stop hook, and its sandbox provider must support uploads
-independent of occupied execution slots. Stop errors remain failures; the model server does not guess
-another owning agent. The stopped agent follows its existing timeout/file-collection/verification path.
-For the CAD recipe, the environment servers set `max_model_calls: 10`; `CAD_BUDGET_DIR` supplies the shared
-storage. This is a generation limit, not ten tool actions or ten successful responses.

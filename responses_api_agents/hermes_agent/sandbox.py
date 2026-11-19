@@ -48,24 +48,6 @@ _HERMES_RUNTIME = SandboxPythonRuntime(
         "import run_agent; from mcp.client.streamable_http import streamablehttp_client"
     ),
 )
-# The image tool returns pixels to the primary model in this runtime, instead of calling an auxiliary model.
-_IMAGE_RUNTIME = SandboxPythonRuntime(
-    harness="hermes",
-    requirements=(
-        "hermes-agent[mcp] @ https://github.com/cmunley1/hermes-agent/archive/0ee05d72f2b30385d4861fd8e30511c6d51100e4.tar.gz",
-    ),
-    constraints=tuple(
-        line
-        for line in Path(__file__).with_name("image-runtime-constraints.txt").read_text().splitlines()
-        if line and not line.startswith("#")
-    ),
-    import_check=(
-        "import os; os.environ['HERMES_HOME'] = os.path.join(os.environ['HOME'], '.hermes'); "
-        "import run_agent; from agent.image_routing import decide_image_input_mode; "
-        "assert decide_image_input_mode('custom', 'gym-policy', "
-        "{'model': {'supports_vision': True}, 'agent': {'image_input_mode': 'native'}}) == 'native'"
-    ),
-)
 _SANDBOX_RUNTIME_DIR = _HERMES_RUNTIME.directory
 _SANDBOX_PYTHON = _HERMES_RUNTIME.python
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
@@ -96,7 +78,6 @@ class HermesSandboxSession(AgentSessionState):
     """Hermes transport and cleanup; HTTP retry bookkeeping stays in the agent base."""
 
     session: SandboxSession[dict[str, JsonValue]]
-    image_input: bool = False
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
@@ -108,23 +89,16 @@ class HermesSandboxSession(AgentSessionState):
         The runtime directory is keyed by its inputs, so a runtime an earlier session left in this sandbox is
         reused when it passes the import check.
         """
-        runtime = _IMAGE_RUNTIME if self.image_input else _HERMES_RUNTIME
         prepared = await self.session.sandbox.exec(
-            f"mkdir -p {quote(runtime.directory)} {quote(self.session.session_dir)}", cwd="/", timeout_s=30
+            f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(self.session.session_dir)}", cwd="/", timeout_s=30
         )
         if prepared.return_code != 0:
             raise RuntimeError(prepared.stderr or prepared.stdout or "Failed to prepare Hermes sandbox paths")
-        if not await runtime.is_installed(self.session.sandbox):
-            await runtime.install(self.session.sandbox, timeout_s=install_timeout)
-        await self.session.sandbox.upload(
-            Path(__file__).with_name("sandbox_runner.py"), f"{runtime.directory}/sandbox_runner.py"
-        )
-        await self.session.sandbox.upload(
-            Path(__file__).with_name("sandbox_observer.py"), f"{runtime.directory}/sandbox_observer.py"
-        )
-        await self.session.sandbox.upload(
-            Path(__file__).with_name("model_kwargs.py"), f"{runtime.directory}/model_kwargs.py"
-        )
+        if not await _HERMES_RUNTIME.is_installed(self.session.sandbox):
+            await _HERMES_RUNTIME.install(self.session.sandbox, timeout_s=install_timeout)
+        await self.session.sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
+        await self.session.sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
+        await self.session.sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
 
     async def upload_json(self, name: str, payload: dict[str, JsonValue]) -> None:
         """Write a Hermes input under the session directory using file transfer."""
@@ -173,11 +147,11 @@ class HermesSandboxSession(AgentSessionState):
         await self.upload_json("input.json", {**payload, "stop_request_path": self.session.stop_request_path})
         return SandboxCommand(
             argv=[
-                _IMAGE_RUNTIME.python if self.image_input else _SANDBOX_PYTHON,
+                _SANDBOX_PYTHON,
                 # Ignore task Python settings without changing the environment inherited by tool subprocesses.
                 "-E",
                 "-s",
-                f"{_IMAGE_RUNTIME.directory}/sandbox_runner.py" if self.image_input else _SANDBOX_RUNNER,
+                _SANDBOX_RUNNER,
                 f"{self.session.session_dir}/input.json",
                 f"{self.session.session_dir}/output.json",
             ],
