@@ -118,6 +118,9 @@ USE_ABSOLUTE_IP = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY_NAME = "absolute_ip_server_types"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
+# true: before starting servers, also set up the venvs of servers that use Ray on every other Ray node. For multi-node
+# clusters whose venvs are on node-local storage; off by default.
+SETUP_VENVS_ON_EVERY_RAY_NODE_KEY_NAME = "setup_venvs_on_every_ray_node"
 H2_PING_SIDECAR_KEY_NAME = "sidecar"
 COMPONENT_EXTRAS_KEY_NAME = "component_extras"
 HF_TOKEN_KEY_NAME = "hf_token"
@@ -185,6 +188,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ABSOLUTE_IP_SERVER_TYPES_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
+    SETUP_VENVS_ON_EVERY_RAY_NODE_KEY_NAME,
     COMPONENT_EXTRAS_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
