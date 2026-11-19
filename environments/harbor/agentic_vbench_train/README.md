@@ -73,6 +73,34 @@ NeMo RL carries its sampling values into every model call the trained agent make
 store itself; the overlay's `token_id_capture` values are the local-run defaults. The harbor server resolves each
 row's task folder through the run config's taskset mapping, so the entry folder must stay where it was prepared.
 
+### Harnesses
+
+`dataset.toml` admits two harnesses, each with its own overlay because an overlay names its harness's block:
+
+| Harness | Overlay | Rows and run config a run writes |
+| --- | --- | --- |
+| `opencode_agent` | [`harbor_train.yaml`](harbor_train.yaml), optionally `compaction_plugins.yaml` and `subagents.yaml` | `tasks_opencode_agent.jsonl`, `run_config_opencode_agent.yaml` |
+| `pi_agent` | [`harbor_train_pi.yaml`](harbor_train_pi.yaml) | `tasks_pi_agent.jsonl`, `run_config_pi_agent.yaml` |
+
+For Pi, replace `opencode_agent` and `harbor_train.yaml` in the commands and the recipe above with `pi_agent` and
+`harbor_train_pi.yaml`. The tasks, the verifiers, the server block and the capture store are the same; the Pi
+overlay sets the same capture opt-in, `image_input`, time ceiling and model budgets
+(`agentic_vbench_context_tokens`, `agentic_vbench_output_tokens`) on Pi. Three things differ:
+
+- Compaction is off (`auto_compaction: false`). The compaction plugins and the model server's summary recovery
+  are OpenCode's, so give the policy its whole training context; an episode that fills it ends there.
+- `subagents.yaml` and `compaction_plugins.yaml` configure OpenCode and do not load with Pi.
+- Pi installs its runtime (Node and the Pi CLI) into the sandbox at session start, from nodejs.org and npm. A
+  sandbox without that access needs an image that carries it: `sandbox_runtime_dir` in the
+  [harness README](../../../responses_api_agents/pi_agent/README.md).
+
+One run trains one harness. Both generated run configs name their servers after the taskset
+(`harbor_agentic_5fvbench_5ftrain_agent` and `..._environment`), so listing both in one run's `config_paths` makes
+the second replace the first; a single run that mixes harnesses needs those instances renamed in a copy.
+
+Status: the Pi pairing is configuration that loads and validates (see the tests); a rollout and a training step
+with token capture through Pi have not been recorded here yet.
+
 Per-family numbers for a run of the entry: `python -m benchmarks.agentic_vbench.family_metrics
 results/harbor/agentic_vbench_train/rollouts.jsonl --entry environments/harbor/agentic_vbench_train`.
 
