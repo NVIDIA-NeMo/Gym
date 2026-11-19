@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Harvey AI
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT
+
+# Original Harvey LAB portions remain under MIT; NVIDIA modifications follow.
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Harvey LAB source (MIT): https://github.com/harveyai/harvey-labs/blob/
+# f46ef86e4788545622db25dcffa3aebb7a139929/harness/tools.py
 """Agent-visible tool schemas used by the Harbor agent."""
 
 # The container-side implementation lives in lab_harbor/container_tool_runner.py
