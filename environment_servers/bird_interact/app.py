@@ -365,14 +365,20 @@ class BirdInteractEpisode:
         self.failure_reason = f"{what}: {type(error).__name__}: {error}"[:2000]
 
 
+# The queries a test case may run, for the command's time budget: a test case's code calls the ADK's helpers as it
+# likes, and about a quarter of Lite's management phases run more than two queries in one.
+_TEST_CASE_QUERIES = 10
+
+
 def _command_scripts(command: str, request: dict[str, Any]) -> int:
-    """The most scripts that ``grading.py <command>`` runs for ``request``, each bounded by the SQL timeout."""
+    """How many scripts ``grading.py <command>`` may run for ``request``, each bounded by the SQL timeout: the bound of
+    the command's time budget."""
     if command != "grade":
         return 1 + len(request.get("preprocess_sql") or []) + len(request.get("applied_sql") or [])
     applied = 1 if request.get("apply_if_passed") else 0
     if test_cases := request.get("test_cases"):
-        # The submission, then the submission's and the solution's queries again for each test case.
-        return 1 + 2 * len(test_cases) + applied
+        # The submission, then the queries of each test case.
+        return 1 + _TEST_CASE_QUERIES * len(test_cases) + applied
     # The submission twice and the solution, then the solution again on clean state if it failed after the submission.
     return 2 + 2 * len(request.get("solution_sql") or []) + applied
 
@@ -656,7 +662,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 cleanup, tool_accesses=served.tool_accesses, continuation=self.config.mode == "c_interact"
             )
             stop_reason = await self._converse(episode, agent)
-            # The agent stops before grading, so grading reads the state the agent left.
+            # Each submission was graded in its turn; the agent's session closes before the episode's result is built.
             await agent.close()
         except NgFailureEvent as error:
             if not is_handled_episode_failure(error):
@@ -933,15 +939,16 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
         it holds the same state.
         """
         try:
-            async with self._queries:
-                for _ in range(self.config.inconclusive_verification_retries):
-                    try:
+            # Each attempt takes one of the server's query slots; starting a fresh sandbox does not, so an outage does
+            # not hold every other episode's queries.
+            for _ in range(self.config.inconclusive_verification_retries):
+                try:
+                    async with self._queries:
                         return await self._run_command(episode.sandbox, command, request)
-                    except SandboxCommandError as error:
-                        LOGGER.warning(
-                            f"Retrying {command} on a fresh sandbox for {episode.task.instance_id}: {error}"
-                        )
-                        await self._replace_sandbox(episode)
+                except SandboxCommandError as error:
+                    LOGGER.warning(f"Retrying {command} on a fresh sandbox for {episode.task.instance_id}: {error}")
+                await self._replace_sandbox(episode)
+            async with self._queries:
                 return await self._run_command(episode.sandbox, command, request)
         except asyncio.CancelledError as error:
             # A tool call cut off by its deadline: the command has no result, so the sample is masked.

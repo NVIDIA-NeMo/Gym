@@ -46,6 +46,7 @@ from environment_servers.bird_interact.app import (
     SandboxCommandError,
 )
 from environment_servers.bird_interact.grading import (
+    GRADE_DATABASE,
     WORK_DATABASE,
     Grade,
     PostgresDatabase,
@@ -657,7 +658,10 @@ _POSTGRES = shutil.which("initdb") and shutil.which("pg_ctl")
 
 @pytest.mark.skipif(not _POSTGRES, reason="needs PostgreSQL's initdb and pg_ctl")
 class TestPostgresDatabase:
-    """The runner's PostgreSQL engine against a real server, started for the test as the current user."""
+    """The runner's PostgreSQL engine against a real server, started for the test as the current user.
+
+    The server has the agent role as the image has it: not a superuser, owning the episode's database and its tables.
+    """
 
     @pytest.fixture
     def database(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PostgresDatabase:
@@ -673,24 +677,57 @@ class TestPostgresDatabase:
             check=True,
             capture_output=True,
         )
-        monkeypatch.setenv("PGHOST", str(socket))
-        monkeypatch.setenv("PGUSER", "bird")
-        # Since psycopg2 2.9, `with connection` opens a transaction even in autocommit, and CREATE DATABASE cannot
-        # run in one.
-        connection = psycopg2.connect(dbname="postgres")
-        connection.autocommit = True
         try:
-            connection.cursor().execute("CREATE DATABASE shop_template")
-        finally:
+            monkeypatch.setenv("PGHOST", str(socket))
+            monkeypatch.setenv("PGUSER", "bird")
+            monkeypatch.setattr("environment_servers.bird_interact.grading.AGENT_ROLE", "bird_agent")
+            # Since psycopg2 2.9, `with connection` opens a transaction even in autocommit, and CREATE DATABASE
+            # cannot run in one.
+            connection = psycopg2.connect(dbname="postgres")
+            connection.autocommit = True
+            try:
+                connection.cursor().execute("CREATE ROLE bird_agent LOGIN NOSUPERUSER")
+                connection.cursor().execute("CREATE DATABASE shop_template OWNER bird_agent")
+            finally:
+                connection.close()
+            connection = psycopg2.connect(dbname="shop_template")
+            with connection, connection.cursor() as cursor:
+                cursor.execute("CREATE TABLE sales (amount numeric, sold date)")
+                cursor.execute("INSERT INTO sales VALUES (1.005, '2024-01-02'), (2.5, '2024-01-03')")
+                cursor.execute("ALTER TABLE sales OWNER TO bird_agent")
+            # A database with a session open cannot be copied, and test-case grading copies it.
             connection.close()
-        connection = psycopg2.connect(dbname="shop_template")
-        with connection, connection.cursor() as cursor:
-            cursor.execute("CREATE TABLE sales (amount numeric, sold date)")
-            cursor.execute("INSERT INTO sales VALUES (1.005, '2024-01-02'), (2.5, '2024-01-03')")
-        # A database with a session open cannot be copied, and test-case grading copies it.
-        connection.close()
-        yield PostgresDatabase("shop_template")
-        subprocess.run(["pg_ctl", "stop", "--pgdata", data, "--mode", "immediate"], capture_output=True)
+            yield PostgresDatabase("shop_template")
+        finally:
+            subprocess.run(["pg_ctl", "stop", "--pgdata", data, "--mode", "immediate"], capture_output=True)
+
+    def test_agent_sql_cannot_read_the_server_s_files_run_programs_or_change_its_settings(
+        self, database: PostgresDatabase
+    ) -> None:
+        # Through any of them, agent SQL could log the solution SQL that grading runs, and read the log.
+        results = [
+            database.run([sql], timeout_seconds=5)[0]
+            for sql in (
+                "SELECT pg_read_file('postgresql.conf')",
+                "COPY (SELECT 1) TO PROGRAM 'true'",
+                "SET log_statement = 'all'",
+                "SELECT pg_reload_conf()",
+            )
+        ]
+        refused = ("permission denied", "must be superuser")
+        assert all(result.error and any(word in result.error for word in refused) for result in results), results
+        # The role owns the tables, so a management task can still change them.
+        (altered,) = database.run(["ALTER TABLE sales ADD COLUMN note text; SELECT 1"], timeout_seconds=5)
+        assert altered.ok
+
+    def test_sql_that_breaks_the_driver_or_its_connection_is_the_query_s_error(
+        self, database: PostgresDatabase
+    ) -> None:
+        late, killed = (
+            database.run([sql], timeout_seconds=5)[0]
+            for sql in ("SELECT DATE '9999-12-31' + 1", "SELECT pg_terminate_backend(pg_backend_pid())")
+        )
+        assert "year" in late.error and killed.error, (late, killed)
 
     def test_a_query_that_writes_leaves_the_database_unchanged(self, database: PostgresDatabase) -> None:
         (deleted,) = database.run(["DELETE FROM sales; SELECT COUNT(*) FROM sales"], timeout_seconds=5)
@@ -701,6 +738,39 @@ class TestPostgresDatabase:
         (slow,) = database.run(["SELECT pg_sleep(5)"], timeout_seconds=0.2)
         (broken,) = database.run(["SELECT nope FROM sales"], timeout_seconds=5)
         assert slow.timed_out and "nope" in broken.error
+
+    def test_a_management_submission_has_one_deadline_like_a_default_one(self, database: PostgresDatabase) -> None:
+        never = "def test_case(*args):\n    raise AssertionError('ran')"
+        # Each statement is under the timeout; together they are over it.
+        sleeps = "SELECT pg_sleep(0.15); " * 8 + "SELECT 1"
+
+        by_rows = grade(database, sleeps, ["SELECT 1"], ordered=False, timeout_seconds=0.5)
+        by_cases = grade_by_test_cases(database, sleeps, ["SELECT 1"], [never], timeout_seconds=0.5)
+
+        assert (by_rows.passed, by_rows.timed_out) == (False, True)
+        assert (by_cases.passed, by_cases.timed_out) == (False, True)
+
+    def test_a_passing_management_submission_that_cannot_be_applied_fails_the_command(
+        self, database: PostgresDatabase
+    ) -> None:
+        passes = "def test_case(*args):\n    pass"
+        # Runs on the test cases' copy, and fails on the episode's database.
+        copy_only = "DO $$ BEGIN IF current_database() = 'shop_template' THEN RAISE 'not here'; END IF; END $$"
+
+        with pytest.raises(RuntimeError, match="not here"):
+            grade_by_test_cases(database, copy_only, ["SELECT 1"], [passes], timeout_seconds=5, apply_if_passed=True)
+
+    def test_a_solution_run_again_alone_cannot_commit_to_the_episode_s_database(
+        self, database: PostgresDatabase
+    ) -> None:
+        # The submission breaks the solution, which then runs again alone, with a COMMIT of its own.
+        solution = ["UPDATE sales SET amount = 1000; COMMIT; SELECT amount FROM sales"]
+        with database.copy(GRADE_DATABASE) as scratch:
+            outcome = grade(scratch, "DROP TABLE sales; SELECT 1", solution, ordered=False, timeout_seconds=5,
+                            baseline=database)  # fmt: skip
+
+        (amounts,) = database.run(["SELECT max(amount) FROM sales"], timeout_seconds=5)
+        assert not outcome.passed and amounts.rows == [(Decimal("2.5"),)]
 
     def test_a_script_has_one_deadline_whatever_its_statements(self, database: PostgresDatabase) -> None:
         (sleeps,) = database.run(["SELECT pg_sleep(0.15); " * 8 + "SELECT 1"], timeout_seconds=0.5)
@@ -1493,13 +1563,13 @@ class TestPostgreSQL:
         # Phase 1 is a management phase, and its follow-up a query.
         assert (phase_1["test_cases"], phase_1["apply_if_passed"]) == ([test_case], True)
         assert phase_2["test_cases"] == []
-        # Each script the grader may run has its SQL timeout. Phase 1: the submission, two queries for the test case
-        # and the application. Phase 2: the submission twice, and the solution, which may run again on clean state.
+        # Each script the grader may run has its SQL timeout. Phase 1: the submission, up to ten queries for the test
+        # case, and the application. Phase 2: the submission twice, and the solution, which may run again alone.
         timeout, follow_up_scripts = (
             server.config.sql_timeout_seconds,
             len(TASKS["bookshop_3"]["follow_up"]["sol_sql"]),
         )
-        assert phase_1_limit == pytest.approx(4 * timeout + 60)
+        assert phase_1_limit == pytest.approx(12 * timeout + 60)
         assert phase_2_limit == pytest.approx((2 + 2 * follow_up_scripts) * timeout + 60)
 
 

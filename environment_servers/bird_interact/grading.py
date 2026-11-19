@@ -23,6 +23,12 @@ ATTACH, which could reach the episode's file; PostgreSQL runs it on a copy of th
 ``GRADE_DATABASE``). Only ``setup`` and a passing phase 1 write the database: as in the ADK, phase 1's SQL is applied
 once it passes, so phase 2 sees what it changed.
 
+On PostgreSQL, the task's SQL, the agent's and grading run as the role the image names in ``BIRD_INTERACT_AGENT_ROLE``:
+not a superuser, it owns the task's tables and what the task's setup creates, so a management task can change them,
+but it cannot read the server's files, run programs or change the server's settings, through which agent SQL could
+reach the solution SQL. Only the copies' creation runs as the image's superuser. An image without the role runs
+everything as the superuser.
+
 The Environment Server uploads this file to the episode's sandbox and runs ``python3 grading.py <command> <request>``
 (see ``main``), so it imports only the standard library, and ``psycopg2`` for PostgreSQL, which the image provides.
 """
@@ -30,6 +36,7 @@ The Environment Server uploads this file to the episode's sandbox and runs ``pyt
 import contextlib
 import datetime
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -54,16 +61,23 @@ _FLOAT_PLACES = 2
 _DECIMAL_STEP = Decimal(1).scaleb(-_FLOAT_PLACES)
 # The rows the ADK keeps of a query that starts with SELECT or WITH.
 MAX_RESULT_ROWS = 10_000
-# Rows returned to the agent by an exploratory query.
+# Rows returned to the agent by an exploratory query, and the characters of each value it shows, as the ADK cuts them.
 MAX_PREVIEW_ROWS = 20
+MAX_PREVIEW_VALUE_CHARACTERS = 100
 # The copy of the episode's database that a management phase is graded on. The sandbox is the episode's own, so one
 # name serves; it is short, because PostgreSQL truncates a name longer than 63 bytes.
 TEST_CASE_DATABASE = "bird_interact_test_cases"
 # PostgreSQL: agent SQL never runs on the episode's database itself, which only setup and an applied phase 1 change.
 # Exploratory queries run on a working copy, and each submission is graded on a fresh copy, as the ADK resets its task
-# database before each submission. A COMMIT in agent SQL can then change only a copy.
+# database before each submission. A COMMIT in agent SQL can then change only a copy, as the agent role cannot reach
+# another database.
 WORK_DATABASE = "bird_interact_work"
 GRADE_DATABASE = "bird_interact_grade"
+# Where a solution that failed after the submission runs again alone: a COMMIT in it must not reach the episode's
+# database.
+SOLUTION_DATABASE = "bird_interact_solution"
+# The role that runs the agent's SQL and grading on PostgreSQL; the image sets it (see the module's docstring).
+AGENT_ROLE = os.environ.get("BIRD_INTERACT_AGENT_ROLE") or None
 
 
 @dataclass(frozen=True)
@@ -143,8 +157,9 @@ def _returns_rows(sql: str) -> bool:
 
 
 def _fetch_rows(cursor: Any, script: str) -> list[tuple] | None:
-    """The rows of a PostgreSQL script's last statement, as the ADK keeps them: at most ``MAX_RESULT_ROWS`` when the
-    script starts with ``SELECT`` or ``WITH``, all of them otherwise, and none when the statement returns no rows."""
+    """The rows of a script's last statement, as the ADK keeps them: at most ``MAX_RESULT_ROWS`` when the script starts
+    with ``SELECT`` or ``WITH``, all of them otherwise, and none when the statement returns no rows. Only that many are
+    read, so a huge result does not fill the sandbox's memory with SQLite (psycopg2 holds a whole result anyway)."""
     if _returns_rows(script):
         return cursor.fetchmany(MAX_RESULT_ROWS + 1)[:MAX_RESULT_ROWS]
     return cursor.fetchall() if cursor.description is not None else None
@@ -188,6 +203,14 @@ def _display_value(value: object) -> object:
         # psycopg2 returns `bytea` as a memoryview, whose repr is its address.
         return bytes(value)
     return value
+
+
+def _preview_value(value: object) -> object:
+    """A value as a preview shows it: ``_display_value``'s, cut to ``MAX_PREVIEW_VALUE_CHARACTERS`` when longer."""
+    shown = _display_value(value)
+    if len(text := repr(shown)) > MAX_PREVIEW_VALUE_CHARACTERS:
+        return text[:MAX_PREVIEW_VALUE_CHARACTERS] + "..."
+    return shown
 
 
 class Database(Protocol):
@@ -239,14 +262,14 @@ def _run_sqlite(database: Path, scripts: Sequence[str], *, timeout_seconds: floa
         for script in scripts:
             deadline[0] = time.monotonic() + timeout_seconds
             try:
-                rows: list[tuple] | None = None
-                for statement in split_statements(script):
+                statements = split_statements(script)
+                cursor = None
+                for statement in statements:
                     cursor = connection.execute(statement)
-                    rows = cursor.fetchall() if cursor.description is not None else None
-                if rows is not None and _returns_rows(script):
-                    rows = rows[:MAX_RESULT_ROWS]
-                results.append(QueryResult(rows=rows))
-            except sqlite3.Error as error:
+                # Only the last statement's rows are kept, so only they are read.
+                results.append(QueryResult(rows=_fetch_rows(cursor, script) if cursor is not None else None))
+            except (sqlite3.Error, ValueError, OverflowError) as error:
+                # A value the driver cannot hold, or SQL it cannot send (a NUL, a lone surrogate), is the query's error.
                 timed_out = isinstance(error, sqlite3.OperationalError) and time.monotonic() > deadline[0]
                 message = f"Query timed out after {timeout_seconds} seconds" if timed_out else str(error)
                 results.append(QueryResult(rows=None, error=message, timed_out=timed_out))
@@ -262,7 +285,8 @@ class PostgresDatabase:
     """A database in the PostgreSQL server of the sandbox's image.
 
     The image sets ``PGDATA`` and the libpq variables (``PGHOST``, ``PGUSER``) that connections use. Each script is
-    sent as one query, as the ADK sends it, so it may hold several statements and dollar-quoted bodies.
+    sent as one query, as the ADK sends it, so it may hold several statements and dollar-quoted bodies. Scripts run as
+    the agent role.
     """
 
     name: str
@@ -275,7 +299,7 @@ class PostgresDatabase:
     def run(self, scripts: Sequence[str], *, timeout_seconds: float, commit: bool = False) -> list[QueryResult]:
         import psycopg2
 
-        connection = psycopg2.connect(dbname=self.name)
+        connection = _connect(self.name)
         results: list[QueryResult] = []
         try:
             with connection.cursor() as cursor:
@@ -291,7 +315,9 @@ class PostgresDatabase:
                         message = f"Query timed out after {timeout_seconds} seconds"
                         results.append(QueryResult(rows=None, error=message, timed_out=True))
                         break
-                    except psycopg2.Error as error:
+                    except (psycopg2.Error, ValueError, OverflowError) as error:
+                        # A value the driver cannot hold (a date past year 9999, a huge interval), or SQL it cannot
+                        # send (a NUL), is the query's error, as in the ADK.
                         results.append(QueryResult(rows=None, error=str(error)))
                         break
                     finally:
@@ -299,8 +325,10 @@ class PostgresDatabase:
         finally:
             if commit and all(result.ok for result in results):
                 connection.commit()
-            else:
-                connection.rollback()
+            elif not connection.closed:
+                # SQL that ended its own connection (pg_terminate_backend) leaves nothing to roll back.
+                with contextlib.suppress(psycopg2.InterfaceError, psycopg2.OperationalError):
+                    connection.rollback()
             connection.close()
         return results
 
@@ -329,13 +357,22 @@ class PostgresDatabase:
                 # Also drops a copy that a crashed command left.
                 cursor.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
                 if create:
+                    # The agent role owns the copy, as it owns the episode's database, so its SQL can create schemas.
+                    owner = sql.SQL(" OWNER {}").format(sql.Identifier(AGENT_ROLE)) if AGENT_ROLE else sql.SQL("")
                     cursor.execute(
-                        sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
-                            sql.Identifier(name), sql.Identifier(self.name)
+                        sql.SQL("CREATE DATABASE {} TEMPLATE {}{}").format(
+                            sql.Identifier(name), sql.Identifier(self.name), owner
                         )
                     )
         finally:
             connection.close()
+
+
+def _connect(database: str) -> Any:
+    """A connection to ``database`` as the agent role, or as the image's superuser when the image names no role."""
+    import psycopg2
+
+    return psycopg2.connect(dbname=database, **({"user": AGENT_ROLE} if AGENT_ROLE else {}))
 
 
 class TestCaseHelpers:
@@ -355,9 +392,7 @@ class TestCaseHelpers:
         self._connections: list[Any] = []
 
     def connect(self, database: str) -> Any:
-        import psycopg2
-
-        connection = psycopg2.connect(dbname=database)
+        connection = _connect(database)
         self._connections.append(connection)
         return connection
 
@@ -393,7 +428,14 @@ class TestCaseHelpers:
         cursor = connection.cursor()
         try:
             cursor.execute("SET statement_timeout = %s", (self._timeout_ms,))
-            cursor.execute(query)
+            # One deadline for the whole query, as PostgresDatabase.run has: the statement timeout applies to each
+            # statement of a multi-statement query on its own, and the query itself can turn it off.
+            timer = threading.Timer(self._timeout_ms / 1000, connection.cancel)
+            timer.start()
+            try:
+                cursor.execute(query)
+            finally:
+                timer.cancel()
             connection.commit()
             return _fetch_rows(cursor, query)
         except Exception:
@@ -473,6 +515,7 @@ def _apply_setup(database: Database, request: dict[str, Any]) -> None:
     scripts = [script for script in (*request["preprocess_sql"], *request.get("applied_sql", [])) if script.strip()]
     if not scripts:
         return
+    # On PostgreSQL as the agent role, so what the setup creates is the role's to change.
     results = database.run(scripts, timeout_seconds=request["timeout_seconds"], commit=True)
     if not results[-1].ok:
         # The task's own setup failed, and the command fails with it.
@@ -485,19 +528,18 @@ def start_postgres() -> None:
     if subprocess.run(["gosu", "postgres", "pg_ctl", "status"], capture_output=True).returncode == 0:
         return
     # The log goes to a file, so the server does not hold this command's output open.
-    subprocess.run(
-        [
-            "gosu",
-            "postgres",
-            "pg_ctl",
-            "start",
-            "--wait",
-            "--log=/tmp/postgresql.log",
-            "--options=-c listen_addresses=",
-        ],
-        check=True,
+    log = Path("/tmp/postgresql.log")
+    started = subprocess.run(
+        ["gosu", "postgres", "pg_ctl", "start", "--wait", f"--log={log}", "--options=-c listen_addresses="],
         capture_output=True,
+        text=True,
     )
+    if started.returncode != 0:
+        tail = log.read_text(errors="replace")[-2000:] if log.is_file() else ""
+        raise RuntimeError(
+            f"PostgreSQL did not start (exit {started.returncode}): {(started.stderr or started.stdout)[-2000:]}"
+            f"\n{tail}"
+        )
 
 
 def grade(
@@ -525,8 +567,13 @@ def grade(
         return Grade(passed=False)
     if not results[-1].ok:
         # The solution runs on the state the submission left, as in the ADK, which grades a submission that breaks it
-        # as wrong. Only a solution that also fails on the episode's own state is bad task data.
-        alone = baseline.run(solution, timeout_seconds=timeout_seconds)[-1]
+        # as wrong. Only a solution that also fails on the episode's own state is bad task data. It runs on a copy, so a
+        # COMMIT in it cannot reach the episode's database; SQLite's run already uses a scratch copy.
+        if isinstance(baseline, PostgresDatabase):
+            with baseline.copy(SOLUTION_DATABASE) as clean:
+                alone = clean.run(solution, timeout_seconds=timeout_seconds)[-1]
+        else:
+            alone = baseline.run(solution, timeout_seconds=timeout_seconds)[-1]
         if not alone.ok:
             raise SolutionFailedError(f"The ground-truth SQL failed: {alone.error}")
         return Grade(passed=False)
@@ -582,8 +629,9 @@ def grade_by_test_cases(
     if passed and apply_if_passed:
         (applied,) = database.run([predicted_sql], timeout_seconds=timeout_seconds, commit=True)
         if not applied.ok:
-            # The test cases ran on a copy under another name; SQL that fails on the episode's database itself fails.
-            return Grade(passed=False, execution_error=applied.error, timed_out=applied.timed_out)
+            # The same SQL just passed on a copy of this state, so the command fails, as grade's does, and the server
+            # retries it on a fresh sandbox, which holds the episode's database without this attempt's writes.
+            raise RuntimeError(f"Applying the passing phase 1 SQL failed: {applied.error}")
     return Grade(passed=passed)
 
 
@@ -613,7 +661,7 @@ def main(argv: list[str]) -> None:
         result = {
             "error": query.error,
             "row_count": len(rows),
-            "preview": [repr(tuple(_display_value(value) for value in row)) for row in rows[:MAX_PREVIEW_ROWS]],
+            "preview": [repr(tuple(_preview_value(value) for value in row)) for row in rows[:MAX_PREVIEW_ROWS]],
         }
     elif command == "grade":
         try:

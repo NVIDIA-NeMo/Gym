@@ -18,10 +18,14 @@
 ARG BIRD_INTERACT_IMAGE=docker.io/shawnxxh/bird-interact-postgresql@sha256:1ae45d7aa5d64dd8eb82e4058f56b4b9625d5035b9b9dc0d2afa0295d9d3053c
 FROM ${BIRD_INTERACT_IMAGE}
 
-# libpq reads PGHOST and PGUSER, so grading.py connects over the local socket as the release's superuser, root.
+# libpq reads PGHOST and PGUSER, so grading.py connects over the local socket as the release's superuser, root, to
+# set up the task and copy its database. It runs the agent's SQL and grading as BIRD_INTERACT_AGENT_ROLE, a role that
+# is not a superuser and owns each <db>_template's objects (agent_role.sql), so agent SQL cannot read the server's files
+# or logs, run programs or change its settings.
 ENV PGDATA=/var/lib/postgresql/bird_interact \
     PGHOST=/var/run/postgresql \
-    PGUSER=root
+    PGUSER=root \
+    BIRD_INTERACT_AGENT_ROLE=bird_agent
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-psycopg2 \
@@ -31,6 +35,7 @@ RUN apt-get update \
 # The scripts connect to the database named after their user, root, which the base image's entrypoint would create.
 # They print failed imports and go on, so the build fails when they print an error or a dump folder did not become a
 # database.
+COPY --chmod=644 agent_role.sql /tmp/agent_role.sql
 RUN set -eu; \
     install -d -o postgres -g postgres -m 0700 "$PGDATA"; \
     gosu postgres initdb --username=root --auth=trust --encoding=UTF8; \
@@ -39,6 +44,13 @@ RUN set -eu; \
     for script in /docker-entrypoint-initdb.d/*.sh; do \
         gosu postgres bash "$script" > /tmp/restore-output.log 2>&1 || { cat /tmp/restore-output.log; exit 1; }; \
         if grep -qE "^Error" /tmp/restore-output.log; then cat /tmp/restore-output.log; exit 1; fi; \
+    done; \
+    gosu postgres psql --dbname=postgres --quiet \
+        --command="CREATE ROLE bird_agent LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE"; \
+    for database in $(gosu postgres psql --dbname=postgres --tuples-only --no-align \
+        --command="SELECT datname FROM pg_database WHERE datname LIKE '%\_template' AND datname <> 'sql_test_template'"); do \
+        gosu postgres psql --dbname="$database" --quiet --set=ON_ERROR_STOP=1 --file=/tmp/agent_role.sql; \
+        gosu postgres psql --dbname=postgres --quiet --command="ALTER DATABASE \"$database\" OWNER TO bird_agent"; \
     done; \
     restored="$(gosu postgres psql --dbname=postgres --tuples-only --no-align \
         --command="SELECT count(*) FROM pg_database WHERE datname LIKE '%\_template' AND datname <> 'sql_test_template'")"; \

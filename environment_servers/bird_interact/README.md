@@ -124,10 +124,11 @@ its comments, `DISTINCT` words and `ROUND(...)` calls removed. The results are c
 places (decimals half-up), dates and timestamps as `YYYY-MM-DD`, JSON values and arrays as sorted JSON; rows in order
 when `conditions.order` is set and as sets otherwise. Each query keeps the rows of its last statement, at most 10,000
 when it starts with `SELECT` or `WITH`, and each query times out after `sql_timeout_seconds` (default 60), however
-many statements it holds. If the solution fails after the submission ran, it runs again on the episode's database: a
-submission that broke the state the solution needs is wrong, as in the ADK. A solution that fails there too is bad
-task data: the ADK's `ex_base` returns 0 for it, so the submission is wrong, the episode goes on, and the rollout's
-`solution_errors` lists the error. `benchmarks/bird_interact/README.md` lists the Lite tasks this affects.
+many statements it holds. If the solution fails after the submission ran, it runs again alone on a fresh copy of the
+episode's database: a submission that broke the state the solution needs is wrong, as in the ADK. A solution that
+fails there too is bad task data: the ADK's `ex_base` returns 0 for it, so the submission is wrong, the episode goes
+on, and the rollout's `solution_errors` lists the error. Only query phases add to it; a management phase's test cases
+decide its grade. `benchmarks/bird_interact/README.md` lists the Lite tasks this affects.
 
 Nothing that grading or an exploratory query runs stays in the database. SQLite runs it on a scratch copy and refuses
 `ATTACH`, which could open the episode's file. PostgreSQL runs it on a copy of the episode's database, as the ADK
@@ -136,6 +137,18 @@ fresh copy, after which the working copy starts again from the episode's databas
 therefore changes only a copy. When phase 1 passes and phase 2 follows, its SQL is applied to the episode's database,
 so phase 2 sees what it changed, as the ADK's phase-1 snapshot does; if applying it fails, the command fails and runs
 again on a fresh sandbox.
+
+On PostgreSQL, the task's setup, the agent's SQL and grading run as the role the image names in
+`BIRD_INTERACT_AGENT_ROLE` (`bird_agent` in `benchmarks/bird_interact`'s image). It is not a superuser. It owns the
+task's tables and what the setup creates, so a management task can change them. It cannot read the server's files or
+logs, run programs, change the server's settings or reach another database, so agent SQL cannot read the solution SQL
+that grading runs, or change anything but its copy. Only the copies are made by the image's superuser. The ADK runs
+everything as a superuser, so a task whose solution needs a superuser (`session_replication_role`, `CREATE ROLE`) differs;
+the benchmark's README lists them. An image without the role runs everything as the superuser.
+
+The PostgreSQL image must provide `gosu`, `pg_ctl` and `initdb`, and set `PGDATA`, `PGHOST` and `PGUSER`; `grading.py`
+starts the server as the `postgres` user, so the sandbox runs its commands as root. Docker and OpenSandbox do; a
+provider that runs commands as the launching user, such as Apptainer, cannot start the server.
 
 The ADK's rules, kept for parity, include its edge cases: a comment at the very end, with no line break after it,
 stays; `COUNT(DISTINCT x)` keeps its `DISTINCT`; an array of decimals or dates fails the comparison, because it cannot
