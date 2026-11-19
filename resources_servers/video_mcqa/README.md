@@ -150,7 +150,9 @@ lines, and the final answer, without its reasoning. The question comes from
 whatever else the prompt holds never reach the judge. It never gets the gold
 label, and it is told not to decide which option is correct. It replies with
 one JSON object, `{"choice": "<letter or none>"}`. Its instructions are the
-ones NVIDIA's Video-MME-v2 evaluations give their judge.
+ones NVIDIA's Video-MME-v2 evaluations give their judge. This policy refuses a
+row without `question` and `options`; rule-scored results saved before rows
+carried them still aggregate and replay.
 
 | Final answer | Outcome | Reward |
 | --- | --- | --- |
@@ -158,14 +160,15 @@ ones NVIDIA's Video-MME-v2 evaluations give their judge.
 | The judge reads `none`: no option, several, or unclear | `no_choice` | 0 |
 | Empty, or only an unfinished reasoning block (no judge call) | `no_answer` | 0 |
 
-A reply without that JSON object, or with a letter the question does not
-offer, is no reading. Neither it nor a failed judge call (after `call_judge`'s
-retries) is a wrong answer: Gym's judge failsafe masks the row
-(`failure_kind: judge_failed`) and keeps it, with the policy model's answer, in
-the run's failures file. The frozen cohort counts that task as missing until
-the saved answer is judged again (`gym eval reverify --judge-failed-only`, or a
-resume). Failed model calls, single-turn tool calls and failed agent runs are
-classified before any judge call, as under the other policies.
+A reply without that JSON object, with a `choice` that is not a string (such
+as `null`), or with a letter the question does not offer, is no reading.
+Neither it nor a failed judge call (after `call_judge`'s retries) is a wrong
+answer: Gym's judge failsafe masks the row (`failure_kind: judge_failed`) and
+keeps it, with the policy model's answer, in the run's failures file. The
+frozen cohort counts that task as missing until the saved answer is judged
+again (`gym eval reverify --judge-failed-only`, or a resume). Failed model
+calls, single-turn tool calls and failed agent runs are classified before any
+judge call, as under the other policies.
 
 The cohort declares the policy (`prepare.py --answer-policy llm_extraction_v1`),
 and a server whose cohort uses it refuses to start without `judge_model_server`.

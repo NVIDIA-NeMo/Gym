@@ -69,6 +69,8 @@ async def grade_final_answer(
     keeps it, answer included, in the failures file, and recovery judges it again. It is never scored as a wrong
     answer.
     """
+    if answer_policy == "llm_extraction_v1" and metadata.question is None:
+        raise ValueError("llm_extraction_v1 needs each row's question and options in its verifier_metadata")
     answer = final_answer_text(final_text)
     if answer_policy != "llm_extraction_v1" or failure is not None or not answer:
         return respond(
