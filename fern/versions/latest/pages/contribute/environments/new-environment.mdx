@@ -461,6 +461,8 @@ A named config is often a variant of a benchmark or environment rather than a wo
 
 Validation checks that a setup runs the same task datasets or `harbor_target`, with the same resources server and grading mode. When both use `prompt_source: template`, it also checks that they use the same prompt templates. A harness may add its own instructions. When a harness needs the benchmark's prompt in another form, the setup names its own template in `standard_prompt_config` and says in its `description` how it adapted the prompt. For example, `hle/opencode` puts the HLE authors' system prompt into the user message, because OpenCode owns the system prompt. Review checks that the benchmark's wording is unchanged. A protocol's tasks are checked in review, because a protocol may prepare its own copy of the data.
 
+Put each config the main manifest lists in the benchmark folder's `configs/` folder, and name it after the benchmark and the config, without `configs/`: `configs/codex.yaml` in `my_benchmark/` is `my_benchmark/codex`. Configs already at the top of a benchmark folder, such as `hle/opencode.yaml`, stay there for now, under names that are their paths.
+
 Each entry names its config and sets only the facts that differ from the main manifest. A field it leaves out, `version` included, is the main manifest's:
 
 ```yaml
@@ -468,19 +470,19 @@ name: my_benchmark
 # ... the main manifest's fields ...
 setups:
 - name: my_benchmark/codex
-  config_path: codex.yaml
+  config_path: configs/codex.yaml
   description: My benchmark run by the Codex harness.
   integration_profile: external-agent-loop
   agent_server: codex_agent
   model_server: null
 protocols:
 - name: my_benchmark/config_with_system
-  config_path: config_with_system.yaml
+  config_path: configs/config_with_system.yaml
   description: My benchmark with a system prompt.
   standard_prompt_config: benchmarks/my_benchmark/prompts/with_system.yaml
 ```
 
-- `name` is required. It is the config's ID, which the catalog lists and `gym eval run --benchmark` takes; see [Names](#names). It is usually the config's path under `benchmarks/` or `environments/` without `.yaml`, as in this example, and stays the same if the config moves. It can also say what the config is, as `my_benchmark/harness_neutral` does in the next example.
+- `name` is required. It is the config's ID, which the catalog lists and `gym eval run --benchmark` takes; see [Names](#names). It need not match the config's path and stays the same if the config moves. It can also say what the config is, as `my_benchmark/harness_neutral` does in the next example.
 - `config_path` is required and relative to the main manifest.
 - An entry may set `description`, `maintainers`, `requirements`, `primary_metric`, `integration_profile`, and `dataset_owner`. A protocol must set `description`, saying how its prompt, tools, or scoring differ, and may also set `standard_prompt_config`. A setup sets `standard_prompt_config` only for a prompt adapted to its harness, and then must set `description`.
 - `requirements` combines field by field: an entry that sets only `network: public` keeps the inherited `gpu`. A list such as `datasets` or `maintainers` replaces the inherited one whole.
@@ -491,13 +493,13 @@ A protocol that several harnesses run lists them as its own `setups`. Such a set
 ```yaml
 protocols:
 - name: my_benchmark/harness_neutral
-  config_path: opencode.yaml
+  config_path: configs/opencode.yaml
   description: My benchmark with a prompt that names no harness's tools, run by OpenCode.
   standard_prompt_config: benchmarks/my_benchmark/prompts/harness-neutral.yaml
   agent_server: opencode_agent
   setups:
   - name: my_benchmark/pi
-    config_path: pi.yaml
+    config_path: configs/pi.yaml
     description: My benchmark with the harness-neutral prompt, run by Pi.
     agent_server: pi_agent
 ```
