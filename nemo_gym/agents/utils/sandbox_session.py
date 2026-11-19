@@ -407,7 +407,8 @@ class SandboxSession[Artifacts]:
         A supervisor that sees the expiry ends its harness within its ``cleanup_bound`` (``grace``, unless
         ``expire`` set another). One that has not by then is not running, as in a sandbox stalled by memory
         pressure, where the command can go on for hours. The activation then stops waiting for the command: it
-        returns None when the supervisor's receipt confirms termination, and otherwise raises the harness
+        returns None when the supervisor's receipt confirms termination, raises the provider's confirmed sandbox
+        OOM when the command reported one while the receipt was read, and otherwise raises the harness
         termination failure (see ``_stop_overdue_harness``). The deadline counts from the later of the delivery
         and the launch, so a marker written before launch leaves the supervisor its whole bound.
         """
@@ -424,7 +425,8 @@ class SandboxSession[Artifacts]:
             await asyncio.wait({exec_task}, timeout=max(0.0, deadline - monotonic()))
             if not exec_task.done():
                 await self._stop_overdue_harness(grace=grace, timeout=close_timeout)
-                return None
+                if self.cleanup is not None:
+                    return None
         return exec_task.result()
 
     async def _stop_overdue_harness(self, *, grace: float, timeout: float) -> None:
@@ -433,8 +435,12 @@ class SandboxSession[Artifacts]:
         The supervisor's receipt, read within ``timeout``, is the only evidence taken: a stop request would
         turn the expiry into a cancellation if the supervisor resumed. A receipt that confirms termination
         (the command's status can hang after the supervisor has finished) lets the activation go on to capture.
-        Otherwise termination is unconfirmed, exactly as after a negative receipt: the session stops waiting for
-        the command, raises the harness termination failure, and close leaves the sandbox to its owner.
+        Without a receipt either way, a command that the provider reported OOM-killed during the read returns,
+        so that ``execute`` classifies that confirmed sandbox death as usual: it is better evidence than a
+        missing receipt and must not be replaced by an inferred termination failure. Otherwise termination is
+        unconfirmed, exactly as after a
+        negative receipt: the session stops waiting for the command, raises the harness termination failure,
+        and close leaves the sandbox to its owner.
         """
         LOG.warning(
             "Rollout %s: the %s harness did not end within %g s of its stop; no longer waiting for its command",
@@ -453,6 +459,15 @@ class SandboxSession[Artifacts]:
         if receipt is not None:
             self.cleanup = receipt
             return
+        exec_task = self._exec_task
+        if self.termination_error is None and exec_task is not None and exec_task.done() and not exec_task.cancelled():
+            error = exec_task.exception()
+            if (
+                isinstance(error, NgFailureEvent)
+                and error.boundary == "sandbox"
+                and error.failure_kind == PROVIDER_OOM_KILLED
+            ):
+                return
         if self.termination_error is None:
             self.termination_error = harness_termination_failure(
                 harness=self.harness,

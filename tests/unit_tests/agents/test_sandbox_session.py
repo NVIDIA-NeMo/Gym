@@ -1125,6 +1125,55 @@ async def test_a_negative_receipt_found_after_the_grace_is_the_failure(session, 
     assert session.closed
 
 
+@pytest.mark.parametrize("receipt", ["missing", "times_out"])
+@pytest.mark.parametrize("owned", [False, True])
+async def test_a_sandbox_oom_reported_during_the_overdue_receipt_read_stays_the_failure(
+    session, receipt_reader, receipt, owned
+):
+    session.owns_sandbox = owned
+    error = sandbox_oom("OpenSandbox reason='OOMKilled'; sandbox_id='task-5'")
+    launched = asyncio.Event()
+    killed = asyncio.get_running_loop().create_future()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await killed
+        return OK
+
+    async def read_receipt(*_, **__):
+        # The provider confirms the sandbox's OOM while the overdue harness's receipt is being read.
+        if not killed.done():
+            killed.set_exception(error)
+        await asyncio.sleep(0.01 if receipt == "missing" else CLOSE * 2)
+        raise FileNotFoundError("cleanup.json")
+
+    session.sandbox.exec.side_effect = exec_
+    receipt_reader.side_effect = read_receipt
+    collect = AsyncMock(return_value="transcript")
+    activation = asyncio.create_task(execute(session, collect=collect, timeout=CLOSE))
+    await asyncio.wait_for(launched.wait(), 2)
+    assert await session.expire(timeout=1, reason="budget", grace=GRACE) is True
+    with pytest.raises(NgFailureEvent) as caught:
+        await asyncio.wait_for(activation, 5)
+    # The confirmed sandbox death is the failure, not a termination failure inferred from the missing receipt.
+    assert caught.value is error and session.execution_oom is error
+    assert session.termination_error is None and not is_harness_termination_failure(caught.value)
+    receipt_reader.assert_awaited_once()
+    collect.assert_not_awaited()
+    assert isinstance(session.capture_error, RuntimeError)
+    # Close takes the dead-sandbox release path: no in-sandbox cleanup command after the launch.
+    await asyncio.wait_for(session.close(timeout=CLOSE), 5)
+    assert session.closed
+    assert session.sandbox.exec.await_count == 1
+    if owned:
+        session.sandbox.stop.assert_awaited_once()
+        session.sandbox.disconnect.assert_not_awaited()
+    else:
+        session.sandbox.disconnect.assert_awaited_once()
+        session.sandbox.stop.assert_not_awaited()
+
+
 async def test_a_supervisor_that_ends_the_harness_promptly_is_waited_for(session, receipt_reader, caplog):
     launched = asyncio.Event()
     expired = asyncio.Event()
