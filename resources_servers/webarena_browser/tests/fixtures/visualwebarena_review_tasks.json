@@ -1,0 +1,267 @@
+[
+  {
+    "runtime_task_id": "108",
+    "source": {
+      "web_name": [
+        "shopping"
+      ],
+      "id": "visualwebarena-108",
+      "ques": "Add something like what the man is wearing to my wish list.",
+      "web": [
+        "__SHOPPING__/"
+      ],
+      "eval": {
+        "eval_types": [
+          "page_image_query"
+        ],
+        "page_image_query": [
+          {
+            "eval_image_url": "__SHOPPING__/wishlist/",
+            "eval_image_class": ".products-grid .wishlist .product-image-photo",
+            "eval_vqa": [
+              {
+                "question": "Is this a polo shirt? (yes/no)",
+                "answer": "yes"
+              },
+              {
+                "question": "Is this shirt green? (yes/no)",
+                "answer": "yes"
+              }
+            ]
+          }
+        ],
+        "reference_url": "",
+        "program_html": [],
+        "string_note": "",
+        "reference_answer_raw_annotation": ""
+      },
+      "image": "visualwebarena/shopping/task_108/input_0.png"
+    }
+  },
+  {
+    "runtime_task_id": "159",
+    "source": {
+      "web_name": [
+        "shopping"
+      ],
+      "id": "visualwebarena-159",
+      "ques": "Add something like what the person is covered with in a similar color to my wish list.",
+      "web": [
+        "__SHOPPING__/"
+      ],
+      "eval": {
+        "eval_types": [
+          "page_image_query"
+        ],
+        "page_image_query": [
+          {
+            "eval_image_url": "__SHOPPING__/wishlist/",
+            "eval_image_class": ".products-grid .wishlist .product-image-photo",
+            "eval_vqa": [
+              {
+                "question": "Is this a blanket? (yes/no)",
+                "answer": "yes"
+              },
+              {
+                "question": "Is this blanket light blue? (yes/no)",
+                "answer": "yes"
+              }
+            ]
+          }
+        ],
+        "reference_url": "",
+        "program_html": [],
+        "string_note": "",
+        "reference_answer_raw_annotation": ""
+      },
+      "image": "visualwebarena/shopping/task_159/input_0.png"
+    }
+  },
+  {
+    "runtime_task_id": "160",
+    "source": {
+      "web_name": [
+        "shopping"
+      ],
+      "id": "visualwebarena-160",
+      "ques": "Add something like what the girl is holding to my wish list.",
+      "web": [
+        "__SHOPPING__/"
+      ],
+      "eval": {
+        "eval_types": [
+          "page_image_query"
+        ],
+        "page_image_query": [
+          {
+            "eval_image_url": "__SHOPPING__/wishlist/",
+            "eval_image_class": ".products-grid .wishlist .product-image-photo",
+            "eval_vqa": [
+              {
+                "question": "Is this a cookie? (yes/no)",
+                "answer": "yes"
+              }
+            ]
+          }
+        ],
+        "reference_url": "",
+        "program_html": [],
+        "string_note": "",
+        "reference_answer_raw_annotation": ""
+      },
+      "image": "visualwebarena/shopping/task_160/input_0.png"
+    }
+  },
+  {
+    "runtime_task_id": "163",
+    "source": {
+      "web_name": [
+        "shopping"
+      ],
+      "id": "visualwebarena-163",
+      "ques": "Add something like this to my wish list.",
+      "web": [
+        "__SHOPPING__/"
+      ],
+      "eval": {
+        "eval_types": [
+          "page_image_query"
+        ],
+        "page_image_query": [
+          {
+            "eval_image_url": "__SHOPPING__/wishlist/",
+            "eval_image_class": ".products-grid .wishlist .product-image-photo",
+            "eval_vqa": [
+              {
+                "question": "Is this a cactus? (yes/no)",
+                "answer": "yes"
+              },
+              {
+                "question": "Is this a potted plant? (yes/no)",
+                "answer": "yes"
+              }
+            ]
+          }
+        ],
+        "reference_url": "",
+        "program_html": [],
+        "string_note": "",
+        "reference_answer_raw_annotation": ""
+      },
+      "image": "visualwebarena/shopping/task_163/input_0.png"
+    }
+  },
+  {
+    "runtime_task_id": "286",
+    "source": {
+      "web_name": [
+        "shopping"
+      ],
+      "id": "visualwebarena-286",
+      "ques": "Can you add a product like what the person is sitting on to the comparison page?",
+      "web": [
+        "__SHOPPING__"
+      ],
+      "eval": {
+        "eval_types": [
+          "page_image_query"
+        ],
+        "page_image_query": [
+          {
+            "eval_image_url": "__SHOPPING__/catalog/product_compare/",
+            "eval_image_class": ".product-image-photo",
+            "eval_vqa": [
+              {
+                "question": "Is this a sofa? (yes/no)",
+                "answer": "yes"
+              }
+            ]
+          }
+        ],
+        "reference_url": "",
+        "program_html": [],
+        "string_note": "",
+        "reference_answer_raw_annotation": ""
+      },
+      "image": "visualwebarena/shopping/task_286/input_0.png"
+    }
+  },
+  {
+    "runtime_task_id": "622",
+    "source": {
+      "web_name": [
+        "reddit"
+      ],
+      "id": "visualwebarena-624",
+      "ques": "Can you subscribe to all subreddits that start with the letter 'a' and have a dog image in their top 3 posts of all time?",
+      "web": [
+        "__REDDIT__"
+      ],
+      "eval": {
+        "eval_types": [
+          "program_html"
+        ],
+        "reference_answers": null,
+        "reference_url": "",
+        "program_html": [
+          {
+            "url": "__REDDIT__",
+            "locator": "func:get_query_text(__page__, \"#sidebar > section > ul\")",
+            "required_contents": {
+              "must_include": [
+                "aww"
+              ],
+              "must_exclude": [
+                "allentown",
+                "arlingtonva",
+                "Art",
+                "AskReddit",
+                "askscience"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "runtime_task_id": "623",
+    "source": {
+      "web_name": [
+        "reddit"
+      ],
+      "id": "visualwebarena-625",
+      "ques": "Can you subscribe to all subreddits that start with the letter 'n' and have a downtown image in their top 3 posts of all time?",
+      "web": [
+        "__REDDIT__"
+      ],
+      "eval": {
+        "eval_types": [
+          "program_html"
+        ],
+        "reference_answers": null,
+        "reference_url": "",
+        "program_html": [
+          {
+            "url": "__REDDIT__",
+            "locator": "func:get_query_text(__page__, \"#sidebar > section > ul\")",
+            "required_contents": {
+              "must_include": [
+                "Newark",
+                "nyc"
+              ],
+              "must_exclude": [
+                "newhampshire",
+                "newhaven",
+                "newjersey",
+                "news",
+                "nosleep",
+                "nottheonion"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+]

@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: model_identity
+version: 1.0.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: agent
+description: Model identity disclosure and resistance to false attribution, using UserSim's identity openings and pressure strategies.
+modality: text
+licensing: LicenseRef-NVIDIA-Evaluation-Dataset-License-Agreement
+authors: [Julien Veron Vialard]
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: stochastic
+resources_server: model_identity
+agent_server: simple_agent
+model_server: policy_model
+dataset_owner: model_identity_resources
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active
+datasets:
+  - name: model_identity
+    type: benchmark
+    jsonl_fpath: benchmarks/model_identity/data/benchmark.jsonl
+    prepare_script: benchmarks/model_identity/prepare.py
+    num_repeats: 1
+  - name: example
+    type: example
+    jsonl_fpath: resources_servers/model_identity/data/example.jsonl
+    num_repeats: 1
