@@ -455,6 +455,29 @@ class TestSandboxVerify:
         assert res.reward == 1.0
         assert res.limits == {"time_limit_s": time_limit_s, "memory_limit_mb": memory_limit_mb}
 
+    @pytest.mark.parametrize(
+        "unit_tests",
+        [
+            {"type": "assertions", "tests": ["assert f(1) == 1"], "unexpected": 1},
+            {"type": "assertions", "tests": ["assert f(1) == 1"], "inputs": ["1"], "outputs": ["1"]},
+            {"type": "assertions", "tests": []},
+            {"type": "assertions"},
+        ],
+    )
+    async def test_invalid_assertion_tests_are_rejected_before_grading(self, monkeypatch, unit_tests) -> None:
+        calls = []
+
+        async def _passing(generation, tests, **kwargs):
+            calls.append(tests)
+            return [True], None
+
+        monkeypatch.setattr(code_gen_app, "check_assertions_in_sandbox", _passing)
+        request = _verify_request("def f(x):\n    return x")
+        request.verifier_metadata["unit_tests"] = unit_tests
+        with pytest.raises(ValidationError):
+            await self._sandbox_server().verify(request)
+        assert calls == []
+
     async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
         async def _failing(*args, **kwargs):
             raise SandboxVerificationError(VERIFIER_ERROR, "runner failed (exit=137)")

@@ -37,7 +37,7 @@ class UnitTests(BaseModel):
 
 
 class AssertionTests(BaseModel):
-    """Assertions run after the candidate's code; mirrors ``AssertionTests`` in app.py."""
+    """Assertions run after the candidate's code; app.py grades with this model too."""
 
     model_config = ConfigDict(extra="forbid")
 

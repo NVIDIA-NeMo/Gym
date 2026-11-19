@@ -24,7 +24,7 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
 from sandbox_execution import check_assertions_in_sandbox, check_correctness_in_sandbox, task_deadline_s
-from task_data import ResourceLimits
+from task_data import AssertionTests, ResourceLimits
 
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.metrics import (
@@ -87,11 +87,6 @@ class UnitTests(BaseModel):
     inputs: List[str]
     outputs: List[str]
     fn_name: Optional[str] = None
-
-
-class AssertionTests(BaseModel):
-    type: Literal["assertions"]
-    tests: list[str] = Field(min_length=1)
 
 
 class CompCodingRunRequest(BaseRunRequest):
