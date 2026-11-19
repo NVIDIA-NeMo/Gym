@@ -272,7 +272,12 @@ def _run_stopping_group_on_timeout(
                 pass  # A process outside the group holds the pipes; the caller's error must not wait for it.
             raise
         except BaseException:
-            process.kill()
+            # An interruption stops the group too: it is in its own session, so the terminal's SIGINT never reached it.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                process.kill()
+            process.wait()
             raise
     return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 

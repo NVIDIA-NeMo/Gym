@@ -24,6 +24,7 @@ import requests
 from pydantic import Field, PositiveFloat
 
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.utils import get_within_deadline
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -46,27 +47,20 @@ class LocalVLLMModelProxyServer(VLLMModel):
 
     @staticmethod
     def _get_config_within(url: str, deadline: float, timeout_s: float) -> dict:
-        """GET the inner vLLM config, ending at the deadline even if the peer keeps the response coming.
-
-        A requests timeout bounds the wait between bytes, not the whole read, so the body is read in chunks and the
-        deadline is checked after each one. A reply that completes after the deadline is not accepted."""
-
-        def expired() -> TimeoutError:
-            return TimeoutError(f"The inner vLLM config of the model server was not received within {timeout_s} s")
-
+        """GET the inner vLLM config, ending at the deadline however the peer sends the response."""
         remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise expired()
-        chunks = []
-        with requests.get(url, timeout=remaining, stream=True) as response:
-            assert response.ok
-            for chunk in response.iter_content(chunk_size=8192):
-                chunks.append(chunk)
-                if monotonic() >= deadline:
-                    raise expired()
-        if monotonic() >= deadline:
-            raise expired()
-        return json.loads(b"".join(chunks))
+        try:
+            if remaining <= 0:
+                raise TimeoutError
+            status, body = get_within_deadline(url, timeout_s=remaining)
+            if monotonic() >= deadline:  # A reply that completes after the deadline is not accepted.
+                raise TimeoutError
+        except TimeoutError:
+            raise TimeoutError(
+                f"The inner vLLM config of the model server was not received within {timeout_s} s"
+            ) from None
+        assert 200 <= status < 300
+        return json.loads(body)
 
     def setup_webserver(self):
         model_server_name = self.config.model_server.name

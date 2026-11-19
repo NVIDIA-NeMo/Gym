@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
+import socket
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -136,61 +138,102 @@ class TestApp:
 
         assert timeouts == [1]  # the poll was limited to the budget that remained, not its usual 5 s
 
-    def _config_reply(self, chunks: list[bytes], on_chunk=None) -> MagicMock:
-        reply = MagicMock(ok=True)
-        reply.json.return_value = json.loads(b"".join(chunks))
-        reply.__enter__.return_value = reply
+    BODY = b'{"base_url": ["abcd"], "api_key": "key", "model": "m"}'  # pragma: allowlist secret
 
-        def iter_content(chunk_size):
-            for chunk in chunks:
-                if on_chunk is not None:
-                    on_chunk()
-                yield chunk
+    @staticmethod
+    def _peer(pieces: list[tuple[bytes, float]]):
+        """A loopback server that answers its first request by sending each piece after its delay, then closes.
 
-        reply.iter_content = iter_content
-        return reply
+        Returns its address and a function that reports whether the whole answer was sent."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        finished = threading.Event()
 
-    def _serve_config(self, monkeypatch, reply: MagicMock, **overrides):
+        def serve() -> None:
+            connection, _ = listener.accept()
+            with connection, listener:
+                connection.recv(65536)
+                try:
+                    for piece, delay in pieces:
+                        time.sleep(delay)
+                        connection.sendall(piece)
+                    finished.set()
+                except OSError:
+                    pass  # The client gave up.
+
+        threading.Thread(target=serve, daemon=True).start()
+        return f"http://127.0.0.1:{listener.getsockname()[1]}", finished
+
+    @classmethod
+    def _reply(cls, body: bytes) -> list[tuple[bytes, float]]:
+        head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body)
+        return [(head, 0), (body, 0)]
+
+    def _serve_config(self, monkeypatch, pieces, **overrides):
         server = self._setup_server(**overrides)
         server.server_client.poll_for_status.side_effect = ["success"]
         server.server_client.global_config_dict = {}
+        url, finished = self._peer(pieces)
+        server.server_client._build_server_base_url.return_value = url
         monkeypatch.setattr(
             responses_api_models.local_vllm_model_proxy.app, "get_first_server_config_dict", MagicMock()
         )
-        requests_mock = MagicMock()
-        requests_mock.get.return_value = reply
-        monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "requests", requests_mock)
-        return server, requests_mock
+        return server, finished
 
-    BODY = [b'{"base_url": ["abcd"], "api_key": "key", ', b'"model": "m"}']  # pragma: allowlist secret
+    def _setup_within(self, server, seconds: float):
+        """Run `setup_webserver` under an outer guard that does not rely on the bound being tested."""
+        outcome = {}
 
-    def test_without_a_limit_the_config_request_has_no_time_limit(self, monkeypatch) -> None:
-        server, requests_mock = self._serve_config(monkeypatch, self._config_reply(self.BODY))
+        def run() -> None:
+            try:
+                server.setup_webserver()
+            except BaseException as error:
+                outcome["error"] = error
 
-        server.setup_webserver()
+        started = time.monotonic()
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(seconds)
+        assert not worker.is_alive(), f"setup_webserver was still running after {seconds} s"
+        return outcome.get("error"), time.monotonic() - started
 
-        assert requests_mock.get.call_args.kwargs["timeout"] is None
-        assert server.config.model == "m"
+    def test_without_a_limit_a_healthy_config_response_populates_the_clients(self, monkeypatch) -> None:
+        server, _ = self._serve_config(monkeypatch, self._reply(self.BODY))
 
-    def test_the_config_request_is_read_within_the_limit(self, monkeypatch) -> None:
-        server, requests_mock = self._serve_config(
-            monkeypatch, self._config_reply(self.BODY), model_server_wait_timeout_seconds=30
-        )
+        error, _ = self._setup_within(server, 10)
 
-        server.setup_webserver()
+        assert error is None
+        assert (server.config.base_url, server.config.api_key, server.config.model) == (["abcd"], "key", "m")
 
-        assert 0 < requests_mock.get.call_args.kwargs["timeout"] <= 30
-        assert server.config.model == "m"
+    def test_a_healthy_config_response_within_the_limit_populates_the_clients(self, monkeypatch) -> None:
+        server, _ = self._serve_config(monkeypatch, self._reply(self.BODY), model_server_wait_timeout_seconds=30)
 
-    def test_a_config_response_that_keeps_arriving_past_the_deadline_is_not_accepted(self, monkeypatch) -> None:
-        now = [0.0]
-        monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "monotonic", lambda: now[0])
-        # Every chunk arrives inside the per-read timeout, but together they take 5 s of the 1 s limit.
-        reply = self._config_reply(self.BODY, on_chunk=lambda: now.__setitem__(0, now[0] + 2.5))
-        server, _ = self._serve_config(monkeypatch, reply, model_server_wait_timeout_seconds=1)
+        error, _ = self._setup_within(server, 10)
 
-        with pytest.raises(TimeoutError, match="was not received within 1"):
-            server.setup_webserver()
+        assert error is None
+        assert (server.config.base_url, server.config.api_key, server.config.model) == (["abcd"], "key", "m")
+
+    def test_a_config_body_that_dribbles_past_the_limit_ends_at_the_limit(self, monkeypatch) -> None:
+        # Valid JSON, one byte every 50 ms (about 2.5 s in all), against a 0.2 s limit.
+        head = self._reply(self.BODY)[0]
+        pieces = [head] + [(self.BODY[i : i + 1], 0.05) for i in range(len(self.BODY))]
+        server, finished = self._serve_config(monkeypatch, pieces, model_server_wait_timeout_seconds=0.2)
+
+        error, elapsed = self._setup_within(server, 5)
+
+        assert isinstance(error, TimeoutError) and "was not received within 0.2" in str(error)
+        assert elapsed < 1.5 and not finished.is_set()
+
+    def test_response_headers_that_dribble_past_the_limit_end_at_the_limit(self, monkeypatch) -> None:
+        head = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(self.BODY)
+        pieces = [(head[i : i + 1], 0.05) for i in range(len(head))] + [(self.BODY, 0)]
+        server, finished = self._serve_config(monkeypatch, pieces, model_server_wait_timeout_seconds=0.2)
+
+        error, elapsed = self._setup_within(server, 5)
+
+        assert isinstance(error, TimeoutError) and "was not received within 0.2" in str(error)
+        assert elapsed < 1.5 and not finished.is_set()
 
     def test_a_wait_limit_of_zero_is_rejected(self) -> None:
         with pytest.raises(ValueError):

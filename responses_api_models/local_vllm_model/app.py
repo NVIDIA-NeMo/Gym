@@ -26,6 +26,8 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from requests.exceptions import ConnectionError, Timeout
 
+from nemo_gym.utils import get_within_deadline
+
 
 try:
     # vLLM 0.29 moved the OpenAI server entry points from vllm.entrypoints.openai.api_server to
@@ -296,12 +298,17 @@ Total Ray cluster resources: {cluster_resources()}""")
                 else:
                     if remaining <= 0:
                         raise not_ready()
-                    # Each poll gets a time limit too, so a server that accepts the connection and never answers
-                    # cannot outlast the deadline. The body is not read (stream=True): readiness is the answer.
-                    with requests.get(
-                        url=f"{self.config.base_url[0]}/models", timeout=min(10.0, remaining), stream=True
-                    ):
-                        pass
+                    # Each poll ends at the deadline however the server answers, even one that keeps sending the
+                    # headers. The body is not read: readiness is the answer.
+                    try:
+                        get_within_deadline(
+                            f"{self.config.base_url[0]}/models",
+                            timeout_s=remaining,
+                            read_timeout_s=min(10.0, remaining),
+                            read_body=False,
+                        )
+                    except TimeoutError:
+                        raise not_ready() from None
                     # A poll that succeeded after the deadline is not accepted.
                     if remaining_s() <= 0:
                         raise not_ready()

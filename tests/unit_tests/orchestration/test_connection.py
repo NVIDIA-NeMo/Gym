@@ -14,7 +14,9 @@
 # limitations under the License.
 
 import shutil
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -354,3 +356,44 @@ def test_a_command_that_outlasts_its_time_limit_takes_its_own_subprocesses_with_
 
 def test_a_command_with_input_inside_its_time_limit_returns_its_output(no_ssh_bounds):
     assert connection_module._checked(["cat"], input="hello", timeout_s=30) == "hello"
+
+
+def test_a_bounded_command_that_exits_nonzero_reports_its_stderr_and_status(no_ssh_bounds):
+    with pytest.raises(RuntimeError, match="boom") as raised:
+        connection_module._checked(["bash", "-c", "echo boom >&2; exit 3"], context="failing", timeout_s=30)
+
+    assert "3" in str(raised.value)
+
+
+def test_a_bounded_command_sees_end_of_input_after_its_input(no_ssh_bounds):
+    command = ["bash", "-c", "cat >/dev/null; echo done"]
+
+    assert connection_module._checked(command, input="payload\n", timeout_s=5) == "done\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups")
+def test_an_interrupted_bounded_command_takes_its_own_subprocesses_with_it(no_ssh_bounds, tmp_path):
+    started, late_output = tmp_path / "started", tmp_path / "late.txt"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys\n"
+        "from nemo_gym.orchestration.executors import connection\n"
+        f"script = '(touch {started}; sleep 3; echo late > {late_output}) & wait'\n"
+        "try:\n"
+        "    connection._checked(['bash', '-c', script], timeout_s=60)\n"
+        "except KeyboardInterrupt:\n"
+        "    sys.exit(42)\n"
+    )
+    process = subprocess.Popen([sys.executable, str(driver)])
+    try:
+        deadline = time.monotonic() + 30
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert started.exists()
+        process.send_signal(signal.SIGINT)
+
+        assert process.wait(timeout=30) == 42  # the interruption propagated
+        time.sleep(4)  # past the descendant's scheduled write
+        assert not late_output.exists()
+    finally:
+        process.kill()
