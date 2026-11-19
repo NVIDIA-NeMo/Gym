@@ -48,16 +48,31 @@ class HarborBOBTask:
     docker_image: str
     template_dir: str | Path = Path(__file__).parent / "task-template"
     timeout: int = 3600
+    skip_data: bool = False
+    data_path_prefix: str | None = None
 
     @property
     def id(self) -> str:
         return f"bob-task__{self.source.id}"
 
-    def environment_data(self, *, skip_data: bool) -> str:
+    @property
+    def environment_data(self) -> str:
         """Return the task data path visible to the agent."""
-        if skip_data:
-            return f"/mnt/s3-data/nemotron-life-science/harbor-data/biomnibench_da/{self.id}/environment/data"
+        if self.skip_data and self.data_path_prefix:
+            return str(Path(self.data_path_prefix) / self.id / "environment/data")
         return "/app/data"
+
+    @property
+    def instruction(self) -> str:
+        """Render the source instruction with the task data location."""
+        instruction = (self.source.task_dir / "instruction.md").read_text()
+        if self.skip_data:
+            instruction = instruction.replace(
+                "## Data Files\n",
+                f"## Data Files\n\nAll data files are available at `{self.environment_data}`.\n",
+                1,
+            )
+        return instruction.rstrip() + "\n"
 
     @property
     def toml(self) -> str:
@@ -82,17 +97,26 @@ class HarborBOBTask:
 
     def _is_complete(self, output_dir: Path, *, skip_data: bool) -> bool:
         task_dir = output_dir / self.id
-        return (task_dir / ".done").is_file() and (
-            not (task_dir / "environment").exists() if skip_data else (task_dir / "environment/data").is_dir()
+        return (
+            (task_dir / ".done").is_file()
+            and (not (task_dir / "environment").exists() if skip_data else (task_dir / "environment/data").is_dir())
+            and (
+                not skip_data
+                or (
+                    (task_dir / "instruction.md").is_file()
+                    and f"All data files are available at `{self.environment_data}`."
+                    in (task_dir / "instruction.md").read_text()
+                )
+            )
         )
 
-    def write(self, output_dir: Path, force: bool = False, *, skip_data: bool = False) -> Path:
+    def write(self, output_dir: Path, force: bool = False) -> Path:
         """Reuse completed tasks unless forced, rebuilding incomplete task directories."""
         task_dir = output_dir / self.id
         done_marker = task_dir / ".done"
 
         if task_dir.exists():
-            if not force and self._is_complete(output_dir, skip_data=skip_data):
+            if not force and self._is_complete(output_dir, skip_data=self.skip_data):
                 return task_dir
             shutil.rmtree(task_dir)
 
@@ -101,7 +125,7 @@ class HarborBOBTask:
             task_dir,
             dirs_exist_ok=True,
             ignore=lambda directory, _names: (
-                ("environment",) if skip_data and Path(directory) == self.source.task_dir else ()
+                ("environment",) if self.skip_data and Path(directory) == self.source.task_dir else ()
             ),
         )
         shutil.copytree(self.template_dir, task_dir, dirs_exist_ok=True)
@@ -109,16 +133,7 @@ class HarborBOBTask:
         ## Do not need custom Dockerfile per task.
         (task_dir / "environment/Dockerfile").unlink(missing_ok=True)
         (task_dir / "task.toml").write_text(self.toml + "\n")
-        if skip_data:
-            instruction_path = task_dir / "instruction.md"
-            instruction = instruction_path.read_text()
-            instruction_path.write_text(
-                instruction.replace(
-                    "## Data Files\n",
-                    f"## Data Files\n\nAll data files are available at `{self.environment_data(skip_data=skip_data)}`.\n",
-                    1,
-                )
-            )
+        (task_dir / "instruction.md").write_text(self.instruction)
 
         done_marker.touch()
 
@@ -145,6 +160,9 @@ class HarborBOB:
     skip_data: bool = False
     """Skip downloading and copying environment/; supply task data separately at the path added to the instruction."""
 
+    data_path_prefix: str | None = None
+    """Root containing <task-id>/environment/data when skip_data is enabled; None uses /app/data."""
+
     _data_repo_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
@@ -170,7 +188,12 @@ class HarborBOB:
             source_tasks = (BOBTask(name, self.data_dir / name) for name in task_names)
 
         for source_task in islice(source_tasks, self.limit):
-            task = HarborBOBTask(source_task, docker_image=self.docker_image)
+            task = HarborBOBTask(
+                source_task,
+                docker_image=self.docker_image,
+                skip_data=self.skip_data,
+                data_path_prefix=self.data_path_prefix,
+            )
             if self._data_repo_id is not None and (
                 self.overwrite or not task._is_complete(self.output_dir, skip_data=self.skip_data)
             ):
@@ -190,7 +213,7 @@ class HarborBOB:
 
         task_count = 0
         for task in tqdm(self.tasks, desc="bob"):
-            task.write(self.output_dir, force=self.overwrite, skip_data=self.skip_data)
+            task.write(self.output_dir, force=self.overwrite)
             task_count += 1
 
         print(f"Adapted {task_count} tasks to {self.output_dir}")
@@ -204,6 +227,7 @@ def prepare(
     limit: int | None = None,
     overwrite: bool = False,
     skip_data: bool = False,
+    data_path_prefix: str | None = None,
 ) -> Path:
     """Prepare Harbor tasks and return their output directory."""
     benchmark = HarborBOB(
@@ -213,6 +237,7 @@ def prepare(
         limit=limit,
         overwrite=overwrite,
         skip_data=skip_data,
+        data_path_prefix=data_path_prefix,
     )
     benchmark.write()
     return Path(benchmark.output_dir)
