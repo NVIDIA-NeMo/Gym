@@ -505,3 +505,7 @@ and expected outputs, use the [benchmark README](../../benchmarks/osworld/README
 - Gym adapter code: Apache 2.0.
 - OSWorld code and task data retain their upstream licenses. See the benchmark
   README and pinned dependency metadata for details.
+
+## Nano4 producer adapter
+
+The opt-in [Nano4 adapter](nano4/README.md) keeps its producer format, parser, execution feedback and coordinate consumer separate from the existing v3/Super 3.5 adapters. Its direct-library entrypoint depends on the shared model-protocol support in PR #5101.

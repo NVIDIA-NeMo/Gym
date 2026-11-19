@@ -1,0 +1,34 @@
+{# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -#}
+{# SPDX-License-Identifier: Apache-2.0 -#}
+{# Independent serializer for prompt_format_repo@35d35a7c fallback_render.
+   The complete tool preamble is already present in the system message.
+   API tools remain available to the serving tool parser; they are not appended.
+   Multimodal preprocessing supplies strings with explicit <img> placeholders.
+-#}
+{%- for message in messages -%}
+    {%- if message.role not in ['system', 'user', 'assistant'] -%}
+        {{- raise_exception('The reference uses system, user and assistant roles') -}}
+    {%- endif -%}
+    {%- if message.content is string -%}
+        {%- set content = message.content -%}
+    {%- else -%}
+        {%- set ns = namespace(text='', images=0) -%}
+        {%- for part in message.content -%}
+            {%- if part.type == 'text' -%}
+                {%- set ns.text = ns.text ~ part.text -%}
+            {%- elif part.type == 'image_url' or part.type == 'image' -%}
+                {%- set ns.images = ns.images + 1 -%}
+            {%- else -%}
+                {{- raise_exception('Unsupported multimodal content part') -}}
+            {%- endif -%}
+        {%- endfor -%}
+        {%- if ns.text.count('<img>') != ns.images -%}
+            {{- raise_exception('Image items must match explicit runtime placeholders') -}}
+        {%- endif -%}
+        {%- set content = ns.text -%}
+    {%- endif -%}
+    {{- '<|im_start|>' ~ message.role ~ '\n' ~ content ~ '<|im_end|>\n' -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- '<|im_start|>assistant\n<think>\n' -}}
+{%- endif -%}
