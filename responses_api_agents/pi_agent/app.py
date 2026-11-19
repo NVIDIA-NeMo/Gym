@@ -35,7 +35,7 @@ from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
-    REQUEST_GZIP_FETCH_SOURCE,
+    REQUEST_GZIP_SCRIPT,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -1035,7 +1035,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             files[runtime_guards_extension] = Path(__file__).with_name(runtime_guards_extension)
         files["outcome.mjs"] = Path(__file__).with_name("outcome.mjs")
         if self.config.gzip_requests_enabled:
-            files["request_gzip.mjs"] = REQUEST_GZIP_FETCH_SOURCE
+            files["request_gzip.mjs"] = REQUEST_GZIP_SCRIPT
             files["request_gzip_extension.mjs"] = Path(__file__).with_name("request_gzip_extension.mjs")
         mcp_servers, unusable_grant_gaps = self._session_mcp_servers(state.request)
         mcp_extension = []
@@ -1487,7 +1487,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         collect_observations: bool = True,
     ) -> AgentEpisode:
         if self.config.gzip_requests_enabled:
-            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
+            raise HTTPException(
+                422, "Pi requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -1615,7 +1617,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         if self._agent_session_id_from_request(request) is not None:
             raise AgentSessionConflictError("Pi sessions require EnvironmentServer /run")
         if self.config.gzip_requests_enabled:
-            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
+            raise HTTPException(
+                422, "Pi requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Pi /run requires resources_server; use EnvironmentServer /run for sandbox sessions"

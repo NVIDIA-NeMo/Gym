@@ -181,24 +181,25 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs,
     }
     const chunks = [];
     for await (const chunk of incoming) chunks.push(chunk);
-    let body = Buffer.concat(chunks);
+    const body = Buffer.concat(chunks);
     const compacting = compactionRequest(body);
     const headers = {};
     for (let index = 0; index < incoming.rawHeaders.length; index += 2) {
         const name = incoming.rawHeaders[index].toLowerCase();
         if (!DROPPED_REQUEST_HEADERS.has(name)) headers[name] = incoming.rawHeaders[index + 1];
     }
+    let wire = body;
     if (compressBody) {
         const encodedHeaders = new Headers(headers);
-        body = await compressBody(body, encodedHeaders);
+        wire = await compressBody(body, encodedHeaders);
         if (encodedHeaders.has("content-encoding")) headers["content-encoding"] = encodedHeaders.get("content-encoding");
     }
-    headers["content-length"] = body.length;
+    headers["content-length"] = wire.length;
     headers["x-session-id"] = invocationForRequest(body, invocationId);
     for (let attempt = 0; ; attempt++) {
         let upstream;
         try {
-            upstream = await post(url, headers, body, timeoutMs);
+            upstream = await post(url, headers, wire, timeoutMs);
         } catch (error) {
             record({ status: null, error: error.message });
             outgoing.writeHead(502, "Upstream model connection failed", { Connection: "close" }).end();

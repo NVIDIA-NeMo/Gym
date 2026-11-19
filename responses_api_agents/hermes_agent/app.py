@@ -1021,7 +1021,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         observation_collector: Optional[Callable[[AgentObservationBundle], None]] = None,
     ) -> NeMoGymResponse:
         if self.config.gzip_requests_enabled:
-            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
+            raise HTTPException(
+                422, "Hermes requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         from run_agent import AIAgent  # from hermes-agent on path  # pyright: ignore[reportMissingImports]
 
         if (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY) is not None:
@@ -1220,7 +1222,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if self._agent_session_id_from_request(request) is not None:
             raise AgentSessionConflictError("Use the agent session responses and close routes")
         if self.config.gzip_requests_enabled:
-            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
+            raise HTTPException(
+                422, "Hermes requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         if self.config.resources_server is None:
             raise HTTPException(422, "Hermes /run requires resources_server; use Environment Server /run for sessions")
         async with self.sem:
