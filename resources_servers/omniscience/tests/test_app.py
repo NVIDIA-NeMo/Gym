@@ -612,3 +612,128 @@ def test_only_explicit_judge_verdict_marks_grading(text: str, expected: str, par
         assert grading.parsed_dependencies == ({0} if parsed else set())
     finally:
         _judge_grading.reset(token)
+
+
+class TestChatCompletionsJudge:
+    """The Chat Completions judge path, which `configs/omniscience.yaml` selects (`use_chat_completions_for_judge`)."""
+
+    @fixture
+    def config(self) -> OmniscienceConfig:
+        return OmniscienceConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge_model"),
+            # Each value differs from the chat path's fallback (64, 0.0, 1.0), so a dropped setting fails the test.
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[], max_output_tokens=32768, temperature=0.2, top_p=0.9
+            ),
+            use_chat_completions_for_judge=True,
+        )
+
+    @staticmethod
+    def _server(config: OmniscienceConfig, content: str | None) -> tuple[OmniscienceServer, MagicMock]:
+        server_mock = MagicMock(spec=ServerClient)
+        reply = AsyncMock()
+        reply.ok = True
+        reply.status = 200
+        body = {
+            "id": "chatcmpl-judge",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "judge_model",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
+        }
+        reply.read = AsyncMock(return_value=orjson.dumps(body))
+        server_mock.post = AsyncMock(return_value=reply)
+        return OmniscienceServer(config=config, server_client=server_mock), server_mock
+
+    @staticmethod
+    def _request(text: str) -> OmniscienceVerifyRequest:
+        return OmniscienceVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse(
+                id="policy_resp",
+                created_at=0.0,
+                model="policy_model",
+                object="response",
+                output=[
+                    NeMoGymResponseOutputMessage(
+                        id="msg",
+                        content=[NeMoGymResponseOutputText(annotations=[], text=text, type="output_text")],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ),
+            question="Which Internal Revenue Code section allows expensing equipment?",
+            expected_answer="179",
+        )
+
+    async def test_request_carries_the_configured_judge_settings(self, config: OmniscienceConfig) -> None:
+        server, server_mock = self._server(config, "A")
+        result = await server.verify(self._request("Section 179"))
+        assert result.verdict == "correct"
+        assert result.reward == approx(1.0)
+        kwargs = server_mock.post.call_args.kwargs
+        assert kwargs["url_path"] == "/v1/chat/completions"
+        payload = kwargs["json"].model_dump()
+        assert payload["max_tokens"] == 32768
+        assert payload["temperature"] == approx(0.2)
+        assert payload["top_p"] == approx(0.9)
+        assert "Which Internal Revenue Code section" in payload["messages"][0]["content"]
+
+    async def test_empty_judge_content_is_a_judge_failure(self, config: OmniscienceConfig) -> None:
+        from nemo_gym.verification import JudgeError
+
+        server, _ = self._server(config, None)
+        with pytest.raises(JudgeError):
+            await server.verify(self._request("Section 179"))
+
+    async def test_unclosed_thinking_block_is_an_empty_answer(self, config: OmniscienceConfig) -> None:
+        server, _ = self._server(config, "D")
+        result = await server.verify(self._request("<thinking>Let me recall the section"))
+        assert result.extracted_answer == ""
+        assert result.verdict == "not_attempted"
+
+
+def test_compute_metrics_index_and_hallucination_rate() -> None:
+    config = OmniscienceConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge_model"),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    server = OmniscienceServer(config=config, server_client=MagicMock(spec=ServerClient))
+    verdicts = [
+        ["correct", "incorrect", "not_attempted", "partial"],
+        ["incorrect", "incorrect", "correct", "not_attempted"],
+    ]
+    tasks = [
+        [
+            {
+                "_ng_task_index": t,
+                "_ng_rollout_index": r,
+                "verdict": v,
+                "reward": 1.0 if v == "correct" else 0.0,
+                "extracted_answer": f"answer-{t}-{r}",
+            }
+            for r, v in enumerate(row)
+        ]
+        for t, row in enumerate(verdicts)
+    ]
+    metrics = server.compute_metrics(tasks)
+    # NeMo Skills OmniMetrics: index = 100 * (correct - incorrect) / n; hallucination = 100 * incorrect / not correct.
+    assert metrics["pass@1[avg-of-4]/judge_correct"] == approx(100 * 2 / 8)
+    assert metrics["pass@1[avg-of-4]/judge_omni_index"] == approx(100 * (2 - 3) / 8)
+    assert metrics["pass@1[avg-of-4]/judge_omni_hallucination"] == approx(100 * 3 / 6)
+    key_metrics = server.get_key_metrics(metrics)
+    for name in ("judge_omni_index", "judge_correct", "judge_omni_hallucination"):
+        assert f"pass@1[avg-of-4]/{name}" in key_metrics
