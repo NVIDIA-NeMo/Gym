@@ -206,8 +206,8 @@ def test_a_group_whose_leader_exited_still_runs_while_a_member_does(worker: Path
         assert record is not None
         member = int(shell.stdout.readline())  # the member started before the shell exits
         shell.wait()
-        # Without tracked members, a leaderless group cannot be told apart from a group that reused its ID.
-        assert not record.is_running()
+        # The process ID counter has not wrapped since the record was written, so no other group can hold the ID.
+        assert record.is_running()
         tracked = record.track_members()
         assert tracked is not None and [pid for pid, _ in tracked.members] == [member]
         assert recorded_process_groups(ROUTING_ID) == [tracked]
@@ -284,9 +284,12 @@ def test_unreadable_records_are_skipped(worker: Path) -> None:
     records.mkdir(parents=True)
     (records / "a").write_text("1.0")
     (records / "b").write_text("garbage")
-    (records / "c").write_text("456 789")
+    (records / "c").write_text("456 789 - 457:790")
+    (records / "d").write_text("456 789")
 
-    assert recorded_process_groups(ROUTING_ID) == [ProcessGroupRecord(pgid=456, start_ticks=789)]
+    assert recorded_process_groups(ROUTING_ID) == [
+        ProcessGroupRecord(pgid=456, start_ticks=789, members=((457, 790),))
+    ]
     assert recorded_process_groups("never-started") == []
 
 
@@ -304,7 +307,7 @@ async def test_the_local_provider_works_and_runs_commands_under_this_worker(work
             f"echo $$; cat {records}/$$-*"
         )
         result = await provider.exec(handle, command)
-        shell_pid, recorded_pgid, _ticks = result.stdout.split()
+        shell_pid, recorded_pgid, _ticks, _last_pid = result.stdout.split()
         assert recorded_pgid == shell_pid
         assert recorded_process_groups(ROUTING_ID) == []
     finally:
@@ -379,3 +382,100 @@ def test_concurrent_first_use_hands_out_one_routing_id(monkeypatch: pytest.Monke
     for thread in threads:
         thread.join()
     assert len(set(seen)) == 1 and seen[0] == worker_routing_id()
+
+
+@pytest.mark.parametrize(
+    ("pid", "since", "now", "passed"),
+    [
+        (500, 400, 450, False),  # not reached yet
+        (500, 400, 500, True),  # allocated again
+        (500, 400, 900, True),
+        (500, 500, 900, False),  # the counter was at the group ID when confirmed
+        (500, 900, 100, False),  # wrapped, but not yet back up to the group ID
+        (500, 900, 600, True),  # wrapped and passed it
+        (950, 900, 100, True),  # passed it before wrapping
+    ],
+)
+def test_the_counter_passes_a_process_id_only_by_reaching_it_again(
+    pid: int, since: int, now: int, passed: bool
+) -> None:
+    assert worker_resources._counter_passed(pid, since=since, now=now) is passed
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
+def test_a_leaderless_group_is_trusted_only_until_the_counter_wraps_past_its_id(worker: Path) -> None:
+    group = subprocess.Popen(["sh", "-c", "sleep 30 & echo $!"], start_new_session=True, stdout=subprocess.PIPE)
+    try:
+        member = int(group.stdout.readline())
+        group.wait()
+        current = worker_resources._last_pid()
+        assert current is not None
+
+        trusted = ProcessGroupRecord(pgid=group.pid, start_ticks=1, last_pid=current)
+        # A counter that went past the group ID since the record was confirmed could have handed it to another group.
+        wrapped = ProcessGroupRecord(pgid=group.pid, start_ticks=1, last_pid=group.pid - 1)
+
+        # A tracked member still in the group proves the group is the original one, whatever the counter did.
+        tracked = ProcessGroupRecord(
+            pgid=group.pid,
+            start_ticks=1,
+            members=((member, worker_resources._start_ticks(member)),),
+            last_pid=group.pid - 1,
+        )
+
+        assert trusted.is_running()
+        assert not wrapped.is_running()
+        assert tracked.is_running()
+        wrapped.end()
+        assert os.getpgid(member) == group.pid
+        trusted.end()
+        for _ in range(500):
+            if not trusted.is_running():
+                break
+            time.sleep(0.01)
+        assert not trusted.is_running()
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(group.pid, signal.SIGKILL)
+        group.stdout.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
+async def test_the_local_provider_kills_a_process_started_after_its_command_returned(worker: Path) -> None:
+    provider = LocalProvider()
+    handle = await provider.create(SandboxSpec())
+    try:
+        # A wrapper that starts the server a second after the command returns, then exits.
+        await provider.exec(handle, "(sleep 1; exec sleep 300 &) >/dev/null 2>&1 & echo started")
+        (record,) = recorded_process_groups(ROUTING_ID)
+        for _ in range(500):
+            if not any(worker_resources._start_ticks(pid) for pid, _ in record.members):
+                break
+            time.sleep(0.01)
+        late = [pid for pid in worker_resources._processes_in_group(record.pgid)]
+        assert late and not any(pid in dict(record.members) for pid in late)
+        # A later command confirms the group again, so the record keeps trusting it.
+        await provider.exec(handle, "true")
+    finally:
+        await provider.close(handle)
+    for _ in range(500):
+        if not worker_resources._processes_in_group(record.pgid):
+            break
+        time.sleep(0.01)
+    assert worker_resources._processes_in_group(record.pgid) == []
+    assert recorded_process_groups(ROUTING_ID) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
+async def test_a_later_command_drops_the_record_of_a_background_group_that_ended(worker: Path) -> None:
+    provider = LocalProvider()
+    handle = await provider.create(SandboxSpec())
+    try:
+        await provider.exec(handle, "sleep 0.5 >/dev/null 2>&1 & echo started")
+        assert len(recorded_process_groups(ROUTING_ID)) == 1
+        time.sleep(1)
+        await provider.exec(handle, "true")
+        assert recorded_process_groups(ROUTING_ID) == []
+        assert handle.raw["process_groups"] == []
+    finally:
+        await provider.close(handle)

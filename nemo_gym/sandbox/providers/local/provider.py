@@ -111,6 +111,16 @@ class LocalProvider:
         if cwd and inst["owned"] and not exec_cwd.is_absolute():
             exec_cwd = inst["workspace"] / exec_cwd
         timeout = timeout_s if timeout_s is not None else self._default_timeout_s
+        # Each command confirms the groups earlier commands left running, so their records keep trusting them.
+        # A group that has ended drops its record.
+        kept = []
+        for group in inst.get("process_groups", []):
+            confirmed = await asyncio.to_thread(group.confirm)
+            if confirmed is None:
+                group.forget()
+            else:
+                kept.append(confirmed)
+        inst["process_groups"] = kept
         async with self._semaphore:
             # The shell waits for one line on stdin, sent once its process group is recorded, then runs the command in
             # place with stdin from /dev/null.

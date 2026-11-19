@@ -29,9 +29,11 @@ The ID groups everything the worker creates on the host:
   A reader checks the record against ``/proc`` before it signals the group, so a reused process ID is never killed.
 
 A record stays while its group runs, including processes a command left running in the background.
-Once a group's leader has exited, its group ID could be reused by an unrelated group.
-So a command that returns with processes still in its group adds those processes and their start times to the record,
-and the group counts as running only while one of them still runs in it.
+Once a group's leader has exited, its group ID could be reused by an unrelated group, but only after the kernel's
+process ID counter wraps around past it, because Linux hands out process IDs in order.
+So each record also holds the counter's value when the group was last confirmed as ours.
+A leaderless group with processes in it counts as ours while the counter has not wrapped past its ID since then, or while
+a process recorded when its command returned still runs in it.
 Whoever owns the group, such as a local sandbox at its close, ends it with ``ProcessGroupRecord.end``.
 Ending the groups of a worker that died is the reap's job.
 Process group records need Linux's ``/proc``; elsewhere children run unrecorded.
@@ -143,11 +145,13 @@ class ProcessGroupRecord:
     ``start_ticks`` is field 22 of ``/proc/<pid>/stat``: clock ticks since boot.
     A change of the wall clock does not move it.
     ``members`` holds ``(process ID, start ticks)`` of the processes left in the group when its command returned.
+    ``last_pid`` is the kernel's last allocated process ID when the group was last confirmed as ours.
     """
 
     pgid: int
     start_ticks: int
     members: tuple[tuple[int, int], ...] = ()
+    last_pid: int | None = field(default=None, compare=False)
     # The record's file, removed by ``forget``; ``None`` for a record that was never written.
     path: Path | None = field(default=None, compare=False)
 
@@ -155,16 +159,40 @@ class ProcessGroupRecord:
         """Whether the recorded group, and not another group that reused its ID, still has a process.
 
         While the leader runs, it must have the recorded start time; one that differs is a reused process ID.
-        Once the leader has exited, the group ID can be reused after the group empties, so a process in group ``pgid``
-        proves nothing alone.
-        The group is then ours only while a recorded member still runs, with its recorded start time, in that group.
-        Linux does not hand out a process ID still in use as a group ID, so such a member means the group is the
-        original one.
+        Once the leader has exited, a process in group ``pgid`` is ours in either of two cases.
+        A recorded member still runs, with its recorded start time, in the group: Linux does not hand out a process ID
+        still in use as a group ID, so the group is the original one.
+        Or the kernel's process ID counter has not wrapped past ``pgid`` since ``last_pid`` was recorded: Linux hands out
+        process IDs in order, so no other group can have taken the ID yet.
+        The second case covers processes started after the command returned, such as a server a wrapper started.
+        It is wrong only if the counter wrapped all the way around between two confirmations.
         """
         leader_ticks = _start_ticks(self.pgid)
         if leader_ticks is not None:
             return leader_ticks == self.start_ticks and _group_has_members(self.pgid)
-        return any(_start_ticks(pid) == ticks and _process_group_of(pid) == self.pgid for pid, ticks in self.members)
+        if any(_start_ticks(pid) == ticks and _process_group_of(pid) == self.pgid for pid, ticks in self.members):
+            return True
+        current = _last_pid()
+        if self.last_pid is None or current is None or _counter_passed(self.pgid, since=self.last_pid, now=current):
+            return False
+        return _group_has_members(self.pgid)
+
+    def confirm(self) -> "ProcessGroupRecord | None":
+        """The record with the counter's current value, written to its file, while the group is ours; else ``None``.
+
+        Call it whenever the owner sees the group, so that ``is_running`` keeps trusting a leaderless group.
+        """
+        if not self.is_running():
+            return None
+        confirmed = ProcessGroupRecord(
+            pgid=self.pgid,
+            start_ticks=self.start_ticks,
+            members=self.members,
+            last_pid=_last_pid(),
+            path=self.path,
+        )
+        confirmed._write()
+        return confirmed
 
     def track_members(self) -> "ProcessGroupRecord | None":
         """The record with the group's current processes as its members, written to its file; ``None`` when empty.
@@ -179,13 +207,19 @@ class ProcessGroupRecord:
         )
         if not members:
             return None
-        tracked = ProcessGroupRecord(pgid=self.pgid, start_ticks=self.start_ticks, members=members, path=self.path)
-        if self.path is not None:
-            try:
-                self.path.write_text(_record_text(tracked), encoding="ascii")
-            except OSError as error:
-                LOGGER.warning("Could not record the members of child process group %d: %r", self.pgid, error)
+        tracked = ProcessGroupRecord(
+            pgid=self.pgid, start_ticks=self.start_ticks, members=members, last_pid=_last_pid(), path=self.path
+        )
+        tracked._write()
         return tracked
+
+    def _write(self) -> None:
+        if self.path is None:
+            return
+        try:
+            self.path.write_text(_record_text(self), encoding="ascii")
+        except OSError as error:
+            LOGGER.warning("Could not update the record of child process group %d: %r", self.pgid, error)
 
     def end(self) -> None:
         """Kill the group if it still runs, then remove its record."""
@@ -223,11 +257,13 @@ def record_process_group(pid: int) -> ProcessGroupRecord | None:
     try:
         records = _private_dir(worker_workspace_dir() / PROCESS_GROUPS_DIR_NAME)
         path = records / f"{pid}-{secrets.token_hex(4)}"
-        path.write_text(_record_text(ProcessGroupRecord(pgid=pid, start_ticks=ticks)), encoding="ascii")
+        path.write_text(
+            _record_text(ProcessGroupRecord(pgid=pid, start_ticks=ticks, last_pid=_last_pid())), encoding="ascii"
+        )
     except OSError as error:
         LOGGER.warning("Could not record child process group %d of this worker: %r", pid, error)
         return None
-    return ProcessGroupRecord(pgid=pid, start_ticks=ticks, path=path)
+    return ProcessGroupRecord(pgid=pid, start_ticks=ticks, last_pid=_last_pid(), path=path)
 
 
 def recorded_process_groups(routing_id: str) -> list[ProcessGroupRecord]:
@@ -239,9 +275,17 @@ def recorded_process_groups(routing_id: str) -> list[ProcessGroupRecord]:
         return records
     for entry in entries:
         try:
-            pgid, ticks, *members = entry.read_text("ascii").split()
+            pgid, ticks, last_pid, *members = entry.read_text("ascii").split()
             parsed = tuple((int(pid), int(start)) for pid, start in (member.split(":") for member in members))
-            records.append(ProcessGroupRecord(pgid=int(pgid), start_ticks=int(ticks), members=parsed, path=entry))
+            records.append(
+                ProcessGroupRecord(
+                    pgid=int(pgid),
+                    start_ticks=int(ticks),
+                    members=parsed,
+                    last_pid=None if last_pid == "-" else int(last_pid),
+                    path=entry,
+                )
+            )
         except (OSError, ValueError):
             LOGGER.warning("Skipping unreadable process group record %s", entry)
     return records
@@ -303,8 +347,31 @@ def _group_has_members(pgid: int) -> bool:
 
 
 def _record_text(record: ProcessGroupRecord) -> str:
-    """A record's file: the group ID and leader start ticks, then ``pid:start`` for each tracked member."""
-    return " ".join([str(record.pgid), str(record.start_ticks), *(f"{pid}:{ticks}" for pid, ticks in record.members)])
+    """A record's file: group ID, leader start ticks, last process ID (``-`` when unknown), then ``pid:start`` each."""
+    last_pid = "-" if record.last_pid is None else str(record.last_pid)
+    members = (f"{pid}:{ticks}" for pid, ticks in record.members)
+    return " ".join([str(record.pgid), str(record.start_ticks), last_pid, *members])
+
+
+def _last_pid() -> int | None:
+    """The kernel's last allocated process ID in this PID namespace; ``None`` when unavailable."""
+    try:
+        with open("/proc/sys/kernel/ns_last_pid", encoding="ascii") as counter:
+            return int(counter.read())
+    except (OSError, ValueError):
+        return None
+
+
+def _counter_passed(pid: int, *, since: int, now: int) -> bool:
+    """Whether the process ID counter allocated past ``pid`` while moving from ``since`` to ``now``.
+
+    The counter only grows until it wraps to the bottom of the range, so it passed ``pid`` when ``pid`` lies in the
+    range it covered: above ``since`` up to ``now``, or, after a wrap, above ``since`` or up to ``now``.
+    More than one full wrap between the two readings cannot be seen.
+    """
+    if now >= since:
+        return since < pid <= now
+    return pid > since or pid <= now
 
 
 def _process_group_of(pid: int) -> int | None:
