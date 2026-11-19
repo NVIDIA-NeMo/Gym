@@ -420,6 +420,7 @@ class TestRecoveryDriverMetrics:
             disable_health_check=True,
             num_samples_in_parallel=1,
             max_resident_rollout_tasks=max_resident_tasks,
+            dispatch_reservation_interval_s=0.0,
         )
         calls = Counter()
 
@@ -689,6 +690,7 @@ class TestRolloutCollection:
             max_resident_rollout_tasks=max_resident_tasks,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
         dispatched = []
 
@@ -772,6 +774,7 @@ class TestRolloutCollection:
             num_samples_in_parallel=num_samples_in_parallel,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
         states_during_dispatch = []
 
@@ -831,6 +834,7 @@ class TestRolloutCollection:
             route_failures_to_sidecar=route_failures_to_sidecar,
             retain_results_in_memory=retain_results_in_memory,
             max_resident_rollout_tasks=1,
+            dispatch_reservation_interval_s=0.0,
         )
         materialized_rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         if resume_from_cache:
@@ -3126,8 +3130,10 @@ class TestRolloutCollection:
 
         # Read the actual persisted rows as the recovery/health gate does. A policy zero remains measured and
         # settled despite evaluation_completed=False; a policy FAIL remains terminal and outside the score.
-        from nemo_gym.orchestration.recovery import decide_from_collected, metric_coverage, trial_faults
-        from tests.unit_tests.orchestration.test_evaluation_health import _run
+        from nemo_gym.eval.recovery.gate import metric_coverage
+        from nemo_gym.eval.recovery.planner import decide_from_collected
+        from nemo_gym.eval.recovery.trials import trial_faults
+        from tests.helpers.recovery_health import _run
 
         collected = _run(2).model_copy(update={"results": persisted, "failures": failures})
         decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
@@ -5727,6 +5733,7 @@ class TestRolloutCollection:
             max_resident_rollout_tasks=window,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
 
         results = await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=10)
@@ -5812,6 +5819,7 @@ class TestRolloutCollection:
             retain_results_in_memory=retain,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
 
         if with_batch_manifest:
@@ -8922,6 +8930,70 @@ class TestDispatchBudget:
         assert tracker.drained == 4
         assert all(result[NG_DISPATCH_DRAINED_KEY] for _row, result in drained)
 
+    @pytest.mark.parametrize(
+        "budget_s, margin_s, history",
+        [(0.5, 0.0, []), (1.5, 1.0, []), (1.5, None, [1.0] * 5)],
+        ids=["deadline", "margin", "adaptive-margin"],
+    )
+    async def test_a_row_the_budget_runs_out_on_while_its_reservation_waits_is_drained_unreserved(
+        self, monkeypatch: pytest.MonkeyPatch, budget_s: float, margin_s: float | None, history: list
+    ) -> None:
+        # Row 0 is reserved at once. Row 1 passes the drain check, then waits 1 s for the next manifest write.
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
+        posted: list = []
+        reserved: list = []
+        tracker = DispatchLatencyTracker()
+        for seconds in history:
+            tracker.record(seconds)
+
+        started = time.monotonic()
+        completions = self._helper(posted)._run_examples_with_metadata(
+            [self._row(0), self._row(1)],
+            semaphore=asyncio.Semaphore(1),
+            on_dispatch_batch=lambda rows: reserved.append([row[TASK_INDEX_KEY_NAME] for row in rows]),
+            dispatch_budget_s=budget_s,
+            drain_margin_s=margin_s,
+            dispatch_reservation_interval_s=1.0,
+            latency_tracker=tracker,
+        )
+        results = [(await future).result for future in completions]
+
+        assert posted == [0]
+        assert reserved == [[0]], "a row drained while waiting must not be reserved"
+        assert tracker.drained == 1
+        drained = [result for result in results if result.get(NG_DISPATCH_DRAINED_KEY)]
+        assert len(drained) == 1 and drained[0][NG_NO_PERSIST_KEY] is True
+        assert time.monotonic() - started >= 0.9, "row 1 must have passed the first check and waited"
+
+    async def test_the_rollout_timer_starts_after_the_reservation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Row 1 waits about 1 s for the next manifest write. That wait is not rollout time.
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
+        posted: list = []
+        reserved: list = []
+        tracker = DispatchLatencyTracker()
+
+        started = time.monotonic()
+        completions = self._helper(posted)._run_examples_with_metadata(
+            [self._row(0), self._row(1)],
+            semaphore=asyncio.Semaphore(1),
+            on_dispatch_batch=lambda rows: reserved.append([row[TASK_INDEX_KEY_NAME] for row in rows]),
+            dispatch_reservation_interval_s=1.0,
+            latency_tracker=tracker,
+        )
+        completed = {done.row[TASK_INDEX_KEY_NAME]: done for done in [await future for future in completions]}
+
+        assert reserved == [[0], [1]]
+        assert time.monotonic() - started >= 0.9, "row 1 must have waited for its reservation"
+        assert completed[1].rollout_latency_ms < 500
+        assert completed[1].elapsed_s < 0.5
+        assert tracker.quantile(1.0) < 0.5, "the drain margin history must not include the wait"
+
     async def test_drain_margin_blocks_a_task_that_cannot_finish(self, monkeypatch: pytest.MonkeyPatch) -> None:
         posted: list = []
         monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
@@ -9241,6 +9313,7 @@ class TestDispatchBudget:
                 count_missing_rollouts_as_zero=True,
                 record_omitted_rollouts=record_omitted,
                 disable_health_check=True,
+                dispatch_reservation_interval_s=0.0,
                 **overrides,
             )
 
@@ -13350,6 +13423,7 @@ class TestEnvironmentServerRouting:
                 route_failures_to_sidecar=route_failures,
                 retain_results_in_memory=retain_results,
                 max_resident_rollout_tasks=1,
+                dispatch_reservation_interval_s=0.0,
             )
 
         await RolloutCollectionHelper().run_from_config(config(resume=False))
@@ -14632,6 +14706,7 @@ class TestUnroutedRunFailure:
         return runs
 
     def _config(self, tmp_path: Path, n: int, **kwargs) -> RolloutCollectionConfig:
+        kwargs.setdefault("dispatch_reservation_interval_s", 0.0)
         return RolloutCollectionConfig(
             input_jsonl_fpath=str(self._input(tmp_path, n)),
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
@@ -14685,7 +14760,9 @@ class TestUnroutedRunFailure:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         self._install(monkeypatch, ClientPayloadError("Response payload is not completed"))
-        config = self._config(tmp_path, 3)
+        # Interval 0 reserves x=2 before the x=1 failure ends the run. At a nonzero interval x=2 may still be waiting
+        # for its reservation then and is never reserved, which is correct: its request was never sent.
+        config = self._config(tmp_path, 3, dispatch_reservation_interval_s=0.0)
         with pytest.raises(ClientPayloadError):
             await RolloutCollectionHelper().run_from_config(config)
 

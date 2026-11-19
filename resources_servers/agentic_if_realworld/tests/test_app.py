@@ -24,7 +24,7 @@ from resources_servers.agentic_if_realworld.app import (
 from resources_servers.agentic_if_realworld.benchmark import scoring
 from resources_servers.agentic_if_realworld.benchmark.core import digest, read, write
 from resources_servers.agentic_if_realworld.benchmark.synthetic import delivery, review
-from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError
+from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError, gym_response_completion
 
 
 @pytest.fixture
@@ -413,6 +413,8 @@ def test_native_response_rewards_without_model_receipts(native, text, verdict, r
         "native_action",
         "two_messages",
         "error",
+        "native_finish_reason",
+        "native_stop_reason",
     ],
 )
 def test_native_technical_failures_are_masked(native, damage):
@@ -447,7 +449,11 @@ def test_native_technical_failures_are_masked(native, damage):
         response["output"].append(deepcopy(response["output"][0]))
     elif damage == "error":
         response["error"] = {"code": "server_error", "message": "Unavailable"}
-    result = asyncio.run(verifier.verify(VerifyRequest.model_validate(body)))
+    elif damage in {"native_finish_reason", "native_stop_reason"}:
+        response[damage] = "repetition" if damage == "native_finish_reason" else "repetition_detected"
+    request = VerifyRequest.model_validate(body)
+    assert gym_response_completion(request.response)["choices"][0]["finish_reason"] == "incomplete"
+    result = asyncio.run(verifier.verify(request))
     assert (result.scoring_status, result.reward, result.mask_sample) == (
         "not_scored",
         0,

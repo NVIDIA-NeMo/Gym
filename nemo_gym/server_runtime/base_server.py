@@ -261,7 +261,7 @@ def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
 def _unblock_shutdown_signals() -> None:
     """Let SIGINT and SIGTERM, on which uvicorn shuts a server down, reach this process. A process starts with the
     signal mask of the thread that launched it, so a server launched from a thread that blocks these signals, such as
-    any thread of a Ray worker, would otherwise leave RunHelper's interrupt pending and never run its shutdown.
+    any thread of a Ray worker, would otherwise leave ServerSupervisor's interrupt pending and never run its shutdown.
     Unblocking a signal that is not blocked changes nothing."""
     signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGINT, signal.SIGTERM))
 

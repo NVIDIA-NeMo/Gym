@@ -20,7 +20,7 @@ from nemo_gym.core import (
     observe_failure,
     sdk_error_details,
 )
-from nemo_gym.server_runtime import SimpleResourcesServer, lost_session_verification
+from nemo_gym.server_runtime import ResourcesSessionConflictError, SimpleResourcesServer, lost_session_verification
 from nemo_gym.utils import bounded_text
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import (
@@ -91,10 +91,6 @@ class OSWorldResourcesServer(SimpleResourcesServer):
         async def session_not_found(_request, exc: SessionNotFoundError):
             return JSONResponse(status_code=404, content={"detail": f"unknown session: {exc.args[0]}"})
 
-        @app.exception_handler(SessionConflictError)
-        async def session_conflict(_request, exc: SessionConflictError):
-            return JSONResponse(status_code=409, content={"detail": str(exc)})
-
         @app.exception_handler(CapacityUnavailableError)
         async def capacity_unavailable(_request, exc: CapacityUnavailableError):
             return JSONResponse(status_code=503, content={"detail": str(exc)})
@@ -120,7 +116,10 @@ class OSWorldResourcesServer(SimpleResourcesServer):
         request: Request,
         body: OSWorldSeedSessionRequest,
     ) -> OSWorldSeedSessionResponse:
-        return await self._manager.seed_session(self._session_id(request), body)
+        try:
+            return await self._manager.seed_session(self._session_id(request), body)
+        except SessionConflictError as error:
+            raise ResourcesSessionConflictError(str(error)) from error
 
     async def session_status(
         self,
