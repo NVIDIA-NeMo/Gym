@@ -1,0 +1,33 @@
+# CVDP agentic tasks with Hermes in the lent task sandbox; see cvdp_agentic.yaml. Replaces
+# responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_hermes.yaml, whose budgets it keeps.
+config_paths:
+  - resources_servers/cvdp/configs/cvdp_agentic.yaml
+  - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+cvdp_agentic_hermes_agent:
+  _inherit_from: hermes_agent
+  responses_api_agents:
+    hermes_agent:
+      resources_server:
+        type: resources_servers
+        name: cvdp_agentic_resources_server
+      model: ${policy_model_name}
+      # A shell for the simulators and file editing; no web or browser tools.
+      enabled_toolsets: [terminal, file]
+      max_turns: 60
+      # cvdp_agent's harness timeout.
+      sandbox_runner_timeout_seconds: 900
+
+cvdp_agentic_hermes:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: cvdp_agentic_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: cvdp_agentic_hermes_agent
+      # Sandbox start (an image conversion on first use), the agent's 900 s, then the harness's container_timeout.
+      default_episode_timeout_seconds: 3600
