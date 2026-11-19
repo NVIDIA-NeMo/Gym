@@ -70,7 +70,9 @@ jobs:
     steps:
       - name: Install NOOA container tools
         if: matrix.harness == 'nooa'
-        run: apt-get update && apt-get install -y --no-install-recommends git curl
+        run: |
+          apt-get -o Acquire::Retries=5 -o Acquire::Retries::Delay=true -o Acquire::Retries::Delay::Maximum=10 update
+          apt-get -o Acquire::Retries=5 -o Acquire::Retries::Delay=true -o Acquire::Retries::Delay::Maximum=10 install -y --no-install-recommends git curl
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ inputs.checkout-ref }}
@@ -93,7 +95,9 @@ jobs:
           node-version: '22'
       - name: Install terminal runtime
         if: matrix.harness == 'terminus_2_sandboxed'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::Retries::Delay=true -o Acquire::Retries::Delay::Maximum=10 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::Retries::Delay=true -o Acquire::Retries::Delay::Maximum=10 install -y --no-install-recommends tmux
       - name: Install pinned dependencies and runtime
         timeout-minutes: 12
         env:
