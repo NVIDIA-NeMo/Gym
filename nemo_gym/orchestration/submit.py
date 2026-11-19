@@ -287,6 +287,7 @@ def recover(
     return with_operator_verdict(outcome).model_copy(update={"reader_token": reader_token()})
 
 
+@experimental
 def inspect_recovery(
     gym_job_id: str,
     benchmark: str,

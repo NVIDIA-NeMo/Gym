@@ -47,7 +47,7 @@ from nemo_gym.orchestration.jobs import (
     local_index_dir,
     restore_index_entry,
 )
-from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, resubmit
+from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, inspect_recovery, recover, resubmit
 from tests.helpers.recovery_store_runs import provider_failures_jsonl
 
 
@@ -235,6 +235,23 @@ def _option_flags(command: str) -> set[str]:
 def test_gym_job_resubmit_offers_no_recovery_options_and_gym_eval_resubmit_still_does() -> None:
     assert _option_flags("job resubmit") == set()
     assert {"--recover", "--inspect", "--repin", "--max-walltime"} <= _option_flags("eval resubmit")
+
+
+def test_gym_job_resubmit_says_in_its_summary_that_it_is_plain_and_where_recovery_is() -> None:
+    summary = COMMANDS["job resubmit"].summary
+
+    assert "no recovery" in summary and "gym eval resubmit --recover" in summary
+    assert len(summary) <= 96, "a summary is one line of the command listing"
+
+
+@pytest.mark.parametrize("entry_point", [resubmit, recover, inspect_recovery])
+def test_the_entry_points_behind_both_resubmit_commands_warn_that_they_are_experimental(
+    entry_point, capsys: pytest.CaptureFixture
+) -> None:
+    with pytest.raises(ValueError):
+        entry_point("gym-job-unknown", "gsm8k")
+
+    assert "is experimental" in capsys.readouterr().err
 
 
 def test_gym_job_resubmit_refuses_a_stray_override_and_lets_the_verbose_one_through(

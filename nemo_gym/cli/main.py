@@ -2497,7 +2497,7 @@ COMMANDS = {
     ),
     "job resubmit": Command(
         target=_job_resubmit,
-        summary="Queue one benchmark of a submitted run again, in place; prints the new job id.",
+        summary="Plain resubmit of one benchmark, no recovery; for a decision use `gym eval resubmit --recover`.",
         flags=(
             Flag(
                 register=lambda p: p.add_argument(
