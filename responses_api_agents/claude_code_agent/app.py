@@ -949,6 +949,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, ClaudeCodeSandboxSession)
+            if state.is_continuation:
+                # Each step of a continued episode is the next indexed activation of the one Claude Code session.
+                return await self.activate_agent_session(request, body)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise AgentSessionConflictError("Claude activation does not match the seeded session and rollout")
             if state.session.closing:

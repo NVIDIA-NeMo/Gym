@@ -864,3 +864,26 @@ async def test_seed_gives_a_continuation_session_a_claude_session_id(monkeypatch
         seed().model_copy(update={"continuation": {"mode": "resume_harness_session"}})
     )
     assert one.claude_session_id is None and len(continued.claude_session_id) == 36
+
+
+@pytest.mark.asyncio
+async def test_responses_routes_a_continued_session_to_its_next_activation(monkeypatch):
+    """The environment server sends each step of a continued episode to /v1/responses with the activation index;
+    the session's later activations must reach the continuation path, not the single-activation one."""
+    instance = agent()
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed().model_copy(update={"continuation": {"mode": "resume_harness_session"}}),
+        runtime="/runtime",
+        session=SimpleNamespace(),
+        claude_session_id="fixed-id",
+    )
+    activated = AsyncMock(return_value="next activation")
+    agent_class = type(instance)  # a pydantic model: patch the class
+    monkeypatch.setattr(agent_class, "_agent_session_id_from_request", lambda self, request: "s1")
+    monkeypatch.setattr(agent_class, "_require_agent_session", lambda self, session_id: state)
+    monkeypatch.setattr(agent_class, "activate_agent_session", activated)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Try again."}])
+    request = SimpleNamespace(path_params={"rollout_id": "0-0"})
+    assert await instance.responses(request, body) == "next activation"
+    activated.assert_awaited_once_with(request, body)
+    assert state.task is None  # the single-activation path was not taken
