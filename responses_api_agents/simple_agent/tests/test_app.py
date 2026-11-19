@@ -59,6 +59,7 @@ from nemo_gym.core import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_SERVER_QUEUE_TIMEOUT,
+    SAVED_FAILURE_REPORT_KEY,
     EpisodeId,
     FailureBoundary,
     FailureEvent,
@@ -71,9 +72,11 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NgFailureEvent,
+    RequestFailureLog,
     SdkErrorDetails,
     TaskId,
     failure_report_for,
+    observe_scored_despite_failure,
 )
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
@@ -1586,6 +1589,75 @@ class TestApp:
         }
         assert expected_usage_dict == actual_usage_dict
 
+    def _step_cap_client(self, outputs: list, max_steps: int = 2) -> TestClient:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="my server name"),
+            resources_server=ResourcesServerRef(type="resources_servers", name=""),
+            max_steps=max_steps,
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        base = {
+            "id": "resp_1",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        model_replies = iter(json.dumps(base | {"output": output}) for output in outputs)
+
+        async def post(*, server_name: str, url_path: str, json=None, cookies=None, **kwargs) -> MagicMock:
+            if server_name == "my server name":
+                reply = _mock_response()
+                reply.read = AsyncMock(return_value=next(model_replies))
+                return reply
+            return _mock_response(content="tool output")  # the resources server answers the tool call
+
+        server.server_client.post = AsyncMock(side_effect=post)
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)  # `run_webserver` installs it; it opens the failure log of a request
+        return TestClient(app)
+
+    def test_a_run_ended_by_max_steps_is_recorded_as_scored_despite_failure(self) -> None:
+        tool_call = {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "my_tool",
+            "arguments": "{bad",
+        }
+        client = self._step_cap_client([[tool_call], [tool_call]])
+
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+
+        # The response is returned as before; the cap is recorded beside it.
+        assert res.status_code == 200
+        report = FailureHeader.decode(res.headers)
+        (recorded,) = [event for event in report.events.values() if event.operation == "scored_despite_failure"]
+        assert (recorded.boundary.value, recorded.failure_kind, recorded.stage) == ("agent", "agent_limit", "agent")
+        assert "max_steps (2)" in recorded.failure_reason
+
+    def test_a_run_that_finishes_before_max_steps_is_not_recorded(self) -> None:
+        answer = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"annotations": [], "text": "42", "type": "output_text"}],
+        }
+        client = self._step_cap_client([[answer]])
+
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+
+        assert res.status_code == 200
+        report = FailureHeader.decode(res.headers)
+        assert report is None or all(event.operation != "scored_despite_failure" for event in report.events.values())
+
     async def test_incomplete_details(self, monkeypatch: MonkeyPatch, caplog) -> None:
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "max_output_tokens"})
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "content_filter"})
@@ -2367,6 +2439,82 @@ class TestCheckpointAcrossModelCalls:
         # Without the header every invocation is a new activation, as before.
         assert unnumbered.status_code == 200 and unnumbered.json()["id"] == "resp-3"
 
+    async def test_a_replayed_reply_carries_the_step_limit_event_without_running_again(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        tool_response = _mock_response(content='{"weather_description":"cold"}')
+        monkeypatch.setattr(
+            "responses_api_agents.simple_agent.app.http_request", AsyncMock(return_value=tool_response)
+        )
+        server, server_client = _make_agent(True)
+        server.config.max_steps = 1
+        server_client.global_config_dict = {
+            "observability_enabled": True,
+            "checkpoint": {"enabled": True, "control_auth_token": "t"},
+        }
+        server_client.post = AsyncMock(side_effect=lambda **kwargs: _mock_response(_TOOL_CALL_RESPONSE))
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)  # `run_webserver` installs it; it opens the failure log of a request
+        seed = AgentSeedSessionRequest(
+            agent_session_id=_SESSION_ID,
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="example", task_id="0"),
+            tool_accesses=[
+                DirectHTTPToolAccess(name="weather.direct_http", required=True, base_url="http://resources:8000")
+            ],
+        )
+        path = "/ng-rollout/rollout/v1/responses"
+        weather_tool = {
+            "type": "function",
+            "name": "get_weather",
+            "description": "",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            "strict": False,
+        }
+        activation = {
+            "json": {"input": "q", "tools": [weather_tool]},
+            "headers": {AGENT_ACTIVATION_HEADER: "1"},
+        }
+
+        def limits(reply) -> dict:
+            report = FailureHeader.decode(reply.headers)
+            events = report.events if report is not None else {}
+            assert report is None or report.failure_id is None
+            return {i: e.failure_kind for i, e in events.items() if e.operation == "scored_despite_failure"}
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://agent") as http:
+            await http.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+            first = await http.post(path, **activation)
+            calls = server_client.post.await_count
+            replayed = await http.post(path, **activation)
+            # A checkpoint exported after the reply, restored into a new agent that was never run.
+            exported = (await server.export_agent_sessions([_SESSION_ID], checkpoint_id="c"))[_SESSION_ID]
+            session_cookies = dict(http.cookies)  # the caller's session cookie names the session after a restore
+
+        restored, restored_client = _make_agent(True)
+        restored_client.global_config_dict = server_client.global_config_dict
+        restored_client.post = AsyncMock(side_effect=AssertionError("a restored reply must not run again"))
+        restored_app = restored.setup_webserver()
+        restored.setup_exception_middleware(restored_app)
+        episode_id = EpisodeId(rollout_id="rollout")
+        await restored.checkpoint_participant.install(
+            [AgentSessionRecord(session_key=_SESSION_ID, episode_id=episode_id, session=exported, episode=None)],
+            [episode_id],
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=restored_app), base_url="http://agent", cookies=session_cookies
+        ) as http:
+            # The replacement attempt calls under its own rollout path.
+            replacement = EpisodeId(rollout_id="rollout", attempt=1).capture_key
+            after_restore = await http.post(f"/ng-rollout/{replacement}/v1/responses", **activation)
+
+        [(event_id, kind)] = limits(first).items()
+        assert kind == "agent_limit"
+        # Replaying adds no model or tool call and no new event: the one the first reply carried, under its own id.
+        assert server_client.post.await_count == calls
+        assert limits(replayed) == limits(after_restore) == {event_id: "agent_limit"}
+        assert after_restore.json() == first.json()
+
 
 @pytest.mark.parametrize("stage", ["verify", "return"])
 async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_trajectory(stage: str) -> None:
@@ -2401,8 +2549,13 @@ async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_traje
         await record_boundary(key, state)
 
     participant.legacy_episodes.boundary = recording
-    await server.run(MagicMock(cookies={}), run_request(0))
+    with RequestFailureLog.capture() as first:
+        # An event the turn loop's reply carried into this request, for example a step limit.
+        observe_scored_despite_failure(boundary="agent", failure_kind="agent_limit", failure_reason="cap")
+        await server.run(MagicMock(cookies={}), run_request(0))
     [episode] = [state for state in boundaries if state["next"] == stage]
+    [(event_id, _)] = first.report.events.items()
+    assert list(episode[SAVED_FAILURE_REPORT_KEY]["events"]) == [event_id]
 
     restored, restored_client = _make_agent(True)
     restored_participant = AgentSessionParticipant(restored)
@@ -2416,9 +2569,12 @@ async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_traje
         ],
         [EpisodeId(rollout_id="0-0")],
     )
-    result = await restored.run(MagicMock(cookies={}), run_request(1))
+    with RequestFailureLog.capture() as replacement:
+        result = await restored.run(MagicMock(cookies={}), run_request(1))
 
     assert result.model_dump()["ng_trajectory"]["rollout_id"] == "0-0-a1"
+    # The replacement observes the loop's event again, under its own id, and selects no failure.
+    assert list(replacement.report.events) == [event_id] and replacement.report.failure_id is None
 
 
 def _legacy_run_request(attempt: int) -> SimpleAgentRunRequest:

@@ -16,8 +16,10 @@ import json
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse, RequestFailureLog
 from resources_servers.swerl_gen.app import (
     SWEGenResourcesServer,
     SWEGenResourcesServerConfig,
@@ -125,6 +127,50 @@ class TestApp:
     def test_sanity(self) -> None:
         config = create_test_config()
         SWEGenResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.parametrize(
+        ("verification_result", "expected_reason"),
+        [
+            (None, "lacks the fields needed to run it"),
+            ({"status": "error", "resolution": None}, "sandbox subprocess could not run the instance"),
+        ],
+    )
+    @patch("resources_servers.swerl_gen.app.compute_score")
+    @patch("resources_servers.swerl_gen.app.extract_pred_patch")
+    async def test_an_instance_the_sandbox_could_not_run_is_recorded_and_scored_as_before(
+        self, mock_extract_pred_patch, mock_compute_score, verification_result, expected_reason
+    ) -> None:
+        server = SWEGenResourcesServer(config=create_test_config(), server_client=MagicMock(spec=ServerClient))
+        mock_extract_pred_patch.return_value = {"model_patch": "diff --git a/f b/f"}
+        mock_compute_score.remote.return_value = AwaitableResult((0.0, verification_result))
+
+        with RequestFailureLog.capture() as log:
+            result = await server.verify(create_verify_request(text="a fix", relevant_file_contents={}))
+
+        assert result.reward == 0.0  # unchanged
+        (recorded,) = [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+        assert (recorded.boundary.value, recorded.failure_kind, recorded.stage) == (
+            "resources_server",
+            "verifier_error",
+            "verification",
+        )
+        assert expected_reason in recorded.failure_reason
+
+    @pytest.mark.parametrize("status", ["done", "timeout"])
+    @patch("resources_servers.swerl_gen.app.compute_score")
+    @patch("resources_servers.swerl_gen.app.extract_pred_patch")
+    async def test_an_instance_that_was_run_is_not_recorded(
+        self, mock_extract_pred_patch, mock_compute_score, status
+    ) -> None:
+        # A patch whose tests hit the time limit was run; that is a result, not a failure to evaluate.
+        server = SWEGenResourcesServer(config=create_test_config(), server_client=MagicMock(spec=ServerClient))
+        mock_extract_pred_patch.return_value = {"model_patch": "diff --git a/f b/f"}
+        mock_compute_score.remote.return_value = AwaitableResult((0.0, {"status": status, "resolution": None}))
+
+        with RequestFailureLog.capture() as log:
+            await server.verify(create_verify_request(text="a fix", relevant_file_contents={}))
+
+        assert log.report.events == {}
 
     @patch("resources_servers.swerl_gen.app.compute_score")
     @patch("resources_servers.swerl_gen.app.extract_pred_patch")

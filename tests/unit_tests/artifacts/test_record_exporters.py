@@ -538,6 +538,32 @@ class TestRegisteredBackends:
         run.finish.assert_called_once()
         assert orjson.loads(artifacts.export_done_fpath("wandb").read_bytes())["run_id"] == "wandb-run-1"
 
+    @pytest.mark.parametrize("failing_call", ["config.update", "log"])
+    def test_wandb_export_that_fails_to_upload_finishes_the_run_as_failed(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, failing_call: str
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+        run = MagicMock(id="wandb-run-1")
+        target = run.config.update if failing_call == "config.update" else run.log
+        target.side_effect = RuntimeError("upload refused")
+        monkeypatch.setattr(wandb_module.wandb, "init", MagicMock(return_value=run))
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+        config = OmegaConf.create(
+            {
+                "rollouts_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath),
+                "results_dir": str(tmp_path / "results"),
+                "wandb_project": "proj",
+                "wandb_name": "nightly",
+                "wandb_api_key": "key",  # pragma: allowlist secret
+            }
+        )
+
+        result = WandbExporter.from_global_config(config).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        run.finish.assert_called_once_with(exit_code=1)
+        assert not artifacts.export_done_fpath("wandb").exists()
+
 
 def test_skip_exporters_leaves_live_exporters_unopened(monkeypatch: MonkeyPatch) -> None:
     import nemo_gym.config.global_config as global_config

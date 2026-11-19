@@ -37,8 +37,11 @@ from nemo_gym.config import (
     get_global_config_dict,
 )
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    observe_scored_despite_failure,
 )
 from nemo_gym.server_runtime import (
     BaseRunRequest,
@@ -329,6 +332,13 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
             except Exception as e:
                 print(f"Error running Harbor job: {e}")
+                # The reward stays 0; the rollout is recorded as scored despite the failed Harbor job.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_RUN_ERROR,
+                    failure_reason=f"The Harbor job failed and the rollout was scored 0: {type(e).__name__}: {e}",
+                    stage="agent",
+                )
                 trial_result = None
                 trajectory = None
                 agent_error_flags = {}

@@ -401,6 +401,106 @@ def driver_metric_reader(monkeypatch: pytest.MonkeyPatch):
     provider.shutdown()
 
 
+class TestResentRunIsRecorded:
+    """A /run that dropped after it may have been delivered, was resent, and answered is recorded on the saved row."""
+
+    async def _collect(self, tmp_path, monkeypatch, empty_global_config, errors: list) -> list[dict]:
+        source = tmp_path / "input.jsonl"
+        source.write_text(json.dumps(failing_row(0)) + "\n")
+        output = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(source),
+            output_jsonl_fpath=str(output),
+            route_failures_to_sidecar=True,
+            upload_rollouts=False,
+            disable_aggregation=True,
+            disable_health_check=True,
+            num_samples_in_parallel=1,
+        )
+
+        async def post(*, _on_transport_failure=None, **kwargs):
+            for error in errors:
+                _on_transport_failure(error, True)  # the client reports each dropped attempt, then resends
+            return FakeResponse(200, {"response": {"output": []}, "reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "_record_rollout_health", lambda *args: None)
+        await RolloutCollectionHelper().run_from_config(config)
+        return [json.loads(line) for line in output.read_text().splitlines()]
+
+    @staticmethod
+    def _recorded(row: dict) -> list[dict]:
+        return [
+            event
+            for event in (row.get("_ng_failure_events") or {}).values()
+            if event.get("operation") == "scored_despite_failure"
+        ]
+
+    async def test_a_dropped_connection_that_was_resent_leaves_an_event_on_the_row(
+        self, tmp_path, monkeypatch, empty_global_config
+    ):
+        from aiohttp import ServerDisconnectedError
+
+        [row] = await self._collect(tmp_path, monkeypatch, empty_global_config, [ServerDisconnectedError()])
+
+        # The result is as before, and the row says it may have run twice.
+        assert row["reward"] == 1.0 and row.get("_ng_failure_id") is None
+        (event,) = self._recorded(row)
+        assert (event["boundary"], event["failure_kind"]) == ("collection", "transport_peer_drop")
+        assert (
+            "may have run more than once" in event["failure_reason"]
+            and "ServerDisconnectedError" in event["failure_reason"]
+        )
+
+    async def test_a_refused_connection_that_was_retried_is_routine_and_not_recorded(
+        self, tmp_path, monkeypatch, empty_global_config
+    ):
+        from tests.unit_tests.rollouts.test_rollout_recovery import _refused_connection
+
+        [row] = await self._collect(tmp_path, monkeypatch, empty_global_config, [_refused_connection()])
+
+        assert row["reward"] == 1.0
+        assert self._recorded(row) == []
+
+    async def test_a_run_that_was_not_resent_is_not_recorded(self, tmp_path, monkeypatch, empty_global_config):
+        [row] = await self._collect(tmp_path, monkeypatch, empty_global_config, [])
+
+        assert self._recorded(row) == []
+
+    @pytest.mark.parametrize("dropped", [True, False])
+    async def test_a_shard_recorded_without_an_attempt_bound_still_records_a_resend(
+        self, tmp_path, monkeypatch, empty_global_config, dropped
+    ):
+        from aiohttp import ServerDisconnectedError
+
+        from tests.unit_tests.rollouts.test_rollout_recovery import _refused_connection
+
+        async def post(*, _on_transport_failure=None, **kwargs):
+            # run_examples sets no attempt bound, so the client's own retries do the resending.
+            assert "_max_num_tries" not in kwargs
+            _on_transport_failure(ServerDisconnectedError() if dropped else _refused_connection(), True)
+            return FakeResponse(200, {"response": {"output": []}, "reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "_record_rollout_health", lambda *args: None)
+        [future] = list(
+            RolloutCollectionHelper().run_examples(
+                [failing_row(0)], record_output_dir=tmp_path, record_shard="shard", route_failures_to_sidecar=True
+            )
+        )
+        _, result = await future
+
+        saved = [json.loads(line) for line in (tmp_path / "rollouts-shard.jsonl").read_text().splitlines()]
+        assert [r["reward"] for r in saved] == [result["reward"]] == [1.0]
+        events = [
+            e
+            for e in (saved[0].get("_ng_failure_events") or {}).values()
+            if e.get("operation") == "scored_despite_failure"
+        ]
+        assert [e["failure_kind"] for e in events] == (["transport_peer_drop"] if dropped else [])
+        assert saved[0].get("_ng_failure_id") is None
+
+
 class TestRecoveryDriverMetrics:
     @pytest.mark.parametrize("max_resident_tasks", [None, 2])
     async def test_only_new_persisted_outcomes_are_measured_on_resume(
@@ -1040,6 +1140,7 @@ class TestRolloutCollection:
             *,
             _resend_after_disconnect: bool = True,
             _max_num_tries: int | None = None,
+            _on_transport_failure=None,
         ) -> FakeResponse:
             assert url_path == "/run"
             started.append((json[AGENT_REF_KEY_NAME]["name"], json[TASK_INDEX_KEY_NAME]))
@@ -1092,6 +1193,7 @@ class TestRolloutCollection:
             *,
             _resend_after_disconnect: bool = True,
             _max_num_tries: int | None = None,
+            _on_transport_failure=None,
         ) -> FakeResponse:
             nonlocal active_total, max_active_total
             assert url_path == "/run"
@@ -1150,6 +1252,7 @@ class TestRolloutCollection:
             *,
             _resend_after_disconnect: bool = True,
             _max_num_tries: int | None = None,
+            _on_transport_failure=None,
         ) -> FakeResponse:
             nonlocal active
             assert server_name == "gamma_environment_server"
@@ -8279,7 +8382,7 @@ class TestRunExamplesAclose:
         consumed = asyncio.Queue()
         consumer_calls = 0
 
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, **_):  # noqa: A002
             index = json[TASK_INDEX_KEY_NAME]
             await gates[index].wait()
             return FakeResponse(200, {"task": index})
@@ -8328,7 +8431,7 @@ class TestRunExamplesAclose:
         gate = asyncio.Event()
         finished = asyncio.Event()
 
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, **_):  # noqa: A002
             index = json[TASK_INDEX_KEY_NAME]
             if index != 0:
                 await asyncio.Event().wait()
@@ -8372,7 +8475,7 @@ class TestRunExamplesAclose:
         finished = asyncio.Event()
         started, cancelled = [], []
 
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, **_):  # noqa: A002
             index = json[TASK_INDEX_KEY_NAME]
             started.append(index)
             try:
@@ -8575,7 +8678,7 @@ class TestRunExamplesAclose:
 
     @staticmethod
     def _helper(slow_task_indices: set, started: list, cancelled: list) -> RolloutCollectionHelper:
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, **_):  # noqa: A002
             task_index = json[TASK_INDEX_KEY_NAME]
             started.append(task_index)
             if task_index in slow_task_indices:
@@ -8838,7 +8941,7 @@ class TestDispatchBudget:
         }
 
     def _helper(self, posted: list) -> RolloutCollectionHelper:
-        async def post(server_name, url_path, json, *, _resend_after_disconnect=True):  # noqa: A002
+        async def post(server_name, url_path, json, *, _resend_after_disconnect=True, _on_transport_failure=None):  # noqa: A002
             posted.append(json[TASK_INDEX_KEY_NAME])
             return MagicMock(status=200)
 
@@ -9345,7 +9448,7 @@ class TestDispatchOrderReachesTheServer:
 
         posted: list = []
 
-        async def post(server_name, url_path, json, *, _resend_after_disconnect=True):  # noqa: A002
+        async def post(server_name, url_path, json, *, _resend_after_disconnect=True, _on_transport_failure=None):  # noqa: A002
             posted.append(json[TASK_INDEX_KEY_NAME])
             await asyncio.sleep(0)
             return MagicMock(status=200)

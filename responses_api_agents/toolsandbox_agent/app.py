@@ -32,6 +32,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -41,6 +43,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseUsage,
     accumulate_response_usage,
+    observe_scored_despite_failure,
 )
 from nemo_gym.server_runtime import BaseRunRequest
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -149,12 +152,25 @@ class ToolSandboxAgent(SimpleResponsesAPIAgent):
                     model_response_json = await raw.json()
                 except (json.JSONDecodeError, aiohttp.ClientResponseError) as e:
                     logger.warning(f"Error calling /v1/responses: {e!r}.")
+                    # The run ends here and is verified as it stands; it is recorded as scored despite this failure.
+                    observe_scored_despite_failure(
+                        boundary=FailureBoundary.AGENT,
+                        failure_kind=AGENT_RUN_ERROR,
+                        failure_reason=f"The run ended early on a failed model call and was verified as it stood: {e!r}",
+                        stage="agent",
+                    )
                     break
 
                 try:
                     model_response = NeMoGymResponse.model_validate(model_response_json)
                 except ValidationError as e:
                     logger.warning(f"Error validating model response: {e!r}.")
+                    observe_scored_despite_failure(
+                        boundary=FailureBoundary.AGENT,
+                        failure_kind=AGENT_RUN_ERROR,
+                        failure_reason=f"The run ended early on an invalid model response and was verified as it stood: {e!r}",
+                        stage="agent",
+                    )
                     break
                 usage = accumulate_response_usage(usage, model_response.usage)
 

@@ -24,7 +24,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import ModelCallSampling, NeMoGymResponseCreateParamsNonStreaming, encode_model_sampling
+from nemo_gym.core import (
+    ModelCallSampling,
+    NeMoGymResponseCreateParamsNonStreaming,
+    RequestFailureLog,
+    encode_model_sampling,
+)
 from responses_api_agents.harbor_agent.app import (
     HarborAgent,
     HarborAgentConfig,
@@ -449,12 +454,21 @@ class TestApp:
 
     async def test_run_failed_execution(self):
         server = _make_server()
-        with _harbor_run_mocks(side_effect=Exception("Harbor job failed")):
+        with RequestFailureLog.capture() as log, _harbor_run_mocks(side_effect=Exception("Harbor job failed")):
             response = await server.run(
                 _make_run_request(instance_id="scientific::fail_task", temperature=0.3, top_p=0.95)
             )
 
         assert response.reward == 0.0
+        (recorded,) = [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+        assert (recorded.boundary.value, recorded.failure_kind, recorded.stage) == (
+            "agent",
+            "agent_run_error",
+            "agent",
+        )
+        assert "Harbor job failed" in recorded.failure_reason
+        assert log.report.failure_id is None
+
         assert len(response.response.output) == 0
         assert response.responses_create_params.temperature == 0.3
         assert response.responses_create_params.input == []

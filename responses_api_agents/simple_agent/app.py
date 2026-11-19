@@ -65,9 +65,11 @@ from nemo_gym.config import (
     ResourcesServerRef,
 )
 from nemo_gym.core import (
+    AGENT_LIMIT,
     AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    SAVED_FAILURE_REPORT_KEY,
     TOOL_OUTPUT_IMAGES_KEY,
     EpisodeId,
     FailureBoundary,
@@ -86,8 +88,11 @@ from nemo_gym.core import (
     RequestFailureLog,
     ToolOutputImage,
     accumulate_response_usage,
+    observe_scored_despite_failure,
     report_for_current_request,
+    restore_saved_failure_report,
     split_tool_output_images,
+    with_saved_failure_report,
 )
 from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
@@ -188,7 +193,8 @@ def _dump_reply(reply: dict[str, Any] | None) -> dict[str, Any] | None:
     """A completed reply as a checkpoint records it."""
     if reply is None:
         return None
-    return {"response": _to_json(reply["response"]), "cookies": reply["cookies"]}
+    saved = {SAVED_FAILURE_REPORT_KEY: reply[SAVED_FAILURE_REPORT_KEY]} if SAVED_FAILURE_REPORT_KEY in reply else {}
+    return {"response": _to_json(reply["response"]), "cookies": reply["cookies"], **saved}
 
 
 @dataclass
@@ -818,6 +824,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 invocation_status = "incomplete"
+                # The reward and the response sent to verification are unchanged; the cap is recorded as a limit that
+                # ended the run, so the rollout is not mistaken for one that finished.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_LIMIT,
+                    failure_reason=f"The run reached max_steps ({self.config.max_steps}) with tool calls still pending",
+                    stage="agent",
+                )
                 break
             await commit_boundary()
 
@@ -969,7 +983,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     loop.completed_activation = index if index is not None else loop.completed_activation + 1
                 # Only a caller that sends the index can ask for the reply again.
                 loop.completed_reply = (
-                    {"response": model_response, "cookies": _cookie_values(dict(downstream_cookies))}
+                    {
+                        "response": model_response,
+                        "cookies": _cookie_values(dict(downstream_cookies)),
+                        # The events the activation observed (for example a step limit), replayed with the reply.
+                        **with_saved_failure_report({}),
+                    }
                     if index is not None
                     else None
                 )
@@ -988,6 +1007,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         if loop.completed_reply is None:
             raise ActivationOutOfOrderError(f"agent session {session_key!r} has completed no activation to reply with")
         reply = JSONResponse(content=_to_json(loop.completed_reply["response"]))
+        # The activation did not run again, so the events it observed are observed again, each under its own id.
+        restore_saved_failure_report(dict(loop.completed_reply))
         for name, value in loop.completed_reply["cookies"].items():
             reply.set_cookie(name, value)
         return reply
@@ -1167,6 +1188,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             cookies = _cookie_values(response.cookies)
         elif stage in ("verify", "return"):
             model_response_json = continuation["response"]
+            # The loop's events were observed by the request that ran it, so a replacement observes them again.
+            restore_saved_failure_report(dict(continuation))
 
         trajectory = None
         expected_rollout_id = self.rollout_id_from_run(body)
@@ -1220,6 +1243,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 {
                     "next": "return",
                     "response": boundary_response_json,
+                    **with_saved_failure_report({}),
                     "result": result,
                     "cookies": _cookie_values(cookies),
                     "resources_verify_step_type": resources_verify_step_type,
@@ -1230,6 +1254,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 {
                     "next": "verify",
                     "response": boundary_response_json,
+                    **with_saved_failure_report({}),
                     "cookies": _cookie_values(cookies),
                     "resources_verify_step_type": resources_verify_step_type,
                 }
@@ -1260,6 +1285,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 {
                     "next": "return",
                     "response": boundary_response_json,
+                    **with_saved_failure_report({}),
                     "result": result,
                     "cookies": _cookie_values(cookies),
                     "resources_verify_step_type": resources_verify_step_type,

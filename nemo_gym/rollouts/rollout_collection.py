@@ -113,12 +113,13 @@ from nemo_gym.core.failure_kinds import (
     JUDGE_FAILURE_KINDS,
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
+    TRANSPORT_PEER_DROP,
     is_namespaced,
     is_registered,
     quota_reset_text,
 )
 from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
-from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core.failure_transport import SCORED_DESPITE_FAILURE_OPERATION, FailureHeader, FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
@@ -5697,12 +5698,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                                     url_path="/run",
                                     json=request_body,
                                     **({"_resend_after_disconnect": False} if not retry_requests else {}),
+                                    # Observed whether or not the attempts are bounded, so a resent /run is recorded.
+                                    _on_transport_failure=lambda error, _: attempt_errors.append(error),
                                     **(
-                                        {
-                                            "_max_num_tries": _max_num_tries,
-                                            "_retry_other_errors": False,
-                                            "_on_transport_failure": lambda error, _: attempt_errors.append(error),
-                                        }
+                                        {"_max_num_tries": _max_num_tries, "_retry_other_errors": False}
                                         if _max_num_tries is not None
                                         else {}
                                     ),
@@ -5743,6 +5742,25 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
                     succeeded = True
+                    reply_report = FailureHeader.decode(getattr(res, "headers", None))
+                    resent = [error for error in attempt_errors if not is_unsent_connection_failure(error)]
+                    if resent:
+                        # A connection that dropped after the request may have been delivered, then /run was resent and
+                        # answered. The episode may have run twice, so the row says so; the result is used as before.
+                        reply_report = (reply_report or FailureReport()).merged(
+                            failure_report_for(
+                                NgFailureEvent(
+                                    boundary=FailureBoundary.COLLECTION,
+                                    failure_kind=TRANSPORT_PEER_DROP,
+                                    failure_reason=(
+                                        f"{len(resent)} /run attempt(s) dropped after the request may have been "
+                                        f"delivered ({type(resent[0]).__name__}); it was resent and answered, so the "
+                                        "episode may have run more than once"
+                                    ),
+                                    operation=SCORED_DESPITE_FAILURE_OPERATION,
+                                )
+                            )
+                        )
                     return _CompletedRollout(
                         row=row,
                         result=outcome,
@@ -5753,7 +5771,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
-                        failure_report=FailureHeader.decode(getattr(res, "headers", None)),
+                        failure_report=reply_report,
                     )
                 except Exception as e:
                     print(

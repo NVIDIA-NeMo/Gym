@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI
 
+from nemo_gym.core import VERIFIER_ERROR, FailureBoundary, observe_scored_despite_failure
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -164,6 +165,22 @@ class SWEGenResourcesServer(SimpleResourcesServer):
             future = compute_score.remote(*task_args)
             reward, verification_result = await future
             verification_time = time.time() - start_time
+
+        # The reward is used as computed. Where the sandbox could not run the instance, the rollout is recorded as
+        # scored despite that, so it is not mistaken for a patch that was run and found wrong.
+        if verification_result is None:
+            sandbox_failure = "the task row lacks the fields needed to run it (image or instance_info)"
+        elif verification_result.get("status") == "error":
+            sandbox_failure = "the sandbox subprocess could not run the instance"
+        else:
+            sandbox_failure = None
+        if sandbox_failure is not None:
+            observe_scored_despite_failure(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=f"The patch was not evaluated: {sandbox_failure}",
+                stage="verification",
+            )
 
         return SWEGenVerifyResponse(
             **body.model_dump(),

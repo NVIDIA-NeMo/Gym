@@ -2157,6 +2157,10 @@ def eval_status(
     """
     from nemo_gym.rollouts.batch_status import BATCH_STATUS_FNAME
 
+    # Where a submitted job's export step keeps the typed result of each post-run export, beside the artifacts
+    # directory. Mirrors `nemo_gym.orchestration.jobs`, which this command may not import; a test pins them together.
+    artifacts_dirname, exports_dirname, export_result_suffix = "artifacts", "exports", ".result.json"
+
     def status_files(directory: Path) -> list[Path]:
         return sorted({*directory.glob("*_batch_status.json"), *directory.glob(BATCH_STATUS_FNAME)})
 
@@ -2180,6 +2184,21 @@ def eval_status(
                     continue
                 fact = facts.setdefault(match.group(1), {"receipt": False})
                 fact[key] = True if key == "receipt" else (file.parent / name).read_text().strip()
+        # A post-run export that failed or was interrupted leaves no receipt, and its result file says why. Without
+        # this, a failed export reads as "receipt: missing", the same as one that was never attempted.
+        results_dir = file.parent.parent / exports_dirname
+        if file.parent.name == artifacts_dirname and results_dir.is_dir():
+            for result_file in sorted(results_dir.glob(f"*{export_result_suffix}")):
+                try:
+                    payload = json.loads(result_file.read_text())
+                except (OSError, ValueError):
+                    payload = {"state": "unreadable"}
+                result = {"state": payload.get("state") if isinstance(payload, dict) else "unreadable"}
+                if isinstance(payload, dict) and payload.get("error"):
+                    result["error"] = str(payload["error"])
+                facts.setdefault(result_file.name.removesuffix(export_result_suffix), {"receipt": False})["result"] = (
+                    result
+                )
         return facts
 
     path = Path(target)
@@ -2234,6 +2253,11 @@ def eval_status(
                 else "missing"
             )
         )
+        for exporter, fact in facts.items():
+            if "result" in fact:
+                result = fact["result"]
+                error = f": {result['error'][:200]}" if result.get("error") else ""
+                print(f"  export {exporter}: {result['state']}{error}")
         if status.get("tracking") == "disabled":
             print(f"  reason: {status.get('reason', 'unknown')}")
             continue

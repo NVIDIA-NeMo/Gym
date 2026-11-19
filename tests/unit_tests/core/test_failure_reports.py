@@ -538,3 +538,56 @@ def test_a_full_request_log_says_once_that_it_drops_events(caplog) -> None:
             log.add(failure_report_for(_model()))
     assert log.dropped_events == 3 and log.report.omitted
     assert sum("later events are dropped" in record.getMessage() for record in caplog.records) == 1
+
+
+class TestSavedAndDiscardedScoredDespiteFailures:
+    @staticmethod
+    def _observe(reason: str = "cap") -> None:
+        from nemo_gym.core.failure_transport import observe_scored_despite_failure
+
+        observe_scored_despite_failure(boundary="agent", failure_kind="agent_limit", failure_reason=reason)
+
+    def test_saved_events_are_restored_once_under_their_ids_and_select_no_failure(self) -> None:
+        from nemo_gym.core.failure_transport import (
+            SAVED_FAILURE_REPORT_KEY,
+            RequestFailureLog,
+            restore_saved_failure_report,
+            with_saved_failure_report,
+        )
+
+        with RequestFailureLog.capture() as original:
+            self._observe()
+            saved = with_saved_failure_report({"reward": 1.0})
+        (event_id,) = original.report.events
+
+        assert saved["reward"] == 1.0 and list(saved[SAVED_FAILURE_REPORT_KEY]["events"]) == [event_id]
+        with RequestFailureLog.capture() as replay:
+            for _ in range(2):  # replaying twice adds the event once
+                payload = restore_saved_failure_report(dict(saved))
+        assert payload == {"reward": 1.0}
+        assert list(replay.report.events) == [event_id] and replay.report.failure_id is None
+
+    def test_a_result_without_observed_events_is_saved_unchanged(self) -> None:
+        from nemo_gym.core.failure_transport import (
+            RequestFailureLog,
+            restore_saved_failure_report,
+            with_saved_failure_report,
+        )
+
+        assert with_saved_failure_report({"reward": 1.0}) == {"reward": 1.0}  # outside a request
+        with RequestFailureLog.capture():
+            assert with_saved_failure_report({"reward": 1.0}) == {"reward": 1.0}
+            assert restore_saved_failure_report({"reward": 1.0}) == {"reward": 1.0}
+
+    def test_discarding_keeps_only_the_events_since_the_snapshot_as_diagnostics(self) -> None:
+        from nemo_gym.core.failure_transport import RequestFailureLog
+
+        with RequestFailureLog.capture() as log:
+            self._observe("earlier")
+            known = set(log.report.events)
+            self._observe("discarded attempt")
+            log.discard_scored_despite_failures(known)
+
+        by_reason = {e.failure_reason: e.operation for e in log.report.events.values()}
+        assert by_reason == {"earlier": "scored_despite_failure", "discarded attempt": "discarded_attempt"}
+        assert log.report.failure_id is None

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 from typing import Generator
 from unittest.mock import MagicMock
 
@@ -15,7 +16,11 @@ from code_extraction import preprocess_code_completion
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse, RequestFailureLog
+
+
+# Other tests in this module replace the method on the class for the whole module, so keep the real one.
+_REAL_RUN_IN_VENV = BigCodeBenchResourcesServer._run_in_venv
 
 
 # ---------------------------------------------------------------------------
@@ -263,3 +268,62 @@ def test_get_key_metrics_picks_pass_at_1_avg() -> None:
     assert "mean/input_tokens" in key
     assert "mean/output_tokens" in key
     assert any("pass@1[avg-of-4]" in k for k in key)
+
+
+class TestRunnerFailuresAreRecorded:
+    """A runner that fails says nothing about the solution. The result is scored as before and the failure is recorded."""
+
+    async def _run(self, server: BigCodeBenchResourcesServer, tmp_path, monkeypatch, script: str, **config):
+        runner = tmp_path / "runner.py"
+        runner.write_text(script)
+        monkeypatch.setattr(server, "_bcb_python", sys.executable)
+        monkeypatch.setattr(server, "_runner_path", runner)
+        for name, value in config.items():
+            monkeypatch.setattr(server.config, name, value)
+        with RequestFailureLog.capture() as log:
+            result = await _REAL_RUN_IN_VENV(server, "code", "test", "entry")
+        return result, [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+
+    async def test_a_runner_that_prints_no_json_is_recorded(self, server, tmp_path, monkeypatch) -> None:
+        result, recorded = await self._run(
+            server, tmp_path, monkeypatch, "import sys\nprint('boom')\nsys.stderr.write('broken venv')\n"
+        )
+
+        assert result["status"] == "error"  # unchanged
+        (event,) = recorded
+        assert (event.boundary.value, event.failure_kind, event.stage) == (
+            "resources_server",
+            "verifier_error",
+            "verification",
+        )
+        assert "broken venv" in event.failure_reason
+
+    async def test_a_runner_that_outlasts_its_time_limit_is_recorded(self, server, tmp_path, monkeypatch) -> None:
+        result, recorded = await self._run(
+            server, tmp_path, monkeypatch, "import time\ntime.sleep(30)\n", subprocess_timeout=0.5
+        )
+
+        assert result == {"status": "timeout", "details": {"reason": "outer_subprocess_timeout"}}  # unchanged
+        (event,) = recorded
+        assert event.failure_kind == "verifier_error" and "0.5 s" in event.failure_reason
+
+    async def test_a_runner_that_reports_its_own_error_is_recorded(self, server, tmp_path, monkeypatch) -> None:
+        script = (
+            "import json\n"
+            "print(json.dumps({'status': 'error', 'details': {'traceback': 'ImportError: bigcodebench'}}))\n"
+        )
+        result, recorded = await self._run(server, tmp_path, monkeypatch, script)
+
+        assert result == {"status": "error", "details": {"traceback": "ImportError: bigcodebench"}}  # unchanged
+        (event,) = recorded
+        assert event.failure_kind == "verifier_error" and "ImportError: bigcodebench" in event.failure_reason
+
+    async def test_a_runner_that_grades_the_solution_is_not_recorded(self, server, tmp_path, monkeypatch) -> None:
+        # The runner's own timeout is the solution running too long; null is its documented no-status result.
+        for status in ("pass", "fail", "timeout", None):
+            result, recorded = await self._run(
+                server, tmp_path, monkeypatch, f"import json\nprint(json.dumps({{'status': {status!r}}}))\n"
+            )
+
+            assert result["status"] == status
+            assert recorded == []

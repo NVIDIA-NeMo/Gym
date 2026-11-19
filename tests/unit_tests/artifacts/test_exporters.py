@@ -812,6 +812,43 @@ class TestMLflowExporter:
 
         client.set_terminated.assert_called_once_with("run-1", status="FAILED")
 
+    def _open_wandb_exporter(self, monkeypatch: MonkeyPatch, wandb_config: DictConfig) -> tuple:
+        run = MagicMock()
+        monkeypatch.setattr(wandb_module.wandb, "init", MagicMock(return_value=run))
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+        exporter = WandbExporter(wandb_config)
+        exporter.setup()
+        return exporter, run
+
+    def test_wandb_teardown_finishes_a_run_that_went_well_as_it_always_did(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
+    ) -> None:
+        exporter, run = self._open_wandb_exporter(monkeypatch, wandb_config)
+
+        exporter.teardown()
+
+        run.finish.assert_called_once_with()
+
+    def test_wandb_teardown_closes_a_run_whose_evaluation_failed_as_failed(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
+    ) -> None:
+        exporter, run = self._open_wandb_exporter(monkeypatch, wandb_config)
+
+        exporters_module.mark_run_failed()
+        exporter.teardown()
+
+        run.finish.assert_called_once_with(exit_code=1)
+
+    def test_wandb_teardown_closes_a_run_whose_delivery_failed_as_failed(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
+    ) -> None:
+        exporter, run = self._open_wandb_exporter(monkeypatch, wandb_config)
+
+        exporter._delivery_failed = True  # `_guard` sets this when a log call fails; TestGuard covers that
+        exporter.teardown()
+
+        run.finish.assert_called_once_with(exit_code=1)
+
     def test_opening_exporters_clears_an_earlier_failure(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
     ) -> None:

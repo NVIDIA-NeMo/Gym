@@ -2737,6 +2737,28 @@ class TestRolloutReverificationRunFromConfig:
         assert returned[0][TASK_INDEX_KEY_NAME] == 0
         assert returned[0]["reward"] == 1.0
 
+    async def test_a_kill_shaped_result_is_announced_though_it_is_written_nowhere(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        pairs = [
+            (self._make_row("agent_a", task=0), {"reward": 1.0}),
+            (self._make_row("agent_a", task=1), {"reward": 0.0, NG_NO_PERSIST_KEY: True}),
+        ]
+        self._patch_common(monkeypatch, pairs)
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, disable_aggregation=True)
+        )
+
+        # Nothing about where it is written or counted changes: one row in the output, none in the sidecar.
+        assert len(returned) == 1
+        assert len(self._read_jsonl(tmp_path / "output.jsonl")) == 1
+        assert self._read_jsonl(tmp_path / "output_failures.jsonl") == []
+        output = capsys.readouterr()
+        announced = [line for line in (output.out + output.err).splitlines() if "rollout not recorded" in line]
+        assert len(announced) == 1
+        assert "a resume verifies it again" in announced[0] and '"task_index": 1' in announced[0].replace("_ng_", "")
+
     @pytest.mark.parametrize(
         ("include_failure_class", "reported_failure_class", "expected_failure_class"),
         [

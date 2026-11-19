@@ -15,6 +15,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import types
 from pathlib import Path
@@ -2485,6 +2486,90 @@ def test_eval_status_reports_each_exporter_receipt_and_live_run_id(tmp_path, mon
         assert entry["export"] == expected
     else:
         assert "export receipt: mlflow present (run id run-123), wandb missing (run id w-7)" in output
+
+
+def _status_run_with_exports(tmp_path: Path, results: dict[str, object]) -> Path:
+    """A job's benchmark directory: `artifacts/` with a status file, and `exports/` with each export's result."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    status = {
+        "schema_version": "1",
+        "tracking": "enabled",
+        "members": {"a": {"completed_rollout_count": 1, "remaining_rollout_count": 0, "failures_by_class": {}}},
+    }
+    (artifacts / "rollouts_batch_status.json").write_text(json.dumps(status))
+    exports = tmp_path / "exports"
+    exports.mkdir()
+    for name, payload in results.items():
+        (exports / f"{name}.result.json").write_text(payload if isinstance(payload, str) else json.dumps(payload))
+    return artifacts
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_eval_status_says_why_a_post_run_export_has_no_receipt(tmp_path, monkeypatch, capsys, json_output):
+    artifacts = _status_run_with_exports(
+        tmp_path,
+        {
+            "mlflow": {"state": "failed", "exit_code": 1, "error": "ConnectionError: tracking server unreachable"},
+            "wandb": {"state": "running"},
+            "atif": {"state": "success", "exit_code": 0, "error": None},
+        },
+    )
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(artifacts), *(["--json"] if json_output else [])])
+    cli_main.main()
+    output = capsys.readouterr().out
+
+    if json_output:
+        [entry] = json.loads(output).values()
+        assert entry["export"]["mlflow"]["result"] == {
+            "state": "failed",
+            "error": "ConnectionError: tracking server unreachable",
+        }
+        assert entry["export"]["wandb"]["result"] == {"state": "running"}
+        assert entry["export"]["atif"]["result"] == {"state": "success"}
+    else:
+        assert "export mlflow: failed: ConnectionError: tracking server unreachable" in output
+        assert "export wandb: running" in output
+        assert "export atif: success" in output
+        # The receipt line is as it was, and a failed export is still missing its receipt.
+        assert "export receipt: atif missing, mlflow missing, wandb missing" in output
+
+
+def test_eval_status_survives_an_unreadable_export_result(tmp_path, monkeypatch, capsys):
+    artifacts = _status_run_with_exports(tmp_path, {"mlflow": "{not json"})
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(artifacts)])
+    cli_main.main()
+
+    assert "export mlflow: unreadable" in capsys.readouterr().out
+
+
+def test_eval_status_without_export_results_is_as_it_was(tmp_path, monkeypatch, capsys):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_batch_status.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "members": {
+                    "a": {"completed_rollout_count": 1, "remaining_rollout_count": 0, "failures_by_class": {}}
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(artifacts)])
+    cli_main.main()
+    output = capsys.readouterr().out
+
+    assert "export receipt: missing" in output
+    assert re.search(r"^  export (?!receipt)", output, re.MULTILINE) is None
+
+
+def test_the_status_command_reads_export_results_where_the_export_step_writes_them():
+    # `eval status` may not import orchestration, so it spells these names itself.
+    from nemo_gym.orchestration import jobs
+
+    source = Path(cli_main.__file__).with_name("eval.py").read_text()
+    assert f'"{jobs.ARTIFACTS_DIRNAME}", "{jobs.EXPORTS_DIRNAME}", "{jobs.EXPORT_RESULT_SUFFIX}"' in source
 
 
 def test_eval_status_missing_artifact_is_actionable(tmp_path, monkeypatch, capsys):
