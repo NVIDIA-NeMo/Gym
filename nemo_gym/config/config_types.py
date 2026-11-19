@@ -730,10 +730,17 @@ class BaseRunServerInstanceConfig(BaseRunServerConfig):
 class BaseRunServerTypeConfig(BaseRunServerConfig):
     model_config = ConfigDict(extra="allow")
 
+    entrypoint: Optional[str] = None
     host: Optional[str] = None
     port: Optional[int] = None
 
     datasets: Optional[List[Union[DatasetConfig, BenchmarkDatasetConfig]]] = None
+
+    @model_validator(mode="after")
+    def validate_external_endpoint(self) -> "BaseRunServerTypeConfig":
+        if self.entrypoint is None and (not self.host or self.port is None or not 1 <= self.port <= 65535):
+            raise ValueError("An external server requires an explicit host and port when entrypoint is omitted.")
+        return self
 
 
 class BaseServerTypeConfig(BaseModel):
@@ -899,13 +906,15 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
     if not has_server_type:
         return False
 
-    # Check for entrypoint presence.
+    # Both a local entrypoint and an external endpoint indicate a server block.
     for server_type_key in SERVER_TYPE_KEYS:
         if server_type_key in server_type_config_dict:
             inner_dict = server_type_config_dict[server_type_key]
             if isinstance(inner_dict, DictConfig):
                 for config in inner_dict.values():
-                    if isinstance(config, DictConfig) and ENTRYPOINT_KEY_NAME in config:
+                    if isinstance(config, DictConfig) and any(
+                        key in config for key in (ENTRYPOINT_KEY_NAME, "host", "port")
+                    ):
                         return True
 
     return False
