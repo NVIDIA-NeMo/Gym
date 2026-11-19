@@ -37,10 +37,13 @@ Tools implement ``async execute(args, state, logger)`` and share a per-session
 """
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
+import shutil
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence, Union
 
@@ -111,6 +114,46 @@ except ImportError:  # pragma: no cover - exercised only under flat entrypoint e
 
 logger = logging.getLogger(__name__)
 
+
+def stage_local_edgar_files(
+    index_path: str, metadata_path: Optional[str], stage_dir: str
+) -> tuple[str, Optional[str]]:
+    """Copy the local EDGAR index, its metadata sidecar and WAL into stage_dir; return the staged paths.
+
+    A runtime SQLite database should not be read in place on shared storage, so the server reads a node-local copy.
+    The index (and a configured sidecar) must exist. A staged copy whose size and modification time match its source
+    is kept; anything else is copied again, through a ``.partial`` name and a rename, under a lock on the stage
+    directory so that concurrent server processes on a node copy each file once. An optional file (the WAL, or the
+    default sidecar) that the source lacks is removed from the stage, so a stale copy never pairs with a new index.
+    """
+    stage = Path(stage_dir)
+    stage.mkdir(parents=True, exist_ok=True)
+    index = Path(index_path)
+    if not index.is_file():
+        raise FileNotFoundError(f"Local EDGAR index not found: {index}")
+    sidecar = Path(metadata_path) if metadata_path else Path(str(index) + ".metadata")
+    if metadata_path and not sidecar.is_file():
+        raise FileNotFoundError(f"Local EDGAR metadata sidecar not found: {sidecar}")
+    with open(stage / ".stage.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for source in (index, Path(str(index) + "-wal"), sidecar):
+            target = stage / source.name
+            if not source.is_file():
+                target.unlink(missing_ok=True)
+                continue
+            source_stat = source.stat()
+            if target.is_file():
+                target_stat = target.stat()
+                if (target_stat.st_size, target_stat.st_mtime_ns) == (source_stat.st_size, source_stat.st_mtime_ns):
+                    continue
+            started = time.monotonic()
+            partial = target.with_name(target.name + ".partial")
+            shutil.copy2(source, partial)
+            os.replace(partial, target)
+            logger.info("edgar_search: staged %s to %s in %.0f s", source, target, time.monotonic() - started)
+    return str(stage / index.name), (str(stage / sidecar.name) if metadata_path else None)
+
+
 # Ceiling on the escalated judge output budget (see _judge_attempt). A correct judge
 # never reaches it: gpt-5.2 answers this prompt in ~200 output tokens at effort=high.
 _JUDGE_MAX_OUTPUT_TOKENS_CAP = 32768
@@ -147,6 +190,12 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         description="Metadata sidecar for the local index, built by "
         "resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py. Defaults to the index path "
         "plus '.metadata' when that file exists. Searches are far slower without it.",
+    )
+    local_edgar_stage_dir: Optional[str] = Field(
+        default=None,
+        description="Node-local directory to copy the local index (and its metadata sidecar and WAL) into once at "
+        "startup; the server then reads the copy. For an index on shared storage, where a runtime database should not "
+        "be read in place.",
     )
     sec_dump_path: Optional[str] = Field(
         default=None,
@@ -516,14 +565,19 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                     "edgar_search_mode is 'local' but local_edgar_index_path is not set. Local mode serves "
                     "edgar_search entirely from that index; without it every search would fail mid-rollout."
                 )
+            index_path, metadata_path = self.config.local_edgar_index_path, self.config.local_edgar_metadata_path
+            if self.config.local_edgar_stage_dir:
+                index_path, metadata_path = stage_local_edgar_files(
+                    index_path, metadata_path, self.config.local_edgar_stage_dir
+                )
             self._local_edgar = LocalEdgarSearch(
-                self.config.local_edgar_index_path,
+                index_path,
                 max_end_date=MAX_END_DATE,
-                metadata_path=self.config.local_edgar_metadata_path,
+                metadata_path=metadata_path,
             )
             logger.info(
                 "edgar_search: local mode, index %s (coverage %s)",
-                self.config.local_edgar_index_path,
+                index_path,
                 self._local_edgar.coverage,
             )
         elif not self.config.sec_api_key:
