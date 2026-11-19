@@ -11,17 +11,29 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox import SandboxExecResult
 
 
-OPENCODE_VERSION = "1.17.11"
+OPENCODE_VERSION = "1.19.6"
 # OpenCode 2 (npm @opencode/cli, GitHub releases of anomalyco/opencode), selected with opencode_version.
-OPENCODE_V2_VERSION = "2.2.7"
-# SHA-256 of each Linux release asset the sandbox installer downloads, from the release's SHA256SUMS. A 2.x version
+OPENCODE_V2_VERSION = "2.3.2"
+# SHA-256 of each Linux release asset the sandbox installer downloads, from the upstream release assets. A 2.x version
 # without an entry here cannot be downloaded into a sandbox; pin a binary with sandbox_executable_path instead.
 OPENCODE_RELEASE_SHA256 = {
+    "1.19.6": {
+        "x64-baseline": "8443113b3f3dfebf8b0fa91c4377e5519a62b9231732d9344a5df001e4a852b3",  # pragma: allowlist secret
+        "x64-baseline-musl": "bc6b0d702163d859161ee8e43ea3f16d1bd43b305ac7ce17742eb01ba72489f3",  # pragma: allowlist secret
+        "arm64": "5b68c1f4c5e75b4134e664cc8f36d634d64208d4fcfe5bcf3b48bab699c2dbac",  # pragma: allowlist secret
+        "arm64-musl": "45407388777dfc1894591c9727c169f202ad92c75757038950630a0fbb12ca97",  # pragma: allowlist secret
+    },
     "2.2.7": {
         "x64-baseline": "89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7",  # pragma: allowlist secret
         "x64-baseline-musl": "c1801a36bf61e03eafac8d7f4521a200e4d3cd76cf43b36621cb78b460b851ee",  # pragma: allowlist secret
         "arm64": "c1682057f0815cb2abdd6e00305f1146ebaf1c167f0335cdb74ddc80008120e7",  # pragma: allowlist secret
         "arm64-musl": "a03405f94ae02db7acb0870cf32030bab86460dc7faf524780e9cae305526b96",  # pragma: allowlist secret
+    },
+    "2.3.2": {
+        "x64-baseline": "563b5d663637226b6e3bb4bb6803281bc39b0d2cd88db06d674b6420aab009b0",  # pragma: allowlist secret
+        "x64-baseline-musl": "4e952a67874cfdb4f53eeae5840f9813acc9f109c10e61bc26020271f56d7d84",  # pragma: allowlist secret
+        "arm64": "9d10185acdb72336e086e699ca363a6065f410fd3c1caed0dc8046e95ac06ccb",  # pragma: allowlist secret
+        "arm64-musl": "2148ba748f5410177868ed67d59ef70626cb6bd4fb2abc5177c807adfdc24fc3",  # pragma: allowlist secret
     },
 }
 

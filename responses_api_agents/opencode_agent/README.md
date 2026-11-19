@@ -6,7 +6,7 @@ sandbox; without one, requests run locally. Invalid or closed sessions fail.
 Episodes use an Environment Server; the default agent `/run` returns HTTP 422.
 Direct local `/v1/responses` remains available without a Resources binding.
 
-The agent runs OpenCode 1.17.11 by default. `opencode_version: "2.2.7"` selects OpenCode 2 through the same
+The agent runs OpenCode 1.19.6 by default. `opencode_version: "2.3.2"` selects OpenCode 2 through the same
 adapter; see [OpenCode 2](#opencode-2) for what differs.
 
 Training token-ID capture is off by default. Enable the agent's `token_id_capture`
@@ -248,8 +248,9 @@ training entry's `subagents.yaml` is an example.
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
 gaps. Reported API errors retain their classified cause for the Environment Server to decide grading and retries; worker and cleanup failures remain execution errors; explicit limits can retain
-gradable partial output. This path is eval-only; working inference does not establish
-training token-ID/logprob support or benchmark accuracy. Sandbox observations use the shared
+gradable partial output. For training, enable run-level and agent-level `token_id_capture`. Gym records the prompt token IDs,
+generated token IDs and log probabilities at the model server when its backend supplies them. OpenCode’s
+session store supplies turn and tool evidence. Sandbox observations use the shared
 `FailureStage` vocabulary: execution is `agent`, while OpenCode’s own setup failure events use `seed`.
 An existing failure stage is preserved when forwarded; scoring and retries belong to the caller’s outcome policy.
 
@@ -299,7 +300,7 @@ stricter, single-activation contract described above. The intentional difference
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
 | Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
-| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; `max_output_tokens` (a per-call limit) accepted when at least the configured limit; other controls rejected explicitly |
+| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11 and 1.19.6; `max_output_tokens` (a per-call limit) accepted when at least the configured limit; other controls rejected explicitly |
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
@@ -390,7 +391,7 @@ and checks archive members itself. OpenCode's `export` and `import` get
 ### Request sampling
 
 A request's `temperature` and `top_p` reach every model call OpenCode makes for the
-activation. OpenCode 1.17.11 gives each agent its own sampling and none inherits from
+activation. OpenCode 1.17.11 and 1.19.6 give each agent its own sampling and none inherits from
 `build` (`title` fixes temperature 0.5), so the adapter sets both on all built-in agents:
 `build`, `plan`, `general`, `explore`, `compaction`, `title` and `summary`. An agent
 name OpenCode does not define would add an agent, so the list is version-specific: with
@@ -525,15 +526,15 @@ harness runner's `cd` sets it), so all three bind the session to the same direct
 
 OpenCode 2 is the rewrite of OpenCode that upstream (`anomalyco/opencode`) releases as 2.x: npm `@opencode/cli`
 and the `opencode-linux-*` assets of its GitHub releases, which the npm package `opencode-ai` (1.x) no longer
-tracks. Setting `opencode_version` to a 2.x release selects it; the adapter pins 2.2.7. `opencode_agent` keeps
-OpenCode 1.17.11 as its default, so existing configs run unchanged. To run a recipe on OpenCode 2, set the version
+tracks. Setting `opencode_version` to a 2.x release selects it; the adapter pins 2.3.2. The default is OpenCode 1.19.6.
+Existing explicit pins at 1.17.11 and 2.2.7 remain available. To run a recipe on OpenCode 2, set the version
 on its agent instance:
 
 ```yaml
 opencode_agent:
   responses_api_agents:
     opencode_agent:
-      opencode_version: "2.2.7"
+      opencode_version: "2.3.2"
 ```
 
 The version is a setting of `opencode_agent`, like the permission profile, not a separate agent variant.
@@ -543,7 +544,7 @@ handled in `opencode2/`:
 
 - **Installation.** The installer downloads the same release asset names and checks each download against the
   release's SHA-256 (`OPENCODE_RELEASE_SHA256` in `runtime.py`); a 2.x version without pinned digests needs
-  `sandbox_executable_path`. OpenCode 2 prints `opencode v2.2.7` for `--version`. It installs no plugin
+  `sandbox_executable_path`. OpenCode 2 prints `opencode v2.3.2` for `--version`. It installs no plugin
   dependencies, so `sandbox_plugin_dependencies_path` is refused. ripgrep is found as in OpenCode 1.
 - **Processes.** Every command runs with `--standalone`: without it, OpenCode 2 joins (or, for `session export`
   and `session import`, starts) a background OpenCode service with that service's configuration. Each run's
