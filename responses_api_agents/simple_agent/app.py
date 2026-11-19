@@ -551,7 +551,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         invocation_id = "root" if activation_id == 1 else f"activation-{activation_id}"
         started = perf_counter()
         try:
-            model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
+            # Through the session hook, as an activation without continuation does, so a subclass's task context applies.
+            (
+                model_response,
+                trajectory,
+                model_server_cookies,
+                resources_server_cookies,
+            ) = await self._create_session_episode(
+                state,
                 request_body,
                 model_url_path=state.model_url_path,
                 model_server_cookies=state.model_server_cookies,
@@ -594,7 +601,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             state.resources_cookies = dict(resources_server_cookies or {})
         if trajectory is not None:
             # The session's conversation is its activations' conversations in order, so each invocation keeps only
-            # this activation's new input and output, and the close payload grows with the conversation, not its square.
+            # this activation's new input and output. Each turn's question still holds the model-visible prefix, as in
+            # a single activation.
             self._record_activation(
                 state,
                 trajectory.model_copy(

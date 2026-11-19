@@ -4035,12 +4035,13 @@ class TestContinuationSessions:
             json={
                 "input": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "first?"}],
                 "tools": [{"type": "function", "name": "lookup", "parameters": {}, "strict": True}],
+                "metadata": {"turn": "1"},
             },
             headers={AGENT_ACTIVATION_HEADER: "1"},
         )
         second = client.post(
             "/ng-rollout/rollout/v1/responses",
-            json={"input": [{"role": "user", "content": "second?"}]},
+            json={"input": [{"role": "user", "content": "second?"}], "metadata": {"turn": "2"}},
             headers={AGENT_ACTIVATION_HEADER: "2"},
         )
         close = client.post(
@@ -4058,12 +4059,40 @@ class TestContinuationSessions:
         ]
         # The second activation keeps the tools of the first, which did not send them again.
         assert [tool["name"] for tool in second_request["tools"]] == ["lookup"]
+        # Every model call stays on the rollout's route, and each activation sends its own metadata.
+        calls = server_client.post.await_args_list
+        assert [call.kwargs["url_path"] for call in calls] == ["/ng-rollout/rollout/v1/responses"] * 2
+        assert [call.kwargs["json"].metadata for call in calls] == [{"turn": "1"}, {"turn": "2"}]
         trajectory = TrajectoryRecord.model_validate(close.json()["trajectory"])
         assert [(invocation.invocation_id, invocation.activation_id) for invocation in trajectory.invocations] == [
             ("root", 1),
             ("activation-2", 2),
         ]
         assert all(invocation.duration_ms is not None for invocation in trajectory.invocations)
+
+    async def test_a_continuation_activation_runs_through_the_subclass_s_session_hook(self) -> None:
+        """A subclass whose task context lives in its session state gets it on every activation, the first and the next."""
+        seen_states: list[Any] = []
+
+        class _StatefulAgent(SimpleAgent):
+            continuation_supported = True
+
+            async def _create_session_episode(self, state, body, **kwargs):  # noqa: ANN001, ANN003, ANN202
+                seen_states.append(state)
+                return await super()._create_session_episode(state, body, **kwargs)
+
+        server, server_client = _make_agent(False, _StatefulAgent)
+        server_client.post = AsyncMock(side_effect=[_message_response("resp-1"), _message_response("resp-2")])
+        client = TestClient(server.setup_webserver())
+        _seed_continuation(client)
+
+        for activation in ("1", "2"):
+            reply = client.post(
+                "/v1/responses", json={"input": "next?"}, headers={AGENT_ACTIVATION_HEADER: activation}
+            )
+            assert reply.status_code == 200
+
+        assert len(seen_states) == 2 and seen_states[0] is seen_states[1]
 
     @pytest.mark.parametrize(
         "changed, field",
