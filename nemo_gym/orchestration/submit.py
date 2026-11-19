@@ -57,6 +57,7 @@ from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm.reader import reader_token
 from nemo_gym.orchestration.executors.slurm.resume_script import fresh_restart_command
+from nemo_gym.orchestration.executors.slurm.shared import SharedSlurmExecutor
 from nemo_gym.orchestration.jobs import (
     BenchmarkJob,
     JobInfo,
@@ -66,6 +67,7 @@ from nemo_gym.orchestration.jobs import (
     list_submissions,
     load_submission_record,
 )
+from nemo_gym.orchestration.shared_allocation import SharedAllocationConfig
 from nemo_gym.utils.decorators import experimental
 
 
@@ -75,10 +77,13 @@ _EXECUTORS = {
 }
 # A record names its executor as a string, so a resubmit dispatches on that.
 _EXECUTORS_BY_NAME = {executor.name: executor for executor in _EXECUTORS.values()}
+_EXECUTORS_BY_NAME[SharedSlurmExecutor.name] = SharedSlurmExecutor
 
 
 @experimental
-def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
+def submit(config: SubmitConfig | SharedAllocationConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
+    if isinstance(config, SharedAllocationConfig):
+        return SharedSlurmExecutor().run(config, dry_run=dry_run)
     compute = next(iter(config.compute.values()))
     executor_cls = _EXECUTORS[type(compute)]
 

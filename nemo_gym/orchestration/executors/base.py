@@ -37,6 +37,7 @@ from nemo_gym.orchestration.jobs import (
     SubmissionRecord,
     SubmissionTelemetry,
 )
+from nemo_gym.orchestration.shared_allocation import SharedAllocationConfig
 
 
 class UnsupportedOperationError(RuntimeError):
@@ -169,7 +170,7 @@ class BaseExecutor(ABC):
 
     @staticmethod
     def submission_environment(
-        config: SubmitConfig, *, required_env: list[str], forwarded_env: list[str]
+        config: SubmitConfig | SharedAllocationConfig, *, required_env: list[str], forwarded_env: list[str]
     ) -> SubmissionEnvironment:
         """Capture known names and resolved controls without inspecting environment values.
 
@@ -210,7 +211,7 @@ class BaseExecutor(ABC):
     def persist(
         self,
         record: SubmissionRecord,
-        config: SubmitConfig,
+        config: SubmitConfig | SharedAllocationConfig,
         write_manifest: Callable[..., None],
     ) -> None:
         """Store the record and the resolved config, in the order that survives a partial failure.

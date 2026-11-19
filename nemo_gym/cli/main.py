@@ -498,6 +498,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 
     from nemo_gym.config.config_types import ConfigError
     from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
+    from nemo_gym.orchestration.shared_allocation import SharedAllocationConfig
     from nemo_gym.orchestration.submit import is_inspectable, submit
 
     _reject_scratch_namespace_additions(overrides)
@@ -520,6 +521,11 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     scratch_keys = {key for key in resolved if key.startswith("_")}
     # Malformed driver/benchmarks shapes are left for SubmitConfig validation to report.
     driver = resolved.get("driver")
+    shared = resolved.get("kind") == "shared_allocation"
+    if shared and args.select is not None:
+        raise ConfigError(
+            "--select is not supported for a shared allocation; explicitly edit its members before submission"
+        )
     available = driver.get("benchmarks") if isinstance(driver, dict) else None
     if (
         args.select is not None
@@ -543,7 +549,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     # SubmitConfig is an orchestration model: report schema errors against its YAML file
     # rather than using the generic CLI handler's +key=<value> hint.
     try:
-        config = SubmitConfig.model_validate(
+        config = (SharedAllocationConfig if shared else SubmitConfig).model_validate(
             {key: value for key, value in resolved.items() if key not in scratch_keys}
         )
     except ValidationError as e:

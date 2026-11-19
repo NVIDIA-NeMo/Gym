@@ -1,6 +1,6 @@
 ---
 title: "How-To Guides"
-description: "Task-oriented guides for gym eval submit: multi-node vLLM, prefill/decode, node pools, custom harnesses, resumable runs, and Lustre metadata load."
+description: "Task-oriented guides for gym eval submit: model services, node pools, custom harnesses, recovery, metadata load, and shared allocations."
 position: 7
 ---
 
@@ -30,6 +30,10 @@ Continue automatically after a time limit, preemption, or node failure.
 
 <Card title="Lustre Metadata Load" href="/orchestration/how-to/lustre-metadata-stats">
 Measure how many Lustre metadata requests a job makes, per phase.
+</Card>
+
+<Card title="Shared Allocation" href="/orchestration/how-to/shared-allocation">
+Run independently pinned benchmark drivers against shared model services in one Slurm allocation.
 </Card>
 
 </Cards>

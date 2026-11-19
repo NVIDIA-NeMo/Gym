@@ -67,6 +67,8 @@ The **model** (also called the **policy**) is what you call for generation — l
 | Term | Definition |
 | --- | --- |
 | **Driver supervision** | Owning a driver invocation until its local descendants and scheduler step have stopped, without deciding whether its evaluation should retry. |
+| **Shared allocation** | One Slurm allocation hosting shared model services and multiple independently pinned benchmark drivers. |
+| **Policy admission** | A shared concurrent-request limit that holds each permit through the policy response stream. |
 
 ### Sessions
 
