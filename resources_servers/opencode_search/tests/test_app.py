@@ -40,6 +40,7 @@ from resources_servers.opencode_search.app import (
     parse_judge_verdict,
 )
 from resources_servers.opencode_search.exa_cache import ExaCache
+from resources_servers.opencode_search.tests.support import within
 
 
 def _text_part(text: str) -> SimpleNamespace:
@@ -344,6 +345,9 @@ SEARCH = {
 }
 # The search endpoint's reply: one SSE frame that carries the JSON-RPC envelope.
 FRAME = b'data: {"jsonrpc": "2.0", "id": 1, "result": {"content": []}}\n\n'
+# Limit for one /mcp request. The first request in a process also pays the app's lazy imports, so this is generous,
+# but it stays below the 30 s that a blocked walk is held for: a request that waited for the walk still fails.
+REQUEST_TIMEOUT_S = 20
 
 
 class _Upstream:
@@ -373,8 +377,9 @@ class _Upstream:
         )
 
 
-def _search_cache_server(exa_cache_root: str) -> SearchResourcesServer:
-    """A server that lends no sandbox, with its search cache at exa_cache_root; an empty root turns the cache off."""
+def _search_cache_server(exa_cache_root: str, **settings: Any) -> SearchResourcesServer:
+    """A server that lends no sandbox, with its search cache at exa_cache_root; an empty root turns the cache off.
+    settings are its other config fields, such as exa_cache_read_only or num_workers."""
     return SearchResourcesServer(
         config=SearchResourcesServerConfig(
             host="0.0.0.0",
@@ -386,6 +391,7 @@ def _search_cache_server(exa_cache_root: str) -> SearchResourcesServer:
             sandbox_image="image",
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
             exa_cache_root=exa_cache_root,
+            **settings,
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -461,3 +467,90 @@ class TestSearchCacheProxy:
 
         assert reply.status_code == 502 and reply.content == b""
         assert len(upstream.calls) == 1
+
+    def test_mcp_serves_an_exact_hit_while_the_index_builds(self, tmp_path, monkeypatch):
+        release = threading.Event()
+        walk = ExaCache._walk
+
+        def blocked_walk(cache: ExaCache) -> tuple:
+            release.wait(30)
+            return walk(cache)
+
+        monkeypatch.setattr(ExaCache, "_walk", blocked_walk)
+        upstream = _Upstream()
+        monkeypatch.setattr("resources_servers.opencode_search.app.aiohttp.ClientSession", upstream)
+        payload = 'event: message\ndata: {"result": {"content": []}}\n\n'
+        query = SEARCH["params"]["arguments"]["query"]
+        ExaCache(str(tmp_path / "store"), exact_only=True).put("search", query, payload)
+        server = _search_cache_server(str(tmp_path / "store"))
+        try:
+            app = server.setup_webserver()
+            assert server._cache._loader.is_alive()
+
+            reply = within(REQUEST_TIMEOUT_S, TestClient(app).post, "/mcp", json=SEARCH)
+
+            assert reply.status_code == 200 and reply.text == payload
+            assert upstream.calls == []
+            assert server._cache._loader.is_alive()
+        finally:
+            release.set()
+            if server._exa_cache is not None and server._exa_cache._loader is not None:
+                server._exa_cache._loader.join(5)
+
+    def test_read_only_mcp_returns_upstream_and_stores_nothing(self, tmp_path, monkeypatch, capsys):
+        upstream = _Upstream()
+        monkeypatch.setattr("resources_servers.opencode_search.app.aiohttp.ClientSession", upstream)
+        server = _search_cache_server(str(tmp_path / "store"), exa_cache_read_only=True)
+        app = server.setup_webserver()
+        try:
+            reply = within(REQUEST_TIMEOUT_S, TestClient(app).post, "/mcp", json=SEARCH)
+        finally:
+            server._cache._loader.join(5)
+
+        assert reply.status_code == 200 and reply.content == FRAME
+        assert len(upstream.calls) == 1
+        assert not (tmp_path / "store").exists()
+        assert server._cache.stats["put_skipped_read_only"] == 1
+        assert "[exa-cache] MISS kind=search not stored" in capsys.readouterr().out
+
+    def test_exact_only_server_starts_no_index_thread(self, tmp_path):
+        fields = SearchResourcesServerConfig.model_fields
+        # Unset, the cache behaves as before these options existed: fuzzy matching, write-back, no index file.
+        assert fields["exa_cache_exact_only"].default is False
+        assert fields["exa_cache_read_only"].default is False
+        assert fields["exa_cache_index_path"].default == ""
+        server = _search_cache_server(str(tmp_path / "store"), exa_cache_exact_only=True)
+
+        server.setup_webserver()
+
+        assert server._cache._loader is None
+
+    @pytest.mark.parametrize(
+        ("num_workers", "worker", "builds"),
+        [(None, False, True), (2, False, False), (2, True, True)],
+        ids=["one_process", "main_process_of_workers", "worker"],
+    )
+    def test_only_a_process_that_serves_the_app_builds_the_index(
+        self, tmp_path, monkeypatch, num_workers, worker, builds
+    ):
+        """With num_workers > 1, the main process runs setup_webserver too, but never serves the app."""
+        monkeypatch.setattr("resources_servers.opencode_search.app.is_nemo_gym_fastapi_worker", lambda: worker)
+        server = _search_cache_server(str(tmp_path / "store"), num_workers=num_workers)
+
+        server.setup_webserver()
+
+        loader = server._exa_cache._loader if server._exa_cache is not None else None
+        if loader is not None:
+            loader.join(5)
+        assert (loader is not None) == builds
+
+    def test_index_build_saves_the_index_file_at_exa_cache_index_path(self, tmp_path):
+        index_file = tmp_path / "index.json"
+        ExaCache(str(tmp_path / "store"), exact_only=True).put("search", "capital of australia", "payload")
+        server = _search_cache_server(str(tmp_path / "store"), exa_cache_index_path=str(index_file))
+
+        server.setup_webserver()
+        server._cache._loader.join(5)
+
+        assert not server._cache._loader.is_alive()
+        assert list(json.loads(index_file.read_text())["entries"]["search"].values()) == ["capital of australia"]

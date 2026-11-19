@@ -377,3 +377,86 @@ sets the agent's `export_dir`, and leaves `episode_export_copy_dir` to a run's o
 
 `unparseable_verdict_policy` decides a rollout the judge gave no verdict, on either pairing: `zero` (the
 default, for evaluation) or `mask` (for training; see [Training](#training)). Neither preset sets it.
+
+## Exa response cache
+
+Off by default. Set `exa_cache_root` (env `NEMO_GYM_EXA_CACHE_ROOT`) to the absolute path of a directory
+to turn it on. The server then registers `POST /mcp`, which the agent's web search and fetch plugin calls
+in place of `mcp.exa.ai`, and `GET /exa_cache_stats`. A hit is served from the store. A miss is forwarded
+to `exa_upstream_url`, and the response is stored unless the cache is read-only.
+
+Each search query or fetched URL is looked up in this order:
+
+1. its exact key in `exa_cache_root`;
+2. its exact key in `exa_cache_legacy_root`, if set (a second store, never written);
+3. unless `exa_cache_exact_only` is set, the most similar stored query by token Jaccard similarity, if
+   that scores at least `exa_cache_fuzzy_threshold`.
+
+Steps 1 and 2 read one file each and never wait for the index build. Other work in the server process
+can still hold them up: a burst of concurrent step 3 scans (see the notes on evals below), and reading
+the index file. Step 3 needs an in-memory index of every stored query. The server starts building it on
+a background thread when it starts (with `num_workers` above 1, each worker builds its own, and the main
+process, which serves no requests, builds none). Building it reads every entry in the store, which is
+slow for a large store on a network filesystem. Until the index is ready, a lookup that would need step 3
+is a miss (counted as `fuzzy_skipped`) and goes upstream.
+
+Set `exa_cache_index_path` to keep the index in one file, the index file. Use one file per
+`exa_cache_root`: the file records the root it indexes, and a file saved for another root is ignored.
+When the file is usable, the index is ready as soon as it is read.
+A background walk of the store follows: it lists every entry but reads only the ones the file lacks,
+drops the keys of entries that are gone, and rewrites the file if it did either. Until the walk ends, a
+fuzzy match on an entry deleted since the file was saved is a miss. The index file holds the stored
+queries, so it is created readable by its owner only, like the entries.
+
+Give `exa_cache_root` and `exa_cache_index_path` as absolute paths. Gym starts the server in its own
+directory, so a relative path would put the store or the index file inside the Gym checkout.
+
+| Key | Environment variable | Default | Effect |
+| --- | --- | --- | --- |
+| `exa_cache_root` | `NEMO_GYM_EXA_CACHE_ROOT` | `""` (off) | Store directory (absolute path). Must be writable unless `exa_cache_read_only` is set. |
+| `exa_cache_legacy_root` | `NEMO_GYM_EXA_CACHE_LEGACY_ROOT` | `""` | Second store, read by exact key only. |
+| `exa_cache_use_tavily` | | `true` | Serve Tavily-format entries from `exa_cache_legacy_root`, translated into Exa's text format. |
+| `exa_cache_fuzzy_threshold` | | `0.8` | Minimum Jaccard similarity for a fuzzy hit. |
+| `exa_cache_exact_only` | | `false` | Serve exact hits only. No index is built, read or saved. |
+| `exa_cache_read_only` | | `false` | Write nothing: misses are not stored and the index file is not saved. |
+| `exa_cache_index_path` | | `""` | Index file (absolute path), one per `exa_cache_root`. Empty keeps the index in memory only. |
+
+For evals, set `exa_cache_exact_only` and `exa_cache_read_only` to `true`. A fuzzy hit returns results
+stored for a different query, so a run that takes them is not the same experiment as a run without the
+cache. For the same reason, if `exa_cache_legacy_root` is set, also set `exa_cache_use_tavily` to `false`:
+that store's Tavily entries are served translated into Exa's text format, which is not what Exa returned.
+Exact-only mode also skips the index build, its memory and step 3's scan of every stored query. That
+scan's CPU time grows with the number of stored queries, and concurrent scans run one at a time, so a
+burst of lookups that are not exact hits can delay every other lookup. Read-only mode keeps an eval
+from changing a store that other runs share. The server enforces it, not the filesystem; use directory
+permissions for a hard guarantee.
+
+`configs/opencode_search.yaml` reads only the two roots from the environment. It does not name
+`exa_cache_exact_only`, `exa_cache_read_only` or `exa_cache_index_path`, so a run that leaves them unset
+resolves the same configuration as before they existed, and its resume is unaffected. Set them, and
+`exa_cache_use_tavily`, in a run's overlay. On the BrowseComp presets, whose resources server instance is
+`search_browsecomp_resources_server`, an eval sets:
+
+```yaml
+search_browsecomp_resources_server:
+  resources_servers:
+    opencode_search:
+      exa_cache_exact_only: true
+      exa_cache_read_only: true
+      exa_cache_use_tavily: false
+```
+
+Keep `exa_cache_exact_only` and `exa_cache_use_tavily` the same for a run and its resume. Both change what
+the model sees, but `gym eval run` treats every `exa_cache_*` setting as operational, so a run that saved
+its configuration resumes across a change to either with only a warning.
+
+`GET /exa_cache_stats` returns these counters (with `num_workers` above 1, those of the worker that
+answers, which keeps its own index and counters):
+
+* lookups: `hit_exact`, `hit_legacy`, `hit_fuzzy`, `miss`, and `fuzzy_skipped` (misses because the index
+  was not ready);
+* writes: `put`, `put_error` and `put_skipped_read_only`;
+* `exa_cache_legacy_root`: `legacy_tavily_served` and `legacy_tavily_skipped`;
+* the index: `index_ready_ms` once fuzzy matching is available, then, when the build is done,
+  `index_entries`, `index_from_file`, `index_from_store`, `index_dropped` (keys of entries that were gone)
+  and `index_load_ms`.

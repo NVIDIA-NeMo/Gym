@@ -56,14 +56,21 @@ opencode_search_resources_server:              # instance name — how agents/CL
       # and the plugin talks straight to mcp.exa.ai. That is the right default for anyone who is
       # not us -- the cache is a private directory on our Lustre scratch, so hardcoding a path
       # here would hand every other user a config pointing somewhere they cannot read.
-      # Point NEMO_GYM_EXA_CACHE_ROOT at a writable directory to turn it on.
+      # Point NEMO_GYM_EXA_CACHE_ROOT at a directory, by absolute path, to turn it on. It must be
+      # writable unless exa_cache_read_only is set.
       exa_cache_root: ${oc.env:NEMO_GYM_EXA_CACHE_ROOT,""}
       exa_cache_fuzzy_threshold: 0.8
       # An optional pre-existing store, consulted read-only and exact-key only, so it costs
       # nothing at startup and everything it holds is immediately reusable. Ours holds ~2M
       # entries accumulated by the legacy runs.
       exa_cache_legacy_root: ${oc.env:NEMO_GYM_EXA_CACHE_LEGACY_ROOT,""}
+      # Serves the legacy root's Tavily entries translated into Exa's text format. Fine for cost,
+      # but not what Exa returned, so an eval sets it to false in its overlay.
       exa_cache_use_tavily: true
+      # exa_cache_exact_only, exa_cache_read_only and exa_cache_index_path are set in a run's
+      # overlay (see the README's Exa response cache section), not here: named here, even at their
+      # defaults, they would change the resolved configuration of every preset that includes this
+      # file, which a resume compares.
 
       sandbox_provider: sandbox
       sandbox_config:

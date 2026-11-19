@@ -109,7 +109,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
     reject_partial_typed_seed,
 )
-from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint, reachable_host
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker, reachable_host
 from nemo_gym.verification import JudgeError, call_judge
 
 # The grader the apptainer comparators were scored with. NOT the longer
@@ -347,12 +347,24 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     exa_cache_legacy_root: str = ""
     # Legacy entries are ~90% Tavily, holding structured results rather than rendered Exa text.
     # Serving them means translating (render_tavily). On by default: the model still gets real
-    # search results and the point of the cache is cost.
+    # search results and the point of the cache is cost. Evals turn it off: a translated entry is
+    # not what Exa returned.
     exa_cache_use_tavily: bool = True
     # 0.8 matches the legacy threshold. Measured by replaying real queries through this store,
     # fuzzy matching returns hits where exact-only returns none at all -- so this knob IS the
     # feature, not a tuning detail.
     exa_cache_fuzzy_threshold: float = 0.8
+    # Serve exact-key hits only: no fuzzy index is built or read, so there is no startup walk of
+    # the store, and a near-duplicate query is a miss. For evals: a fuzzy hit returns results stored
+    # for a different query, which makes a cached run a different experiment from an uncached one.
+    exa_cache_exact_only: bool = False
+    # Write nothing: a miss is forwarded upstream but not stored, and the index file is not saved.
+    # For evals that read a shared store they must not change.
+    exa_cache_read_only: bool = False
+    # A file that keeps the fuzzy index between runs. When it is usable, fuzzy matching is ready as
+    # soon as it is read instead of after a walk of the whole store. An absolute path, one file per
+    # exa_cache_root: a file saved for another root is ignored. Empty: in memory only.
+    exa_cache_index_path: str = ""
     # Upstream, overridable so a run can be pinned to a frozen mirror.
     exa_upstream_url: str = "https://mcp.exa.ai/mcp"
 
@@ -1078,6 +1090,11 @@ class SearchResourcesServer(SimpleResourcesServer):
         if self.config.exa_cache_root:
             app.post("/mcp")(self._exa_proxy)
             app.get("/exa_cache_stats")(self._exa_cache_stats)
+            # Start the fuzzy index build now rather than at the first lookup. Nothing waits for it.
+            # With num_workers > 1 the main process also runs this, but never serves the app: only the
+            # workers, which each keep their own index, build one.
+            if (self.config.num_workers or 1) <= 1 or is_nemo_gym_fastapi_worker():
+                self._cache.load_in_background()
         parent_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -1099,6 +1116,9 @@ class SearchResourcesServer(SimpleResourcesServer):
                 self.config.exa_cache_fuzzy_threshold,
                 legacy_root=self.config.exa_cache_legacy_root,
                 use_tavily=self.config.exa_cache_use_tavily,
+                exact_only=self.config.exa_cache_exact_only,
+                read_only=self.config.exa_cache_read_only,
+                index_path=self.config.exa_cache_index_path,
             )
         return self._exa_cache
 
@@ -1136,17 +1156,15 @@ class SearchResourcesServer(SimpleResourcesServer):
         else:
             return await self._exa_forward(request, body)
 
-        # ExaCache.get/put are SYNCHRONOUS and touch Lustre. Calling them directly from this
-        # async handler blocks the whole event loop -- not just this request -- because asyncio
-        # is single-threaded. The first get() is the worst: it lazily builds the fuzzy index by
-        # globbing "*/*/*.json" under the cache root and read_text()-ing every entry (2M entries
-        # on the shared store), and every other in-flight search sits behind it. Measured on the
-        # cached arm, a large share of searches died on the plugin's deadline, against virtually
-        # none on the same harness with the cache off.
+        # ExaCache.get/put are SYNCHRONOUS and do file I/O: an exact lookup reads a file and a
+        # store creates and renames one. Calling them directly from this async handler would block
+        # the whole event loop -- not just this request -- so they run on the default executor.
         #
-        # asyncio.to_thread moves the blocking work to the default executor so the loop stays
-        # free. It does NOT make the cache faster -- the first lookup still pays the index walk --
-        # it stops that cost being charged to every concurrent rollout.
+        # Neither waits for the fuzzy index. Building it reads every entry in the store, and it
+        # used to happen inside the first get() while holding the cache lock: on a large store,
+        # every search queued behind it and could run past the plugin's deadline. The index is now
+        # built on its own thread from server startup (setup_webserver), and until it is ready a
+        # lookup that would need fuzzy matching is a miss and goes upstream.
         if keytext:
             try:
                 cached, how = await asyncio.to_thread(self._cache.get, kind, keytext)
@@ -1162,8 +1180,13 @@ class SearchResourcesServer(SimpleResourcesServer):
             try:
                 # Also offloaded: put() writes a temp file and renames it on Lustre, where a
                 # create has been measured at ~1% EIO under load and is never fast.
-                await asyncio.to_thread(self._cache.put, kind, keytext, upstream.body.decode("utf-8", "replace"))
-                print(f"[exa-cache] MISS kind={kind} stored key={keytext[:70]!r}", flush=True)
+                # put() returns False when nothing was written: in read-only mode, or when it
+                # swallowed a write error.
+                stored = await asyncio.to_thread(
+                    self._cache.put, kind, keytext, upstream.body.decode("utf-8", "replace")
+                )
+                outcome = "stored" if stored else "not stored"
+                print(f"[exa-cache] MISS kind={kind} {outcome} key={keytext[:70]!r}", flush=True)
             except Exception as e:  # noqa: BLE001
                 print(f"[exa-cache] store failed ({type(e).__name__}): {e}", flush=True)
         return upstream

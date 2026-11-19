@@ -25,6 +25,18 @@
 // outright.
 
 const PLUGIN = "[nemo-gym-plugin]";
+
+// Readiness proof for the host (app.py). opencode swallows a plugin's load error, and the sentinel
+// loads first, so its "loaded" line cannot vouch for this plugin. markReady() runs on every return
+// path of the setup below; app.py refuses to score a rollout unless every configured plugin is named
+// either by this line or by the sentinel's periodic "ready=" list (nemo_gym_sentinel.js), which
+// survives a long transcript whose start scrolled out of the capture. PLUGIN_FILE must equal this
+// file's name under plugins/ (tests/plugin_ready.test.mjs checks it).
+const PLUGIN_FILE = "nemo_gym_turn_budget.js";
+function markReady() {
+  (globalThis.__nemoGymPluginsReady ??= new Set()).add(PLUGIN_FILE);
+  process.stderr.write(PLUGIN + " ready plugin=" + PLUGIN_FILE + "\n");
+}
 const NO_TOOLS = new Proxy({}, { get: () => false });
 
 function envInt(name, fallback) {
@@ -39,7 +51,11 @@ export default async function nemoGymTurnBudget({ client }) {
   // Extra model calls tolerated after the cap before we abort. Stripping tools should end the
   // run on the next call; this only catches the spin described above.
   const grace = envInt("NEMO_GYM_MAX_TURNS_GRACE", 5);
-  if (!cap) return {};
+  if (!cap) {
+    // Inactive by configuration, but loaded and healthy.
+    markReady();
+    return {};
+  }
 
   // Per session: opencode may run subagent sessions alongside the main one, and each gets its
   // own budget rather than sharing (and prematurely exhausting) one counter.
@@ -65,6 +81,7 @@ export default async function nemoGymTurnBudget({ client }) {
   // as below, is the lever that actually removes it from the surface the model sees.
   const noBash = process.env.NEMO_GYM_DISABLE_BASH === "1";
 
+  markReady();
   return {
     "chat.params": async (input) => {
       const id = input.sessionID;
