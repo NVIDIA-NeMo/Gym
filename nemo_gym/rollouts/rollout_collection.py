@@ -18,6 +18,7 @@ import fcntl
 import functools
 import glob as glob_module
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -1492,17 +1493,17 @@ class _RunRecordWriter:
                 raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
             with fpath.open("ab") as f:
                 f.write(line + b"\n")
-            # Read back from the line, so the status and the sink see exactly what the shard holds.
-            written = orjson.loads(line) if self.sink is not None or self._status is not None else None
             # The status follows under the same lock, so a writer superseded meanwhile cannot overwrite the newer
-            # writer's counts.
+            # writer's counts. It reads the line back, as the sink does, so both see exactly what the shard holds.
             if self._status is not None and self._status.enabled:
-                status_row = _batch_status_row(written, self._status_agent_refs)
+                status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
                 (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
                 last = self._status_expected is not None and self._status_written >= self._status_expected
                 self._status.write_status(self._status_completed, self._status_failures, force=last)
         if self.sink is not None:
-            self.sink(kind, written)
+            # A copy of its own: the status keeps its rows until a throttled write, and a sink that edits its record
+            # (renaming a field for its table) must not change them.
+            self.sink(kind, orjson.loads(line))
         return fpath
 
     def flush_status(self) -> None:
@@ -5959,12 +5960,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         leaves out) and ``"omitted"`` for an omitted-rollout row; ``record`` is the line as written, read back. A caller
         that keeps its own copy of the records (a database, a table store) gets the same lines as the shard. It runs
         on the event loop before the row's result is returned, so it should hand slow work off; an exception it raises
-        is raised from that row's awaitable, after the record is already in the shard. It needs ``record_output_dir``.
+        is raised from that row's awaitable, after the record is already in the shard. It is called, not awaited, so a
+        coroutine function is refused. ``kind`` names the file the record is in, not its score: a failure row marked
+        ``_ng_failure_counts_as_zero`` still counts as the model's 0, so a copy that leaves failures out of its scores
+        must keep those. Reopening a shard replaces its files but not what the sink already received: a caller that
+        replays a step under the same label replaces its own copy of that label's records, and each record's
+        ``_ng_run_id`` names the call that wrote it. It needs ``record_output_dir``.
         """
         if record_output_dir is not None and not record_shard:
             raise ValueError("record_output_dir needs a record_shard label naming this call's shard")
         if record_sink is not None and record_output_dir is None:
             raise ValueError("record_sink receives the records a shard writes, so it needs record_output_dir")
+        if inspect.iscoroutinefunction(record_sink) or inspect.iscoroutinefunction(
+            getattr(record_sink, "__call__", None)
+        ):
+            raise TypeError("record_sink is called, not awaited: pass a plain function that hands slow work off")
         enrich_results = enrich_results or record_output_dir is not None
         if delete_model_call_capture and not include_model_call_payloads:
             raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")

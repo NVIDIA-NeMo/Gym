@@ -15559,6 +15559,87 @@ class TestRunRecordWriter:
         status = json.loads(writer.status_fpath.read_text())
         assert status["members"]["a"]["completed_rollout_count"] == 2
 
+    def test_a_sink_that_edits_its_record_leaves_the_shard_and_its_status_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.rollouts import batch_status
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        # Every write but the last is throttled, so the status still holds the earlier rows when the sink edits them.
+        monkeypatch.setattr(batch_status, "BATCH_STATUS_WRITE_INTERVAL_SECONDS", 3600)
+
+        def sink(kind: str, record: dict) -> None:
+            record[AGENT_REF_KEY_NAME]["name"] = "table-a"
+
+        rows = [
+            {TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "a"}}
+            for index in range(3)
+        ]
+        writer = _RunRecordWriter(tmp_path, "step_1", sink=sink, rows=rows, status_rows=rows)
+        for row in rows:
+            writer.write({**row, "reward": 1.0})
+
+        assert {row[AGENT_REF_KEY_NAME]["name"] for row in self._lines(writer.rollouts_fpath)} == {"a"}
+        status = json.loads(writer.status_fpath.read_text())
+        assert status["tracking"] == "enabled"
+        member = status["members"]["a"]
+        assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (3, 0)
+
+    async def test_a_replayed_label_replaces_the_shard_but_not_what_the_sink_received(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import RUN_ID_KEY
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for row in examples:
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(row=row, result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                    )
+                    futures.append(future)
+                return iter(futures)
+
+        rows = [
+            TestEnrichRunResult._row("g1_g0_a0"),
+            {**TestEnrichRunResult._row("g2_g0_a0"), TASK_INDEX_KEY_NAME: 4, ROLLOUT_INDEX_KEY_NAME: 0},
+        ]
+        received: list[dict] = []
+        run_dir = tmp_path / "run"
+        for _ in range(2):
+            for completion in Helper().run_examples(
+                rows,
+                record_output_dir=run_dir,
+                record_shard="step_1",
+                record_sink=lambda kind, record: received.append(record),
+            ):
+                await completion
+
+        shard = self._lines(run_dir / "rollouts-step_1.jsonl")
+        assert (len(shard), len(received)) == (2, 4)
+        # Each record names the call that wrote it, so the caller keeps the last call's records for the label.
+        replay = shard[0][RUN_ID_KEY]
+        assert {record[RUN_ID_KEY] for record in shard} == {replay}
+        assert len({record[RUN_ID_KEY] for record in received}) == 2
+        assert [record for record in received if record[RUN_ID_KEY] == replay] == shard
+
+    def test_an_async_sink_is_refused(self, tmp_path: Path) -> None:
+        async def sink(kind: str, record: dict) -> None:
+            pass
+
+        class Sink:
+            async def __call__(self, kind: str, record: dict) -> None:
+                pass
+
+        for refused in (sink, Sink()):
+            with pytest.raises(TypeError, match="called, not awaited"):
+                RolloutCollectionHelper().run_examples(
+                    [], record_output_dir=tmp_path, record_shard="s", record_sink=refused
+                )
+        assert list(tmp_path.iterdir()) == []
+
     async def test_the_sink_gets_a_failure_row_with_the_model_calls_made_before_it_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
