@@ -290,6 +290,10 @@ other provider rejects a restricted value, including ones with network controls 
 their own. `network_access` cannot be combined with
 `sandbox_config.provider_options.network_policy`. Claude uses no tool grants, so
 `model_and_tools` is rejected. Each of these refusals fails the seed with HTTP 422.
+A borrowed sandbox that its owner restricted (a Harbor task's `network_mode`) is created with the hosts Claude declares
+in its session capabilities (`sandbox_egress`): the model endpoint's host and the host of each `http` or `sse` server
+in `mcp_config`, and no download host. A `stdio` server adds none. An `mcp_config` URL whose host cannot be read (an
+unexpanded `${VAR}`) makes the owner refuse the task, and an `mcp_config` that cannot be read declares nothing.
 Under `model_only` the image must already include `bash`: the step that installs a
 missing one on a root image runs after the sandbox starts, when the package mirrors
 are out of reach. A borrowed sandbox relies on its owner's network policy. The policy

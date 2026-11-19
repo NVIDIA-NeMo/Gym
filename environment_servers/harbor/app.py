@@ -44,6 +44,7 @@ settings), retryable when the sandbox provider failed.
 """
 
 import asyncio
+import json
 import logging
 import math
 import shutil
@@ -52,6 +53,7 @@ from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
@@ -66,6 +68,7 @@ from environment_servers.harbor.entrypoint import (
     HarborEntrypointMixin,
     _cancel_entrypoint,
 )
+from environment_servers.harbor.network_policy import phase_network_policy, with_harness_hosts
 from environment_servers.harbor.overlay import HarborOverlayError, HarborOverlayMixin
 from environment_servers.harbor.sandboxes import (
     COMPOSE_IMAGES_FILE,
@@ -1367,13 +1370,9 @@ class HarborEnvironmentServer(
                 trajectory=handle.trajectory,
             )
 
-    async def _require_turn_continuation(self) -> None:
-        """Refuse a ``turn_sessions: continue`` run before any sandbox when the harness cannot continue a session.
-
-        The agent server's capabilities are asked once per process. An agent server without the route (an older
-        build) cannot continue either. Harbor's multi-step trial refuses ``resume_trajectory`` the same way for an
-        agent without ``SUPPORTS_RESUME``, before any environment spend.
-        """
+    async def _agent_session_capabilities(self) -> AgentSessionCapabilitiesResponse:
+        """The agent server's session capabilities, asked once per process. An agent server without the route (an
+        older build) declares none. A failed request raises its error for the caller to turn into a failure."""
         if self._agent_capabilities is None:
             try:
                 http_response = await self.server_client.get(
@@ -1383,19 +1382,109 @@ class HarborEnvironmentServer(
                 capabilities = AgentSessionCapabilitiesResponse.model_validate(await get_response_json(http_response))
             except ClientResponseError as error:
                 if error.status not in (404, 405):
-                    raise dependency_failure(
-                        error,
-                        stage="seed",
-                        terminal=False,
-                    ) from error
+                    raise
                 capabilities = AgentSessionCapabilitiesResponse()
-            except Exception as error:
-                raise dependency_failure(
-                    error,
-                    stage="seed",
-                ) from error
             self._agent_capabilities = capabilities
-        if self._agent_capabilities.continuation is None:
+        return self._agent_capabilities
+
+    async def _agent_network_policy(self, task: HarborTask) -> dict[str, Any] | None:
+        """The egress policy the agent's sandbox is created with; ``None`` when the agent's network is public.
+
+        The agent's network is Harbor's agent phase (``[steps.agent]``, else ``[agent]``, else ``[environment]``;
+        the loader made every step agree). A running OpenSandbox sandbox cannot switch from public to restricted, so
+        the policy holds from creation on: the seed (Dockerfile ``RUN`` lines, entrypoint, health check), the
+        harness's setup, every step and a shared verifier run under it. It is the task's policy opened to what the
+        harness needs in the sandbox, which the task cannot know: the hosts the agent server declares
+        (``sandbox_egress``: the model endpoint it calls, where its seed downloads its runtime and the tool servers
+        its own configuration connects it to) and the hosts of the task's MCP servers it connects to
+        (:meth:`_task_tool_hosts`). That is looser than the task asked, by exactly those hosts.
+
+        Refused with HTTP 422 before anything is provisioned, as a retry would fail the same way: a provider other
+        than OpenSandbox, a Compose group, a harness that declares nothing, a host the policy cannot express or the
+        sandbox cannot reach, a deny-by-default deployment policy the result would widen, or deny rules in the
+        deployment's policy that a result allowing any host would drop. An agent server that cannot be asked raises
+        HTTP 503, retried.
+        """
+        network = task.config.agent_network(task.config.steps[0] if task.config.steps else None)
+        if not network.restricted:
+            return None
+        where = f"Task {task.task_id!r} agent network ({network})"
+        try:
+            policy = phase_network_policy(self._task_provider_name(task), network.mode, network.allowed_hosts)
+        except ValueError as exc:
+            raise HTTPException(422, f"{where}: {exc}") from exc
+        if self._uses_compose(task):
+            raise HTTPException(
+                422,
+                f"{where}: not supported for a Compose group yet; the egress policy would also close the network its "
+                "services reach one another on",
+            )
+        try:
+            capabilities = await self._agent_session_capabilities()
+        except Exception as error:
+            raise HTTPException(
+                503, f"{where}: could not ask the agent server which hosts it reaches from the sandbox: {error}"
+            ) from error
+        egress = capabilities.sandbox_egress
+        if egress is None:
+            raise HTTPException(
+                422,
+                f"{where}: the agent {self.config.agent_server.name!r} does not declare the hosts it reaches from "
+                "inside the task's sandbox (sandbox_egress in its session capabilities), so the sandbox cannot be "
+                "restricted around them; run the task with a harness that declares them",
+            )
+        try:
+            task_tool_hosts = self._task_tool_hosts(task, reads_task_context=capabilities.supports_task_tool_context)
+            policy = with_harness_hosts(
+                policy, [*egress.model_hosts, *egress.install_hosts, *egress.tool_hosts, *task_tool_hosts]
+            )
+            self._refuse_widening_the_deployment(policy, sandbox="the agent")
+            self._refuse_dropping_the_deployments_denials(policy, sandbox="the agent")
+        except ValueError as exc:
+            raise HTTPException(422, f"{where}: {exc}") from exc
+        LOGGER.info(
+            "%s: the agent's sandbox egress policy is %s (task: %s; harness model hosts %s, install hosts %s, tool "
+            "hosts %s; task tool hosts %s)",
+            task.task_id,
+            json.dumps(policy),
+            network,
+            egress.model_hosts,
+            egress.install_hosts,
+            egress.tool_hosts,
+            task_tool_hosts,
+        )
+        return policy
+
+    def _task_tool_hosts(self, task: HarborTask, *, reads_task_context: bool) -> list[str]:
+        """The hosts of the task's MCP servers (:meth:`_task_mcp_servers`) the harness connects to from the sandbox.
+
+        A harness that reads ``/tmp/.nemo-gym/task.json`` (``supports_task_tool_context``, such as mini-SWE) connects
+        to every URL entry written there, ``sse`` included, whatever ``task_mcp_grants`` grants. Any other harness
+        reaches only the streamable-http entries :meth:`_task_tool_accesses` grants it, none when grants are off. A
+        stdio entry runs in the sandbox and opens nothing; its command and arguments are never read as hosts. A URL
+        whose host cannot be read is returned whole, so the policy refuses it by name.
+        """
+        servers = [server for server in self._task_mcp_servers(task) if server.transport != "stdio" and server.url]
+        if not reads_task_context:
+            if self.config.task_mcp_grants == "off":
+                return []
+            servers = [server for server in servers if server.transport == "streamable-http"]
+        return [urlsplit(server.url).hostname or server.url for server in servers]
+
+    async def _require_turn_continuation(self) -> None:
+        """Refuse a ``turn_sessions: continue`` run before any sandbox when the harness cannot continue a session.
+
+        An agent server without the capabilities route (an older build) cannot continue either. Harbor's multi-step
+        trial refuses ``resume_trajectory`` the same way for an agent without ``SUPPORTS_RESUME``, before any
+        environment spend.
+        """
+        try:
+            capabilities = await self._agent_session_capabilities()
+        except ClientResponseError as error:
+            raise dependency_failure(error, stage="seed", terminal=False) from error
+        except Exception as error:
+            raise dependency_failure(error, stage="seed") from error
+        if capabilities.continuation is None:
             raise self._failure(
                 stage="seed",
                 failure_reason=(
@@ -1854,21 +1943,33 @@ class HarborEnvironmentServer(
         # The separate verifier's user is as static as its image: a `name:group` the provider cannot run as fails
         # here, before the rollout it would otherwise follow (`_sandbox_spec` refuses the agent's own the same way).
         self._refuse_verifier_group(task)
-        # So is its network: `[verifier].network_mode` becomes the separate verifier sandbox's egress policy at its
-        # creation, which only OpenSandbox enforces; a provider that cannot, or an entry the policy cannot express,
-        # fails here rather than after the rollout. The loader admits the phase policy for separate-mode tasks only.
-        try:
-            verifier_network_policy = self._verifier_network_policy(task)
-        except ValueError as exc:
-            raise HTTPException(422, f"Task {task.task_id!r} [verifier] network policy: {exc}") from exc
-        shared_turns = [turn.name for turn in task.turns if not self._turn_separate(task, turn)]
-        if verifier_network_policy is not None and (not separate or shared_turns):
-            raise HTTPException(
-                422,
-                f"Task {task.task_id!r} restricts the verifier's network but verifies in the agent's sandbox"
-                f"{' for step(s) ' + ', '.join(shared_turns) if shared_turns else ''}, whose network policy cannot be "
-                "changed after it started; declare separate verification",
-            )
+        # So is its network: a separate verifier's network becomes its sandbox's egress policy at its creation, which
+        # only OpenSandbox enforces; a provider that cannot, or an entry the policy cannot express, fails here rather
+        # than after the rollout.
+        for where, view in [("", task)] if separate and not task.turns else views:
+            try:
+                self._verifier_network_policy(view)
+            except ValueError as exc:
+                raise HTTPException(422, f"Task {task.task_id!r}{where} [verifier] network policy: {exc}") from exc
+        # A verifier in the agent's sandbox runs under the agent's network, fixed when that sandbox is created. The
+        # loader refuses a shared verifier that asks for another one; checked again here, where the server's own
+        # choice of separate verification is known.
+        agent_network = task.config.agent_network(task.turns[0].config if task.turns else None)
+        if task.turns:
+            shared = [(f" step {t.name!r}", t.config) for t in task.turns if not self._turn_separate(task, t)]
+        else:
+            shared = [] if separate else [("", None)]
+        for where, step in shared:
+            verifier_network = task.config.verifier_network(step, separate=False)
+            if verifier_network != agent_network:
+                raise HTTPException(
+                    422,
+                    f"Task {task.task_id!r}{where} verifies in the agent's sandbox, whose network policy cannot be "
+                    f"changed after it started ({agent_network}), but its verifier asks for {verifier_network}; "
+                    "declare separate verification",
+                )
+        # The agent's own network, the policy the agent's sandbox is created with.
+        agent_network_policy = await self._agent_network_policy(task)
         for turn in task.turns:
             # The sources the turn's verifier resolves its env from (`_verifier_env`: the server's secrets, then the
             # process environment), so a judge key only `secrets` supplies passes here as it does at the task level.
@@ -1958,7 +2059,9 @@ class HarborEnvironmentServer(
                 self._sandboxes[episode_key] = compose
                 sandbox = compose.services["main"]
             else:
-                sandbox = await self._create_sandbox_within_deadline(task, episode_key)
+                sandbox = await self._create_sandbox_within_deadline(
+                    task, episode_key, network_policy=agent_network_policy
+                )
                 self._sandboxes[episode_key] = sandbox
             session = HarborSession(
                 task=task,

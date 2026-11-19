@@ -149,6 +149,23 @@ async def test_run_uses_sandbox_reachable_model_url_with_rollout_capture(fixture
     )
 
 
+async def test_capabilities_declare_the_model_host_and_pypi_for_a_restricted_borrowed_sandbox(fixture):
+    """A Harbor task that restricts the agent's network gets a sandbox opened to exactly these hosts: the model
+    address the sandbox calls, and PyPI, which setup's ``uv pip install`` reaches (uv and Python are uploaded)."""
+    f = fixture
+    capabilities = await f.agent.agent_session_capabilities()
+    assert capabilities.supports_task_tool_context
+    assert capabilities.sandbox_egress.model_dump() == {
+        "model_hosts": ["gym-model"],
+        "install_hosts": ["pypi.org", "files.pythonhosted.org"],
+        "tool_hosts": [],
+    }
+    f.agent.config = module.MiniSWESandboxedConfig.model_validate(
+        f.agent.config.model_dump() | {"sandbox_model_base_url": "https://sandbox-model:8443/gym/v1/"}
+    )
+    assert (await f.agent.agent_session_capabilities()).sandbox_egress.model_hosts == ["sandbox-model"]
+
+
 @pytest.mark.parametrize("url", ["localhost:8000", "https://sandbox-model/gym?token=secret"])
 def test_sandbox_model_url_rejects_non_http_roots(url):
     with pytest.raises(ValueError, match="sandbox_model_base_url"):

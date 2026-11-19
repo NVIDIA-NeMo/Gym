@@ -29,6 +29,7 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from time import monotonic, time
 from typing import Any, ClassVar, Literal, Mapping, Optional
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -40,6 +41,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
     AgentOutcome,
+    AgentSandboxEgress,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
@@ -108,6 +110,10 @@ LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
 _PROVIDER_ERROR = "provider_error"
+# Where `install_codex_runtime.sh` downloads from inside a borrowed sandbox: Node (its musl build on Alpine), npm's
+# registry for the CLI, and on old Alpine the pinned libstdc++ package. Its fallback to apt-get or apk for missing
+# tools reaches the image's own package mirrors, which are not listed.
+CODEX_INSTALL_HOSTS = ("nodejs.org", "unofficial-builds.nodejs.org", "registry.npmjs.org", "dl-cdn.alpinelinux.org")
 _OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
 # Characters of Codex stderr kept in the error of an activation that never started a turn.
 _STDERR_TAIL_CHARS = 2000
@@ -767,6 +773,27 @@ class CodexAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
+
+    def sandbox_egress(self) -> AgentSandboxEgress | None:
+        """In a borrowed sandbox Codex calls the Gym Model Server, its seed downloads Node and the CLI
+        (:data:`CODEX_INSTALL_HOSTS`) unless ``sandbox_runtime_dir`` holds them, and it connects to the MCP servers of
+        its configured ``tool_accesses`` it writes into ``config.toml`` (:meth:`_granted_mcp_servers`, which leaves out
+        a direct HTTP grant and a name Codex cannot use). The environment server opens the hosts of its own grants; a
+        configured grant that one of them replaces by name is still declared, as this is asked before any episode.
+        Without a ``model_server`` Codex cannot run in a borrowed sandbox at all (the seed refuses it), so it
+        declares nothing."""
+        if self.config.model_server is None:
+            return None
+        model_url = self.resolve_model_base_url(self.config.model_server.name, trace_context=False)
+        return AgentSandboxEgress(
+            model_hosts=[urlsplit(model_url).hostname or ""],
+            install_hosts=[] if self.config.sandbox_runtime_dir else list(CODEX_INSTALL_HOSTS),
+            tool_hosts=[
+                urlsplit(str(access.connection.url)).hostname or ""
+                for access in self.config.tool_accesses
+                if isinstance(access, MCPToolAccess) and _codex_mcp_server_name(access.name)
+            ],
+        )
 
     def _session_marker(self, request: Request) -> Optional[str]:
         marker = self._agent_session_id_from_request(request)

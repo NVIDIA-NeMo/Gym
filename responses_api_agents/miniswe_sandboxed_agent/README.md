@@ -73,6 +73,12 @@ not inherit Gym's MCP v1 SDK: LiteLLM's Responses adapter imports MCP v2 types
 even for ordinary function tools. Task MCP clients remain in their separate
 MCP v1 environment. LiteLLM uses its bundled model-cost map.
 
+A borrowed sandbox that its owner restricted (a Harbor task's `network_mode`) is created with the hosts mini-SWE
+declares in its session capabilities (`sandbox_egress`): the host of the model address the sandbox calls
+(`sandbox_model_base_url`, else the Model Server's), and PyPI's `pypi.org` and `files.pythonhosted.org` for
+`uv pip install`. The task's own commands reach those hosts too. The owner also opens the host of each `url` MCP
+server it writes into `task.json` (`sse` included), which mini-SWE connects to at setup.
+
 The native agent calls Gym's rollout-prefixed `/v1/responses` endpoint directly.
 Gym's model wrapper retains model-call and training-token capture; every request
 includes the resource session's `x-session-id` header. Set

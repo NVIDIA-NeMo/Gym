@@ -69,7 +69,7 @@ gym eval run skillsbench_no_skill --agent miniswe_sandboxed_agent --sandbox open
 
 `--skip-unloadable` runs the tasks the environment server loads and records the ones it refuses in
 `skipped.json`; `--exclude-tasks fix-visual-stability` leaves out a task whose Compose service has to be built (see below). On a host without an
-image builder that is 83 of the 87 tasks. Add `--only-tasks <name> --concurrency 1` for a first check.
+image builder that is 84 of the 87 tasks. Add `--only-tasks <name> --concurrency 1` for a first check.
 `gym dataset validate skillsbench --sandbox opensandbox --exclude-tasks fix-visual-stability` plays every reference solution through the same
 server, leaving out the tasks it cannot load. Eight official reference solutions import scripts from a task skill.
 Four of them (`3d-scan-calc`, `exceltable-in-ppt`, `pptx-reference-formatting`, `video-silence-remover`) search
@@ -100,9 +100,14 @@ folder it was given, as with any non-Claude harness in the official runner.
 
 ### Differences from the official runner
 
-- One task (`bike-rebalance` at the pinned revision) requests `no-network`. The environment server does not
-  restrict an agent sandbox's network yet, so its loader refuses that task instead of running it with open
-  egress; `--skip-unloadable` leaves it out of a run and names it in `skipped.json`.
+- One task (`bike-rebalance` at the pinned revision) requests `no-network`. On OpenSandbox the environment server
+  creates its sandbox without network except for the hosts the harness declares it needs there; see "Network
+  restrictions" in `fern/versions/latest/pages/agent-interactions/harbor.mdx`. For `miniswe_sandboxed_agent` those
+  are the Model Server's host and PyPI (`pypi.org`, `files.pythonhosted.org`), where its setup installs mini-SWE, so
+  the agent and the verifier can reach them too. `codex_agent` and `claude_code_agent` declare their hosts as well,
+  but neither declares `supports_task_tool_context`, so they run `skillsbench_no_skill` only. On another provider,
+  or with a harness that does not declare `sandbox_egress`, the episode fails at seed instead of running with open egress; add
+  `--exclude-tasks bike-rebalance` there.
 - Three tasks ship Compose files written for Docker whose services are built from the task's own Dockerfiles
   (`drone-planning-control`, `fix-visual-stability`, `react-performance-debugging`); the published images cover only
   each task's main image. Preparation keeps the files as they are. Without an image builder (see "Dockerfile builds"

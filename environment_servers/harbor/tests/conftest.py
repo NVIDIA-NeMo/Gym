@@ -172,6 +172,8 @@ class FakeSandbox:
     image_user: str = "root"
     dirs: dict[str, str] = field(default_factory=lambda: {"/": "root", "/tmp": "root", "/home": "root"})
     passwd: dict[str, str] = field(default_factory=lambda: {"0": "root", "1000": "agent"})
+    # The egress policy the server created the sandbox with (`network_policy` of its `_create_sandbox`).
+    network_policy: dict | None = None
 
     default_user: str | int | None = None
 
@@ -365,6 +367,8 @@ class FakeAgentClient(ServerClient):
     # built before the route existed.
     continuation_capabilities: dict | None = None
     capabilities_status: int = 200
+    # The hosts the harness reaches from inside the sandbox (``sandbox_egress``); None declares none.
+    sandbox_egress: dict | None = None
     turn_response: dict | None = None
     # Called when the harness takes its turn, between the seed and the verification of an episode.
     turn_hooks: list = []
@@ -419,6 +423,7 @@ class FakeAgentClient(ServerClient):
             return _Response(
                 {"supports_task_tool_context": self.supports_task_tool_context}
                 | ({"continuation": self.continuation_capabilities} if self.continuation_capabilities else {})
+                | ({"sandbox_egress": self.sandbox_egress} if self.sandbox_egress is not None else {})
             )
         raise AssertionError(f"unexpected agent GET {url_path}")
 
@@ -491,9 +496,10 @@ def make_server(
     sandbox = sandbox or FakeSandbox()
     created: list[tuple] = []
 
-    async def create(task, workdir, *, episode_key=None):
+    async def create(task, workdir, *, episode_key=None, network_policy=None):
         created.append((task.task_id, workdir))
         sandbox.created_in(workdir)
+        sandbox.network_policy = network_policy
         return sandbox
 
     monkeypatch.setattr(server, "_create_sandbox", create)

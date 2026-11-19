@@ -30,7 +30,12 @@ from nemo_gym.data.tasks.harbor.dockerfile import (
     resolve_dockerfile,
 )
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
-from nemo_gym.data.tasks.harbor.models import HARBOR_STEP_VERIFIER_TIMEOUT_SEC, HarborTaskConfig, HarborTaskStep
+from nemo_gym.data.tasks.harbor.models import (
+    HARBOR_STEP_VERIFIER_TIMEOUT_SEC,
+    HarborPhaseSettings,
+    HarborTaskConfig,
+    HarborTaskStep,
+)
 from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE, python_verifier_for
 from nemo_gym.data.tasks.harbor.records import (
     BUILT_IMAGES_FILE,
@@ -395,6 +400,52 @@ def read_instruction(path: Path) -> str:
     return "\n".join(lines)
 
 
+def _check_network_phases(path: Path, config: HarborTaskConfig) -> None:
+    """Refuse the network settings the server cannot apply as Harbor would. Raises :class:`HarborTaskError`.
+
+    The agent works in one sandbox for the whole episode, created with the agent's network policy (``[environment]``,
+    or the ``[agent]`` and ``[steps.agent]`` policies over it) because an egress policy cannot change once a sandbox
+    runs. So every step's agent must resolve to one policy, and a verifier that runs in that sandbox (shared mode)
+    must ask for that policy too, as Harbor requires on a provider that cannot switch policies after start. A
+    separate verifier's sandbox is created with its own policy. A verifier environment's own restriction and a
+    step verifier's are not applied yet, so they are refused rather than dropped.
+    """
+    unsupported: dict[str, HarborPhaseSettings | None] = {"verifier.environment": config.verifier.environment}
+    for step in config.steps:
+        unsupported[f"steps.{step.name}.verifier"] = step.verifier
+        unsupported[f"steps.{step.name}.verifier.environment"] = step.verifier.environment
+    for name, phase in unsupported.items():
+        if phase is not None and (phase.network_mode not in (None, "public") or phase.allowed_hosts):
+            raise HarborTaskError(f"{path}: {name} network restrictions are not supported yet")
+    phases = {"environment": config.environment, "agent": config.agent, "verifier": config.verifier}
+    phases |= {f"steps.{step.name}.agent": step.agent for step in config.steps}
+    for name, phase in phases.items():
+        if phase.allowed_hosts and phase.network_mode != "allowlist":
+            raise HarborTaskError(f"{path}: [{name}] allowed_hosts is only valid when network_mode='allowlist'")
+    # A multi-step task's agents and graders are its steps' (the task-level verifier is never run by itself).
+    steps: list[HarborTaskStep | None] = list(config.steps) or [None]
+    agent_networks = {step.name if step else "": config.agent_network(step) for step in steps}
+    if len(set(agent_networks.values())) > 1:
+        described = ", ".join(f"{name}: {network}" for name, network in agent_networks.items())
+        raise HarborTaskError(
+            f"{path}: the steps' agents ask for different networks ({described}), but every step works in one "
+            "sandbox, whose network policy is fixed when it is created"
+        )
+    agent_network = next(iter(agent_networks.values()))
+    for step in steps:
+        shared = step_verifier_mode(config, step) == "shared" if step is not None else config.is_shared_verifier
+        verifier_network = config.verifier_network(step, separate=False)
+        if shared and verifier_network != agent_network:
+            where = f"step {step.name!r}" if step is not None else "the task"
+            raise HarborTaskError(
+                f"{path}: {where} verifies in the agent's sandbox (shared mode), whose network policy is the "
+                f"agent's ({agent_network}) for its whole life, but its verifier asks for {verifier_network}; give "
+                "[verifier] the agent's network_mode and allowed_hosts, or declare separate verification "
+                '([verifier].environment_mode = "separate" or a [verifier.environment], on every step of a '
+                "multi-step task too)"
+            )
+
+
 def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[str, Any] | None = None) -> HarborTask:
     """Read ``path`` as one task. Raises :class:`HarborTaskError` when it is not one.
 
@@ -434,42 +485,7 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     except ValueError as exc:
         raise HarborTaskError(str(exc)) from exc
 
-    phases = {"environment": config.environment, "agent": config.agent, "verifier": config.verifier}
-    if config.verifier.environment is not None:
-        phases["verifier.environment"] = config.verifier.environment
-    for step in config.steps:
-        phases[f"steps.{step.name}.agent"] = step.agent
-        phases[f"steps.{step.name}.verifier"] = step.verifier
-        if step.verifier.environment is not None:
-            # A step's own verifier environment carries the same restriction fields as the task's; the server creates
-            # the step's verifier sandbox from it with no egress policy, so a restriction there is refused like the
-            # task-level one rather than dropped.
-            phases[f"steps.{step.name}.verifier.environment"] = step.verifier.environment
-    for name, phase in phases.items():
-        if phase.network_mode in (None, "public") and not phase.allowed_hosts:
-            continue
-        if name != "verifier":
-            # The agent's sandbox is created public and a running sandbox's egress policy cannot be switched, so
-            # only the separate verifier's own sandbox can carry a phase policy (multi-step tasks verify in the
-            # agent's sandbox).
-            raise HarborTaskError(f"{path}: {name} network restrictions are not supported yet")
-        # The task-wide [verifier] restriction applies to every grader that runs: for a multi-step task those are the
-        # steps' verifiers in their resolved modes (the task-level default is never run by itself), for a task without
-        # steps the task's own verifier.
-        if config.steps:
-            shared_grader = any(step_verifier_mode(config, step) == "shared" for step in config.steps)
-        else:
-            shared_grader = config.is_shared_verifier
-        if shared_grader:
-            raise HarborTaskError(
-                f"{path}: [verifier] network restrictions are not supported in Harbor's shared verifier mode: a "
-                "running sandbox's network policy cannot be changed after the agent's turn, so the restricted "
-                "policy is applied to the separate verifier's sandbox when it is created (declare "
-                '[verifier].environment_mode = "separate" or a [verifier.environment], on every step of a '
-                "multi-step task too)"
-            )
-        if phase.allowed_hosts and phase.network_mode != "allowlist":
-            raise HarborTaskError(f"{path}: [verifier] allowed_hosts is only valid when network_mode='allowlist'")
+    _check_network_phases(path, config)
     environments = [("environment", config.environment), ("verifier.environment", config.verifier.environment)]
     environments += [(f"steps.{step.name}.verifier.environment", step.verifier.environment) for step in config.steps]
     for name, environment in environments:

@@ -449,7 +449,8 @@ class VerifierSettings:
     env: dict[str, str]
     user: str | int | None
     collect: list[Any] = field(default_factory=list)
-    # The task's `[verifier].network_mode` (a step's over it), reported as `verifier_network`.
+    # The network the verification runs under (:meth:`HarborTaskConfig.verifier_network`), reported as
+    # `verifier_network`.
     network_mode: str | None = None
 
 
@@ -637,7 +638,11 @@ class HarborVerificationMixin:
         artifacts, then the rest of the group is stopped.
         """
         task = session.task
-        settings = task.config.verifier
+        # `[verifier]` as it is, but for the network: reported as the one this verification runs under, which a
+        # separate verifier without a policy of its own takes from its environment (see `_verifier_network_policy`).
+        settings = task.config.verifier.model_copy(
+            update={"network_mode": task.config.verifier_network(separate=True).mode}
+        )
         started = asyncio.get_running_loop().time()
         try:
             logs_dir = self._reserve_logs_dir()
@@ -1111,7 +1116,7 @@ class HarborVerificationMixin:
                 env=verifier.env,
                 user=verifier.user,
                 collect=verifier.collect,
-                network_mode=verifier.network_mode,
+                network_mode=task.config.verifier_network(separate=not task.config.is_shared_verifier).mode,
             )
         # A step's tests/ (and a multi-step task's top-level tests/) may be absent; a single-turn task's tests/ is
         # uploaded whatever the host says, so a snapshot removed under the episode fails the upload and masks.
@@ -1443,5 +1448,5 @@ class HarborVerificationMixin:
             env=task.config.verifier.env | step.env,
             user=step.user if step.user is not None else task.config.verifier.user,
             collect=[*task.config.verifier.collect, *step.collect],
-            network_mode=step.network_mode if step.network_mode is not None else task.config.verifier.network_mode,
+            network_mode=task.config.verifier_network(turn.config, separate=turn.verifier_mode == "separate").mode,
         )
