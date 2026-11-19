@@ -86,8 +86,15 @@ class TaskDataSchemaError(Exception):
 # Files that mark ``<base_folder>/<server>/`` as a server's source directory. The CLI accepts a server
 # directory on ``requirements.txt`` / ``pyproject.toml`` (``nemo_gym/cli/env.py::_resolve_server_dir``);
 # the data tooling also accepts the module it is looking for, so a server that ships only a schema (or
-# only a metrics hook) and no installable requirements still resolves.
-SERVER_DIR_MARKERS = ("requirements.txt", "pyproject.toml", TASK_DATA_MODULE_NAME + ".py", "dataset_metrics.py")
+# only a metrics hook, or only an environment server's task input module) and no installable requirements still
+# resolves.
+SERVER_DIR_MARKERS = (
+    "requirements.txt",
+    "pyproject.toml",
+    TASK_DATA_MODULE_NAME + ".py",
+    "dataset_metrics.py",
+    "task_input.py",
+)
 
 
 def _looks_like_server_dir(path: Path) -> bool:

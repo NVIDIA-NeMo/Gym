@@ -5,9 +5,9 @@
 from time import time
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, Field, JsonValue
 
-from environment_servers.swe_together.task import TaskData
+from environment_servers.swe_together.task_input import TaskInput
 from nemo_gym.agents import AgentCloseSessionResponse
 from nemo_gym.core import (
     BaseEpisodeRequest,
@@ -95,12 +95,6 @@ class CandidateTurn(BaseModel):
         return root.get("stop_reason") or root.get("error_type")
 
 
-class SWETTaskInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    task_data: TaskData
-    responses_create_params: NeMoGymResponseCreateParamsNonStreaming | None = None
-
-
 class UserTurn(BaseModel):
     """The accepted simulator decision and the environment's stopping decision."""
 
@@ -133,7 +127,7 @@ class SWETFailure(SingleAgentTurnFailure):
     dependency_error: dict[str, JsonValue] | None = None
 
 
-class SWETRequest(BaseEpisodeRequest[SWETTaskInput]):
+class SWETRequest(BaseEpisodeRequest[TaskInput]):
     pass
 
 

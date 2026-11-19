@@ -965,7 +965,9 @@ class TestFindServerDirRejectsOutputOnlyDirs:
     # The markers are spelled out rather than taken from SERVER_DIR_MARKERS so that dropping one from the tuple
     # fails here: requirements.txt and pyproject.toml are the CLI's server-dir rule, task_data.py and
     # dataset_metrics.py are the modules the data tooling looks up.
-    @pytest.mark.parametrize("marker", ["requirements.txt", "pyproject.toml", "task_data.py", "dataset_metrics.py"])
+    @pytest.mark.parametrize(
+        "marker", ["requirements.txt", "pyproject.toml", "task_data.py", "dataset_metrics.py", "task_input.py"]
+    )
     def test_a_directory_holding_only_that_marker_is_a_server_dir(self, tmp_path, monkeypatch, marker):
         server_dir = tmp_path / "resources_servers" / "marker_only_rs"
         server_dir.mkdir(parents=True)
@@ -973,7 +975,9 @@ class TestFindServerDirRejectsOutputOnlyDirs:
         monkeypatch.chdir(tmp_path)
         assert find_server_dir("marker_only_rs") == server_dir
 
-    @pytest.mark.parametrize("marker", ["requirements.txt", "pyproject.toml", "task_data.py", "dataset_metrics.py"])
+    @pytest.mark.parametrize(
+        "marker", ["requirements.txt", "pyproject.toml", "task_data.py", "dataset_metrics.py", "task_input.py"]
+    )
     def test_a_marker_that_is_a_directory_does_not_count(self, tmp_path, monkeypatch, marker):
         (tmp_path / "resources_servers" / "marker_dir_rs" / marker).mkdir(parents=True)
         monkeypatch.chdir(tmp_path)
