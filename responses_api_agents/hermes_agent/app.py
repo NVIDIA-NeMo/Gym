@@ -28,7 +28,7 @@ from uuid import uuid4
 
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
 from nemo_gym.agents import (
@@ -37,6 +37,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -56,6 +57,7 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    MediaFile,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -68,6 +70,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    UnsupportedContentError,
 )
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
@@ -87,6 +90,7 @@ from nemo_gym.trajectory import (
     ObservationGap,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession
@@ -97,12 +101,22 @@ from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, Hermes
 MODEL_REJECTION_STATUSES = frozenset({400, 413, 422})
 _HTTP_STATUS = re.compile(r"\b(?:HTTP |Error code: )([45]\d{2})\b")
 _TRUNCATION_ERROR = "First response truncated due to output length limit"
+# Every error Hermes 26bb847a returns when a run ends because the model's output reached max_tokens (run_agent.py).
+_OUTPUT_LIMIT_ERRORS = frozenset(
+    {
+        _TRUNCATION_ERROR,
+        "Response truncated due to output length limit",
+        "Response remained truncated after 3 continuation attempts",
+        "Model used all output tokens on reasoning with none left for the response. "
+        "Try lowering reasoning effort or increasing max_tokens.",
+    }
+)
 
 
 def _is_limit_result(result: Mapping[str, Any]) -> bool:
     """Recognize explicit Hermes limit results; tested on Hermes 26bb847a.
 
-    `partial` alone also covers invalid model output, so require a native limit reason.
+    `partial` alone also covers invalid model output, so require a Hermes limit reason.
     """
     error = str(result.get("error") or "")
     return (
@@ -110,10 +124,7 @@ def _is_limit_result(result: Mapping[str, Any]) -> bool:
         or error == _TRUNCATION_ERROR
         or (
             bool(result.get("partial"))
-            and (
-                error == "Response truncated due to output length limit"
-                or error.startswith("Request payload too large")
-            )
+            and (error in _OUTPUT_LIMIT_ERRORS or error.startswith("Request payload too large"))
         )
     )
 
@@ -255,7 +266,33 @@ if not LOG.handlers:
     LOG.addHandler(_SafeStderrHandler(level=logging.WARNING))
 
 
-def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Optional[str]]:
+def _hermes_message_content(content: str | list[dict[str, Any] | BaseModel]) -> str | list[dict[str, Any]]:
+    """Keep images and text in order using Hermes' Chat Completions content format.
+
+    Image data URIs have already been checked and normalized at the HTTP boundary.
+    Text-only content keeps the existing concatenation behavior.
+    """
+    if isinstance(content, str):
+        return content
+    parts = [part if isinstance(part, dict) else part.model_dump() for part in content]
+    if not any(part.get("type") == "input_image" for part in parts):
+        return "".join(part.get("text", "") for part in parts)
+    return [
+        # Chat has no "original" detail; use its highest supported level.
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": part["image_url"],
+                "detail": "high" if part.get("detail") == "original" else part.get("detail", "auto"),
+            },
+        }
+        if part.get("type") == "input_image"
+        else {"type": "text", "text": part.get("text", "")}
+        for part in parts
+    ]
+
+
+def _split_input_to_user_and_history(input_items) -> tuple[str | list[dict[str, Any]], list[dict], Optional[str]]:
     if isinstance(input_items, str):
         return input_items, [], None
     items = list(input_items)
@@ -272,14 +309,12 @@ def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Opti
             system_message = first_content or ""
             items = items[1:]
 
-    user_message = ""
+    user_message: str | list[dict[str, Any]] = ""
     history: list[dict] = []
     for idx, item in enumerate(items):
         role = getattr(item, "role", None) or (item.get("role") if isinstance(item, dict) else None)
         content = getattr(item, "content", None) or (item.get("content") if isinstance(item, dict) else None)
-        if isinstance(content, list):
-            content = "".join((p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "")) for p in content)
-        content = content or ""
+        content = _hermes_message_content(content or "")
         if idx == len(items) - 1 and role == "user":
             user_message = content
         else:
@@ -720,6 +755,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "model_base_url": self.resolve_model_base_url(
                 self.config.model_server.name, state.request.episode_id.capture_key
             ),
+            # Compression is a side call that token capture does not deliver, so no training framework trains it: it
+            # keeps its own sampling.
+            "compression_model_base_url": self.resolve_model_base_url(
+                self.config.model_server.name, state.request.episode_id.capture_key, trained=False
+            ),
             "terminal_timeout": self.config.terminal_timeout,
         }
         timeout = self._agent_timeout_sec(body)
@@ -831,14 +871,30 @@ class HermesAgent(SimpleResponsesAPIAgent):
             or conversation_roles[-1] != "user"
             or any(role not in ("user", "assistant") for role in conversation_roles)
         ):
-            raise HTTPException(422, "Hermes accepts text history ending with a user message")
+            raise HTTPException(422, "Hermes accepts user/assistant history ending with a user message")
         for item in body.input:
-            if not isinstance(item.content, str) and any(
-                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None))
-                not in ("input_text", "output_text")
-                for part in item.content
-            ):
-                raise HTTPException(422, "Hermes only supports text input")
+            if isinstance(item.content, str):
+                continue
+            for part in item.content:
+                part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+                if part_type in ("input_text", "output_text"):
+                    continue
+                if part_type != "input_image":
+                    raise HTTPException(422, f"Hermes does not support content part {part_type!r}")
+                if item.role != "user":
+                    raise HTTPException(422, "Hermes accepts images only in user messages")
+                uri = part.get("image_url") if isinstance(part, dict) else getattr(part, "image_url", None)
+                if not isinstance(uri, str):
+                    raise HTTPException(422, "Hermes input_image must hold a base64 data URI")
+                try:
+                    uri = MediaFile.from_data_uri(uri).to_data_uri()
+                except UnsupportedContentError as error:
+                    raise HTTPException(422, f"Hermes: {error}") from error
+                # Normalize the MIME label to the image bytes without mutating the caller's request.
+                if isinstance(part, dict):
+                    part["image_url"] = uri
+                else:
+                    part.image_url = uri
         return body
 
     def _agent_timeout_sec(self, body: NeMoGymResponseCreateParamsNonStreaming) -> float:
@@ -1084,10 +1140,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         if isinstance(agent_session_id, str):
             if not isinstance(rollout_id, str):
-                raise HTTPException(409, "Agent sessions require an attempt-qualified rollout path")
+                raise AgentSessionConflictError("Agent sessions require an attempt-qualified rollout path")
             state = self._require_agent_session(agent_session_id)
             if state.request.episode_id.capture_key != rollout_id:
-                raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
+                raise AgentSessionConflictError("Agent-session episode_id does not match the rollout route")
             if state.task is None:
                 # No await until the task and its immutable request binding are installed.
                 state.activation_request = body.model_copy(deep=True)
@@ -1104,7 +1160,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
                 state.task = asyncio.create_task(activate())
             elif body != state.activation_request:
-                raise HTTPException(409, "Hermes sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "Hermes sandbox sessions support one activation; retry the same request"
+                )
             assert state.task is not None
             # A disconnected HTTP waiter must not cancel the shared activation. Session close
             # owns cancellation; identical retries join this task or replay its result/error.
@@ -1156,7 +1214,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Use the agent session responses and close routes")
+            raise AgentSessionConflictError("Use the agent session responses and close routes")
         if self.config.resources_server is None:
             raise HTTPException(422, "Hermes /run requires resources_server; use Environment Server /run for sessions")
         async with self.sem:
@@ -1223,3 +1281,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HermesAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HermesAgent.run_webserver()  # noqa: F401

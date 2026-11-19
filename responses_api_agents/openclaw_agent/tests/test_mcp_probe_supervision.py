@@ -91,6 +91,11 @@ async def borrowed_state(tmp_path, runtime, workdir):
     return owner, state, release
 
 
+# Long enough for a loaded runner to start Node and finish the healthy probe, and for the blocked probe to
+# record its pid, before the probe timeout stops the blocked one.
+PROBE_TIMEOUT_SECONDS = 8
+
+
 def payload_for(runtime, pid_dir, block=""):
     return {
         "command": [f"{runtime}/node/bin/node", f"{runtime}/openclaw/node_modules/openclaw/openclaw.mjs"],
@@ -108,12 +113,16 @@ async def test_optional_probe_timeout_is_stopped_before_the_agent_runs(probe_env
     servers = {"task_tools": {"url": "http://x/mcp"}, "extra": {"url": "http://y/mcp"}}
     try:
         gaps = await agent._probe_mcp_grants(
-            state, payload_for(runtime, pid_dir, block="extra"), servers, {"task_tools"}, timeout=2
+            state,
+            payload_for(runtime, pid_dir, block="extra"),
+            servers,
+            {"task_tools"},
+            timeout=PROBE_TIMEOUT_SECONDS,
         )
         # When the probe step returns, the agent could launch; the blocked probe must already be gone.
         assert not alive(pid_of(pid_dir, "extra"))
         assert not alive(pid_of(pid_dir, "task_tools"))
-        assert [gap.detail for gap in gaps] == ["extra: timeout: probe exceeded 2 s"]
+        assert [gap.detail for gap in gaps] == [f"extra: timeout: probe exceeded {PROBE_TIMEOUT_SECONDS} s"]
         assert set(servers) == {"task_tools"} and getattr(state, "probe", None) is None
         receipt = json.loads((Path(state.session.session_dir) / "mcp-probe-1" / "cleanup.json").read_text())
         assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is True
@@ -131,7 +140,7 @@ async def test_required_probe_timeout_fails_and_leaves_no_probe(probe_env, tmp_p
                 payload_for(runtime, pid_dir, block="task_tools"),
                 {"task_tools": {"url": "http://x/mcp"}},
                 {"task_tools"},
-                timeout=2,
+                timeout=PROBE_TIMEOUT_SECONDS,
             )
         assert failed.value.status_code == 502
         assert not alive(pid_of(pid_dir, "task_tools")) and getattr(state, "probe", None) is None
@@ -308,7 +317,7 @@ async def test_unconfirmed_first_cleanup_keeps_the_probe_for_close(probe_env, tm
                 payload_for(runtime, pid_dir, block="task_tools"),
                 {"task_tools": {"url": "http://x/mcp"}},
                 {"task_tools"},
-                timeout=2,
+                timeout=PROBE_TIMEOUT_SECONDS,
             )
         # The result did not count, and the probe stays registered: close must confirm it before release.
         assert state.probe is not None and not state.probe.cleanup_confirmed and release["calls"] == 0

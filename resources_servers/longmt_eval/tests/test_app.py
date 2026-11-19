@@ -1,10 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import gzip
-import io
-import os
 import sys
-import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,6 +11,7 @@ from app import (
     LongmtEvalVerifyRequest,
     _assert_no_reasoning,
 )
+from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
@@ -76,6 +73,19 @@ def _make_request(
         target_language=target_language,
         doc_id="test-doc-1",
     )
+
+
+@pytest.mark.parametrize("compute_segale", [False, True])
+def test_reverify_mode_is_stateless(compute_segale: bool) -> None:
+    server = _make_server(compute_segale=compute_segale)
+    with patch.object(LongmtEvalServer, "_ensure_actors") as ensure_actors:
+        with TestClient(server.setup_webserver()) as client:
+            assert ensure_actors.call_count == int(compute_segale)
+            ensure_actors.reset_mock()
+            response = client.get("/reverify_mode")
+        assert response.status_code == 200
+        assert response.json() == "stateless"
+        ensure_actors.assert_not_called()
 
 
 class TestAssertNoReasoning:
@@ -277,6 +287,12 @@ class TestBuildSegaleActorClass:
     The inner @ray.remote class requires a live Ray cluster + GPUs, so we mock
     ray.remote to capture decoration kwargs and verify the setup logic.
     """
+
+    @pytest.fixture(autouse=True)
+    def scoring_runtime(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import setup_scoring
+
+        monkeypatch.setattr(setup_scoring, "ensure_scoring_python", lambda _: tmp_path / "scoring-python")
 
     def _stub_ray_remote(self, captured: dict):
         def _ray_remote(**decorator_kwargs):
@@ -499,366 +515,146 @@ class TestBuildSegaleActorClass:
             _build_segale_actor_class()
 
 
-class TestErsatzWeightsOnlyLoad:
-    """The ersatz judge checkpoint pickles an ``argparse.Namespace`` ('args'), which
-    torch>=2.6's ``weights_only=True`` default rejects. The pinned ersatz fork
-    (>= d21f404) allowlists Namespace via ``torch.serialization.add_safe_globals`` so the
-    judge loads WITHOUT a ``TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`` global override.
+class TestActorStartup:
+    @pytest.mark.parametrize("compute_segale", [False, True])
+    def test_construction_does_not_provision(self, compute_segale: bool) -> None:
+        with patch.object(LongmtEvalServer, "_ensure_actors") as initialize:
+            _make_server(compute_segale=compute_segale)
+            initialize.assert_not_called()
 
-    These guard that contract with a tiny synthetic checkpoint — no multi-GB model
-    download. If the pin regresses to an ersatz without the allowlist (or someone drops
-    the ``add_safe_globals`` call), ``load_model`` raises ``UnpicklingError`` and these fail.
-    """
+    def test_dry_run_does_not_provision_or_setup_webserver(self) -> None:
+        server = _make_server(compute_segale=True)
+        server.config.uvicorn_reuse_port = False
+        with (
+            patch("nemo_gym.server_runtime.base_server.get_global_config_dict", return_value={"dry_run": True}),
+            patch("nemo_gym.server_runtime.base_server._connect_server_to_ray"),
+            patch("nemo_gym.server_runtime.base_server.ServerClient", return_value=server.server_client),
+            patch.object(LongmtEvalServer, "load_config_from_global_config", return_value=server.config),
+            patch.object(LongmtEvalServer, "_ensure_actors") as initialize,
+            patch.object(LongmtEvalServer, "setup_webserver") as setup,
+        ):
+            LongmtEvalServer.run_webserver()
+        initialize.assert_not_called()
+        setup.assert_not_called()
 
-    def _write_namespace_checkpoint(self, tmp_path: Path):
-        import argparse
+    @pytest.mark.parametrize("compute_segale", [False, True])
+    def test_provisions_before_serving(self, compute_segale: bool) -> None:
+        server = _make_server(compute_segale=compute_segale)
+        with patch.object(LongmtEvalServer, "_ensure_actors") as initialize:
+            server.setup_webserver()
+            assert initialize.call_count == int(compute_segale)
 
-        import torch
+    def test_startup_failure_prevents_webserver_setup(self) -> None:
+        server = _make_server(compute_segale=True)
+        with patch.object(LongmtEvalServer, "_ensure_actors", side_effect=RuntimeError("setup failed")):
+            with pytest.raises(RuntimeError, match="setup failed"):
+                server.setup_webserver()
 
-        # Mirror the real checkpoint shape: a pickled argparse.Namespace under 'args'
-        # (the part weights_only=True refuses), plus opaque tokenizer bytes and a
-        # here-empty 'weights' state dict. Real weights are irrelevant to the load gate.
-        ckpt = {
-            "args": argparse.Namespace(vocab_size=8, transformer_nlayers=1, foo="bar"),
-            "tokenizer": b"<sentencepiece-bytes>",
-            "weights": {},
-        }
-        path = tmp_path / "ersatz_ckpt.pt"
-        torch.save(ckpt, str(path))
-        return path
-
-    def _stub_model_construction(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Exercise only load_model's torch.load path; stub the heavy tokenizer/model build.
-        import ersatz.split as split
-
-        class _FakeModel:
-            def load_state_dict(self, *_a, **_k):
-                pass
-
-            def eval(self):
-                return self
-
-        monkeypatch.setattr(split, "SentencePiece", lambda **_k: object())
-        monkeypatch.setattr(split, "ErsatzTransformer", lambda *_a, **_k: _FakeModel())
-
-    def test_loads_namespace_checkpoint_without_env_override(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        pytest.importorskip("ersatz.split")
-        import ersatz.split as split
-        import torch
-
-        # Ensure we're testing the real torch default, not the global escape hatch.
-        monkeypatch.delenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", raising=False)
-        self._stub_model_construction(monkeypatch)
-        ckpt = self._write_namespace_checkpoint(tmp_path)
-
-        # add_safe_globals is process-global and sticky, so clear it first (restoring
-        # after) to force load_model to perform the registration itself — otherwise a
-        # regression that dropped the call could pass on residue from another test.
-        ser = torch.serialization
-        prior = list(ser.get_safe_globals()) if hasattr(ser, "get_safe_globals") else None
-        if prior is not None:
-            ser.clear_safe_globals()
-        try:
-            # Must NOT raise UnpicklingError under torch>=2.6 weights_only=True default.
-            model = split.load_model(str(ckpt))
-            assert model is not None
-        finally:
-            if prior is not None:
-                ser.clear_safe_globals()
-                if prior:
-                    ser.add_safe_globals(prior)
-
-    def test_does_not_disable_weights_only(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """The fix must be add_safe_globals + the safe default, NOT weights_only=False."""
-        pytest.importorskip("ersatz.split")
-        import ersatz.split as split
-        import torch
-
-        monkeypatch.delenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", raising=False)
-        self._stub_model_construction(monkeypatch)
-        ckpt = self._write_namespace_checkpoint(tmp_path)
-
-        captured: dict = {}
-        real_load = torch.load
-
-        def _spy_load(*args, **kwargs):
-            captured["weights_only"] = kwargs.get("weights_only")
-            return real_load(*args, **kwargs)
-
-        monkeypatch.setattr(torch, "load", _spy_load)
-        split.load_model(str(ckpt))
-        # weights_only=False would defeat the protection wholesale; the allowlist keeps
-        # the default (True on torch>=2.6). Absent kwarg (None) is also acceptable.
-        assert captured.get("weights_only") is not False
-
-
-class TestDownloadOnce:
-    """Unit tests for _download_once() in segale_actor.py — the generic race-safe
-    publish guard shared by the ersatz/laser/comet fetchers.
-
-    Deliberately free of library or network deps: a fake ``produce`` callback plus
-    real tmp dirs exercises every branch (fast-path, won-race file/dir, lost-race
-    file/dir), so these run everywhere and are the cheapest coverage of the logic
-    most likely to corrupt a shared cache.
-    """
-
-    def test_fast_path_skips_produce_when_present(self, tmp_path: Path) -> None:
+    def test_failed_startup_releases_actors_without_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import app
         import segale_actor
 
-        dest = tmp_path / "sub" / "f.bin"
-        dest.parent.mkdir(parents=True)
-        dest.write_bytes(b"cached")
-        called: list[int] = []
+        actor = MagicMock()
+        ping = object()
+        actor.ping.remote.return_value = ping
+        factory = MagicMock()
+        factory.remote.return_value = actor
+        build = MagicMock(return_value=factory)
+        monkeypatch.setattr(segale_actor, "_build_segale_actor_class", build)
+        monkeypatch.setattr(app.ray, "wait", lambda *a, **kw: ([], [ping]))
+        killed = []
+        monkeypatch.setattr(app.ray, "kill", killed.append)
+        server = _make_server(comet_num_shards=1)
+        server.config.actors_per_gpu = 1
+        with pytest.raises(RuntimeError, match="0/1"):
+            server._ensure_actors()
+        assert killed == [actor]
+        with pytest.raises(RuntimeError, match="restart the server"):
+            server._ensure_actors()
+        build.assert_called_once()
 
-        segale_actor._download_once(str(dest), lambda tmp: called.append(1))
-
-        assert called == []
-        assert dest.read_bytes() == b"cached"
-
-    def test_publishes_file_atomically(self, tmp_path: Path) -> None:
+    def test_partial_creation_failure_releases_existing_actors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import app
         import segale_actor
 
-        dest = tmp_path / "sub" / "f.bin"  # parent does not exist yet
-        segale_actor._download_once(str(dest), lambda tmp: Path(tmp).write_bytes(b"hello"))
-
-        assert dest.read_bytes() == b"hello"
-        assert not list(dest.parent.glob("*.tmp"))
-
-    def test_publishes_directory_atomically(self, tmp_path: Path) -> None:
-        import segale_actor
-
-        dest = tmp_path / "model"
-
-        def produce(tmp: str) -> None:
-            ck = Path(tmp) / "checkpoints"
-            ck.mkdir(parents=True)
-            (ck / "model.ckpt").write_bytes(b"ckpt")
-
-        segale_actor._download_once(str(dest), produce)
-
-        assert (dest / "checkpoints" / "model.ckpt").read_bytes() == b"ckpt"
-        assert not list(tmp_path.glob("*.tmp"))
-
-    def test_lost_race_file_keeps_winner(self, tmp_path: Path) -> None:
-        import segale_actor
-
-        dest = tmp_path / "race" / "f.bin"
-
-        def produce(tmp: str) -> None:
-            Path(tmp).write_bytes(b"ours")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(b"theirs")  # a competitor publishes while we "download"
-
-        segale_actor._download_once(str(dest), produce)
-
-        assert dest.read_bytes() == b"theirs"  # winner kept, our copy discarded
-        assert not list(dest.parent.glob("*.tmp"))
-
-    def test_lost_race_directory_keeps_winner(self, tmp_path: Path) -> None:
-        import segale_actor
-
-        dest = tmp_path / "model"
-
-        def produce(tmp: str) -> None:
-            Path(tmp).mkdir()
-            (Path(tmp) / "x").write_bytes(b"ours")
-            dest.mkdir()
-            (dest / "x").write_bytes(b"theirs")  # competitor publishes the dir first
-
-        segale_actor._download_once(str(dest), produce)
-
-        assert (dest / "x").read_bytes() == b"theirs"  # our tmp dir was rmtree'd
-        assert not list(tmp_path.glob("*.tmp"))
-
-
-class TestDownloadTo:
-    """Unit tests for _download_to() — the single URL->file download body."""
-
-    def test_plain_download(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import segale_actor
-
-        monkeypatch.setattr(urllib.request, "urlopen", lambda url: io.BytesIO(b"raw-bytes"))
-        out = tmp_path / "out.bin"
-        segale_actor._download_to("http://x/f", str(out))
-
-        assert out.read_bytes() == b"raw-bytes"
-
-    def test_gunzip_download(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import segale_actor
-
-        raw = b"decompressed-payload"
-        monkeypatch.setattr(urllib.request, "urlopen", lambda url: io.BytesIO(gzip.compress(raw)))
-        out = tmp_path / "out.bin"
-        segale_actor._download_to("http://x/f.gz", str(out), gunzip=True)
-
-        assert out.read_bytes() == raw
-
-
-class TestDownloadErsatzModel:
-    """Unit tests for _download_ersatz_model(): path wiring against the real ersatz
-    registry (ERSATZ_DIR/MODELS) with the network mocked — no multi-GB fetch."""
-
-    def _patch_registry(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str = "http://x/model.gz"
-    ) -> Path:
-        eu = pytest.importorskip("ersatz.utils")
-        monkeypatch.setattr(eu, "ERSATZ_DIR", str(tmp_path / "ersatz_home"))
-        monkeypatch.setattr(
-            eu,
-            "MODELS",
-            {"default-multilingual": {"destination": os.path.join("models", "dm"), "source": source}},
-        )
-        return Path(eu.ERSATZ_DIR) / "models" / "dm"
-
-    def test_downloads_and_gunzips(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import segale_actor
-
-        dest = self._patch_registry(monkeypatch, tmp_path)
-        raw = b"ersatz-weights"
-        monkeypatch.setattr(urllib.request, "urlopen", lambda url: io.BytesIO(gzip.compress(raw)))
-
-        segale_actor._download_ersatz_model("default-multilingual")
-
-        assert dest.read_bytes() == raw
-        assert not list(dest.parent.glob("*.tmp"))
-
-    def test_idempotent_second_call_skips_download(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import segale_actor
-
-        dest = self._patch_registry(monkeypatch, tmp_path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"cached")
-
-        def _boom(url):
-            raise AssertionError("must not download when the checkpoint already exists")
-
-        monkeypatch.setattr(urllib.request, "urlopen", _boom)
-
-        segale_actor._download_ersatz_model("default-multilingual")
-
-        assert dest.read_bytes() == b"cached"
-
-
-class TestDownloadLaserModel:
-    """Unit tests for _download_laser_model(): fetches laser2.{pt,spm,cvocab} via the
-    real LaserModelDownloader.base_url plumbing, with the network mocked."""
-
-    def _patch_downloader(self, monkeypatch: pytest.MonkeyPatch, base_url: str = "http://x/laser") -> None:
-        dl = pytest.importorskip("laser_encoders.download_models")
-
-        class _FakeDownloader:
-            def __init__(self, model_dir):
-                self.base_url = base_url
-
-        monkeypatch.setattr(dl, "LaserModelDownloader", _FakeDownloader)
-
-    def test_downloads_all_three(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import segale_actor
-
-        self._patch_downloader(monkeypatch)
-        monkeypatch.setattr(
-            urllib.request, "urlopen", lambda url: io.BytesIO(b"data-" + url.rsplit("/", 1)[-1].encode())
-        )
-        model_dir = tmp_path / "laser_home"
-
-        segale_actor._download_laser_model(str(model_dir))
-
-        for fn in ("laser2.pt", "laser2.spm", "laser2.cvocab"):
-            assert (model_dir / fn).read_bytes() == b"data-" + fn.encode()
-        assert not list(model_dir.glob("*.tmp"))
-
-    def test_skips_existing_files(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import segale_actor
-
-        self._patch_downloader(monkeypatch)
-        model_dir = tmp_path / "laser_home"
-        model_dir.mkdir()
-        (model_dir / "laser2.pt").write_bytes(b"cached-pt")
-
-        fetched: list[str] = []
-
-        def _urlopen(url):
-            fetched.append(url.rsplit("/", 1)[-1])
-            return io.BytesIO(b"new")
-
-        monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
-
-        segale_actor._download_laser_model(str(model_dir))
-
-        assert fetched == ["laser2.spm", "laser2.cvocab"]  # laser2.pt skipped via fast-path
-        assert (model_dir / "laser2.pt").read_bytes() == b"cached-pt"
-
-
-class TestDownloadCometModel:
-    """Unit tests for _download_comet_model(): the produce-into-tmp then
-    resolve-from-dest flow, with comet.download_model mocked (no HF/URL fetch)."""
-
-    @staticmethod
-    def _fake_download_model(calls: list):
-        def fake(model, saving_directory=None, local_files_only=False):
-            calls.append((saving_directory, local_files_only))
-            ck = Path(saving_directory) / "checkpoints"
-            ck.mkdir(parents=True, exist_ok=True)
-            p = ck / "model.ckpt"
-            if not p.exists():
-                p.write_bytes(b"ckpt")
-            return str(p)
-
-        return fake
-
-    def test_two_call_flow_and_path(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import segale_actor
-
-        comet = pytest.importorskip("comet")
-        calls: list = []
-        monkeypatch.setattr(comet, "download_model", self._fake_download_model(calls))
-        monkeypatch.setenv("LONGMT_COMET_CACHE", str(tmp_path / "comet_cache"))
-
-        ckpt = segale_actor._download_comet_model("Unbabel/wmt22-cometkiwi-da")
-
-        dest = tmp_path / "comet_cache" / "Unbabel__wmt22-cometkiwi-da"
-        assert ckpt == str(dest / "checkpoints" / "model.ckpt")
-        assert Path(ckpt).read_bytes() == b"ckpt"
-        # First call produces into a private .tmp dir; second resolves locally from dest.
-        assert len(calls) == 2
-        assert calls[0][0].endswith(".tmp")
-        assert calls[1] == (str(dest), True)
-        assert not list(dest.parent.glob("*.tmp"))
-
-    def test_default_path_uses_configured_gym_cache_dir(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import segale_actor
-
-        comet = pytest.importorskip("comet")
-        calls: list = []
-        monkeypatch.setattr(comet, "download_model", self._fake_download_model(calls))
-        monkeypatch.setattr(
-            segale_actor,
-            "maybe_get_global_config_dict",
-            lambda: {"cache_dir": str(tmp_path / "gym_cache")},
-        )
-        monkeypatch.delenv("LONGMT_COMET_CACHE", raising=False)
-
-        ckpt = segale_actor._download_comet_model("model")
-
-        dest = tmp_path / "gym_cache" / "longmt-comet" / "model"
-        assert ckpt == str(dest / "checkpoints" / "model.ckpt")
-
-    def test_idempotent_second_call_only_resolves(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import segale_actor
-
-        comet = pytest.importorskip("comet")
-        monkeypatch.setattr(comet, "download_model", self._fake_download_model([]))
-        monkeypatch.setenv("LONGMT_COMET_CACHE", str(tmp_path / "comet_cache"))
-        segale_actor._download_comet_model("m")  # populate the cache
-
-        calls: list = []
-        monkeypatch.setattr(comet, "download_model", self._fake_download_model(calls))
-
-        ckpt = segale_actor._download_comet_model("m")
-
-        dest = tmp_path / "comet_cache" / "m"
-        # Fast-path skips produce entirely; only the local resolve runs.
-        assert calls == [(str(dest), True)]
-        assert ckpt == str(dest / "checkpoints" / "model.ckpt")
+        actor = MagicMock()
+        factory = MagicMock()
+        factory.remote.side_effect = [actor, RuntimeError("creation failed")]
+        monkeypatch.setattr(segale_actor, "_build_segale_actor_class", lambda **kw: factory)
+        killed = []
+        monkeypatch.setattr(app.ray, "kill", killed.append)
+        with pytest.raises(RuntimeError, match="creation failed"):
+            _make_server(compute_segale=True).setup_webserver()
+        assert killed == [actor]
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "exception", "error_result"])
+async def test_scoring_failures_are_masked_without_reprovisioning(failure: str) -> None:
+    server = _make_server()
+    server.config.compute_segale = True
+
+    async def score() -> dict:
+        if failure == "exception":
+            raise TimeoutError("worker timeout")
+        return {"error": "non-finite score"}
+
+    with patch.object(LongmtEvalServer, "_ensure_actors") as initialize:
+        with patch.object(
+            LongmtEvalServer, "_dispatch", side_effect=lambda *a: None if failure == "unavailable" else score()
+        ):
+            result = await server.verify(_make_request("hello", "bonjour"))
+    initialize.assert_not_called()
+    assert result.mask_sample is True
+    assert result.evaluation_completed is False
+    assert result.failure_kind == "verifier_error"
+    assert result.segale_error == result.failure_reason
+    assert server.compute_metrics([[result.model_dump()]]) == {}
+
+
+async def test_successful_scoring_remains_unmasked() -> None:
+    server = _make_server()
+    server.config.compute_segale = True
+
+    async def score() -> dict:
+        return {"comet_qe": 0.8, "total_seg": 2, "misaligned_seg": 0}
+
+    with patch.object(LongmtEvalServer, "_dispatch", side_effect=lambda *args: score()):
+        result = await server.verify(_make_request("hello", "bonjour"))
+    assert result.reward == 0.8
+    assert result.evaluation_completed is True
+    assert result.mask_sample is False
+    assert result.failure_kind is None
+    assert result.segale_error is None
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_actor_pool_reuse_and_dispatch_order(monkeypatch: pytest.MonkeyPatch, partial: bool) -> None:
+    import app
+    import segale_actor
+
+    actors = [MagicMock(name=f"actor-{i}") for i in range(4)]
+    pings = [actor.ping.remote.return_value for actor in actors]
+    factory = MagicMock()
+    factory.remote.side_effect = actors
+    build = MagicMock(return_value=factory)
+    monkeypatch.setattr(segale_actor, "_build_segale_actor_class", build)
+    monkeypatch.setattr(app.ray, "wait", lambda *a, **kw: (pings[:3] if partial else pings, []))
+
+    def get(ping: object) -> None:
+        if partial and ping is pings[1]:
+            raise RuntimeError("actor initialization failed")
+
+    monkeypatch.setattr(app.ray, "get", get)
+    killed = []
+    monkeypatch.setattr(app.ray, "kill", killed.append)
+    server = _make_server(comet_num_shards=2)
+    server.config.actors_per_gpu = 2
+    server.config.use_extra_gpu = False
+    server._ensure_actors()
+    server._ensure_actors()
+    build.assert_called_once()
+    assert factory.remote.call_count == 4
+    expected = [actors[0], actors[2]] if partial else [actors[0], actors[2], actors[1], actors[3]]
+    assert killed == ([actors[1], actors[3]] if partial else [])
+    for actor in expected * 2:
+        assert server._dispatch("source", "translation", "fr_FR") is actor.score.remote.return_value

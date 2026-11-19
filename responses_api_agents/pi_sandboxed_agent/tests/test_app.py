@@ -399,7 +399,7 @@ async def test_terminal_stop_controls_scoring_without_observations(
 
 
 def _provider_event(kind="provider_unavailable", **kwargs):
-    from nemo_gym.sandbox.failures import sandbox_failure
+    from nemo_gym.sandbox import sandbox_failure
 
     return sandbox_failure(operation="exec", failure_kind=kind, sandbox_id="box", provider="opensandbox", **kwargs)
 

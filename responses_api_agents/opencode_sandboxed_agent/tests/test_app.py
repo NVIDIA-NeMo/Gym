@@ -57,6 +57,7 @@ from nemo_gym.core import (
     SandboxFailureDetails,
 )
 from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxHandle
+from nemo_gym.sandbox.testing import fake_sandbox
 from nemo_gym.trajectory import (
     NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentInvocation,
@@ -584,8 +585,10 @@ class TestOpenCodeSandboxedAgent:
                 'else rg --version && touch "$HOME/agent-started"; fi\n'
             )
             opencode.chmod(0o755)
-            local_command = command.replace("/tmp/nemo-gym-ripgrep-", shlex.quote(str(uploaded))).replace(
-                "/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error"))
+            local_command = (
+                command.replace("/tmp/nemo-gym-ripgrep-", shlex.quote(str(uploaded)))
+                .replace("/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error")))
+                .replace(app_module.STABLE_DATE_MARKER, shlex.quote(str(tmp_path / "stable-date")))
             )
             try:
                 completed = subprocess.run(
@@ -1065,6 +1068,8 @@ class TestOpenCodeSandboxedAgent:
         config = await server._create_opencode_config(request)
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
+        stable_date = "file:///tmp/nemo-gym-stable-date.js"
+        assert (stable_date in config.get("plugin", [])) == token_capture_enabled
 
     async def test_create_opencode_config_merges_recursively(self, monkeypatch: MonkeyPatch) -> None:
         """A nested override must not blow away its siblings in the generated config.
@@ -1696,14 +1701,13 @@ class TestOpenCodeSandboxedAgent:
         server_client.post = AsyncMock(return_value=Response())
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
 
-        stopped = anyio.Event()
+        sandbox = fake_sandbox()
 
-        async def stop() -> None:
+        async def slow_close() -> None:
+            # A close that has to await, so a stop the cancelled handler reaches would never finish.
             await anyio.sleep(0)
-            stopped.set()
 
-        sandbox = MagicMock()
-        sandbox.stop = stop
+        sandbox.provider.on_close.side_effect = slow_close
         server._start_sandbox = AsyncMock(return_value=sandbox)
         rollout_started = anyio.Event()
 
@@ -1722,7 +1726,7 @@ class TestOpenCodeSandboxedAgent:
             await rollout_started.wait()
             task_group.cancel_scope.cancel()
 
-        assert stopped.is_set(), "the pod was left running"
+        assert sandbox.provider.closed == ["fake-1"], "the pod was left running"
         assert server._sandbox_id_to_sandbox == {}
         assert server._sandbox_id_to_run_result == {}
 
@@ -2388,6 +2392,62 @@ class TestBenchmarkLifecycle:
         assert run_result["opencode_finished"] is False
         sandbox.download.assert_awaited_once()
 
+    @mark.parametrize(
+        ("return_code", "sandbox_error_type", "expected_error_type"),
+        [
+            # The sandbox killed the run at its deadline; the export error the killed session left must not hide it.
+            (124, "timeout", "timeout"),
+            # Without a sandbox-reported error, the export error still classifies the failure.
+            (1, None, "APIError"),
+        ],
+    )
+    async def test_sandbox_error_type_outranks_export_terminal_error(
+        self, tmp_path: Path, return_code: int, sandbox_error_type: str | None, expected_error_type: str
+    ) -> None:
+        config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
+        config.preinstalled_opencode = True
+        config.opencode_version = "test"
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+
+        async def execute(command: str, **_kwargs: Any) -> Any:
+            if "session list" in command:
+                return SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None)
+            if "opencode export" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+            if "opencode db" in command:
+                return SimpleNamespace(stdout="", stderr="snapshot unavailable", return_code=1, error_type=None)
+            return SimpleNamespace(
+                stdout="Shell: bash\npartial", stderr="", return_code=return_code, error_type=sandbox_error_type
+            )
+
+        export = json.loads((Path(__file__).parent / "opencode_export_test_data.json").read_text())
+        last_assistant = [m for m in export["messages"] if m["info"].get("role") == "assistant"][-1]
+        last_assistant["info"]["error"] = {"name": "APIError", "data": {"message": "request aborted"}}
+
+        async def download(_remote: str, local: Path) -> None:
+            local.write_text(json.dumps(export))
+
+        sandbox = MagicMock(
+            upload=AsyncMock(), exec=AsyncMock(side_effect=execute), download=AsyncMock(side_effect=download)
+        )
+        server._sandbox_id_to_sandbox = {"session": sandbox}
+        server._create_opencode_config = AsyncMock(return_value={})
+        request = SimpleNamespace(
+            cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+
+        await server.responses(request, body)
+
+        run_result = server._sandbox_id_to_run_result["session"]
+        assert run_result["opencode_failed"] is True
+        assert run_result["opencode_exit_code"] == return_code
+        assert run_result["opencode_error_type"] == expected_error_type
+        assert run_result["opencode_export_found"] is True
+
 
 @mark.parametrize(
     ("failure", "error"),
@@ -2617,6 +2677,49 @@ async def test_plugin_registration_and_upload_come_from_one_list(monkeypatch):
         server._plugin_uploads()
 
 
+async def test_unpinned_date_fails_a_finished_capture_run(monkeypatch):
+    server = OpenCodeSandboxedAgent(
+        config=TestOpenCodeSandboxedAgent()._create_config(), server_client=MagicMock(spec=ServerClient)
+    )
+    monkeypatch.setattr(server, "_token_id_capture_enabled", lambda: True)
+    monkeypatch.setattr(server, "_upload_plugin_verified", AsyncMock())
+    sandbox = MagicMock(
+        upload=AsyncMock(),
+        download=AsyncMock(),
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    stdout="Shell: /bin/sh\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                ),
+                SimpleNamespace(stdout="", stderr="", return_code=1, error_type=None),
+            ]
+        ),
+    )
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+    with raises(NgFailureEvent, match="stable-date plugin"):
+        await server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "trial"}, cookies={"sandbox_id": ""}, path_params={}),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+        )
+    assert app_module.STABLE_DATE_MARKER in sandbox.exec.await_args_list[0].kwargs["command"]
+    assert sandbox.exec.await_args_list[1].kwargs["command"] == f"test -f {app_module.STABLE_DATE_MARKER}"
+    sandbox.download.assert_not_awaited()
+    assert not server._sandbox_id_to_run_result
+
+
+@mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")
+def test_stable_date_extension():
+    result = subprocess.run(
+        ["node", "--test", str(Path(__file__).with_name("test_stable_date.mjs"))],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")
 def test_required_mcp_extension():
     result = subprocess.run(
@@ -2699,6 +2802,8 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     result = await server.run(request, body)
     limited = stop_reason == "length"
     assert result.opencode_failed is limited
+    # Only the final assistant message decides it (an earlier length stop does not).
+    assert result.opencode_context_limited is limited
     assert result.reward == (0 if limited and force_zero else 1)
     assert result.model_dump()["library_reward"] == result.reward
     assert result.response.output

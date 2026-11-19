@@ -33,13 +33,14 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
-from nemo_gym.orchestration.executors.resume_script import render_resume_epilogue
+from nemo_gym.orchestration.executors.otel import COLLECTOR_SERVICE_NAME
 from nemo_gym.orchestration.executors.script_templates import (
     RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
     render_gym_cmd,
 )
-from nemo_gym.orchestration.executors.slurm_script import (
+from nemo_gym.orchestration.executors.slurm.resume_script import render_resume_epilogue
+from nemo_gym.orchestration.executors.slurm.script import (
     _RAY_SERVE_GATEWAY_SOURCE_PATH,
     _build_ray_command,
     _build_service_command,
@@ -56,6 +57,7 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _with_default_capture_dir,
     _with_resume_flag,
     build_sbatch_script,
+    planned_log_sources,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
 
@@ -85,8 +87,58 @@ def test_list_value():
     ]
 
 
+def test_list_of_mappings_is_written_in_hydra_syntax():
+    stages = [{"num_tasks": 4}, {"num_tasks": 24, "name": "full run"}]
+    (arg,) = _flatten_run_args({"run": stages})
+    (token,) = shlex.split(arg)
+    assert token.startswith("+run=[{num_tasks: 4},{num_tasks: 24")
+    assert OverridesParser.create().parse_overrides([token])[0].value() == stages
+
+
+@pytest.mark.parametrize(
+    "stages",
+    [
+        [{"num_tasks": 4, "name": "1"}, {"num_tasks": 24, "name": "a,b"}],
+        [{"waivable": [None, True], "limits": {"max": 2}}],
+        [[1, None], ["a b"]],
+        [["", "a"], ["C:\\dir\\"]],
+        [{"suffix": ""}],
+    ],
+    ids=[
+        "strings-hydra-would-retype",
+        "nested-list-and-mapping",
+        "list-of-lists",
+        "empty-and-backslash",
+        "empty-value",
+    ],
+)
+def test_nested_run_values_reach_hydra_unchanged(stages):
+    (arg,) = _flatten_run_args({"run": stages})
+    (token,) = shlex.split(arg)
+    assert OverridesParser.create().parse_overrides([token])[0].value() == stages
+
+
+@pytest.mark.parametrize("key", ["a=b", "null", "true", "1"])
+def test_a_mapping_key_hydra_would_change_is_rejected(key):
+    with pytest.raises(ValueError, match="cannot be written as a Hydra override value"):
+        _flatten_run_args({"run": [{key: 1}]})
+
+
 def test_empty():
     assert _flatten_run_args({}) == []
+
+
+def test_a_run_task_id_list_reaches_the_collection_config_as_the_same_ids():
+    # A submit's `run: {task_ids: [...]}` runs only those tasks; Hydra reads an unquoted `7` as a number.
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig
+
+    [arg] = _flatten_run_args({"task_ids": ["django__django-11099", "7", "org/repo.2"]})
+    override = OverridesParser.create().parse_overrides([shlex.split(arg)[0]])[0]
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath="in.jsonl", output_jsonl_fpath="out.jsonl", task_ids=override.value()
+    )
+
+    assert [str(task_id) for task_id in config.task_ids] == ["django__django-11099", "7", "org/repo.2"]
 
 
 def test_value_with_spaces_is_quoted():
@@ -95,6 +147,14 @@ def test_value_with_spaces_is_quoted():
 
 def test_deeply_nested():
     assert _flatten_run_args({"a": {"b": {"c": 1}}}) == ["+a.b.c=1"]
+
+
+def test_none_value_is_written_as_hydra_null():
+    (token,) = _flatten_run_args({"a": {"b": None}})
+    assert token == "+a.b=null"
+    override = OverridesParser.create().parse_overrides([token])[0]
+    assert override.key_or_group == "a.b"
+    assert override.value() is None
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +825,38 @@ def test_render_driver_entrypoint_with_gym_install():
     assert '"${GYM_CMD[@]}"' in out
 
 
+@pytest.mark.parametrize("failed_command", ["clone", "checkout"])
+def test_driver_checkout_failure_stops_before_environment_setup(tmp_path: Path, failed_command: str) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    marker = tmp_path / "uv-was-run"
+    scripts = {
+        "curl": "#!/bin/bash\nexit 0\n",
+        "git": (
+            "#!/bin/bash\n"
+            f"if [[ $1 == {shlex.quote(failed_command)} ]]; then exit 73; fi\n"
+            'if [[ $1 == clone ]]; then mkdir -p "${@: -1}"; fi\n'
+            "exit 0\n"
+        ),
+        "uv": f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\nexit 0\n",
+    }
+    for name, content in scripts.items():
+        path = tools / name
+        path.write_text(content)
+        path.chmod(0o755)
+    entrypoint = render_driver_entrypoint("https://example.invalid/gym", "pinned-ref", None, cleanup=True)
+    result = subprocess.run(
+        ["bash", "-c", "GYM_CMD=(true); " + entrypoint],
+        cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": f"{tools}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 73, result.stderr
+    assert not marker.exists()
+
+
 def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
     # The uv installer does not write $HOME/.local/bin/env when that directory is
     # already on PATH, so sourcing it would abort the `set -e` preamble.
@@ -776,7 +868,14 @@ def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
 
 
 def _run_private_uv_entrypoint(
-    tmp_path: Path, *, shared_uv: str, tmpdir: Path | None = None
+    tmp_path: Path,
+    *,
+    shared_uv: str,
+    tmpdir: Path | None = None,
+    uv_version: str = "0.0.0",
+    required_version: str | None = None,
+    fresh_uv_version: str | None = None,
+    check: bool = True,
 ) -> tuple[str, Path, Path]:
     """Run a private-uv reader entrypoint with stub git, uv and curl; return its report, the shared uv and curl log."""
     home, tools = tmp_path / "home", tmp_path / "tools"
@@ -784,7 +883,7 @@ def _run_private_uv_entrypoint(
     tools.mkdir()
     # `uv venv` records the interpreter preference it ran with, which decides whether a Python on PATH may be used.
     fake_uv = (
-        '#!/bin/bash\ncase "$1" in --version) echo "uv 0.0.0";; venv) mkdir -p .venv/bin; '
+        '#!/bin/bash\ncase "$1" in --version) echo "uv ' + uv_version + '";; venv) mkdir -p .venv/bin; '
         "printf 'export VIRTUAL_ENV=%q\\n' \"$PWD/.venv\" > .venv/bin/activate; "
         'printf %s "${UV_PYTHON_PREFERENCE:-unset}" > .venv/python-preference;; esac\n'
     )
@@ -794,8 +893,10 @@ def _run_private_uv_entrypoint(
         shared.chmod(0o755)
     # The clone declares the extras the entrypoint asks for, and `python` is the one that reads them.
     (tools / "git").write_text(
-        '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "$3"; '
-        'printf "[project.optional-dependencies]\\nray = []\\n" > "$3/pyproject.toml"; fi\nexit 0\n'
+        '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "${@: -1}"; '
+        'printf "[tool.uv]\\n%b[project.optional-dependencies]\\nray = []\\n" '
+        + shlex.quote(f'required-version = "{required_version}"\\n' if required_version else "")
+        + ' > "${@: -1}/pyproject.toml"; fi\nexit 0\n'
     )
     (tools / "python").symlink_to(sys.executable)
     curl_log = tmp_path / "curl.log"
@@ -803,7 +904,7 @@ def _run_private_uv_entrypoint(
     # unmanaged writes the user-level receipt.
     installer = (
         'dir="${UV_UNMANAGED_INSTALL:-${UV_INSTALL_DIR:-$HOME/.local/bin}}"; mkdir -p "$dir"; printf %s '
-        + shlex.quote(fake_uv)
+        + shlex.quote(fake_uv.replace(uv_version, fresh_uv_version or uv_version, 1))
         + ' > "$dir/uv"; chmod +x "$dir/uv"; if [ -z "${UV_UNMANAGED_INSTALL:-}" ]; then '
         'mkdir -p "$HOME/.config/uv"; echo "{\\"install_prefix\\":\\"$dir\\"}" > "$HOME/.config/uv/uv-receipt.json"; fi'
     )
@@ -820,8 +921,43 @@ def _run_private_uv_entrypoint(
         "https://github.com/NVIDIA-NeMo/gym", "main", None, command=report, cleanup=True, private_uv=True
     )
     env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin"} | ({"TMPDIR": str(tmpdir)} if tmpdir else {})
-    result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, check=True)
+    result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, check=check)
+    if not check:
+        assert result.returncode != 0, result.stdout + result.stderr
+        return result.stdout + result.stderr, shared, curl_log
     return result.stdout, shared, curl_log
+
+
+def test_a_private_uv_older_than_the_checkout_requires_is_replaced_by_a_fresh_install(tmp_path: Path) -> None:
+    out, shared, curl_log = _run_private_uv_entrypoint(
+        tmp_path,
+        shared_uv="working",
+        uv_version="0.11.32",
+        fresh_uv_version="0.13.8",
+        required_version=">=0.13.4",
+    )
+    fields = dict(part.split("=", 1) for part in out.split())
+    assert curl_log.exists()  # the fresh install ran
+    assert fields["UV"] == f"{fields['SRC']}/uv-bin/uv"
+    assert "VENV_PREFERENCE=only-managed" in out  # and the read went on
+    assert "0.11.32" in shared.read_text()  # the user's own uv is left as it was
+
+
+def test_a_private_uv_that_stays_too_old_after_the_fresh_install_fails_naming_both_versions(tmp_path: Path) -> None:
+    out, _, _ = _run_private_uv_entrypoint(
+        tmp_path, shared_uv="working", uv_version="0.11.32", required_version=">=0.13.4", check=False
+    )
+    assert "uv 0.11.32" in out and "0.13.4" in out and "older" in out
+    assert "VENV_PREFERENCE" not in out  # stopped before `uv venv` and the command
+
+
+@pytest.mark.parametrize("uv_version", ["0.13.4", "0.13.10", "1.0.0"])
+def test_a_private_uv_that_meets_the_requirement_runs_on(tmp_path: Path, uv_version: str) -> None:
+    out, _, curl_log = _run_private_uv_entrypoint(
+        tmp_path, shared_uv="working", uv_version=uv_version, required_version=">=0.13.4"
+    )
+    assert "VENV_PREFERENCE=only-managed" in out
+    assert not curl_log.exists()  # no reinstall when the copy already meets the requirement
 
 
 @pytest.mark.parametrize("shared_uv", ["working", "broken", "missing"])
@@ -860,7 +996,7 @@ def test_a_private_uv_reader_never_bases_its_venv_on_a_shared_python_on_path(tmp
     shutil.copy(shutil.which("uv"), home / ".local/bin/uv")
     shared_python = home / ".local/bin" / f"python{sys.version_info[0]}.{sys.version_info[1]}"
     shared_python.symlink_to(Path(sys.executable).resolve())
-    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "$3"\nexit 0\n')
+    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "${@: -1}"\nexit 0\n')
     (tools / "git").chmod(0o755)
     report = "python -c 'import sys; print(\"BASE=\" + sys.base_prefix)'"
     out = render_driver_entrypoint(
@@ -1094,6 +1230,28 @@ def test_build_sbatch_script_not_resumable_omits_prologue(submit_config, bench_d
     assert "\n    +resume_from_cache=True" not in script
 
 
+def test_build_sbatch_script_nested_list_of_mappings_reaches_hydra_intact(bench_dir):
+    stages = [{"num_tasks": 4}, {"num_tasks": 24}]
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gdpval": {"run": {"stages": stages}}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gdpval"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gdpval", benchmark, compute, bench_dir)
+    # Let bash split the rendered GYM_CMD array, so what is parsed is what the driver receives.
+    array = script[script.index("GYM_CMD=(") :].split("\n)\n", 1)[0] + "\n)"
+    words = subprocess.run(
+        ["bash", "-c", array + '\nprintf "%s\\n" "${GYM_CMD[@]}"'], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    (override,) = [w for w in words if w.startswith("+stages=")]
+    assert OverridesParser.create().parse_overrides([override])[0].value() == stages
+
+
 def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
     config = SubmitConfig.model_validate(
         {
@@ -1141,6 +1299,26 @@ def test_build_sbatch_script_no_capture_dir_when_observability_off(submit_config
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
     assert "+observability_enabled=False" in script
     assert "model_call_capture_dir" not in script
+
+
+@pytest.mark.parametrize("resumable", [False, True])
+def test_every_step_uses_the_selected_slurm_account(submit_config, bench_dir, resumable):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    benchmark.resumable = resumable
+    compute = next(iter(submit_config.compute.values()))
+    compute.account = "operator_account_override"
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    steps = [line for line in script.splitlines() if "srun --overlap" in line]
+    assert len(steps) >= 2
+    assert all("--account=operator_account_override" in line for line in steps)
+
+
+def test_ray_head_and_worker_steps_use_the_selected_slurm_account(tmp_path):
+    script = _render(tmp_path, {"ray": {"type": "ray", "container": "img", "node_pools": ["gpu", "aux"]}})
+    steps = [line for line in script.splitlines() if "srun --overlap" in line]
+    assert any("ray start --block --head" in line for line in steps)
+    assert any("--output=logs/ray_aux_workers-" in line for line in steps)
+    assert all("--account=acct" in line for line in steps)
 
 
 def test_build_sbatch_script_contains_shebang(submit_config, bench_dir):
@@ -1531,7 +1709,7 @@ def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_d
 from unittest.mock import MagicMock
 
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.executors.slurm import _validate_mounts
+from nemo_gym.orchestration.executors.slurm.executor import _validate_mounts
 
 
 def _make_submit_config_with_mounts(driver_mounts=None, service_mounts=None):
@@ -1928,7 +2106,7 @@ def test_gym_install_does_not_clone_into_the_job_directory():
     entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
 
     assert "mktemp -d /tmp/gym-install-" in entrypoint
-    assert 'git clone https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
+    assert 'git clone --filter=blob:none --no-checkout https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
 
 
 def test_gym_install_runs_from_the_install_root():
@@ -2020,6 +2198,14 @@ def test_a_command_keeps_the_driver_env_the_config_declared(tmp_path):
     assert "NEMO_GYM_BENCH_DIR=" in script
 
 
+@pytest.mark.parametrize("command", [None, "harness"])
+def test_driver_bench_dir_uses_bound_path_instead_of_host_pwd(tmp_path, command):
+    script = _render_command(tmp_path, command, env={"NEMO_GYM_BENCH_DIR": "runtime:PWD"})
+    bench_dir = tmp_path / "jobs" / "x" / "osworld"
+    assert f"NEMO_GYM_BENCH_DIR={bench_dir}" in script
+    assert "NEMO_GYM_BENCH_DIR=${PWD}" not in script
+
+
 def test_a_command_still_runs_prepare_first(tmp_path):
     config = SubmitConfig.model_validate(
         {
@@ -2039,7 +2225,7 @@ def test_a_command_still_runs_prepare_first(tmp_path):
     )
 
     prepare_at = script.index("gym eval prepare")
-    assert prepare_at < script.index("harness")
+    assert prepare_at < script.index("    harness\n", prepare_at)
 
 
 def test_a_multi_line_command_survives_quoting(tmp_path):
@@ -2839,7 +3025,14 @@ def test_a_ray_head_is_probed_beside_a_non_zero_driver_node(tmp_path):
 
 def test_the_collector_is_probed_beside_a_non_zero_driver_node(tmp_path):
     script = _driver_on_aux(tmp_path, {})
-    assert "Waiting for otel_collector at http://${gym_nodes[1]}:13133" in script
+    assert "Waiting for otel_collector at http://${gym_nodes[1]}:4319" in script
+
+
+def test_the_collector_is_stopped_on_its_own_node_beside_a_non_zero_driver_node(tmp_path):
+    # pkill sees only the node it runs on, and the batch script runs on node 0.
+    stop = next(line for line in _driver_on_aux(tmp_path, {}).splitlines() if "pkill -TERM" in line)
+    assert stop.startswith('srun --overlap --nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1 pkill -TERM ')
+    assert stop.endswith(" || true")
 
 
 def test_services_on_node_0_are_probed_locally(tmp_path):
@@ -3245,11 +3438,11 @@ def test_a_service_named_driver_is_watched_apart_from_the_driver(tmp_path):
 
 def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged(tmp_path):
     # A multi-task service (a vllm_pd tier, a Ray worker pool) must not outlive one of its tasks, whatever the cluster's
-    # KillOnBadExit and WaitTime defaults; the driver and OTel collector steps keep Slurm's defaults.
+    # KillOnBadExit and WaitTime defaults; the driver and OTel collector steps (its stop included) keep Slurm's defaults.
     script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
     steps = [line for line in script.splitlines() if "srun --overlap" in line]
     driver_steps = [line for line in steps if "logs/driver-" in line]
-    collector_steps = [line for line in steps if "logs/otel_collector-" in line]
+    collector_steps = [line for line in steps if "logs/otel_collector-" in line or " pkill -TERM " in line]
     service_steps = [line for line in steps if line not in driver_steps and line not in collector_steps]
 
     assert service_steps and driver_steps
@@ -3289,3 +3482,110 @@ def test_a_private_uv_entrypoint_creates_its_shared_cache_dir_private(tmp_path: 
     cache = shared_tmp / f"gym-uv-cache-{os.getuid()}"
     assert dict(part.split("=", 1) for part in stdout.split())["CACHE"] == str(cache)
     assert cache.stat().st_mode & 0o777 == 0o700
+
+
+# ---------------------------------------------------------------------------
+# planned_log_sources
+# ---------------------------------------------------------------------------
+
+
+def _ray_alongside_a_policy(tmp_path):
+    return _placement_config(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "ray": {"type": "ray", "container": "img", "node_pools": ["gpu", "aux"], "port": 6380},
+        },
+        _TWO_POOLS,
+    )
+
+
+def _with_a_collector(tmp_path):
+    return SubmitConfig.model_validate(
+        {
+            "services": {"policy": _vllm(8000, "aux", tensor_parallel_size=4)},
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
+            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": _TRACED_OTEL,
+        }
+    )
+
+
+_LOG_PLAN_CONFIGS = {
+    "two pinned services": lambda tmp_path: _placement_config(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
+        },
+        _TWO_POOLS,
+    ),
+    "a ray service with worker steps": _ray_alongside_a_policy,
+    "a prefill/decode pair": lambda tmp_path: _pd_config(tmp_path),
+    "a per-node prefill/decode pair": lambda tmp_path: _pd_config(tmp_path, services=_per_node_services()),
+    "a telemetry collector": _with_a_collector,
+}
+
+
+@pytest.mark.parametrize("make_config", _LOG_PLAN_CONFIGS.values(), ids=_LOG_PLAN_CONFIGS.keys())
+def test_the_planned_log_sources_are_exactly_the_logs_the_script_writes(tmp_path, make_config):
+    config = make_config(tmp_path)
+    compute = config.compute["hsg"]
+
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], compute, tmp_path / "jobs" / "b")
+
+    written = set(re.findall(r"--output=(logs/\S+)", script))
+    planned = {source.location.replace("{job_id}", "$SLURM_JOB_ID") for source in planned_log_sources(config, compute)}
+    assert written == planned
+    assert len(written) > 1
+
+
+def _without_telemetry(config):
+    return config.model_copy(update={"otel": config.otel.model_copy(update={"enabled": False})})
+
+
+def test_a_ray_service_plans_a_log_for_its_head_and_for_each_worker_step(tmp_path):
+    config = _without_telemetry(_ray_alongside_a_policy(tmp_path))
+
+    sources = planned_log_sources(config, config.compute["hsg"])
+
+    assert [source.name for source in sources] == ["driver", "policy", "ray", "ray_aux_workers"]
+
+
+def test_the_driver_is_planned_first_and_is_the_only_driver_source(tmp_path):
+    config = _pd_config(tmp_path)
+
+    sources = planned_log_sources(config, config.compute["hsg"])
+
+    assert sources[0].name == "driver"
+    assert [source.kind for source in sources].count("driver") == 1
+    assert {source.kind for source in sources[1:]} == {"service"}
+
+
+def test_a_prefill_decode_pair_plans_both_tiers_and_the_router(tmp_path):
+    config = _without_telemetry(_pd_config(tmp_path))
+
+    names = [source.name for source in planned_log_sources(config, config.compute["hsg"])]
+
+    assert names == ["driver", "policy-prefill", "policy-decode", "policy"]
+
+
+def test_the_telemetry_collector_has_a_planned_log_only_when_it_is_on(tmp_path):
+    with_collector = _with_a_collector(tmp_path)
+    without = _without_telemetry(with_collector)
+
+    on = [s.name for s in planned_log_sources(with_collector, with_collector.compute["hsg"])]
+    off = [s.name for s in planned_log_sources(without, without.compute["hsg"])]
+
+    assert on == ["driver", COLLECTOR_SERVICE_NAME, "policy"]
+    assert off == ["driver", "policy"]
+
+
+def test_planned_locations_keep_the_job_id_open_for_the_reader(tmp_path):
+    config = _pd_config(tmp_path)
+
+    locations = [s.location for s in planned_log_sources(config, config.compute["hsg"])]
+
+    assert locations[0] == "logs/driver-{job_id}.log"
+    assert all("{job_id}" in location and "$SLURM_JOB_ID" not in location for location in locations)

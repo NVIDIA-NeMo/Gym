@@ -38,7 +38,7 @@ from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
-from pydantic import BaseModel, PositiveInt, model_validator
+from pydantic import BaseModel, PositiveInt, ValidationError, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
@@ -64,6 +64,7 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.core.correlation import CorrelationPathError, parse_path
 from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.ray_support import (
@@ -86,10 +87,7 @@ from nemo_gym.server_runtime.request_handling.session_routing import (
     create_session_socket_dir,
     install_session_routing,
 )
-from nemo_gym.server_runtime.request_handling.trace_context import (
-    _ROLLOUT_PREFIX_RE,
-    install_trace_context_path,
-)
+from nemo_gym.server_runtime.request_handling.trace_context import install_trace_context_path
 from nemo_gym.server_runtime.uvicorn_reuse_port import reuse_port_supported, run_with_reuse_port
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.connection_pool import (
@@ -153,9 +151,29 @@ class BaseServer(BaseModel):
         server_config_dict = get_first_server_config_dict(global_config_dict, config_path_str)
 
         server_config_cls: Type[BaseRunServerInstanceConfig] = cls.model_fields["config"].annotation
-        server_config = server_config_cls.model_validate(
-            OmegaConf.to_container(server_config_dict, resolve=True) | {"name": config_path_str}
-        )
+        try:
+            server_config = server_config_cls.model_validate(
+                OmegaConf.to_container(server_config_dict, resolve=True) | {"name": config_path_str}
+            )
+        except ValidationError as exc:
+            # Name the source setting when a required field interpolates an unset value.
+            unresolved = OmegaConf.to_container(server_config_dict, resolve=False)
+            missing = set()
+            for error in exc.errors():
+                if error.get("input") is None and error["loc"]:
+                    source = unresolved.get(error["loc"][0])
+                    if isinstance(source, str) and source.startswith("${") and source.endswith("}"):
+                        key = source[2:-1]
+                        if key in global_config_dict and global_config_dict[key] is None:
+                            missing.add(key)
+            if missing:
+                settings = ", ".join(sorted(missing))
+                overrides = " ".join(f"++{key}=<value>" for key in sorted(missing))
+                raise ValueError(
+                    f"Required settings for {config_path_str} are unset: {settings}. "
+                    f"Provide them in a config file or via CLI overrides: {overrides}"
+                ) from None
+            raise
 
         return server_config
 
@@ -263,7 +281,7 @@ def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
 def _unblock_shutdown_signals() -> None:
     """Let SIGINT and SIGTERM, on which uvicorn shuts a server down, reach this process. A process starts with the
     signal mask of the thread that launched it, so a server launched from a thread that blocks these signals, such as
-    any thread of a Ray worker, would otherwise leave RunHelper's interrupt pending and never run its shutdown.
+    any thread of a Ray worker, would otherwise leave ServerSupervisor's interrupt pending and never run its shutdown.
     Unblocking a signal that is not blocked changes nothing."""
     signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGINT, signal.SIGTERM))
 
@@ -725,7 +743,12 @@ def with_rollout_prefix(url: str, base_urls: Sequence[str]) -> str:
         ] != base_segments:
             continue
         rest = "/" + "/".join(segments[len(base_segments) :])
-        if _ROLLOUT_PREFIX_RE.match(rest):
+        try:
+            resolved = parse_path(rest, allow_empty_rest=True)
+        except CorrelationPathError:
+            # The receiving server answers a malformed prefix; adding a second one would only hide it.
+            return url
+        if resolved is not None and resolved[0].capture_key is not None:
             return url
         rollout_id = current_rollout_id()
         if not rollout_id:

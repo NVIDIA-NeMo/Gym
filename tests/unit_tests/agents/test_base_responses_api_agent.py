@@ -17,8 +17,10 @@ from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import Body, Request
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
+from pydantic import ConfigDict
 
 from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgent,
@@ -30,7 +32,9 @@ from nemo_gym.agents.base_responses_api_agent import (
 )
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.server_runtime.base_resources_server import AggregateMetricsRequest
+from nemo_gym.core.model_call_sampling import ModelCallSampling, encode_model_sampling
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime.base_resources_server import AggregateMetricsRequest, BaseRunRequest
 
 
 class TestBaseResponsesAPIAgent:
@@ -185,6 +189,263 @@ class TestModelEndpoint:
     def test_no_endpoint_configured_raises(self, base_url: str | None) -> None:
         with pytest.raises(ValueError, match="No model endpoint"):
             self._agent().model_endpoint(model_server=None, rollout_id="3-1", base_url=base_url)
+
+
+class TestModelSampling:
+    """A trained agent's model URLs carry the rollout's sampling values, whichever way the agent builds them."""
+
+    VALUES = {"temperature": 0.6, "top_p": 0.95, "max_output_tokens": 64}
+    SEGMENT = encode_model_sampling(ModelCallSampling(**VALUES))
+
+    def _agent(self, *, observability: bool = True) -> tuple[SimpleResponsesAPIAgent, dict]:
+        """An agent that records the model URLs it builds, and the record."""
+        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="agent")
+        seen: dict = {}
+
+        class _RunRequest(BaseRunRequest):
+            model_config = ConfigDict(extra="allow")
+
+        class _Agent(SimpleResponsesAPIAgent):
+            async def responses(self, request: Request, body: dict = Body()) -> dict:
+                seen["responses"] = {
+                    "model_path": self.url_path_for_request("/v1/responses", request),
+                    "model_url": self.resolve_model_base_url("policy_model"),
+                }
+                return {}
+
+            async def run(self, body: _RunRequest) -> dict:
+                seen["run"] = {
+                    "self_call": self.url_path_for_run("/v1/responses", body),
+                    "harness_url": f"{self.base_url_for_run('http://model-host:8000', body)}/v1",
+                    "model_url": self.resolve_model_base_url("policy_model", self.rollout_id_from_run(body)),
+                }
+                seen["untrained"] = {
+                    "model_path": self.url_path_for_run("/v1/chat/completions", body, trained=False),
+                    "harness_url": f"{self.base_url_for_run('http://model-host:8000', body, trained=False)}/v1",
+                    "model_url": self.resolve_model_base_url(
+                        "policy_model", self.rollout_id_from_run(body), trained=False
+                    ),
+                }
+                return {}
+
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = OmegaConf.create(
+            {
+                "observability_enabled": observability,
+                "policy_model": {"responses_api_models": {"vllm_model": {"host": "model-host", "port": 8000}}},
+            }
+        )
+        client._build_server_base_url.side_effect = lambda server: ServerClient._build_server_base_url(client, server)
+        return _Agent(config=config, server_client=client), seen
+
+    def test_a_run_with_values_puts_them_in_every_model_url_it_builds(self) -> None:
+        agent, seen = self._agent()
+        row = {"_ng_task_index": 3, "_ng_rollout_index": 1, "responses_create_params": {"input": "task"}}
+
+        TestClient(agent.setup_webserver()).post("/run", json=row | {"_ng_model_sampling": self.VALUES})
+
+        assert seen["run"] == {
+            "self_call": f"/ng-rollout/3-1/ng-sampling/{self.SEGMENT}/v1/responses",
+            "harness_url": f"http://model-host:8000/ng-rollout/3-1/ng-sampling/{self.SEGMENT}/v1",
+            "model_url": f"http://model-host:8000/ng-rollout/3-1/ng-sampling/{self.SEGMENT}/v1",
+        }
+
+        # Without a rollout prefix the segment still travels; without values nothing changes.
+        unprefixed, unprefixed_seen = self._agent(observability=False)
+        TestClient(unprefixed.setup_webserver()).post("/run", json=row | {"_ng_model_sampling": self.VALUES})
+        assert unprefixed_seen["run"]["self_call"] == f"/ng-sampling/{self.SEGMENT}/v1/responses"
+        TestClient(unprefixed.setup_webserver()).post("/run", json=row)
+        assert unprefixed_seen["run"] == {
+            "self_call": "/v1/responses",
+            "harness_url": "http://model-host:8000/v1",
+            "model_url": "http://model-host:8000/v1",
+        }
+
+    def test_a_role_the_framework_does_not_train_gets_null_in_a_run_with_values(self) -> None:
+        agent, seen = self._agent()
+        row = {"_ng_task_index": 3, "_ng_rollout_index": 1, "responses_create_params": {"input": "task"}}
+
+        TestClient(agent.setup_webserver()).post("/run", json=row | {"_ng_model_sampling": self.VALUES})
+
+        assert seen["untrained"] == {
+            "model_path": "/ng-rollout/3-1/ng-sampling/null/v1/chat/completions",
+            "harness_url": "http://model-host:8000/ng-rollout/3-1/ng-sampling/null/v1",
+            "model_url": "http://model-host:8000/ng-rollout/3-1/ng-sampling/null/v1",
+        }
+
+        # Gym-only evaluation sends no values, so no role gets a segment.
+        TestClient(agent.setup_webserver()).post("/run", json=row)
+        assert seen["untrained"] == {
+            "model_path": "/ng-rollout/3-1/v1/chat/completions",
+            "harness_url": "http://model-host:8000/ng-rollout/3-1/v1",
+            "model_url": "http://model-host:8000/ng-rollout/3-1/v1",
+        }
+
+    @pytest.mark.parametrize("capture", ["", "/training-token-capture"])
+    def test_an_activation_passes_its_segment_on_to_the_agents_model_calls(self, capture: str) -> None:
+        agent, seen = self._agent()
+
+        response = TestClient(agent.setup_webserver()).post(
+            f"/ng-rollout/3-1{capture}/ng-sampling/{self.SEGMENT}/v1/responses", json={"input": "task"}
+        )
+
+        assert response.status_code == 200, response.text
+        assert seen["responses"] == {
+            "model_path": f"/ng-rollout/3-1{capture}/ng-sampling/{self.SEGMENT}/v1/responses",
+            "model_url": f"http://model-host:8000/ng-sampling/{self.SEGMENT}/v1",
+        }
+
+    def test_an_invalid_segment_is_refused(self) -> None:
+        agent, _ = self._agent()
+        response = TestClient(agent.setup_webserver()).post(
+            "/ng-rollout/3-1/ng-sampling/not+valid/v1/responses", json={"input": "task"}
+        )
+
+        assert response.status_code == 422
+
+
+class TestRolloutTokenCapture:
+    """A rollout that skips token capture sends none of its model calls with the training tag.
+
+    The run captures every agent (RL's ``all_agents: true``); only the rollout's own setting skips capture.
+    """
+
+    def _agent(self) -> SimpleResponsesAPIAgent:
+        class _Agent(SimpleResponsesAPIAgent):
+            async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> dict:
+                # A harness builds its model URL from the agent's own capture setting, as Claude Code does.
+                return {"model_base_url": self.resolve_model_base_url("policy_model", "3-1")}
+
+            async def run(self, body: BaseRunRequest = Body()) -> dict:
+                # A harness's URL follows the request's capture setting; the run's URL helpers read the row.
+                return {
+                    "model_url_path": self.url_path_for_run("/v1/responses", body),
+                    "model_base_url": self.resolve_model_base_url("policy_model", self.rollout_id_from_run(body)),
+                }
+
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = OmegaConf.create(
+            {
+                "policy_model": {"responses_api_models": {"vllm_model": {"host": "model-host", "port": 8000}}},
+                "token_id_capture": {"enabled": True, "all_agents": True},
+            }
+        )
+        client._build_server_base_url.side_effect = lambda server: ServerClient._build_server_base_url(client, server)
+        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="agent")
+        return _Agent(config=config, server_client=client)
+
+    def _client(self) -> TestClient:
+        return TestClient(self._agent().setup_webserver())
+
+    @pytest.mark.parametrize(
+        ("row", "model_url_path", "model_base_url"),
+        [
+            (
+                {},
+                "/ng-rollout/3-1/training-token-capture/v1/responses",
+                "http://model-host:8000/ng-rollout/3-1/training-token-capture/v1",
+            ),
+            (
+                {"_ng_skip_token_capture": False},
+                "/ng-rollout/3-1/training-token-capture/v1/responses",
+                "http://model-host:8000/ng-rollout/3-1/training-token-capture/v1",
+            ),
+            (
+                {"_ng_skip_token_capture": None},
+                "/ng-rollout/3-1/training-token-capture/v1/responses",
+                "http://model-host:8000/ng-rollout/3-1/training-token-capture/v1",
+            ),
+            # The rollout keeps its prefix and drops only the training tag.
+            (
+                {"_ng_skip_token_capture": True},
+                "/ng-rollout/3-1/v1/responses",
+                "http://model-host:8000/ng-rollout/3-1/v1",
+            ),
+        ],
+    )
+    def test_a_run_follows_its_rollout_setting(self, row: dict, model_url_path: str, model_base_url: str) -> None:
+        reply = self._client().post(
+            "/run", json={"responses_create_params": {"input": "task"}, "_ng_rollout_id": "3-1", **row}
+        )
+
+        assert reply.status_code == 200, reply.text
+        assert reply.json() == {"model_url_path": model_url_path, "model_base_url": model_base_url}
+
+    def test_a_run_with_a_setting_that_is_not_a_boolean_is_refused(self) -> None:
+        reply = self._client().post(
+            "/run",
+            json={
+                "responses_create_params": {"input": "task"},
+                "_ng_rollout_id": "3-1",
+                "_ng_skip_token_capture": "yes",
+            },
+        )
+
+        assert reply.status_code == 422
+
+    @pytest.mark.parametrize(
+        ("activation_path", "model_base_url"),
+        [
+            (
+                "/ng-rollout/3-1/training-token-capture/v1/responses",
+                "http://model-host:8000/ng-rollout/3-1/training-token-capture/v1",
+            ),
+            # The caller that built the path decided not to capture: the agent's own setting does not override it.
+            ("/ng-rollout/3-1/v1/responses", "http://model-host:8000/ng-rollout/3-1/v1"),
+            # A call that names no rollout keeps the agent's own setting.
+            ("/v1/responses", "http://model-host:8000/ng-rollout/3-1/training-token-capture/v1"),
+            # The rollout's sampling values ride along either way; only the training tag follows the path.
+            (
+                f"/ng-rollout/3-1/ng-sampling/{TestModelSampling.SEGMENT}/v1/responses",
+                f"http://model-host:8000/ng-rollout/3-1/ng-sampling/{TestModelSampling.SEGMENT}/v1",
+            ),
+            (
+                f"/ng-rollout/3-1/training-token-capture/ng-sampling/{TestModelSampling.SEGMENT}/v1/responses",
+                f"http://model-host:8000/ng-rollout/3-1/training-token-capture/ng-sampling/{TestModelSampling.SEGMENT}/v1",
+            ),
+        ],
+    )
+    def test_an_activation_follows_the_training_tag_of_its_path(
+        self, activation_path: str, model_base_url: str
+    ) -> None:
+        reply = self._client().post(activation_path, json={"input": "task"})
+
+        assert reply.status_code == 200, reply.text
+        assert reply.json() == {"model_base_url": model_base_url}
+
+    def test_every_rollout_route_without_the_training_tag_turns_capture_off(self) -> None:
+        # Covers activation routes added later, such as one per agent instance: each must turn capture off.
+        app = self._agent().setup_webserver()
+        paths = [
+            path
+            for route in app.routes
+            if (path := getattr(route, "path", "")).startswith("/ng-rollout/{rollout_id}/")
+            and path.endswith("/v1/responses")
+            and "training-token-capture" not in path
+        ]
+        assert "/ng-rollout/{rollout_id}/v1/responses" in paths
+        client = TestClient(app)
+        for path in paths:
+            url = path.replace("{rollout_id}", "3-1")
+            url = "/".join("x" if part.startswith("{") else part for part in url.split("/"))
+            reply = client.post(url, json={"input": "task"})
+
+            assert reply.status_code == 200, (path, reply.text)
+            assert "training-token-capture" not in reply.json()["model_base_url"], path
+
+    def test_the_run_url_helpers_read_the_row_where_the_run_route_sets_no_context(self) -> None:
+        # Some agents register their own /run route; the URL helpers still read the row's setting.
+        agent = self._agent()
+        captured_row = {"_ng_rollout_id": "3-1"}
+        uncaptured_row = {"_ng_rollout_id": "3-1", "_ng_skip_token_capture": True}
+
+        assert agent.url_path_for_run("/v1/responses", captured_row) == (
+            "/ng-rollout/3-1/training-token-capture/v1/responses"
+        )
+        assert agent.url_path_for_run("/v1/responses", uncaptured_row) == "/ng-rollout/3-1/v1/responses"
+        assert (
+            agent.base_url_for_run("http://model-host:8000", uncaptured_row) == "http://model-host:8000/ng-rollout/3-1"
+        )
 
 
 class TestCallsModelFromSandbox:

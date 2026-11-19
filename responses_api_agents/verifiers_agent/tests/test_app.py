@@ -25,14 +25,15 @@ from fastapi.testclient import TestClient
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, Timeout
 from verifiers.clients import NeMoRLChatCompletionsClient
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import ServerClient, apply_rollout_prefix
 from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef
-from nemo_gym.core import FailureReportRow, StageOutcomePolicyConfig
+from nemo_gym.core import FailureReportRow, StageOutcomePolicyConfig, model_sampling_context
 from nemo_gym.core.outcome_policy import is_policy_counted_zero
 from nemo_gym.rollouts.rollout_recovery import masked_infrastructure_kind
 from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
     VerifiersAgentConfig,
+    _as_response_usage,
     _NoStoreCookieJar,
     _rollout_error_fact,
 )
@@ -349,6 +350,25 @@ class TestPolicyClient:
 
         assert first is second
         assert str(first.client.base_url).rstrip("/") == POLICY_URL
+
+    def test_a_rollout_with_sampling_values_gets_its_own_url_with_capture_off(self) -> None:
+        agent = self._agent()
+
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
+            return f"{apply_rollout_prefix('http://policy', rollout_id, trace_context=trace_context)}/v1"
+
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", side_effect=fake_resolve),
+            patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: None),
+        ):
+            with model_sampling_context("SEG"):
+                sampled = agent._get_client(MagicMock())
+            unsampled = agent._get_client(MagicMock())
+
+        # The shared client is built inside the first rollout, yet its URL carries no rollout's values.
+        assert str(unsampled.client.base_url).rstrip("/") == "http://policy/v1"
+        assert str(sampled.client.base_url).rstrip("/") == "http://policy/ng-sampling/SEG/v1"
+        assert sampled.client._client is unsampled.client._client
 
     def test_policy_client_never_replays_the_session_cookie(self) -> None:
         agent = self._agent()
@@ -1130,3 +1150,19 @@ class TestRolloutErrorFact:
     def test_a_clean_rollout_has_no_field(self) -> None:
         body = self._run(None)
         assert "rollout_error" not in body and "rollout_error" not in body["response"]
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens_details", "expected"),
+    [(None, None), ({"cached_tokens": None}, None), ({"cached_tokens": 0}, 0), ({"cached_tokens": 12}, 12)],
+)
+def test_usage_reports_cache_reads_only_when_the_model_does(prompt_tokens_details, expected) -> None:
+    usage = openai.types.CompletionUsage.model_validate(
+        {
+            "prompt_tokens": 20,
+            "completion_tokens": 5,
+            "total_tokens": 25,
+            "prompt_tokens_details": prompt_tokens_details,
+        }
+    )
+    assert _as_response_usage(usage).input_tokens_details.cached_tokens == expected

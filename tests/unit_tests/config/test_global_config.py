@@ -17,6 +17,7 @@ import importlib.metadata
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import DictConfig, OmegaConf
@@ -36,6 +37,7 @@ from nemo_gym.config.config_types import (
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     HeadServerConfigMalformedError,
+    InheritCycleError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
@@ -52,6 +54,7 @@ from nemo_gym.config.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     USE_ABSOLUTE_IP,
+    UV_CACHE_DIR_KEY_NAME,
     UV_LOCK_TIMEOUT_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -63,6 +66,13 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
 from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
+
+
+@fixture(autouse=True)
+def _no_exported_uv_cache_dir(monkeypatch: MonkeyPatch) -> None:
+    # An exported UV_CACHE_DIR (CI runners set one) takes precedence over the default
+    # cache_dir/uv, so the default-config expectations only hold without it.
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
 
 
 class TestGlobalConfig:
@@ -199,6 +209,28 @@ class TestGlobalConfig:
 
         assert config[UV_LOCK_TIMEOUT_KEY_NAME] == expected
         assert nemo_gym.config.global_config.environ["UV_LOCK_TIMEOUT"] == str(expected)
+
+    @mark.parametrize(
+        ("exported", "configured", "expected"),
+        [
+            ("/warm/uv", {"uv_cache_dir": "/configured/uv"}, "/configured/uv"),  # the config key wins over the export
+            ("/warm/uv", {}, "/warm/uv"),  # an exported cache directory survives
+            (None, {}, str(Path("/local/cache") / "uv")),  # otherwise the default under the cache root
+        ],
+    )
+    def test_uv_cache_dir_precedence(
+        self, monkeypatch: MonkeyPatch, exported: Optional[str], configured: dict, expected: str
+    ) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(
+            nemo_gym.config.global_config, "environ", {} if exported is None else {"UV_CACHE_DIR": exported}
+        )
+        self._mock_parse_environment(monkeypatch, DictConfig({"cache_dir": "/local/cache", **configured}))
+
+        config = get_global_config_dict()
+
+        assert config[UV_CACHE_DIR_KEY_NAME] == expected
+        assert nemo_gym.config.global_config.environ["UV_CACHE_DIR"] == expected
 
     def test_null_uv_lock_timeout_leaves_the_environment_alone(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
@@ -1208,6 +1240,43 @@ contested: second_inner
         parser._recursively_swap_keys(config)
         with raises(ConfigMissingValuesError):
             parser.raise_on_missing_values(config)
+
+    @mark.parametrize("target_first", [False, True])
+    def test_inherit_chain_resolves_every_link(self, target_first: bool) -> None:
+        # target -> profile -> base: the target gets the base's fields, then the profile's overrides,
+        # then its own. Both moved sources are gone, whichever order the entries are listed in.
+        entries = {
+            "base": {"server": {"entrypoint": "app.py", "mode": "embedded"}, "extra": 1},
+            "profile": {"_inherit_from": "base", "_delete_key": "extra", "server": {"mode": "sandboxed"}},
+            "target": {"_inherit_from": "profile", "server": {"datasets": ["rows.jsonl"]}},
+        }
+        order = ["target", "profile", "base"] if target_first else ["base", "profile", "target"]
+        config = DictConfig({name: entries[name] for name in order})
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config) == {
+            "target": {"server": {"entrypoint": "app.py", "mode": "sandboxed", "datasets": ["rows.jsonl"]}}
+        }
+
+    def test_copy_of_an_inheriting_source_keeps_the_source(self) -> None:
+        config = DictConfig(
+            {
+                "base": {"a": 1},
+                "profile": {"_inherit_from": "base", "b": 2},
+                "clone": {"_copy": "profile", "c": 3},
+            }
+        )
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config) == {"profile": {"a": 1, "b": 2}, "clone": {"a": 1, "b": 2, "c": 3}}
+
+    def test_inherit_cycle_is_reported(self) -> None:
+        config = DictConfig({"first": {"_inherit_from": "second"}, "second": {"_inherit_from": "first"}})
+
+        with raises(InheritCycleError, match="second -> first -> second"):
+            GlobalConfigDictParser()._recursively_swap_keys(config)
 
     def test_missing_value_in_list_is_reported_not_crash(self) -> None:
         # A '???' as a list element (or inside a dict nested in a list) must not crash the swap; it is
@@ -2589,8 +2658,13 @@ class TestConfigLoadErrors:
 
         assert missing_path in str(error.value)
 
-    @mark.parametrize("resources_server", ["reasoning_gym", "tavily_search"])
-    def test_langchain_deepagents_configs_have_environment_servers(self, resources_server: str) -> None:
+    @mark.parametrize(
+        ("resources_server", "resources_instance"),
+        [("reasoning_gym", "reasoning_gym"), ("tavily_search", "tavily_search_resources_server")],
+    )
+    def test_langchain_deepagents_configs_have_environment_servers(
+        self, resources_server: str, resources_instance: str
+    ) -> None:
         agent_name = f"{resources_server}_langchain_deepagents_agent_model_server"
         config_path = (
             Path(__file__).resolve().parents[3]
@@ -2620,9 +2694,13 @@ class TestConfigLoadErrors:
             )
         )
 
-        environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["legacy_agent"]
+        environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
         assert environment["entrypoint"] == "app.py"
         assert environment["agent_server"] == {"type": "responses_api_agents", "name": agent_name}
+        # single_agent_turn_legacy requires the Resources Server it seeds and verifies against.
+        assert environment["resources_server"] == {"type": "resources_servers", "name": resources_instance}
+        # The deepagents graph runs only its own tools, so the session sends it no grant.
+        assert environment["resources_tool_transports"] == []
 
     def test_multi_agent_environment_server_satisfies_agent_routing(self) -> None:
         parser = GlobalConfigDictParser()
@@ -2896,6 +2974,101 @@ class TestModelServerPairing:
         assert "vllm_model" in resolved["policy_model"]["responses_api_models"]
 
 
+class TestIgnoredAgentTypeSelection:
+    """`--agent-type` must select an agent the composed config runs the run's tasks on."""
+
+    CODEX = DictConfig({"codex_agent": {"responses_api_agents": {"codex_agent": {"resources_server": None}}}})
+
+    @staticmethod
+    def _bound_agent(agent_type: str, resources_server: str) -> dict:
+        return {
+            "responses_api_agents": {
+                agent_type: {"resources_server": {"type": "resources_servers", "name": resources_server}}
+            }
+        }
+
+    def _flat_config(self, **extra) -> DictConfig:
+        """A benchmark split that runs on Codex, composed with a train split that runs on simple_agent."""
+        return DictConfig(
+            {
+                "bench_resources_server": {
+                    "resources_servers": {"bench": {"datasets": [{"name": "bench", "type": "benchmark"}]}}
+                },
+                "train_resources_server": {
+                    "resources_servers": {"train": {"datasets": [{"name": "train", "type": "train"}]}}
+                },
+                "bench_agent": self._bound_agent("codex_agent", "bench_resources_server"),
+                "train_agent": self._bound_agent("simple_agent", "train_resources_server"),
+                **extra,
+            }
+        )
+
+    def _taskset_config(self) -> DictConfig:
+        """A taskset routed to a single_agent_turn server that binds OpenCode, plus a loaded Codex instance."""
+        return DictConfig(
+            {
+                "environment_server_routes": {"pro:benchmark": "pro_episode"},
+                "pro_resources_server": {
+                    "resources_servers": {
+                        "pro": {
+                            "datasets": [
+                                {"name": "pro", "type": "benchmark", "taskset": "pro:benchmark"},
+                                # No route: data preparation reports it, not this check.
+                                {"name": "unrouted", "type": "benchmark", "taskset": "pro:unrouted"},
+                            ]
+                        }
+                    }
+                },
+                "pro_episode": {
+                    "environment_servers": {
+                        "single_agent_turn": {
+                            "resources_server": {"type": "resources_servers", "name": "pro_resources_server"},
+                            "agent_server": {"type": "responses_api_agents", "name": "pro_agent"},
+                        }
+                    }
+                },
+                "pro_agent": {"responses_api_agents": {"opencode_agent": {"resources_server": None}}},
+                **self.CODEX,
+            }
+        )
+
+    def _check(self, config: DictConfig, selected: DictConfig = CODEX) -> None:
+        parser = GlobalConfigDictParser()
+        parser._raise_on_ignored_agent_type(config, parser._agent_instances(selected))
+
+    def test_only_the_split_the_run_collects_is_checked(self) -> None:
+        self._check(self._flat_config(split="benchmark"))
+        with raises(AgentCompositionError) as error:
+            self._check(self._flat_config(split="train"))
+        assert "  - dataset 'train' of train_resources_server runs on train_agent (simple_agent)" in str(error.value)
+
+    def test_without_a_split_every_mismatched_dataset_is_listed(self) -> None:
+        with raises(AgentCompositionError) as error:
+            self._check(self._flat_config())
+        listing = [line for line in str(error.value).splitlines() if line.startswith("  - ")]
+        assert listing == ["  - dataset 'train' of train_resources_server runs on train_agent (simple_agent)"]
+
+    def test_taskset_mismatch_names_the_route_and_its_rebinding(self) -> None:
+        with raises(AgentCompositionError) as error:
+            self._check(self._taskset_config())
+        message = str(error.value)
+        assert message.startswith("--agent-type loaded codex_agent (codex_agent), but these tasks")
+        listing = [line for line in message.splitlines() if line.startswith("  - ")]
+        assert listing == [
+            "  - taskset 'pro:benchmark' of pro_resources_server routes to pro_episode, which runs pro_agent "
+            "(opencode_agent)"
+        ]
+        assert "  ++pro_episode.environment_servers.single_agent_turn.agent_server.name=codex_agent" in message
+
+    def test_rebinding_the_route_satisfies_the_selection(self) -> None:
+        config = self._taskset_config()
+        config.pro_episode.environment_servers.single_agent_turn.agent_server.name = "codex_agent"
+        self._check(config)
+
+    def test_a_config_that_declares_no_agent_selects_nothing_to_check(self) -> None:
+        self._check(self._taskset_config(), DictConfig({"overlay": {"timeout": 60}}))
+
+
 class TestComposeUnboundAgent:
     """Composition of a standalone agent config onto the environment's agent instances."""
 
@@ -2987,9 +3160,9 @@ class TestComposeUnboundAgent:
         return self._parse(DictConfig({"config_paths": list(paths)}))
 
     def test_shipped_terminus_template_replaces_a_benchmarks_agent(self) -> None:
-        """`--benchmark terminal_bench_2_1/opencode --agent-type terminus_2_sandboxed_agent` swaps the harness."""
+        """`--benchmark terminal_bench_2_1/opencode_legacy_agent --agent-type terminus_2_sandboxed_agent` swaps the harness."""
         config = self._parse_config_paths(
-            "benchmarks/terminal_bench_2_1/opencode.yaml",
+            "benchmarks/terminal_bench_2_1/opencode_legacy_agent.yaml",
             "responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml",
         )
         agents = {
@@ -3472,7 +3645,42 @@ class TestComposeUnboundAgent:
         assert OmegaConf.to_container(servers["legacy_agent"]) == {
             "entrypoint": "app.py",
             "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
+            "default_episode_timeout_seconds": 600,
         }
+
+    @mark.parametrize("configured", [None, 600, 43200])
+    def test_legacy_relay_keeps_an_explicit_episode_deadline(self, configured: object) -> None:
+        config = self._session_environment_config("opencode_sandboxed_agent")
+        server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        server["default_episode_timeout_seconds"] = configured
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        relay = config["gpqa_mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert "default_episode_timeout_seconds" in relay
+        assert relay["default_episode_timeout_seconds"] == configured
+
+    def test_legacy_relay_leaves_an_omitted_episode_deadline_to_the_relays_default(self) -> None:
+        config = self._session_environment_config("opencode_sandboxed_agent")
+        server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        del server["default_episode_timeout_seconds"]
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        relay = config["gpqa_mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert "default_episode_timeout_seconds" not in relay
+
+    @mark.parametrize("harness_type", sorted(nemo_gym.config.global_config.HOST_RUN_SWAP_AGENT_TYPES))
+    def test_swap_to_host_run_template_keeps_legacy_relay(self, harness_type: str) -> None:
+        """A session agent whose swap template runs on the host, with no model_server as shipped, keeps the relay."""
+        config = self._session_environment_config(harness_type)
+        config[harness_type].responses_api_agents[harness_type].pop("model_server")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        servers = config["gpqa_mcqa_environment_server"]["environment_servers"]
+        assert harness_type in AGENT_SESSION_AGENT_TYPES
+        assert list(servers) == ["legacy_agent"]
 
     def test_legacy_relay_keeps_the_servers_own_worker_settings(self) -> None:
         config = self._session_environment_config("opencode_sandboxed_agent")
@@ -3486,9 +3694,22 @@ class TestComposeUnboundAgent:
         assert relay["num_workers"] == 4
         assert relay["uvicorn_reuse_port"] is True
 
-    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent", "pool_agent"])
-    def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
+    @mark.parametrize(
+        ("harness_type", "transports"),
+        [
+            ("hermes_agent", ["mcp"]),
+            ("opencode_agent", ["mcp"]),
+            ("pool_agent", ["mcp"]),
+            ("langchain_deepagents_agent", ["direct_http"]),
+        ],
+    )
+    def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(
+        self, harness_type: str, transports: list[str]
+    ) -> None:
         config = self._session_environment_config(harness_type)
+        config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"][
+            "resources_tool_transports"
+        ] = transports
         server_before = OmegaConf.to_container(
             config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
         )
@@ -3498,15 +3719,19 @@ class TestComposeUnboundAgent:
         servers = config["gpqa_mcqa_environment_server"]["environment_servers"]
         assert list(servers) == ["single_agent_turn_legacy"]
         server_before["agent_server"]["name"] = f"gpqa_mcqa_{harness_type}"
+        if harness_type == "langchain_deepagents_agent":
+            server_before["resources_tool_transports"] = []
         assert OmegaConf.to_container(servers["single_agent_turn_legacy"]) == server_before
 
     def test_agent_session_agent_types_match_the_agent_apps(self) -> None:
-        """Every agent app that seeds agent sessions is listed, and nothing else is."""
+        """Every agent app that implements session seeding is listed, and nothing else is."""
         agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
+        # SimpleAgent subclasses can customize seeding through _new_session_state while inheriting the endpoint.
+        seed_hooks = ("def _seed_agent_session_state(", "def _new_session_state(")
         implementing = {
             app.parent.name
             for app in agents_root.glob("*/app.py")
-            if "def _seed_agent_session_state(" in app.read_text(encoding="utf-8")
+            if any(hook in app.read_text(encoding="utf-8") for hook in seed_hooks)
         }
 
         assert implementing == AGENT_SESSION_AGENT_TYPES
