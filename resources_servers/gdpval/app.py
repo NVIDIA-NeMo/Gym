@@ -457,7 +457,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_provider: str
     sandbox_config: GDPValSandboxConfig
     # Sandboxes started per seed before it fails. A provider that is slow while many sandboxes start at once
-    # times out some of them; a new sandbox a few minutes later usually starts.
+    # times out some of them; a new sandbox a few minutes later usually starts. Only a failure the provider marks
+    # retry_safe (it already removed the failed sandbox) is retried.
     sandbox_start_attempts: int = Field(default=2, ge=1)
 
 

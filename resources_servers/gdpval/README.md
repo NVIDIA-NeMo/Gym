@@ -57,9 +57,11 @@ architecture your sandboxes run on; an arm64 build leaves out the pins in
 `sandbox_config.provider_options.image_auth: {username: ..., password: ...}`, and select the architecture with
 `sandbox_config.provider_options.platform: {os: linux, arch: arm64}` when it is not the provider's default.
 
-A sandbox the provider cannot create, or that is not ready within the provider's timeout, is replaced by a new one:
-each seed starts up to `sandbox_start_attempts` sandboxes (default 2) before it fails. This covers the timeouts a
-provider hits when many sandboxes start at once, at the start of a large run.
+A sandbox that fails to start is replaced by a new one when its provider reports the failure as safe to retry
+(`SandboxCreateError.retry_safe`: the provider already removed the failed sandbox, as OpenShell does for one that is
+not ready in time). Each seed starts up to `sandbox_start_attempts` sandboxes (default 2) before it fails. This covers
+the timeouts a provider hits when many sandboxes start at once, at the start of a large run. A create whose outcome
+the provider cannot tell (E2B, Daytona timeouts) is not retried, so it cannot leave a second sandbox running.
 
 ## Office to PDF conversion
 

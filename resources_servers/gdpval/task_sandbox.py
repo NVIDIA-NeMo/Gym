@@ -68,8 +68,9 @@ async def start_task_sandbox(
 ) -> AsyncSandbox:
     """Start a sandbox and stage the task's reference files under the working directory.
 
-    A start that fails with ``SandboxCreateError`` (the provider could not create the sandbox, or it was not ready
-    in time) is retried with a new sandbox, up to ``start_attempts`` starts in all.
+    A start that fails with a ``SandboxCreateError`` its provider marks ``retry_safe`` (the failed sandbox is already
+    being deleted) is retried with a new sandbox, up to ``start_attempts`` starts in all. Any other failure, including
+    a create whose outcome the provider cannot tell, is raised at once so no second allocation is made.
     """
     if not sandbox_config.image:
         raise ValueError(
@@ -91,8 +92,15 @@ async def start_task_sandbox(
             await sandbox.start(spec)
             break
         except SandboxCreateError as error:
-            await sandbox.stop()
-            if attempt == start_attempts:
+            # No sandbox came back, so this only releases the attempt's provider client; a failure to release it
+            # must not hide why the start failed.
+            try:
+                await sandbox.stop()
+            except Exception:
+                LOGGER.warning(
+                    "Could not release the client of a failed sandbox start for task %s", task_id, exc_info=True
+                )
+            if not error.retry_safe or attempt == start_attempts:
                 raise
             LOGGER.warning(
                 "Sandbox for task %s failed to start (attempt %d of %d), retrying: %s",

@@ -15,6 +15,9 @@ from fastapi.testclient import TestClient
 from nemo_gym.client import ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxExecResult
+from nemo_gym.sandbox.providers.daytona.provider import DaytonaCreateTimeoutError
+from nemo_gym.sandbox.providers.e2b.provider import E2BCreateError
+from nemo_gym.sandbox.providers.openshell.provider import OpenShellCreateError
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
@@ -518,8 +521,15 @@ def _failing_starts(monkeypatch, *errors: BaseException) -> list[AsyncSandbox]:
     return started
 
 
+def _retry_safe(error: SandboxCreateError) -> SandboxCreateError:
+    """The error as a provider raises it after removing the sandbox that failed to start."""
+    error.retry_safe = True
+    return error
+
+
 def test_a_sandbox_that_was_not_ready_in_time_is_replaced_by_a_new_one(server, root, tmp_path, monkeypatch):
-    started = _failing_starts(monkeypatch, SandboxCreateError("sandbox was not ready within 300s"))
+    error = _retry_safe(OpenShellCreateError("sandbox 'a' was not READY within 300s"))
+    started = _failing_starts(monkeypatch, error)
     client = TestClient(server.setup_webserver())
 
     assert _post_seed(client, _seed(tmp_path)).status_code == 200
@@ -531,7 +541,7 @@ def test_a_sandbox_that_was_not_ready_in_time_is_replaced_by_a_new_one(server, r
 
 def test_a_seed_fails_once_every_start_attempt_failed_and_releases_its_claim(tmp_path, root, monkeypatch, references):
     server = _server(tmp_path, sandbox_start_attempts=3)
-    errors = [SandboxCreateError(f"attempt {n} not ready") for n in range(1, 4)]
+    errors = [_retry_safe(SandboxCreateError(f"attempt {n} not ready")) for n in range(1, 4)]
     started = _failing_starts(monkeypatch, *errors)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
 
@@ -541,6 +551,33 @@ def test_a_seed_fails_once_every_start_attempt_failed_and_releases_its_claim(tmp
     assert len(started) == 3
     assert list(references.iterdir()) == []
     assert _post_seed(client, _seed(tmp_path, session_id="b")).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # E2B: the create may have committed remotely before its response was lost.
+        E2BCreateError("E2B create failed: connection reset"),
+        # Daytona: its own create retries exclude this ambiguous timeout.
+        DaytonaCreateTimeoutError("ambiguous create timeout"),
+        SandboxCreateError("not ready"),
+    ],
+)
+def test_a_create_failure_not_marked_retry_safe_is_not_replaced(server, root, tmp_path, monkeypatch, error):
+    started = _failing_starts(monkeypatch, error)
+
+    with pytest.raises(type(error)):
+        _post_seed(TestClient(server.setup_webserver()), _seed(tmp_path))
+
+    assert len(started) == 1
+
+
+def test_a_client_that_cannot_be_released_does_not_hide_the_create_error(server, root, tmp_path, monkeypatch):
+    _failing_starts(monkeypatch, E2BCreateError("E2B create failed: connection reset"))
+    monkeypatch.setattr(AsyncSandbox, "stop", AsyncMock(side_effect=OSError("client already gone")))
+
+    with pytest.raises(E2BCreateError, match="connection reset"):
+        _post_seed(TestClient(server.setup_webserver()), _seed(tmp_path))
 
 
 def test_a_start_failure_that_is_not_a_create_error_is_not_retried(server, root, tmp_path, monkeypatch):
@@ -554,9 +591,9 @@ def test_a_start_failure_that_is_not_a_create_error_is_not_retried(server, root,
 
 def test_one_start_attempt_keeps_the_first_failure(tmp_path, root, monkeypatch):
     server = _server(tmp_path, sandbox_start_attempts=1)
-    started = _failing_starts(monkeypatch, SandboxCreateError("not ready"))
+    started = _failing_starts(monkeypatch, _retry_safe(OpenShellCreateError("not ready")))
 
-    with pytest.raises(SandboxCreateError, match="not ready"):
+    with pytest.raises(OpenShellCreateError, match="not ready"):
         _post_seed(TestClient(server.setup_webserver()), _seed(tmp_path))
 
     assert len(started) == 1

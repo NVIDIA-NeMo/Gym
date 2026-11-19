@@ -763,8 +763,11 @@ class OpenShellProvider:
             ready_timeout_s = spec.ready_timeout_s or self._create_config.ready_timeout_s
             await self._wait_ready(handle, timeout_s=ready_timeout_s)
             await self._verify_created_handle(handle)
-        except BaseException:
+        except BaseException as error:
             await self._cleanup_failed_create_handle(handle)
+            if isinstance(error, SandboxCreateError):
+                # The sandbox this attempt created is being deleted, so a caller may start another.
+                error.retry_safe = True
             raise
         return handle
 

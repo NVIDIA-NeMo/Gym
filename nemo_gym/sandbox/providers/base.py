@@ -317,7 +317,14 @@ def sandbox_credentials_rejected(
 
 
 class SandboxCreateError(RuntimeError):
-    """Raised when a provider cannot create a sandbox."""
+    """Raised when a provider cannot create a sandbox.
+
+    ``retry_safe`` is True only when the provider has accounted for everything the failed attempt allocated (it
+    deleted the sandbox or submitted its deletion), so a caller may start a replacement. A create whose outcome is
+    unknown, such as a lost response, leaves it False: a replacement could leave the first allocation running.
+    """
+
+    retry_safe: bool = False
 
 
 class SandboxCreateVerificationError(SandboxCreateError):

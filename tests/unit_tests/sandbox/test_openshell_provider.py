@@ -651,19 +651,22 @@ async def test_create_error_phase_reports_the_gateway_conditions(make_provider, 
 async def test_create_terminal_phase_cleans_up(make_provider, fake_client: FakeClient, phase: int, match: str) -> None:
     provider = make_provider()
     fake_client.get_results = [make_ref(phase)]
-    with pytest.raises(OpenShellCreateError, match=match):
+    with pytest.raises(OpenShellCreateError, match=match) as raised:
         await provider.create(SandboxSpec())
     await _drain(provider)
     assert fake_client.delete_calls[0]["name"] == fake_client.create_calls[0]["name"]
+    # The failed sandbox is being deleted, so a caller may start a replacement.
+    assert raised.value.retry_safe
 
 
 async def test_create_ready_timeout_cleans_up(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider()
     fake_client.get_results = [make_ref(openshell_pb2.SANDBOX_PHASE_PROVISIONING)]
-    with pytest.raises(OpenShellCreateError, match="was not READY"):
+    with pytest.raises(OpenShellCreateError, match="was not READY") as raised:
         await provider.create(SandboxSpec(ready_timeout_s=0.05))
     await _drain(provider)
     assert fake_client.delete_calls
+    assert raised.value.retry_safe
 
 
 async def test_create_ready_timeout_reports_gateway_conditions(make_provider, fake_client: FakeClient) -> None:
@@ -722,9 +725,11 @@ async def test_create_exhausted_retries_wrapped(make_provider, fake_client: Fake
         FakeRpcError(grpc.StatusCode.UNAVAILABLE),
         FakeRpcError(grpc.StatusCode.UNAVAILABLE, "still down"),
     ]
-    with pytest.raises(OpenShellCreateError, match="CreateSandbox failed"):
+    with pytest.raises(OpenShellCreateError, match="CreateSandbox failed") as raised:
         await provider.create(SandboxSpec())
     assert len(fake_client.create_calls) == 2
+    # The gateway may have committed a sandbox that no reference came back for: not safe to replace.
+    assert not raised.value.retry_safe
 
 
 async def test_create_nonretryable_rpc_failure_wrapped_without_retry(make_provider, fake_client: FakeClient) -> None:
@@ -757,10 +762,11 @@ async def test_create_probe_failure_cleans_up(make_provider, fake_client: FakeCl
         probe={"command": "printf ready", "expected_stdout": "ready", "deadline_s": 0.05, "stable_delay_s": 0.01}
     )
     fake_client.exec_results = [make_exec_result(exit_code=1, stderr="broken")]
-    with pytest.raises(OpenShellCreateVerificationError, match="readiness probe"):
+    with pytest.raises(OpenShellCreateVerificationError, match="readiness probe") as raised:
         await provider.create(SandboxSpec())
     await _drain(provider)
     assert fake_client.delete_calls
+    assert raised.value.retry_safe
 
 
 async def test_exec_maps_command_and_result(make_provider, fake_client: FakeClient) -> None:
