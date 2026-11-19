@@ -179,7 +179,7 @@ from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.rollouts.tool_telemetry import record_tool_telemetry
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.concurrency import MeteredSemaphore
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
@@ -194,6 +194,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_run_summary,
 )
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
+from nemo_gym.telemetry.run_context import RunContext, run_context_from_config
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.trajectory.trajectory_format import project_result_v1
@@ -223,7 +224,7 @@ from nemo_gym.utils.tqdm import tqdm
 
 
 if TYPE_CHECKING:
-    from opentelemetry.trace import SpanContext
+    from opentelemetry.trace import Span, SpanContext
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
@@ -2502,6 +2503,9 @@ _MAX_FAILURE_BODY_CHARS = 2000
 _OWNED_JOB_SPAN_CONTEXT: ContextVar[Optional["SpanContext"]] = ContextVar(
     "nemo_gym_owned_job_span_context", default=None
 )
+#: The ``gym.job`` span of the current run while traces are exported, owned or embedded, so the run
+#: can put its context on it once the rows it dispatches are known. None otherwise.
+_EXPORTED_JOB_SPAN: ContextVar[Optional["Span"]] = ContextVar("nemo_gym_exported_job_span", default=None)
 
 
 def _current_span_is_valid() -> bool:
@@ -2524,7 +2528,9 @@ def _span_task_id(row: Mapping[str, Any]) -> Optional[str]:
 
 
 @contextmanager
-def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: str) -> Iterator["SpanContext"]:
+def _dispatch_span(
+    row: Mapping[str, Any], dispatch_name: str, *, server_name: str, run_context: Optional[RunContext] = None
+) -> Iterator["SpanContext"]:
     """One rollout's dispatch as the root of its own trace, linked to the run's `job` span.
 
     The `/run` call made inside carries this span as `traceparent`, so the agent's
@@ -2535,8 +2541,9 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
     `dispatch_name` is the value the rollout counters record under the same key, so spans
     and metrics join on it; `server_name` is the server the call goes to, which differs for
     a row routed by agent. Only a job the driver opened as its own root is split; under an
-    embedder's trace the dispatch keeps nesting (see `linked_root_span`). Gate on the
-    `rollout` group and the trace exporter before calling.
+    embedder's trace the dispatch keeps nesting (see `linked_root_span`). `run_context` adds
+    the served model, benchmark and attempt, since the trace cannot inherit them from
+    `gym.job`. Gate on the `rollout` group and the trace exporter before calling.
 
     Yields the span's context, which the driver keeps to attach `gym.rollout.health` later.
     """
@@ -2559,6 +2566,8 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
     repeat = row.get(ROLLOUT_INDEX_KEY_NAME)
     if isinstance(repeat, int) and not isinstance(repeat, bool):
         attributes[ROLLOUT_REPEAT_ATTRIBUTE] = repeat
+    if run_context is not None:
+        attributes |= run_context.dispatch_attributes(row)
     with linked_root_span("gym.rollout.dispatch", split_from=_OWNED_JOB_SPAN_CONTEXT.get(), **attributes) as span:
         yield span.get_span_context()
 
@@ -4188,9 +4197,11 @@ executions → not run again (left to recovery)
             with managed_span(GymSpanGroup.JOB, "gym.job") as job:
                 owned = job.get_span_context() if job is not None and not embedded else None
                 token = _OWNED_JOB_SPAN_CONTEXT.set(owned)
+                job_token = _EXPORTED_JOB_SPAN.set(job if is_trace_exporter_active() else None)
                 try:
                     return await self._run_from_config(config)
                 finally:
+                    _EXPORTED_JOB_SPAN.reset(job_token)
                     _OWNED_JOB_SPAN_CONTEXT.reset(token)
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
@@ -4335,6 +4346,8 @@ executions → not run again (left to recovery)
         )
         results = store.selected("success") if config.retain_results_in_memory else []
         rows = store.inputs_for(results)
+        if (job_span := _EXPORTED_JOB_SPAN.get()) is not None:
+            safe_set_span_attributes(job_span, run_context_from_config(global_config).job_attributes(input_rows))
 
         batch_completed_rows: List[Dict] = []
         batch_failure_rows: List[Dict] = []
@@ -5614,6 +5627,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # `is not None`, not truthiness: 0.0 is a real budget that is already
         # spent, and must drain rather than disable the check.
         deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s is not None else None
+        # Read once per call, and only when dispatch spans are exported.
+        run_context = (
+            run_context_from_config(server_client.global_config_dict)
+            if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active()
+            else None
+        )
 
         def drained_result() -> Optional[Dict[str, Any]]:
             # Checked after a row acquires its slot, and again when its delayed reservation is due.
@@ -5684,7 +5703,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
                     dispatch_span = (
-                        _dispatch_span(row, self._dispatch_name(row), server_name=server_name)
+                        _dispatch_span(row, self._dispatch_name(row), server_name=server_name, run_context=run_context)
                         if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active()
                         else nullcontext()
                     )

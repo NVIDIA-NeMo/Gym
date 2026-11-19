@@ -939,3 +939,136 @@ def test_health_metrics_are_recorded_without_a_span(recorded_spans, monkeypatch)
 
     assert recorded == [("unhealthy", "failed", ["truncated"])]
     assert [s for s in recorded_spans() if s.name == "gym.rollout.health"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Run context on gym.job and gym.rollout.dispatch
+# --------------------------------------------------------------------------- #
+
+_RUN_CONTEXT_KEYS = (
+    "nemo.gym.model.name",
+    "nemo.gym.benchmark.name",
+    "nemo.gym.benchmark.names",
+    "nemo.gym.rollout.attempt.index",
+)
+
+
+def _use_driver_config(monkeypatch, driver_telemetry, extra: dict) -> None:
+    """Merge *extra* into the fake head server's config and serve it to the driver as its global config."""
+    from omegaconf import OmegaConf
+
+    client = driver_telemetry.setup_server_client_utils()
+    client.global_config_dict = OmegaConf.merge(client.global_config_dict, extra)
+    monkeypatch.setattr(driver_telemetry, "get_global_config_dict", lambda *a, **k: client.global_config_dict)
+
+
+def _run_context_of(span) -> dict:
+    return {key: value for key, value in span.attributes.items() if key in _RUN_CONTEXT_KEYS}
+
+
+_ALPHA_BENCHMARK = {
+    "alpha": {"responses_api_agents": {"impl": {"datasets": [{"name": "bench_a", "type": "benchmark"}]}}}
+}
+
+
+@pytest.mark.parametrize(
+    ("extra_config", "expected_job", "expected_dispatch"),
+    [
+        pytest.param(
+            {"policy_model_name": "served-model", "split": "benchmark", **_ALPHA_BENCHMARK},
+            {"nemo.gym.model.name": "served-model", "nemo.gym.benchmark.names": ("bench_a",)},
+            {
+                "nemo.gym.model.name": "served-model",
+                "nemo.gym.benchmark.name": "bench_a",
+                "nemo.gym.rollout.attempt.index": 0,
+            },
+            id="benchmark-run-with-served-model",
+        ),
+        pytest.param(
+            {"policy_model_name": "served-model", "split": "train", **_ALPHA_BENCHMARK},
+            {"nemo.gym.model.name": "served-model"},
+            {"nemo.gym.model.name": "served-model", "nemo.gym.rollout.attempt.index": 0},
+            id="train-run-omits-the-benchmark",
+        ),
+        pytest.param({}, {}, {"nemo.gym.rollout.attempt.index": 0}, id="nothing-known-is-omitted"),
+    ],
+)
+async def test_run_context_lands_on_the_job_and_every_dispatch(
+    tmp_path, monkeypatch, recorded_spans, driver_telemetry, extra_config, expected_job, expected_dispatch
+):
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+
+    _install_recording_post(monkeypatch)
+    _use_driver_config(monkeypatch, driver_telemetry, extra_config)
+    await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
+
+    spans = recorded_spans()
+    (job,) = [s for s in spans if s.name == "gym.job"]
+    dispatches = [s for s in spans if s.name == "gym.rollout.dispatch"]
+    assert len(dispatches) == 2
+    assert _run_context_of(job) == expected_job
+    assert [_run_context_of(d) for d in dispatches] == [expected_dispatch] * 2
+
+
+@pytest.mark.parametrize(
+    ("row", "expected_attempt"),
+    [
+        pytest.param({"_ng_task_index": 3, "_ng_rollout_index": 0}, 0, id="first-attempt"),
+        pytest.param({"_ng_task_index": 3, "_ng_rollout_index": 0, "_ng_attempt_index": 2}, 2, id="resumed-attempt"),
+    ],
+)
+def test_dispatch_span_carries_the_attempt_index(recorded_spans, row, expected_attempt):
+    from nemo_gym.rollouts.rollout_collection import _dispatch_span
+    from nemo_gym.telemetry.run_context import RunContext
+
+    with _dispatch_span(row, "alpha", server_name="alpha_environment_server", run_context=RunContext()):
+        pass
+
+    (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert span.attributes["nemo.gym.rollout.attempt.index"] == expected_attempt
+
+
+@pytest.mark.parametrize("span_groups", ["all", "none"], ids=["traces-off-metrics-on", "telemetry-off"])
+async def test_run_context_is_not_read_while_traces_are_off(
+    tmp_path, monkeypatch, recorded_spans, driver_telemetry, span_groups
+):
+    """Metrics-only processes keep span groups enabled; neither they nor a run without telemetry read run context."""
+    from nemo.lens.state import set_enabled_span_groups
+
+    import nemo_gym.rollouts.rollout_collection as rollout_collection
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setattr(rollout_collection, "is_trace_exporter_active", lambda: False)
+    if span_groups == "none":
+        set_enabled_span_groups(frozenset())
+
+    def boom(*args, **kwargs):
+        raise AssertionError("run context must not be read while traces are off")
+
+    monkeypatch.setattr(rollout_collection, "run_context_from_config", boom)
+    sent = _install_recording_post(monkeypatch)
+    _use_driver_config(monkeypatch, driver_telemetry, {"policy_model_name": "served-model"})
+    await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
+
+    assert len(sent) == 2
+    # The test provider records even a `gym.job` production would not export; no span carries run context.
+    assert [_run_context_of(s) for s in recorded_spans() if _run_context_of(s)] == []
+    assert not [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+
+
+async def test_run_context_lands_on_an_embedded_job(tmp_path, monkeypatch, recorded_spans, driver_telemetry):
+    """Under a caller's trace the dispatches nest under `gym.job`, which still carries the run's context."""
+    from opentelemetry import trace as otel_trace
+
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+
+    _install_recording_post(monkeypatch)
+    _use_driver_config(monkeypatch, driver_telemetry, {"policy_model_name": "served-model"})
+    with otel_trace.get_tracer("embedder").start_as_current_span("embedder.step"):
+        await RolloutCollectionHelper().run_from_config(
+            _collection_config(tmp_path, _write_rollout_input(tmp_path, 1))
+        )
+
+    (job,) = [s for s in recorded_spans() if s.name == "gym.job"]
+    assert _run_context_of(job) == {"nemo.gym.model.name": "served-model"}
+    assert driver_telemetry._EXPORTED_JOB_SPAN.get() is None
