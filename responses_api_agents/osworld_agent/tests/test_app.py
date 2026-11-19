@@ -8,6 +8,7 @@ boundary so the suite runs on a login node without OSWorld installed.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -40,6 +41,7 @@ from responses_api_agents.osworld_agent.app import (
     _resolve_run_rollout_purpose,
     _validate_runner_runtime,
 )
+from responses_api_agents.osworld_agent.client import EPISODE_END_KINDS
 from responses_api_agents.osworld_agent.rollout_outcome import (
     LEGACY_RUNTIME_ADMISSION_POLICY_ID,
     RUNTIME_ADMISSION_POLICY_ID,
@@ -898,6 +900,29 @@ def test_build_response_preserves_evaluated_horizon_without_runtime_mask(score: 
     assert response.mask_sample is False
     assert response.verifier_metadata["osworld_termination_reason"] == "max_steps"
     assert response.verifier_metadata["osworld_horizon_reached"] is True
+
+
+@pytest.mark.parametrize("episode_end", EPISODE_END_KINDS)
+def test_build_response_exposes_episode_end_as_one_hot_scalars(episode_end: str) -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {**DEFAULT_RUN_RESULT, "episode_end": episode_end}
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+    dumped = response.model_dump()
+
+    assert response.verifier_metadata["osworld_episode_end"] == episode_end
+    assert {key: value for key, value in dumped.items() if key.startswith("episode_end_")} == {
+        f"episode_end_{kind}": float(kind == episode_end) for kind in EPISODE_END_KINDS
+    }
+
+
+def test_build_response_without_episode_end_adds_no_scalars() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+
+    response = _build_response(request, dict(DEFAULT_RUN_RESULT), "test-policy", 1.0, 0.9)
+
+    assert "osworld_episode_end" not in response.verifier_metadata
+    assert not any(key.startswith("episode_end_") for key in response.model_dump())
 
 
 def test_build_response_rejects_inconsistent_legacy_runtime_mask() -> None:
@@ -1875,13 +1900,15 @@ class TestApp:
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
-    async def test_run_forwards_rollout_diagnostic_paths_to_ray_child(
+    async def test_run_forwards_required_rollout_env_to_ray_child(
         self,
         mock_to_thread,
         mock_remote,
         mock_get_first_server_config_dict,
         monkeypatch,
     ) -> None:
+        monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "global_aiohttp_connector_limit: 64")
+        monkeypatch.setenv("NEMO_GYM_CONFIG_PATH", "osworld_nano_omni_agent")
         monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", "/workspace/output/r6f/osworld-model-io.jsonl")
         monkeypatch.setenv("OSWORLD_TASK_ARTIFACT_ROOT", "/workspace/output/r6f/osworld-tasks")
         monkeypatch.setenv("OSWORLD_VM_EXEC_LOG", "/workspace/output/r6f/osworld-vm-exec.jsonl")
@@ -1893,11 +1920,13 @@ class TestApp:
 
         runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
         expected_env = {
+            "NEMO_GYM_CONFIG_PATH": "osworld_nano_omni_agent",
             "OSWORLD_MODEL_IO_LOG": "/workspace/output/r6f/osworld-model-io.jsonl",
             "OSWORLD_TASK_ARTIFACT_ROOT": "/workspace/output/r6f/osworld-tasks",
             "OSWORLD_VM_EXEC_LOG": "/workspace/output/r6f/osworld-vm-exec.jsonl",
         }
         assert {name: runtime_env["env_vars"][name] for name in expected_env} == expected_env
+        assert "NEMO_GYM_CONFIG_DICT" not in runtime_env["env_vars"]
 
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
@@ -2260,7 +2289,9 @@ def _chat_usage(prompt: int, cached: int, completion: int, reasoning: int) -> Di
 def _child_result(**fields: Any) -> SimpleNamespace:
     steps = [SimpleNamespace(**step, state=None, next_state=None) for step in DEFAULT_RUN_RESULT["steps"]]
     values = {k: v for k, v in DEFAULT_RUN_RESULT.items() if k != "steps"}
-    return SimpleNamespace(**values, termination_reason="done", agent_contract=None, steps=steps, **fields)
+    return SimpleNamespace(
+        **values, termination_reason="done", agent_contract=None, episode_end=None, steps=steps, **fields
+    )
 
 
 def _run_child(fake_run_osworld_task: Any, completions: list[Any]) -> Dict[str, Any]:
@@ -2597,3 +2628,109 @@ def test_a_sandbox_start_failure_keeps_its_own_fields_beside_the_generic_typing(
     ).model_dump(mode="json")
     assert _failure_event(row)["operation"] == "osworld.sandbox_start"
     assert (row["failure_kind"], row["sandbox_provider"]) == ("infrastructure_error", "docker")
+
+
+def _fork_request(rollout_index: int, *, active: Optional[List[int]] = None, **extra: Any) -> OSWorldRunRequest:
+    return OSWorldRunRequest.model_validate(
+        {
+            **make_run_request(osworld_task=DEFAULT_OSWORLD_TASK).model_dump(),
+            "_ng_group_id": "group-7",
+            "_ng_group_attempt": 0,
+            "_ng_rollout_index": rollout_index,
+            "_ng_active_generation_indices": [0, 1, 2] if active is None else active,
+            **extra,
+        }
+    )
+
+
+class TestForkRolloutGroups:
+    def test_fork_requires_a_sandbox_provider(self) -> None:
+        with pytest.raises(ValueError, match="fork_rollout_groups requires sandbox_provider"):
+            OSWorldAgent(config=make_config(fork_rollout_groups=True), server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.parametrize("weights", [{"a": 0.0}, {"a": -1.0}, {"a": float("inf")}, {" ": 1.0}])
+    def test_image_weights_must_be_positive(self, weights: Dict[str, float]) -> None:
+        with pytest.raises(ValueError, match="sandbox_image_weights"):
+            make_config(sandbox_image_weights=weights)
+
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._prepare_osworld_fork_remote")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_one_setup_is_forked_to_every_rollout_of_the_group(
+        self, mock_to_thread, mock_run_remote, mock_prepare_remote, mock_get_first_server_config_dict
+    ) -> None:
+        prepare_future, run_future = MagicMock(name="prepare"), MagicMock(name="run")
+        mock_prepare_remote.options.return_value.remote.return_value = prepare_future
+        mock_run_remote.options.return_value.remote.return_value = run_future
+        children = [{"sandbox_id": f"child-{index}"} for index in range(3)]
+        mock_to_thread.side_effect = lambda _fn, future, **_kwargs: (
+            children if future is prepare_future else dict(DEFAULT_RUN_RESULT)
+        )
+        server_client = make_server_client(
+            mock_get_first_server_config_dict, osworld_sandbox={"e2b": {"create": {"template": "base"}}}
+        )
+        agent = OSWorldAgent(
+            config=make_config(
+                sandbox_provider="osworld_sandbox",
+                sandbox_spec={"image": "osworld-slim"},
+                fork_rollout_groups=True,
+                fork_post_setup_settle_s=20.0,
+                sandbox_image_weights={"osworld-slim-v2": 1.0},
+            ),
+            server_client=server_client,
+        )
+
+        responses = await asyncio.gather(*(agent.run(_fork_request(index)) for index in (2, 0, 1)))
+
+        assert [response.reward for response in responses] == [1.0, 1.0, 1.0]
+        assert mock_prepare_remote.options.return_value.remote.call_count == 1
+        task_config, count, prepare_kwargs = mock_prepare_remote.options.return_value.remote.call_args.args
+        assert (task_config["id"], count) == ("test-task-001", 3)
+        assert prepare_kwargs["sandbox_provider_config"] == {"e2b": {"create": {"template": "base"}}}
+        assert prepare_kwargs["sandbox_spec"]["image"] == "osworld-slim-v2"
+        assert prepare_kwargs["post_setup_settle_s"] == 20.0
+        attached = sorted(
+            call_args.args[1]["sandbox_attach_descriptor"]["sandbox_id"]
+            for call_args in mock_run_remote.options.return_value.remote.call_args_list
+        )
+        assert attached == ["child-0", "child-1", "child-2"]
+
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._prepare_osworld_fork_remote")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_rows_without_group_identity_start_fresh(
+        self, mock_to_thread, mock_run_remote, mock_prepare_remote, mock_get_first_server_config_dict
+    ) -> None:
+        mock_run_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+        agent = OSWorldAgent(
+            config=make_config(sandbox_provider="osworld_sandbox", fork_rollout_groups=True),
+            server_client=make_server_client(mock_get_first_server_config_dict, osworld_sandbox={"e2b": {}}),
+        )
+
+        await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        mock_prepare_remote.options.return_value.remote.assert_not_called()
+        assert "sandbox_attach_descriptor" not in mock_run_remote.options.return_value.remote.call_args.args[1]
+
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._prepare_osworld_fork_remote")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_a_failed_group_setup_is_an_infrastructure_failure(
+        self, mock_to_thread, mock_run_remote, mock_prepare_remote, mock_get_first_server_config_dict
+    ) -> None:
+        mock_prepare_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.side_effect = RuntimeError("fork refused")
+        agent = OSWorldAgent(
+            config=make_config(sandbox_provider="osworld_sandbox", fork_rollout_groups=True),
+            server_client=make_server_client(mock_get_first_server_config_dict, osworld_sandbox={"e2b": {}}),
+        )
+
+        response = await agent.run(_fork_request(0, active=[0]))
+
+        assert response.verifier_metadata["osworld_termination_reason"] == "sandbox_fork_failure"
+        assert "fork refused" in response.verifier_metadata["osworld_error"]
+        mock_run_remote.options.return_value.remote.assert_not_called()

@@ -569,6 +569,63 @@ class E2BProvider:
         )
         return SandboxHandle(sandbox_id=str(sandbox.sandbox_id), provider_name=self.name, raw=sandbox)
 
+    async def fork(self, handle: SandboxHandle, count: int, *, ttl_s: float | None = None) -> list[SandboxHandle]:
+        """Clone a running sandbox ``count`` times, preserving its memory and disk state.
+
+        This is AgentENV's ``POST /sandboxes/{id}/fork`` control-plane extension; plain E2B
+        returns 404. Like create, a fork is never replayed: an ambiguous failure could leak
+        billable children.
+        """
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError("fork count must be a positive integer")
+        timeout_s = ttl_s if ttl_s is not None else self._create.timeout_s
+        if timeout_s is not None and (not _is_finite_number(timeout_s) or timeout_s <= 0):
+            raise ValueError("fork ttl_s must be > 0")
+        timeout = max(1, math.ceil(timeout_s)) if timeout_s is not None else None
+        body: dict[str, Any] = {"count": count}
+        if timeout is not None:
+            body["timeout"] = timeout
+        if self._create.auto_resume is not None:
+            body["autoPause"] = self._create.auto_resume
+            body["autoResume"] = {"enabled": self._create.auto_resume}
+
+        e2b = _require_e2b_sdk()
+        config = e2b.ConnectionConfig(**self._api_params())
+        client = e2b.api.client_async.get_api_client(config).get_async_httpx_client()
+        response = await client.post(f"/sandboxes/{handle.sandbox_id}/fork", json=body)
+        if response.status_code >= 300:
+            raise RuntimeError(
+                f"POST /sandboxes/{handle.sandbox_id}/fork returned HTTP {response.status_code}: {response.text[:500]}"
+            )
+        payload = response.json()
+        try:
+            child_ids = [str(item["sandbox"]["sandboxID"]) for item in payload]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(f"fork of {handle.sandbox_id} returned an unrecognized body") from exc
+
+        children: list[SandboxHandle] = []
+        try:
+            if len(child_ids) != count:
+                raise RuntimeError(f"fork of {handle.sandbox_id} returned {len(child_ids)} children, expected {count}")
+            for child_id in child_ids:
+                sandbox = await self._with_retries(
+                    lambda child_id=child_id: e2b.AsyncSandbox.connect(
+                        child_id, timeout=timeout, **self._api_params()
+                    ),
+                    operation="connect",
+                )
+                children.append(
+                    SandboxHandle(sandbox_id=str(sandbox.sandbox_id), provider_name=self.name, raw=sandbox)
+                )
+        except BaseException:
+            for child_id in child_ids:
+                try:
+                    await e2b.AsyncSandbox.kill(child_id, **self._api_params())
+                except Exception as kill_exc:  # noqa: BLE001 - best effort; the sandbox TTL is the backstop
+                    LOGGER.warning("Could not kill forked e2b sandbox %s: %s", child_id, kill_exc)
+            raise
+        return children
+
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         """Resolve a declared service port to a caller-reachable endpoint.
 

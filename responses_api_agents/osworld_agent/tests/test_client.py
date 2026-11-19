@@ -1136,6 +1136,32 @@ def test_horizon_preserves_evaluated_zero_as_runtime_eligible(monkeypatch) -> No
     assert result.termination_reason == "max_steps"
 
 
+def test_mask_policy_masks_evaluated_horizon_without_terminal_action(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    FakePromptAgent.next_actions = [{"action_type": "LEFT_CLICK", "x": 753, "varies": 45}]
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-horizon-mask", "instruction": "Try once, then evaluate."},
+        model_fn=lambda *_args: "unused",
+        runner_name="prompt_agent_computer_13",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePromptAgent",
+        agent_kwargs={"unterminated_episode_policy": "mask"},
+        messages_model_fn=lambda _messages, _payload: "native response",
+        max_steps=1,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.horizon_reached is True
+    assert result.evaluation_completed is True
+    assert result.reward == 1.0
+    assert result.runtime_eligible is False
+    assert result.mask_sample is True
+    assert result.runtime_admission_reason == "unterminated_masked"
+    assert result.termination_reason == "max_steps"
+
+
 def test_prompt_agent_runner_strips_thinking_before_native_agent_parse(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
@@ -1364,6 +1390,7 @@ def test_nemotron_v3_nano_omni_runner_uses_gym_messages_transport(monkeypatch) -
 
     assert result.reward == 1.0
     assert result.finished is True
+    assert result.episode_end == "done"
     assert result.steps[0].model_text == "Nemotron response"
     assert result.steps[0].actions == ["DONE"]
     assert result.steps[0].info["agent"]["thought"] == "Inspect then finish."
@@ -1416,6 +1443,7 @@ def test_nemotron_invalid_sample_stops_without_synthetic_fail(monkeypatch, agent
     assert result.runtime_eligible is True
     assert result.mask_sample is False
     assert result.termination_reason == agent_outcome
+    assert result.episode_end == "unterminated"
     assert result.steps[0].actions == []
     assert FakeEnv.instances[0].actions == []
 
@@ -1455,7 +1483,47 @@ def test_nemotron_model_transport_failure_stops_and_masks(monkeypatch, agent_out
     assert result.runtime_eligible is False
     assert result.mask_sample is True
     assert result.termination_reason == "model_call_failed"
+    assert result.episode_end == "aborted"
     assert "policy endpoint unreachable" in (result.error or "")
+    assert FakeEnv.instances[0].actions == []
+
+
+@pytest.mark.parametrize("model_call_completed", [False, True])
+def test_nemotron_context_limit_stop_is_evaluated_and_trainable(monkeypatch, model_call_completed) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    def context_limit(_self, _instruction, _obs):
+        return (
+            "context_length_exceeded",
+            [],
+            {
+                "agent_outcome": "context_limit_reached",
+                "stop_rollout": True,
+                "model_call_completed": model_call_completed,
+                "parse_failure": {"last_error": "context_length_exceeded"},
+                "model_calls": [],
+            },
+        )
+
+    monkeypatch.setattr(FakeNemotronAgent, "predict", context_limit)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-nano-context-limit", "instruction": "Use the scaffold."},
+        model_fn=lambda *_args: pytest.fail("Nemotron should not use model_fn"),
+        runner_name="nemotron_v3_nano_omni_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeNemotronAgent",
+        messages_model_fn=lambda *_args: pytest.fail("predict is stubbed"),
+        policy_model_name="nemotron-3-nano-omni-under-test",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.evaluation_completed is True
+    assert result.runtime_eligible is True
+    assert result.mask_sample is False
+    assert result.termination_reason == "context_limit_reached"
+    assert result.episode_end == "unterminated"
+    assert result.error is None
     assert FakeEnv.instances[0].actions == []
 
 
@@ -1486,7 +1554,41 @@ def test_nemotron_model_authored_fail_remains_unmasked(monkeypatch) -> None:
     assert result.finished is True
     assert result.mask_sample is False
     assert result.termination_reason == "agent_fail"
+    assert result.episode_end == "agent_fail"
     assert result.steps[0].actions == ["FAIL"]
+
+
+@pytest.mark.parametrize("forced_terminal", ["max_steps", "context_limit", "model_response_invalid"])
+def test_nemotron_adapter_forced_fail_is_reported_as_forced(monkeypatch, capsys, forced_terminal) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    def forced_fail(_self, _instruction, _obs):
+        return "", ["FAIL"], {"forced_terminal": forced_terminal, "model_calls": []}
+
+    monkeypatch.setattr(FakeNemotronAgent, "predict", forced_fail)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-nano-forced-fail", "instruction": "Use the scaffold."},
+        model_fn=lambda *_args: pytest.fail("Nemotron should not use model_fn"),
+        runner_name="nemotron_v3_nano_omni_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeNemotronAgent",
+        messages_model_fn=lambda *_args: pytest.fail("predict is stubbed"),
+        policy_model_name="nemotron-3-nano-omni-under-test",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.termination_reason == "agent_fail"
+    assert result.episode_end == "forced_fail"
+    episode_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("OSWORLD_EPISODE_END|")]
+    assert len(episode_lines) == 1
+    assert "|episode_end=forced_fail|" in episode_lines[0]
+    assert f"|forced_terminal={forced_terminal}|" in episode_lines[0]
+
+
+def test_rollout_result_rejects_unknown_episode_end() -> None:
+    with pytest.raises(ValueError, match="episode_end"):
+        osworld_client.RolloutResult(reward=0.0, score=0.0, steps=[], episode_end="quit")
 
 
 def test_qwen3_omni_runner_retries_and_merges_adjacent_pyautogui_actions(monkeypatch) -> None:
@@ -1557,6 +1659,19 @@ def test_stage_setup_cache_links_task_artifacts_without_patching_osworld(monkeyp
     assert linked == 1
     assert destination.is_symlink()
     assert destination.read_bytes() == b"pdf"
+
+
+def test_sanitize_setup_task_config_avoids_pkill_self_match_without_mutation() -> None:
+    command = "pkill -f 'http.server 8539'; rm -rf /home/user/crosstown && mkdir -p /home/user/crosstown"
+    task_config = {"config": [{"parameters": {"command": command}}]}
+
+    sanitized = osworld_client._sanitize_setup_task_config(task_config)
+
+    assert task_config["config"][0]["parameters"]["command"] == command
+    assert sanitized["config"][0]["parameters"]["command"] == (
+        "pkill -f '[h]ttp.server 8539' 2>/dev/null || true; "
+        "rm -rf /home/user/crosstown && mkdir -p /home/user/crosstown"
+    )
 
 
 def test_stage_setup_cache_does_not_link_evaluator_outputs(monkeypatch, tmp_path: Path) -> None:
@@ -2545,3 +2660,228 @@ def test_a_guest_start_timeout_is_reported_as_a_sandbox_start_failure(monkeypatc
     assert result.sandbox_start_failure == (expected if reported else None)
     # The score and the runtime mask do not change.
     assert (result.reward, result.mask_sample, result.evaluation_completed) == (0.0, True, False)
+
+
+def test_rollout_timeout_counts_the_agent_loop_and_masks_the_rollout(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    clock = iter(range(0, 10_000, 100))
+    monkeypatch.setattr(osworld_client.time, "monotonic", lambda: float(next(clock)))
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-rollout-timeout", "instruction": "Keep clicking."},
+        model_fn=lambda *_args: "```pyautogui.click(1, 1)```",
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        max_steps=50,
+        task_timeout=1_000_000,
+        rollout_timeout_s=1200,
+    )
+
+    assert "rollout_timeout_s exceeded (1200s)" in (result.error or "")
+    assert result.mask_sample is True
+    assert 0 < len(result.steps) < 50
+
+
+class FakeForkController(FakeController):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cache_dirs: List[str] = []
+
+    def reset_cache_dir(self, cache_dir: str) -> None:
+        self.cache_dirs.append(cache_dir)
+
+
+class FakeForkableEnv(FakeEnv):
+    """A DesktopEnv whose guest supports fork, with the state ``_reset_forked_env`` binds."""
+
+    forks: List[Dict[str, Any]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.controller = FakeForkController()
+        self.setup_controller = self.controller
+        self._traj_no = 3
+        self._step_no = 7
+        self.action_history = ["stale"]
+        self.enable_proxy = kwargs.get("enable_proxy", False)
+        self.cache_dir = kwargs.get("cache_dir", "cache")
+        self.config: List[Any] = []
+        self.resets: List[Dict[str, Any]] = []
+        self.provider = SimpleNamespace(fork=self._fork)
+
+    def reset(self, task_config: Dict[str, Any]) -> Dict[str, Any]:
+        self.resets.append(task_config)
+        return super().reset(task_config)
+
+    def _set_task_info(self, task_config: Dict[str, Any]) -> None:
+        self.task_config = task_config
+        self.config = task_config.get("config", [])
+
+    def _fork(self, count: int, *, ttl_s: float | None = None) -> List[Dict[str, Any]]:
+        FakeForkableEnv.forks.append({"count": count, "ttl_s": ttl_s})
+        return [{"sandbox_id": f"child-{index}"} for index in range(count)]
+
+
+def test_forked_rollout_attaches_and_binds_the_task_without_rerunning_setup(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    real_load_attr = osworld_client.load_attr
+    monkeypatch.setattr(
+        osworld_client,
+        "load_attr",
+        lambda path: FakeForkableEnv if path == "fake.FakeForkableEnv" else real_load_attr(path),
+    )
+    task = {"id": "task-fork", "instruction": "Finish the task.", "config": [{"type": "launch"}]}
+
+    result = osworld_client.run_osworld_task(
+        task,
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeForkableEnv",
+        sandbox_provider_config={"e2b": {}},
+        sandbox_spec={"image": "osworld-slim"},
+        sandbox_attach_descriptor={"sandbox_id": "child-1"},
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    env = FakeEnv.instances[0]
+    assert env.kwargs["sandbox_attach_descriptor"] == {"sandbox_id": "child-1"}
+    assert env.resets == []
+    assert env.task_config["id"] == "task-fork"
+    assert (env._traj_no, env._step_no, env.action_history, env.is_environment_used) == (4, 0, [], True)
+    assert env.controller.cache_dirs == ["cache"]
+
+
+def test_attach_descriptor_requires_a_sandbox_provider(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    with pytest.raises(ValueError, match="sandbox_attach_descriptor requires sandbox_provider"):
+        osworld_client.run_osworld_task(
+            {"id": "task-fork", "instruction": "Finish the task."},
+            model_fn=lambda *_args: "```DONE```",
+            env_class_path="fake.FakeEnv",
+            sandbox_attach_descriptor={"sandbox_id": "child-1"},
+            task_timeout=10,
+        )
+
+
+def test_prepare_fork_runs_setup_once_settles_forks_and_stops_the_parent(monkeypatch) -> None:
+    FakeEnv.instances.clear()
+    FakeForkableEnv.forks.clear()
+    sleeps: List[float] = []
+    monkeypatch.setattr(
+        osworld_client,
+        "load_attr",
+        lambda path: FakeForkableEnv if path == osworld_client.SANDBOX_DESKTOP_ENV_CLASS else pytest.fail(path),
+    )
+    monkeypatch.setattr(osworld_client, "_patch_chrome_setup_cdp_lifecycle", lambda: None)
+    monkeypatch.setattr(osworld_client.time, "sleep", sleeps.append)
+
+    descriptors = osworld_client.prepare_osworld_fork(
+        {"id": "task-fork", "instruction": "Finish the task.", "config": [{"type": "launch"}]},
+        3,
+        sandbox_provider_config={"e2b": {}},
+        sandbox_spec={"image": "osworld-slim"},
+        sandbox_vnc_guest_port=6901,
+        post_setup_settle_s=20.0,
+        fork_ttl_s=600.0,
+    )
+
+    assert descriptors == [{"sandbox_id": "child-0"}, {"sandbox_id": "child-1"}, {"sandbox_id": "child-2"}]
+    env = FakeEnv.instances[0]
+    assert env.kwargs["sandbox_provider"] == {"e2b": {}}
+    assert env.kwargs["sandbox_vnc_guest_port"] == 6901
+    assert "sandbox_attach_descriptor" not in env.kwargs
+    assert [reset["id"] for reset in env.resets] == ["task-fork"]
+    assert sleeps == [20.0]
+    assert FakeForkableEnv.forks == [{"count": 3, "ttl_s": 600.0}]
+    assert env.closed is True
+
+
+def _spy_frozen_evaluators(monkeypatch) -> List[tuple]:
+    calls: List[tuple] = []
+
+    def register(task_config: Dict[str, Any], root: str) -> List[str]:
+        resets = len(getattr(FakeEnv.instances[-1], "resets", [])) if FakeEnv.instances else 0
+        calls.append(("register", task_config["id"], root, resets))
+        return ["metrics:check_rows"]
+
+    monkeypatch.setattr(osworld_client, "register_frozen_evaluators", register)
+    monkeypatch.setattr(osworld_client, "clear_frozen_evaluators", lambda: calls.append(("clear",)))
+    return calls
+
+
+def test_frozen_evaluators_wrap_the_rollout_and_score_binary_tasks(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    calls = _spy_frozen_evaluators(monkeypatch)
+    monkeypatch.setattr(FakeEnv, "evaluate", lambda self: 0.5)
+    task = {"id": "task-rlvr", "instruction": "Finish the task.", "metadata": {"binary_final_reward": True}}
+
+    result = osworld_client.run_osworld_task(
+        task,
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        frozen_evaluator_root="/snapshot/tmp_funcs",
+    )
+    unscored = osworld_client.run_osworld_task(
+        task, model_fn=lambda *_args: "```DONE```", env_class_path="fake.FakeEnv", sleep_after_execution=0
+    )
+
+    assert calls == [("register", "task-rlvr", "/snapshot/tmp_funcs", 0), ("clear",), ("clear",)]
+    assert result.score == 0.0 and result.error is None
+    assert unscored.score == 0.5
+
+
+def test_frozen_evaluators_refuse_the_remote_resources_path(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    calls = _spy_frozen_evaluators(monkeypatch)
+
+    with pytest.raises(ValueError, match="local resources path"):
+        osworld_client.run_osworld_task(
+            {"id": "task-rlvr", "instruction": "Finish the task."},
+            model_fn=lambda *_args: "```DONE```",
+            provider_name="remote_docker",
+            resources_server_url="http://resources.example",
+            frozen_evaluator_root="/snapshot/tmp_funcs",
+        )
+
+    assert calls == []
+
+
+def test_prepare_fork_registers_frozen_evaluators_before_setup(monkeypatch) -> None:
+    FakeEnv.instances.clear()
+    calls = _spy_frozen_evaluators(monkeypatch)
+    monkeypatch.setattr(osworld_client, "load_attr", lambda _path: FakeForkableEnv)
+    monkeypatch.setattr(osworld_client, "_patch_chrome_setup_cdp_lifecycle", lambda: None)
+
+    osworld_client.prepare_osworld_fork(
+        {"id": "task-rlvr", "instruction": "Finish the task."},
+        2,
+        sandbox_provider_config={"e2b": {}},
+        sandbox_spec={"image": "osworld-slim"},
+        frozen_evaluator_root="/snapshot/tmp_funcs",
+    )
+
+    assert calls == [("register", "task-rlvr", "/snapshot/tmp_funcs", 0), ("clear",)]
+    assert len(FakeEnv.instances[0].resets) == 1
+
+
+def test_prepare_fork_stops_the_parent_when_setup_fails(monkeypatch) -> None:
+    FakeEnv.instances.clear()
+
+    class FailingSetupEnv(FakeForkableEnv):
+        def reset(self, task_config: Dict[str, Any]) -> Dict[str, Any]:
+            raise RuntimeError("setup failed")
+
+    monkeypatch.setattr(osworld_client, "load_attr", lambda _path: FailingSetupEnv)
+    monkeypatch.setattr(osworld_client, "_patch_chrome_setup_cdp_lifecycle", lambda: None)
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        osworld_client.prepare_osworld_fork(
+            {"id": "task-fork", "instruction": "Finish the task."},
+            2,
+            sandbox_provider_config={"e2b": {}},
+            sandbox_spec={"image": "osworld-slim"},
+        )
+
+    assert FakeEnv.instances[0].closed is True

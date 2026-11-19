@@ -1706,3 +1706,115 @@ async def test_real_sdk_status_only_reads_control_plane(
     # Only the control-plane GET: an envd health check would resume a paused sandbox.
     assert [method for method, _ in requests] == ["GET"]
     assert requests[0][1].endswith("/sandboxes/sbx-1")
+
+
+class TestFork:
+    async def test_fork_posts_one_request_and_connects_every_child(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider = E2BProvider(connection={"api_key": "k"}, create={"template": "base", "timeout_s": 600})
+        parent = await provider.create(_spec())
+        FakeApiClient.calls.clear()
+        monkeypatch.setattr(
+            FakeApiClient,
+            "response",
+            FakeHttpResponse(201, [{"sandbox": {"sandboxID": "child-a"}}, {"sandbox": {"sandboxID": "child-b"}}]),
+        )
+
+        children = await provider.fork(parent, 2, ttl_s=90.5)
+
+        assert [child.sandbox_id for child in children] == ["child-a", "child-b"]
+        assert all(child.provider_name == "e2b" for child in children)
+        assert [call["url"] for call in FakeApiClient.calls] == [f"/sandboxes/{parent.sandbox_id}/fork"]
+        assert FakeApiClient.calls[0]["json"] == {
+            "count": 2,
+            "timeout": 91,
+            "autoPause": False,
+            "autoResume": {"enabled": False},
+        }
+        assert [sandbox.create_kwargs["timeout"] for sandbox in FakeSandbox.instances[-2:]] == [91, 91]
+
+    async def test_fork_ttl_defaults_to_create_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider = E2BProvider(create={"template": "base", "timeout_s": 600})
+        parent = await provider.create(_spec())
+        FakeApiClient.calls.clear()
+        monkeypatch.setattr(FakeApiClient, "response", FakeHttpResponse(201, [{"sandbox": {"sandboxID": "child"}}]))
+
+        await provider.fork(parent, 1)
+
+        assert FakeApiClient.calls[0]["json"]["timeout"] == 600
+
+    @pytest.mark.parametrize("count", [0, -1, True, 1.5])
+    async def test_fork_rejects_bad_count(self, count: object) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        parent = await provider.create(_spec())
+        with pytest.raises(ValueError, match="positive integer"):
+            await provider.fork(parent, count)  # type: ignore[arg-type]
+
+    async def test_fork_http_error_is_not_replayed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        parent = await provider.create(_spec())
+        FakeApiClient.calls.clear()
+        monkeypatch.setattr(FakeApiClient, "response", FakeHttpResponse(404, "not found"))
+
+        with pytest.raises(RuntimeError, match="HTTP 404"):
+            await provider.fork(parent, 2)
+
+        assert len(FakeApiClient.calls) == 1
+
+    async def test_fork_kills_every_child_when_the_result_is_incomplete(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        killed: list[str] = []
+
+        async def kill(sandbox_id, **kwargs):
+            killed.append(sandbox_id)
+            return True
+
+        provider = E2BProvider(create={"template": "base"})
+        parent = await provider.create(_spec())
+        monkeypatch.setattr(FakeSandbox, "kill", staticmethod(kill))
+        monkeypatch.setattr(FakeApiClient, "response", FakeHttpResponse(201, [{"sandbox": {"sandboxID": "only"}}]))
+
+        with pytest.raises(RuntimeError, match="returned 1 children, expected 2"):
+            await provider.fork(parent, 2)
+
+        assert killed == ["only"]
+
+    async def test_fork_rejects_unrecognized_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        parent = await provider.create(_spec())
+        monkeypatch.setattr(FakeApiClient, "response", FakeHttpResponse(201, [{"sandboxID": "flat"}]))
+
+        with pytest.raises(RuntimeError, match="unrecognized body"):
+            await provider.fork(parent, 1)
+
+    async def test_async_sandbox_fork_returns_attachable_descriptors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        sandbox = await AsyncSandbox(provider, _spec(workdir="/repo")).start()
+        monkeypatch.setattr(
+            FakeApiClient,
+            "response",
+            FakeHttpResponse(201, [{"sandbox": {"sandboxID": "child-a"}}, {"sandbox": {"sandboxID": "child-b"}}]),
+        )
+
+        descriptors = await sandbox.fork(2)
+
+        assert descriptors == [
+            {"sandbox_id": "child-a", "workdir": "/repo"},
+            {"sandbox_id": "child-b", "workdir": "/repo"},
+        ]
+        child = await AsyncSandbox.connect(descriptors[1], provider=E2BProvider())
+        await child.exec("pwd")
+        assert FakeSandbox.instances[-1].sandbox_id == "child-b"
+        assert FakeSandbox.instances[-1].exec_calls[-1]["cwd"] == "/repo"
+
+    def test_sync_sandbox_fork_and_connect(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(FakeApiClient, "response", FakeHttpResponse(201, [{"sandbox": {"sandboxID": "child-a"}}]))
+        with Sandbox(E2BProvider(create={"template": "base"}), _spec(workdir="/repo")).start() as sandbox:
+            descriptors = sandbox.fork(1)
+        assert descriptors == [{"sandbox_id": "child-a", "workdir": "/repo"}]
+
+        child = Sandbox.connect(E2BProvider(), descriptors[0])
+        try:
+            child.exec("pwd")
+        finally:
+            child.stop()
+        assert FakeSandbox.instances[-1].sandbox_id == "child-a"
+        assert FakeSandbox.instances[-1].killed

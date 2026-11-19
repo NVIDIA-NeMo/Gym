@@ -749,3 +749,46 @@ def test_a_logged_readiness_url_carries_no_credentials() -> None:
     assert osworld_sandbox._url_without_credentials("http://[2001:db8::1]:5000/screenshot") == (
         "http://[2001:db8::1]:5000/screenshot"
     )
+
+
+def test_attach_descriptor_connects_once_then_later_starts_are_fresh(tmp_path, monkeypatch) -> None:
+    connected: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    class ForkableSandbox(FakeSandbox):
+        @classmethod
+        def connect(cls, provider: dict[str, Any], descriptor: dict[str, Any]) -> "ForkableSandbox":
+            connected.append((provider, descriptor))
+            return cls(provider)
+
+        def fork(self, count: int, *, ttl_s: float | None = None) -> list[dict[str, Any]]:
+            return [{"sandbox_id": f"child-{index}", "ttl_s": ttl_s} for index in range(count)]
+
+    ForkableSandbox.instances.clear()
+    monkeypatch.setattr(osworld_sandbox, "Sandbox", ForkableSandbox)
+    vm_path = tmp_path / "Ubuntu.qcow2"
+    vm_path.write_bytes(b"qcow2")
+    descriptor = {"sandbox_id": "child-0"}
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}},
+        {"image": "osworld:fixed"},
+        attach_descriptor=descriptor,
+    )
+    monkeypatch.setattr(provider, "_wait_for_vm_ready", lambda *_args: None)
+
+    with pytest.raises(RuntimeError, match="has not started"):
+        provider.fork(1)
+    provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
+    assert connected == [({"docker": {}}, descriptor)]
+    attached = ForkableSandbox.instances[-1]
+    assert attached.spec is None
+    assert provider.fork(2, ttl_s=30) == [
+        {"sandbox_id": "child-0", "ttl_s": 30},
+        {"sandbox_id": "child-1", "ttl_s": 30},
+    ]
+
+    provider.revert_to_snapshot(str(vm_path), "init_state")
+    provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
+    assert len(connected) == 1
+    assert ForkableSandbox.instances[-1].spec is not None
+    provider.stop_emulator(str(vm_path))
+    assert attached.stopped == 1

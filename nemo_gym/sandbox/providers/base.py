@@ -571,6 +571,18 @@ class SupportsSandboxSidecars(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxFork(Protocol):
+    """Optional provider capability to clone a running sandbox, memory and disk included.
+
+    Each child is an independent sandbox owned by the caller.
+    """
+
+    async def fork(self, handle: SandboxHandle, count: int, *, ttl_s: float | None = None) -> list[SandboxHandle]:
+        """Clone ``handle`` ``count`` times and return the children's handles."""
+        ...
+
+
+@runtime_checkable
 class SupportsSandboxPauseResume(Protocol):
     """Optional provider capability to pause and resume a sandbox.
 

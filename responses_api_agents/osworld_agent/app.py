@@ -26,6 +26,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import sys
 import time
@@ -42,6 +43,7 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     MODEL_POLICY_RESPONSE_TIMEOUT,
@@ -62,6 +64,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.trajectory import ModelCallRef, TrajectoryRecord, TrajectoryTurn
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.osworld_agent.agent_contract import (
     ResolvedAgentContract,
@@ -69,6 +72,7 @@ from responses_api_agents.osworld_agent.agent_contract import (
     resolve_agent_contract,
 )
 from responses_api_agents.osworld_agent.exact_trace import build_exact_trace_envelope
+from responses_api_agents.osworld_agent.fork_groups import ForkGroupRegistry, fork_claim_from_request
 from responses_api_agents.osworld_agent.proxy import (
     inspect_proxy_config_file,
     parse_env_bool,
@@ -114,7 +118,8 @@ _OSWORLD_LOG_CONTEXT_FIELDS = (
 _MODEL_LOG_CONTEXT_HEADERS = {
     field: f"x-nemo-gym-log-{field.replace('_', '-')}" for field in _OSWORLD_LOG_CONTEXT_FIELDS
 }
-_ROLLOUT_DIAGNOSTIC_ENV_VARS = (
+_ROLLOUT_CHILD_ENV_VARS = (
+    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     "NEMO_GYM_RESPONSE_LOGGING",
     "OSWORLD_MODEL_IO_LOG",
     "OSWORLD_RUN_ID",
@@ -342,6 +347,24 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # Guest port of the template's noVNC. None follows the provider default:
     # 8006 for the OSWorld Docker image, 6901 for AgentENV's osworld-slim.
     sandbox_vnc_guest_port: int | None = Field(default=None, ge=1, le=65535)
+    # Run each prompt group's task setup once, then fork one guest for every rollout
+    # the group dispatched together (``_ng_active_generation_indices``), so all of
+    # them start from the same desktop state. Needs a fork-capable sandbox provider
+    # (AgentENV through the e2b provider). Rows without group identity, and rows
+    # re-sent after their group was claimed, get an ordinary fresh guest.
+    fork_rollout_groups: bool = False
+    # Seconds a forked guest waits for its rollout before it is stopped.
+    fork_claim_timeout_s: float = Field(default=7200.0, gt=0)
+    # Pause between the task setup and the fork so the desktop settles.
+    fork_post_setup_settle_s: float = Field(default=0.0, ge=0)
+    # Weighted ``sandbox_spec.image`` choices (for example AgentENV templates),
+    # drawn per rollout; forked rollouts share their group's draw. Empty keeps
+    # ``sandbox_spec.image``.
+    sandbox_image_weights: Dict[str, float] = Field(default_factory=dict)
+    # Root of an RLVR task snapshot's per-task evaluator modules
+    # (``<root>/<task_id>/{getters,metrics}/*.py``); they replace same-named built-in
+    # evaluators for their task. Tasks with ``metadata.binary_final_reward`` then score 1 or 0.
+    frozen_evaluator_root: Optional[str] = None
     headless: bool = True
     screen_width: int = 1920
     screen_height: int = 1080
@@ -374,6 +397,9 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # receives this value as a cooperative deadline so model/step boundaries
     # can stop cleanly before the parent has to cancel the Ray task.
     task_timeout: int = 1800
+    # Agent-loop budget counted from the first step; reaching it ends the
+    # rollout as a timeout.
+    rollout_timeout_s: Optional[float] = Field(default=None, gt=0)
     task_cancel_grace_s: float = Field(default=30.0, gt=0)
     # Optional semantic Ray resources for each OSWorld rollout task. This lets
     # an embedding scheduler keep image-heavy environment work off trainer
@@ -412,6 +438,16 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # Schema 2 is the complete validation envelope. Schema 3 is the bounded
     # post-evaluation Gym-to-trainer projection and is the server default.
     exact_trace_transport_version: Literal[2, 3] = 3
+
+    @field_validator("sandbox_image_weights")
+    @classmethod
+    def validate_sandbox_image_weights(cls, value: Dict[str, float]) -> Dict[str, float]:
+        for image, weight in value.items():
+            if not image.strip():
+                raise ValueError("sandbox_image_weights keys must be non-empty")
+            if not math.isfinite(weight) or weight <= 0:
+                raise ValueError("sandbox_image_weights values must be finite and greater than zero")
+        return value
 
     @field_validator("ray_task_resources")
     @classmethod
@@ -883,6 +919,12 @@ def _record_served_response_id(normalized: Dict[str, Any], resp: Any) -> None:
     response_id = getattr(resp, "id", None)
     if isinstance(response_id, str) and response_id:
         normalized["response_id"] = response_id
+    prompt_tokens = getattr(getattr(resp, "usage", None), "prompt_tokens", None)
+    if type(prompt_tokens) is int:
+        normalized["prompt_tokens"] = prompt_tokens
+    completion_tokens = getattr(getattr(resp, "usage", None), "completion_tokens", None)
+    if type(completion_tokens) is int:
+        normalized["completion_tokens"] = completion_tokens
 
 
 def _recover_first_fenced_action(content: str) -> str | None:
@@ -1202,6 +1244,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "mask_sample": result.mask_sample,
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
+        "episode_end": result.episode_end,
         "agent_contract": result.agent_contract,
         # Set only by the built-in rollout; a runner's own result type need not have it.
         "sandbox_start_failure": getattr(result, "sandbox_start_failure", None),
@@ -1224,10 +1267,31 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     }
 
 
+@ray.remote(num_cpus=1)
+def _prepare_osworld_fork_remote(
+    task_config: Dict[str, Any], count: int, prepare_kwargs: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Ray entrypoint: run one task setup and fork its guest ``count`` times."""
+    from responses_api_agents.osworld_agent.client import prepare_osworld_fork  # noqa: PLC0415
+
+    return prepare_osworld_fork(task_config, count, **prepare_kwargs)
+
+
+def _stop_forked_guests(sandbox_provider_config: Dict[str, Any], descriptors: List[Dict[str, Any]]) -> None:
+    from nemo_gym.sandbox import Sandbox  # noqa: PLC0415
+
+    for descriptor in descriptors:
+        try:
+            Sandbox.connect(sandbox_provider_config, descriptor).stop()
+        except Exception:  # noqa: BLE001 - the guest's TTL is the backstop
+            LOG.exception("Could not stop forked OSWorld guest %s", descriptor.get("sandbox_id"))
+
+
 class OSWorldAgent(SimpleResponsesAPIAgent):
     ray_enabled = True
     config: OSWorldAgentConfig
     sem: Optional[Semaphore] = None
+    fork_groups: Optional[ForkGroupRegistry] = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
@@ -1245,6 +1309,8 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             )
         if self.config.resources_server is not None and self.config.sandbox_provider is not None:
             raise ValueError("OSWorld resources_server and sandbox_provider cannot be enabled together")
+        if self.config.fork_rollout_groups and self.config.sandbox_provider is None:
+            raise ValueError("OSWorld fork_rollout_groups requires sandbox_provider")
         training_contract = _resolve_configured_agent_contract(self.config, "training")
         evaluation_contract = _resolve_configured_agent_contract(self.config, "evaluation")
         assert_train_eval_parity(
@@ -1254,6 +1320,8 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
         )
         _validate_runner_runtime(self.config)
         self.sem = Semaphore(self.config.concurrency)
+        if self.config.fork_rollout_groups:
+            self.fork_groups = ForkGroupRegistry(claim_timeout_s=self.config.fork_claim_timeout_s)
 
     def setup_webserver(self):
         """Idempotently fill a configured asset cache before accepting work."""
@@ -1340,6 +1408,58 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
         # OSWorld's loop runs sync inside Ray; we do not expose a stand-alone
         # /v1/responses endpoint for this agent.
         raise NotImplementedError("OSWorldAgent runs full rollouts via /run only.")
+
+    async def _claim_forked_guest(
+        self,
+        task_config: Dict[str, Any],
+        request_extra: Dict[str, Any],
+        runner_kwargs: Dict[str, Any],
+        ray_task_options: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Return this rollout's share of its group's forked guests, or None for a fresh guest."""
+        claim = fork_claim_from_request(request_extra, str(task_config.get("id") or ""))
+        if claim is None:
+            return None
+        provider_config = runner_kwargs["sandbox_provider_config"]
+        prepare_kwargs = {
+            "sandbox_provider_config": provider_config,
+            "sandbox_spec": runner_kwargs["sandbox_spec"],
+            "vm_path": runner_kwargs["vm_path"] or runner_kwargs["sandbox_vm_path"],
+            "sandbox_require_kvm": runner_kwargs["sandbox_require_kvm"],
+            "sandbox_ready_timeout_s": runner_kwargs["sandbox_ready_timeout_s"],
+            "sandbox_ready_poll_s": runner_kwargs["sandbox_ready_poll_s"],
+            "sandbox_vnc_guest_port": runner_kwargs["sandbox_vnc_guest_port"],
+            "screen_size": runner_kwargs["screen_size"],
+            "headless": runner_kwargs["headless"],
+            "client_password": runner_kwargs["client_password"],
+            "enable_proxy": runner_kwargs["enable_proxy"],
+            "cache_dir": runner_kwargs["cache_dir"],
+            "setup_cache_dir": runner_kwargs["setup_cache_dir"],
+            "post_setup_settle_s": self.config.fork_post_setup_settle_s,
+            "frozen_evaluator_root": runner_kwargs["frozen_evaluator_root"],
+        }
+
+        async def prepare(count: int) -> List[Dict[str, Any]]:
+            future = _prepare_osworld_fork_remote.options(**ray_task_options).remote(
+                task_config, count, prepare_kwargs
+            )
+            try:
+                return await asyncio.to_thread(ray.get, future, timeout=float(self.config.task_timeout))
+            except ray.exceptions.GetTimeoutError:
+                # Cooperative first, so the child's ``finally`` stops the parent guest.
+                ray.cancel(future, force=False)
+                try:
+                    return await asyncio.to_thread(ray.get, future, timeout=float(self.config.task_cancel_grace_s))
+                except ray.exceptions.GetTimeoutError:
+                    ray.cancel(future, force=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise TimeoutError(f"fork group setup exceeded task_timeout ({self.config.task_timeout}s)") from None
+
+        async def release(descriptors: List[Dict[str, Any]]) -> None:
+            await asyncio.to_thread(_stop_forked_guests, provider_config, descriptors)
+
+        return await self.fork_groups.claim(claim, prepare=prepare, release=release)
 
     async def run(self, body: OSWorldRunRequest = Body()) -> OSWorldVerifyResponse:
         async with self.sem:
@@ -1437,6 +1557,11 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             policy_base_url = global_config_dict.get("policy_base_url", "")
             sandbox_provider_config: Optional[Dict[str, Any]] = None
             sandbox_spec = dict(self.config.sandbox_spec)
+            if self.config.sandbox_image_weights:
+                images = list(self.config.sandbox_image_weights)
+                sandbox_spec["image"] = random.choices(
+                    images, weights=list(self.config.sandbox_image_weights.values())
+                )[0]
             if self.config.sandbox_provider is not None:
                 sandbox_provider_config = resolve_provider_config(
                     self.config.sandbox_provider,
@@ -1560,6 +1685,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "sandbox_ready_timeout_s": self.config.sandbox_ready_timeout_s,
                 "sandbox_ready_poll_s": self.config.sandbox_ready_poll_s,
                 "sandbox_vnc_guest_port": self.config.sandbox_vnc_guest_port,
+                "frozen_evaluator_root": self.config.frozen_evaluator_root,
                 "max_steps": self.config.max_steps,
                 "max_trajectory_length": self.config.max_trajectory_length,
                 "sleep_after_execution": self.config.sleep_after_execution,
@@ -1569,6 +1695,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "step_timeout": self.config.step_timeout,
                 "model_timeout": self.config.model_timeout,
                 "task_timeout": self.config.task_timeout,
+                "rollout_timeout_s": self.config.rollout_timeout_s,
                 "docker_port_lock_timeout": self.config.docker_port_lock_timeout,
                 "evaluator_disable_gpu": self.config.evaluator_disable_gpu,
                 "reward_mode": self.config.reward_mode,
@@ -1596,18 +1723,34 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "log_context": log_context,
             }
 
+            # Child Ray tasks do not reliably inherit the NemoGym actor's
+            # runtime environment. Forward the server instance name and
+            # diagnostic paths explicitly.
+            rollout_env = {name: os.environ[name] for name in _ROLLOUT_CHILD_ENV_VARS if os.environ.get(name)}
+            runtime_env: Dict[str, Any] = {"py_executable": sys.executable}
+            if rollout_env:
+                runtime_env["env_vars"] = rollout_env
+            ray_task_options: Dict[str, Any] = {"runtime_env": runtime_env}
+            if self.config.ray_task_resources:
+                ray_task_options["resources"] = dict(self.config.ray_task_resources)
+
+            if self.fork_groups is not None:
+                try:
+                    attach_descriptor = await self._claim_forked_guest(
+                        task_config, extra, runner_kwargs, ray_task_options
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    LOG.exception("OSWorld fork group preparation failed")
+                    return _empty_response(
+                        body,
+                        error=f"OSWorldForkError: {type(exc).__name__}: {exc}",
+                        termination_reason="sandbox_fork_failure",
+                    )
+                if attach_descriptor is not None:
+                    runner_kwargs["sandbox_attach_descriptor"] = attach_descriptor
+
             future = None
             try:
-                # Child Ray tasks do not reliably inherit the NemoGym actor's
-                # runtime environment. Forward diagnostic paths explicitly so
-                # parse failures retain their model I/O and task trajectory.
-                rollout_env = {name: os.environ[name] for name in _ROLLOUT_DIAGNOSTIC_ENV_VARS if os.environ.get(name)}
-                runtime_env: Dict[str, Any] = {"py_executable": sys.executable}
-                if rollout_env:
-                    runtime_env["env_vars"] = rollout_env
-                ray_task_options: Dict[str, Any] = {"runtime_env": runtime_env}
-                if self.config.ray_task_resources:
-                    ray_task_options["resources"] = dict(self.config.ray_task_resources)
                 future = _run_osworld_task_remote.options(**ray_task_options).remote(task_config, runner_kwargs)
                 # ``run_osworld_task`` checks task_timeout only after DesktopEnv
                 # has been constructed.  A wedged sandbox create therefore used
@@ -1675,6 +1818,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 max_output_tokens=max_tokens,
                 exact_trace_transport_version=self.config.exact_trace_transport_version,
                 served_call_output=self._token_id_capture_enabled(),
+                policy_model_ref=self.config.model_server,
             )
 
 
@@ -1743,6 +1887,7 @@ def _build_response(
     max_output_tokens: Optional[int] = None,
     exact_trace_transport_version: Literal[2, 3] = 2,
     served_call_output: bool = False,
+    policy_model_ref: Optional[ModelServerRef] = None,
 ) -> OSWorldVerifyResponse:
     """Pack one run without changing its prompt policy for training consumers.
 
@@ -1831,10 +1976,12 @@ def _build_response(
             # generation arrays are validation/debug data, not transport data.
             trajectory_fields.pop("trajectory_model_calls", None)
     terminal_response_id: Optional[str] = None
+    accepted_call_references: List[Dict[str, str]] = []
     if served_call_output and not capabilities["exact_model_call_evidence"] and model_calls:
         # An empty accepted history is meaningful; never replace it with
         # parser-normalized step text that cannot identify captured calls.
         output, terminal_response_id = _served_model_call_output(model_calls)
+        accepted_call_references = _accepted_call_references(model_calls)
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1895,15 +2042,51 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    episode_end = result.get("episode_end")
+    if episode_end is not None:
+        from responses_api_agents.osworld_agent.client import EPISODE_END_KINDS  # noqa: PLC0415
+
+        metadata["osworld_episode_end"] = episode_end
+        # Scalar top-level fields become per-step trainer metrics.
+        for kind in EPISODE_END_KINDS:
+            response_fields[f"episode_end_{kind}"] = float(episode_end == kind)
     if terminal_response_id is not None:
         # Names the scored (last) generation by the id the model server served.
         response_fields["terminal_response_id"] = terminal_response_id
+    if accepted_call_references and policy_model_ref is not None:
+        # The trainer resolves these served response IDs against capture records.
+        # Keeping membership separate from response.output means rejected
+        # retries remain in the capture manifest as exact context evidence.
+        task_id = trajectory_fields["trajectory_contract"]["task_id"]
+        rollout_id = trajectory_fields["trajectory_contract"]["rollout_id"]
+        response_fields["ng_trajectory"] = TrajectoryRecord(
+            task_id=task_id,
+            rollout_id=rollout_id,
+            turns=[
+                TrajectoryTurn(
+                    invocation_id=rollout_id,
+                    task_id=task_id,
+                    rollout_id=rollout_id,
+                    turn_no=turn_no,
+                    timestamp=0.0,
+                    answer=[item],
+                    step_count=turn_no,
+                    model_calls=[ModelCallRef(model_ref=policy_model_ref, response_id=reference["response_id"])],
+                )
+                for turn_no, (item, reference) in enumerate(zip(output, accepted_call_references, strict=True), 1)
+            ],
+        ).model_dump(mode="json")
     # A refused rollout is a typed failure row: an infrastructure cause retries, a failed policy call is the model's.
     response_fields |= _admission_failure_fields(result, runtime_admission)
     sandbox_start_failure = result.get("sandbox_start_failure")
     if isinstance(sandbox_start_failure, Mapping):
         response_fields |= _sandbox_start_failure_fields(result.get("error"), sandbox_start_failure)
     return OSWorldVerifyResponse(**response_fields)
+
+
+def _is_loss_member(model_call: Mapping[str, Any]) -> bool:
+    """Accepted calls train; ``loss_member`` overrides that, e.g. for a trained invalid terminal call."""
+    return model_call.get("loss_member", model_call.get("accepted")) is True
 
 
 def _served_model_call_output(
@@ -1919,10 +2102,12 @@ def _served_model_call_output(
     reply) provide no usable returned-content witness. Both are skipped; the
     capture ledger independently records what ran. Rejected calls remain in
     trajectory evidence but not in accepted history. The terminal still names
-    the last observed non-empty served response,
-    even when rejected. A returned-history consumer must reject an absent
-    terminal or missing selected parent, not silently select another call;
-    an explicit all-captured policy may include rejected calls.
+    the last observed non-empty served response, even when rejected, except a
+    reply that the prompt-token guard discarded: like the step horizon, a
+    context-limit stop names the last accepted call. A returned-history
+    consumer must reject an absent terminal or missing selected parent, not
+    silently select another call; an explicit all-captured policy may include
+    rejected calls.
     """
 
     output: List[Dict[str, Any]] = []
@@ -1935,9 +2120,11 @@ def _served_model_call_output(
         raw_content = response.get("raw_content")
         if not isinstance(raw_content, str) or not raw_content:
             continue
+        if model_call.get("failure_kind") == "context_overflow" and not _is_loss_member(model_call):
+            continue
         response_id = response.get("response_id")
         terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
-        terminal_accepted = model_call.get("accepted") is True
+        terminal_accepted = _is_loss_member(model_call)
         if not terminal_accepted:
             continue
         output.append(
@@ -1952,6 +2139,31 @@ def _served_model_call_output(
     if not terminal_accepted and terminal_response_id is None:
         raise ValueError("Rejected terminal call has no served response_id; cannot attribute the captured reward")
     return output, terminal_response_id
+
+
+def _accepted_call_references(model_calls: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Served response IDs of the generations ``_served_model_call_output`` returns, in call order.
+
+    The trainer joins these against capture records, which stays unambiguous even
+    when parser retries have identical content. Partial references would be
+    rejected, so a member without a served ID leaves content matching in charge.
+    """
+
+    references: List[Dict[str, str]] = []
+    for model_call in model_calls:
+        if not _is_loss_member(model_call):
+            continue
+        response = model_call.get("response")
+        if not isinstance(response, Mapping):
+            continue
+        raw_content = response.get("raw_content")
+        if not isinstance(raw_content, str) or not raw_content:
+            continue
+        response_id = response.get("response_id")
+        if not isinstance(response_id, str) or not response_id:
+            return []
+        references.append({"response_id": response_id})
+    return references
 
 
 # Runtime-admission reasons the policy did not cause: the row is a retryable ``infrastructure_error``. A sandbox guest

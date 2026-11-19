@@ -39,9 +39,15 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import requests
 
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
+from responses_api_agents.osworld_agent.frozen_evaluators import (
+    apply_task_reward_contract,
+    clear_frozen_evaluators,
+    register_frozen_evaluators,
+)
 from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
 from responses_api_agents.osworld_agent.reward_modes import REWARD_MODES, reward_from_score
 from responses_api_agents.osworld_agent.rollout_outcome import (
+    CONTEXT_LIMIT_STOP_REASON,
     RUNTIME_ADMISSION_POLICY_ID,
     RolloutOutcomeFacts,
     classify_rollout_outcome,
@@ -164,8 +170,11 @@ class RolloutResult:
     # {"provider", "http_status", "message", "sandbox_id"}. The agent reports it as a
     # retryable infrastructure_error instead of a masked result.
     sandbox_start_failure: Optional[Dict[str, Any]] = None
+    episode_end: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if self.episode_end is not None and self.episode_end not in EPISODE_END_KINDS:
+            raise ValueError(f"RolloutResult.episode_end must be one of {EPISODE_END_KINDS}")
         for field_name in (
             "finished",
             "horizon_reached",
@@ -248,6 +257,20 @@ def _terminal_action_name(action: Any) -> Optional[str]:
     if isinstance(action, dict) and action.get("action_type") in _TERMINAL_ACTIONS:
         return str(action["action_type"])
     return None
+
+
+EPISODE_END_KINDS = ("done", "agent_fail", "forced_fail", "unterminated", "aborted")
+
+
+def _episode_end_kind(terminal_action: Optional[str], forced_terminal: Optional[str]) -> str:
+    """How the policy ended the episode; ``forced_fail`` is a FAIL the adapter injected."""
+    if forced_terminal is not None:
+        return "forced_fail"
+    if terminal_action == "DONE":
+        return "done"
+    if terminal_action == "FAIL":
+        return "agent_fail"
+    return "unterminated"
 
 
 def _flatten_actions(actions: Any) -> List[Any]:
@@ -373,6 +396,21 @@ def _readonly_task_cache_names(task_config: Mapping[str, Any]) -> List[str]:
                     destination for destination in destinations if isinstance(destination, str) and destination
                 )
     return list(dict.fromkeys(names))
+
+
+def _sanitize_setup_task_config(value: Any) -> Any:
+    """Prevent a known cleanup command from killing its own setup shell."""
+
+    if isinstance(value, dict):
+        return {key: _sanitize_setup_task_config(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_setup_task_config(item) for item in value]
+    if isinstance(value, str):
+        return value.replace(
+            "pkill -f 'http.server 8539'",
+            "pkill -f '[h]ttp.server 8539' 2>/dev/null || true",
+        )
+    return value
 
 
 def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str, setup_cache_dir: Optional[str] = None) -> int:
@@ -1685,6 +1723,93 @@ def _evaluate_osworld_env(
                 os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
 
 
+def _report_execution_results(controller: Any, record: Callable[[str, Any], None]) -> None:
+    """Pass each guest ``/execute`` reply to ``record``; ``DesktopEnv.step`` discards it."""
+
+    execute_python_command = controller.execute_python_command
+
+    def _execute_and_record(command: str) -> Any:
+        result = execute_python_command(command)
+        record(command, result)
+        return result
+
+    controller.execute_python_command = _execute_and_record
+
+
+def _reset_forked_env(env: Any, task_config: Dict[str, Any]) -> None:
+    """``DesktopEnv.reset`` for a guest forked after the task setup ran: bind the task, skip the setup."""
+    env._traj_no += 1  # noqa: SLF001
+    env._step_no = 0  # noqa: SLF001
+    env.action_history.clear()
+    env.current_use_proxy = bool(task_config.get("proxy", False) and env.enable_proxy)
+    env._set_task_info(task_config)  # noqa: SLF001
+    env.setup_controller.reset_cache_dir(env.cache_dir)
+    env.is_environment_used = bool(env.config)
+
+
+def prepare_osworld_fork(
+    task_config: Dict[str, Any],
+    count: int,
+    *,
+    sandbox_provider_config: Dict[str, Any],
+    sandbox_spec: Dict[str, Any],
+    vm_path: Optional[str] = None,
+    sandbox_require_kvm: bool = True,
+    sandbox_ready_timeout_s: float = 600.0,
+    sandbox_ready_poll_s: float = 2.0,
+    sandbox_vnc_guest_port: Optional[int] = None,
+    screen_size: tuple = (1920, 1080),
+    headless: bool = True,
+    client_password: str = "password",
+    enable_proxy: bool = False,
+    cache_dir: str = "cache",
+    setup_cache_dir: Optional[str] = None,
+    post_setup_settle_s: float = 0.0,
+    fork_ttl_s: Optional[float] = None,
+    frozen_evaluator_root: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Run a task's setup once in a fresh guest and fork it ``count`` times.
+
+    Returns one ``sandbox_attach_descriptor`` per child for ``run_osworld_task``; the
+    caller owns the children. The set-up parent is stopped before returning.
+    """
+    _patch_chrome_setup_cdp_lifecycle()
+    env_cls = load_attr(SANDBOX_DESKTOP_ENV_CLASS)
+    env_kwargs: Dict[str, Any] = {
+        "provider_name": "docker",
+        "action_space": "pyautogui",
+        "screen_size": screen_size,
+        "headless": headless,
+        "require_a11y_tree": False,
+        "os_type": "Ubuntu",
+        "client_password": client_password,
+        "cache_dir": cache_dir,
+        "enable_proxy": enable_proxy,
+        "sandbox_provider": dict(sandbox_provider_config),
+        "sandbox_spec": dict(sandbox_spec),
+        "sandbox_require_kvm": sandbox_require_kvm,
+        "sandbox_ready_timeout_s": sandbox_ready_timeout_s,
+        "sandbox_ready_poll_s": sandbox_ready_poll_s,
+        "sandbox_vnc_guest_port": sandbox_vnc_guest_port,
+    }
+    if vm_path:
+        env_kwargs["path_to_vm"] = vm_path
+    env = env_cls(**env_kwargs)
+    try:
+        _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
+        register_task_plugins(task_config)
+        if frozen_evaluator_root:
+            register_frozen_evaluators(task_config, frozen_evaluator_root)
+        env.reset(task_config=_sanitize_setup_task_config(task_config))
+        if post_setup_settle_s > 0:
+            time.sleep(post_setup_settle_s)
+        return env.provider.fork(count, ttl_s=fork_ttl_s)
+    finally:
+        clear_task_plugins()
+        clear_frozen_evaluators()
+        env.close()
+
+
 def run_osworld_task(
     task_config: Dict[str, Any],
     model_fn: ModelFn,
@@ -1713,6 +1838,10 @@ def run_osworld_task(
     # default: 8006 for the OSWorld Docker image, 6901 for AgentENV's osworld-slim.
     sandbox_vnc_guest_port: Optional[int] = None,
     sandbox_ready_poll_s: float = 2.0,
+    # A guest from ``prepare_osworld_fork``: attach to it and skip the task setup it already ran.
+    sandbox_attach_descriptor: Optional[Dict[str, Any]] = None,
+    # Root of an RLVR snapshot's per-task evaluator modules; see frozen_evaluators.py.
+    frozen_evaluator_root: Optional[str] = None,
     max_steps: int = 15,
     max_trajectory_length: int = 3,
     sleep_after_execution: float = 0.5,
@@ -1723,6 +1852,7 @@ def run_osworld_task(
     step_timeout: float = 60.0,  # per-action backend timeout where supported
     model_timeout: float = 900.0,
     task_timeout: int = 1800,  # cooperative deadline checked between steps and by Pointer model calls
+    rollout_timeout_s: Optional[float] = None,  # agent-loop budget from the first step, checked between steps
     docker_port_lock_timeout: float = 300.0,
     runner_name: str = "gym_pyautogui",
     action_space: Optional[str] = None,
@@ -1790,6 +1920,10 @@ def run_osworld_task(
     use_gym_sandbox = sandbox_provider_config is not None
     if use_remote_resources and use_gym_sandbox:
         raise ValueError("resources_server and sandbox_provider are mutually exclusive OSWorld backends")
+    if sandbox_attach_descriptor is not None and not use_gym_sandbox:
+        raise ValueError("sandbox_attach_descriptor requires sandbox_provider")
+    if frozen_evaluator_root and use_remote_resources:
+        raise ValueError("frozen evaluators run in this process and need the local resources path")
     if vm_path and sandbox_vm_path and os.path.realpath(vm_path) != os.path.realpath(sandbox_vm_path):
         raise ValueError("vm_path and deprecated sandbox_vm_path refer to different qcow2 files")
     effective_vm_path = vm_path or sandbox_vm_path
@@ -1887,6 +2021,7 @@ def run_osworld_task(
     horizon_reached = False
     evaluation_completed = False
     agent_terminal_action: Optional[str] = None
+    agent_forced_terminal: Optional[str] = None
     agent_stop_reason: Optional[str] = None
     agent_model_call_completed: Optional[bool] = None
     operation_failure_reason: Optional[str] = None
@@ -2000,6 +2135,8 @@ def run_osworld_task(
                     "sandbox_vnc_guest_port": sandbox_vnc_guest_port,
                 }
             )
+            if sandbox_attach_descriptor is not None:
+                env_kwargs["sandbox_attach_descriptor"] = sandbox_attach_descriptor
         if not use_remote_resources and effective_vm_path:
             env_kwargs["path_to_vm"] = effective_vm_path
         env = env_cls(
@@ -2019,8 +2156,19 @@ def run_osworld_task(
                 len(plugin_functions),
                 _safe_task_id(task_config),
             )
+        if frozen_evaluator_root:
+            frozen_functions = register_frozen_evaluators(task_config, frozen_evaluator_root)
+            if frozen_functions:
+                LOG.info(
+                    "Registered %d frozen evaluator function(s) for task %s",
+                    len(frozen_functions),
+                    _safe_task_id(task_config),
+                )
         rollout_phase = "environment_reset"
-        env.reset(task_config=task_config)
+        if sandbox_attach_descriptor is not None:
+            _reset_forked_env(env, _sanitize_setup_task_config(task_config))
+        else:
+            env.reset(task_config=_sanitize_setup_task_config(task_config))
         if use_gym_sandbox and runner_spec.kind == "pointer_agent":
             _install_guest_idle_inhibitor(env.setup_controller, task_logger)
         rollout_phase = "rollout"
@@ -2100,6 +2248,9 @@ def run_osworld_task(
 
             native_agent.call_llm = _call_nemotron_llm
             native_agent.reset(task_logger)
+            record_execution_result = getattr(native_agent, "record_execution_result", None)
+            if callable(record_execution_result):
+                _report_execution_results(env.controller, record_execution_result)
         elif runner_spec.kind == "qwen3_omni_agent":
             if not runner_spec.agent_class_path:
                 raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
@@ -2326,7 +2477,17 @@ def run_osworld_task(
             },
         )
 
+        loop_start = time.monotonic()
         for step_idx in range(max_steps):
+            if rollout_timeout_s is not None and time.monotonic() - loop_start > rollout_timeout_s:
+                error = f"rollout_timeout_s exceeded ({rollout_timeout_s}s) at step {step_idx}"
+                timed_out = True
+                task_logger.warning(error)
+                _append_task_trajectory(
+                    task_artifacts,
+                    {"event": "timeout", "step_num": step_idx + 1, "error": error},
+                )
+                break
             if time.monotonic() - task_start > task_timeout:
                 error = f"task_timeout exceeded ({task_timeout}s) at step {step_idx}"
                 timed_out = True
@@ -2454,7 +2615,7 @@ def run_osworld_task(
                     },
                 )
                 if agent_stop_reason is not None:
-                    if agent_model_call_completed is False:
+                    if agent_model_call_completed is False and agent_stop_reason != CONTEXT_LIMIT_STOP_REASON:
                         parse_failure = agent_step_info.get("parse_failure")
                         failure_message = (
                             parse_failure.get("last_error") if isinstance(parse_failure, Mapping) else None
@@ -2470,6 +2631,8 @@ def run_osworld_task(
                 terminal_action = _terminal_action_name(action)
                 if terminal_action is not None:
                     agent_terminal_action = terminal_action
+                    forced_terminal = agent_step_info.get("forced_terminal")
+                    agent_forced_terminal = forced_terminal if isinstance(forced_terminal, str) else None
                 task_logger.info("Step %d executing action: %r", step_idx + 1, action)
                 try:
                     obs, reward, done, info = env.step(action, sleep_after_execution)
@@ -2543,6 +2706,8 @@ def run_osworld_task(
         try:
             eval_logger = pointer_logger if pointer_agent is not None else task_logger
             final_score = _evaluate_osworld_env(env, eval_logger, disable_gpu=evaluator_disable_gpu)
+            if frozen_evaluator_root:
+                final_score = apply_task_reward_contract(task_config, final_score)
             evaluation_completed = True
         except Exception as exc:  # noqa: BLE001
             evaluation_error = f"env.evaluate() failed: {exc}"
@@ -2623,6 +2788,7 @@ def run_osworld_task(
                     LOG.exception("env.close() raised")
         finally:
             clear_task_plugins()
+            clear_frozen_evaluators()
 
     reward = reward_from_score(reward_mode, final_score, agent_terminal_action)
 
@@ -2634,7 +2800,11 @@ def run_osworld_task(
         infrastructure_failure_reason = "evaluator_error"
     elif proxy_setup_error:
         infrastructure_failure_reason = "proxy_setup_error"
-    elif agent_stop_reason is not None and agent_model_call_completed is False:
+    elif (
+        agent_stop_reason is not None
+        and agent_model_call_completed is False
+        and agent_stop_reason != CONTEXT_LIMIT_STOP_REASON
+    ):
         infrastructure_failure_reason = "model_call_failed"
     elif error:
         infrastructure_failure_reason = "rollout_error"
@@ -2649,6 +2819,13 @@ def run_osworld_task(
             environment_done=finished and agent_terminal_action is None,
             horizon_reached=horizon_reached,
             policy_stop_reason=agent_stop_reason,
+            mask_unterminated=(
+                runner_spec.agent_kwargs.get("unterminated_episode_policy") == "mask"
+                or (
+                    bool(runner_spec.agent_kwargs.get("mask_context_limit"))
+                    and agent_stop_reason == CONTEXT_LIMIT_STOP_REASON
+                )
+            ),
         )
     )
 
@@ -2668,6 +2845,21 @@ def run_osworld_task(
             outcome.horizon_reached,
         )
 
+    episode_end = _episode_end_kind(agent_terminal_action, agent_forced_terminal)
+    if episode_end == "unterminated" and infrastructure_failure_reason is not None:
+        episode_end = "aborted"
+    print(
+        "OSWORLD_EPISODE_END|"
+        f"rollout_id={event_context.get('rollout_id', 'none')}|"
+        f"episode_end={episode_end}|"
+        f"forced_terminal={agent_forced_terminal or 'none'}|"
+        f"termination={outcome.termination_reason}|"
+        f"steps={len(steps)}|"
+        f"reward={reward}|"
+        f"mask_sample={outcome.mask_sample}",
+        flush=True,
+    )
+
     result = RolloutResult(
         reward=reward,
         score=final_score,
@@ -2684,6 +2876,7 @@ def run_osworld_task(
         termination_reason=outcome.termination_reason,
         agent_contract=effective_agent_contract,
         sandbox_start_failure=sandbox_start_failure,
+        episode_end=episode_end,
     )
     _finalize_task_artifacts(
         task_artifacts,
