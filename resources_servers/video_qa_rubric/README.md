@@ -60,10 +60,10 @@ policy.
 | `execution_failure` | A tool call in a single-turn row, or an agent run marked as failed | 0 | no |
 | `infrastructure_failure` | The model call or the agent's infrastructure failed | 0 | yes |
 
-`empty_answer_reward` is a training option (for example `-0.5`). With it set, the answer must also be the last thing
-the model produced: an attempt that ended on a tool call, a tool result or reasoning gets `empty_answer_reward`
-instead of a grade for an earlier message. A response with no output at all stays at 0, because Gym's agents verify a
-failed run (`execution_failure_reward_zero`) as such a response and require exactly 0.
+`empty_answer_reward` is a training option (for example `-0.5`), as in video_mcqa: the reward of an attempt that
+produced output but no final answer. The final answer is always the last assistant message, whatever comes after it.
+A response with no output at all stays at 0, because Gym's agents verify a failed run
+(`execution_failure_reward_zero`) as such a response and require exactly 0.
 
 Metrics: `mean/rubric_score` and `mean/reward` (they differ only when `empty_answer_reward` applies), with
 `full_score_rate`, `at_least_0.8_rate` and `outcomes/*` counts. Masked rows are left out of all of them and reported
