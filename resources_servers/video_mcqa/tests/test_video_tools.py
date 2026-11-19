@@ -64,7 +64,9 @@ def test_each_sample_is_the_frame_on_screen_and_held_frames_repeat() -> None:
     assert resolved.sampling_timestamps_seconds == (0.25, 0.75, 1.25, 1.75, 2.25, 2.75)
     assert resolved.frame_indices == (0, 0, 1, 1, 2, 2)
     assert resolved.timestamps_seconds == (0.0, 0.0, 1.0, 1.0, 2.0, 2.0)
-    assert "Frames: 6 total, 3 unique source frames (50.0% repeated)" in sampling_receipt(resolved)
+    assert sampling_receipt(resolved).startswith(
+        "Sampled 6 frames (3 distinct) of videos/a.mp4 from 0.00 s to 3.00 s,"
+    )
 
 
 def test_a_frame_that_started_before_the_window_is_sampled_inside_it() -> None:
@@ -127,38 +129,35 @@ def test_the_pixel_cap_refuses_a_call_instead_of_dropping_frames() -> None:
     assert error.value.details["video_pixels"] == 595 * 448 * 252
 
 
-def test_labels_and_receipt_read_as_a_video_prompt() -> None:
+def test_text_says_what_was_sampled_and_lists_the_frames_in_image_order() -> None:
     resolved = resolve_frames(spec(), source=one_fps_source(), profile=FrameProfile())
-    assert (
-        frame_labels((0.25, 1.5))
-        == "This is a video:\nFrame 1 sampled at 0.25 seconds:\nFrame 2 sampled at 1.50 seconds:"
-    )
+    assert frame_labels((0.25, 1.5)) == "Frame 1: 0.25 s\nFrame 2: 1.50 s"
     assert watch_video_text(resolved) == (
-        "Video: videos/a.mp4\n"
-        "Source range: [0.00s, 3.00s)\n"
-        "Temporal labels are sampling times; original source PTS is preserved separately.\n"
-        "Frames: 6 total, 3 unique source frames (50.0% repeated)\n"
-        "Resolution: 448×224\n"
-        "Visual tokens: 768\n"
-        "Sampling interval: 0.5 s\n"
-        "Maximum gap between distinct source-frame PTS: 1 s\n"
-        "This is a video:\n"
-        "Frame 1 sampled at 0.25 seconds:\n"
-        "Frame 2 sampled at 0.75 seconds:\n"
-        "Frame 3 sampled at 1.25 seconds:\n"
-        "Frame 4 sampled at 1.75 seconds:\n"
-        "Frame 5 sampled at 2.25 seconds:\n"
-        "Frame 6 sampled at 2.75 seconds:"
+        "Sampled 6 frames (3 distinct) of videos/a.mp4 from 0.00 s to 3.00 s, one every 0.5 s, at 448×224 "
+        "(768 visual tokens).\n"
+        "The 6 frames are attached after the tool results, in this order:\n"
+        "Frame 1: 0.25 s\n"
+        "Frame 2: 0.75 s\n"
+        "Frame 3: 1.25 s\n"
+        "Frame 4: 1.75 s\n"
+        "Frame 5: 2.25 s\n"
+        "Frame 6: 2.75 s"
     )
-    single = sampling_receipt(resolve_frames(spec(num_frames=1), source=one_fps_source(), profile=FrameProfile()))
-    assert "Sampling interval: n/a (one sample)" in single
-    assert "Maximum gap between distinct source-frame PTS: n/a (one unique source frame)" in single
+    # Every sample shows another source frame: no count of distinct frames.
+    distinct = resolve_frames(spec(num_frames=3), source=one_fps_source(), profile=FrameProfile())
+    assert sampling_receipt(distinct).startswith(
+        "Sampled 3 frames of videos/a.mp4 from 0.00 s to 3.00 s, one every 1 s,"
+    )
+    single = resolve_frames(spec(start=1.0, end=2.5, num_frames=1), source=one_fps_source(), profile=FrameProfile())
+    assert watch_video_text(single) == (
+        f"Sampled 1 frame of videos/a.mp4 from 1.00 s to 2.50 s, at 448×224 ({single.vision_tokens} visual tokens).\n"
+        "The frame is attached after the tool results:\n"
+        "Frame 1: 1.75 s"
+    )
 
 
 def test_a_path_that_could_read_as_a_special_token_is_quoted() -> None:
-    assert video_source_label(spec(video_path="videos/<img>.mp4")).startswith(
-        'Video: "videos/\\u003cimg\\u003e.mp4"\n'
-    )
+    assert video_source_label(spec(video_path="videos/<img>.mp4")) == '"videos/\\u003cimg\\u003e.mp4"'
     with pytest.raises(ValueError, match="line breaks"):
         video_source_label(spec(video_path="videos/a\n.mp4"))
 
@@ -232,8 +231,12 @@ def test_watch_video_decodes_the_resolved_frames_as_jpeg(media, workspace, tmp_p
     assert resolved["frame_indices"] == [6, 12, 17]
     assert resolved["timestamps_seconds"] == [0.75, 1.5, 2.125]
     assert (resolved["width"], resolved["height"]) == (84, 56)
-    assert result["output"].startswith("Video: videos/clip.mp4\nSource range: [0.50s, 2.50s)\n")
-    assert result["output"].endswith("Frame 3 sampled at 2.17 seconds:")
+    assert result["output"] == (
+        "Sampled 3 frames of videos/clip.mp4 from 0.50 s to 2.50 s, one every 0.667 s, at 84×56 "
+        f"({resolved['vision_tokens']} visual tokens).\n"
+        "The 3 frames are attached after the tool results, in this order:\n"
+        "Frame 1: 0.83 s\nFrame 2: 1.50 s\nFrame 3: 2.17 s"
+    )
     assert [attachment["mime"] for attachment in result["attachments"]] == ["image/jpeg"] * 3
     for attachment in result["attachments"]:
         data = base64.b64decode(attachment["url"].removeprefix("data:image/jpeg;base64,"))
@@ -318,7 +321,7 @@ def test_watch_video_reads_a_clip_in_a_scratch_directory(media, workspace, tmp_p
         profile=FrameProfile(),
         scratch_roots=(scratch,),
     )
-    assert result["output"].startswith(f"Video: {(scratch / 'cut.mp4').resolve()}\nSource range: [0.50s, 2.50s)\n")
+    assert result["output"].startswith(f"Sampled 3 frames of {(scratch / 'cut.mp4').resolve()} from 0.50 s to 2.50 s,")
     in_workspace = media.watch_video(
         request.model_copy(update={"video_path": "videos/clip.mp4"}),
         workspace_root=workspace,
@@ -394,6 +397,6 @@ def test_the_program_returns_frames_and_checks_ffmpeg(media, config_file) -> Non
     result = run_cli(config_file, json.dumps({"tool": "watch_video", "arguments": arguments}))
     assert result.returncode == 0, result.stderr
     reply = json.loads(result.stdout)
-    assert len(reply["attachments"]) == 8 and "Visual tokens: 1536" in reply["output"]
+    assert len(reply["attachments"]) == 8 and "(1536 visual tokens)" in reply["output"]
     check = run_cli(config_file, "", "--check")
     assert check.returncode == 0 and json.loads(check.stdout)["ok"] is True

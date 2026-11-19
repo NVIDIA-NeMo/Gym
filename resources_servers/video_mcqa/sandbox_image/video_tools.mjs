@@ -7,8 +7,9 @@
 // seed (tools.json, video_tools/contract.py ToolConfig).
 //
 // A tool returns its images as attachments. For an OpenAI-compatible provider, OpenCode keeps a tool result's text in
-// the tool message and moves its images into the user message after it ("Attached media from tool result:"), so
-// watch_video's text lists one label per frame in the order of the images.
+// the tool message and moves the images of all the tool results of one response, in call order, into one user message
+// after them ("Attached media from tool result:"). So watch_video's text says that its frames are attached after the
+// tool results and lists each frame's time in the order of the images, and its description gives the call order.
 //
 // Every request sends the episode's earlier tool images again. From the tool result whose images would pass
 // max_tool_media_bytes (base64 bytes, all tools together) on, each result shows a notice in place of its images, the
@@ -51,7 +52,8 @@ function videoToolDescription(profile) {
     `num_frames is the total sampled frame count, not FPS: at least ${temporal}, divisible by ${temporal}. Sampling times are uniform across the window. A source frame may repeat while held until the next original PTS; temporal labels are sampling times. ` +
     `resize_long_edge is the requested long edge in pixels. Preserve source aspect ratio; actual H/W round down to multiples of ${alignment}, with each dimension at least ${alignment}. ` +
     `Per call, num_frames*H*W <= ${maxPixels} pixels (video_max_pixels). Per frame, H*W <= ${MAX_FRAME_PIXELS} pixels (2048*2048), an area limit, not a long-edge limit. Use actual H/W, not resize_long_edge squared. ` +
-    "Invalid arguments return a tool error; choose fewer frames or a smaller resize. No silent frame reduction or resizing.";
+    "Invalid arguments return a tool error; choose fewer frames or a smaller resize. No silent frame reduction or resizing. " +
+    "The frames are attached as images after the tool results, in the order the result lists them; images from several tool calls in one response follow in call order.";
 }
 
 // The JSON Schema of each tool's arguments; OpenCode sends it as the tool's parameters.
