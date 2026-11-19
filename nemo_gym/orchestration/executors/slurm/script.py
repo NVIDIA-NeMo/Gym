@@ -63,9 +63,18 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_export_tail,
     render_gym_cmd,
     render_health_check,
+    render_lustre_md_stats_prelude,
     render_ray_prelude,
     render_vllm_ray_symmetric_run,
     render_write_file_from_base64,
+)
+from nemo_gym.orchestration.executors.slurm.lustre_md_stats import (
+    DRIVER_END,
+    END,
+    SERVICES_READY,
+    START,
+    STATS_FILE_PREFIX,
+    STATS_FILE_SUFFIX,
 )
 from nemo_gym.orchestration.executors.slurm.resume_script import (
     DRIVER_FAILURE_NAME,
@@ -819,9 +828,11 @@ def _render_collector_health_check(config: SubmitConfig, driver_node: int | None
     )
 
 
-def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path, driver_node: int | None = None) -> str:
+def _render_collector_shutdown(
+    config: SubmitConfig, remote_bench_dir: Path, driver_node: int | None = None, *, before_exit: str = ""
+) -> str:
     """Run after the driver: one more scrape interval so the final counters are seen, then a
-    graceful stop, keeping the driver's exit code.
+    graceful stop, keeping the driver's exit code. `before_exit` runs last, just before the exit.
 
     The TERM goes to the collector process itself, matched by its unique `--config` path. Sent to
     `srun` instead, TERM makes Slurm kill the step outright and INT is treated as a console
@@ -847,6 +858,7 @@ def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path, dri
         f"{signal} || true\n"
         f"for _i in $(seq 1 {SHUTDOWN_WAIT_SECONDS}); do kill -0 {pid} 2>/dev/null || break; sleep 1; done\n"
         f"kill -TERM {pid} 2>/dev/null || true\n"
+        f"{before_exit}"
         "exit $DRIVER_RC"
     )
 
@@ -897,6 +909,23 @@ def _render_watched_driver(driver: str, services: list[str]) -> str:
         for name in services
     )
     return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks)
+
+
+def _render_lustre_md_stats_start(compute: SlurmComputeConfig, remote_bench_dir: Path, total_nodes: int) -> str:
+    """Define the `lustre_md_stats` snapshot and take the `start` one, before any service starts.
+
+    A multi-node job reads every node in one host step (no container: lctl is a host tool); one node reads in place.
+    """
+    stats_file = (
+        shlex.quote(str(remote_bench_dir / LOGS_DIRNAME / STATS_FILE_PREFIX)) + f'"$SLURM_JOB_ID"{STATS_FILE_SUFFIX}'
+    )
+    step = (
+        f"srun --overlap --nodes={total_nodes} --ntasks={total_nodes} --ntasks-per-node=1"
+        f" --account={shlex.quote(compute.account)} "
+        if total_nodes > 1
+        else ""
+    )
+    return f"{render_lustre_md_stats_prelude(stats_file, step)}\n_gym_md_stats {START}"
 
 
 def _pool_offsets(compute: SlurmComputeConfig) -> dict[str, tuple[int, int]]:
@@ -1340,14 +1369,31 @@ def build_sbatch_script(
         if export_tail is not None
         else ""
     )
+    md_stats = compute.lustre_md_stats
     driver_command = (
-        marker_definition + (f"{gym_cmd}\n" if gym_cmd else "") + _render_watched_driver(driver_srun, watched)
+        marker_definition
+        + (f"{gym_cmd}\n" if gym_cmd else "")
+        + (f"_gym_md_stats {SERVICES_READY}\n" if md_stats else "")
+        + _render_watched_driver(driver_srun, watched)
+        + (f"\n_gym_md_stats {DRIVER_END}" if md_stats else "")
     )
     if resume:
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.
         driver_command += "\n" + render_resume_epilogue()
+    end_snapshot = f"_gym_md_stats {END}\n" if md_stats else ""
     if observed:
-        driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir, driver_node)
+        driver_command += "\n" + _render_collector_shutdown(
+            config, remote_bench_dir, driver_node, before_exit=end_snapshot
+        )
+    elif md_stats:
+        # The snapshot returns the status before it, so the job's exit status is unchanged.
+        driver_command += "\n" + end_snapshot.rstrip()
+    if md_stats:
+        resume_prologue = "\n\n".join(
+            part
+            for part in (resume_prologue, _render_lustre_md_stats_start(compute, remote_bench_dir, total_nodes))
+            if part
+        )
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,

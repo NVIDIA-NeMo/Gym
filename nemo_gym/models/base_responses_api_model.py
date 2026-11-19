@@ -40,8 +40,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
+from nemo_gym.config.global_config import model_call_sampling_config
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
-from nemo_gym.core.model_call_sampling import model_call_sampling_config
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
