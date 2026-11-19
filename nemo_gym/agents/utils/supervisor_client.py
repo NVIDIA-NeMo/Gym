@@ -28,7 +28,8 @@ which does not depend on these names.
 
 ``supervisor.pid`` holds the PID that executes the supervisor. When the provider did not
 make the launch shell a process group leader, that process starts the supervisor in a new
-group, passes TERM on to it and exits with its status.
+group, passes TERM on to it and exits with its status. While the file is missing, the
+provider has not run the launch yet (see ``launch_queued``).
 """
 
 import json
@@ -80,13 +81,19 @@ class CleanupReceipt(TypedDict):
     timed_out: bool
 
 
-def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
-    """Reserve TERM grace, direct-process reaping, and process-group reaping.
+def cleanup_bound(*, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
+    """The longest a working supervisor takes to end its harness once its deadline arrives.
 
-    The extra 30 seconds cover startup, polling, and receipt I/O beyond those
+    TERM grace, direct-process reaping, and process-group reaping are each bounded by
+    ``cleanup_timeout``. The extra 30 seconds cover startup, polling, and receipt I/O beyond those
     bounded cleanup phases. Keep their count shared with the controller budget.
     """
-    return timeout + CLEANUP_PHASE_COUNT * cleanup_timeout + 30
+    return CLEANUP_PHASE_COUNT * cleanup_timeout + 30
+
+
+def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
+    """Reserve the supervisor's ``cleanup_bound`` after the harness timeout."""
+    return timeout + cleanup_bound(cleanup_timeout=cleanup_timeout)
 
 
 _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
@@ -203,6 +210,37 @@ def control_cwd(*, session_dir: str, workdir: str | None) -> str | None:
     return "/" if Path(session_dir).is_absolute() else workdir
 
 
+async def read_cleanup_receipt(sandbox: AsyncSandbox, *, session_dir: str, harness: str) -> CleanupReceipt | None:
+    """The supervisor's receipt when it confirms termination; None while there is no such receipt.
+
+    A negative receipt raises the harness termination failure. Nothing is asked of the supervisor.
+    """
+    try:
+        receipt = json.loads(await read_text(sandbox, path=f"{session_dir}/{CLEANUP_RECEIPT_FILE}"))
+    except Exception:
+        return None
+    _raise_terminal_failure(receipt, harness=harness)
+    if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
+        return None
+    return parse_cleanup_receipt(receipt)
+
+
+async def launch_queued(sandbox: AsyncSandbox, *, session_dir: str) -> bool:
+    """Whether the provider has yet to run the launch, as one that queues commands for a free slot can.
+
+    The launch shell writes ``supervisor.pid`` before it starts the supervisor. So when this returns True, the
+    supervisor has yet to start, and it will find an expiry marker written before the call. Only a missing file
+    counts: a read that fails for another reason cannot tell, and returns False.
+    """
+    try:
+        await read_text(sandbox, path=f"{session_dir}/{SUPERVISOR_PID_FILE}")
+    except FileNotFoundError:
+        return True
+    except Exception:
+        LOG.debug("Could not read %s in %s", SUPERVISOR_PID_FILE, session_dir, exc_info=True)
+    return False
+
+
 async def stop_and_confirm_cleanup(
     sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, timeout: float, harness: str
 ) -> CleanupReceipt:
@@ -212,12 +250,8 @@ async def stop_and_confirm_cleanup(
     supervisor, with no return code because no harness process ran.
     """
     receipt_path = f"{session_dir}/{CLEANUP_RECEIPT_FILE}"
-    try:
-        receipt = json.loads(await read_text(sandbox, path=receipt_path))
-    except Exception:
-        receipt = {}
-    _raise_terminal_failure(receipt, harness=harness)
-    if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
+    receipt = await read_cleanup_receipt(sandbox, session_dir=session_dir, harness=harness)
+    if receipt is None:
         stop_path = quote(f"{session_dir}/{STOP_REQUEST_FILE}")
         claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
         temporary = quote(f"{receipt_path}.{uuid4().hex}.tmp")

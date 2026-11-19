@@ -19,13 +19,18 @@ from nemo_gym.agents.utils.supervisor_client import (
     SUPERVISOR_FILE,
     SUPERVISOR_SCRIPT,
     CleanupReceipt,
+    cleanup_bound,
     control_cwd,
+    harness_termination_failure,
     is_harness_termination_failure,
+    launch_queued,
+    read_cleanup_receipt,
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
     supervision_timeouts,
 )
+from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
@@ -109,7 +114,8 @@ class SandboxSession[Artifacts]:
     stops and collects artifacts. Adapters may explicitly rearm it with ``begin_activation``
     after confirmed cleanup, retaining native state outside the per-activation directory.
     The default still permits only one launch. Execution retains the sandbox until close
-    releases it. Missing termination evidence remains retryable. A final negative
+    releases it. Missing termination evidence remains retryable, except after an expiry
+    whose grace ran out (see ``expire``), which close treats as a final negative receipt. A final negative
     receipt skips capture, releases a borrowed connection and leaves teardown to
     Resources; an owned sandbox falls back to provider stop. Closed means release succeeded.
 
@@ -154,6 +160,10 @@ class SandboxSession[Artifacts]:
     _unconfirmed_expiry: bool = field(default=False, init=False)
     _unconfirmed_expire_reason: str | None = field(default=None, init=False)
     _expire_write: asyncio.Task[None] | None = field(default=None, init=False)
+    # Set once the expiry marker is in the sandbox; the activation then waits only a bounded time for the harness.
+    _expiry_delivered: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _expiry_delivered_at: float | None = field(default=None, init=False)
+    _expiry_grace: float | None = field(default=None, init=False)
 
     @property
     def closing(self) -> bool:
@@ -255,16 +265,18 @@ class SandboxSession[Artifacts]:
                 )
             )
             try:
-                result = await asyncio.shield(self._exec_task)
+                result = await self._await_exec(
+                    grace=cleanup_bound(cleanup_timeout=cleanup_timeout), close_timeout=close_timeout
+                )
             except NgFailureEvent as error:
                 # The provider confirmed that the whole sandbox died during the
                 # supervised harness command. In-sandbox cleanup is no longer possible.
                 if error.boundary == "sandbox" and error.failure_kind == PROVIDER_OOM_KILLED:
                     self.execution_oom = error
                 raise
-            if result.error_type == "timeout":
+            if result is not None and result.error_type == "timeout":
                 raise TimeoutError(f"{self.harness} sandbox supervisor exceeded its execution deadline")
-            if result.error_type:
+            if result is not None and result.error_type:
                 raise RuntimeError(f"{self.harness} sandbox execution failed: {result.error_type}: {result.stderr}")
             # A harness process's nonzero exit can still carry useful, adapter-specific output.
             await self._finish(timeout=close_timeout)
@@ -277,9 +289,14 @@ class SandboxSession[Artifacts]:
                         "%s harness termination was not confirmed; close must release the session", self.harness
                     )
             raise
-        if result.return_code != 0 and self.capture_error is not None:
+        # Without a command result, the supervisor's receipt holds the harness's exit status.
+        if result is not None:
+            return_code, stderr = result.return_code, result.stderr
+        else:
+            return_code, stderr = (self.cleanup["return_code"] if self.cleanup else None), ""
+        if return_code != 0 and self.capture_error is not None:
             raise RuntimeError(
-                f"{self.harness} sandbox execution failed (exit {result.return_code}): {result.stderr or ''}"
+                f"{self.harness} sandbox execution failed (exit {return_code}): {stderr or ''}"
             ) from self.capture_error
         if self.capture_error is not None:
             raise self.capture_error
@@ -308,6 +325,9 @@ class SandboxSession[Artifacts]:
             self.expire_reason = None
             self._unconfirmed_expiry = False
             self._expire_write = None
+            self._expiry_delivered = asyncio.Event()
+            self._expiry_delivered_at = None
+            self._expiry_grace = None
         if self._session_root is None:
             self._session_root = self.session_dir
         self.session_dir = session_dir
@@ -321,7 +341,7 @@ class SandboxSession[Artifacts]:
         self._collect = None
         self._capture_attempted = False
 
-    async def expire(self, *, timeout: float, reason: str | None = None) -> bool:
+    async def expire(self, *, timeout: float, reason: str | None = None, grace: float | None = None) -> bool:
         """End the harness as at its time limit, so its receipt records ``timed_out``.
 
         Unlike ``stop_harness`` (a cancellation), the activation is then graded like a timeout.
@@ -331,6 +351,12 @@ class SandboxSession[Artifacts]:
         Stopping a running harness takes an upload, which on a provider without
         ``SupportsSandboxIndependentUploads`` can wait behind the very commands it must stop, so there it
         raises ``ExpiryUnsupportedError``. A request before launch works on every provider.
+
+        Once the marker is in the sandbox, the activation waits at most ``grace`` seconds for the harness to end
+        (by default the supervisor's ``cleanup_bound``). Past that it stops waiting for the supervised command, and
+        unless the supervisor's receipt confirms termination it fails with the harness termination failure, which
+        close does not retry. A launch that the provider has not run yet, as when Local queues it for a free exec
+        slot, is waited for instead: its supervisor finds the marker as it starts and never starts the harness.
         """
         if self.closing or self.sandbox_stopped or self._expire_requested or self.cleanup is not None:
             return False
@@ -343,6 +369,7 @@ class SandboxSession[Artifacts]:
             )
         self._expire_requested = True
         self.expire_reason = reason
+        self._expiry_grace = grace
         if self.launch_started:
             # A task, so that finalization can wait for a write still in flight before it checks the marker.
             self._expire_write = asyncio.create_task(self._write_expiry(timeout=timeout, reason=reason))
@@ -375,6 +402,117 @@ class SandboxSession[Artifacts]:
             raise RuntimeError(f"Could not request {self.harness} expiry within {timeout:g} s") from error
         except Exception as error:
             raise RuntimeError(f"Could not request {self.harness} expiry: {error}") from error
+        self._expiry_delivered_at = monotonic()
+        self._expiry_delivered.set()
+
+    async def _await_exec(self, *, grace: float, close_timeout: float) -> SandboxExecResult | None:
+        """The supervised command's result; once an expiry is delivered, waited for only a bounded time.
+
+        A supervisor that sees the expiry ends its harness within its ``cleanup_bound`` (``grace``, unless
+        ``expire`` set another). One that has not by then is not running, as in a sandbox stalled by memory
+        pressure, where the command can go on for hours. The activation then stops waiting for the command: it
+        returns None when the supervisor's receipt confirms termination, raises the provider's confirmed sandbox
+        OOM when the command reported one while the receipt was read, and otherwise raises the harness
+        termination failure (see ``_stop_overdue_harness``).
+
+        The deadline counts from the later of the delivery and the submission. A provider that queues commands,
+        as Local does for a free exec slot, may not have run the launch by then. Its supervisor will find the
+        marker as it starts and end without starting the harness, so the activation waits for the queued command,
+        checking every ``grace``, and once it finds that the launch has run, the supervisor gets a whole bound.
+        """
+        exec_task = cast(asyncio.Task[SandboxExecResult], self._exec_task)
+        submitted_at = monotonic()
+        delivered = asyncio.ensure_future(self._expiry_delivered.wait())
+        try:
+            await asyncio.wait({exec_task, delivered}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            delivered.cancel()
+        if exec_task.done():
+            return exec_task.result()
+        grace = self._expiry_grace if self._expiry_grace is not None else grace
+        counted_from = max(cast(float, self._expiry_delivered_at), submitted_at)
+        queued = await self._launch_queued(timeout=close_timeout)
+        while queued:
+            await asyncio.wait({exec_task}, timeout=grace)
+            queued = await self._launch_queued(timeout=close_timeout)
+            counted_from = monotonic()
+        await asyncio.wait({exec_task}, timeout=max(0.0, counted_from + grace - monotonic()))
+        if not exec_task.done():
+            await self._stop_overdue_harness(grace=grace, timeout=close_timeout)
+            if self.cleanup is not None:
+                return None
+        return exec_task.result()
+
+    async def _launch_queued(self, *, timeout: float) -> bool:
+        """Whether the provider has yet to run the submitted launch; False once it ends, or if ``timeout`` passes."""
+        if cast(asyncio.Task[SandboxExecResult], self._exec_task).done():
+            return False
+        try:
+            async with asyncio.timeout(timeout):
+                return await launch_queued(self.sandbox, session_dir=self.session_dir)
+        except TimeoutError:
+            return False
+
+    async def _stop_overdue_harness(self, *, grace: float, timeout: float) -> None:
+        """Settle a harness whose supervisor has not ended it within ``grace`` of a delivered expiry.
+
+        The supervisor's receipt, read within ``timeout``, is the only evidence taken: a stop request would
+        turn the expiry into a cancellation if the supervisor resumed. A receipt that confirms termination
+        (the command's status can hang after the supervisor has finished) lets the activation go on to capture.
+        Without a receipt either way, a command that ended during the read decides what follows. One the provider
+        reported OOM-killed returns, so that ``execute`` classifies that confirmed sandbox death as usual: it is
+        better evidence than a missing receipt and must not be replaced by an inferred termination failure. One
+        that returned a result gets one more read, since its supervisor writes the receipt before it exits.
+        Otherwise termination is unconfirmed, exactly as after a negative receipt: the session stops waiting for
+        the command, raises the harness termination failure, and close leaves the sandbox to its owner.
+        """
+        LOG.warning(
+            "Rollout %s: the %s harness did not end within %g s of its stop; no longer waiting for its command",
+            current_rollout_id() or f"of session {self.session_dir}",
+            self.harness,
+            grace,
+        )
+        receipt = await self._read_overdue_receipt(timeout=timeout)
+        exec_task = cast(asyncio.Task[SandboxExecResult], self._exec_task)
+        if receipt is None and self.termination_error is None and exec_task.done() and not exec_task.cancelled():
+            error = exec_task.exception()
+            if error is None:
+                receipt = await self._read_overdue_receipt(timeout=timeout)
+            elif (
+                isinstance(error, NgFailureEvent)
+                and error.boundary == "sandbox"
+                and error.failure_kind == PROVIDER_OOM_KILLED
+            ):
+                return
+        if receipt is not None:
+            self.cleanup = receipt
+            return
+        if self.termination_error is None:
+            self.termination_error = harness_termination_failure(
+                harness=self.harness,
+                receipt={
+                    "cleanup_confirmed": False,
+                    "return_code": None,
+                    "error": f"it did not end within {grace:g} s of its stop, and no receipt confirms that it ended",
+                    "timed_out": True,
+                },
+            )
+        try:
+            await self._release_exec(timeout=timeout)
+        except Exception:
+            LOG.warning("Could not release the %s harness command", self.harness, exc_info=True)
+        raise self.termination_error
+
+    async def _read_overdue_receipt(self, *, timeout: float) -> CleanupReceipt | None:
+        """The receipt, read within ``timeout``, when it confirms termination; a negative one sets the failure."""
+        try:
+            async with asyncio.timeout(timeout):
+                return await read_cleanup_receipt(self.sandbox, session_dir=self.session_dir, harness=self.harness)
+        except TimeoutError:
+            return None
+        except NgFailureEvent as error:  # A negative receipt.
+            self.termination_error = error
+            return None
 
     async def stop_harness(self, *, timeout: float) -> None:
         """Confirm harness termination before capture and transport release."""

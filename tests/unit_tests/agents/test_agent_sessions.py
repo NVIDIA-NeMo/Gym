@@ -478,10 +478,11 @@ class _StoppableAgent(_Agent):
         return self._sandbox_session
 
 
-def _stoppable_agent(expired: list[bool]) -> _StoppableAgent:
-    agent = _StoppableAgent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+def _stoppable_agent(expired: list[bool], *, grace: float | None = None) -> _StoppableAgent:
+    config = MagicMock(num_workers=1, rollout_stop_grace_seconds=grace)
+    agent = _StoppableAgent.model_construct(config=config, server_client=MagicMock())
     agent._installed = asyncio.Event()
-    agent._sandbox_session = MagicMock(expire=AsyncMock(side_effect=lambda *, timeout, reason: expired.pop(0)))
+    agent._sandbox_session = MagicMock(expire=AsyncMock(side_effect=lambda *, timeout, reason, grace: expired.pop(0)))
     return agent
 
 
@@ -493,7 +494,7 @@ def test_rollout_stop_answers_501_for_an_agent_without_sandbox_sessions() -> Non
 
 def test_rollout_stop_expires_the_running_harness_once() -> None:
     async def scenario():
-        agent = _stoppable_agent([True, False])
+        agent = _stoppable_agent([True, False], grace=30.0)
         agent._installed.set()
         await agent.seed_agent_session(MagicMock(session={}), _seed_request())
         with pytest.raises(HTTPException) as unknown:
@@ -507,6 +508,7 @@ def test_rollout_stop_expires_the_running_harness_once() -> None:
     assert first == RolloutStopResponse(rollout_id="rollout-a2", stopped=True)
     assert second == RolloutStopResponse(rollout_id="rollout-a2", stopped=False)
     assert [call.kwargs["reason"] for call in agent._sandbox_session.expire.await_args_list] == ["budget", None]
+    assert [call.kwargs["grace"] for call in agent._sandbox_session.expire.await_args_list] == [30.0, 30.0]
 
 
 def test_rollout_stop_answers_501_when_the_sandbox_cannot_stop_a_running_harness() -> None:
@@ -529,7 +531,7 @@ def test_rollout_stop_answers_501_when_the_sandbox_cannot_stop_a_running_harness
 
 def test_rollout_stop_during_install_expires_the_harness_at_launch() -> None:
     async def scenario():
-        agent = _stoppable_agent([True])
+        agent = _stoppable_agent([True], grace=45.0)
         seeding = asyncio.create_task(agent.seed_agent_session(MagicMock(session={}), _seed_request()))
         await asyncio.sleep(0)
         first = await agent.stop_rollout("rollout-a2", RolloutStopRequest(reason="budget"))
@@ -544,6 +546,7 @@ def test_rollout_stop_during_install_expires_the_harness_at_launch() -> None:
     # The first stop's reason is the one the harness's launch carries.
     agent._sandbox_session.expire.assert_awaited_once()
     assert agent._sandbox_session.expire.await_args.kwargs["reason"] == "budget"
+    assert agent._sandbox_session.expire.await_args.kwargs["grace"] == 45.0
 
 
 def test_rollout_stop_after_close_is_unknown() -> None:
