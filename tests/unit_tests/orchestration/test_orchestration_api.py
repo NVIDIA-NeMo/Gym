@@ -104,6 +104,15 @@ def test_driver_env_accepted():
     assert config.driver.env == {"KEY": "val"}
 
 
+def test_driver_supervision_is_opt_in_and_slurm_only():
+    config = SubmitConfig.model_validate(_config())
+    assert "supervise" not in config.model_dump()["driver"]
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "supervise": True}))
+    assert config.model_dump()["driver"]["supervise"] is True
+    with pytest.raises(ValidationError, match="requires Slurm"):
+        SubmitConfig.model_validate(_config(driver={**DRIVER, "supervise": True}, compute=COMPUTE_K8S))
+
+
 def test_env_lit_prefix_strips_to_literal():
     config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "lit:600"}}}))
     assert config.services["svc"].env == {"FOO": "600"}
