@@ -1059,6 +1059,34 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     return run
 
 
+# Set for each reverify step: the run's rollouts file, so a resources server can read what /verify is not sent
+# (the saved rewards, for instance) from its config with ${oc.env:NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS}.
+REVERIFY_SOURCE_ROLLOUTS_ENV = "NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS"
+
+
+def reverify_steps(benchmark: BenchmarkRunConfig, remote_bench_dir: Path) -> list[tuple[str, str, str]]:
+    """(step name, shell-quoted output path, command) for each reverify step of a benchmark."""
+    artifacts = remote_bench_dir / ARTIFACTS_DIRNAME
+    rollouts = shlex.quote(str(artifacts / ROLLOUTS_FILENAME))
+    inputs = shlex.quote(str(artifacts / "rollouts_materialized_inputs.jsonl"))
+    steps = []
+    for name, step in benchmark.reverify.items():
+        output = shlex.quote(str(artifacts / f"rollouts_{name}.jsonl"))
+        command = " ".join(
+            [
+                f"{REVERIFY_SOURCE_ROLLOUTS_ENV}={rollouts}",
+                "gym eval reverify",
+                *(f"--config {shlex.quote(path)}" for path in step.config),
+                f"--inputs {inputs}",
+                f"--rollouts {rollouts}",
+                f"--output {output}",
+                *flatten_export_args(step.overrides),
+            ]
+        )
+        steps.append((name, output, command))
+    return steps
+
+
 def _command_env(benchmark: BenchmarkRunConfig, remote_bench_dir: Path) -> dict[str, str]:
     """Environment a `command` benchmark gets in place of `gym eval run` arguments.
 
@@ -1313,8 +1341,9 @@ def build_sbatch_script(
                 )
                 for name, settings in exports.items()
             ],
+            reverify_steps(benchmark, remote_bench_dir),
         )
-        if exports
+        if exports or benchmark.reverify
         else None
     )
     extras = tuple(
