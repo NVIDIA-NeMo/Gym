@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """SWE-Together's task input: the ``task_input`` its episode request validates.
 
-Data tooling loads this module without the server's dependencies.
+Collation and ``gym env validate`` load this module without the server's dependencies.
 So it imports only the standard library, pydantic, and ``nemo_gym`` packages at or below ``nemo_gym.data`` (see ``nemo_gym/data/task_input.py``).
 """
 

@@ -849,9 +849,11 @@ def _validate_task_row(
 
     Rollout collection sends only the row's ``task_id`` and ``task_input`` to the environment server its taskset routes to.
     That server validates them as ``MaterializedTask[TaskInput]``, with the ``TaskInput`` of its task input module (``nemo_gym/data/task_input.py``).
+    Collation checks the same model.
     A relay (whose module sets ``TaskInput = None``) passes rows to an agent's ``/run``, which takes flat rows, so a task row routed to one is refused.
     For a taskset with no route, or a server without a task input module, only the envelope is checked here: a valid ``TaskId`` and a ``task_input`` object.
-    A manifest can be validated without the run config that routes it.
+    That differs from collation on purpose.
+    A manifest can be validated without the run config that routes it, and collation, which runs with that config, refuses unrouted rows.
     """
     if templated:
         # Collation and rollout collection apply a template to the row's top level, which a task never reads.

@@ -87,7 +87,6 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
-    dataset_agent_pins,
     environment_server_agent_names,
     environment_server_attributed_agent,
     environment_server_for_agent,
@@ -97,7 +96,7 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
     label_runs,
     pairing_override_enabled,
-    resolve_dataset_agent,
+    task_source_agent,
 )
 from nemo_gym.core.episode_context import (
     check_rollout_id_length,
@@ -5226,7 +5225,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         """Stamp an agent_ref onto every row that carries only a task_source.
 
         task_source names the config instance that declared the row's dataset. Resolution is
-        :func:`~nemo_gym.config.global_config.resolve_dataset_agent` — the same rules benchmark
+        :func:`~nemo_gym.config.global_config.task_source_agent` — the same rules benchmark
         discovery uses, so dispatch can never disagree with the listing. Conflicting `agent:`
         pins across one instance's datasets are a hard error (rows carry only the instance
         name), as are unknown/non-routable instances; +agent_map is the disambiguator.
@@ -5269,15 +5268,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             elif not isinstance(block, DictConfig):
                 errors.append(f"{ts!r}: not a server instance")
             elif "responses_api_agents" in block or "resources_servers" in block:
-                pins = dataset_agent_pins(global_config_dict, ts)
-                if len(pins) > 1:
-                    errors.append(
-                        f"{ts!r}: its datasets pin conflicting agents ({sorted(pins)}), which task_source "
-                        f"alone cannot tell apart; pass +agent_map={{{ts}: <agent>}} to pick one"
-                    )
-                    continue
                 try:
-                    resolution[ts] = resolve_dataset_agent(global_config_dict, ts, pin=pins[0] if pins else None)
+                    resolution[ts] = task_source_agent(global_config_dict, ts)
                 except ConfigError as e:
                     errors.append(f"{ts!r}: {e}")
             else:
