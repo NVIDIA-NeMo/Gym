@@ -129,7 +129,7 @@ from nemo_gym.eval.eval_plan import (
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
-from nemo_gym.server_runtime.supervisor.server_supervisor import RunHelper
+from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
 from nemo_gym.utils.path_utils import materialized_path_for
 
 
@@ -276,7 +276,7 @@ class PlanBenchmarkConfig(PrepareBenchmarkConfig):
     Examples:
 
     ```bash
-    gym eval plan --benchmark terminal_bench_2_1/terminus_2 --out plan.json
+    gym eval plan --benchmark terminal_bench_2_1/terminus_2_legacy_agent --out plan.json
     gym eval plan --schema
     ```
     """
@@ -419,8 +419,8 @@ def e2e_rollout_collection():  # pragma: no cover
 
     write_resolved_config(global_config_dict, output_fpath)
 
-    rh = RunHelper()
-    rh.start(None)
+    supervisor = ServerSupervisor()
+    supervisor.start(None)
 
     rch = RolloutCollectionHelper()
     rch._termination_requested = lambda: _terminated
@@ -490,7 +490,7 @@ def e2e_rollout_collection():  # pragma: no cover
                     disabled=not health_check_enabled,
                 )
         finally:
-            rh.shutdown()
+            supervisor.shutdown()
     _exit_if_terminated()
     try:
         _check_collection_completion(
@@ -1295,15 +1295,15 @@ def export_run() -> None:  # pragma: no cover
 def reverify_rollouts():  # pragma: no cover
     from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 
-    rh = RunHelper()
-    rh.start(None)
+    supervisor = ServerSupervisor()
+    supervisor.start(None)
     try:
         global_config_dict = get_global_config_dict()
         config = RolloutReverificationConfig.model_validate(global_config_dict)
         # The judge-only recovery job's pass settles, refreshes the run and ends with a receipt; any other runs as before.
         _reverify_with_receipt(global_config_dict, config)
     finally:
-        rh.shutdown()  # stop the servers this command started
+        supervisor.shutdown()  # stop the servers this command started
 
 
 @exit_cleanly_on_config_error
@@ -2266,6 +2266,28 @@ def compare_suite() -> None:
     written = write_suite_reports(result, output, config.report_format)
     print(render_suite_summary(result))
     for path in written:
+        print(f"Wrote: {path}")
+
+
+@exit_cleanly_on_config_error
+def plan_repeats() -> None:
+    """Plan fixed benchmark, model, or suite repeats from direct standard-deviation inputs."""
+    from nemo_gym.eval.comparison.planning.report import (
+        render_repeat_planning_summary,
+        write_repeat_planning_reports,
+    )
+    from nemo_gym.eval.comparison.planning.runner import build_repeat_planning_result, invoked_command
+    from nemo_gym.eval.comparison.planning.schema import RepeatPlanningCLIConfig
+
+    config_dict = get_global_config_dict()
+    if not config_dict.get("repeat_plan_fpath") and not (config_dict.get("help") or config_dict.get("h")):
+        raise ConfigError("gym eval plan-repeats requires --plan PATH.")
+    config = RepeatPlanningCLIConfig.model_validate(config_dict)
+    result = build_repeat_planning_result(config, invoked_command())
+    output_dir = Path(config.output_dirpath) if config.output_dirpath else result.plan_fpath.parent
+    report_paths = write_repeat_planning_reports(result, output_dir, config.report_format)
+    print(render_repeat_planning_summary(result))
+    for path in report_paths:
         print(f"Wrote: {path}")
 
 
