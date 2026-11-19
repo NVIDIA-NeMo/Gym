@@ -398,7 +398,7 @@ async def _check_lineage_visibility(
         request_items=_REQUEST,
         text="It is sunny.",
     )
-    # Gym resolves a request within its own group (agent instance and model server), so the committed call
+    # Gym resolves a request within its own lineage scope (agent instance and model server), so the committed call
     # carries an identity and every probe passes one.
     entry.agent_instance = _IDENTITY.agent_instance
     entry.agent_kind = _IDENTITY.agent_kind

@@ -35,8 +35,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from nemo_gym.models.token_capture.fingerprint import _tools_of, assistant_fingerprint, trailing_assistant_turn
-from nemo_gym.models.token_capture.groups import group_key, row_group, same_agent_other_server
 from nemo_gym.models.token_capture.lineage import MODEL_SERVER_CHANGED_REASON, stamp_continuation
+from nemo_gym.models.token_capture.lineage_scope import lineage_scope_key, row_lineage_scope, same_agent_other_server
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     CaptureInputError,
@@ -356,7 +356,7 @@ async def resolve_parent(request_messages: list | None) -> None:
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
     try:
-        # Only the call's own group counts: another agent instance's calls never make this one a continuation.
+        # Only the call's own lineage scope counts: another agent instance's calls never make this one a continuation.
         has_rows = await ledger.has_rows(context.capture_key, identity=context.identity)
     except RolloutRetiredError:
         # A late call of an abandoned attempt, or the first call of a duplicate run. Admitting it would stage
@@ -440,9 +440,9 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
         manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.capture_key))
     except RolloutRetiredError as error:
         raise CaptureAdmissionError(str(error)) from error
-    # Candidates come only from the call's own group: the same agent instance on the same model server.
-    group = group_key(context.identity)
-    own_records = [record for record in manifest.records if row_group(record) == group]
+    # Candidates come only from the call's own lineage scope: the same agent instance on the same model server.
+    scope = lineage_scope_key(context.identity)
+    own_records = [record for record in manifest.records if row_lineage_scope(record) == scope]
     predecessor = None
     root_reason: RootReason = "first_call" if not own_records else "no_prefix_match"
     try:
@@ -454,9 +454,9 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
     if not matches and any(
         _source_history_matches([record], request_replay, prefixes, root_reason)[0]
         for record in manifest.records
-        if same_agent_other_server(group, row_group(record))
+        if same_agent_other_server(scope, row_lineage_scope(record))
     ):
-        root_reason = "model_server_changed"
+        root_reason = MODEL_SERVER_CHANGED_REASON
     if matches:
         # Prefer the longest complete prefix; use identity to break ties when available.
         longest = max(record.replay.item_count for record in matches)

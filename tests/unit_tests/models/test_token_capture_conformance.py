@@ -369,7 +369,7 @@ def test_kit_rejects_a_sink_whose_mark_incomplete_takes_no_identity(tmp_path):
 def test_kit_rejects_a_lineage_resolver_whose_resolve_takes_no_identity(tmp_path):
     class _ResolveWithoutIdentity(FileLineageStore):
         async def resolve(self, rollout_id: str, request_items: list[dict]):
-            return await super().resolve(rollout_id, request_items)
+            return await super().resolve(rollout_id, request_items, identity=CallIdentity())
 
     with pytest.raises(ConformanceError) as info:
         asyncio.run(

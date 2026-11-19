@@ -42,7 +42,7 @@ from uuid import uuid4
 
 import orjson
 
-from nemo_gym.models.token_capture.groups import OutcomeAttribution, inherited_identity_columns
+from nemo_gym.models.token_capture.lineage_scope import OutcomeAttribution, inherited_identity_columns
 from nemo_gym.models.token_capture.protocols import (
     RolloutRemovalPayload,
     TokenCaptureFrozenError,
@@ -258,13 +258,16 @@ class TokenCaptureStore:
             state = self._read_state(rollout_id)
             if state.get("retired", False):
                 raise TokenCaptureRetiredError(f"Token capture for rollout {rollout_id} is retired")
-            state["incomplete"] = True
-            state["version"] = int(state.get("version", 0)) + 1
-            self._write_state(rollout_id, state)
+            # The mark line first: ``_outcomes`` reads the marks whatever the state says, so a crash between
+            # the two writes still masks whoever the mark names. The other order would leave a state that says
+            # incomplete with no line saying for whom.
             with self.incomplete_path_for(rollout_id).open("ab") as handle:
                 handle.write(_call_line(model_call_id, identity))
                 handle.flush()
                 os.fsync(handle.fileno())
+            state["incomplete"] = True
+            state["version"] = int(state.get("version", 0)) + 1
+            self._write_state(rollout_id, state)
             self._fsync_root()
 
     async def mark_incomplete(
@@ -436,9 +439,11 @@ class TokenCaptureStore:
         rows = [{**intent, "intent": True} for intent in intents] + marks
         for row, columns in zip(rows, inherited_identity_columns(rows)):
             if not row.get("intent"):
-                outcomes.add(row["model_call_id"], columns, named_episode=named_episode)
+                outcomes.add(columns, named_episode=named_episode)
         for intent in self._dangling_intents(rollout_id, entries, state):
-            outcomes.add(intent["model_call_id"], intent, named_episode=named_episode)
+            # The intent row itself is passed, so a lost call with no recorded identity still has columns: in an
+            # unnamed episode it belongs to the unnamed agent.
+            outcomes.add(intent, named_episode=named_episode)
         if state.get("incomplete_episode", False) or (state.get("incomplete", False) and not marks):
             # A conflicting write, or a state marked without a record of which call: the whole episode.
             outcomes.episode_wide = True
@@ -463,7 +468,7 @@ class TokenCaptureStore:
                 self._write_state(rollout_id, state)
             entries = tuple(self._read_entries_unlocked(rollout_id))
             # A dispatched call with neither an entry nor a refusal was lost.
-            # The agent instance that made it, or the whole rollout, must be masked.
+            # The agent instance that made it, or the whole episode, must be masked.
             outcomes = self._outcomes(rollout_id, entries, state)
             incomplete = bool(state.get("incomplete", False)) or bool(outcomes.agent_instances)
             return TokenCaptureSnapshot(

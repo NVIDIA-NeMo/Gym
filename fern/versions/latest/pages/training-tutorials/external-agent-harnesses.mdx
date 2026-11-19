@@ -371,6 +371,30 @@ Exclude any result with `mask_sample: true` from the loss. Call `retire_rollout_
 - `await source.retire(capture_keys)` removes the rollouts' records and leaves a fence, so any later write for those rollouts fails with `TokenCaptureRetiredError` and is dropped. Late writes come from an abandoned attempt that is still running, or from a second run of a finished rollout after a client retry. Retire masked or failed captures once you no longer need them, and retire abandoned attempts as soon as you give up on them.
 - `await source.delete(capture_keys)` removes the records together with the fence. Because the fence is what stops late writes, delete retired rollouts only once no write from them can still arrive, for example at the end of the run. Also delete a rollout ID before reusing it.
 
+### Episodes with several agent instances
+
+When an episode's model calls name agent instances, such as `assistant` and `judge`, Gym keeps each agent instance's calls apart. Parent search, retry grouping and terminal selection run within one lineage scope: the calls of one agent instance on one model server. A judge whose prompt replays the assistant's turns therefore starts its own chain instead of continuing the assistant's, and a continuation that moves to another model server starts a new chain with root reason `model_server_changed`.
+
+`finalize_rollout_token_capture` returns one build for every named agent instance under `agent_instances`:
+
+```python
+built = await finalize_rollout_token_capture(result, source)
+agent_builds = (built or {}).get("agent_instances", {})
+judge_build = agent_builds.get("judge")
+```
+
+The finalizer writes only one build into `result`: the build of the primary agent instance, which is the one the scored response belongs to. Persist any other build yourself. Gym picks the primary in this order:
+
+1. `assistant`, when the episode has an agent instance with that name.
+2. The unnamed agent, when some calls name no agent instance.
+3. The only agent instance, when there is exactly one.
+
+`assistant` is therefore the name to give the agent instance whose trajectory is the episode's result. An episode whose agent instances are, for example, `solver` and `judge` has no primary: the top-level result is masked with the error `no primary agent instance captured`, and the per-agent builds are still returned.
+
+A lost call masks only the agent instance that made it. A capture failure that cannot be placed on one agent instance masks every build of the episode: a mark with no identity, a conflicting write, or a failure with no agent instance in an episode that names them.
+
+A custom lineage store receives the caller's identity on every call: `resolve(rollout_id, request_items, *, identity)` and, for a capture ledger, `has_rows(rollout_id, *, identity)`. It must search only the calls of that identity's agent instance and model server. A store that does not accept the keyword raises `TypeError` on every call: under worker custody the model call fails, and under local capture every continuation is recorded as unresolved, so multi-call rollouts are masked. The conformance kit in the next section checks that `resolve` accepts and honors the identity.
+
 ### Check a custom transport
 
 Run `run_conformance` from `nemo_gym.models.token_capture` before using a custom transport for training. It takes factories rather than instances, because several checks need a fresh client. Each factory call must return a new client connected to the backend. The function is async, returns the names of the checks that passed, and raises `ConformanceError` on the first failure:

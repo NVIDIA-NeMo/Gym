@@ -37,7 +37,11 @@ from nemo_gym.models.token_capture.builder import (
     project_main_chain_response,
     run_builder,
 )
-from nemo_gym.models.token_capture.groups import by_agent_instance, group_entries, primary_agent_instance
+from nemo_gym.models.token_capture.lineage_scope import (
+    by_agent_instance,
+    entries_by_lineage_scope,
+    primary_agent_instance,
+)
 from nemo_gym.models.token_capture.protocols import TokenCaptureSnapshot, TokenSource
 from nemo_gym.models.token_capture.records import EngineRefusalRecord, TokenEntry
 from nemo_gym.models.token_capture.store import TokenCaptureStore
@@ -89,6 +93,22 @@ def clear_token_captures_for_rollouts(records: list, token_capture_dirs: list[Pa
         TokenCaptureStore(directory).delete_now(rollout_ids)
 
 
+def _attribute_terminal(
+    rollout_id: str,
+    entries: list[TokenEntry],
+    verified_response: dict | None,
+    explicit_terminal_call_id: str | None,
+    declared_response_id: str | None,
+) -> TerminalAttribution:
+    try:
+        return resolve_terminal(
+            entries, verified_response, explicit_terminal_call_id, declared_response_id=declared_response_id
+        )
+    except Exception:
+        logger.warning("Terminal attribution failed for rollout %s.", rollout_id, exc_info=True)
+        return TerminalAttribution(None, reason="attribution_error")
+
+
 def _assemble(
     rollout_id: str,
     entries: list[TokenEntry],
@@ -99,18 +119,21 @@ def _assemble(
     explicit_terminal_call_id: str | None = None,
     declared_response_id: str | None = None,
     engine_refusals: tuple[EngineRefusalRecord, ...] = (),
+    terminal_attribution: TerminalAttribution | None = None,
 ) -> dict:
     # Attribute the verified terminal before building.
     # ``verified_response`` is the scored response from the /run result.
     # Attribution anchors chain selection; its absence falls back to the
     # strict single-chain policy. It must never fail a build.
-    try:
-        attribution = resolve_terminal(
-            entries, verified_response, explicit_terminal_call_id, declared_response_id=declared_response_id
+    # ``terminal_attribution`` is an attribution the caller already resolved over a wider set of calls
+    # than ``entries``; it may name a call outside ``entries``, which then delivers nothing here.
+    attribution = (
+        terminal_attribution
+        if terminal_attribution is not None
+        else _attribute_terminal(
+            rollout_id, entries, verified_response, explicit_terminal_call_id, declared_response_id
         )
-    except Exception:
-        logger.warning("Terminal attribution failed for rollout %s.", rollout_id, exc_info=True)
-        attribution = TerminalAttribution(None, reason="attribution_error")
+    )
 
     # Mask a malformed rollout instead of failing the caller.
     # The contiguity check and projection can raise.
@@ -249,7 +272,7 @@ AGENT_INSTANCE_BUILDS_KEY = "agent_instances"
 
 def _assemble_agent_instance(
     rollout_id: str,
-    groups: list[list[TokenEntry]],
+    scopes: list[list[TokenEntry]],
     builder: str,
     model: str,
     *,
@@ -258,12 +281,25 @@ def _assemble_agent_instance(
     declared_response_id: str | None,
     engine_refusals: tuple[EngineRefusalRecord, ...],
 ) -> dict:
-    """Build one agent instance's trajectory from its groups, one per model server it called.
+    """Build one agent instance's trajectory from its lineage scopes, one per model server it called.
 
-    Each group is built on its own, so no chain crosses model servers. An agent instance on several
-    model servers delivers the group whose chain reached its attributed terminal call; without one,
-    no group can be chosen and the build is masked.
+    Each lineage scope is built on its own, so no chain crosses model servers. An agent instance on several
+    model servers delivers the lineage scope whose chain reached its attributed terminal call; without one,
+    no lineage scope can be chosen and the build is masked.
+
+    The terminal call is attributed once, over all the agent instance's calls. Attributing per lineage scope
+    would let a scope whose call merely shares the scored response's text claim it, beside the scope whose
+    call the response id names.
     """
+    attribution = None
+    if len(scopes) > 1:
+        attribution = _attribute_terminal(
+            rollout_id,
+            [entry for entries in scopes for entry in entries],
+            verified_response,
+            explicit_terminal_call_id,
+            declared_response_id,
+        )
     builds = [
         _assemble(
             rollout_id,
@@ -274,8 +310,9 @@ def _assemble_agent_instance(
             explicit_terminal_call_id=explicit_terminal_call_id,
             declared_response_id=declared_response_id,
             engine_refusals=engine_refusals,
+            terminal_attribution=attribution,
         )
-        for entries in groups
+        for entries in scopes
     ]
     if not builds:
         # Every call of this agent instance was lost, so there is nothing to build.
@@ -307,8 +344,8 @@ def _build_snapshot(
 ) -> dict:
     """Build every captured agent instance of a frozen snapshot.
 
-    Lineage, retry grouping and terminal selection run within one group (an agent instance on one
-    model server). The returned build is the primary agent instance's (``groups.primary_agent_instance``):
+    Lineage, retry grouping and terminal selection run within one lineage scope (an agent instance on one
+    model server). The returned build is the primary agent instance's (``lineage_scope.primary_agent_instance``):
     the scored response and the declared terminal belong to it. When the episode names agent instances,
     ``AGENT_INSTANCE_BUILDS_KEY`` maps every named agent instance to its own build, attributed without
     a scored response.
@@ -320,7 +357,7 @@ def _build_snapshot(
         built = _failed_build(rollout_id, builder, "capture contains no token records")
         _apply_snapshot_outcome(built, snapshot, None, always=mask_incomplete_when_attributed)
         return built
-    agents = by_agent_instance(group_entries(snapshot.entries).items(), key=lambda item: item[0])
+    agents = by_agent_instance(entries_by_lineage_scope(snapshot.entries).items(), key=lambda item: item[0])
     # An agent instance that lost every call has no entry. It still takes part in choosing the primary and gets
     # a failed build, so another agent instance's chain is never delivered in its place.
     for lost in sorted(snapshot.incomplete_agent_instances, key=lambda name: name or ""):
@@ -331,11 +368,11 @@ def _build_snapshot(
     except LookupError:
         primary, has_primary = None, False
     builds: dict[str | None, dict] = {}
-    for agent_instance, groups in agents.items():
+    for agent_instance, scopes in agents.items():
         is_primary = has_primary and agent_instance == primary
         built = _assemble_agent_instance(
             rollout_id,
-            [entries for _, entries in groups],
+            [entries for _, entries in scopes],
             builder,
             model,
             verified_response=verified_response if is_primary else None,
