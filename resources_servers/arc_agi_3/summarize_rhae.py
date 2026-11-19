@@ -132,6 +132,11 @@ def scores_from_benchmark(path: Path, hours: list[float]) -> dict[str, dict[str,
 
 def _row_flags(row: dict[str, Any]) -> list[str]:
     flags = []
+    # The verifier's model-error mask: the game was played without the model, so its score does not measure it.
+    if row.get("model_error"):
+        flags.append(f"model_error: {str(row['model_error'])[:120]}")
+    if row.get("mask_sample"):
+        flags.append(f"masked: {row.get('failure_kind') or 'unknown'}")
     if row.get("agent_error"):
         flags.append(f"agent_error: {str(row['agent_error'])[:120]}")
     if row.get("persistence_error"):

@@ -47,7 +47,7 @@ COMMON=(--config resources_servers/arc_agi_3/configs/arc_agi_3.yaml
         ++$A.play_seconds=600 ++$A.num_attempts=2 ++$A.concurrency=2 ++$A.run_name=smoke)
 gym env start "${COMMON[@]}" &   # wait for "servers ready"
 gym eval run --no-serve "${COMMON[@]}" --agent arc_agi_3_agent \
-    --input resources_servers/arc_agi_3/data/example.jsonl --concurrency 2 --output results/arc3_rollouts.jsonl
+    --input resources_servers/arc_agi_3/data/example.jsonl --limit 2 --concurrency 2 --output results/arc3_rollouts.jsonl
 ```
 
 First start: each environment installs what it runs (the harness, the official

@@ -557,3 +557,51 @@ def test_run_reports_a_model_that_never_answered(monkeypatch: pytest.MonkeyPatch
     )
     asyncio.run(agent.run(MagicMock(cookies={}), body))
     assert sent["model_error"] == "every model call of the game failed (2 calls; last: TimeoutError: )"
+
+
+@pytest.mark.parametrize("control", [{"temperature": 0.0}, {"top_p": 0.5}, {"max_output_tokens": 64}])
+def test_row_level_generation_controls_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, control: dict
+) -> None:
+    """The harness's request settings are the agent's configuration: a row asking for other values gets a 422 before
+    any game starts or model or verifier traffic."""
+    from fastapi import HTTPException
+
+    from responses_api_agents.arc_agi_3_official_agent.app import ArcAgi3OfficialRunRequest
+
+    agent = make_agent(monkeypatch, tmp_path)
+    monkeypatch.setattr(ArcAgi3OfficialAgent, "play_game", AsyncMock(side_effect=AssertionError("no game")))
+    agent.server_client.post = AsyncMock(side_effect=AssertionError("no traffic"))
+    body = ArcAgi3OfficialRunRequest(
+        responses_create_params={"input": [{"role": "user", "content": "Play ls20"}], **control},
+        verifier_metadata={"game_id": "ls20", "full_game_id": "ls20-v1", "dispatch_index": 0},
+    )
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(agent.run(MagicMock(cookies={}), body))
+    assert raised.value.status_code == 422 and next(iter(control)) in raised.value.detail
+
+
+def test_close_card_of_an_aborted_attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The agent closes the card of an attempt that never reached the verifier; an already-closed card (404) or an
+    unreachable server is logged, never raised over the attempt's own error."""
+    agent = make_agent(monkeypatch, tmp_path)
+    agent._game_server_url = "http://game-server.invalid"
+    sent, replies = [], iter([FakeHttpResponse({}), FakeHttpResponse({}, status=404), ConnectionError("down")])
+
+    async def http_request(method, url, json=None, headers=None):
+        sent.append((method, url, json, headers))
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(official_app, "http_request", http_request)
+    for _ in range(3):
+        asyncio.run(agent._close_card("card-1"))
+    assert sent[0] == (
+        "POST",
+        "http://game-server.invalid/api/scorecard/close",
+        {"card_id": "card-1"},
+        {"X-API-Key": agent._game_api_key},
+    )
+    assert len(sent) == 3

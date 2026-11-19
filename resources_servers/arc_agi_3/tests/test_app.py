@@ -22,7 +22,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.data import load_task_data_schema, validate_jsonl_rows
 from resources_servers.arc_agi_3 import create_dataset
 from resources_servers.arc_agi_3 import game_server as game_server_module
 from resources_servers.arc_agi_3.app import (
@@ -404,6 +406,52 @@ class TestVerify:
         assert metrics["complete"] is True and metrics["received_games"] == 2
         assert metrics["rhae"] == 50.0 and metrics["rhae_1h"] == 50.0 and metrics["rhae_2h"] == 50.0
 
+    def test_aggregate_metrics_counts_masked_rows(self, tmp_path: Path) -> None:
+        # The shared aggregation drops masked rows before compute_metrics; completeness must still see them.
+        write_fake_game(tmp_path, "fake", "0001", [10])
+        server = make_server(tmp_path, expected_games=2)
+
+        def row(task: int, rollout: int, full_game_id: str, rhae: float, **extra) -> dict:
+            return {
+                TASK_INDEX_KEY_NAME: task,
+                ROLLOUT_INDEX_KEY_NAME: rollout,
+                "reward": rhae / 100.0,
+                "rhae": rhae,
+                "rhae_1h": rhae,
+                "rhae_2h": rhae,
+                "timing_valid": True,
+                "result_valid": True,
+                "agent_state": "gave_up",
+                "game_id": full_game_id.split("-")[0],
+                "verifier_metadata": {"full_game_id": full_game_id},
+                **extra,
+            }
+
+        masked = dict(result_valid=False, model_error="every model call failed", mask_sample=True)
+        valid_a, valid_b = row(0, 0, "aa01-v1", 0.0), row(1, 0, "bb02-v1", 100.0)
+        rows = [valid_a, valid_b, row(0, 1, "aa01-v1", 0.0, **masked)]
+        metrics = asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows)))
+        agent = metrics.agent_metrics
+        assert agent["received_rows"] == 3 and agent["model_errors"] == 1 and agent["complete"] is False
+        assert agent["rhae"] is None and agent["rhae_1h"] is None and agent["rhae_2h"] is None
+        assert metrics.key_metrics["complete"] is False and metrics.key_metrics["rhae"] is None
+        # the shared path's coverage counters and quality metrics stay (computed from the measured rows)
+        assert agent["coverage/masked_rollouts"] == 1 and agent["coverage/measured_rollouts"] == 2
+        assert agent["mean/reward"] == pytest.approx(0.5)
+        # every row masked: still reported, not a vanished game
+        all_masked = asyncio.run(
+            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[row(0, 0, "aa01-v1", 0.0, **masked)]))
+        )
+        assert all_masked.agent_metrics["received_rows"] == 1 and all_masked.agent_metrics["model_errors"] == 1
+        assert all_masked.agent_metrics["complete"] is False and all_masked.key_metrics["rhae"] is None
+        # healthy rows only: the equal-game mean over uneven repeats is unchanged
+        healthy = asyncio.run(
+            server.aggregate_metrics(
+                AggregateMetricsRequest(verify_responses=[valid_a, row(0, 1, "aa01-v1", 0.0), valid_b])
+            )
+        )
+        assert healthy.agent_metrics["complete"] is True and healthy.agent_metrics["rhae"] == 50.0
+
 
 class TestAuthority:
     """The scorecard is the source of truth: any disagreement with the agent's report fails loudly."""
@@ -669,6 +717,69 @@ class TestDataset:
             assert meta["number_of_levels"] == len(meta["baseline_actions"])
         # The committed example games are the pinned files.
         create_dataset.check_rows(HERE.parent / "data" / "environment_files", HERE.parent / "data" / "example.jsonl")
+
+
+class TestTaskData:
+    """``task_data.py`` describes the rows ``create_dataset.py`` writes and the verifier and both agents read."""
+
+    adapter = load_task_data_schema(HERE.parent)
+
+    def report(self, rows: list[dict]):
+        return validate_jsonl_rows("arc_agi_3", self.adapter, "rows", [json.dumps(row) for row in rows])
+
+    def test_committed_and_generated_rows_validate(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        committed = HERE.parent / "data" / "example.jsonl"
+        assert validate_jsonl_rows("arc_agi_3", self.adapter, str(committed), committed.read_text().splitlines()).clean
+        monkeypatch.setattr(create_dataset, "PUBLIC25_VERSIONS", {"aa11": "v1"})
+        write_fake_game(tmp_path, "aa11", "v1", [3, 4])
+        write_fake_game(tmp_path, "sg0005", "aee9edbb", [5])
+        write_fake_game(tmp_path, "sg0005x", "2b3d7198", [6])  # several versions of one game are separate rows
+        (tmp_path / "sg0005x" / "2b3d7198" / "metadata.json").write_text(
+            json.dumps({"game_id": "sg0005-2b3d7198", "baseline_actions": [6]})
+        )
+        rows = create_dataset.build_rows(tmp_path, ["aa11", "sg0005", "sg0005x"])
+        assert self.report(rows).clean
+        # dispatch_index is optional (the agents default it to 0)
+        meta = dict(rows[0]["verifier_metadata"])
+        del meta["dispatch_index"]
+        assert self.report([{**rows[0], "verifier_metadata": meta}]).clean
+        # an undeclared field validates (extra="allow") but the drift gate reports it
+        report = self.report([{**rows[0], "verifier_metadata": dict(meta, comment="kept")}])
+        assert report.error_rows == 0 and report.unknown_keys == {"comment": 1}
+
+    @pytest.mark.parametrize("pin", ["game_id", "full_game_id", "version", "files_sha256"])
+    def test_required_pins_match_the_verifier(self, tmp_path: Path, pin: str) -> None:
+        # A row without a pin the schema requires is one the verifier refuses too, so the two cannot drift.
+        write_fake_game(tmp_path, "fake", "0001", [10])
+        server = make_server(tmp_path)
+        record = record_for([3], 0, [10], [1.0, 2.0, 3.0], game_id="fake-0001")
+        fake_play(server, record)
+        request = verify_request(tmp_path, "fake", record)
+        assert self.report([{"verifier_metadata": request.verifier_metadata}]).clean
+        assert asyncio.run(server.verify(request)).result_valid
+        del request.verifier_metadata[pin]
+        assert not self.report([{"verifier_metadata": request.verifier_metadata}]).clean
+        with pytest.raises((ValueError, KeyError)):
+            asyncio.run(server.verify(request))
+
+    def test_malformed_pins_fail(self) -> None:
+        row = json.loads((HERE.parent / "data" / "example.jsonl").read_text().splitlines()[0])
+        meta = row["verifier_metadata"]
+        for bad in ({"files_sha256": {"cn04.py": "not-a-sha"}}, {"files_sha256": {}}, {"full_game_id": ""}):
+            assert not self.report([{**row, "verifier_metadata": {**meta, **bad}}]).clean
+        # a pin written top-level is invisible to the server (it reads verifier_metadata only)
+        assert not self.report([{**meta, "responses_create_params": row["responses_create_params"]}]).clean
+
+    @pytest.mark.parametrize("config", ["arc_agi_3.yaml", "arc_agi_3_official.yaml"])
+    def test_both_harness_configs_resolve_this_schema(self, config: str) -> None:
+        import yaml
+
+        cfg = yaml.safe_load((HERE.parent / "configs" / config).read_text())
+        (agent,) = [body for v in cfg.values() for body in (v.get("responses_api_agents") or {}).values()]
+        assert agent["datasets"] and agent["resources_server"]["type"] == "resources_servers"
+        owner = cfg[agent["resources_server"]["name"]]["resources_servers"]
+        assert list(owner) == ["arc_agi_3"]
+        assert self.adapter is not None  # resources_servers/arc_agi_3/task_data.py, which collation loads for them
 
 
 def test_two_versions_of_a_game_on_the_real_game_server(tmp_path: Path) -> None:

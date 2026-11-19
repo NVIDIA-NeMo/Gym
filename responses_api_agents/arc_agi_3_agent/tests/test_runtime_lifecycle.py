@@ -15,7 +15,9 @@
 """HarnessRuntime lifecycle with fake games and solver (no harness needed): saves, pins, cancellation, shutdown."""
 
 import asyncio
+import contextlib
 import datetime as dt
+import functools
 import hashlib
 import json
 import os
@@ -405,3 +407,48 @@ class TestInheritedEnv:
         assert harness_runtime.inherited_harness_env(environ, {"ONLY_RESET_LEVELS": "true"}) == [
             "TAAF_RUN_AS_SUBMISSION"
         ]
+
+
+class TestCallRoles:
+    """``install_call_roles`` binds the harness's ``_chat_completion`` to the current transport, also on a reinstall."""
+
+    class Transport:
+        def __init__(self):
+            self.roles = []
+
+        @contextlib.contextmanager
+        def call_role(self, role: str, history_id: str):
+            self.roles.append((role, history_id))
+            yield
+
+    def test_reinstall_rebinds_to_the_new_transport(self) -> None:
+        calls = []
+
+        def unrelated_decorator(method):
+            @functools.wraps(method)
+            def decorated(self, *args, **kwargs):
+                return method(self, *args, **kwargs)
+
+            return decorated
+
+        class ToolAgent:
+            @unrelated_decorator
+            def _chat_completion(self, *args, **kwargs):
+                calls.append(kwargs)
+                if kwargs.get("fail"):
+                    raise RuntimeError("model call failed")
+                return "reply"
+
+        first, second = self.Transport(), self.Transport()
+        harness_runtime.install_call_roles(ToolAgent, first)
+        harness_runtime.install_call_roles(ToolAgent, second)  # a failed start, recovered with a new transport
+        assert ToolAgent()._chat_completion(gdn_role="helper", gdn_history_id="drain-summary") == "reply"
+        assert first.roles == [] and second.roles == [("helper", "drain-summary")] and len(calls) == 1
+        harness_runtime.install_call_roles(ToolAgent, second)  # reinstalling the same transport: still one wrapper
+        ToolAgent()._chat_completion()
+        assert second.roles[-1] == ("gameplay", "main") and len(calls) == 2
+        with pytest.raises(RuntimeError, match="model call failed"):
+            ToolAgent()._chat_completion(fail=True)
+        assert len(calls) == 3 and first.roles == []
+        # the unrelated decorator is kept under the role wrapper
+        assert ToolAgent._chat_completion.__wrapped__.__wrapped__.__name__ == "_chat_completion"

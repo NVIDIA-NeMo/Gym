@@ -58,6 +58,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import requests
+from aiohttp import ClientError
 
 from responses_api_agents.arc_agi_3_agent.call_log import GAMEPLAY_ROLE, GameCallLog
 
@@ -449,7 +450,7 @@ class GymChatTransport:
             except TimeoutError as exc:  # also asyncio.TimeoutError (an alias): the upstream call timed out
                 error = requests.exceptions.ReadTimeout(f"Gym model server request timed out: {exc!r}")
                 error.__cause__ = exc
-            except OSError as exc:
+            except (OSError, ClientError) as exc:  # e.g. a refused connection, a dropped or truncated response
                 error = requests.exceptions.ConnectionError(f"Gym model server request failed: {exc!r}")
                 error.__cause__ = exc
         if error is not None:

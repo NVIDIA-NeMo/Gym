@@ -143,7 +143,7 @@ files (`<game>_p<n>`).
    ```
    `gym eval run` without `--no-serve` reads the config's datasets (`--split`), not `--input`.
    `expected_games=25` makes Gym's aggregate RHAE a public25 score: it is reported only when all 25 games have a valid result.
-   A smoke on the 2 committed example games (no download): `--input resources_servers/arc_agi_3/data/example.jsonl --concurrency 2`, `num_attempts=2`, `concurrency=2`, `expected_games=2`, and a shorter `play_seconds`.
+   A smoke on the 2 committed example games (no download): `--input resources_servers/arc_agi_3/data/example.jsonl --limit 2 --concurrency 2` (the first two rows: one per game), `num_attempts=2`, `concurrency=2`, `expected_games=2`, and a shorter `play_seconds`.
 4. **Results:** complete runs only, one clock:
    ```bash
    python resources_servers/arc_agi_3/summarize_rhae.py --expected resources_servers/arc_agi_3/data/public25.jsonl \

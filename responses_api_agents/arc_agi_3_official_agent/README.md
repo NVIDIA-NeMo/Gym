@@ -134,7 +134,7 @@ gym eval run --no-serve "${COMMON[@]}" --agent arc_agi_3_official_agent \
     `git archive 27f3d03d`).
 - **Requirements:** building the venv needs `uv` and access to PyPI, or a filled uv cache.
 - **A short smoke:** the two committed example games (cn04, ls20), once per type:
-  `--input resources_servers/arc_agi_3/data/example.jsonl --concurrency 2`, `expected_games=2`, a shorter
+  `--input resources_servers/arc_agi_3/data/example.jsonl --limit 2 --concurrency 2` (the first two rows: one per game), `expected_games=2`, a shorter
   `play_seconds`, and `++$A.harness_type=provider` or `standard`.
 
 ## Outputs

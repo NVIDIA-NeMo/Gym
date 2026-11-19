@@ -190,10 +190,12 @@ def game_files_sha256(game_dir: Path) -> dict[str, str]:
 
 def install_call_roles(tool_agent_cls: Any, transport: Any) -> None:
     """Mark every harness model call with its role (``gdn_role``: gameplay or helper, and ``gdn_history_id``) on the
-    transport, which records it in the game's call log. The harness files are unchanged; the method is wrapped once."""
+    transport, which records it in the game's call log. The harness files are unchanged. A reinstall (a runtime
+    restarted with a new transport) replaces this function's earlier wrapper, so the method is wrapped once and calls
+    reach the current transport."""
     original = tool_agent_cls._chat_completion
     if getattr(original, "_gym_call_roles", False):
-        return
+        original = original.__wrapped__
 
     @functools.wraps(original)
     def chat_completion(self: Any, *args: Any, **kwargs: Any) -> Any:

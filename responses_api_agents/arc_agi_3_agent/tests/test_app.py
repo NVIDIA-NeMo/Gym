@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import ServerClient
@@ -289,6 +290,24 @@ def test_run_scores_a_game_that_cannot_start(monkeypatch: pytest.MonkeyPatch, tm
     assert sent["body"]["game_record"] is None
     assert sent["body"]["agent_error"] == "GameStartError: pins differ"
     assert result.reward == 0.0
+
+
+@pytest.mark.parametrize("control", [{"temperature": 0.0}, {"top_p": 0.5}, {"max_output_tokens": 64}])
+def test_row_level_generation_controls_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, control: dict
+) -> None:
+    """The harness's sampling is process-wide configuration: a row asking for other values gets a 422 before the
+    runtime starts or any model or verifier traffic, instead of silently playing another experiment."""
+    agent = make_agent(monkeypatch, tmp_path)
+    agent._ensure_runtime = AsyncMock(side_effect=AssertionError("the runtime must not start"))
+    agent.server_client.post = AsyncMock(side_effect=AssertionError("no traffic"))
+    body = run_request()
+    body.responses_create_params = body.responses_create_params.model_copy(update=control)
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(agent.run(MagicMock(cookies={}), body))
+    assert raised.value.status_code == 422 and list(control) == [
+        name for name in agent_app.UNSUPPORTED_ROW_CONTROLS if name in raised.value.detail
+    ]
 
 
 def test_post_model_and_aggregate_metrics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

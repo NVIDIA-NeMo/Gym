@@ -109,6 +109,34 @@ def test_flagged_rows_and_failures_make_the_run_incomplete(tmp_path: Path) -> No
     assert summary["per_game"]["bb22-v1"]["end"] is None and summary["per_game"]["aa11-v1"]["end"] == 100.0
 
 
+def test_model_error_rows_are_not_results(tmp_path: Path) -> None:
+    # The verifier masked the game (no model call answered): its numeric RHAE does not measure the model.
+    expected = summarize_rhae.load_expected(write_expected(tmp_path / "e.jsonl", ["aa11", "bb22"]))
+    masked = dict(
+        model_error="every model call of the game failed (4 calls; last: HTTP 404)",
+        mask_sample=True,
+        failure_kind="model_request_error",
+        result_valid=False,
+    )
+    rows = rollout("aa11", 0.0, 0.0, 0.0, **masked) + rollout("bb22", 0.0, 0.0, 0.0)  # bb22: a healthy zero
+    rollouts = tmp_path / "rollouts.jsonl"
+    rollouts.write_text(rows)
+    summary = summarize_rhae.summarize("r", summarize_rhae.load_run(rollouts, HOURS), expected, HOURS)
+    assert not summary["complete"] and summary["overall"] == {"end": None, "rhae_1h": None, "rhae_2h": None}
+    assert summary["counts"]["model_error"] == 1 and summary["counts"]["masked"] == 1
+    assert summary["per_game"]["aa11-v1"]["status"] == "invalid"
+    assert summary["per_game"]["bb22-v1"]["status"] == "valid" and summary["per_game"]["bb22-v1"]["end"] == 0.0
+    assert summary["coverage"] == {"end": 1, "rhae_1h": 1, "rhae_2h": 1}
+    # A run directory: the snapshot's scores carry the verifier's flags.
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    write_benchmark(run_dir / "benchmark.json", [game_run("aa11", [0, 0], 0, 1.0), game_run("bb22", [0, 0], 0, 1.0)])
+    (run_dir / "rollouts.jsonl").write_text(rows)
+    summary = summarize_rhae.summarize("r", summarize_rhae.load_run(run_dir, HOURS), expected, HOURS)
+    assert not summary["complete"] and summary["overall"] == {"end": None, "rhae_1h": None, "rhae_2h": None}
+    assert summary["per_game"]["aa11-v1"]["end"] is None and summary["per_game"]["bb22-v1"]["end"] == 0.0
+
+
 def test_legacy_rollouts_have_no_timed_scores(tmp_path: Path) -> None:
     # F7: rows timed on a per-game clock (no clock_offset_seconds) give no @1h/@2h value.
     expected = summarize_rhae.load_expected(write_expected(tmp_path / "e.jsonl", ["aa11"]))

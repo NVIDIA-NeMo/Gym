@@ -68,7 +68,12 @@ def agent_with_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str
     async def open_card(self, key):
         return f"card-{key}"
 
+    async def close_card(self, card_id):
+        self._closed_cards.append(card_id)
+
     monkeypatch.setattr(ArcAgi3OfficialAgent, "_open_card", open_card)
+    monkeypatch.setattr(ArcAgi3OfficialAgent, "_close_card", close_card)
+    agent._closed_cards = []
     return agent
 
 
@@ -98,6 +103,7 @@ def test_a_finished_worker_report_becomes_the_record(monkeypatch, tmp_path: Path
     assert again["key"] == "0-ls20-v1-p1" and again["scorecard_id"] == "card-0-ls20-v1-p1"
     settings = json.loads((agent._run.run_dir / "games" / "0-ls20-v1-p1" / "result.json").read_text())["settings"]
     assert settings["benchmark_config"]["client"]["base_url"].endswith("/official/0-ls20-v1-p1/v1")
+    assert agent._closed_cards == []  # reported games hand their cards to the verifier, which closes them
 
 
 def test_a_harness_error_crashes_the_game_with_its_score(monkeypatch, tmp_path: Path, meta: dict) -> None:
@@ -109,8 +115,32 @@ def test_a_harness_error_crashes_the_game_with_its_score(monkeypatch, tmp_path: 
 
 def test_a_worker_dead_without_a_report_fails_loudly(monkeypatch, tmp_path: Path, meta: dict) -> None:
     mode = "sys.stderr.write('segfault in the harness'); sys.stderr.flush(); os._exit(3)"
+    agent = agent_with_worker(monkeypatch, tmp_path, mode)
     with pytest.raises(RuntimeError, match=r"exited \(3\) without a game report.*segfault"):
-        asyncio.run(agent_with_worker(monkeypatch, tmp_path, mode).play_game(meta, 0))
+        asyncio.run(agent.play_game(meta, 0))
+    assert agent._closed_cards == ["card-0-ls20-v1"] and not agent._workers and not agent._attempts
+
+
+def test_a_worker_that_cannot_launch_releases_its_card(monkeypatch, tmp_path: Path, meta: dict) -> None:
+    agent = agent_with_worker(monkeypatch, tmp_path, "pass")
+    monkeypatch.setattr(official_app, "venv_python", lambda root: tmp_path / "no-such-python")
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(agent.play_game(meta, 0))
+    assert (
+        agent._closed_cards == ["card-0-ls20-v1"] and not agent._workers and not agent._attempts and not agent._in_play
+    )
+
+
+def test_a_settings_failure_releases_its_card(monkeypatch, tmp_path: Path, meta: dict) -> None:
+    agent = agent_with_worker(monkeypatch, tmp_path, "pass")
+
+    def broken_settings(*_):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ArcAgi3OfficialAgent, "_worker_settings", broken_settings)
+    with pytest.raises(OSError, match="disk full"):
+        asyncio.run(agent.play_game(meta, 0))
+    assert agent._closed_cards == ["card-0-ls20-v1"]
 
 
 def test_a_worker_outliving_the_window_is_stopped(monkeypatch, tmp_path: Path, meta: dict) -> None:
@@ -152,6 +182,71 @@ def test_cancelling_the_run_stops_the_worker(monkeypatch, tmp_path: Path, meta: 
 
     process = asyncio.run(main())
     assert process.returncode is not None and agent._attempts == {}
+    # the worker is stopped first, then the card closed; the cancellation still propagates
+    assert agent._closed_cards == ["card-0-ls20-v1"] and not agent._workers
+
+
+def test_shutdown_refuses_a_game_still_opening_its_card(monkeypatch, tmp_path: Path, meta: dict) -> None:
+    agent = agent_with_worker(monkeypatch, tmp_path, "time.sleep(600)")
+
+    async def main():
+        opening, release = asyncio.Event(), asyncio.Event()
+
+        async def open_card(self, key):
+            opening.set()
+            await release.wait()
+            return f"card-{key}"
+
+        monkeypatch.setattr(ArcAgi3OfficialAgent, "_open_card", open_card)
+        game = asyncio.ensure_future(agent.play_game(meta, 0))
+        await opening.wait()
+        shutdown = asyncio.ensure_future(agent.shutdown())
+        await asyncio.sleep(0.2)
+        assert not shutdown.done()  # it waits for the launch in flight
+        release.set()
+        await asyncio.wait_for(shutdown, 10)
+        with pytest.raises(RuntimeError, match="shutting down"):
+            await game
+
+    asyncio.run(main())
+    assert agent._closed_cards == ["card-0-ls20-v1"]
+    assert not agent._workers and not agent._attempts and not agent._in_play
+
+
+def test_shutdown_stops_a_worker_still_launching(monkeypatch, tmp_path: Path, meta: dict) -> None:
+    agent = agent_with_worker(monkeypatch, tmp_path, "time.sleep(600)")
+    launched = []
+
+    async def main():
+        launching, release = asyncio.Event(), asyncio.Event()
+        create = asyncio.create_subprocess_exec
+
+        async def slow_create(*args, **kwargs):
+            launching.set()
+            await release.wait()
+            process = await create(*args, **kwargs)
+            launched.append(process)
+            return process
+
+        monkeypatch.setattr(official_app.asyncio, "create_subprocess_exec", slow_create)
+        game = asyncio.ensure_future(agent.play_game(meta, 0))
+        await launching.wait()
+        shutdown = asyncio.ensure_future(agent.shutdown())
+        await asyncio.sleep(0.2)
+        assert not shutdown.done()  # it waits for the launch in flight
+        release.set()
+        await asyncio.wait_for(shutdown, 15)
+        assert game.done()  # the game ended before shutdown returned
+        return game.exception() or game.result()
+
+    outcome = asyncio.run(main())
+    assert launched[0].returncode is not None and not agent._workers and not agent._attempts and not agent._in_play
+    # A worker stopped before it could install its SIGTERM handler leaves no report: the attempt fails and its card is
+    # closed. Otherwise it reports, and the game ends as cancelled with its card for the verifier.
+    if isinstance(outcome, RuntimeError):
+        assert "without a game report" in str(outcome) and agent._closed_cards == ["card-0-ls20-v1"]
+    else:
+        assert outcome["record"]["state"] == "cancelled" and agent._closed_cards == []
 
 
 def test_per_game_clock_gives_a_later_game_its_own_window(monkeypatch, tmp_path: Path, meta: dict) -> None:

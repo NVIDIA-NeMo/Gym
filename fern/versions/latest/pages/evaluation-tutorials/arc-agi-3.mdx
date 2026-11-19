@@ -1,0 +1,43 @@
+---
+title: "Evaluate ARC-AGI-3 Whole Games"
+description: "Play whole ARC-AGI-3 games with the Kaggle kit's harness or the official ARC Prize harness, scored by the official game server."
+position: 9
+---
+
+[ARC-AGI-3](https://arcprize.org/arc-agi/3/) is a set of interactive, turn-based games: the agent sees a 64×64 board, sends actions, and has to discover each level's rules and goal by itself. In NeMo Gym, one rollout is one whole game, played for a fixed time by a real harness.
+
+## What This Tutorial Runs
+
+| Component | Value |
+|---|---|
+| Resources server | `resources_servers/arc_agi_3`: runs the official `arc_agi` game server on the pinned game files and scores each game's scorecard |
+| Agent (default) | `arc_agi_3_agent`: the ARC-AGI-3 Kaggle kit's harness, config [`arc_agi_3.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/arc_agi_3/configs/arc_agi_3.yaml) |
+| Agent (option) | `arc_agi_3_official_agent`: the official ARC Prize harness, config [`arc_agi_3_official.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/arc_agi_3/configs/arc_agi_3_official.yaml) |
+| Dataset | `resources_servers/arc_agi_3/data/example.jsonl`: rows over the 2 committed games, cn04 and ls20 |
+| Reward | the scorecard's score / 100 (RHAE), plus RHAE at 1 h and 2 h on the game server's clock |
+
+Both agents send every model call through the Gym model server, and the verifier checks each agent's report against the authoritative scorecard.
+
+## Run a Smoke
+
+Serve a model with tool-call and reasoning parsing (the [overview](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/arc_agi_3/OVERVIEW.md) shows an SGLang example), then play the 2 example games for 10 minutes:
+
+```bash
+A=arc_agi_3_agent.responses_api_agents.arc_agi_3_agent
+COMMON=(--config resources_servers/arc_agi_3/configs/arc_agi_3.yaml
+        --config responses_api_models/vllm_model/configs/qwen_vl_arc3_kit.yaml
+        --model-url http://<host>:<port>/v1 --model-api-key EMPTY ++policy_model_name=<served model name>
+        ++arc_agi_3_resources_server.resources_servers.arc_agi_3.expected_games=2
+        ++$A.play_seconds=600 ++$A.num_attempts=2 ++$A.concurrency=2 ++$A.run_name=smoke)
+gym env start "${COMMON[@]}" &   # wait for "servers ready"
+gym eval run --no-serve "${COMMON[@]}" --agent arc_agi_3_agent \
+    --input resources_servers/arc_agi_3/data/example.jsonl --limit 2 --concurrency 2 --output results/arc3_rollouts.jsonl
+```
+
+On first start, each agent installs its pinned harness. The harness's sampling settings are agent configuration: a row that sets `temperature`, `top_p` or `max_output_tokens` is rejected.
+
+## Learn More
+
+- [Overview](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/arc_agi_3/OVERVIEW.md): both harnesses, the official harness's `provider` and `standard` types, status, and known limits.
+- [Resources server README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/arc_agi_3/README.md): scoring, the public25 dataset, and `summarize_rhae.py` for benchmark tables.
+- [Kaggle kit harness README](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/arc_agi_3_agent/README.md) and [official harness README](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/arc_agi_3_official_agent/README.md): settings, outputs, and the full public25 run.

@@ -97,7 +97,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from resources_servers.arc_agi_3.setup_arc_agi import ensure_flask
-from responses_api_agents.arc_agi_3_agent.app import redact
+from responses_api_agents.arc_agi_3_agent.app import redact, reject_row_controls
 from responses_api_agents.arc_agi_3_agent.call_log import (
     GAMEPLAY_ROLE,
     GameCallLog,
@@ -151,6 +151,8 @@ STOP_REASONS = {"GAME_WIN": "won", "TIME_BUDGET": "play_window"}
 ACTION_BUDGET_STOP_REASONS = {"level": "level_action_budget", "total": "total_action_budget"}
 # Environment the worker inherits; nothing else (no proxies for the local route, no provider keys, no harness caps).
 WORKER_ENV_NAMES = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TZ")
+# How long the agent waits for the game server to close the scorecard of an attempt that aborted before verification.
+CARD_CLOSE_TIMEOUT_S = 30.0
 
 
 def repo_path(path: str) -> Path:
@@ -345,6 +347,9 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
         # This agent's key on the game server (its scorecards and games); the verifier gets it to close a card.
         self._game_api_key = f"arc3-official-{uuid4().hex}"
         self._closing = False
+        # Games between their registration and their end (the scorecard handed to the verifier or closed); shutdown
+        # waits for them, so no worker launch or open scorecard outlives it.
+        self._in_play: set[asyncio.Future] = set()
         # Attempts started per route key (repeats of one row share its dispatch index).
         self._passes: collections.Counter = collections.Counter()
         return super().model_post_init(context)
@@ -521,6 +526,25 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
         await raise_for_status(response)
         return (await get_response_json(response))["card_id"]
 
+    async def _close_card(self, card_id: str) -> None:
+        """Close a scorecard of an attempt that ended before verification (cancelled, the worker failed to launch or
+        sent no report), so the game server does not keep it until its idle timeout. Bounded; a failure is logged, not
+        raised over the attempt's own error."""
+        try:
+            response = await asyncio.wait_for(
+                http_request(
+                    "POST",
+                    f"{self._game_server_url}/api/scorecard/close",
+                    json={"card_id": card_id},
+                    headers={"X-API-Key": self._game_api_key},
+                ),
+                timeout=CARD_CLOSE_TIMEOUT_S,
+            )
+            if response.status != 404:  # 404: the card is already closed
+                await raise_for_status(response)
+        except Exception as exc:  # the attempt's own error is what the caller sees
+            LOG.warning("could not close scorecard %s of an aborted attempt: %s", card_id, exc)
+
     async def _stop_worker(self, process: asyncio.subprocess.Process) -> None:
         """SIGTERM (the worker writes its report and exits), then SIGKILL after cancel_drain_s."""
         if process.returncode is not None:
@@ -578,6 +602,8 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
             )
         self._workers.add(process)
         try:
+            if attempt.cancelled:  # shutdown began while the worker was launching: it ends at once, as cancelled
+                await self._stop_worker(process)
             timeout = max(0.0, attempt.seconds_left()) + self.config.window_grace_s
             try:
                 await asyncio.wait_for(asyncio.shield(process.wait()), timeout=timeout)
@@ -652,7 +678,11 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
     ) -> dict[str, Any]:
         """Play one attempt, its model calls on the model server's ``url_path``; return the worker's report as a
         record, the scorecard id, the game's guid and the call log. Raises GameStartError when it cannot start, and
-        RuntimeError when the worker died without a report (the scorecard then cannot be checked)."""
+        RuntimeError when the worker died without a report (the scorecard then cannot be checked) or the server began
+        shutting down before the worker started.
+
+        The attempt owns its scorecard until it returns it for verification: on every earlier exit (cancellation, a
+        worker that failed to launch or sent no report) its worker is stopped first and then the card is closed."""
         run = await self._ensure_run()
         full_game_id = run.check_game_pins(verifier_metadata)
         game_dir_files = run.environments_dir / str(verifier_metadata["game_id"]) / str(verifier_metadata["version"])
@@ -670,35 +700,47 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
         self._passes[key] += 1
         if self._passes[key] > 1:  # a repeat of the row: its own route, game directory and scorecard
             key = f"{key}-p{self._passes[key] - 1}"
-        try:
-            card_id = await self._open_card(key)
-        except Exception as exc:
-            raise GameStartError(f"{full_game_id}: the game server did not open a scorecard: {exc}") from exc
-        game_dir = run.run_dir / "games" / key
-        game_dir.mkdir(parents=True, exist_ok=True)
-        attempt = Attempt(
-            key,
-            log_path=(game_dir / "requests.jsonl") if self.config.save_request_logs else None,
-            url_path=url_path,
-            deadline=deadline,
-        )
+        # Registered before the first suspension, so a shutdown from here on cancels it and waits for its end.
+        attempt = Attempt(key, url_path=url_path, deadline=deadline)
         self._attempts[key] = attempt
-        started_at = dt.datetime.now()
+        in_play = asyncio.get_running_loop().create_future()
+        self._in_play.add(in_play)
+        card_id: str | None = None
+        verified = False  # the card goes to the verifier
         try:
+            try:
+                card_id = await self._open_card(key)
+            except Exception as exc:
+                raise GameStartError(f"{full_game_id}: the game server did not open a scorecard: {exc}") from exc
+            if attempt.cancelled:
+                raise RuntimeError("the agent server is shutting down; no new games")
+            game_dir = run.run_dir / "games" / key
+            game_dir.mkdir(parents=True, exist_ok=True)
+            attempt.log_path = (game_dir / "requests.jsonl") if self.config.save_request_logs else None
+            started_at = dt.datetime.now()
             outcome = await self._play_attempt(run, attempt, game_dir, full_game_id, card_id)
+            report = outcome.report
+            if not report or not report.get("guid"):
+                tail = ""
+                with contextlib.suppress(OSError):
+                    tail = (game_dir / "worker.log").read_text(errors="replace")[-1500:]
+                raise RuntimeError(
+                    f"{key}: the worker exited ({outcome.returncode}) without a game report; scorecard {card_id} "
+                    f"cannot be checked: {(report or {}).get('error') or tail}"
+                )
+            state, note, stop_reason = self._end_state(attempt, outcome)
+            verified = True
         finally:
             attempt.playing = False
             self._attempts.pop(key, None)
-        report = outcome.report
-        if not report or not report.get("guid"):
-            tail = ""
-            with contextlib.suppress(OSError):
-                tail = (game_dir / "worker.log").read_text(errors="replace")[-1500:]
-            raise RuntimeError(
-                f"{key}: the worker exited ({outcome.returncode}) without a game report; scorecard {card_id} "
-                f"cannot be checked: {(report or {}).get('error') or tail}"
-            )
-        state, note, stop_reason = self._end_state(attempt, outcome)
+            if card_id is not None and not verified:
+                close = asyncio.ensure_future(self._close_card(card_id))
+                self._in_play.add(close)  # shutdown also waits for the close
+                close.add_done_callback(self._in_play.discard)
+            self._in_play.discard(in_play)
+            in_play.set_result(None)
+            if card_id is not None and not verified:
+                await asyncio.shield(close)
         record = {
             "game_id": full_game_id,
             "number_of_levels": len(baselines),
@@ -723,6 +765,7 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
         }
 
     async def run(self, request: Request, body: ArcAgi3OfficialRunRequest) -> ArcAgi3OfficialVerifyResponse:
+        reject_row_controls(body.responses_create_params)
         meta = body.verifier_metadata
         record, agent_error, solver_note, scorecard_id, guid, clock_origin = None, None, None, None, None, None
         index = int(meta.get("dispatch_index", 0))
@@ -794,13 +837,17 @@ class ArcAgi3OfficialAgent(SimpleResponsesAPIAgent):
         return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def shutdown(self) -> None:
-        """Stop every worker (each writes its report; games in play end as cancelled)."""
+        """Stop every worker (each writes its report; games in play end as cancelled), then wait until every game has
+        ended: a game still opening its scorecard is refused (and its card closed), a worker still launching is
+        stopped as soon as it exists, and the cards of aborted attempts are closed."""
         self._closing = True
         if self._run is not None:
             self._run.closed = True
         for attempt in list(self._attempts.values()):
             attempt.cancelled = True
         await asyncio.gather(*(self._stop_worker(p) for p in list(self._workers)), return_exceptions=True)
+        while self._in_play:
+            await asyncio.wait(list(self._in_play))
 
 
 if __name__ == "__main__":

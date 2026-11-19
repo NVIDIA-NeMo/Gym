@@ -20,12 +20,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import pytest
 import requests
 
 from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.models import ChatCompletionsConverter as VLLMConverter
-from responses_api_agents.arc_agi_3_agent.call_log import call_log_entries, harness_log_entries
+from responses_api_agents.arc_agi_3_agent.call_log import call_log_entries, harness_log_entries, model_unavailable
 from responses_api_agents.arc_agi_3_agent.gym_transport import (
     GymChatTransport,
     GymHTTPResponse,
@@ -438,6 +439,39 @@ class TestCancellation:
 
         out = self.call_in_thread(GymChatTransport(self.run_loop(), refused), None)
         assert isinstance(out["error"], requests.exceptions.ConnectionError) and out["seconds"] < 1
+
+    @pytest.mark.parametrize(
+        "failure", [aiohttp.ClientPayloadError("Response payload is not completed"), aiohttp.ServerDisconnectedError()]
+    )
+    def test_aiohttp_failures_are_recorded_connection_errors(self, failure: Exception) -> None:
+        # A truncated body or a dropped connection is a call without an answer: recorded (status 0) before the harness
+        # sees a ConnectionError, so a game whose calls all failed this way is flagged as not measuring the model.
+        async def fails(body, cookies, game_key=None):
+            raise failure
+
+        transport = GymChatTransport(self.run_loop(), fails)
+        transport.bind_game("0:ls20")
+        with pytest.raises(requests.exceptions.ConnectionError) as raised:
+            transport.post_chat("u", harness_payload(), 30)
+        assert raised.value.__cause__ is failure
+        log = transport.take_call_log("0:ls20")
+        assert [(e["status"], e["response_id"]) for e in call_log_entries(log)] == [(0, None)]
+        assert model_unavailable(log) is not None
+
+        answers = iter([(200, json.dumps({"id": "r0", "choices": []}), {}), failure])
+
+        async def answers_once(body, cookies, game_key=None):
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        transport = GymChatTransport(self.run_loop(), answers_once)
+        transport.bind_game("0:ls20")
+        transport.post_chat("u", harness_payload(), 30)
+        with pytest.raises(requests.exceptions.ConnectionError):
+            transport.post_chat("u", harness_payload(), 30)
+        assert model_unavailable(transport.take_call_log("0:ls20")) is None  # an earlier call got an answer
 
     def test_pending_call_times_out_at_the_deadline(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from responses_api_agents.arc_agi_3_agent import gym_transport

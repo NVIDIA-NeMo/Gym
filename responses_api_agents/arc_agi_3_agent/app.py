@@ -41,7 +41,7 @@ from time import time
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Request, Response
 from omegaconf import OmegaConf
 from pydantic import ConfigDict, Field
 
@@ -127,6 +127,22 @@ def redact(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+# Row-level generation controls (the CLI's --temperature / --top-p / --max-output-tokens) that the harnesses do not
+# apply per attempt: their sampling is process-wide agent configuration.
+UNSUPPORTED_ROW_CONTROLS = ("temperature", "top_p", "max_output_tokens")
+
+
+def reject_row_controls(params: NeMoGymResponseCreateParamsNonStreaming) -> None:
+    """Raise a 422 when the row sets a generation control the harness would ignore (a different experiment)."""
+    unsupported = [name for name in UNSUPPORTED_ROW_CONTROLS if getattr(params, name, None) is not None]
+    if unsupported:
+        raise HTTPException(
+            422,
+            f"Row-level controls {unsupported} are unsupported by the ARC-AGI-3 harnesses; configure the agent "
+            "server instead (its sampling settings are process-wide)",
+        )
 
 
 class ArcAgi3AgentConfig(BaseResponsesAPIAgentConfig):
@@ -468,6 +484,7 @@ class ArcAgi3Agent(SimpleResponsesAPIAgent):
         return NeMoGymResponse.model_validate(await get_response_json(model_response))
 
     async def run(self, request: Request, body: ArcAgi3AgentRunRequest) -> ArcAgi3AgentVerifyResponse:
+        reject_row_controls(body.responses_create_params)
         runtime = await self._ensure_runtime()
         meta = body.verifier_metadata
         record, agent_error, persistence_error, solver_note = None, None, None, None

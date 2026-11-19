@@ -34,6 +34,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core import MODEL_REQUEST_ERROR
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -452,6 +453,19 @@ class ArcAgi3ResourcesServer(SimpleResourcesServer):
             key = hour_key(h)
             timed = scored and all(r.get(key) is not None for r in rows)
             metrics[key] = game_mean(key) if timed else None
+        return metrics
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        """The shared aggregation, with the RHAE and completeness fields over every received row.
+
+        The shared path calls ``compute_metrics`` with the measured rows only (masked rows removed), so a masked
+        model-error attempt would vanish from ``received_rows`` and ``complete``. Those fields are recomputed from all
+        rows here; the generic quality metrics and the coverage counters stay as the shared path computes them.
+        """
+        metrics = await super().aggregate_metrics(body)
+        if body.verify_responses:
+            metrics.agent_metrics.update(self.compute_metrics([body.verify_responses]))
+            metrics.key_metrics.update(self.get_key_metrics(metrics.agent_metrics))
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
