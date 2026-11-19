@@ -555,6 +555,10 @@ class _ContextErrorMiddleware:
             await response(scope, receive, send)
 
 
+# The run name where the launcher exports one (same in every server worker), else this process.
+_SESSION_HEADER_PREFIX = os.environ.get("PBRUN") or f"gym-{os.getpid()}-{int(time())}"
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     # Where each backend takes generation cuts, aligned with `base_url`,
@@ -771,6 +775,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # schema, and strict OpenAI-compatible backends reject it, so this is off by default and
     # enabled only by deployments that route on conversation/rank affinity.
     forward_session_id_as_conversation_id: bool = False
+
+    # Send the rollout id in this request header (e.g. "X-Session-ID"), for a gateway that keeps every turn of a
+    # rollout on the server holding its prefix (Zirui Liu's Kimi K3.1 gateway). Off by default; local, not upstream.
+    session_id_header: Optional[str] = None
 
     # How often endpoint_file may be stat'd; otherwise the `os.stat` results is cached and reused.
     endpoint_check_interval_s: float = 10.0
@@ -1977,6 +1985,17 @@ class VLLMModel(SimpleResponsesAPIModel):
             if _session_id:
                 body_dict["conversation_params"] = {"conversation_id": str(_session_id)}
         execution = start_model_execution(request, upstream_attempted=False)
+        session_headers: Dict[str, str] = {}
+        if self.config.session_id_header:
+            # Stable per rollout: the id the agent sent in the same header (opencode_session_header), else the rollout
+            # id (known here only when model-call capture is on), else the Gym session (per request for OpenCode).
+            _sid = (
+                request.headers.get(self.config.session_id_header)
+                or current_rollout_id()
+                or request.session.get(SESSION_ID_KEY)
+            )
+            if _sid:
+                session_headers[self.config.session_id_header] = f"{_SESSION_HEADER_PREFIX}-{_sid}"
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
@@ -2026,6 +2045,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             transport_options["_headers"] = {MODEL_SAMPLING_HEADER: MODEL_SAMPLING_NULL}
         if extra_headers:
             transport_options["_headers"] = {**transport_options.get("_headers", {}), **extra_headers}
+        if session_headers:
+            transport_options["_headers"] = {**transport_options.get("_headers", {}), **session_headers}
         try:
             try:
                 chat_completion_dict = await self._engine_chat_completion(
