@@ -169,3 +169,47 @@ def test_correct_developer_and_model_have_separate_averages():
     assert metrics["mean/correct_model"] == pytest.approx(1 / 3)
     assert "mean/correct_identity" not in metrics
     assert not any("on_identity_openings" in key for key in metrics)
+
+
+@pytest.mark.parametrize(
+    "entrypoint", ["resources_servers/model_identity/app.py", "environment_servers/nemo_user_sim/model_identity.py"]
+)
+@pytest.mark.parametrize("worker,spawn_copy", [(False, False), (True, False), (True, True)])
+def test_identity_entrypoints_export_only_the_served_worker_app(tmp_path, monkeypatch, entrypoint, worker, spawn_copy):
+    import runpy
+
+    from benchmarks.model_identity import prepare
+    from environment_servers.nemo_user_sim.app import UserSimEnvironmentServer
+    from nemo_gym.server_runtime import BaseServer
+
+    monkeypatch.setattr(prepare, "DATA", tmp_path / "panel.jsonl")
+    spec = prepare.DATA.with_suffix(".spec.yaml")
+    spec.write_text("prepared")
+    monkeypatch.setenv("USERSIM_IDENTITY_DISCLOSURE_SPEC", "stale.spec.yaml")
+    monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_WORKER", "1" if worker else "0")
+    monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_ENTRYPOINT", entrypoint)
+    built = []
+    app = object()
+
+    def run_webserver(cls):
+        if issubclass(cls, UserSimEnvironmentServer):
+            import os
+
+            assert os.environ["USERSIM_IDENTITY_DISCLOSURE_SPEC"] == str(spec)
+        built.append(cls.__name__)
+        return app
+
+    monkeypatch.setattr(BaseServer, "run_webserver", classmethod(run_webserver))
+    root = Path(__file__).resolve().parents[3]
+    namespace = runpy.run_path(str(root / entrypoint), run_name="__mp_main__" if spawn_copy else "identity_worker")
+    if worker and not spawn_copy:
+        assert namespace["app"] is app
+        expected = (
+            "UserSimEnvironmentServer"
+            if entrypoint.startswith("environment_servers/")
+            else "ModelIdentityResourcesServer"
+        )
+        assert built == [expected]
+    else:
+        assert "app" not in namespace
+        assert built == []
