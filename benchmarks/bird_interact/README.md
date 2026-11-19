@@ -47,6 +47,9 @@ Put the file in `benchmarks/bird_interact/data/`, where `prepare.py` reads it by
 
 ## 3. Prepare
 
+`env.yaml` needs the policy model (`policy_base_url`, `policy_api_key`, `policy_model_name`) and the simulator
+(`user_model_base_url`, `user_model_api_key`, `user_model_name`); preparing reads the config too, so set them first.
+
 ```bash
 gym eval prepare --benchmark bird_interact
 ```
@@ -57,12 +60,10 @@ To read the ground truth from another place, add `+prepare_script_args.ground_tr
 database the schema, column meanings and knowledge base, into `data/<release>/databases/`, the servers'
 `database_dir`. It merges the ground truth into the rows by `instance_id`, for the task and its follow-up, and writes
 `data/<release>/<mode>.jsonl` with the tasks the server can grade. It prints how many it kept and why it left the
-others out. For another config, pass `--config benchmarks/bird_interact/<config>` in place of `--benchmark`.
+others out. For another config, pass `--config benchmarks/bird_interact/<config>` in place of `--benchmark`. It
+downloads the dataset revision the ground truth files belong to (`RELEASE_REVISIONS`).
 
 ## 4. Run
-
-`env.yaml` needs the policy model (`policy_base_url`, `policy_api_key`, `policy_model_name`) and the simulator
-(`user_model_base_url`, `user_model_api_key`, `user_model_name`).
 
 ```bash
 gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark \
@@ -75,6 +76,8 @@ gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark
 - **Harnesses.** c-Interact needs an agent that resumes its session across turns, such as `simple_agent`; a-Interact
   an agent that takes tool grants. The server's README lists which harnesses run each mode, and how to point the
   a-Interact server at an MCP-only harness such as Codex.
+- **Outputs hold the ground truth.** Each row the run writes, such as `results/*_materialized_inputs.jsonl`, carries
+  the task's solution SQL and test cases. Keep the run's outputs private, as the ground truth itself.
 
 ## Results
 

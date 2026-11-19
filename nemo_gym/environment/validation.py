@@ -221,7 +221,8 @@ class _StaticWiringParser(GlobalConfigDictParser):
             (("*", "responses_api_agents", "*", "sandbox_config", "image"), "static-validation-image"),
             (("*", "responses_api_models", "openai_model", "openai_base_url"), "https://judge.invalid/v1"),
             (("*", "responses_api_models", "openai_model", "openai_api_key"), "static-validation"),
-            # An auxiliary model the environment runs, such as a user simulator, is a deployment setting too.
+            # A model server's endpoint, key and model name are deployment settings: those of the policy and of any
+            # other model the environment runs, such as a user simulator.
             (("*", "responses_api_models", "vllm_model", "base_url"), "https://model.invalid/v1"),
             (("*", "responses_api_models", "vllm_model", "api_key"), "static-validation"),
             (("*", "responses_api_models", "vllm_model", "model"), "static-validation"),
