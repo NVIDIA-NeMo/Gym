@@ -47,8 +47,13 @@ Gym checkout.
 gym eval prepare --benchmark robodojo
 gym env validate robodojo
 gym eval run --benchmark robodojo --model-type openai_model \
-  --split benchmark --limit 1 --concurrency 1 --output results/robodojo-smoke.jsonl
+  --split benchmark --limit 1 --concurrency 1 --output results/robodojo-smoke.jsonl \
+  ++policy_model.responses_api_models.openai_model.responses_stream_item_events=true
 ```
+
+OpenCode reads item creation and content events in Responses streams. Set
+`responses_stream_item_events` on the selected Gym model server when it
+buffers the upstream response before emitting the stream.
 
 The prepared split contains one row per supplied panel slot. Drop `--limit 1`
 to evaluate the complete supplied panel. A scheduler such as Eval Factory may
