@@ -15,8 +15,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.core.episode_types import TaskId
-from nemo_gym.data.task_materialization import TASK_ID_FIELDS, materialize_task
+from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
+from nemo_gym.data.task_materialization import TASK_ID_FIELDS, materialize_task, require_row_in_taskset
+from nemo_gym.data.task_selection import row_task_id
 
 
 EVAL_PLAN_SCHEMA = "nemo-gym.eval-plan.v1"
@@ -67,25 +68,43 @@ def canonical_json(value: JsonValue) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
-def _row_task_id(row: Mapping[str, JsonValue]) -> str | None:
-    return next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
+def _task_of_row(
+    row: Mapping[str, JsonValue], *, taskset: str | None, default_taskset: str
+) -> tuple[TaskId, JsonValue]:
+    """A row's identity and task input, whether the row is flat or already materialized.
+
+    A flat row is materialized into ``taskset``, or ``default_taskset`` when the dataset declares none. A materialized
+    row keeps the identity and task input it carries; when the dataset declares a taskset, the row must name it, as
+    dataset collation requires.
+    """
+    if is_materialized_task_row(row):
+        if taskset is not None:
+            require_row_in_taskset(row, taskset)
+        return TaskId.model_validate(row["task_id"]), row["task_input"]
+    materialized = materialize_task(row, taskset=taskset or default_taskset)
+    return TaskId.model_validate(materialized["task_id"]), materialized["task_input"]
 
 
 def build_eval_plan(
     rows: Sequence[Mapping[str, JsonValue]],
     *,
     benchmark: PlanBenchmark,
-    taskset: str,
+    taskset: str | None,
     gym: PlanGym,
     selected_task_ids: Sequence[str] | None = None,
 ) -> EvalPlan:
     """Turn prepared benchmark rows into a plan.
 
-    Every row must carry its own id in one of ``TASK_ID_FIELDS``. Unlike collation, there is no fallback to
-    the row's position, because a position-based id names a different task once rows are reordered.
-    ``taskset`` is the dataset's declared taskset, or the benchmark name when it declares none.
+    A row is either flat or already materialized (a ``task_id`` of taskset and id, and a ``task_input``), as collation
+    accepts both. A flat row must carry its own id in one of ``TASK_ID_FIELDS``. Unlike collation, there is no
+    fallback to the row's position, because a position-based id names a different task once rows are reordered.
+    A materialized row's id and task input are used as written, and its digest is that of its ``task_input``.
+    ``taskset`` is the dataset's declared taskset, or None when it declares none: flat rows then take the benchmark's
+    name, and materialized rows keep the taskset they name.
     """
-    missing = [index for index, row in enumerate(rows) if _row_task_id(row) is None]
+    missing = [
+        index for index, row in enumerate(rows) if not is_materialized_task_row(row) and row_task_id(row) is None
+    ]
     if missing:
         raise ConfigError(
             f"Benchmark {benchmark.name!r}: {len(missing)} of {len(rows)} tasks have no task id "
@@ -97,16 +116,15 @@ def build_eval_plan(
     duplicates: set[str] = set()
     for row in rows:
         try:
-            materialized = materialize_task(row, taskset=taskset)
+            task_id, task_input = _task_of_row(row, taskset=taskset, default_taskset=benchmark.name)
         except ValueError as e:
             raise ConfigError(f"Benchmark {benchmark.name!r}: {e}") from e
-        task_id = TaskId.model_validate(materialized["task_id"])
         if task_id.task_id in tasks:
             duplicates.add(task_id.task_id)
             continue
         tasks[task_id.task_id] = PlanTask(
             task_id=task_id,
-            digest="sha256:" + hashlib.sha256(canonical_json(materialized["task_input"])).hexdigest(),
+            digest="sha256:" + hashlib.sha256(canonical_json(task_input)).hexdigest(),
         )
     if duplicates:
         raise ConfigError(f"Benchmark {benchmark.name!r}: task ids are not unique: {sorted(duplicates)[:10]}")
