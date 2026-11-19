@@ -49,3 +49,14 @@ class TaskData(BaseModel):
         description="Training task identity, split, original prompt and private reference binding.",
         json_schema_extra={"consumed_by": ["seed", "verify", "provenance"]},
     )
+    problem_id: str | None = Field(
+        default=None,
+        description="Flat-row task identity, scoped by benchmark for training without a collector task index.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+
+    @model_validator(mode="after")
+    def validate_problem_id(self) -> "TaskData":
+        if self.problem_id is not None and self.problem_id != f"{self.task.benchmark}:{self.task.task_id}":
+            raise ValueError("problem_id must match benchmark:task_id from the coding task")
+        return self
