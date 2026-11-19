@@ -47,6 +47,7 @@ from nemo_gym.core import (
     observe_failure,
 )
 from nemo_gym.sandbox import (
+    AsyncSandbox,
     ConnectableProvider,
     SandboxCreateError,
     SandboxSpec,
@@ -156,15 +157,14 @@ def resolve_agent(name: str) -> tuple[str, str, str]:
 
 
 async def stage_and_run_eval(
-    provider,
-    handle,
+    sandbox: AsyncSandbox,
     eval_files: Mapping[str, str],
     eval_command: str,
     reward_file: str,
     timeout_s: int,
 ) -> float:
     """Stage eval files into the sandbox, run them and get the reward."""
-    if handle.provider_name == "local":
+    if sandbox.provider_name == "local":
         paths = {str(parent) for path in [*eval_files, reward_file] for parent in [Path(path), *Path(path).parents]}
         for path in sorted(paths - {"/", "."}, key=len, reverse=True):
             eval_command = eval_command.replace(path, path.lstrip("/"))
@@ -174,15 +174,15 @@ async def stage_and_run_eval(
         for target, content in eval_files.items():
             local = Path(td) / uuid4().hex
             local.write_text(content)
-            await provider.exec(handle, f"mkdir -p {Path(target).parent}", timeout_s=30)
-            await provider.upload_file(handle, local, target)
-        result = await provider.exec(handle, eval_command, timeout_s=timeout_s)
+            await sandbox.exec(f"mkdir -p {Path(target).parent}", timeout_s=30)
+            await sandbox.upload(local, target)
+        result = await sandbox.exec(eval_command, timeout_s=timeout_s)
         if result.return_code != 0:
             raise RuntimeError(
                 f"eval command failed ({result.return_code}): {(result.stderr or result.stdout or '')[:300]}"
             )
         local = Path(td) / "reward"
-        await provider.download_file(handle, reward_file, local)
+        await sandbox.download(reward_file, local)
         reward = local.read_text().strip()
         if not reward:
             raise RuntimeError(f"reward file {reward_file} is empty")
@@ -317,15 +317,15 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         return script, runner_config, f"{self.config.sandbox_python} runner.py"
 
     @staticmethod
-    def _box_path(handle, path: str) -> str:
-        return path.lstrip("/") if handle.provider_name == "local" else path
+    def _box_path(sandbox: AsyncSandbox, path: str) -> str:
+        return path.lstrip("/") if sandbox.provider_name == "local" else path
 
-    async def _upload_files(self, handle, files: Mapping[str, str]) -> None:
+    async def _upload_files(self, sandbox: AsyncSandbox, files: Mapping[str, str]) -> None:
         with tempfile.TemporaryDirectory() as td:
             for i, (target, content) in enumerate(files.items()):
                 local = Path(td) / str(i)
                 local.write_text(content)
-                await self._provider.upload_file(handle, local, self._box_path(handle, target))
+                await sandbox.upload(local, self._box_path(sandbox, target))
 
     async def run(self, request: Request, body: HarnessAgentRunRequest) -> HarnessAgentVerifyResponse:
         async with self.sem:
@@ -411,73 +411,76 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             }
         }
 
-    async def _grade_in_box(self, handle, grade_spec: dict) -> float:
+    async def _grade_in_box(self, sandbox: AsyncSandbox, grade_spec: dict) -> float:
         return await stage_and_run_eval(
-            self._provider,
-            handle,
+            sandbox,
             eval_files=grade_spec.get("eval_files") or {},
             eval_command=grade_spec.get("eval_command") or "bash /tests/test.sh",
             reward_file=grade_spec.get("eval_reward_file") or "/logs/verifier/reward.txt",
             timeout_s=self.config.eval_timeout,
         )
 
-    async def _provision_box(self, image: str, files: dict[str, str], model_url: str):
+    async def _provision_box(self, image: str, files: dict[str, str], model_url: str) -> AsyncSandbox:
+        """A ready sandbox for one run: the resources server's, borrowed by its descriptor, or one this agent owns.
+
+        A borrowed sandbox belongs to the resources server, so this agent never stops it.
+        """
         descriptor = _RUN_CONTEXT.get().get("sandbox_descriptor")
         if descriptor:
             if not isinstance(self._provider, ConnectableProvider):
                 raise TypeError("sandbox provider cannot connect to a resource-owned sandbox")
-            handle = await self._provider.connect(descriptor)
+            sandbox = await AsyncSandbox.connect(descriptor, provider=self._provider, owns_provider=False)
         else:
             spec_config = dict(self.config.sandbox_spec)
             metadata = self._sandbox_metadata | dict(spec_config.pop("metadata", {}))
-            handle = await self._provider.create(SandboxSpec(image=image, metadata=metadata, **spec_config))
+            sandbox = AsyncSandbox(
+                self._provider, SandboxSpec(image=image, metadata=metadata, **spec_config), owns_provider=False
+            )
+            await sandbox.start()
         try:
-            work_dir = self._box_path(handle, "/work")
-            await self._provider.exec(handle, f"mkdir -p {shlex.quote(work_dir)}", timeout_s=60)
-            await self._upload_files(handle, files)
+            work_dir = self._box_path(sandbox, "/work")
+            await sandbox.exec(f"mkdir -p {shlex.quote(work_dir)}", timeout_s=60)
+            await self._upload_files(sandbox, files)
             if self._gym_tar is not None or self._gym_source_url is not None:
-                archive = self._box_path(handle, "/work/gym_src.tar.gz")
-                gym_mount = self._box_path(handle, "/work/gym_mount")
+                archive = self._box_path(sandbox, "/work/gym_src.tar.gz")
+                gym_mount = self._box_path(sandbox, "/work/gym_mount")
                 if self._gym_tar is not None:
-                    await self._provider.upload_file(handle, self._gym_tar, archive)
+                    await sandbox.upload(self._gym_tar, archive)
                 else:
-                    r = await self._provider.exec(
-                        handle,
+                    r = await sandbox.exec(
                         f"curl -fsSL -o {shlex.quote(archive)} {shlex.quote(self._gym_source_url)}",
                         timeout_s=600,
                     )
                     if r.return_code != 0:
                         raise RuntimeError(f"gym source fetch failed: {(r.stderr or '')[:300]}")
-                r = await self._provider.exec(
-                    handle,
+                r = await sandbox.exec(
                     f"mkdir -p {shlex.quote(gym_mount)} && tar xzf {shlex.quote(archive)} -C {shlex.quote(gym_mount)}",
                     timeout_s=300,
                 )
                 if r.return_code != 0:
                     raise RuntimeError(f"gym source extraction failed: {(r.stderr or '')[:300]}")
             for cmd in self.config.setup_commands:
-                r = await self._provider.exec(handle, cmd, timeout_s=900)
+                r = await sandbox.exec(cmd, timeout_s=900)
                 if r.return_code != 0:
                     raise RuntimeError(f"setup failed ({r.return_code}): {cmd} | {(r.stderr or '')[:300]}")
 
             pm = re.match(r"https?://([^:/]+):(\d+)", model_url)
             if pm:
-                net = await self._provider.exec(
-                    handle,
+                net = await sandbox.exec(
                     f"bash -c 'echo > /dev/tcp/{pm.group(1)}/{pm.group(2)}'",
                     timeout_s=5,
                 )
                 if net.return_code != 0:
                     raise RuntimeError(f"model endpoint {pm.group(1)}:{pm.group(2)} unreachable from sandbox")
-            return handle
+            return sandbox
         except BaseException:
             if not descriptor:
-                await self._close_box(handle)
+                await self._close_box(sandbox)
             raise
 
-    async def _close_box(self, handle) -> None:
+    async def _close_box(self, sandbox: AsyncSandbox) -> None:
         try:
-            await self._provider.close(handle)
+            await sandbox.stop()
         except Exception:
             LOG.warning("sandbox close failed", exc_info=True)
 
@@ -489,16 +492,16 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             LOG.warning("sandbox provider cannot clean up a resource-owned sandbox")
             return
         try:
-            handle = await self._provider.connect(descriptor)
+            sandbox = await AsyncSandbox.connect(descriptor, provider=self._provider, owns_provider=False)
         except Exception:
             LOG.warning("sandbox cleanup connect failed", exc_info=True)
             return
-        await self._close_box(handle)
+        await self._close_box(sandbox)
 
-    async def _download_json(self, handle, path: str) -> Any:
+    async def _download_json(self, sandbox: AsyncSandbox, path: str) -> Any:
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "out"
-            await self._provider.download_file(handle, path, local)
+            await sandbox.download(path, local)
             # Split on "\n" only: str.splitlines() also breaks on U+2028, U+2029, U+0085 and
             # other separators that model_dump_json() leaves unescaped inside strings, so a
             # response quoting such text would look like several rows.
@@ -547,48 +550,47 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             agent_config["mcp_config"] = "__WORK_DIR__/mcp.json"
         files["/work/agent_config.json"] = json.dumps(agent_config)
         files["/work/runner_config.json"] = json.dumps(runner_config)
-        handle = await self._provision_box(image, files, model_url)
+        sandbox = await self._provision_box(image, files, model_url)
         try:
-            work_dir = self._box_path(handle, "/work")
+            work_dir = self._box_path(sandbox, "/work")
             if descriptor and not workdir:
-                pwd = await self._provider.exec(handle, "pwd", timeout_s=30)
+                pwd = await sandbox.exec("pwd", timeout_s=30)
                 workdir = (pwd.stdout or "").strip() if pwd.return_code == 0 else ""
                 if workdir:
                     runner_config["cwd"] = workdir
                     if workdir_key := _WORKDIR_KEYS.get(self.config.agent):
                         agent_config.setdefault(workdir_key, workdir)
                     await self._upload_files(
-                        handle,
+                        sandbox,
                         {
                             "/work/agent_config.json": json.dumps(agent_config),
                             "/work/runner_config.json": json.dumps(runner_config),
                         },
                     )
-            r = await self._provider.exec(
-                handle,
+            r = await sandbox.exec(
                 f"{runner_cmd} > runner.out 2>&1",
                 cwd=work_dir,
                 timeout_s=self.config.rollout_timeout,
             )
-            logs = await self._provider.exec(handle, "tail -c 6000 runner.out", cwd=work_dir, timeout_s=30)
+            logs = await sandbox.exec("tail -c 6000 runner.out", cwd=work_dir, timeout_s=30)
             if r.return_code != 0 or "RUNNER_DONE" not in (logs.stdout or ""):
                 raise RuntimeError(
                     f"runner failed ({r.return_code}): {(logs.stdout or logs.stderr or r.stderr or '')[-6000:]}"
                 )
 
             resp = NeMoGymResponse.model_validate(
-                await self._download_json(handle, self._box_path(handle, "/work/response.json"))
+                await self._download_json(sandbox, self._box_path(sandbox, "/work/response.json"))
             )
 
             grade_raw = meta.get("sandbox_eval")
             grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw
             if grade_spec:
-                reward = await self._grade_in_box(handle, grade_spec)
+                reward = await self._grade_in_box(sandbox, grade_spec)
                 resp.metadata = (resp.metadata or {}) | {"sandbox_reward": str(reward)}
             return resp
         finally:
             if not descriptor:
-                await self._close_box(handle)
+                await self._close_box(sandbox)
 
 
 if __name__ == "__main__":
