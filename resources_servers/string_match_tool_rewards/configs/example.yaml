@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+string_match_tool_rewards:
+  resources_servers:
+    string_match_tool_rewards:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: string_match training verification with configurable tool penalties
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/string_match_tool_rewards/data/example.jsonl

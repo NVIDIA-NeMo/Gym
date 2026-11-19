@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from nemo_gym.sandbox.api import AsyncSandbox
@@ -357,6 +358,31 @@ async def test_two_writes_waiting_for_room_are_both_failed_before_the_terminal_i
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(holder, signal.SIGKILL)
+
+
+async def test_a_close_cut_short_by_a_time_limit_still_releases_the_local_terminal() -> None:
+    """The in-container cleanup hangs past the close's time limit, as when a one-shot exec's private session closes
+    under ``STOP_TIMEOUT_S``: the docker client is still killed and the pty released, since the session is already
+    marked closed and no later close would do it."""
+
+    async def hung_cleanup(command: str, **kwargs: Any):
+        await asyncio.Event().wait()
+
+    session = await docker_pty.spawn(
+        [SH, "-c", "exec sleep 300"],
+        use_pty=True,
+        rows=24,
+        cols=80,
+        session_id=SESSION_ID,
+        run_in_container=hung_cleanup,
+        pid_file=docker_pty.pid_file_for(SESSION_ID),
+    )
+    client = session._proc
+    with anyio.move_on_after(0.3) as scope:
+        await session.close()
+    assert scope.cancelled_caught, "the in-container cleanup should have outlasted the limit"
+    assert client.returncode is not None, "the docker client should be killed"
+    assert session._master_fd is None and session._client_stderr_fd is None
 
 
 async def test_run_detached_runs_attached_with_the_marker_protocol() -> None:

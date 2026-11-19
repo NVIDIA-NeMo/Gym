@@ -18,8 +18,10 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable
 
+import anyio
 import pytest
 
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
@@ -28,6 +30,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.docker import provider as docker_provider
+from tests.unit_tests.sandbox.cli_testing import is_running, requires_sh, stand_in_cli
 
 
 pytestmark = pytest.mark.sandbox
@@ -1007,6 +1010,37 @@ async def test_run_real_echo(fake_binary: str) -> None:
     assert code == 0
     assert out.strip() == "hi"
     assert err == ""
+
+
+@requires_sh
+async def test_a_stop_cut_short_by_its_limit_kills_the_docker_command_and_can_be_retried(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The stop's limit (120 s) is shorter than the docker command's own (180 s): the limit must not leave
+    # `docker rm -f` running.
+    cli = stand_in_cli(tmp_path)
+    monkeypatch.setattr(docker_provider, "_require_docker", lambda: str(cli.path))
+    provider = docker_provider.DockerProvider()
+    sandbox = AsyncSandbox(provider, SandboxSpec())
+    sandbox._handle = _make_handle()
+    sandbox._stopped = False
+
+    with pytest.raises(TimeoutError):
+        await sandbox.stop(timeout_s=0.5)
+    assert not is_running(cli.last_pid())
+
+    cli.hang.unlink()
+    await sandbox.stop()
+    assert sandbox._stopped
+
+
+@requires_sh
+async def test_a_cancelled_docker_command_is_killed(fake_binary: str, tmp_path: Path) -> None:
+    cli = stand_in_cli(tmp_path)
+    provider = docker_provider.DockerProvider()
+    with anyio.move_on_after(0.5):
+        await provider._run([str(cli.path)], timeout_s=None)
+    assert not is_running(cli.last_pid())
 
 
 @pytest.mark.skipif(shutil.which("cat") is None, reason="cat not available")

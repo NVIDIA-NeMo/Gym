@@ -37,12 +37,11 @@ from environment_servers.harbor.users import _creation_user, _is_root
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
 from nemo_gym.agents import sandbox_server_url
 from nemo_gym.client import apply_rollout_prefix
-from nemo_gym.config import get_global_config_dict
+from nemo_gym.config import get_global_config_dict, model_call_sampling_config
 from nemo_gym.core import (
     MODEL_SAMPLING_NULL,
     FailureBoundary,
     NgFailureEvent,
-    model_call_sampling_config,
     observe_failure,
 )
 from nemo_gym.data.tasks.harbor import (

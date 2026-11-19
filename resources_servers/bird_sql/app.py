@@ -11,6 +11,10 @@ With ``dialect: spark`` the model is expected to write Spark SQL: it is executed
 the databases (see ``setup_bird_spark.py``) and its result set is compared against the original SQLite
 gold query's result set. The gold SQL is never transpiled.
 
+``dialect: postgres`` works the same way against a PostgreSQL server holding one schema per ``db_id`` (see
+``setup_bird_postgres.py``); the model's query runs in a read-only transaction with a server-side timeout, on one of
+``max_concurrency`` pooled connections.
+
 Only the model's query is scored. When the verifier itself cannot measure it (the
 database is missing or corrupt, the gold query cannot run, the executor crashes)
 the row keeps the model's answer, is masked and names ``failure_kind``
@@ -47,7 +51,13 @@ from nemo_gym.server_runtime import (
     observe_programmatic_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from resources_servers.bird_sql.eval_utils import SparkUnavailableError, execute_and_compare, execute_and_compare_spark
+from resources_servers.bird_sql.eval_utils import (
+    PostgresPool,
+    SparkUnavailableError,
+    execute_and_compare,
+    execute_and_compare_postgres,
+    execute_and_compare_spark,
+)
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql, ensure_bird_train
 
 
@@ -135,11 +145,17 @@ class BirdSqlResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "bird_sql"
     bird_sql_dir: str = "resources_servers/bird_sql/.bird_sql"
-    dialect: Literal["sqlite", "spark"] = "sqlite"
+    dialect: Literal["sqlite", "spark", "postgres"] = "sqlite"
     # Which BIRD split's databases to verify against. ``train`` uses a different db_id set than dev, so pair it with
     # its own ``spark_warehouse_dir`` when ``dialect`` is ``spark``.
     split: Literal["dev", "train"] = "dev"
     spark_warehouse_dir: str = "resources_servers/bird_sql/.bird_sql/spark_warehouse"
+    # ``dialect: postgres``: the grader connects with ``postgres_dsn`` (a read-only role). With ``postgres_admin_dsn``
+    # set, startup loads any missing db_id and creates that role; without it, the data must already be loaded.
+    # Dev and train db_ids differ, so both splits can share one database. Each server process keeps a pool of
+    # ``max_concurrency`` connections, so the server needs ``max_connections`` above that times the processes.
+    postgres_dsn: str = "postgresql://bird_reader@127.0.0.1:5432/bird"  # password via the DSN or PGPASSWORD
+    postgres_admin_dsn: Optional[str] = None
     max_concurrency: int = 32
     sql_execution_timeout_s: float = 30.0
 
@@ -211,6 +227,15 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             self._spark_sessions = ensure_bird_spark(
                 self._databases_dir, self._resolve_dir(self.config.spark_warehouse_dir)
             )
+        elif self.config.dialect == "postgres":
+            # Imported here so the default SQLite path needs neither psycopg nor pandas.
+            from resources_servers.bird_sql.setup_bird_postgres import check_bird_postgres, ensure_bird_postgres
+
+            if self.config.postgres_admin_dsn:
+                ensure_bird_postgres(self._databases_dir, self.config.postgres_admin_dsn, self.config.postgres_dsn)
+            else:
+                check_bird_postgres(self._databases_dir, self.config.postgres_dsn)
+            self._postgres = PostgresPool(self.config.postgres_dsn, self.config.max_concurrency)
 
     @staticmethod
     def _resolve_dir(path: str) -> Path:
@@ -292,6 +317,16 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                 match, _gold, _pred, err = await execute_and_compare_spark(
                     db_path=db_path,
                     session=self._spark_sessions[body.db_id],
+                    gold_sql=body.gt_sql,
+                    pred_sql=extracted_sql,
+                    semaphore=self._semaphore,
+                    timeout_s=self.config.sql_execution_timeout_s,
+                )
+            elif self.config.dialect == "postgres":
+                match, _gold, _pred, err = await execute_and_compare_postgres(
+                    db_path=db_path,
+                    pool=self._postgres,
+                    db_id=body.db_id,
                     gold_sql=body.gt_sql,
                     pred_sql=extracted_sql,
                     semaphore=self._semaphore,
