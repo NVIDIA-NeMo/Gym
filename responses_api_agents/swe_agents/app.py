@@ -1805,24 +1805,31 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _probe_openhands_venv(self, openhands_dir: Path) -> Optional[str]:
         """Probe an existing OpenHands venv's deps; return None if healthy, else the failure."""
         venv_python = openhands_dir / ".venv" / "bin" / "python"
-        probe = subprocess_run(
-            [
-                str(venv_python),
-                "-c",
-                (
-                    "from importlib.metadata import version; "
-                    "from packaging.version import Version; "
-                    "assert Version(version('jinja2')) >= Version('3.1.3'); "
-                    "assert Version(version('pyjwt')) >= Version('2.9'); "
-                    "assert Version(version('sqlalchemy')) >= Version('2.0.40'); "
-                    "assert Version(version('flask')) >= Version('2.2'); "
-                    "import datasets, wandb"
-                ),
-            ],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "PYTHONNOUSERSITE": "1"},
-        )
+        try:
+            probe = subprocess_run(
+                [
+                    str(venv_python),
+                    "-I",
+                    "-c",
+                    (
+                        "from importlib.metadata import version; "
+                        "from packaging.version import Version; "
+                        "assert Version(version('jinja2')) >= Version('3.1.3'); "
+                        "assert Version(version('pyjwt')) >= Version('2.9'); "
+                        "assert Version(version('sqlalchemy')) >= Version('2.0.40'); "
+                        "assert Version(version('flask')) >= Version('2.2'); "
+                        "import datasets"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                errors="replace",
+            )
+        except OSError as e:
+            # Other launch errors are the host's, not the tree's.
+            if e.errno not in (errno.EACCES, errno.ENOENT, errno.ENOEXEC):
+                raise
+            return f"{type(e).__name__}: {e}"
         if probe.returncode == 0:
             return None
         return " ".join(probe.stderr.strip().splitlines()[-1:]) or f"exit code {probe.returncode}"
@@ -1865,6 +1872,15 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
 
         commit = _resolve_remote_commit(repo, ref)
         setup_dir = self._openhands_setup_target(commit)
+
+        if setup_dir == legacy_dir:
+            with file_lock(setup_dir, "OpenHands setup"):
+                if self._existing_setup_is_reusable(setup_dir / "OpenHands"):
+                    print(f"OpenHands already set up at {setup_dir}", flush=True)
+                    self._sync_openhands_to_commit(setup_dir / "OpenHands", commit)
+                    return setup_dir
+            # A pre-staged tree is never rebuilt in place: build under the cache root instead.
+            setup_dir = self.setup_root / "swe_openhands_setup" / _repo_slug(repo) / commit
 
         with file_lock(setup_dir, "OpenHands setup"):
             openhands_dir = setup_dir / "OpenHands"

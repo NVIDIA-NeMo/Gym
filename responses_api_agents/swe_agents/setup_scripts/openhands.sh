@@ -163,10 +163,10 @@ done
 echo "Installing Python dependencies (creating .venv in OpenHands directory)..."
 poetry install --no-interaction --no-root
 
-# Install datasets package.
+# Install datasets package
 echo "Installing datasets package..."
 
-poetry run python -m pip install datasets huggingface_hub packaging==26.0 wandb
+poetry run python -m pip install datasets huggingface_hub packaging==26.0
 
 mkdir -p evaluation/oh
 mkdir -p logs
