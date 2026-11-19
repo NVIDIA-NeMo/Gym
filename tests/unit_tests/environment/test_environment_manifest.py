@@ -689,6 +689,31 @@ def test_a_setup_a_protocol_lists_takes_the_protocols_facts() -> None:
     assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
 
 
+def test_a_listed_config_combines_requirements_field_by_field() -> None:
+    raw = _nested_listing_manifest()
+    raw["requirements"] = {"gpu": True, "network": "allowlist"}
+    raw["setups"][0]["requirements"] = {"network": "public"}
+    raw["setups"][0]["maintainers"] = ["bob-nv"]
+    raw["protocols"][0]["requirements"] = {"network": "no-network"}
+    raw["protocols"][0]["setups"][0]["requirements"] = {"gpu": False}
+    main = EnvironmentManifest.model_validate(raw)
+
+    setup, protocol, nested = (resolve_listed_manifest(main, listed) for listed in main.listed_configs())
+
+    # Each keeps the GPU need it does not set, from the main manifest or, for the nested setup, its protocol.
+    assert setup.requirements.model_dump() == {"gpu": True, "network": "public"}
+    assert protocol.requirements.model_dump() == {"gpu": True, "network": "no-network"}
+    assert nested.requirements.model_dump() == {"gpu": False, "network": "no-network"}
+    # A list replaces the inherited one whole, and the entry still dumps only what it set.
+    assert (setup.maintainers, protocol.maintainers) == (["bob-nv"], ["alice-nv"])
+    assert yaml.safe_load(dump_manifest(main))["setups"][0]["requirements"] == {"network": "public"}
+
+    # null still clears the whole object.
+    raw["setups"][0]["requirements"] = None
+    cleared = EnvironmentManifest.model_validate(raw)
+    assert resolve_listed_manifest(cleared, cleared.setups[0]).requirements is None
+
+
 @pytest.mark.parametrize("backend", ["pydantic", "schema"])
 def test_a_setup_lists_no_setups_of_its_own(backend: str) -> None:
     raw = _nested_listing_manifest()

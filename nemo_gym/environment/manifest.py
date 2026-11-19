@@ -255,8 +255,9 @@ class _ListedConfig(_ManifestModel):
     """A config that a main manifest lists. It shares the main manifest's facts and sets only those that differ.
 
     A field left out takes the main manifest's value; ``null`` sets it to none, as for a harness with no model server.
-    The composition fields mirror this config as the main manifest's mirror the main config, and
-    ``gym env validate --sync`` writes them here.
+    ``requirements`` is combined field by field, so setting only ``network`` keeps the inherited ``gpu``; a list such as
+    ``datasets`` or ``maintainers`` replaces the inherited one whole. The composition fields mirror this config as the
+    main manifest's mirror the main config, and ``gym env validate --sync`` writes them here.
     """
 
     name: NonEmptyString = Field(
@@ -273,7 +274,13 @@ class _ListedConfig(_ManifestModel):
         json_schema_extra={"uniqueItems": True},
         description="GitHub logins of the people who maintain this config, when they are not the main manifest's.",
     )
-    requirements: ManifestRequirements | None = None
+    requirements: ManifestRequirements | None = Field(
+        default=None,
+        description=(
+            "The requirements that differ, field by field: a field it sets replaces the inherited one, and a field it "
+            "leaves out keeps the inherited value."
+        ),
+    )
     primary_metric: NonEmptyString | None = Field(
         default=None,
         description="The headline metric, when this config reports another one, for example after more repeats.",
@@ -630,7 +637,11 @@ def resolve_listed_manifest(
     protocol = main.listing_protocol(listed)
     inherited = main if protocol is None else resolve_listed_manifest(main, protocol)
     data = inherited.model_dump(mode="json", exclude={"setups", "protocols"})
-    data.update(listed.model_dump(mode="json", exclude_unset=True, exclude={"setups"}))
+    own = listed.model_dump(mode="json", exclude_unset=True, exclude={"setups"})
+    # Requirements are separate facts, so a setup that names only its network need keeps the inherited GPU need.
+    if isinstance(own.get("requirements"), dict) and isinstance(data.get("requirements"), dict):
+        own["requirements"] = {**data["requirements"], **own["requirements"]}
+    data.update(own)
     return EnvironmentManifest.model_validate(data)
 
 

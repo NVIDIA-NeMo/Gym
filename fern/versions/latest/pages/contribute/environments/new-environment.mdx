@@ -474,6 +474,7 @@ protocols:
 - `name` is required. It is the name the catalog gives the config: its path under `benchmarks/` or `environments/` without `.yaml`, which is also what `gym eval run --benchmark` takes.
 - `config_path` is required and relative to the main manifest.
 - An entry may set `description`, `maintainers`, `requirements`, `primary_metric`, `integration_profile`, and `dataset_owner`. A protocol must set `description`, saying how its prompt, tools, or scoring differ, and may also set `standard_prompt_config`.
+- `requirements` combines field by field: an entry that sets only `network: public` keeps the inherited `gpu`. A list such as `datasets` or `maintainers` replaces the inherited one whole.
 - The composition fields `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, `grading_mode`, and `harbor_target` mirror the entry's own config. `gym env validate --sync` writes the ones that differ from the main manifest's and removes those that match it again. `null` clears a value the main manifest sets, as for a harness that reaches the model itself.
 
 A protocol that several harnesses run lists them as its own `setups`. Such a setup takes the protocol's facts, not only the main manifest's, so the protocol's prompt and rows are written once, and validation checks the setup against the protocol: the same task datasets, scoring and prompt templates. A setup lists no setups of its own; one more level would add nothing, since a setup of a setup runs the same tasks and prompt as its parent.
