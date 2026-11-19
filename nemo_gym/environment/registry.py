@@ -126,6 +126,14 @@ def _manifest_entries(
     for listed in main.listed_configs():
         manifest = resolve_listed_manifest(main, listed)
         config_path = resolve_manifest_config_path(manifest_path, manifest)
+        # As for the main manifest: under another name, the entry would take that name from the config at its path and
+        # leave its own config out of the catalog.
+        expected_listed_name = _benchmark_config_name(config_path.relative_to(tree_dir.resolve()))
+        if listed.name != expected_listed_name:
+            raise RegistryError(
+                f"Manifest '{manifest_path}' lists '{listed.name}', but the catalog path of its config "
+                f"'{config_path}' requires '{expected_listed_name}'."
+            )
         protocol = main.listing_protocol(listed)
         relation = (
             {"setup_of": main.name if protocol is None else protocol.name}

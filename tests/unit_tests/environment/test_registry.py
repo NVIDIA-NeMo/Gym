@@ -459,6 +459,23 @@ class TestEnvironmentCatalog:
         assert (entries[("benchmark", "suite")].setup_of, entries[("benchmark", "suite")].protocol_of) == (None, None)
         assert len([key for key in entries if key[1].startswith("suite")]) == 4
 
+    def test_rejects_a_listed_name_that_is_not_its_configs_catalog_path(self, tmp_path: Path, monkeypatch) -> None:
+        # Named `other`, the setup would take that name from benchmarks/other/config.yaml, which `--benchmark other`
+        # still runs, and leave its own config out of the catalog under `demo/variant`.
+        listing = {"setups": [{"name": "other", "config_path": "variant.yaml"}]}
+        manifest_path = _write_manifest(tmp_path, "benchmarks", "demo", _manifest("demo", "benchmark", **listing))
+        benchmark_config = "agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n"
+        manifest_path.with_name("variant.yaml").write_text(benchmark_config, encoding="utf-8")
+        other = tmp_path / "benchmarks" / "other" / "config.yaml"
+        other.parent.mkdir()
+        other.write_text(benchmark_config, encoding="utf-8")
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        with pytest.raises(
+            RegistryError, match="lists 'other', but the catalog path of its config .* requires 'demo/variant'"
+        ):
+            discover_environment_catalog()
+
     def test_resolution_requires_kind_only_for_cross_kind_collision(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(tmp_path, "environments", "shared", _manifest("shared"))
         _write_manifest(tmp_path, "benchmarks", "shared", _manifest("shared", "benchmark"))
