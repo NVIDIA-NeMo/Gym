@@ -16,7 +16,7 @@ import os
 from argparse import Namespace
 from pathlib import Path
 from time import monotonic, sleep
-from typing import ClassVar, Dict, Tuple
+from typing import Any, ClassVar, Dict, Tuple
 
 import ray
 import requests
@@ -160,7 +160,27 @@ Environment variables: {env_vars_to_print}""")
         venv_bin_dir = str(Path(self.config.ray_worker_py_executable).resolve().parent)
         return os.pathsep.join(filter(None, [venv_bin_dir, os.environ.get("PATH", "")]))
 
-    def _select_vllm_server_head_node(self, server_args: Namespace, env_vars: Dict[str, str]) -> PlacementGroup:
+    def _startup_timeout_error(self) -> TimeoutError:
+        return TimeoutError(
+            f"{self.config.name} LocalVLLMModel server was not ready within "
+            f"{self.config.server_ready_timeout_seconds} s"
+        )
+
+    def _get_within(self, ref: Any, deadline: float | None) -> Any:
+        """`ray.get(ref)` that ends at the startup `deadline` (a `monotonic()` time) with the startup TimeoutError."""
+        if deadline is None:
+            return ray.get(ref)
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise self._startup_timeout_error()
+        try:
+            return ray.get(ref, timeout=remaining)
+        except GetTimeoutError:
+            raise self._startup_timeout_error() from None
+
+    def _select_vllm_server_head_node(
+        self, server_args: Namespace, env_vars: Dict[str, str], deadline: float | None = None
+    ) -> PlacementGroup:
         """
         Our LocalVLLMModelActor Ray actor scheduling strategy is as follows:
         1. We estimate the size of a single placement group vLLM will make using TP * PP
@@ -183,7 +203,7 @@ Environment variables: {env_vars_to_print}""")
             strategy=placement_strategy,
             bundles=bundles,
         )
-        ray.get(head_node_placement_group.ready())
+        self._get_within(head_node_placement_group.ready(), deadline)
 
         return head_node_placement_group
 
@@ -200,8 +220,12 @@ Environment variables: {env_vars_to_print}""")
             print(f"""Currently available Ray cluster resources: {available_resources()}
 Total Ray cluster resources: {cluster_resources()}""")
 
+        # One startup deadline covers the placement group, the actor address and the readiness wait.
+        timeout_s = self.config.server_ready_timeout_seconds
+        deadline = None if timeout_s is None else monotonic() + timeout_s
+
         server_args, env_vars = self._configure_vllm_serve()
-        head_node_placement_group = self._select_vllm_server_head_node(server_args, env_vars)
+        head_node_placement_group = self._select_vllm_server_head_node(server_args, env_vars, deadline)
 
         pythonpath = str(Path(__file__).parent.parent.parent)
         if self.config.debug:
@@ -230,22 +254,24 @@ Total Ray cluster resources: {cluster_resources()}""")
             show_vllm_engine_stats=self.config.show_vllm_engine_stats,
         )
 
-        self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
+        self.config.base_url = [self._get_within(self._local_vllm_model_actor.base_url.remote(), deadline)]
 
         # Reset clients after base_url config
         self._post_init()
 
-        self.await_server_ready()
+        self.await_server_ready(deadline)
 
-    def await_server_ready(self) -> None:
+    def await_server_ready(self, deadline: float | None = None) -> None:
+        """Wait for the launched server; `deadline` is the startup deadline, started now when not given."""
         timeout_s = self.config.server_ready_timeout_seconds
-        deadline = None if timeout_s is None else monotonic() + timeout_s
+        if deadline is None and timeout_s is not None:
+            deadline = monotonic() + timeout_s
 
         def remaining_s() -> float | None:
             return None if deadline is None else deadline - monotonic()
 
         def not_ready() -> TimeoutError:
-            return TimeoutError(f"{self.config.name} LocalVLLMModel server was not ready within {timeout_s} s")
+            return self._startup_timeout_error()
 
         poll_count = 0
         while True:

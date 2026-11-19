@@ -43,7 +43,7 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
     # Wait for the launched vLLM server to answer `/models` at startup. None (default) waits for as long as the server's
     # actor stays alive. A number of seconds makes startup fail with a TimeoutError if the server is not ready by then. The
-    # limit covers the readiness wait only; it starts after the placement group and the actor have been created.
+    # limit starts when the launch begins and covers the placement group, the actor address and the readiness wait.
     server_ready_timeout_seconds: float | None = Field(default=None, gt=0)
 
     def model_post_init(self, context):

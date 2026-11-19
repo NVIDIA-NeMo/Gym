@@ -242,7 +242,8 @@ class TestApp:
             dummy._select_vllm_server_head_node = lambda *args, **kwargs: MagicMock()
             dummy._ray_actor_path = lambda: LocalVLLMModel._ray_actor_path(dummy)
             dummy._post_init = lambda: None
-            dummy.await_server_ready = lambda: None
+            dummy.await_server_ready = lambda deadline=None: None
+            dummy._get_within = lambda ref, deadline: LocalVLLMModel._get_within(dummy, ref, deadline)
             return dummy
 
         # Default: the venv's bin directory is on the actor's PATH.
@@ -322,6 +323,10 @@ class TestAwaitServerReady:
         class Server:
             config = MagicMock(server_ready_timeout_seconds=timeout_s, base_url=["http://engine/v1"])
             _local_vllm_model_actor = MagicMock()
+
+            @classmethod
+            def _startup_timeout_error(cls):
+                return LocalVLLMModel._startup_timeout_error(cls)
 
         Server.config.name = "model"
         return Server, calls, requests
@@ -452,3 +457,98 @@ class TestAwaitServerReady:
 
         assert len(calls) == 41
         assert all("timeout" not in call for call in calls)
+
+
+class TestStartupDeadline:
+    """One `server_ready_timeout_seconds` deadline covers the placement group, the actor address and the readiness wait."""
+
+    def _launch(self, monkeypatch, *, timeout_s, stage_costs: dict, health_timeouts: list | None = None):
+        """Run `start_vllm_server` on a fake clock. Each stage advances it by its cost, or never returns if None."""
+        from ray.exceptions import GetTimeoutError
+
+        module = responses_api_models.local_vllm_model.app
+        now = [0.0]
+        monkeypatch.setattr(module, "monotonic", lambda: now[0])
+        polled: list = []
+
+        def ray_get(reference, timeout=None):
+            cost = stage_costs[reference]
+            if cost is None or (timeout is not None and cost > timeout):
+                now[0] += timeout if timeout is not None else 1e9
+                raise GetTimeoutError("stalled")
+            now[0] += cost
+            if reference == "alive":
+                health_timeouts.append(timeout)
+                return True
+            return "http://engine/v1"
+
+        monkeypatch.setattr(module.ray, "get", ray_get)
+        monkeypatch.setattr(module.requests, "get", lambda url, **kwargs: polled.append(url) or MagicMock())
+
+        actor = MagicMock()
+        actor.base_url.remote.return_value = "address"
+        actor.is_alive.remote.return_value = "alive"
+
+        class FakeActorClass:
+            @staticmethod
+            def options(**kwargs):
+                return MagicMock(remote=lambda **_: actor)
+
+        monkeypatch.setattr(module, "LocalVLLMModelActor", FakeActorClass)
+
+        class Server:
+            config = MagicMock(
+                server_ready_timeout_seconds=timeout_s, base_url=None, debug=False, vllm_serve_env_vars={}
+            )
+            _post_init = lambda self: None  # noqa: E731
+            _ray_actor_path = lambda self: ""  # noqa: E731
+            _configure_vllm_serve = lambda self: (MagicMock(), {})  # noqa: E731
+            _startup_timeout_error = LocalVLLMModel._startup_timeout_error
+            _get_within = LocalVLLMModel._get_within
+            await_server_ready = LocalVLLMModel.await_server_ready
+
+            def _select_vllm_server_head_node(self, server_args, env_vars, deadline=None):
+                return self._get_within(placement_group_ready, deadline)
+
+        Server.config.name = "model"
+        placement_group_ready = "placement"
+        return Server(), polled, now
+
+    def test_a_stalled_placement_group_ends_at_the_deadline_without_polling(self, monkeypatch) -> None:
+        server, polled, now = self._launch(monkeypatch, timeout_s=1, stage_costs={"placement": None})
+
+        with pytest.raises(TimeoutError, match="not ready within 1 s"):
+            LocalVLLMModel.start_vllm_server(server)
+
+        assert polled == [] and now[0] == 1
+
+    def test_a_stalled_actor_address_ends_at_the_deadline_without_polling(self, monkeypatch) -> None:
+        server, polled, now = self._launch(monkeypatch, timeout_s=1, stage_costs={"placement": 0.4, "address": None})
+
+        with pytest.raises(TimeoutError, match="not ready within 1 s"):
+            LocalVLLMModel.start_vllm_server(server)
+
+        assert polled == [] and now[0] == 1
+
+    def test_the_health_check_gets_only_what_the_earlier_stages_left(self, monkeypatch) -> None:
+        health_timeouts: list = []
+        server, polled, _ = self._launch(
+            monkeypatch,
+            timeout_s=100,
+            stage_costs={"placement": 30, "address": 20, "alive": 0},
+            health_timeouts=health_timeouts,
+        )
+
+        LocalVLLMModel.start_vllm_server(server)
+
+        assert health_timeouts == [50] and len(polled) == 1
+
+    def test_without_a_limit_no_launch_wait_has_a_time_limit(self, monkeypatch) -> None:
+        seen: list = []
+        server, _, _ = self._launch(
+            monkeypatch, timeout_s=None, stage_costs={"placement": 5, "address": 5, "alive": 0}, health_timeouts=seen
+        )
+
+        LocalVLLMModel.start_vllm_server(server)
+
+        assert seen == [None]
