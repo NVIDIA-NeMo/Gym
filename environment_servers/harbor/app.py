@@ -909,6 +909,7 @@ class HarborEnvironmentServer(
         # when the harness did not honour the `[agent].timeout_sec` it was handed.
         budget = self._post_seed_budget_s(session.task) if self.config.enforce_task_timeouts else None
         task_deadline = asyncio.timeout(budget) if budget is not None else None
+        session.deadline = task_deadline.when() if task_deadline is not None else None
         progress = _TurnProgress()
         try:
             async with task_deadline if task_deadline is not None else nullcontext():

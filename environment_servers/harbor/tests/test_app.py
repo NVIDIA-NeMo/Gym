@@ -4483,8 +4483,95 @@ class TestSeedGuards:
         assert result.reward == 0.0 and result.mask_sample is True
         assert result.failure_kind == "provider_unavailable"
         assert "HarborSeedTimeoutError: the sandbox was not ready within 0.05s" in result.failure_reason
-        # The agent's sandbox was stopped before the verifier's create; the verifier's entry is released too.
-        assert agent.stopped and stopped == [True] and not server._sandboxes
+        # The agent's sandbox was stopped before the verifier's create; both verifier creates are released too.
+        assert agent.stopped and stopped == [True, True] and not server._sandboxes
+
+    def separate_with_verifier_starts(self, tmp_path, monkeypatch, *starts):
+        """A separate-mode server whose real verifier create hands out ``starts`` in order, each a sandbox double
+        or ``None`` for one that never becomes ready."""
+        agent = AgentSandbox()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, sandbox_ready_timeout_s=0.05)
+        (task.path / "task.toml").write_text(SEPARATE_TOML)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.SEED_CREATE_GRACE_S", 0.0)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        stopped = []
+
+        class Hanging:
+            async def start(self, spec):
+                await asyncio.get_running_loop().create_future()
+
+            async def stop(self):
+                stopped.append("hanging")
+
+        made = iter(starts)
+
+        def make(provider_config):
+            sandbox = next(made)
+            return Hanging() if sandbox is None else sandbox
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", make)
+        return server, task, agent, stopped
+
+    async def test_separate_verifier_create_is_retried_once_after_a_ready_timeout(self, tmp_path, monkeypatch):
+        """A verifier sandbox that never became ready is released and created again: the rollout is scored."""
+        verifier = VerifierSandbox()
+
+        async def start(spec):
+            pass
+
+        monkeypatch.setattr(verifier, "start", start, raising=False)
+        server, task, agent, stopped = self.separate_with_verifier_starts(tmp_path, monkeypatch, None, verifier)
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        result = response.result
+        assert result.mask_sample is not True and result.failure_kind is None, result.failure_reason
+        assert result.verifier_mode == "separate"
+        assert any("bash /tests/test.sh" in call["command"] for call in verifier.execs)
+        assert stopped == ["hanging"] and verifier.stopped and not server._sandboxes
+
+    async def test_separate_verifier_is_not_retried_past_the_task_deadline(self, tmp_path, monkeypatch):
+        """No second create when the episode's deadline cannot hold it and test.sh: masked after one attempt."""
+        server, task, agent, stopped = self.separate_with_verifier_starts(tmp_path, monkeypatch, None, None)
+        monkeypatch.setattr(server, "_post_seed_budget_s", lambda task: 5.0)
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        assert response.result.mask_sample is True and response.result.failure_kind == "provider_unavailable"
+        assert stopped == ["hanging"] and not server._sandboxes
+
+    async def test_separate_verifier_is_not_retried_when_the_timed_out_one_cannot_be_released(
+        self, tmp_path, monkeypatch
+    ):
+        server, task, agent, stopped = self.separate_with_verifier_starts(tmp_path, monkeypatch, None, None)
+
+        async def stop_fails(episode_key):
+            raise RuntimeError("provider unreachable")
+
+        monkeypatch.setattr(server, "_stop_sandbox", stop_fails)
+        response = await run_episode(server, task)
+        assert response.result.mask_sample is True and response.result.failure_kind == "provider_unavailable"
+        assert "HarborSeedTimeoutError: the sandbox was not ready within 0.05s" in response.result.failure_reason
+        # Still owned under the verifier key, for the episode cleanup and shutdown to stop.
+        assert [key for key in server._sandboxes if key.endswith("/verifier")]
+
+    async def test_separate_verifier_create_failure_other_than_the_ready_timeout_is_not_retried(
+        self, tmp_path, monkeypatch
+    ):
+        server, task, agent, stopped = self.separate_with_verifier_starts(tmp_path, monkeypatch)
+        calls = []
+
+        async def refused(task, *, episode_key=None):
+            calls.append(episode_key)
+            raise RuntimeError("provider refused the create")
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", refused)
+        response = await run_episode(server, task)
+        assert response.result.mask_sample is True and response.result.failure_kind == "provider_unavailable"
+        assert "provider refused the create" in response.result.failure_reason
+        assert len(calls) == 1
 
     async def test_a_providers_own_timeout_inside_the_deadline_is_reported_as_is(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox_ready_timeout_s=100)

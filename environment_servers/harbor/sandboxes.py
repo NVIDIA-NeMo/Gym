@@ -32,7 +32,7 @@ from fastapi import HTTPException
 from environment_servers.harbor.entrypoint import is_keepalive_entrypoint
 from environment_servers.harbor.network_policy import phase_network_policy
 from environment_servers.harbor.overlay import HarborOverlayError
-from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
+from environment_servers.harbor.session import HarborSession, _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user, _is_root
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
 from nemo_gym.agents import sandbox_server_url
@@ -861,6 +861,34 @@ class HarborSandboxMixin:
                 start=lambda sandbox: sandbox.start(spec),
             )
         )
+
+    async def _start_separate_verifier(
+        self, session: HarborSession, task: HarborTask, settings: Any, *, overlaid: bool
+    ) -> AsyncSandbox:
+        """The episode's separate verifier sandbox, its create retried once after a ready timeout.
+
+        The rollout is complete by now, so a verifier sandbox the provider never made ready is retried before the
+        episode is masked, once, and only while the episode's task deadline still leaves a whole create, the overlay
+        when there is one, and ``test.sh`` with its grace. Any other create failure is reported at once.
+        """
+        try:
+            return await self._create_verifier_sandbox(task, episode_key=session.session_id)
+        except HarborSeedTimeoutError as exc:
+            need = self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S
+            need += settings.timeout_sec + self.config.verifier_grace_s
+            if overlaid:
+                need += task.config.environment.build_timeout_sec
+            if session.deadline is not None and session.deadline - asyncio.get_running_loop().time() < need:
+                raise
+            LOGGER.warning(f"{task.task_id}: retrying the verifier sandbox once: {exc}")
+            try:
+                await self._stop_sandbox(_verifier_key(session.session_id))
+            except Exception:
+                # Still owned: the caller's cleanup retries the stop. A second create would replace it unstopped.
+                LOGGER.exception(f"{task.task_id}: could not release the verifier sandbox that was never ready")
+                exc.__suppress_context__ = True
+                raise exc
+        return await self._create_verifier_sandbox(task, episode_key=session.session_id)
 
     async def _start_with_pull_retries(
         self,
