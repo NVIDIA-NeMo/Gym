@@ -4,6 +4,8 @@
 import ast
 import json
 import logging
+import sys
+import uuid
 from copy import deepcopy
 from pathlib import Path
 
@@ -157,13 +159,22 @@ def test_prepared_materialized_task_rows_are_valid_rollout_inputs(tmp_path: Path
     assert report.datasets[0].rows == 2
 
 
+_SWE_TOGETHER_TASK_DATA = {
+    "task_id": "task-1",
+    "image": "example.com/task-1:tag",
+    "image_digest": "sha256:" + "0" * 64,
+}
+
+
 @pytest.mark.parametrize("prompt_source", ["prepared", "agent"])
-@pytest.mark.parametrize("environment_server", ["swe_together", None])
-def test_tasks_of_another_environment_server_are_checked_as_task_envelopes(
-    tmp_path: Path, prompt_source: str, environment_server: str | None
+@pytest.mark.parametrize(
+    ("environment_server", "task_data"), [("swe_together", _SWE_TOGETHER_TASK_DATA), (None, {"instance_id": "1"})]
+)
+def test_tasks_of_a_server_that_builds_its_own_request_need_no_responses_create_params(
+    tmp_path: Path, prompt_source: str, environment_server: str | None, task_data: dict
 ) -> None:
     # As swe_together's prepare writes them: the server builds the request, so the task input holds task_data only.
-    row = {"task_id": {"taskset": "demo", "task_id": "1"}, "task_input": {"task_data": {"instance_id": "1"}}}
+    row = {"task_id": {"taskset": "demo", "task_id": "1"}, "task_input": {"task_data": task_data}}
     path = _benchmark_rows(tmp_path, [row], prompt_source=prompt_source, environment_server=environment_server)
 
     report = validate_environment(path)
@@ -171,7 +182,51 @@ def test_tasks_of_another_environment_server_are_checked_as_task_envelopes(
     assert report.datasets[0].rows == 1
 
 
-@pytest.mark.parametrize("environment_server", ["single_agent_turn", "swe_together", None])
+def test_tasks_are_checked_against_the_task_input_of_the_server_their_taskset_routes_to(tmp_path: Path) -> None:
+    row = {"task_id": {"taskset": "demo", "task_id": "1"}, "task_input": {"task_data": {"instance_id": "1"}}}
+    path = _benchmark_rows(tmp_path, [row], prompt_source="agent", environment_server="swe_together")
+
+    with pytest.raises(EnvironmentValidationError, match=r"row 1 is not a valid task at task_input\.task_data\."):
+        validate_environment(path)
+
+
+@pytest.mark.parametrize("question", ["q", None])
+def test_a_contract_that_imports_task_data_from_the_manifest_root_loads(tmp_path: Path, question: str | None) -> None:
+    # The manifest's root is a component search root but not on sys.path; validation makes it importable.
+    resources_server = f"plugin_rs_{uuid.uuid4().hex}"
+    environment_server = f"plugin_env_{uuid.uuid4().hex}"
+    (tmp_path / "resources_servers" / resources_server).mkdir(parents=True)
+    (tmp_path / "resources_servers" / resources_server / "task_data.py").write_text(
+        "from pydantic import BaseModel, ConfigDict\n\n"
+        "class TaskData(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    question: str\n"
+    )
+    (tmp_path / "environment_servers" / environment_server).mkdir(parents=True)
+    (tmp_path / "environment_servers" / environment_server / "task_input.py").write_text(
+        f"from resources_servers.{resources_server}.task_data import TaskData as TaskInput\n"
+    )
+    task_input = {} if question is None else {"question": question}
+    row = {"task_id": {"taskset": "demo", "task_id": "1"}, "task_input": task_input}
+    path = _benchmark_rows(tmp_path, [row], prompt_source="agent", environment_server=environment_server)
+    sys_path = sys.path[:]
+
+    if question is None:
+        with pytest.raises(EnvironmentValidationError, match=r"task_input\.question"):
+            validate_environment(path)
+    else:
+        assert validate_environment(path).datasets[0].rows == 1
+    assert sys.path == sys_path
+
+
+def test_a_task_row_routed_to_a_relay_is_refused(tmp_path: Path) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row()], prompt_source="agent", environment_server="legacy_agent")
+
+    with pytest.raises(
+        EnvironmentValidationError, match=r"legacy_agent, a relay \(its task_input.py sets TaskInput = None\)"
+    ):
+        validate_environment(path)
+
+
+@pytest.mark.parametrize("environment_server", ["single_agent_turn", "harbor", None])
 @pytest.mark.parametrize(
     ("row", "location"),
     [
