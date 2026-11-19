@@ -83,11 +83,13 @@ def _object(text: str) -> dict[str, Any]:
 def _termination(response: dict[str, Any]) -> Submission | None:
     """Preserve failure evidence before considering a source or a scored no-answer.
 
-    Declared response-budget exhaustion or an explicit content-filter outcome establishes a no-answer attempt, and
-    so does a failed response the agent classified as unusable model output (``agent_invalid_output``, such as
-    Stirrup's ``compaction_failed``): the default outcome policy grades it as the model's result and never retries it.
-    A wall deadline, cancellation, provider failure or undifferentiated limit does not. HTTP model rejection codes
-    alone likewise do not distinguish a model refusal from a request/configuration fault.
+    Declared response-budget exhaustion, the agent's own turn or wall-clock limit (``stop_reason`` ``max_turns`` or
+    ``wall_time``) or an explicit content-filter outcome establishes a no-answer attempt, and so does a failed
+    response the agent classified as unusable model output (``agent_invalid_output``, such as Stirrup's
+    ``compaction_failed``): the default outcome policy grades it as the model's result and never retries it. Gym's
+    recovery treats an agent that ran out of its own deadline the same way: what it kept is its result. Cancellation,
+    a provider failure or an undifferentiated limit does not establish a no-answer. HTTP model rejection codes alone
+    likewise do not distinguish a model refusal from a request/configuration fault.
     """
     metadata = response.get("metadata")
     if metadata is None:
@@ -102,7 +104,7 @@ def _termination(response: dict[str, Any]) -> Submission | None:
             return _INVALID
         if outcome.failure_kind not in (AGENT_LIMIT, AGENT_INVALID_OUTPUT):
             return _INCOMPLETE
-    if response.get("error") or metadata.get("stop_reason") in ("cancelled", "wall_time"):
+    if response.get("error") or metadata.get("stop_reason") == "cancelled":
         return _INCOMPLETE
     status = response.get("status")
     details = response.get("incomplete_details")
@@ -111,7 +113,7 @@ def _termination(response: dict[str, Any]) -> Submission | None:
     if status == "failed" and outcome is not None and outcome.failure_kind == AGENT_INVALID_OUTPUT:
         return _NO_ANSWER
     if status == "incomplete" or (status == "failed" and outcome is not None):
-        if metadata.get("stop_reason") == "max_turns" or (
+        if metadata.get("stop_reason") in ("max_turns", "wall_time") or (
             type(details) is dict and details.get("reason") in ("max_output_tokens", "content_filter")
         ):
             return _NO_ANSWER

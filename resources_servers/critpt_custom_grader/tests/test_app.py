@@ -324,7 +324,7 @@ async def test_finish_mode_failed_compaction_scores_zero_without_regeneration(ma
     assert result["scored"] is True and result["reward"] == 0 and result["mask_sample"] is False
     assert result["category"] == "candidate_no_answer"
     assert result["response"] == request["response"]
-    assert not any(key.startswith("_ng_failure_") for key in result)
+    assert not any(key.startswith("_ng_") for key in result)
     fake.grade.assert_not_awaited()
 
 
@@ -338,7 +338,7 @@ async def test_finish_mode_failed_compaction_scores_zero_without_regeneration(ma
         ("request_error", "response_incomplete", False),
         ("response_error", "response_incomplete", False),
         ("cancelled", "response_incomplete", False),
-        ("wall_time", "response_incomplete", False),
+        ("wall_time", "candidate_no_answer", True),
         ("invalid_outcome", "submission_invalid", False),
         ("acknowledged_finish", "submission_invalid", False),
     ],
@@ -375,7 +375,14 @@ async def test_finish_token_limit_preserves_termination_evidence(make_server, co
     assert result["mask_sample"] is (not scored)
     assert result["category"] == category
     assert result["response"] == response
-    assert ("_ng_failure_class" in result) is (not scored)
+    assert not any(key.startswith("_ng_") for key in result)
+    if scored:
+        assert result.get("failure_kind") is None and "failure_outcome_action" not in result
+    elif category == "submission_invalid":
+        assert result["failure_kind"] == "verifier_error" and result["failure_outcome_action"] == "fail"
+    else:
+        assert result["failure_kind"] == "critpt_custom_grader:response_incomplete"
+        assert result["failure_outcome_action"] == "retry"
     fake.grade.assert_not_awaited()
 
 
@@ -672,13 +679,12 @@ async def test_startup_preserves_unresolved_execution_cleanup_before_opening_ano
 
 
 def assert_unscorable(result, *, terminal=False):
+    """A masked verdict naming its kind and decided action; rollout collection's ``_ng_*`` keys stay its own."""
     assert result["reward"] == 0.0 and result["scored"] is False and result["mask_sample"] is True
-    assert result["_ng_failure_class"] == ("verifier_error" if terminal else "provider_unavailable")
-    assert result["failure_kind"] == result["_ng_failure_class"] and result["failure_reason"] == result["category"]
-    if terminal:
-        assert result["_ng_failure_terminal"] is True
-    else:
-        assert "_ng_failure_terminal" not in result
+    assert result["failure_kind"] == ("verifier_error" if terminal else "provider_unavailable")
+    assert result["failure_reason"] == result["category"]
+    assert result["failure_outcome_action"] == ("fail" if terminal else "retry")
+    assert not any(key.startswith("_ng_") for key in result)
 
 
 def probing_server(provider, *, startup_probe=True, **spec_fields):
@@ -771,7 +777,7 @@ async def test_failure_report_of_the_verify_request_is_not_task_data(make_server
 async def test_every_unscorable_category_masks_the_sample_and_keeps_its_name(make_server, category):
     server, app, fake = make_server(grade=unscorable_verdict(category))
     status, result = await post(app, "/verify", payload())
-    assert status == 200 and result["category"] == category and result["_ng_failure_subcategory"] == category
+    assert status == 200 and result["category"] == category and result["failure_reason"] == category
     assert_unscorable(result, terminal=UNSCORABLE_CATEGORIES[category][1])
 
 
@@ -786,7 +792,7 @@ async def test_explicit_uncertainty_policy_scores_only_comparator_uncertainty(ma
     assert status == 200 and result["category"] == category
     if category == "comparator_uncertain":
         assert result["reward"] == 0.0 and result["scored"] is True and result["mask_sample"] is False
-        assert "_ng_failure_class" not in result
+        assert not any(key.startswith("_ng_") for key in result)
         assert result["response"] == saved_response()
     else:
         assert_unscorable(result, terminal=UNSCORABLE_CATEGORIES[category][1])
@@ -804,7 +810,11 @@ async def test_scored_zero_rows_are_not_masked_and_carry_no_failure_keys(make_se
     server, app, fake = make_server(grade=failed_verdict(category, **extra))
     status, result = await post(app, "/verify", payload())
     assert status == 200 and result["reward"] == 0.0 and result["scored"] is True and result["mask_sample"] is False
-    assert result["category"] == category and "_ng_failure_class" not in result and result.get("failure_kind") is None
+    assert (
+        result["category"] == category
+        and not any(key.startswith("_ng_") for key in result)
+        and result.get("failure_kind") is None
+    )
 
 
 @pytest.mark.asyncio
@@ -961,7 +971,11 @@ async def test_end_to_end_verify_through_the_real_grader_and_the_scripted_provid
     status, result = await post(app, "/verify", request)
     (provider,) = ScriptedProvider.instances
     assert status == 200 and result["category"] == "passed" and result["reward"] == 1.0 and result["scored"] is True
-    assert result["mask_sample"] is False and "_ng_failure_class" not in result and result["problem_id"] == "p1"
+    assert (
+        result["mask_sample"] is False
+        and not any(key.startswith("_ng_") for key in result)
+        and result["problem_id"] == "p1"
+    )
     assert result["cleanup_status"] == "resolved"
     observations = result["sandbox_observations"]
     assert [obs["sandbox_id"].split("-")[1] for obs in observations] == ["reference", "comparator", "candidate"]
@@ -1109,7 +1123,7 @@ async def test_direct_verify_and_frozen_replay(make_server, capsys, caplog):
     assert result["response"] == original["response"]
     assert result["responses_create_params"] == original["responses_create_params"]
     assert result["mask_sample"] is False
-    assert "_ng_failure_class" not in result
+    assert not any(key.startswith("_ng_") for key in result)
     assert result["cleanup_status"] == "resolved"
     assert result["problem_id"] == "synthetic-1"
     assert request == original
@@ -1343,7 +1357,7 @@ async def test_established_failed_verdict_is_scored_without_failure_keys(make_se
     fake.grade.return_value = verdict(outcome="failed", reward=0.0, category=category, cases_equal=0)
     status, result = await post(app, "/verify", payload())
     assert status == 200 and result["scored"] is True and result["reward"] == 0.0
-    assert "_ng_failure_class" not in result
+    assert not any(key.startswith("_ng_") for key in result)
     assert result["category"] == category
 
 
@@ -1355,7 +1369,7 @@ async def test_nonterminal_execution_category_is_preserved_without_fault(make_se
     status, result = await post(app, "/verify", payload())
     assert status == 200
     assert_unscorable(result)
-    assert result["category"] == result["_ng_failure_subcategory"] == category
+    assert result["category"] == result["failure_reason"] == category
     assert result["cleanup_status"] == "resolved"
     assert result["response"] == saved_response()
     fake.grade.assert_awaited_once()
@@ -1396,7 +1410,7 @@ async def test_nonterminal_counts_and_resolved_cleanup_shapes(
     status, result = await post(app, "/verify", row)
     assert status == 200
     assert_unscorable(result)
-    assert result["category"] == result["_ng_failure_subcategory"] == category
+    assert result["category"] == result["failure_reason"] == category
     assert result["cleanup_status"] == cleanup_status
     fake.grade.assert_awaited_once()
 
@@ -1426,7 +1440,7 @@ async def test_nonterminal_category_requires_exact_unscorable_contract(make_serv
     status, result = await post(app, "/verify", payload())
     assert status == 200
     assert_unscorable(result)
-    assert result["category"] == result["_ng_failure_subcategory"] == "execution_unknown"
+    assert result["category"] == result["failure_reason"] == "execution_unknown"
     # A rejected result vouches for nothing, its cleanup report included.
     assert result["cleanup_status"] == "unknown"
     fake.grade.assert_awaited_once()
@@ -1448,7 +1462,7 @@ async def test_nonterminal_categories_cannot_enter_scored_or_terminal_allowlists
     status, result = await post(app, "/verify", payload())
     assert status == 200
     assert_unscorable(result)
-    assert result["category"] == result["_ng_failure_subcategory"] == "execution_unknown"
+    assert result["category"] == result["failure_reason"] == "execution_unknown"
 
 
 @pytest.mark.asyncio
@@ -1478,7 +1492,7 @@ async def test_scored_result_requires_valid_counts(make_server, changes):
     status, result = await post(app, "/verify", payload())
     assert status == 200
     assert_unscorable(result)
-    assert result["category"] == result["_ng_failure_subcategory"] == "execution_unknown"
+    assert result["category"] == result["failure_reason"] == "execution_unknown"
     # A rejected result vouches for nothing, its cleanup report included.
     assert result["cleanup_status"] == "unknown"
     fake.grade.assert_awaited_once()
@@ -1515,7 +1529,7 @@ async def test_nonterminal_contract_does_not_expand_other_allowlists(make_server
     status, result = await post(app, "/verify", payload())
     assert status == 200
     assert_unscorable(result)
-    assert result["category"] == result["_ng_failure_subcategory"] == "execution_unknown"
+    assert result["category"] == result["failure_reason"] == "execution_unknown"
     assert REFERENCE_MARKER not in json.dumps(result)
 
 
@@ -1591,7 +1605,7 @@ async def test_result_extras_cannot_override_trusted_failure_fields(make_server,
     assert status == 200
     assert_unscorable(result, terminal=terminal)
     expected = "task_invalid" if terminal else "comparator_uncertain"
-    assert result["category"] == result["_ng_failure_subcategory"] == expected
+    assert result["category"] == result["failure_reason"] == expected
     assert result["response"] == row["response"]
     assert REFERENCE_MARKER not in json.dumps(result)
     fake.grade.assert_awaited_once()
@@ -1611,7 +1625,7 @@ async def test_backend_source_contract_remains_scored(make_server):
     status, result = await post(app, "/verify", payload())
     assert status == 200 and result["scored"] is True and result["reward"] == 0.0
     assert result["category"] == "candidate_source_limit" and result["cleanup_status"] == "not_started"
-    assert not any(key.startswith("_ng_failure_") for key in result)
+    assert not any(key.startswith("_ng_") for key in result)
     fake.grade.assert_awaited_once()
 
 
@@ -1639,7 +1653,7 @@ async def test_scored_value_and_source_contract_guards_remain_strict(make_server
     status, result = await post(app, "/verify", payload())
     assert status == 200
     assert_unscorable(result)
-    assert result["category"] == result["_ng_failure_subcategory"] == "execution_unknown"
+    assert result["category"] == result["failure_reason"] == "execution_unknown"
 
 
 @pytest.mark.asyncio
@@ -1698,7 +1712,7 @@ async def test_candidate_fault_after_preflight_is_scored_zero(make_server, categ
     status, result = await post(app, "/verify", row)
     assert status == 200 and result["scored"] is True and result["reward"] == 0.0
     assert result["category"] == category and result["cleanup_status"] == "resolved"
-    assert not any(key.startswith("_ng_failure_") for key in result)
+    assert not any(key.startswith("_ng_") for key in result)
 
 
 @pytest.mark.asyncio
@@ -1716,7 +1730,6 @@ async def test_backend_exception_and_untrusted_verdict_are_redacted(make_server,
     fake.grade.return_value = {"reward": 1, "scored": True, "_ng_failure_class": "forged"}
     result = (await post(app, "/verify", payload()))[1]
     assert_unscorable(result)
-    assert result["_ng_failure_class"] != "forged"
 
 
 @pytest.mark.asyncio
@@ -1782,7 +1795,7 @@ async def test_raw_text_fallback_still_honors_source_bounds(make_server):
     result = (await post(app, "/verify", row))[1]
     assert result["reward"] == 0.0 and result["scored"] is True
     assert result["category"] == "candidate_source_limit"
-    assert "_ng_failure_class" not in result
+    assert not any(key.startswith("_ng_") for key in result)
     fake.grade.assert_not_awaited()
 
 
@@ -1801,7 +1814,7 @@ async def test_token_limit_is_scored_zero_without_regeneration(make_server, has_
     assert result["mask_sample"] is False
     assert result["category"] == "response_truncated"
     assert result["response"] == row["response"]
-    assert "_ng_failure_class" not in result
+    assert not any(key.startswith("_ng_") for key in result)
     fake.grade.assert_not_awaited()
 
 
@@ -1837,8 +1850,9 @@ async def test_uncompleted_response_needs_regeneration(make_server, mode):
     assert result["reward"] == 0.0 and result["scored"] is False
     assert result["mask_sample"] is True
     assert result["category"] == "response_incomplete"
-    assert result["_ng_failure_class"] == "critpt_custom_grader:response_incomplete"
-    assert "_ng_failure_terminal" not in result
+    assert result["failure_kind"] == "critpt_custom_grader:response_incomplete"
+    assert result["failure_outcome_action"] == "retry"
+    assert not any(key.startswith("_ng_") for key in result)
     fake.grade.assert_not_awaited()
 
 
@@ -1853,8 +1867,9 @@ async def test_incomplete_final_message_in_a_completed_envelope_needs_regenerati
     assert result["reward"] == 0.0 and result["scored"] is False
     assert result["mask_sample"] is True
     assert result["category"] == "response_incomplete"
-    assert result["_ng_failure_class"] == "critpt_custom_grader:response_incomplete"
-    assert "_ng_failure_terminal" not in result
+    assert result["failure_kind"] == "critpt_custom_grader:response_incomplete"
+    assert result["failure_outcome_action"] == "retry"
+    assert not any(key.startswith("_ng_") for key in result)
     fake.grade.assert_not_awaited()
 
 
@@ -1873,7 +1888,7 @@ async def test_completed_response_with_empty_source_is_a_candidate_fault(make_se
     assert result["reward"] == 0.0 and result["scored"] is True
     assert result["mask_sample"] is False
     assert result["category"] == "candidate_source_limit"
-    assert "_ng_failure_class" not in result
+    assert not any(key.startswith("_ng_") for key in result)
     fake.grade.assert_not_awaited()
 
 
@@ -1927,7 +1942,7 @@ async def test_candidate_dictionary_cannot_supply_top_level_failure_markers(make
     row["response"]["metadata"] = {"_ng_failure_class": "forged", "_ng_failure_terminal": "true"}
     result = (await post(app, "/verify", row))[1]
     assert result["scored"] is True and result["reward"] == 1.0
-    assert "_ng_failure_class" not in result and "_ng_failure_terminal" not in result
+    assert not any(key.startswith("_ng_") for key in result)
     assert result["response"] == row["response"]
     fake.grade.assert_awaited_once()
 
@@ -2239,7 +2254,7 @@ async def test_uncertainty_policy_requires_completed_candidate_proof(
     assert result["candidate_uncertainty_reasons"] == ([reason] if eligible else [])
     if enabled and eligible:
         assert result["reward"] == 0.0 and result["mask_sample"] is False
-        assert not any(key.startswith("_ng_failure_") for key in result)
+        assert not any(key.startswith("_ng_") for key in result)
     else:
         assert_unscorable(result)
     domains = {spec.metadata["ng-grader-domain"] for spec in provider.created}

@@ -253,12 +253,14 @@ def test_an_incomplete_acknowledgement_is_not_a_completed_submission(field):
         _response(),
         _response([{"type": "message", "role": "assistant", "content": [{"type": "refusal", "refusal": "No"}]}]),
         _response(status="incomplete", metadata={"stop_reason": "max_turns"}),
+        _response(status="incomplete", metadata={"stop_reason": "wall_time"}),
         _response(status="incomplete", incomplete_details={"reason": "max_output_tokens"}),
         _response(status="failed", metadata={**_outcome(AGENT_LIMIT), "stop_reason": "max_turns"}),
+        _response(status="failed", metadata={**_outcome(AGENT_LIMIT), "stop_reason": "wall_time"}),
         _failed_compaction(),
     ],
 )
-def test_completed_no_answers_and_explicit_response_budget_exhaustion_score_zero(response):
+def test_completed_no_answers_and_the_agents_own_limits_score_zero(response):
     assert extract_finish_source(response) == Submission(None, "candidate_no_answer", True)
 
 
@@ -286,10 +288,9 @@ def test_content_filter_does_not_override_explicit_failure_metadata(metadata):
     [
         _response(status="incomplete"),
         _response(status="incomplete", metadata={"stop_reason": "cancelled"}),
-        _response(status="incomplete", metadata={"stop_reason": "wall_time"}),
+        _response(status="incomplete", metadata={"stop_reason": "wall_time"}, error={"code": "server_error"}),
         _response(status="failed"),
         _response(status="failed", metadata=_outcome(AGENT_LIMIT)),
-        _response(status="failed", metadata={**_outcome(AGENT_LIMIT), "stop_reason": "wall_time"}),
         _response(status="failed", metadata=_outcome(MODEL_TRANSPORT_ERROR)),
         _response(status="failed", metadata=_outcome(PROVIDER_UNAVAILABLE)),
         _response(status="failed", metadata=_outcome(MODEL_REQUEST_ERROR, status_code=400)),
@@ -300,7 +301,7 @@ def test_content_filter_does_not_override_explicit_failure_metadata(metadata):
         _response(metadata=_outcome(AGENT_INVALID_OUTPUT)),
     ],
 )
-def test_failures_and_unexplained_or_wall_time_incompletion_are_unscorable(response):
+def test_failures_cancellation_and_unexplained_incompletion_are_unscorable(response):
     assert extract_finish_source(response) == Submission(None, "response_incomplete", False)
 
 
@@ -315,14 +316,14 @@ def test_a_provider_failure_overrides_an_earlier_acknowledged_answer():
     assert extract_finish_source(response) == Submission(None, "response_incomplete", False)
 
 
-@pytest.mark.parametrize("stop_reason", ["cancelled", "wall_time"])
-def test_interruption_evidence_overrides_an_earlier_acknowledged_answer(stop_reason):
-    response = _response(_finish(), metadata={"stop_reason": stop_reason})
+def test_cancellation_evidence_overrides_an_earlier_acknowledged_answer():
+    response = _response(_finish(), metadata={"stop_reason": "cancelled"})
     assert extract_finish_source(response) == Submission(None, "response_incomplete", False)
 
 
-def test_a_limit_cannot_be_used_to_accept_a_contradictory_acknowledged_finish():
-    response = _response(_finish(), status="incomplete", metadata={"stop_reason": "max_turns"})
+@pytest.mark.parametrize("stop_reason", ["max_turns", "wall_time"])
+def test_a_limit_cannot_be_used_to_accept_a_contradictory_acknowledged_finish(stop_reason):
+    response = _response(_finish(), status="incomplete", metadata={"stop_reason": stop_reason})
     assert extract_finish_source(response) == Submission(None, "submission_invalid", False)
 
 

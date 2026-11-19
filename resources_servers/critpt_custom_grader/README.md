@@ -17,8 +17,8 @@ from it.
    usable assistant text, or a source that is empty, not valid UTF-8, holds a NUL byte or exceeds
    `max_candidate_source_bytes`, scores 0.0 (`candidate_source_limit`) before any sandbox is created. A response that
    stopped at `max_output_tokens` with status `incomplete` and no response error scores 0.0
-   (`response_truncated`), preserving its truncation metadata and preventing regeneration on resume.
-   Other incomplete responses are marked for regeneration (`response_incomplete`).
+   (`response_truncated`), preserving its truncation metadata. Other incomplete responses are unscored and need a new
+   generation (`response_incomplete`, see [Recovery](#recovery)).
 3. A reference preflight runs the task's reference solution and compares every outcome with the stored expectations.
    Candidate code runs only after the preflight passes. The preflight outcome is cached per task, so a task's
    reference runs once per server process (`reference_cache_dir` also keeps entries on disk for later processes).
@@ -237,19 +237,23 @@ is also `candidate_no_answer`, not `response_truncated`.
 The saved trajectory holds at most 50 model-response turns. A turn that context-overflow recovery removed is not
 counted, so an episode can make more model calls than that (see
 [Runtime and model configuration](#runtime-and-model-configuration)). A completed episode that never submits an
-answer, an empty accepted answer, or normal turn-budget exhaustion scores zero. So does an episode Stirrup ends
+answer, an empty accepted answer, or normal turn-budget exhaustion scores zero. So does an episode stopped at the
+agent's wall-clock limit (`sandbox_runner_timeout_seconds`, `metadata.stop_reason: wall_time`) without an accepted
+answer: the limit is the agent's own, so what it kept is its result, the way Gym's recovery treats an agent that ran
+out of its deadline. AA publishes no wall-clock limit, so when comparing with AA set the limit well above the
+episodes' durations at the serving speed and report how many episodes it stopped. So does an episode Stirrup ends
 because every context-compaction summary was unusable (`metadata.stop_reason: compaction_failed`, classified
 `agent_invalid_output`): it is the model's result, scored zero as `candidate_no_answer` and never regenerated.
-Provider failures, an episode stopped at the agent's wall-clock limit or cancelled (`metadata.stop_reason: wall_time`
-or `cancelled`) and unknown incomplete outcomes remain unscorable, as do inconclusive verification failures; the
-only exception is an undecided comparison that the operator opts to score as zero with
-`score_comparator_uncertain_as_incorrect`. Preserve those categories and report incomplete
-coverage; do not silently count infrastructure failures as incorrect answers or regenerate legitimate no-answer
-outcomes. An explicit content-filter outcome with no answer also scores zero; ambiguous API rejections remain
-unscorable. A request the model server rejects (HTTP 400, 413 or 422, such as a context overflow that recovery
+Provider failures, a cancelled episode (`metadata.stop_reason: cancelled`) and unknown incomplete outcomes remain
+unscorable, as do inconclusive verification failures; the only exception is an undecided comparison that the
+operator opts to score as zero with `score_comparator_uncertain_as_incorrect`. Preserve those categories and report
+incomplete coverage; do not silently count infrastructure failures as incorrect answers or regenerate legitimate
+no-answer outcomes. An explicit content-filter outcome with no answer also scores zero; ambiguous API rejections
+remain unscorable. A request the model server rejects (HTTP 400, 413 or 422, such as a context overflow that recovery
 could not resolve) is one of those: the status alone does not tell a model outcome from a request or configuration
-fault, so the row is `response_incomplete`. That row is not terminal, so resuming the run generates the attempt
-again; a rejection that repeats on every attempt stays unscored and must be reported as incomplete coverage.
+fault, so the row is `response_incomplete`. Its verdict asks for another attempt (`failure_outcome_action: retry`);
+resume keeps it, because it holds the agent's response, so run it again through [Recovery](#recovery). A rejection
+that repeats on every attempt stays unscored and must be reported as incomplete coverage.
 
 Five repeats mean the mean of five independently scored attempts per task (mean pass@1), not credit when any one
 of five attempts succeeds. Keep the repeat count and denominator in the result report. Retry only infrastructure
@@ -465,10 +469,12 @@ once. BLAS and OpenMP are always limited to one thread. `max_concurrent_jobs` bo
 ## Verify response contract
 
 `reward` 0.0 or 1.0; `scored`; `mask_sample` (true on every unscored row); `category`; `cleanup_status`;
-`sandbox_observations` (per-domain provider, sandbox id, outcome, exit code, wall time); `failure_kind` and
-`failure_reason` on unscored rows. An unscored row also carries `_ng_failure_class` and `_ng_failure_subcategory`. Only
-a terminal unscorable row carries `_ng_failure_terminal` (true): a non-terminal row never has it, and a scored row
-carries no `_ng_failure_*` key.
+`sandbox_observations` (per-domain provider, sandbox id, outcome, exit code, wall time). An unscored row is a masked
+result that also carries `failure_kind`, `failure_reason` (its category) and `failure_outcome_action`: `fail` for a
+terminal category, which grading the same response again cannot change, and `retry` otherwise. A scored row carries
+none of the three. The server writes no `_ng_*` key: that namespace belongs to rollout collection, which refuses it in
+an Environment Server's result, so the same row works behind `single_agent_turn_legacy` and on the `legacy_agent`
+relay.
 
 `cleanup_status` is `resolved` when no sandbox the row created is left running and `unresolved` when a stop failed: the
 sandbox then lives until the provider-side backstop reaps it, which is `sandbox_spec.ttl_s` where the provider enforces
@@ -513,16 +519,18 @@ one exec argument (127 KiB), gets an `invalid_argument` tool result that the mod
 Categories. Scored: `passed`, `response_truncated`, `candidate_mismatch`, `candidate_invalid_output`, `candidate_source_limit`,
 `candidate_source_error`, `candidate_timeout`, `candidate_exception`, `candidate_encoding_error`,
 `candidate_worker_abort` and, in `finish_tool` mode, `candidate_no_answer` (the episode ended without an accepted
-answer; see [Submission and accounting](#submission-and-accounting)). Unscorable, terminal (`verifier_error`):
+answer; see [Submission and accounting](#submission-and-accounting)). Unscorable, terminal (`verifier_error`,
+`failure_outcome_action: fail`):
 `task_invalid` (a row that fails task validation, a `semantic_validator` identifier the server has not registered,
 or a stored expectation or policy the comparator cannot represent), `reference_mismatch` (the reference does not
 reproduce its own expectation) and, in `finish_tool` mode,
 `submission_invalid` (the saved trajectory's finish evidence is malformed, ambiguous or contradicts how the episode
-ended). Unscorable, non-terminal (`provider_unavailable`, re-graded by
+ended). Unscorable, non-terminal (`provider_unavailable`, `failure_outcome_action: retry`, re-graded by
 `gym eval reverify`): `exec_user_unsupported` (the provider refused `execution.exec_user`), `reference_error`,
 `reference_timeout`, `comparator_uncertain`, `provider_create`, `provider_exec`, `transfer_limit`, `result_invalid`,
 `*_no_result`, `job_deadline`, `server_draining`, `execution_unknown`. No usable source: category
-`response_incomplete`, failure class `critpt_custom_grader:response_incomplete` (regenerate the candidate).
+`response_incomplete`, failure kind `critpt_custom_grader:response_incomplete`, `failure_outcome_action: retry`
+(generate the candidate again).
 
 The reference cache holds a passed preflight and exactly two refusals, `task_invalid` and `reference_mismatch`: facts
 about the task itself. Every other unscorable category describes the infrastructure or the configuration, so it is
@@ -534,17 +542,13 @@ so an entry persisted under one provider or image is never read under another.
 ## Recovery
 
 Verification is stateless (`/reverify_mode` is `stateless`), also with `agentic_execution`: `/verify` reads only its
-request and never an execution sandbox. Non-terminal rows sit in `<rollouts>_failures.jsonl`, with
-one row per attempt. Take the latest attempt of each rollout that is not already in `<rollouts>.jsonl`, keep the
-`provider_unavailable` ones and re-grade them without a model call:
+request and never an execution sandbox. An unscored verdict is a masked row in `<rollouts>.jsonl` that keeps the
+agent's response, so resume does not run it again. Re-grade the `provider_unavailable` rows from their saved
+responses without a model call, and aggregate the new grades in place of those rows:
 
 ```bash
-jq -cn --slurpfile ok <(jq -c '[._ng_task_index, ._ng_rollout_index]' <rollouts>.jsonl) '
-  ($ok | map({key: tostring, value: true}) | from_entries) as $done
-  | reduce inputs as $r ({}; .[([$r._ng_task_index, $r._ng_rollout_index] | tostring)] = $r)
-  | to_entries[] | select($done[.key] | not) | .value
-  | select(._ng_failure_class == "provider_unavailable")' \
-  <rollouts>_failures.jsonl > <retry>.jsonl
+jq -c 'select(.mask_sample == true and .failure_kind == "provider_unavailable")' <rollouts>.jsonl > <retry>.jsonl
+jq -c 'select(.mask_sample != true or .failure_kind != "provider_unavailable")' <rollouts>.jsonl > <kept>.jsonl
 # Stop the gym env start servers first: reverify launches its own server stack, with a head server on the same port.
 gym eval reverify --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml --model-type openai_model \
@@ -552,8 +556,14 @@ gym eval reverify --config resources_servers/critpt_custom_grader/configs/critpt
     --inputs <rollouts>_materialized_inputs.jsonl --rollouts <retry>.jsonl --output <recovered>.jsonl
 # Run gym env start again with the same configs: aggregate reads the config from the head server and posts to each
 # agent server's /aggregate_metrics endpoint.
-gym eval aggregate -i "'<rollouts>.jsonl,<recovered>.jsonl'" -o <merged>.jsonl
+gym eval aggregate -i "'<kept>.jsonl,<recovered>.jsonl'" -o <merged>.jsonl
 ```
+
+A `verifier_error` row (`failure_outcome_action: fail`) is final. A `response_incomplete` row has no answer to grade
+again: it needs a new episode. For a run started with `gym eval submit`, `gym eval resubmit --recover
+--rerun-masked-without-artifact --rerun-reason <text>` runs masked rows without a recorded grade again, each within its
+attempt cap. It can also select `provider_unavailable` rows, so re-grade those first and check the selection with
+`--inspect` before dispatching.
 
 Sandboxes are single-use and stopped in a `finally`; `sandbox_spec.ttl_s`, where the provider enforces it, and the
 metadata labels (`ng-grader-job`, `ng-grader-domain`) are the provider-side backstop. Daytona does not read `ttl_s`;
