@@ -286,8 +286,11 @@ def _legacy_config_paths(tree_dir: Path, kind: CatalogKind) -> Iterable[tuple[st
 def _legacy_config_name(tree_dir: Path, config_path: Path, kind: CatalogKind) -> Optional[str]:
     """The name :func:`_legacy_config_paths` lists ``config_path`` under, or None when it does not list it.
 
-    Reads only that one config instead of scanning the tree, so a selector can afford it on every launch.
+    Reads only that one config instead of scanning the tree, so a selector can afford it on every launch. A config
+    outside ``tree_dir``, such as one an absolute ``--benchmark`` folder points to, is not listed.
     """
+    if not config_path.is_relative_to(tree_dir):
+        return None
     relative = config_path.relative_to(tree_dir)
     if kind == "benchmark":
         # The benchmark scan globs `**/*.yaml`, which skips hidden files and folders.

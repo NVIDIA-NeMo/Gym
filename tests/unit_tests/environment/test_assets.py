@@ -111,6 +111,14 @@ def test_a_setup_of_a_shadowed_manifest_does_not_take_its_name_from_a_later_root
     assert _selected("suite/fast") == _listed("suite/fast") == declared.with_name("config.yaml").resolve()
 
 
+def test_an_absolute_folder_selects_its_config(roots: tuple[Path, Path], tmp_path: Path) -> None:
+    folder = tmp_path / "elsewhere/my_benchmark"
+    folder.mkdir(parents=True)
+    (folder / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+    assert Path(asset_config_path("benchmark", str(folder))) == (folder / "config.yaml").resolve()
+
+
 def test_a_flavor_path_in_an_earlier_root_does_not_shadow_a_declared_name(roots: tuple[Path, Path]) -> None:
     # The catalog lists no environment flavor file, so `suite/fast` here is a path, not a catalog entry.
     earlier, later = roots
