@@ -272,6 +272,8 @@ def task_list(records):
 def print_report(summary):
     cov = summary["coverage"]
     pct = "n/a" if cov["measured_pct"] is None else f"{cov['measured_pct']}%"
+    # Without the inputs, a task with no row in the profile file cannot be counted at all.
+    unknown = "" if cov["inputs_checked"] else "; tasks with no row in the profile file are unknown"
     if not cov["inputs_checked"]:
         print(
             f"Coverage: {cov['measured_rollouts']} rollouts measured. Materialized inputs not found, so the planned "
@@ -296,7 +298,7 @@ def print_report(summary):
         )
     print(
         f"Tasks: {cov['tasks']}; {cov['complete_tasks']} complete, {len(cov['partial_tasks'])} partial, "
-        f"{len(cov['tasks_without_measured_rollout'])} with no measured rollout."
+        f"{len(cov['tasks_without_measured_rollout'])} with no measured rollout{unknown}."
     )
     absent = [r for r in summary["no_measured_rollout"] if not r["in_profile_file"]]
     if absent:
@@ -320,7 +322,7 @@ def print_report(summary):
         print(f"Only one measured rollout (spread unknown): {task_list(summary['one_rollout'])}")
     if summary["no_reward"]:
         print(f"Measured rollouts without a reward: {task_list(summary['no_reward'])}")
-    print(f"No measured rollout (not measured): {task_list(summary['no_measured_rollout'])}")
+    print(f"No measured rollout (not measured): {task_list(summary['no_measured_rollout'])}{unknown}")
 
 
 def main():

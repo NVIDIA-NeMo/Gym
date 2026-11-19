@@ -142,7 +142,7 @@ def test_inputs_from_another_run_are_rejected(tmp_path):
     completed = _summarize(profile, check=False)
 
     assert completed.returncode != 0
-    assert "do not match this profile" in completed.stderr
+    assert "materialized inputs or the agent metrics do not match this profile" in completed.stderr
     # Without the agent metrics to check against, the difference is reported as unknown rather than as masked.
     (tmp_path / "run_agent_metrics.json").unlink()
     assert _summary(profile)["coverage"]["masked_rollouts"] is None
@@ -158,6 +158,18 @@ def test_float_noise_is_not_spread(tmp_path):
     profile = _gym_profile(tmp_path, rows, [rows[0] | {"reward": 0.1 + 0.2}, rows[1] | {"reward": 0.3}])
 
     assert "Same reward (0.3) on every repeat (no signal): 0\n" in _summarize(profile).stdout
+
+
+def test_full_coverage_needs_no_masked_note(tmp_path):
+    # Taskset rows name no agent, so the masked split is unknown, but nothing can be masked when all was measured.
+    rows = [
+        {"_ng_task_index": task, "_ng_rollout_index": repeat, "_ng_environment_server": "server"}
+        for task in range(2)
+        for repeat in range(2)
+    ]
+    profile = _gym_profile(tmp_path, rows, [row | {"reward": 1.0} for row in rows])
+
+    assert _summarize(profile).stdout.startswith("Coverage: 4 of 4 planned rollouts measured (100.0%).\n")
 
 
 def test_long_task_lists_are_cut_in_the_text_report(tmp_path):
@@ -257,4 +269,7 @@ def test_without_inputs_the_planned_total_is_unknown(tmp_path):
 
     assert summary["coverage"]["inputs_checked"] is False
     assert summary["coverage"]["planned_rollouts"] is None
-    assert "Materialized inputs not found" in _summarize(profile).stdout
+    report = _summarize(profile).stdout
+    assert "Materialized inputs not found" in report
+    # nemo-gym 0.7.0 writes no row for tasks 12 and 14, so without the inputs they are unknown, not absent.
+    assert "No measured rollout (not measured): none; tasks with no row in the profile file are unknown\n" in report
