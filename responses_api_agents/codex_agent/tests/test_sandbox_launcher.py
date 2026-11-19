@@ -3,6 +3,7 @@
 """Exercise the Node launcher's 429 forwarder and native-session snapshot against real HTTP servers."""
 
 import base64
+import gzip
 import json
 import shutil
 import socket
@@ -17,6 +18,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from nemo_gym.agents import REQUEST_GZIP_SCRIPT
 from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE
 
 
@@ -244,15 +246,22 @@ def test_connection_error_answers_502_and_records_the_error(tmp_path):
     assert "ECONNREFUSED" in records[-1]["error"]
 
 
-def test_launcher_starts_codex_behind_the_forwarder(tmp_path):
+@pytest.mark.parametrize("gzip_enabled", [False, True], ids=["plain", "gzip"])
+def test_launcher_starts_codex_behind_the_forwarder(tmp_path, gzip_enabled):
     requests = []
+    body = json.dumps({"input": "task " * 1024}).encode()
+    launcher = shutil.copyfile(LAUNCHER, tmp_path / LAUNCHER.name)
+    shutil.copyfile(REQUEST_GZIP_SCRIPT, tmp_path / REQUEST_GZIP_SCRIPT.name)
 
     class Upstream(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
 
         def do_POST(self):
-            requests.append((self.headers.get("x-session-id"), self.rfile.read(int(self.headers["Content-Length"]))))
+            request_body = self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append(
+                (self.path, self.headers.get("x-session-id"), self.headers.get("Content-Encoding"), request_body)
+            )
             self.send_response(429 if len(requests) == 1 else 200)
             self.send_header("Retry-After", "0")
             self.end_headers()
@@ -263,7 +272,8 @@ def test_launcher_starts_codex_behind_the_forwarder(tmp_path):
         "const [flag, setting] = process.argv.slice(2);\n"
         "if (flag !== '-c') process.exit(2);\n"
         "const url = JSON.parse(setting.split('=').slice(1).join('='));\n"
-        "const response = await fetch(`${url}/responses`, { method: 'POST', body: '{}' });\n"
+        f"const body = Buffer.from({json.dumps(body.decode())});\n"
+        "const response = await fetch(`${url}/responses`, { method: 'POST', body });\n"
         "console.log(JSON.stringify({ type: 'turn.completed', result: await response.text() }));\n"
     )
     with upstream_server(Upstream) as upstream:
@@ -273,15 +283,21 @@ def test_launcher_starts_codex_behind_the_forwarder(tmp_path):
             "env": {},
             "command": [shutil.which("node"), str(fake)],
             "timeout": 5,
-            "model_base_url": upstream,
+            "model_base_url": f"{upstream}/v1",
             "invocation_id": "launcher-invocation",
+            "gzip_requests_enabled": gzip_enabled,
         }
         (tmp_path / "input.json").write_text(json.dumps(params))
         launched = subprocess.run(
-            ["node", str(LAUNCHER), str(tmp_path / "input.json")], capture_output=True, text=True, timeout=15
+            ["node", str(launcher), str(tmp_path / "input.json")], capture_output=True, text=True, timeout=15
         )
     assert launched.returncode == 0, launched.stderr
-    assert requests == [("launcher-invocation.unattributed", b"{}")] * 2
+    assert len(requests) == 2
+    for path, invocation_id, encoding, request_body in requests:
+        assert path == "/v1/responses"
+        assert invocation_id == "launcher-invocation.unattributed"
+        assert encoding == ("gzip" if gzip_enabled else None)
+        assert (gzip.decompress(request_body) if gzip_enabled else request_body) == body
     assert [json.loads(line)["status"] for line in (tmp_path / "model_attempts.jsonl").read_text().splitlines()] == [
         429,
         200,

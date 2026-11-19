@@ -3,7 +3,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -135,28 +134,4 @@ test("OpenCode plugin wraps the configured fetch without changing the model URL"
     assert.equal(observed.url, "http://gym.test/v1/chat/completions");
     assert.equal(observed.headers.get("content-encoding"), "gzip");
     assert.deepEqual(gunzipSync(Buffer.from(await observed.arrayBuffer())), body);
-});
-
-test("Codex forwarder sends gzip upstream when enabled", async (t) => {
-    const directory = stageHarness(t, "codex_agent", "sandbox_launcher.mjs");
-    let observed;
-    const upstream = http.createServer(async (request, response) => {
-        const chunks = [];
-        for await (const chunk of request) chunks.push(chunk);
-        observed = { headers: request.headers, body: Buffer.concat(chunks), url: request.url };
-        response.writeHead(200).end();
-    });
-    t.after(() => { upstream.closeAllConnections(); upstream.close(); });
-    await new Promise(resolve => upstream.listen(0, "127.0.0.1", resolve));
-    const { rateLimitProxy } = await import(pathToFileURL(join(directory, "sandbox_launcher.mjs")));
-    const proxy = await rateLimitProxy(
-        `http://127.0.0.1:${upstream.address().port}/v1`, "test-invocation", join(directory, "attempts.jsonl"),
-        { timeoutMs: 5000, gzipRequestsEnabled: true },
-    );
-    t.after(() => { proxy.closeAllConnections(); proxy.close(); });
-    const response = await fetch(`http://127.0.0.1:${proxy.address().port}/responses`, { method: "POST", body });
-    await response.arrayBuffer();
-    assert.equal(observed.url, "/v1/responses");
-    assert.equal(observed.headers["content-encoding"], "gzip");
-    assert.deepEqual(gunzipSync(observed.body), body);
 });

@@ -451,7 +451,7 @@ def count_media_decodes(monkeypatch):
 
 
 @pytest.mark.parametrize("gzip_enabled", [False, True])
-def test_gzip_helpers_are_uploaded_only_when_enabled(setup, gzip_enabled):
+def test_gzip_plugin_is_staged_and_configured_only_when_enabled(setup, gzip_enabled):
     agent, sandbox = setup
     agent.config.gzip_requests_enabled = gzip_enabled
     with TestClient(agent.setup_webserver()) as client:
@@ -462,6 +462,9 @@ def test_gzip_helpers_are_uploaded_only_when_enabled(setup, gzip_enabled):
         directory = sandbox.directory
         assert (f"{directory}/request_gzip.mjs" in sandbox.files) is gzip_enabled
         assert (f"{directory}/request_gzip_plugin.mjs" in sandbox.files) is gzip_enabled
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        plugin = (Path(directory) / "request_gzip_plugin.mjs").as_uri()
+        assert (plugin in config["plugin"]) is gzip_enabled
 
 
 def test_session_attaches_prompt_images_and_declares_image_input(setup, monkeypatch):
