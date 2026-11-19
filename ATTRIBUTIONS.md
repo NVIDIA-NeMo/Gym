@@ -35,6 +35,28 @@ external executable (GPL-2.0-or-later). Its source and binaries are **not**
 included in this repository. The optional Linux startup installer downloads
 revision `6441b478418350b338589cbfb1b4397fed4a490e` (abc2midi 4.88) into an ignored local directory.
 
+## SWE-bench Pro v2 example inputs
+
+`resources_servers/swebench_pro_v2/data/example.jsonl` packages five genuine inputs from
+[ScaleAI/SWE-bench_Pro, revision 2d52cb3df914a3fcf80c7f66738b3a88ae37fc50](https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro/tree/2d52cb3df914a3fcf80c7f66738b3a88ae37fc50)
+with unchanged task assets from
+[scaleapi/SWE-bench_Pro-os, revision 66f92766bba642462d4bbe5479e83f91f9211862](https://github.com/scaleapi/SWE-bench_Pro-os/tree/66f92766bba642462d4bbe5479e83f91f9211862/v2/tasks).
+The embedded files are each task's `instruction.md`, `solution/gold_patch.diff`, and
+`tests/{test.sh,run_script.sh,parser.py,config.json,test_patch.patch}`.
+The evaluation harness and tooling are MIT licensed, Copyright (c) 2026 Scale AI, Inc.;
+the original notice is retained in `resources_servers/swebench_pro_v2/data/LICENSE`.
+
+The selected task text and code patches originate from Teleport under Apache-2.0 at these exact bases:
+[4d7c51b4f535cecfd139625e6af1746c46abc712](https://github.com/gravitational/teleport/blob/4d7c51b4f535cecfd139625e6af1746c46abc712/LICENSE),
+[2e7b253d55a1b6da5673ea5846503c43fa53cf37](https://github.com/gravitational/teleport/blob/2e7b253d55a1b6da5673ea5846503c43fa53cf37/LICENSE),
+[6f2f17a7f6749418d0bb329169b9181dba446845](https://github.com/gravitational/teleport/blob/6f2f17a7f6749418d0bb329169b9181dba446845/LICENSE),
+[8ee8122b10b3a0a53cb369503ed64d25a6ad1f34](https://github.com/gravitational/teleport/blob/8ee8122b10b3a0a53cb369503ed64d25a6ad1f34/LICENSE), and
+[42beccb27e0e5797a10db05bf126e529273d2d95](https://github.com/gravitational/teleport/blob/42beccb27e0e5797a10db05bf126e529273d2d95/LICENSE).
+Their identical license text is retained in `resources_servers/swebench_pro_v2/data/LICENSE-TELEPORT`.
+Each row records its repository, base commit, upstream task path, image digest and immutable task-license URL.
+The task and verifier files are unmodified; local changes are JSONL packaging and provenance fields.
+The upstream task content is not attributed wholesale to the MIT harness license.
+
 ## ether0 reward overrides
 
 `resources_servers/ether0/graders.py` adapts `oracle_solubility_eval` from
@@ -250,6 +272,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 | Component | License | Vendored at | Upstream |
 |-----------|---------|-------------|---------|
+| VisualWebArena reference evaluator | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/webarena_browser/reference_evaluation/visualwebarena_evaluation.py`; original root license and notices in [SOURCE_LICENSE](resources_servers/webarena_browser/reference_evaluation/SOURCE_LICENSE), pinned revision, hash, file mapping and modifications in [PROVENANCE.md](resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md) | [Immutable original-source provenance](https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md#source-url-license-and-original-notices) |
 | Vision2Code | Apache-2.0 | `resources_servers/vision2code/` (adapted scoring, prompts, and image metrics; see [NOTICE](resources_servers/vision2code/NOTICE)) | https://github.com/image2code/vision2code |
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
@@ -259,6 +282,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | Harbor | Apache-2.0 (vendored unmodified) | `nemo_gym/data/tasks/harbor/harbor_compat.py` (`environment_content_hash` and `_CONTENT_HASH_IGNORE_NAMES` from `src/harbor/environments/definition.py`, `_sanitize_docker_image_name` from `src/harbor/environments/docker/docker.py`, at tag `v0.22.0`; bodies byte-for-byte, the private sanitiser exposed without its leading underscore) | https://github.com/harbor-framework/harbor |
 | NeMo Skills `generic/math` prompt | Apache-2.0 (vendored unmodified) | `resources_servers/ns_tools/prompts/generic/math.yaml` (upstream `nemo_skills/prompt/config/generic/math.yaml`, byte-for-byte below a provenance header) | https://github.com/NVIDIA-NeMo/Skills |
 | OpenCode max-steps prompt | MIT (vendored unmodified) | `nemo_gym/models/token_capture/harness_notes/opencode.py` (`OPENCODE_MAX_STEPS_PROMPT`, upstream `packages/core/src/session/runner/max-steps.ts`, verbatim) | https://github.com/anomalyco/opencode |
+| HLE with-tools blocklist | MIT (vendored unmodified) | `resources_servers/hle_web_tools/blocklist.json` (upstream `docs/blocklist.json` at revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`, byte-for-byte; its SHA-256 is pinned in `app.py` and verified at server start) | https://github.com/centerforaisafety/hle |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
@@ -270,6 +294,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 - ChemReason-Bench: pinned at upstream revision `c0b9ac2933708fcca47b1795492952cbf280e194`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required; its `LICENSE` leaves the copyright holder unfilled, so no upstream notice exists to reproduce. NVIDIA modifications are noted in-file and in `resources_servers/chemreason_bench/README.md`. Benchmark rows committed as test fixtures are CC BY 4.0 (upstream `DATA_LICENSE`), attributed in that README.
 - NeMo Skills `generic/math` prompt: vendored, unmodified, from upstream revision `da85a881d972e6fec847b90cf553a0bf9bf10638` (https://github.com/NVIDIA-NeMo/Skills/blob/da85a881d972e6fec847b90cf553a0bf9bf10638/nemo_skills/prompt/config/generic/math.yaml), the revision `resources_servers/ns_tools/requirements.txt` pins, because the pinned `nemo-skills-tools` package ships no prompt YAMLs. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The file header records the same source, revision and license.
 - OpenCode max-steps prompt: copied verbatim from upstream revision `67aec2212010d67775c35e696d8b8b54902eb338` (OpenCode 1.17.11, https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts), because token capture must recognize the exact text OpenCode sends at its step limit. Upstream is MIT; its license is reproduced in full in the OpenCode MIT License section below. The file header records the same source, revision and license.
+- HLE with-tools blocklist: vendored, unmodified, from upstream revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`. Upstream is MIT, Copyright (c) 2025 centerforaisafety. The JSON must stay byte-exact for its digest check, so it carries no notice itself; the upstream `LICENSE` at that revision is reproduced unchanged in `resources_servers/hle_web_tools/LICENSE-HLE`. The server that applies it (`resources_servers/hle_web_tools/app.py`) is NVIDIA code under Apache-2.0.
 
 ---
 

@@ -19,32 +19,52 @@ import json
 import math
 import re
 import shlex
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
-from nemo_gym.orchestration.executors.base import SchedulerRefusedError
-from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
-from nemo_gym.orchestration.executors.resume_script import fresh_restart_command
-from nemo_gym.orchestration.executors.slurm import SlurmExecutor, reader_token
-from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.budgets import OperatorBudget
+from nemo_gym.eval.recovery.decision import (
     ACKNOWLEDGE_JUDGE_JOBS_FLAGS,
-    MLFLOW_NOT_REQUIRED_NOTE,
     RERUN_MASKED_FLAGS,
-    GateCriteria,
-    OperatorBudget,
     RecoveryAction,
     RecoveryDecision,
     RecoveryOutcome,
-    RecoveryOutcomePolicyConfig,
+)
+from nemo_gym.eval.recovery.gate import (
+    MLFLOW_NOT_REQUIRED_NOTE,
+    GateCriteria,
     gate_summary_from_collected,
     gate_task_summary,
     mlflow_tracking_required,
     tracking_export_due,
     with_operator_verdict,
+)
+from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
+from nemo_gym.orchestration import operations
+from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.base import BaseExecutor, SchedulerRefusedError
+from nemo_gym.orchestration.executors.capabilities import (
+    Inspectable,
+    LogReadable,
+    Resubmittable,
+    Terminable,
+    require,
+)
+from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm.reader import reader_token
+from nemo_gym.orchestration.executors.slurm.resume_script import fresh_restart_command
+from nemo_gym.orchestration.jobs import (
+    BenchmarkJob,
+    JobInfo,
+    JobStatus,
+    SubmissionRecord,
+    SubmissionStatus,
+    list_submissions,
+    load_submission_record,
 )
 from nemo_gym.utils.decorators import experimental
 
@@ -73,14 +93,98 @@ def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord |
     return executor_cls().run(config, dry_run=dry_run)
 
 
+def _executor_for(record: SubmissionRecord) -> BaseExecutor:
+    executor_cls = _EXECUTORS_BY_NAME.get(record.executor)
+    if executor_cls is None:
+        raise ValueError(f"Submission {record.gym_job_id} was made by unknown executor {record.executor!r}.")
+    return executor_cls()
+
+
 @experimental
 def resubmit(gym_job_id: str, benchmark: str) -> BenchmarkJob:
     """Queue `benchmark` of submission `gym_job_id` again, in place, and return its updated record entry."""
     record = load_submission_record(gym_job_id)
+    return require(_executor_for(record), Resubmittable, "resubmit").resubmit(record, benchmark)
+
+
+@experimental
+def status(
+    ids: list[str] | None = None, *, benchmarks: list[str] | None = None, limit: int | None = 10
+) -> list[SubmissionStatus]:
+    """The live status of the submissions `ids`, or with no ids of the newest `limit` in the local index.
+
+    `benchmarks` limits each submission to those benchmarks. With ids it is strict: a submission that lacks
+    one fails the whole call. Without ids it selects: only submissions that have all of them are considered,
+    and `limit` applies after that.
+    """
+    records = _records_to_inspect(ids, benchmarks, limit)
+    by_executor: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        by_executor.setdefault(record.executor, []).append(index)
+
+    results: list[SubmissionStatus | None] = [None] * len(records)
+    for indices in by_executor.values():
+        executor = require(_executor_for(records[indices[0]]), Inspectable, "status")
+        answered = operations.status(executor, [records[index] for index in indices], benchmarks)
+        for index, submission_status in zip(indices, answered, strict=True):
+            results[index] = submission_status
+    return [submission_status for submission_status in results if submission_status is not None]
+
+
+@experimental
+def info(gym_job_id: str, benchmark: str | None = None) -> JobInfo:
+    """Describe submission `gym_job_id`, or only `benchmark` of it, and where its parts are."""
+    record = load_submission_record(gym_job_id)
+    return operations.info(require(_executor_for(record), Inspectable, "info"), record, benchmark)
+
+
+@experimental
+def cancel(gym_job_id: str, benchmark: str) -> JobStatus:
+    """Stop `benchmark` of submission `gym_job_id` and return its status as observed afterwards."""
+    record = load_submission_record(gym_job_id)
+    return operations.cancel(require(_executor_for(record), Terminable, "cancel"), record, benchmark)
+
+
+@experimental
+def cancel_submission(gym_job_id: str, *, confirm: str) -> list[JobStatus]:
+    """Stop every live benchmark of submission `gym_job_id`; `confirm` must be its id."""
+    record = load_submission_record(gym_job_id)
+    return operations.cancel_submission(require(_executor_for(record), Terminable, "cancel"), record, confirm=confirm)
+
+
+@experimental
+def logs(
+    gym_job_id: str, benchmark: str, *, source: str = "driver", instance: str | None = None, tail: int | None = None
+) -> Iterator[str]:
+    """The lines of one of `benchmark`'s logs, `tail` of them if given."""
+    record = load_submission_record(gym_job_id)
+    executor = require(_executor_for(record), LogReadable, "logs")
+    return operations.logs(executor, record, benchmark, source=source, instance=instance, tail=tail)
+
+
+def is_inspectable(record: SubmissionRecord) -> bool:
+    """Whether `gym job status` can look at `record`: its executor can say what is happening to its jobs."""
     executor_cls = _EXECUTORS_BY_NAME.get(record.executor)
-    if executor_cls is None:
-        raise ValueError(f"Submission {gym_job_id} was made by unknown executor {record.executor!r}.")
-    return executor_cls().resubmit(record, benchmark)
+    return executor_cls is not None and issubclass(executor_cls, Inspectable)
+
+
+def _records_to_inspect(
+    ids: list[str] | None, benchmarks: list[str] | None, limit: int | None
+) -> list[SubmissionRecord]:
+    if ids:
+        records, problems = [], []
+        for gym_job_id in dict.fromkeys(ids):
+            try:
+                records.append(load_submission_record(gym_job_id))
+            except ValueError as error:
+                problems.append(str(error))
+        if problems:
+            raise ValueError(" ".join(problems))
+        return records
+    records = list_submissions()
+    if benchmarks:
+        records = [r for r in records if set(benchmarks) <= {job.benchmark for job in r.benchmarks}]
+    return records if limit is None else records[:limit]
 
 
 @experimental
@@ -183,6 +287,7 @@ def recover(
     return with_operator_verdict(outcome).model_copy(update={"reader_token": reader_token()})
 
 
+@experimental
 def inspect_recovery(
     gym_job_id: str,
     benchmark: str,
@@ -428,10 +533,9 @@ def _recover(
         else None
     )
     # A walltime raise the partition cannot take is refused at once, before the slow evidence read.
-    plan_walltime = getattr(executor, "walltime_plan", None)
     walltime_plan = (
-        plan_walltime(record, benchmark, max_walltime)
-        if max_walltime is not None and not inspect_only and plan_walltime is not None
+        executor.walltime_plan(record, benchmark, max_walltime)
+        if max_walltime is not None and not inspect_only
         else None
     )
     if walltime_plan is not None and walltime_plan.get("refused"):
@@ -508,7 +612,7 @@ def _recover(
         return decision, collected, gate_task, mlflow
 
     # A run pinned at another commit is planned with the installed Gym's rules; its pin moves only when it must.
-    pinned = executor.gym_pin(record) if repin is None and hasattr(executor, "gym_pin") else None
+    pinned = executor.gym_pin(record) if repin is None else None
     installed = executor.installed_commit() if pinned is not None else None
     pin_plan: dict[str, Any] | None = None
     if (
@@ -641,7 +745,7 @@ def _recover(
     if decision.action == RecoveryAction.RESUBMIT:
         operator = decision.operator_continuation
         try:
-            job = executor.resubmit(
+            job = require(executor, Resubmittable, "resubmit").resubmit(
                 record,
                 benchmark,
                 keep_budget=True,
@@ -700,7 +804,7 @@ def _recover(
         if repin is not None or extend_retries or extend_attempts:
             raise ValueError("a fresh restart takes only --max-walltime and --walltime-reason")
         try:
-            job = executor.resubmit(
+            job = require(executor, Resubmittable, "resubmit").resubmit(
                 record,
                 benchmark,
                 fresh_restart=True,

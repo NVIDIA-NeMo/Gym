@@ -36,9 +36,9 @@ def stopped(monkeypatch) -> list[AsyncSandbox]:
     stopped: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         stopped.append(self)
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
     return stopped
@@ -104,11 +104,11 @@ def test_a_failed_stop_leaves_the_session_open_and_a_retried_close_stops_it(root
     stops: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         stops.append(self)
         if len(stops) == 1:
             raise RuntimeError("provider unavailable")
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
     server = _server(root)

@@ -134,6 +134,7 @@ class CaptureContext:
     # strict tri-state of the lineage result.
     external_staging: bool = False
     parent_resolution_mode: ParentResolutionMode = "fingerprint"
+    allow_system_suffix: bool = False
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.
@@ -398,8 +399,13 @@ def _source_history_matches(
     request_replay: ReplayContext,
     prefixes: dict[int, ReplaySummary],
     root_reason: RootReason,
+    *,
+    allow_system_suffix: bool,
 ) -> tuple[list[CallRecord], RootReason]:
-    """Return the recorded calls whose source history the request extends with only user or tool items."""
+    """Return the recorded calls whose source history the request extends with only user or tool items.
+
+    With ``allow_system_suffix``, system items may also follow the recorded history.
+    """
     from nemo_gym.models.token_capture.replay import same_replay_source, summarize_replay
 
     matches = []
@@ -417,7 +423,9 @@ def _source_history_matches(
             # proof before using an empty-content-equivalent prefix.
             same_replay_source(prefixes[replay.item_count], replay, allow_empty_tool_content=True) and suffix
         ):
-            if all(item.role in ("user", "tool") for item in suffix):
+            if all(
+                item.role in ("user", "tool") or (allow_system_suffix and item.role == "system") for item in suffix
+            ):
                 matches.append(record)
             else:
                 root_reason = "non_user_suffix"
@@ -450,9 +458,13 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
     except ValueError as error:
         raise CaptureInputError(str(error)) from error
     prefixes = {}
-    matches, root_reason = _source_history_matches(own_records, request_replay, prefixes, root_reason)
+    matches, root_reason = _source_history_matches(
+        own_records, request_replay, prefixes, root_reason, allow_system_suffix=context.allow_system_suffix
+    )
     if not matches and any(
-        _source_history_matches([record], request_replay, prefixes, root_reason)[0]
+        _source_history_matches(
+            [record], request_replay, prefixes, root_reason, allow_system_suffix=context.allow_system_suffix
+        )[0]
         for record in manifest.records
         if same_agent_other_server(scope, row_lineage_scope(record))
     ):
