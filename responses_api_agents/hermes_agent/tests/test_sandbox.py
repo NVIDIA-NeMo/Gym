@@ -1561,6 +1561,31 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
         sandbox.stop.assert_not_awaited()
 
 
+async def test_seed_refuses_sandbox_glibc_hermes_cannot_run(agent, state, monkeypatch):
+    import responses_api_agents.hermes_agent.app as module
+
+    sandbox = state.session.sandbox
+    factory = MagicMock(return_value=sandbox)
+    factory.connect = AsyncMock(return_value=sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
+    unsupported = hermes_sandbox.HermesPlatformUnsupportedError("Hermes requires glibc 2.28 or newer")
+    monkeypatch.setattr(SandboxPythonRuntime, "install", AsyncMock(side_effect=unsupported))
+    ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+    failed = SimpleNamespace(return_code=1, stdout="", stderr="")
+    # Prepare paths, detect a missing runtime, fail installation, then remove session files.
+    sandbox.exec.side_effect = [ok, failed, ok]
+
+    # Every rerun gets a sandbox from the same image, so the seed is a final 422, not a retried 500.
+    with pytest.raises(AgentSeedRejectedError, match=r"glibc 2\.28") as refused:
+        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    assert refused.value.status_code == 422
+    sandbox.disconnect.assert_awaited_once()
+    assert all(record.state is None for record in agent._session_records.values())
+
+
 @pytest.mark.parametrize("url", ["http://127.0.0.1:8000/ng-rollout/native-a1/v1", "http://[::1]:8000/v1"])
 async def test_seed_refuses_loopback_model_url_on_remote_provider(agent, state, monkeypatch, url):
     import responses_api_agents.hermes_agent.app as module
@@ -1927,9 +1952,9 @@ async def test_invalid_images_fail_before_execution(agent, state, role, image, m
 
 @pytest.mark.parametrize("minor", [17, 27, None])
 async def test_hermes_explains_unsupported_glibc_before_downloading_wheels(tmp_path, minor):
-    from nemo_gym.agents.utils.sandbox_python import SandboxPlatform
+    from nemo_gym.agents import SandboxPlatform
 
-    with pytest.raises(RuntimeError, match=r"Hermes requires glibc 2\.28 or newer"):
+    with pytest.raises(hermes_sandbox.HermesPlatformUnsupportedError, match=r"Hermes requires glibc 2\.28 or newer"):
         await hermes_sandbox._HERMES_RUNTIME._build_site_packages(
             SandboxPlatform("x86_64", "gnu", minor), tmp_path / "bundle"
         )

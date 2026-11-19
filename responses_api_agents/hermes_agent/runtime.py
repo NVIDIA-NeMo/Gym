@@ -3,6 +3,7 @@
 
 """Host-side helpers for running Hermes locally and building the runtime uploaded to task sandboxes."""
 
+import ast
 import functools
 import hashlib
 import json
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 from pathlib import Path
 
@@ -56,12 +58,21 @@ def source_checkout(source_spec: str = HERMES_SOURCE) -> Path:
     return source
 
 
-@functools.cache
+_HOST_PYTHON_LOCK = threading.Lock()
+
+
 def host_python() -> Path:
-    """Return the host interpreter used by the local worker and the MCP toolset probe.
+    """Return the host interpreter used by the local worker.
 
     Reuse a prebuilt Hermes environment or run ``uv sync`` on the host with the upstream lock and MCP extra.
+    Concurrent first calls (one per request thread) share one installation.
     """
+    with _HOST_PYTHON_LOCK:
+        return _host_python()
+
+
+@functools.cache
+def _host_python() -> Path:
     bundled = Path(sys.prefix) / "hermes-runtime"
     if (bundled / "hermes-source").is_file():
         recorded = json.loads((bundled / "hermes-source").read_text())
@@ -84,17 +95,21 @@ def host_python() -> Path:
 
 @functools.cache
 def builtin_toolsets() -> frozenset[str]:
-    """Read toolset names in a host subprocess so the agent server can detect conflicting sandbox MCP grants."""
-    output = subprocess.check_output(
-        [
-            str(host_python()),
-            "-I",
-            "-c",
-            "import json; from toolsets import TOOLSETS; print(json.dumps(sorted(TOOLSETS)))",
-        ],
-        text=True,
-    )
-    return frozenset(json.loads(output))
+    """Read the built-in toolset names from the pinned source, so the Agent Server can detect conflicting MCP grants.
+
+    This parses ``toolsets.py`` instead of importing it, so a session that runs Hermes only in its sandbox does not
+    install Hermes on the Agent Server host.
+    """
+    tree = ast.parse((source_checkout() / "toolsets.py").read_text())
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "TOOLSETS" for target in node.targets)
+            and isinstance(node.value, ast.Dict)
+            and all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in node.value.keys)
+        ):
+            return frozenset(key.value for key in node.value.keys)
+    raise RuntimeError(f"Could not read the TOOLSETS literal from Hermes {HERMES_COMMIT} toolsets.py")
 
 
 def stage_source(source: Path, site_packages: Path) -> None:

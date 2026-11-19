@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
-from nemo_gym.agents.utils.sandbox_python import SandboxPlatform, _python_archive
+from nemo_gym.agents import SandboxPlatform
 from responses_api_agents.hermes_agent.runtime import HERMES_SOURCE
 from responses_api_agents.hermes_agent.sandbox import _HERMES_RUNTIME, HERMES_MIN_GLIBC_MINOR
 
@@ -22,8 +22,7 @@ async def prepare(prefix: Path, *, target: str, source: str) -> None:
     arch, libc = target.split("-unknown-linux-")
     platform = SandboxPlatform(arch, libc, glibc_minor=HERMES_MIN_GLIBC_MINOR)
     runtime = replace(_HERMES_RUNTIME, requirements=(source,))
-    interpreter = await _python_archive(platform, version=runtime.python_version)
-    packages = await runtime._site_packages_archive(platform)
+    interpreter, packages = await runtime.archives(platform)
     destination = prefix / "hermes-runtime"
     with tempfile.TemporaryDirectory(dir=prefix) as temporary:
         staged = Path(temporary)

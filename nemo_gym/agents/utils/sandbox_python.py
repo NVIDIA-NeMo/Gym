@@ -330,8 +330,7 @@ class SandboxPythonRuntime:
         try:
             async with asyncio.timeout(timeout_s):
                 platform = await probe_sandbox_platform(sandbox)
-                python_archive = await _python_archive(platform, version=self.python_version)
-                site_packages_archive = await self._site_packages_archive(platform)
+                python_archive, site_packages_archive = await self.archives(platform)
                 setup = f"{self.directory}/.setup-{uuid4().hex}"
                 try:
                     prepared = await sandbox.exec(f"mkdir -p {shlex.quote(setup)}", cwd="/", timeout_s=30)
@@ -368,6 +367,14 @@ class SandboxPythonRuntime:
                 f"Installing the {self.harness} Python runtime failed with {result.error_type or result.return_code}: "
                 f"{(result.stderr or '')[-2000:]}{(result.stdout or '')[-2000:]}"
             )
+
+    async def archives(self, platform: SandboxPlatform) -> tuple[Path, Path]:
+        """Return the host-cache paths to the Python and package archives for ``platform``, building them if needed.
+
+        ``install()`` uploads both to a sandbox; a prebuilt runtime can also be unpacked from them.
+        """
+        python_archive = await _python_archive(platform, version=self.python_version)
+        return python_archive, await self._site_packages_archive(platform)
 
     async def _site_packages_archive(self, platform: SandboxPlatform) -> Path:
         """Return the host-cache path to the package archive built for this sandbox platform."""

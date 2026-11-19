@@ -15,8 +15,7 @@ from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRuntime, SandboxSession
-from nemo_gym.agents.utils.sandbox_python import SandboxPlatform
+from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPlatform, SandboxPythonRuntime, SandboxSession
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -34,13 +33,17 @@ LOG = logging.getLogger(__name__)
 HERMES_MIN_GLIBC_MINOR = 28
 
 
+class HermesPlatformUnsupportedError(RuntimeError):
+    """The task sandbox's platform cannot run the locked Hermes wheels, so every attempt on its image fails."""
+
+
 class HermesPythonRuntime(SandboxPythonRuntime):
     """Bundle the exact upstream lock and source tree for an offline task sandbox."""
 
     async def _build_site_packages(self, platform: SandboxPlatform, destination: Path) -> None:
         if platform.libc == "gnu" and (platform.glibc_minor or 0) < HERMES_MIN_GLIBC_MINOR:
             version = f"2.{platform.glibc_minor}" if platform.glibc_minor is not None else "unknown"
-            raise RuntimeError(
+            raise HermesPlatformUnsupportedError(
                 f"Hermes requires glibc 2.{HERMES_MIN_GLIBC_MINOR} or newer for its locked wheels. "
                 f"The sandbox reported glibc {version} on {platform.arch}."
             )

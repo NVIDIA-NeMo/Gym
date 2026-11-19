@@ -98,15 +98,15 @@ def _mcp_access(name: str, *, required: bool = True) -> MCPToolAccess:
 
 
 def test_gym_mcp_tool_name_maps_hermes_names_of_granted_servers() -> None:
-    assert _gym_mcp_tool_name("mcp_weather_get_weather", ["weather"]) == "mcp__weather__get_weather"
+    assert _gym_mcp_tool_name("mcp__weather__get_weather", ["weather"]) == "mcp__weather__get_weather"
     # Hermes replaced "-" and "." in the server name; the granted name is restored.
-    assert _gym_mcp_tool_name("mcp_my_store_v1_append", ["my-store.v1"]) == "mcp__my-store.v1__append"
+    assert _gym_mcp_tool_name("mcp__my_store_v1__append", ["my-store.v1"]) == "mcp__my-store.v1__append"
     # A granted name that extends another does not lose its tools to the shorter one.
-    assert _gym_mcp_tool_name("mcp_store_b_append", ["store", "store_b"]) == "mcp__store_b__append"
-    assert _gym_mcp_tool_name("mcp_store_append", ["store", "store_b"]) == "mcp__store__append"
+    assert _gym_mcp_tool_name("mcp__store_b__append", ["store", "store_b"]) == "mcp__store_b__append"
+    assert _gym_mcp_tool_name("mcp__store__append", ["store", "store_b"]) == "mcp__store__append"
     # Built-in tools and servers that were not granted are left alone.
     assert _gym_mcp_tool_name("terminal", ["weather"]) == "terminal"
-    assert _gym_mcp_tool_name("mcp_other_get", ["weather"]) == "mcp_other_get"
+    assert _gym_mcp_tool_name("mcp__other__get", ["weather"]) == "mcp__other__get"
 
 
 class TestSanity:
@@ -530,7 +530,7 @@ class TestSanity:
                 tool_call = {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "mcp_weather_get_weather", "arguments": '{"city": "Paris"}'},
+                    "function": {"name": "mcp__weather__get_weather", "arguments": '{"city": "Paris"}'},
                 }
                 messages = [
                     {"role": "user", "content": "what is the weather"},

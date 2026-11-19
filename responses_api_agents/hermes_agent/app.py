@@ -93,7 +93,12 @@ from nemo_gym.trajectory import (
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.hermes_agent.observability import normalize_hermes_messages
 from responses_api_agents.hermes_agent.runtime import builtin_toolsets, host_python
-from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession, parse_runtime_info
+from responses_api_agents.hermes_agent.sandbox import (
+    HarnessProcessInfo,
+    HermesPlatformUnsupportedError,
+    HermesSandboxSession,
+    parse_runtime_info,
+)
 
 
 # Legacy /run grades these request rejections and masks other provider failures.
@@ -236,14 +241,15 @@ _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
 def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
-    """Rename Hermes' ``mcp_<server>_<tool>`` to Gym's ``mcp__<server>__<tool>``, which Gym strips before verify.
+    """Rename Hermes' ``mcp__<server>__<tool>`` to Gym's ``mcp__<granted server>__<tool>``, which Gym strips.
 
-    Hermes replaces "-" and "." with "_" in both parts. The server part is matched against the granted names,
-    longest first so one name that extends another cannot capture its tools; a tool name that contained "-" or
-    "." keeps Hermes' replacement.
+    Hermes replaces every character outside ``[A-Za-z0-9_]`` with "_" in both parts. The server part is matched
+    against the granted names, longest first so one name that extends another cannot capture its tools; a tool
+    name keeps Hermes' replacement. Hermes shortens a name longer than 64 characters with a hash suffix, and such a
+    name stays as Hermes wrote it.
     """
     for server in sorted(server_names, key=len, reverse=True):
-        prefix = "mcp_" + server.replace("-", "_").replace(".", "_") + "_"
+        prefix = "mcp__" + re.sub(r"[^A-Za-z0-9_]", "_", server) + "__"
         if name.startswith(prefix):
             return f"mcp__{server}__{name[len(prefix) :]}"
     return name
@@ -378,7 +384,7 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
 
 class HermesAgent(SimpleResponsesAPIAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Map native Hermes result flags and errors to Gym outcome kinds."""
+        """Map the Hermes worker's result flags and errors to Gym outcome kinds."""
         error = str(native_result.get("error") or "")
         if native_result.get("partial") and (
             error.startswith("Context length exceeded")
@@ -487,7 +493,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "model": model,
             "provider": "auto",
             "toolsets": ["hermes-cli"],
-            # Keep tool names visible to Gym verifiers and match the previous native action space.
+            # Keep tool names visible to Gym verifiers and match the action space of the previous Hermes pin.
             "agent": {"max_turns": self.config.max_turns},
             "memory": {
                 "memory_enabled": False,
@@ -612,6 +618,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             except BaseException:
                 LOG.exception("Could not clean failed Hermes setup %s; retaining session for close", agent_session_id)
                 raise AgentSessionSetupError(state, error=error) from error
+            if isinstance(error, HermesPlatformUnsupportedError):
+                # A rerun gets a sandbox from the same image: refuse the seed rather than fail with a retryable 500.
+                raise AgentSeedRejectedError(str(error)) from error
             raise
         return state
 
@@ -1024,6 +1033,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[AgentObservationBundle], None]] = None,
     ) -> NeMoGymResponse:
+        if (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY) is not None:
+            LOG.warning("Hermes host execution does not bound the run by %s", AGENT_TIMEOUT_METADATA_KEY)
         payload = self._worker_payload(body, agent_session_id=uuid4().hex, rollout_id=rollout_id, mcp_accesses=[])
         payload["terminal_backend"] = self.config.terminal_backend
         payload["api_key"] = self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym")  # pragma: allowlist secret
