@@ -1690,6 +1690,13 @@ def _strip_r2egym_infra_files_from_patch(patch: str) -> str:
     return "".join(out)
 
 
+_PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
+
+
+def _container_proxy_env() -> dict[str, str]:
+    return {var: os.environ[var] for var in _PROXY_ENV_VARS if os.environ.get(var)}
+
+
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
@@ -2541,6 +2548,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # This is needed because uv venv has hardcoded absolute paths
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst={params.swebench_setup_dir}")
+            # [CUSTOM-VENV-RO 2026-11-17] Shadow just the venv subtree read-only, same pattern
+            # as the VM sidecar's block-device mounts ("Each image shadows ONLY its venv/.venv
+            # dir, NOT the whole setup dir" -- see _spawn's block_device_mounts). Plain
+            # SWE-bench never runs inside the VM sidecar (see _uses_vm_sidecar), so unlike
+            # SWE-Gym/R2E-Gym/SWE-smith/SWE-rebench its shared venv has no QEMU-readonly-
+            # block-device backstop -- without this, an in-container `pip install` can corrupt
+            # it for every later rollout in the job. Can't make the whole setup dir read-only:
+            # run_local_evaluation writes its own logs/run_evaluation/<run_id> under
+            # {swebench_setup_dir}/SWE-bench before get_run_command's own cp-then-rm-rf copies
+            # them out (see that command's cd into /swebench_setup/SWE-bench).
+            swebench_venv = f"{params.swebench_setup_dir}/SWE-bench/venv"
+            mount_args.append(f"--mount type=bind,src={swebench_venv},dst=/swebench_setup/SWE-bench/venv,ro")
+            mount_args.append(f"--mount type=bind,src={swebench_venv},dst={swebench_venv},ro")
 
         if command.mode == "eval" and "SWE-bench_Multilingual" in data_point["dataset_name"]:
             mount_args.append(
@@ -2549,6 +2569,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             mount_args.append(
                 f"--mount type=bind,src={params.swebench_multilingual_setup_dir},dst={params.swebench_multilingual_setup_dir}"
             )
+            # [CUSTOM-VENV-RO 2026-11-17] See the matching comment on the plain-SWE-bench venv
+            # mount above -- same reasoning, same shape.
+            swebench_ml_venv = f"{params.swebench_multilingual_setup_dir}/SWE-bench_Multilingual/venv"
+            mount_args.append(
+                f"--mount type=bind,src={swebench_ml_venv},dst=/swebench_multilingual_setup/SWE-bench_Multilingual/venv,ro"
+            )
+            mount_args.append(f"--mount type=bind,src={swebench_ml_venv},dst={swebench_ml_venv},ro")
 
         if command.mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
             run_script_path = params.persistent_dir / "run_script.sh"
@@ -2891,7 +2918,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     async def _inner_responses(
         self, params: SWEBenchWrapperInstanceConfig, dataset_processor: BaseDatasetHarnessProcessor
     ) -> NeMoGymResponse:
-        maybe_report_file = await runner_ray_remote.remote(params.model_dump())
+        # options() replaces the decorator's runtime_env: keep py_executable
+        maybe_report_file = await runner_ray_remote.options(
+            runtime_env={"py_executable": sys.executable, "env_vars": _container_proxy_env()},
+        ).remote(params.model_dump())
         metrics_to_update = dict()
 
         if maybe_report_file:
