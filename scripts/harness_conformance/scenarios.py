@@ -29,6 +29,7 @@ class Scenario:
     health_expectations: dict[str, Verdict] = field(default_factory=dict)
     tier: PriorityTier = "P0"
     compaction: bool | None = None
+    native_model_timeout: bool = False
 
     def default_responses(self, *, final_responses: int = 1) -> list[dict]:
         """Build ordinary replies before execution; compaction requires an explicit schedule."""
@@ -108,6 +109,16 @@ SCENARIOS = (
         tool_steps=14,
         tier="P1",
         compaction=True,
+    ),
+    Scenario(
+        "native_model_call_timeout",
+        "A harness-native model deadline fires before the scripted server and retains original failure events.",
+        tool_steps=0,
+        steps=False,
+        tier="P1",
+        terminal_error=True,
+        evidence=("TE-1", "TE-8"),
+        native_model_timeout=True,
     ),
 )
 

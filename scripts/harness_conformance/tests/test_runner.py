@@ -882,7 +882,9 @@ def test_checker_error_preserves_independent_ci_measurements(
 ):
     from scripts.harness_conformance import ci_table, runner
 
-    scenarios = tuple(s for s in SCENARIOS if s.name != "context_compaction") + (SCENARIO["context_compaction"],)
+    scenarios = tuple(s for s in SCENARIOS if s.name != "context_compaction" and not s.native_model_timeout) + (
+        SCENARIO["context_compaction"],
+    )
     monkeypatch.setattr(runner, "SCENARIOS", scenarios)
     monkeypatch.setattr(ci_table, "SCENARIOS", scenarios)
     monkeypatch.setattr(runner, "run_process", lambda *args, **kwargs: {"returncode": 0, "timed_out": False})

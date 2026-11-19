@@ -145,6 +145,24 @@ def _config(
     return OmegaConf.to_container(OmegaConf.create(config), resolve=True, throw_on_missing=True)
 
 
+async def _collect_episode(config, probe, *, directory: Path, timeout: float, native_timeout: bool) -> None:
+    from nemo_gym.rollouts import IncompleteEvaluationError, RolloutCollectionHelper
+
+    try:
+        async with asyncio.timeout(timeout):
+            await RolloutCollectionHelper().run_from_config(config)
+    except IncompleteEvaluationError:
+        if not native_timeout:
+            raise
+        from .native_timeouts import native_timeout_observed
+
+        probe.save()
+        witness = json.loads((directory / "witness.json").read_text())
+        if not native_timeout_observed(witness, {"timed_out": False}):
+            raise
+        # A witnessed native failure has no score; conformance inspects its actual sidecar.
+
+
 async def run_episode(*, harness: str, scenario_name: str, directory: Path, timeout: float) -> None:
     """Start fresh servers and let Gym write the rollout without modifying the harness."""
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
@@ -203,7 +221,12 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                     probe.agent_responses.append(
                         response.model_dump(
                             mode="json",
-                            include={"status": True, "error": True, "metadata": {AGENT_OUTCOME_METADATA_KEY}},
+                            include={
+                                "status": True,
+                                "error": True,
+                                "failure_report": True,
+                                "metadata": {AGENT_OUTCOME_METADATA_KEY},
+                            },
                         )
                     )
                     probe.save()
@@ -220,9 +243,13 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             environment_cls = LegacyAgentEnvironmentServer
             environment_config_cls = LegacyAgentEnvironmentServerConfig
         from nemo_gym.client import get_global_aiohttp_client, setup_server_client
-        from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.rollouts import RolloutCollectionConfig
 
         client = setup_server_client()
+        if scenario.native_model_timeout:
+            from .native_timeouts import observe_caller
+
+            client = observe_caller(client, probe)
         agent = agent_cls(
             config=config_cls.model_validate(config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]),
             server_client=client,
@@ -249,6 +276,11 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                 "probe_agent": agent.setup_webserver(),
                 "probe_environment": environment.setup_webserver(),
             }
+            if scenario.native_model_timeout:
+                from .native_timeouts import ReplyWitness
+
+                agent.setup_exception_middleware(apps["probe_agent"])
+                apps["probe_agent"] = ReplyWitness(apps["probe_agent"], probe)
             if scenario.judge_verifier:
                 apps["judge_model"] = probe.judge_app()
             for name, app in apps.items():
@@ -267,20 +299,24 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                 OmegaConf.merge(scenario.task(), settings.get("task_overrides", {})), resolve=True
             )
             inputs.write_text(json.dumps(task) + "\n")
-            async with asyncio.timeout(timeout + 10):
-                await RolloutCollectionHelper().run_from_config(
-                    RolloutCollectionConfig(
-                        agent_name="probe_agent",
-                        input_jsonl_fpath=str(inputs),
-                        output_jsonl_fpath=str(directory / "rollouts.jsonl"),
-                        num_samples_in_parallel=1,
-                        num_repeats=1,
-                        resume_from_cache=False,
-                        disable_aggregation=True,
-                        disable_health_check=True,
-                        route_failures_to_sidecar=True,
-                    )
-                )
+            await _collect_episode(
+                RolloutCollectionConfig(
+                    agent_name="probe_agent",
+                    input_jsonl_fpath=str(inputs),
+                    output_jsonl_fpath=str(directory / "rollouts.jsonl"),
+                    num_samples_in_parallel=1,
+                    num_repeats=1,
+                    resume_from_cache=False,
+                    disable_aggregation=True,
+                    disable_health_check=True,
+                    route_failures_to_sidecar=True,
+                ),
+                probe,
+                directory=directory,
+                timeout=timeout + 10,
+                native_timeout=scenario.native_model_timeout,
+            )
+
         finally:
             for server in servers:
                 server.should_exit = True

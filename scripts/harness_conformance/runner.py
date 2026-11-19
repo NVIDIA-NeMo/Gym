@@ -104,14 +104,29 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         checks += inspect_compaction(
             witness, record, expected=scenario.compaction, policy_responses=scenario.tool_steps + 1
         )
+    diagnostic_checks = []
+    if scenario.native_model_timeout:
+        from .native_timeouts import inspect_native_timeout
+
+        required = {"episode.initialized", "model.reached"}
+        diagnostic_checks = [check for check in checks if check["id"] not in required]
+        checks = [check for check in checks if check["id"] in required]
+        checks += inspect_native_timeout(witness, record, execution)
     summary, report = None, None
     if record is not None:
         destination, summary = inspect_bundle(bundle, output=directory / "evidence", scope=scope)
         report = str(destination.relative_to(directory) / "evidence_summary.json")
     evidence = {}
     for key in scenario.evidence:
-        verdict = artifact["evidence"][key]["verdict"]
-        evidence[key] = {"verdict": verdict, "artifact_verdict": verdict}
+        artifact_verdict = artifact["evidence"][key]["verdict"]
+        verdict = artifact_verdict
+        if scenario.native_model_timeout:
+            verdict = (
+                "fulfilled"
+                if all(check["status"] in {"pass", "not_applicable"} for check in checks if key in check["evidence"])
+                else "not_fulfilled"
+            )
+        evidence[key] = {"verdict": verdict, "artifact_verdict": artifact_verdict}
     behavioral = [c for c in checks if c["kind"] == "behavioral"]
     behavior_passed = all(c["status"] in ("pass", "not_applicable") for c in behavioral)
     p0_passed = gate_passes(checks)
@@ -124,6 +139,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         "p0_verdict": "fulfilled" if p0_passed else "not_fulfilled",
         "issues": [reason for c in checks if c["status"] == "fail" for reason in c["reasons"]],
         "checks": checks,
+        "diagnostic_checks": diagnostic_checks,
         "behavioral_status": "pass" if behavior_passed else "fail",
         "execution": execution,
         "delivery": delivery,
@@ -281,7 +297,17 @@ def run_suite(
             "multimodal, parallelism and deployment health are outside this suite",
         ],
     }
-    (output / "conformance_report.md").write_text(render_matrices(rows))
+    report_text = render_matrices(rows)
+    diagnostics = [
+        f"- {harness}/{result['scenario']}: `{check['id']}` ({check['status']})"
+        for harness, row in rows.items()
+        for result in row["scenarios"]
+        for check in result.get("diagnostic_checks", [])
+        if check["status"] == "fail"
+    ]
+    if diagnostics:
+        report_text += "\n## Ancillary diagnostics (not scenario requirements)\n\n" + "\n".join(diagnostics) + "\n"
+    (output / "conformance_report.md").write_text(report_text)
     temporary = output / ".conformance_summary.json.tmp"
     temporary.write_text(_json(summary))
     os.replace(temporary, output / "conformance_summary.json")
