@@ -453,6 +453,14 @@ class AnthropicConverter:
     def _anthropic_tool_result_content(self, content: Any) -> Any:
         if isinstance(content, str):
             return content
+        # A tool search result names the tools it loaded (Anthropic's `tool_reference` blocks). The converted request
+        # declares every tool as a function from the start, so the reference becomes a note naming the tool.
+        content = [
+            {"type": "text", "text": f"[tool loaded: {block.get('tool_name')}]"}
+            if block.get("type") == "tool_reference"
+            else block
+            for block in content
+        ]
         if all(block.get("type") == "text" for block in content):
             return "\n".join(block.get("text", "") for block in content)
 
