@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
+from nemo_gym.config.global_config import environment_servers_by_agent
 from tests.helpers.agent_environment_migration import (
     AGENT_CONFIG,
     FOLLOWING,
@@ -57,7 +57,7 @@ def test_switch_replaces_a_simple_agent_relay(tmp_path: Path, capsys: pytest.Cap
     assert server_config.default_episode_timeout_seconds == 21600
     assert server_config.cleanup_timeout_seconds == 180
     resolved = _parse(config, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"my_simple_agent": ["my_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"my_simple_agent": ["my_environment_server"]}
     assert "relays switched: 1, staying on the relay: 0" in capsys.readouterr().out
 
 

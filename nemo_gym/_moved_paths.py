@@ -532,6 +532,19 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     },
     "nemo_gym.rollout_collection": {
         **_names("nemo_gym.artifacts.rollout_rows", "0.8.0", "_MODEL_CALL_PAYLOAD_KEYS _strip_capture_payloads"),
+        # rollout_collection imported these for routing code that moved to global_config.
+        **_names(
+            "nemo_gym.config.config_types",
+            "0.8.0",
+            "AgentWithoutEnvironmentServerError AmbiguousEnvironmentServerError",
+        ),
+        # Moved to global_config, and lost their leading underscore because other modules call them now.
+        "_environment_servers_by_agent": MovedPath(
+            new="nemo_gym.config.global_config:environment_servers_by_agent", since="0.8.0"
+        ),
+        "_environment_server_for_agent": MovedPath(
+            new="nemo_gym.config.global_config:environment_server_for_agent", since="0.8.0"
+        ),
         # Moved, and still imported by rollout_collection for its own use.
         **_names(
             "nemo_gym.artifacts.rollout_rows",

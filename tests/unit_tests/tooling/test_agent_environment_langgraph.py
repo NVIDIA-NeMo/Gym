@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
+from nemo_gym.config.global_config import environment_servers_by_agent
 from tests.helpers.agent_environment_migration import (
     SCRIPT,
     _parse,
@@ -46,7 +46,7 @@ def test_langgraph_flavor_composes_with_one_session_environment(tmp_path: Path, 
     assert migration.main([str(config)]) == 0
     assert config.read_text() == before
     resolved = _parse(config, composition, strict=True)
-    assert _environment_servers_by_agent(resolved) == {f"{flavor}_agent": ["session_environment"]}
+    assert environment_servers_by_agent(resolved) == {f"{flavor}_agent": ["session_environment"]}
     agent = resolved[f"{flavor}_agent"].responses_api_agents.langgraph_agent
     assert agent.resources_server is None
 
@@ -65,7 +65,7 @@ def test_langgraph_pairings_use_sessions_without_grants(tmp_path: Path, flavor: 
     model = tmp_path / "model.yaml"
     model.write_text("policy_model_name: test-model\n")
     resolved = _parse(path, model, strict=True)
-    fronting = _environment_servers_by_agent(resolved)
+    fronting = environment_servers_by_agent(resolved)
     assert len(fronting) == 1
     agent_name, environments = next(iter(fronting.items()))
     assert len(environments) == 1
