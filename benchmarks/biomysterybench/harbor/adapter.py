@@ -48,6 +48,8 @@ class HarborBMBTask:
     source: BMBTask
     docker_image: str
     template_dir: str | Path = Path(__file__).parent / "task-template"
+    skip_data: bool = False
+    data_path_prefix: str | None = None
 
     @property
     def id(self) -> str:
@@ -66,18 +68,18 @@ class HarborBMBTask:
             allowed_domains=json.dumps(allowed_domains),
         )
 
-    def environment_data(self, *, skip_data: bool) -> str:
+    @property
+    def environment_data(self) -> str:
         """Return the task data path visible to the agent."""
-        if skip_data:
-            return f"/mnt/s3-data/nemotron-life-science/harbor-data/biomysterybench/{self.id}/environment/data"
+        if self.skip_data and self.data_path_prefix:
+            return str(Path(self.data_path_prefix) / self.id / "environment/data")
         return "/app/data"
 
-    def render_instruction(self, *, skip_data: bool) -> str:
-        """Render the task question with the data location visible to the agent."""
-        instruction_template = (self.template_dir / "instruction.md").read_text().strip()
-        return instruction_template.format(
-            question=self.source.question, data_path=self.environment_data(skip_data=skip_data)
-        )
+    @property
+    def instruction(self) -> str:
+        """Render the task question and data location with a trailing newline."""
+        instruction_template = (self.template_dir / "instruction.md").read_text().strip() + "\n"
+        return instruction_template.format(question=self.source.question, data_path=self.environment_data)
 
     @property
     def task_data(self) -> dict[str, str]:
@@ -85,22 +87,27 @@ class HarborBMBTask:
         return {"question": self.source.question, "answer_rubric": self.source.answer_rubric}
 
     def write(
-        self, output_dir: Path, force: bool = False, *, skip_data: bool = False, data_repo_id: str | None = None
+        self,
+        output_dir: Path,
+        force: bool = False,
+        *,
+        data_repo_id: str | None = None,
     ) -> Path:
         """Reuse completed tasks unless forced, rebuilding incomplete task directories."""
         task_dir = output_dir / self.id
         done_marker = task_dir / ".done"
 
         if task_dir.exists():
-            if not force and done_marker.is_file() and (skip_data or (task_dir / "environment/data").is_dir()):
+            if not force and done_marker.is_file() and (self.skip_data or (task_dir / "environment/data").is_dir()):
+                (task_dir / "instruction.md").write_text(self.instruction)
                 return task_dir
             shutil.rmtree(task_dir)
 
         shutil.copytree(self.template_dir, task_dir, dirs_exist_ok=True)
 
         (task_dir / "task.toml").write_text(self.toml + "\n")
-        (task_dir / "instruction.md").write_text(self.render_instruction(skip_data=skip_data) + "\n")
-        if not skip_data:
+        (task_dir / "instruction.md").write_text(self.instruction)
+        if not self.skip_data:
             archive_path = Path(self.source.data)
             if data_repo_id is not None:
                 archive_path = Path(
@@ -139,6 +146,9 @@ class HarborBMB:
     skip_data: bool = False
     """Skip downloading and extracting data archives; fetch only problems.csv and supply task data separately."""
 
+    data_path_prefix: str | None = None
+    """Root containing <task-id>/environment/data when skip_data is enabled; None uses /app/data."""
+
     _data_repo_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
@@ -155,7 +165,12 @@ class HarborBMB:
     @property
     def tasks(self) -> Iterator[HarborBMBTask]:
         for source_task in BMBTask.from_dir(self.data_dir):
-            yield HarborBMBTask(source_task, docker_image=self.docker_image)
+            yield HarborBMBTask(
+                source_task,
+                docker_image=self.docker_image,
+                skip_data=self.skip_data,
+                data_path_prefix=self.data_path_prefix,
+            )
 
     def write(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -170,7 +185,6 @@ class HarborBMB:
                 self.output_dir,
                 data_repo_id=self._data_repo_id,
                 force=self.overwrite,
-                skip_data=self.skip_data,
             )
             task_count += 1
 
@@ -185,6 +199,7 @@ def prepare(
     limit: int | None = None,
     overwrite: bool = False,
     skip_data: bool = False,
+    data_path_prefix: str | None = None,
 ) -> Path:
     """Prepare Harbor tasks and return their output directory."""
     benchmark = HarborBMB(
@@ -194,6 +209,7 @@ def prepare(
         limit=limit,
         overwrite=overwrite,
         skip_data=skip_data,
+        data_path_prefix=data_path_prefix,
     )
     benchmark.write()
     return Path(benchmark.output_dir)
