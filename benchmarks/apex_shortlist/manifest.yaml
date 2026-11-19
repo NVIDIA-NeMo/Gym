@@ -58,7 +58,6 @@ setups:
   description: MathArena APEX Shortlist math problems with symbolic-only math-verify grading, solved by the OpenCode harness in agent sessions.
   primary_metric: pass@1[avg-of-16]/symbolic_accuracy
   requirements:
-    gpu: false
     network: allowlist
   agent_server: opencode_agent
   datasets:
@@ -74,7 +73,6 @@ setups:
   description: MathArena APEX Shortlist math problems with symbolic-only math-verify grading, solved by OpenCode through the sandboxed OpenCode agent server.
   primary_metric: pass@1[avg-of-16]/symbolic_accuracy
   requirements:
-    gpu: false
     network: allowlist
   agent_server: opencode_sandboxed_agent
   datasets:
@@ -90,7 +88,6 @@ setups:
   description: MathArena APEX Shortlist math problems with symbolic-only math-verify grading, solved by the pi harness in agent sessions.
   primary_metric: pass@1[avg-of-16]/symbolic_accuracy
   requirements:
-    gpu: false
     network: allowlist
   agent_server: pi_agent
   datasets:
@@ -106,7 +103,6 @@ setups:
   description: MathArena APEX Shortlist math problems with symbolic-only math-verify grading, solved by pi through the sandboxed pi agent server.
   primary_metric: pass@1[avg-of-16]/symbolic_accuracy
   requirements:
-    gpu: false
     network: allowlist
   agent_server: pi_sandboxed_agent
   datasets:

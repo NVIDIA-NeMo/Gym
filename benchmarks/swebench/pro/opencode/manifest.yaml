@@ -63,7 +63,6 @@ setups:
   config_path: ../hermes.yaml
   description: SWE-bench Pro test-split software engineering tasks using prepared repair prompts, the Hermes harness in the benchmark's task sandbox, and binary patch-resolution scoring.
   requirements:
-    gpu: false
     network: allowlist
   dataset_owner: null
   agent_server: hermes_agent
@@ -77,7 +76,6 @@ setups:
   config_path: ../nooa.yaml
   description: SWE-bench Pro test-split software engineering tasks using prepared repair prompts, the NOOA harness in the benchmark's task sandbox, and binary patch-resolution scoring.
   requirements:
-    gpu: false
     network: allowlist
   dataset_owner: null
   agent_server: nooa_agent

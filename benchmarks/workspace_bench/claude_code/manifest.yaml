@@ -62,7 +62,6 @@ setups:
   config_path: ../hermes.yaml
   description: Workspace-Bench-Lite English workspace tasks graded against rubrics by the upstream agent-as-a-judge, run with the Hermes harness.
   requirements:
-    gpu: false
     network: allowlist
 - name: workspace_bench/pi
   config_path: ../pi.yaml

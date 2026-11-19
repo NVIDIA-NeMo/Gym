@@ -55,7 +55,6 @@ setups:
   config_path: ../hermes.yaml
   description: SWE-bench Verified test-split software engineering tasks using prepared repair prompts, the Hermes harness in the benchmark's task sandbox, and binary patch-resolution scoring.
   requirements:
-    gpu: false
     network: allowlist
   agent_server: hermes_agent
   datasets:
