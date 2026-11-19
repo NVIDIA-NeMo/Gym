@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from harbor.models.task.config import NetworkMode, NetworkPolicy
 
-from benchmarks.skillsbench.environment import SkillsBenchSandboxEnvironment
+from benchmarks.skillsbench.environment import MAVEN_MIRROR_SETTINGS, SkillsBenchSandboxEnvironment
 from responses_api_agents.harbor_agent.tests.test_environment import _make_environment, _provider
 from responses_api_agents.harbor_agent.tests.test_environment import _reset_fake_provider as _reset_fake_provider
 
@@ -22,7 +23,9 @@ class TestSkillsBenchSkillModes:
 
     @pytest.mark.asyncio
     async def test_no_skill_failure_stops_sandbox(self, tmp_path):
-        env = _make_environment(tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill")
+        env = _make_environment(
+            tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill", maven_mirror=False
+        )
         env.exec = AsyncMock(return_value=SimpleNamespace(return_code=1, stderr="denied", stdout=""))
         with pytest.raises(RuntimeError, match="denied"):
             await env.start(force_build=False)
@@ -74,6 +77,47 @@ class TestSkillsBenchSkillModes:
                 await env.start(force_build=False)
         assert env._sandbox is not None
         await env.stop(delete=True)
+        assert _provider().closed_handles == ["sbx-123"]
+
+
+def _maven_mirror_commands():
+    return [call["command"] for call in _provider().exec_calls if "/root/.m2/settings.xml" in call["command"]]
+
+
+class TestSkillsBenchMavenMirror:
+    @pytest.mark.asyncio
+    async def test_installs_mirror_without_replacing_existing_settings(self, tmp_path):
+        env = _make_environment(tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill")
+        await env.start(force_build=False)
+        await env.stop(delete=True)
+        [command] = _maven_mirror_commands()
+        assert "maven-central.storage-download.googleapis.com" in MAVEN_MIRROR_SETTINGS.read_text()
+
+        root = tmp_path / "root"
+        local = command.replace("/root/", f"{root}/")
+        subprocess.run(["bash", "-c", local], check=True)
+        settings = root / ".m2" / "settings.xml"
+        assert settings.read_text() == MAVEN_MIRROR_SETTINGS.read_text()
+
+        settings.write_text("<settings>task-owned</settings>")
+        subprocess.run(["bash", "-c", local], check=True)
+        assert settings.read_text() == "<settings>task-owned</settings>"
+
+    @pytest.mark.asyncio
+    async def test_opt_out_leaves_maven_alone(self, tmp_path):
+        env = _make_environment(
+            tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill", maven_mirror=False
+        )
+        await env.start(force_build=False)
+        await env.stop(delete=True)
+        assert _maven_mirror_commands() == []
+
+    @pytest.mark.asyncio
+    async def test_install_failure_stops_sandbox(self, tmp_path):
+        env = _make_environment(tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill")
+        env.exec = AsyncMock(return_value=SimpleNamespace(return_code=1, stderr="read-only", stdout=""))
+        with pytest.raises(RuntimeError, match="Maven mirror: read-only"):
+            await env.start(force_build=False)
         assert _provider().closed_handles == ["sbx-123"]
 
 
