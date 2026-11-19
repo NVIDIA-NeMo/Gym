@@ -1058,6 +1058,26 @@ async def test_a_session_still_being_graded_past_its_deadline_is_checkpointed_wi
     assert _snapshotted(provider) == [] and _running_forks(provider) == []
 
 
+async def test_a_session_past_its_deadline_whose_verify_claimed_the_task_sandbox_is_left_out_of_a_commit(
+    tmp_path: Path,
+) -> None:
+    provider = FakeSnapshotProvider()
+    server = make_server(provider, checkpointing_config(tmp_path / "state"))
+    await _seeded(server, ["a", "b"])
+    # A verify claims the sandbox of "a" and takes it out of the registry until it releases it. It still runs,
+    # and the checkpointer still tracks it.
+    server._claim_task_sandbox("a")
+    sandbox = server._session_id_to_sandbox.pop("a")
+    server._open_task_sessions["a"] = monotonic() - 1
+
+    states = await server.export_session_states(["a", "b"], checkpoint_id="c1")
+
+    # Past the deadline the provider may have ended it, and a snapshot that fails would fail the commit for "b" too.
+    assert sorted(states) == ["b"] and _snapshotted(provider) == [server._session_id_to_sandbox["b"].sandbox_id]
+    await server._release_task_sandbox("a", sandbox)
+    await server.shutdown()
+
+
 async def test_task_state_a_checkpoint_cannot_store_fails_the_export_before_any_snapshot(tmp_path: Path) -> None:
     class UnstorableTaskState(NotesServer):
         def _export_task_sandbox_state(self, session_id: str) -> dict[str, JsonValue]:

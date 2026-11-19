@@ -319,10 +319,19 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
             # all. A session whose verify stopped the sandbox has nothing to snapshot, and one still being graded
             # past the deadline has not expired, so its capture stays in the checkpoint.
             and (
-                session_id not in self._session_id_to_sandbox
+                not self._has_task_sandbox_to_snapshot(session_id)
                 or self._open_task_sessions.get(session_id, float("inf")) > monotonic()
             )
         )
+
+    def _has_task_sandbox_to_snapshot(self, session_id: str) -> bool:
+        """Whether a commit would snapshot a sandbox for the session.
+
+        The checkpointer is asked too, not the registry alone: a verify that claimed the sandbox takes it out of the
+        registry while it still runs, until ``_release_task_sandbox``.
+        """
+        tracked = self._checkpointer().get(self._sandbox_key(session_id))
+        return session_id in self._session_id_to_sandbox or (tracked is not None and tracked.started)
 
     def _session_state(self, session_id: str) -> "_CheckpointedSession":
         """What a commit exports for the session, apart from its sandboxes; raises for what it cannot store."""
