@@ -978,14 +978,17 @@ def _validate_manifest_location(manifest_path: Path, manifest: EnvironmentManife
         )
 
 
-def _validate_listing(manifest_path: Path, main: EnvironmentManifest) -> None:
+def _validate_listing(
+    manifest_path: Path, main: EnvironmentManifest, selected: ManifestSetup | ManifestProtocol | None = None
+) -> None:
     """Check that each setup and protocol a main manifest lists is a config of its catalog with no manifest of its own.
 
     A listed config is named as the catalog names it without a manifest, so `gym eval run --benchmark` keeps taking
-    the same name. A manifest of its own would make the config a second catalog entry with the same name.
+    the same name. A manifest of its own would make the config a second catalog entry with the same name. With
+    ``selected``, only that setup or protocol is checked.
     """
     catalog_directory = _catalog_directory(manifest_path)
-    for listed in main.listed_configs():
+    for listed in main.listed_configs() if selected is None else (selected,):
         config_path = resolve_manifest_config_path(manifest_path, resolve_listed_manifest(main, listed))
         if not config_path.is_file():
             raise EnvironmentValidationError(
@@ -1133,8 +1136,7 @@ def validate_environment(
         if config_path is None
         else Path(config_path).expanduser().resolve()
     )
-    if listed is None:
-        _validate_listing(resolved_manifest_path, main)
+    _validate_listing(resolved_manifest_path, main, listed)
     if not resolved_config_path.is_file():
         raise EnvironmentValidationError(f"Gym config was not found: {resolved_config_path}")
 

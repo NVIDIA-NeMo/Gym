@@ -1344,6 +1344,9 @@ def test_a_listed_config_keeps_the_name_the_catalog_gives_its_config(tmp_path: P
 
     with pytest.raises(EnvironmentValidationError, match="'demo/renamed' must be named 'demo/variant'"):
         validate_environment(main_path)
+    # Selecting the setup by name runs the same check, as `gym env validate demo/renamed` does.
+    with pytest.raises(EnvironmentValidationError, match="'demo/renamed' must be named 'demo/variant'"):
+        validate_environment(main_path, name="demo/renamed")
 
 
 def test_a_listed_config_has_no_manifest_of_its_own(tmp_path: Path) -> None:
@@ -1357,6 +1360,8 @@ def test_a_listed_config_has_no_manifest_of_its_own(tmp_path: Path) -> None:
 
     with pytest.raises(EnvironmentValidationError, match="also has a manifest of its own"):
         validate_environment(main_path)
+    with pytest.raises(EnvironmentValidationError, match="also has a manifest of its own"):
+        validate_environment(main_path, name="demo/variant")
 
 
 def test_a_listed_config_must_exist(tmp_path: Path) -> None:
