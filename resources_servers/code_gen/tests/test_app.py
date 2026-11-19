@@ -380,7 +380,7 @@ class TestSandboxVerify:
         ((args, kwargs),) = calls
         assert args[2] == timeout
         assert (kwargs["memory_limit_mb"], kwargs["deadline_s"]) == (memory_limit_mb, deadline_s)
-        assert res.limits == {"time_limit_s": timeout, "memory_limit_mb": memory_limit_mb}
+        assert res.limits.model_dump() == {"time_limit_s": timeout, "memory_limit_mb": memory_limit_mb}
 
     async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
         async def _failing(*args, **kwargs):
