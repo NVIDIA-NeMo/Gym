@@ -131,6 +131,18 @@ class AgentRunSeeds(NotesServer):
             return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
 
+class GradesAfterCapture(NotesServer):
+    """Holds a verify once it captured the note and stopped the task sandbox, as a grading that takes long does."""
+
+    grading: Any = None
+    finish: Any = None
+
+    async def stop_task_sandbox_after_capture(self, session_id: str) -> None:
+        await super().stop_task_sandbox_after_capture(session_id)
+        self.grading.set()
+        await self.finish.wait()
+
+
 def make_server(
     provider: Any, global_config: dict, *, server_type: type[NotesServer] = NotesServer, **fields: Any
 ) -> NotesServer:
@@ -998,6 +1010,36 @@ async def test_a_session_past_its_deadline_that_no_request_swept_is_left_out_of_
     assert sorted(states) == ["b"] and _snapshotted(provider) == [server._session_id_to_sandbox["b"].sandbox_id]
     assert not server._task_sessions["a"].expired, "the sweep still closes the session when a request arrives"
     await server.shutdown()
+
+
+async def test_a_session_still_being_graded_past_its_deadline_is_checkpointed_with_its_capture(tmp_path: Path) -> None:
+    provider = FakeSnapshotProvider()
+    config = checkpointing_config(tmp_path / "state")
+    grading, finish = asyncio.Event(), asyncio.Event()
+    server = make_server(provider, config, server_type=GradesAfterCapture, grading=grading, finish=finish)
+    async with _http(server) as http:
+        seeded = await _post_seed(http, _seed())
+        verify = asyncio.create_task(http.post("/ng-rollout/r/verify", json=_verify_body(), cookies=seeded.cookies))
+        async with asyncio.timeout(10):
+            await grading.wait()
+        # The grading outlasts the lifetime of the task sandbox, which verify already stopped.
+        server._open_task_sessions["rs-1"] = monotonic() - 1
+        await _checkpoint(http, config, tmp_path / "ckpt")
+        expired = server._task_sessions["rs-1"].expired
+        finish.set()
+        graded = await verify
+
+    restored = make_server(provider, config)
+    async with _http(restored) as http:
+        await _restore(http, config, tmp_path / "ckpt")
+        again = await restored.capture_task_sandbox_patch(
+            "rs-1", AsyncMock(side_effect=AssertionError("captured again"))
+        )
+
+    assert not expired, "the sweep leaves a session alone while its verify runs"
+    assert graded.status_code == 200 and graded.json()["reward"] == 1.0, graded.text
+    assert again == "hello", "a verify replayed after the restore grades the capture the checkpoint saved"
+    assert _snapshotted(provider) == [] and _running_forks(provider) == []
 
 
 async def test_task_state_a_checkpoint_cannot_store_fails_the_export_before_any_snapshot(tmp_path: Path) -> None:

@@ -315,9 +315,14 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
             and record.seed is not None
             and record.response is not None
             and not record.expired
-            # Past its deadline the provider may have ended the sandbox, and the sweep that marks the session expired
-            # runs only when a request arrives: without this, one such session would fail the commit for all.
-            and self._open_task_sessions.get(session_id, float("inf")) > monotonic()
+            # Past its deadline the provider may have ended the task sandbox, and the sweep that marks the session
+            # expired runs only when a request arrives: without this, one such session would fail the commit for
+            # all. A session whose verify stopped the sandbox has nothing to snapshot, and one still being graded
+            # past the deadline has not expired, so its capture stays in the checkpoint.
+            and (
+                session_id not in self._session_id_to_sandbox
+                or self._open_task_sessions.get(session_id, float("inf")) > monotonic()
+            )
         )
 
     def _session_state(self, session_id: str) -> "_CheckpointedSession":
