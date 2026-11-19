@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Auto Ontology's non-reasoning role on a model of its own, as auto-ontology-eval runs it (Claude Sonnet 5.5 beside
+# Claude Opus 5.5), in place of the policy. Chain it after an Auto Ontology config and set
+# auto_ontology_non_reasoning_model_name. The model is served at the policy's endpoint, with the policy's key, through a
+# Gym Model Server of its own, so Gym captures its calls on the rollout's route too.
+
+auto_ontology_non_reasoning_model_name: ???
+
+auto_ontology_non_reasoning_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${auto_ontology_non_reasoning_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+auto_ontology_agent:
+  responses_api_agents:
+    auto_ontology_agent:
+      non_reasoning_model_server:
+        type: responses_api_models
+        name: auto_ontology_non_reasoning_model

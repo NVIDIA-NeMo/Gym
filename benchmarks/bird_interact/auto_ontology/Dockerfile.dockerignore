@@ -1,3 +1,8 @@
-# The build context is the repository root: send only this directory.
+# The build context is the repository root: send only this directory, and the releases' database files (schema, column
+# meanings and knowledge base, from Hugging Face). The ground truth, in data/*.jsonl, stays out.
 *
 !benchmarks/bird_interact/auto_ontology/
+!benchmarks/bird_interact/data/*/databases/
+# Only each database's own files: not the release's task rows or the download cache.
+benchmarks/bird_interact/data/*/databases/*.jsonl
+benchmarks/bird_interact/data/*/databases/.cache

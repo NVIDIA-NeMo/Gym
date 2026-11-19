@@ -123,11 +123,22 @@ grades it as it grades the query of any agent.
    `auto_ontology_api_key` is the key of the embedding endpoint that the catalog was built with. Retrieval calls it
    for each search.
 
+Auto Ontology's interactive pipeline, the one auto-ontology-eval runs on BIRD-Interact, runs in place of its ReAct
+agent with `auto_ontology_interactive.yaml` (Lite) and `full_auto_ontology_interactive.yaml` (Full) in c-Interact, and
+`full_auto_ontology_a_interact.yaml` (Full) in a-Interact; see the agent's README, "The interactive pipeline". Each
+chains `auto_ontology/interactive.yaml`. To run Auto Ontology's non-reasoning role on a model of its own, as
+auto-ontology-eval does, add `--config benchmarks/bird_interact/auto_ontology/non_reasoning_model.yaml` and
+`++auto_ontology_non_reasoning_model_name=<model>`.
+
 What differs from `simple_agent`:
 
-- **The catalog holds the schema only**, as c-Interact shows it to an agent. It holds no column meanings, which
-  c-Interact does not show, and no knowledge base, part of which each task hides. The agent gets the task's visible
-  knowledge from the first request, as evidence. auto-ontology-eval builds its BIRD-Interact catalog the same way.
+- **The catalog holds the schema**, as c-Interact shows it to an agent, and no knowledge base, part of which each task
+  hides. The agent gets the task's visible knowledge from the first request. `build_image.sh --column-meanings`
+  builds a catalog that also holds the release's column meanings as column descriptions, tagged
+  `nemo-gym/bird-interact-catalog:<release>-meanings`, as auto-ontology-eval builds its catalog
+  (`auto_ontology/column_meanings.py` writes the same descriptions). c-Interact never shows an agent the column
+  meanings, and a-Interact charges for them, so that catalog gives Auto Ontology what other agents do not get: report
+  its scores as "catalog built with the column meanings".
 - **Prompts.** The agent reads the ADK's texts (the database, the visible knowledge, the request, the debug message
   and the follow-up question) and gives them to Auto Ontology's own prompts. The ADK's instruction does not reach the
   model. A section on asking the user, with the questions that are left, is added to Auto Ontology's system prompt.

@@ -67,7 +67,11 @@ def test_each_release_runs_its_prepared_rows_on_its_own_image(config: str, relea
     # build_image.sh tags the image for the release, as the Lite config names it.
     lite = yaml.safe_load((BENCHMARK_DIR / "auto_ontology_agent.yaml").read_text())
     assert lite["auto_ontology_image"] == "nemo-gym/bird-interact-catalog:${bird_interact_release}"
-    assert 'TAG="${3:-nemo-gym/bird-interact-catalog:$RELEASE}"' in BUILD_IMAGE
+    # A catalog with the column meanings gets its own tag, so it never stands in for the one without.
+    assert (
+        'TAG="${3:-nemo-gym/bird-interact-catalog:$RELEASE$([[ $COLUMN_MEANINGS == true ]] && echo -meanings)}"'
+        in (BUILD_IMAGE)
+    )
 
 
 def test_the_pairing_runs_c_interact_on_the_auto_ontology_agent_alone():
@@ -77,3 +81,38 @@ def test_the_pairing_runs_c_interact_on_the_auto_ontology_agent_alone():
     assert loaded["bird_interact_a_interact"] is None
     server = loaded["bird_interact_c_interact"]["environment_servers"]["bird_interact"]
     assert server["agent_server"] == {"name": "auto_ontology_agent"}
+
+
+def test_the_interactive_pairings_run_auto_ontology_eval_s_pipeline_with_its_flags():
+    fragment = yaml.safe_load((BENCHMARK_DIR / "auto_ontology" / "interactive.yaml").read_text())
+    agent = fragment["auto_ontology_agent"]["responses_api_agents"]["auto_ontology_agent"]
+
+    assert agent["pipeline"] == "interactive"
+    assert agent["knowledge_dir"] == "benchmarks/bird_interact/data/${bird_interact_release}/databases"
+    # auto-ontology-eval's BIRD-Interact flags, as strings for the sandbox's environment.
+    assert agent["environment"]["INTERACTIVE"] == "true"
+    assert all(isinstance(value, str) for value in agent["environment"].values())
+    # Each release and mode chains the fragment after its own config, so the fragment's settings win.
+    for config, base in (
+        ("auto_ontology_interactive.yaml", "auto_ontology_agent.yaml"),
+        ("full_auto_ontology_interactive.yaml", "full_auto_ontology_agent.yaml"),
+        ("full_auto_ontology_a_interact.yaml", "full_a_interact.yaml"),
+    ):
+        paths = yaml.safe_load((BENCHMARK_DIR / config).read_text())["config_paths"]
+        assert paths[0] == f"benchmarks/bird_interact/{base}"
+        assert paths[-1] == "benchmarks/bird_interact/auto_ontology/interactive.yaml"
+
+
+def test_the_a_interact_pairing_runs_the_full_tasks_on_the_auto_ontology_agent_alone():
+    loaded = yaml.safe_load((BENCHMARK_DIR / "full_auto_ontology_a_interact.yaml").read_text())
+    [dataset] = loaded["auto_ontology_agent"]["responses_api_agents"]["auto_ontology_agent"]["datasets"]
+
+    assert (dataset["jsonl_fpath"], dataset["taskset"]) == (
+        "benchmarks/bird_interact/data/full/a_interact.jsonl",
+        "bird_interact:a_interact",
+    )
+    assert loaded["bird_interact_agent"] is None and loaded["bird_interact_c_interact"] is None
+    server = loaded["bird_interact_a_interact"]["environment_servers"]["bird_interact"]
+    assert server["agent_server"] == {"name": "auto_ontology_agent"}
+    # The server waits past the agent's own bound on the task.
+    assert server["turn_timeout_seconds"] > 1800
