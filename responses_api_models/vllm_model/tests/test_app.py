@@ -5684,19 +5684,69 @@ class TestAudioPathSplice:
         assert _b64.b64decode(content[1]["audio_url"]["url"].split(",", 1)[1]) == b"BBBB"
         assert content[2] == {"type": "text", "text": "Compare these."}
 
-    def test_audio_paths_must_be_a_list(self, tmp_path) -> None:
+    def test_audio_paths_rejects_a_plain_path_string(self, tmp_path) -> None:
+        # A bare path is neither a list nor a JSON-encoded list.
         model = _make_audio_path_model()
         body = {
             "model": "dummy-model",
             "messages": [{"role": "user", "content": "x"}],
-            "metadata": {"audio_paths": str(tmp_path / "a.wav")},  # string, not list
+            "metadata": {"audio_paths": str(tmp_path / "a.wav")},
         }
-        try:
+        with raises(ValueError, match="must be a list or JSON-encoded list"):
             model._preprocess_chat_completion_create_params(MagicMock(), body)
-        except ValueError as e:
-            assert "must be a list" in str(e)
-        else:
-            raise AssertionError("expected ValueError when audio_paths is not a list")
+
+    @mark.parametrize(
+        "audio_paths",
+        [
+            "123",  # valid JSON, but not a list
+            '"a.wav"',
+            '{"a": "a.wav"}',
+            "null",
+            "[]",  # an empty list carries no audio
+            '[""]',  # empty entry
+            '["a.wav", ""]',
+            "[1]",  # non-string entry
+            '["a.wav", null]',
+            '[["a.wav"]]',  # nested list
+        ],
+    )
+    def test_audio_paths_json_must_be_a_nonempty_list_of_path_strings(self, audio_paths) -> None:
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "x"}],
+            "metadata": {"audio_paths": audio_paths},
+        }
+        with raises(ValueError, match="nonempty list of path strings"):
+            model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+    @mark.parametrize("audio_paths", [["a.wav", ""], [1], [None]])
+    def test_audio_paths_list_entries_must_be_nonempty_strings(self, audio_paths) -> None:
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "x"}],
+            "metadata": {"audio_paths": audio_paths},
+        }
+        with raises(ValueError, match="nonempty list of path strings"):
+            model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+    def test_audio_paths_accept_json_encoded_list(self, tmp_path) -> None:
+        a = tmp_path / "a.wav"
+        b = tmp_path / "b.wav"
+        a.write_bytes(b"AAAA")
+        b.write_bytes(b"BBBB")
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Compare these."}],
+            "metadata": {"audio_paths": json.dumps([str(a), str(b)])},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        content = result["messages"][0]["content"]
+        assert [part["type"] for part in content] == ["audio_url", "audio_url", "text"]
+        assert _b64.b64decode(content[0]["audio_url"]["url"].split(",", 1)[1]) == b"AAAA"
+        assert _b64.b64decode(content[1]["audio_url"]["url"].split(",", 1)[1]) == b"BBBB"
 
     def test_audio_keys_mutually_exclusive(self, tmp_path) -> None:
         wav = tmp_path / "clip.wav"
@@ -10694,6 +10744,10 @@ def test_messages_preserve_native_provider_causes_and_saved_response_population(
     if stream:
         events = [json.loads(line[6:]) for line in received.text.splitlines() if line.startswith("data: ")]
         served = next(event["message"] for event in events if event["type"] == "message_start")
+        assert served["stop_reason"] is None
+        assert served["usage"] == {"input_tokens": 3, "output_tokens": 0}
+        [final] = [event for event in events if event["type"] == "message_delta"]
+        served = {**served, **final["delta"], "usage": {**served["usage"], **final["usage"]}}
         assert events[-1]["type"] == "message_stop"
         assert [event["delta"]["text"] for event in events if event["type"] == "content_block_delta"] == [
             "Retained answer."
