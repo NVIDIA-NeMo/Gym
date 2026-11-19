@@ -92,17 +92,17 @@ single_agent_turn_legacy:
 
 `child_app.py` is an evaluation-only entrypoint of this adapter for Prime Agent **0.7.0**
 (public revision `be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387`). It creates a depth-one
-child with Prime's own IPython tool and agent-message skill. The parent is a recording
-controller; it makes no model calls. This mode requires a borrowed task sandbox and
-uses the agent-session API through `single_agent_turn` or `single_agent_turn_legacy`.
-The Resources Server prepares the repository and destroys the sandbox after verification.
+child with Prime's own IPython tool and agent-message skill. The child makes the model
+calls, and the parent records the rollout. This mode receives a borrowed task sandbox
+through the agent-session API. The Resources Server prepares the repository with
+`single_agent_turn` or `single_agent_turn_legacy`. The `harbor` Environment Server
+provides the sandbox for the task-folder pairing.
 
 The implementation calls the public SDK; it does not vendor Prime's source. See
 [the pinned SDK](https://github.com/PrimeIntellect-ai/prime-agent/blob/be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387/packages/coding-agent/src/core/sdk.ts).
 The child reuses `PrimeAgent`'s seeded-session validation, activation joining, stop and
-close lifecycle, with `PrimeSession.install` and `PrimeSession.stage`. Resources owns
-repository preparation and lends the sandbox through `LentSandboxes`; the agent
-releases its connection, while Resources stops the sandbox after verification.
+close lifecycle, with `PrimeSession.install` and `PrimeSession.stage`. Partner IF's
+Resources Server lends the sandbox through `LentSandboxes`.
 The SDK-specific code is limited to its recording parent, execution hooks and capture.
 
 The shared installer supplies Node, Prime and the Python kernel. The SDK entrypoint is
@@ -131,7 +131,7 @@ continuation and required external tool grants are rejected. Task environment va
 use the shared staging filters; only Gym's generated `nemo` provider is uploaded.
 The pinned SDK uses thinking off, and supervised rollout stops follow the shared
 Prime lifecycle. Session files stay outside the task repository and are removed at
-close; the runtime cache lives until the Resources-owned sandbox is destroyed.
+close. The runtime cache lives for the lifetime of the task sandbox.
 
 The shared installer integrity-locks npm artifacts, constrains Python runtime and isolated
 build dependency versions, and checksum-checks Node, Python, uv and the primary Prime release
@@ -147,25 +147,30 @@ an automatic final response. Compaction, auto-refinement, and retries are disabl
 The 65,536-token output reservation shrinks to fit remaining context with an
 8,192-token margin. Do not remove or override that per-call cap in the Model Server.
 
-Capability level: **Evaluation with native observation export**. Close exports captured SDK turns, model
-response IDs, tool outcomes and supervised process metadata; unavailable evidence remains an explicit gap.
-This mode claims neither training nor full trajectory conformance. Raw SDK events, controller
-receipts, effective prompts/tools, model requests, and supervisor cleanup receipts
-are saved. Function-calling shell probes do not apply: the only exposed tool is
-IPython. Terminal-Bench support is not claimed. The first pairing is Partner IF's
-repository/report task. A second pairing and runtime reproducibility checks remain
-required before this experimental entrypoint is ready to merge. The stock CLI's
-SWE-bench smoke described above exercises a different execution path and does not
-satisfy the SDK child's second-pairing requirement. The capability probe checks the
-installed SDK and `agent-message` interfaces, while regression tests cover provider
-credential filtering and the shared session lifecycle. These checks do not establish
-a real-model second pairing or eliminate the remaining artifact and image limits described
-above; retain this warning until those results are recorded for the tested revision.
+The SDK child remains **experimental and evaluation-only**, with native observation
+export and IPython as its sole tool. Close exports captured SDK turns, model response
+IDs, tool outcomes and supervised process metadata. Unavailable evidence remains an
+explicit gap. Raw SDK events, controller receipts, effective prompts and tools,
+model requests, and supervisor cleanup receipts are saved. The input-token total
+includes uncached prompt tokens, cache reads and cache writes.
+
+- **Second pairing.** At `e85828ce`, one Astra rollout on Linux/ARM64 earned **1.0** on
+  OpenThoughts-TBLite's `build-system-task-ordering` through the `harbor` Environment
+  Server. The original verifier exited 0. Prime completed five assistant turns and
+  four tool executions. Supervisor cleanup succeeded, and zero containers remained.
+  The runner preinstalled the verifier's pinned uv 0.9.5 from PyPI and preserved the
+  task instructions, verifier files and time limits. [Pinned upstream task](https://github.com/open-thoughts/OpenThoughts-TBLite/tree/f075e463472c7790b85793b392dff1fff20cc0e3/build-system-task-ordering)
+- **Runtime repeatability.** Two fresh Linux/ARM64 installs at `cb6cfc3` on the same
+  immutable image produced matching inventories of 390 npm package manifests, 58 Python
+  distributions and three hashed task wheels. Both passed the SDK, AI, `agent-message`
+  and kernel probes and confirmed teardown. `npm ls` reported `ELSPROBLEMS` for three
+  known Prime tarball aliases. The comparison covers repeatability on that pinned image.
+  [Validation record](https://github.com/NVIDIA-NeMo/Gym/pull/5314)
 
 Session close exports the native SDK conversation as Gym observations. Kernel errors remain failed tool
 observations even when the SDK's outer isError flag is false; missing model response IDs remain evidence gaps.
-The borrowed sandbox's provider/ID and cleanup receipt describe supervised process completion. Agent close
-does not destroy that sandbox; teardown remains the Resources Server's responsibility.
+The borrowed sandbox's provider/ID and cleanup receipt describe supervised process completion. The agent
+releases its connection at close. The server that provides the sandbox stops it after verification.
 Well-formed SDK captures are retained even when execution or disposal fails.
 Those invocations remain failed, with missing diagnostic files recorded as gaps.
 Corroborated parent deliveries can still be verified; absent or malformed captures

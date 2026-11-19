@@ -426,7 +426,7 @@ async def test_execution_preserves_output_usage_and_error_distinctions(tmp_path,
         "role": "assistant",
         "stopReason": "stop",
         "content": [{"type": "text", "text": "Observed task findings"}],
-        "usage": {"input": 1, "output": 2},
+        "usage": {"input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4},
     }
     if kind == "no_usage":
         message.pop("usage")
@@ -476,7 +476,10 @@ async def test_execution_preserves_output_usage_and_error_distinctions(tmp_path,
             assert result.output[0].content[0].text == "Observed task findings"
             assert (result.usage is None) == (kind == "no_usage")
             if result.usage:
-                assert result.usage.total_tokens == 3
+                assert result.usage.input_tokens == 8
+                assert result.usage.output_tokens == 2
+                assert result.usage.total_tokens == 10
+                assert result.usage.input_tokens_details.cached_tokens == 3
             assert result.status == ("incomplete" if kind == "turn_limit" else "completed")
     instance._build_models_config.assert_called_once_with("0-0")
 
