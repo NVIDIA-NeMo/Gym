@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: robodojo
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: RoboDojo simulated manipulation via EmberBridge OpenCode episodes and Nanoverse native grading.
+modality: image
+licensing: unknown
+authors:
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: null
+agent_server: robodojo_agent
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: agent
+datasets:
+  - name: robodojo
+    type: benchmark
+    jsonl_fpath: benchmarks/robodojo/data/panel.jsonl
+    prepare_script: benchmarks/robodojo/prepare.py
+    num_repeats: 1
+  - name: example
+    type: example
+    jsonl_fpath: benchmarks/robodojo/data/example.jsonl
+    num_repeats: 1

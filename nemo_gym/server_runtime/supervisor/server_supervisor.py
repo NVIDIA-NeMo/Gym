@@ -429,12 +429,11 @@ def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredS
         if not isinstance(server_config_dict, DictConfig):
             continue
 
-        entrypoint = server_config_dict.get("entrypoint")
-        if entrypoint is None:
+        if "entrypoint" not in server_config_dict:
             continue
 
         # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
-        entrypoint_fpath = Path(entrypoint)
+        entrypoint_fpath = Path(server_config_dict.entrypoint)
         assert not entrypoint_fpath.is_absolute()
 
         # Resolve cwd-first (a local server), else the install location for built-ins.

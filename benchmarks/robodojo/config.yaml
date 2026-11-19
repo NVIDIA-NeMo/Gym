@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+robodojo:
+  responses_api_agents:
+    robodojo_agent:
+      entrypoint: app.py
+      num_workers: 1
+      model_server: {type: responses_api_models, name: policy_model}
+      model_name: ${policy_model_name}
+      bridge_config: ${oc.env:ROBODOJO_BRIDGE_CONFIG,null}
+      panel_manifest: ${oc.env:ROBODOJO_PANEL,null}
+      case_validity: ${oc.env:ROBODOJO_VALIDITY,null}
+      bridge_python: ${oc.env:ROBODOJO_BRIDGE_PYTHON,null}
+      simulation_python: ${oc.env:ROBODOJO_SIMULATION_PYTHON,null}
+      task_policy: ${oc.env:ROBODOJO_TASK_POLICY,null}
+      output_root: ${oc.env:ROBODOJO_OUTPUT_ROOT,results/robodojo}
+      evidence_export_root: ${oc.env:ROBODOJO_EVIDENCE_EXPORT_ROOT,null}
+      horizon_profile: native_x2
+      datasets:
+        - name: robodojo
+          type: benchmark
+          jsonl_fpath: benchmarks/robodojo/data/panel.jsonl
+          prepare_script: benchmarks/robodojo/prepare.py
+          num_repeats: 1
+        - name: example
+          type: example
+          jsonl_fpath: benchmarks/robodojo/data/example.jsonl
+          num_repeats: 1
+
+robodojo_environment:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server: {type: responses_api_agents, name: robodojo}
