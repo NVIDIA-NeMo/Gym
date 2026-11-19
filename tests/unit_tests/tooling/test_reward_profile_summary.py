@@ -129,9 +129,15 @@ def test_inputs_from_another_run_are_rejected(tmp_path):
         for repeat in range(2)
     ]
     profile = _gym_profile(tmp_path, rows, [row | {"reward": 1.0} for row in rows])
+    inputs = tmp_path / "run_materialized_inputs.jsonl"
+    # A smaller run's inputs plan fewer rollouts than the profile measured.
+    _write_jsonl(inputs, rows[2:])
+    completed = _summarize(profile, check=False)
+    assert completed.returncode != 0
+    assert "do not match this profile (task 0)" in completed.stderr
     # The same tasks with twice the repeats, as a stale inputs file from an earlier run would have.
     extra = [row | {"_ng_rollout_index": row["_ng_rollout_index"] + 2} for row in rows]
-    _write_jsonl(tmp_path / "run_materialized_inputs.jsonl", rows + extra)
+    _write_jsonl(inputs, rows + extra)
 
     completed = _summarize(profile, check=False)
 
@@ -140,6 +146,33 @@ def test_inputs_from_another_run_are_rejected(tmp_path):
     # Without the agent metrics to check against, the difference is reported as unknown rather than as masked.
     (tmp_path / "run_agent_metrics.json").unlink()
     assert _summary(profile)["coverage"]["masked_rollouts"] is None
+    # A truncated profile is an error, not a smaller run.
+    profile.write_text(profile.read_text()[:-20])
+    completed = _summarize(profile, check=False)
+    assert completed.returncode != 0
+    assert "not valid JSON" in completed.stderr
+
+
+def test_float_noise_is_not_spread(tmp_path):
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": repeat, "agent_ref": {"name": "agent"}} for repeat in range(2)]
+    profile = _gym_profile(tmp_path, rows, [rows[0] | {"reward": 0.1 + 0.2}, rows[1] | {"reward": 0.3}])
+
+    assert "Same reward (0.3) on every repeat (no signal): 0\n" in _summarize(profile).stdout
+
+
+def test_long_task_lists_are_cut_in_the_text_report(tmp_path):
+    rows = [
+        {"_ng_task_index": task, "_ng_rollout_index": repeat, "agent_ref": {"name": "agent"}}
+        for task in range(25)
+        for repeat in range(2)
+    ]
+    profile = _gym_profile(tmp_path, rows, [row | {"reward": float(row["_ng_rollout_index"])} for row in rows])
+
+    listed = ", ".join(str(task) for task in range(20))
+    assert f"Reward varies across repeats (learning signal): {listed}, and 5 more (see --json)\n" in (
+        _summarize(profile).stdout
+    )
+    assert len(_summary(profile)["varies"]) == 25
 
 
 @pytest.mark.parametrize(

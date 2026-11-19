@@ -33,6 +33,9 @@ from pathlib import Path
 PROFILE_SUFFIX = "_reward_profiling.jsonl"
 # Rewards closer than this count as equal, so float noise does not read as spread.
 REWARD_TOLERANCE = 1e-9
+# The text report lists at most this many tasks per group, so it stays short on runs with thousands of tasks;
+# --json lists every task.
+MAX_LISTED_TASKS = 20
 
 
 def read_jsonl(path):
@@ -208,8 +211,9 @@ def summarize(profile_rows, planned_by_task_label=None, agent_metrics=None, ever
     if planned is not None and masked_reported is not None and every_input_names_agent and not per_task_fallback:
         if masked_in_rows > masked_reported:
             raise ValueError(
-                "The materialized inputs do not match this profile: they plan more rollouts than were saved or masked. "
-                "Use the <stem>_materialized_inputs.jsonl written next to the same rollouts file."
+                "The materialized inputs or the agent metrics do not match this profile: the inputs plan more rollouts "
+                "than the profile and the agent metrics account for. Use the <stem>_materialized_inputs.jsonl and "
+                "<stem>_agent_metrics.json written with the same rollouts file."
             )
         masked_total = masked_reported
     known = masked_total is not None
@@ -260,6 +264,8 @@ def task_list(records):
         (str(r["task"]) if r["agent"] is None else f"{r['task']} ({r['agent']})") + ("*" if r["partial"] else "")
         for r in records
     ]
+    if len(names) > MAX_LISTED_TASKS:
+        return ", ".join(names[:MAX_LISTED_TASKS]) + f", and {len(names) - MAX_LISTED_TASKS} more (see --json)"
     return ", ".join(names) if names else "none"
 
 
@@ -274,9 +280,14 @@ def print_report(summary):
         if cov["masked_rollouts_in_agent_metrics"]:
             print(f"  The agent metrics count {cov['masked_rollouts_in_agent_metrics']} masked rollouts.")
     elif cov["never_saved_rollouts"] is None:
+        # When every planned rollout was measured, none was masked or never saved.
+        rest = (
+            "."
+            if cov["measured_rollouts"] == cov["planned_rollouts"]
+            else "; the rest were never saved or were masked, and these files cannot tell which."
+        )
         print(
-            f"Coverage: {cov['measured_rollouts']} of {cov['planned_rollouts']} planned rollouts measured ({pct}); "
-            "the rest were never saved or were masked, and these files cannot tell which."
+            f"Coverage: {cov['measured_rollouts']} of {cov['planned_rollouts']} planned rollouts measured ({pct}){rest}"
         )
     else:
         print(
