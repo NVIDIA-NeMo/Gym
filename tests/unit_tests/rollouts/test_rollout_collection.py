@@ -420,6 +420,7 @@ class TestRecoveryDriverMetrics:
             disable_health_check=True,
             num_samples_in_parallel=1,
             max_resident_rollout_tasks=max_resident_tasks,
+            dispatch_reservation_interval_s=0.0,
         )
         calls = Counter()
 
@@ -689,6 +690,7 @@ class TestRolloutCollection:
             max_resident_rollout_tasks=max_resident_tasks,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
         dispatched = []
 
@@ -772,6 +774,7 @@ class TestRolloutCollection:
             num_samples_in_parallel=num_samples_in_parallel,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
         states_during_dispatch = []
 
@@ -831,6 +834,7 @@ class TestRolloutCollection:
             route_failures_to_sidecar=route_failures_to_sidecar,
             retain_results_in_memory=retain_results_in_memory,
             max_resident_rollout_tasks=1,
+            dispatch_reservation_interval_s=0.0,
         )
         materialized_rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         if resume_from_cache:
@@ -1412,6 +1416,24 @@ class TestRolloutCollection:
             "model": "producer-model",
             "response_status": "completed",
         }
+
+    def test_trajectory_model_call_carries_the_captured_agent_instance_and_kind(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            "ng_model_call_capture": {
+                "calls": [
+                    {"model_call_id": "named", "agent_instance": "judge.1", "agent_kind": "judge"},
+                    {"model_call_id": "unnamed"},
+                ]
+            }
+        }
+
+        trajectory = _build_trajectory_record(row, result)
+
+        assert [(call.model_call_id, call.agent_instance, call.agent_kind) for call in trajectory.model_calls] == [
+            ("named", "judge.1", "judge"),
+            ("unnamed", None, None),
+        ]
 
     def test_trajectory_keeps_each_captured_calls_total_duration(self) -> None:
         # A saved row keeps every captured call's start, end and total duration, a failed call's too, so a reader can
@@ -3108,8 +3130,10 @@ class TestRolloutCollection:
 
         # Read the actual persisted rows as the recovery/health gate does. A policy zero remains measured and
         # settled despite evaluation_completed=False; a policy FAIL remains terminal and outside the score.
-        from nemo_gym.orchestration.recovery import decide_from_collected, metric_coverage, trial_faults
-        from tests.unit_tests.orchestration.test_evaluation_health import _run
+        from nemo_gym.eval.recovery.gate import metric_coverage
+        from nemo_gym.eval.recovery.planner import decide_from_collected
+        from nemo_gym.eval.recovery.trials import trial_faults
+        from tests.helpers.recovery_health import _run
 
         collected = _run(2).model_copy(update={"results": persisted, "failures": failures})
         decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
@@ -5709,6 +5733,7 @@ class TestRolloutCollection:
             max_resident_rollout_tasks=window,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
 
         results = await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=10)
@@ -5794,6 +5819,7 @@ class TestRolloutCollection:
             retain_results_in_memory=retain,
             disable_aggregation=True,
             disable_health_check=True,
+            dispatch_reservation_interval_s=0.0,
         )
 
         if with_batch_manifest:
@@ -8904,6 +8930,70 @@ class TestDispatchBudget:
         assert tracker.drained == 4
         assert all(result[NG_DISPATCH_DRAINED_KEY] for _row, result in drained)
 
+    @pytest.mark.parametrize(
+        "budget_s, margin_s, history",
+        [(0.5, 0.0, []), (1.5, 1.0, []), (1.5, None, [1.0] * 5)],
+        ids=["deadline", "margin", "adaptive-margin"],
+    )
+    async def test_a_row_the_budget_runs_out_on_while_its_reservation_waits_is_drained_unreserved(
+        self, monkeypatch: pytest.MonkeyPatch, budget_s: float, margin_s: float | None, history: list
+    ) -> None:
+        # Row 0 is reserved at once. Row 1 passes the drain check, then waits 1 s for the next manifest write.
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
+        posted: list = []
+        reserved: list = []
+        tracker = DispatchLatencyTracker()
+        for seconds in history:
+            tracker.record(seconds)
+
+        started = time.monotonic()
+        completions = self._helper(posted)._run_examples_with_metadata(
+            [self._row(0), self._row(1)],
+            semaphore=asyncio.Semaphore(1),
+            on_dispatch_batch=lambda rows: reserved.append([row[TASK_INDEX_KEY_NAME] for row in rows]),
+            dispatch_budget_s=budget_s,
+            drain_margin_s=margin_s,
+            dispatch_reservation_interval_s=1.0,
+            latency_tracker=tracker,
+        )
+        results = [(await future).result for future in completions]
+
+        assert posted == [0]
+        assert reserved == [[0]], "a row drained while waiting must not be reserved"
+        assert tracker.drained == 1
+        drained = [result for result in results if result.get(NG_DISPATCH_DRAINED_KEY)]
+        assert len(drained) == 1 and drained[0][NG_NO_PERSIST_KEY] is True
+        assert time.monotonic() - started >= 0.9, "row 1 must have passed the first check and waited"
+
+    async def test_the_rollout_timer_starts_after_the_reservation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Row 1 waits about 1 s for the next manifest write. That wait is not rollout time.
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
+        posted: list = []
+        reserved: list = []
+        tracker = DispatchLatencyTracker()
+
+        started = time.monotonic()
+        completions = self._helper(posted)._run_examples_with_metadata(
+            [self._row(0), self._row(1)],
+            semaphore=asyncio.Semaphore(1),
+            on_dispatch_batch=lambda rows: reserved.append([row[TASK_INDEX_KEY_NAME] for row in rows]),
+            dispatch_reservation_interval_s=1.0,
+            latency_tracker=tracker,
+        )
+        completed = {done.row[TASK_INDEX_KEY_NAME]: done for done in [await future for future in completions]}
+
+        assert reserved == [[0], [1]]
+        assert time.monotonic() - started >= 0.9, "row 1 must have waited for its reservation"
+        assert completed[1].rollout_latency_ms < 500
+        assert completed[1].elapsed_s < 0.5
+        assert tracker.quantile(1.0) < 0.5, "the drain margin history must not include the wait"
+
     async def test_drain_margin_blocks_a_task_that_cannot_finish(self, monkeypatch: pytest.MonkeyPatch) -> None:
         posted: list = []
         monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
@@ -9223,6 +9313,7 @@ class TestDispatchBudget:
                 count_missing_rollouts_as_zero=True,
                 record_omitted_rollouts=record_omitted,
                 disable_health_check=True,
+                dispatch_reservation_interval_s=0.0,
                 **overrides,
             )
 
@@ -13332,6 +13423,7 @@ class TestEnvironmentServerRouting:
                 route_failures_to_sidecar=route_failures,
                 retain_results_in_memory=retain_results,
                 max_resident_rollout_tasks=1,
+                dispatch_reservation_interval_s=0.0,
             )
 
         await RolloutCollectionHelper().run_from_config(config(resume=False))
@@ -14614,6 +14706,7 @@ class TestUnroutedRunFailure:
         return runs
 
     def _config(self, tmp_path: Path, n: int, **kwargs) -> RolloutCollectionConfig:
+        kwargs.setdefault("dispatch_reservation_interval_s", 0.0)
         return RolloutCollectionConfig(
             input_jsonl_fpath=str(self._input(tmp_path, n)),
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
@@ -14667,7 +14760,9 @@ class TestUnroutedRunFailure:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         self._install(monkeypatch, ClientPayloadError("Response payload is not completed"))
-        config = self._config(tmp_path, 3)
+        # Interval 0 reserves x=2 before the x=1 failure ends the run. At a nonzero interval x=2 may still be waiting
+        # for its reservation then and is never reserved, which is correct: its request was never sent.
+        config = self._config(tmp_path, 3, dispatch_reservation_interval_s=0.0)
         with pytest.raises(ClientPayloadError):
             await RolloutCollectionHelper().run_from_config(config)
 
@@ -15536,6 +15631,124 @@ class TestRunRecordWriter:
                 delete_model_call_capture=True,
             )
         assert self._lines(run_dir / "rollouts-step_3.jsonl") == [written]
+
+    @pytest.mark.parametrize("scope_rollout_ids", [True, False])
+    async def test_a_caller_with_unique_ids_can_keep_them_in_a_recorded_shard(
+        self, tmp_path: Path, scope_rollout_ids: bool
+    ) -> None:
+        capture_dir = tmp_path / "capture"
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
+        dispatched_ids: list[str] = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched_ids.append(maybe_rollout_id_from_run_body(examples[0]))
+                TestEnrichRunResult._store_call(capture_dir, dispatched_ids[0], "c1", "first")
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        run_dir = tmp_path / "run"
+        [completion] = list(
+            Helper().run_examples(
+                [row], record_output_dir=run_dir, record_shard="step_1", scope_rollout_ids=scope_rollout_ids
+            )
+        )
+        _, returned = await completion
+
+        # By default the shard scopes the id; opted out, the id the caller dispatched comes back unchanged.
+        [dispatched] = dispatched_ids
+        assert (dispatched == "gate-7") is not scope_rollout_ids
+        assert dispatched.endswith("gate-7")
+        assert maybe_rollout_id_from_run_body(returned) == dispatched
+        [written] = self._lines(run_dir / "rollouts-step_1.jsonl")
+        assert [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]] == ["c1"]
+
+    async def test_a_row_without_an_explicit_id_keeps_its_task_and_rollout_id_when_unscoped(
+        self, tmp_path: Path
+    ) -> None:
+        row = {key: value for key, value in TestEnrichRunResult._row().items() if key != ROLLOUT_ID_KEY_NAME}
+        dispatched_ids: list[str] = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched_ids.append(maybe_rollout_id_from_run_body(examples[0]))
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        [completion] = list(
+            Helper().run_examples([row], record_output_dir=tmp_path, record_shard="s", scope_rollout_ids=False)
+        )
+        _, returned = await completion
+        expected = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+        assert dispatched_ids == [expected] and maybe_rollout_id_from_run_body(returned) == expected
+
+    @pytest.mark.parametrize("scope_rollout_ids", [True, False])
+    async def test_an_id_dispatched_again_shares_its_capture_only_when_unscoped(
+        self, tmp_path: Path, scope_rollout_ids: bool
+    ) -> None:
+        capture_dir = tmp_path / "capture"
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
+        calls = iter(["call1", "call2"])
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                TestEnrichRunResult._store_call(
+                    capture_dir, maybe_rollout_id_from_run_body(examples[0]), next(calls), "x"
+                )
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        for shard in ("s1", "s2"):
+            [completion] = list(
+                Helper().run_examples(
+                    [row], record_output_dir=tmp_path / "run", record_shard=shard, scope_rollout_ids=scope_rollout_ids
+                )
+            )
+            await completion
+
+        def captured(shard: str) -> list[str]:
+            [written] = self._lines(tmp_path / "run" / f"rollouts-{shard}.jsonl")
+            return [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]]
+
+        # Unscoped, nothing checks across calls: the second shard reads the first one's capture file too.
+        assert captured("s1") == ["call1"]
+        assert captured("s2") == (["call2"] if scope_rollout_ids else ["call1", "call2"])
+
+    def test_rows_that_share_an_id_are_refused_with_or_without_scoping(self, tmp_path: Path) -> None:
+        row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+        for scope_rollout_ids in (True, False):
+            with pytest.raises(ValueError, match="would share one rollout"):
+                Helper().run_examples(
+                    [row, dict(row)],
+                    record_output_dir=tmp_path / str(scope_rollout_ids),
+                    record_shard="s",
+                    scope_rollout_ids=scope_rollout_ids,
+                )
 
     def test_a_shard_whose_every_rollout_failed_still_has_its_rollouts_file(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import _RunRecordWriter

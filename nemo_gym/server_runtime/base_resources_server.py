@@ -51,12 +51,12 @@ if TYPE_CHECKING:
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config.global_config import MODEL_SAMPLING_KEY_NAME
+from nemo_gym.config.global_config import MODEL_SAMPLING_KEY_NAME, model_call_sampling_config
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, FailureClass, validate_failure_kind
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import observe_failure
-from nemo_gym.core.model_call_sampling import ModelCallSampling, model_call_sampling_config
+from nemo_gym.core.model_call_sampling import ModelCallSampling
 from nemo_gym.core.outcome_policy import OutcomeAction
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
@@ -402,11 +402,12 @@ class ResourcesSeedRejectedError(HTTPException, ValueError):
 
 
 class ResourcesSessionConflictError(HTTPException, ValueError):
-    """Refuse a seed or close that conflicts with what this server recorded for the session.
+    """Refuse a session request that conflicts with what this server recorded for the session.
 
     Examples: a ``resources_session_id`` already bound to another episode or task, a close that names another
-    episode, or a seed for a session that already closed. FastAPI answers it with HTTP 409, which an Environment
-    Server treats as terminal. It is also a ``ValueError`` for direct callers.
+    episode, a seed for a session that already closed, or a verify that names another task than the seed. FastAPI
+    answers it with HTTP 409, which an environment server treats as terminal. It is also a ``ValueError`` for direct
+    callers.
     """
 
     def __init__(self, detail: str) -> None:

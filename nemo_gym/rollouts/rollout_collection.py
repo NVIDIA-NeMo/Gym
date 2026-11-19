@@ -54,7 +54,10 @@ from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.artifacts.rollout_rows import (
     NG_DISPATCH_DRAINED_KEY,
     NG_FAILURE_CLASS_KEY,
+    NG_FAILURE_COUNTS_AS_ZERO_KEY,
+    NG_FAILURE_MAX_ATTEMPTS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
     _rollout_for_export,
 )
 from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
@@ -173,6 +176,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     record_resubmit_offset as record_resubmit_offset,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.rollouts.tool_telemetry import record_tool_telemetry
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
@@ -351,13 +355,6 @@ def is_non_superseding_rollout_row(row: Mapping[str, Any]) -> bool:
     )
 
 
-NG_TERMINAL_KEY = "_ng_failure_terminal"
-# Set by the producer of a final failure row that must be counted as a zero in the metrics, whatever
-# count_failure_classes_as_zero names (a rollout the evaluated model failed, for example).
-NG_FAILURE_COUNTS_AS_ZERO_KEY = "_ng_failure_counts_as_zero"
-# The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
-# instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
-NG_FAILURE_MAX_ATTEMPTS_KEY = "_ng_failure_max_attempts"
 NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
@@ -2380,6 +2377,16 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         ),
     )
 
+    dispatch_reservation_interval_s: float = Field(
+        default=1.0,
+        ge=0,
+        description=(
+            "Least number of seconds between the run manifest writes that reserve dispatched attempts. Attempts "
+            "admitted within the interval share one write, so each rollout may wait up to the interval inside its "
+            "concurrency slot before its request is sent. 0 writes once per event-loop turn."
+        ),
+    )
+
     dispatch_longest_first: bool = Field(
         default=False,
         description=(
@@ -3469,6 +3476,62 @@ class _RowResultIterator:
         return outcomes
 
 
+class _DispatchReservations:
+    """Persist attempt reservations in batches, each before any of its requests start.
+
+    A reservation after a quiet interval is written on the next event-loop turn. Later ones wait for the interval
+    to pass and share one write, so an admitted request waits at most ``interval_s`` for its reservation.
+    ``drained`` is asked again when the batch is due: a batch the dispatch budget ran out on while it waited is
+    neither reserved nor started.
+    """
+
+    def __init__(
+        self,
+        persist: Callable[[List[Dict]], None],
+        *,
+        interval_s: float,
+        drained: Callable[[], Optional[Dict]] = lambda: None,
+    ):
+        self._persist = persist
+        self._interval_s = interval_s
+        self._drained = drained
+        self._waiters: list[tuple[Dict, Future]] = []
+        self._last_write: Optional[float] = None
+
+    async def reserve(self, row: Dict) -> Optional[Dict]:
+        """None once the row's reservation is durable, else the drained result to return instead of dispatching."""
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        if not self._waiters:
+            delay = 0.0 if self._last_write is None else self._last_write + self._interval_s - time.monotonic()
+            if delay > 0:
+                loop.call_later(delay, self._flush)
+            else:
+                loop.call_soon(self._flush)
+        self._waiters.append((row, waiter))
+        return await waiter
+
+    def _flush(self) -> None:
+        batch = [(row, waiter) for row, waiter in self._waiters if not waiter.cancelled()]
+        self._waiters.clear()
+        if not batch:
+            return
+        drained = self._drained()
+        if drained is not None:
+            for _, waiter in batch:
+                waiter.set_result(dict(drained))
+            return
+        self._last_write = time.monotonic()
+        try:
+            self._persist([row for row, _ in batch])
+        except Exception as error:
+            for _, waiter in batch:
+                waiter.set_exception(error)
+        else:
+            for _, waiter in batch:
+                waiter.set_result(None)
+
+
 class _BoundedCompletionIterator:
     """Completion-order iterator with a bounded set of resident asyncio tasks."""
 
@@ -4521,6 +4584,7 @@ executions → not run again (left to recovery)
                 interleave_by_agent=True,
                 dispatch_budget_s=config.dispatch_budget_s,
                 drain_margin_s=config.drain_margin_s,
+                dispatch_reservation_interval_s=config.dispatch_reservation_interval_s,
                 latency_tracker=latency_tracker,
                 **({"run_timing": run_timing} if run_timing is not None else {}),
             )
@@ -4821,6 +4885,8 @@ executions → not run again (left to recovery)
                         health_ignored_checks,
                         health_span_context,
                     )
+                if health_metrics_enabled or health_span_context is not None:
+                    await asyncio.to_thread(record_tool_telemetry, result, health_span_context)
 
             collection_succeeded = True
 
@@ -5482,6 +5548,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         interleave_by_agent: bool = False,
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
+        dispatch_reservation_interval_s: float = 0.0,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
         _max_num_tries: Optional[int] = None,
@@ -5503,6 +5570,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
         ``drain_margin_s`` stops sooner for rows that would not have time to finish. A row
         drained this way resolves to a Gym-built ``_dispatch_drained_result``.
+
+        ``dispatch_reservation_interval_s`` spaces the ``on_dispatch_batch`` writes. The default, 0, writes once per
+        event-loop turn; collection passes its configured interval.
 
         Identical contract to ``run_examples``, but each future resolves to a ``_CompletedRollout``
         that carries ``rollout_latency_ms`` alongside the raw ``/run`` result instead of inside it,
@@ -5545,36 +5615,32 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # spent, and must drain rather than disable the check.
         deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s is not None else None
 
-        # Coalesce requests admitted on the same event-loop turn. Only rows that
-        # acquired a slot and passed the drain check enter this batch. Persist the
+        def drained_result() -> Optional[Dict[str, Any]]:
+            # Checked after a row acquires its slot, and again when its delayed reservation is due.
+            if deadline is None:
+                return None
+            remaining = deadline - time.monotonic()
+            margin = tracker.drain_margin(drain_margin_s)
+            if remaining <= 0 or (margin is not None and remaining < margin):
+                return _dispatch_drained_result(remaining, margin)
+            return None
+
+        # Only rows that acquired a slot and are still within the dispatch budget are reserved. Persist the
         # reservations before releasing any request to the server.
-        reservation_waiters: list[tuple[Dict, Future]] = []
+        reservations = (
+            _DispatchReservations(
+                on_dispatch_batch, interval_s=dispatch_reservation_interval_s, drained=drained_result
+            )
+            if on_dispatch_batch is not None
+            else None
+        )
 
-        def flush_reservations() -> None:
-            batch = [(row, waiter) for row, waiter in reservation_waiters if not waiter.cancelled()]
-            reservation_waiters.clear()
-            if not batch:
-                return
-            try:
-                on_dispatch_batch([row for row, _ in batch])
-            except Exception as error:
-                for _, waiter in batch:
-                    waiter.set_exception(error)
-            else:
-                for _, waiter in batch:
-                    waiter.set_result(None)
-
-        async def reserve_dispatch(row: Dict) -> None:
-            if on_dispatch_batch is None:
-                if on_dispatch is not None:
-                    on_dispatch(row)
-                return
-            loop = asyncio.get_running_loop()
-            waiter = loop.create_future()
-            if not reservation_waiters:
-                loop.call_soon(flush_reservations)
-            reservation_waiters.append((row, waiter))
-            await waiter
+        async def reserve_dispatch(row: Dict) -> Optional[Dict[str, Any]]:
+            if reservations is not None:
+                return await reservations.reserve(row)
+            if on_dispatch is not None:
+                on_dispatch(row)
+            return None
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
             server_name = (
@@ -5587,18 +5653,18 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 # Drain check happens *after* acquiring a slot, so it sees the
                 # real remaining time at the moment this task would start rather
                 # than at queueing time.
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    margin = tracker.drain_margin(drain_margin_s)
-                    if remaining <= 0 or (margin is not None and remaining < margin):
-                        tracker.record_drained()
-                        return _CompletedRollout(
-                            row=row,
-                            result=_dispatch_drained_result(remaining, margin),
-                            rollout_latency_ms=None,
-                            environment_server=server_name,
-                            environment_server_type=server_type,
-                        )
+                drained = drained_result()
+                if drained is None:
+                    drained = await reserve_dispatch(row)
+                if drained is not None:
+                    tracker.record_drained()
+                    return _CompletedRollout(
+                        row=row,
+                        result=drained,
+                        rollout_latency_ms=None,
+                        environment_server=server_name,
+                        environment_server_type=server_type,
+                    )
 
                 if is_global_aiohttp_client_request_debug_enabled():
                     print(
@@ -5613,7 +5679,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 res = None
                 stage = "request"
                 attempt_errors: list[Exception] = []
-                await reserve_dispatch(row)
                 succeeded = False
                 dispatch_span_context = None
                 try:
@@ -5840,6 +5905,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         record_output_dir: Optional[Path | str] = None,
         record_shard: Optional[str] = None,
         record_omitted_rollouts: bool = False,
+        scope_rollout_ids: bool = True,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -5927,7 +5993,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         shard's run, and the Store, the run health check and ``gym eval aggregate`` read the shard like an eval run.
         Each copy's rollout id is the row's own id (its ``_ng_rollout_id``, or ``<task>-<rollout>``) prefixed with the
         shard's run id, so the shard's model calls are captured under keys of its own; a caller that looks a capture up
-        reads its key from the returned row (``maybe_rollout_id_from_run_body``). ``gym eval run`` with
+        reads its key from the returned row (``maybe_rollout_id_from_run_body``).
+
+        ``scope_rollout_ids=False`` keeps each row's own id instead, for a caller whose ids are already unique across
+        calls (a trainer that tracks rollouts and token capture by the id it dispatched). Rows that would share an id
+        in one call are still refused, but nothing checks across calls: a row dispatched again under an id an earlier
+        call used (a step replayed under the same shard label, or a returned row fed back with its id) shares that
+        call's capture file, and the later shard's records silently carry the earlier shard's model calls. It only
+        applies with ``record_output_dir``: a call that records no shard already dispatches each row under its own id.
+
+        ``gym eval run`` with
         ``+input_jsonl_fpath=<dir>/rollouts-<shard>_materialized_inputs.jsonl +output_jsonl_fpath=<dir>/rollouts-<shard>.jsonl
         +resume_from_cache=true`` resumes a shard and runs only what it still lacks.
         """
@@ -6028,12 +6103,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 for row in examples
             ]
             if record_output_dir is not None:
-                # A recorded shard names its rollouts within its run, so its capture keys are its own. Two rows that
-                # come to the same id (a row fed back as `<earlier run>.0` beside a new `0`) would share capture files
-                # and one manifest identity: refused before dispatch and before the shard is replaced.
+                # A scoped shard names its rollouts within its run, so its capture keys are its own; unscoped, the
+                # caller's ids are used as they are. Either way, two rows in this call that come to the same id (a row
+                # fed back as `<earlier run>.0` beside a new `0`) would share capture files and one manifest identity:
+                # refused before dispatch and before the shard is replaced.
                 sources: Dict[str, Tuple[int, str]] = {}
                 for index, (row, copy) in enumerate(zip(examples, dispatched)):
-                    scoped = copy[ROLLOUT_ID_KEY_NAME] = _shard_rollout_id(row, run_id)
+                    scoped = copy[ROLLOUT_ID_KEY_NAME] = (
+                        _shard_rollout_id(row, run_id) if scope_rollout_ids else logical_rollout_id(dict(row))
+                    )
                     check_rollout_id_length(scoped)  # the run-id prefix makes a long id longer
                     if scoped in sources:
                         first, source = sources[scoped]

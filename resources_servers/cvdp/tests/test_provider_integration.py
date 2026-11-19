@@ -59,12 +59,16 @@ async def test_real_provider_workspace_round_trip() -> None:
     runner = CVDPTestbenchRunner(config)
     compose = """
 services:
-  direct:
+  build:
     image: ghcr.io/hdl/sim/osvb
     volumes:
       - ./src:/src:ro
     working_dir: /code/rundir
     command: /bin/sh -c "test -f /src/check.sh && test -f /code/rtl/design.sv && /bin/sh /src/check.sh"
+  check:
+    image: ghcr.io/hdl/sim/osvb
+    working_dir: /code/rundir
+    command: /bin/sh -c "test -s /code/rundir/design.out && echo second-service-sees-the-first-ones-file"
 """
     exit_code, output, services = await runner.run(
         rtl_files={"rtl/design.sv": "module design; endmodule\n"},
@@ -81,5 +85,7 @@ services:
     )
 
     assert exit_code == 0, output
-    assert services[0]["exit_code"] == 0
+    # The second service starts from the archive the first one handed on, so it sees the file the first one built.
+    assert [(s["service"], s["exit_code"]) for s in services] == [("build", 0), ("check", 0)]
     assert "provider-round-trip-ok" in output
+    assert "second-service-sees-the-first-ones-file" in output

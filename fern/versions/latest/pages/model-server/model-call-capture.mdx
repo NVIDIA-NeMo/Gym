@@ -98,6 +98,15 @@ Source-history candidates carry an explicit source-match proof. Deploy compatibl
 revisions together: a missing proof is an error, not permission to assume an exact match.
 Direct roots retain replay evidence and framework safety checks so later calls can continue them.
 
+`token_id_capture.allow_system_suffix` defaults to `false` and requires `source_history` with
+`external_staging_backend: vllm_worker`. Dynamo staging supports source-history capture with this
+setting off; system-suffix admission is not enabled for that backend. Enable it only with a worker that
+checks that the full tokenized prompt starts with the separately rendered historical prefix
+before installing captured tokens. This permits appended system messages such as CLI budget
+updates. If the template moves the update ahead of the historical prefix, the worker must
+capture a new root (`worker_rooted`). Workers that only check message boundaries must leave
+this setting disabled.
+
 Staging admissions, snapshots, commit coordinates, manifests and receipts identify the current capture
 attempt with `capture_key`. A carried-over `CallRecord.source_capture_key` identifies the earlier
 attempt that staged that call; when absent, the receipt's own capture key applies. Logical rollout IDs,
@@ -148,7 +157,8 @@ ordinary rollout output for framework reconstruction instead of Gym's single-cha
 | Responses history item kinds | `message`, `reasoning`, `function_call`, and `function_call_output`. |
 | Other Responses history items, including `web_search_call`, `custom_tool_call`, `custom_tool_call_output`, and opaque `compaction` | Refused with HTTP 422 before capture intent. |
 | Chat Completions with explicit history | Supported, including buffered SSE; one choice. Omitted or null `n` means one. |
-| `/v1/messages` | Refused with HTTP 422. |
+| Messages with explicit history | Supported, including buffered SSE. Responses are served as generated; capture reads a served turn without its blank text blocks, as Messages clients echo it. |
+| Messages content block kinds | `text`, `image`, `tool_use`, `tool_result`, `thinking`, and `redacted_thinking`, converted to Responses history items. Other block kinds, such as `server_tool_use`, are unsupported. |
 | Responses `previous_response_id` or `conversation` | Refused with HTTP 422; full input must be visible. |
 | Chat `n` other than null or 1 | Refused with HTTP 422. |
 
@@ -305,6 +315,11 @@ for readability but stored as one JSONL line.
 }
 ```
 
+A call whose URL names an agent instance also carries `agent_instance` and `agent_kind`. The raw record and
+the training-token records (ledger rows, manifest records and failures, receipts) leave both fields out for
+an unnamed agent, so a single-agent record keeps its earlier shape. `ModelCallRecord` always has both and
+sets them to `null`. Read an absent field and `null` as the same thing: the agent is unnamed.
+
 Writes are flushed and fsynced. Capture failures are logged without failing model requests. Resume
 attempts use an `-a<n>` suffix so their data does not mix with an earlier attempt. Before dispatch,
 the collector clears any existing capture for the exact rollout-attempt id.
@@ -321,7 +336,7 @@ totals = aggregate_model_call_metrics(store, rollout_id)
 ```
 
 `ModelCallRecord` includes the server-generated `model_call_id`, protocol `response_id`, typed
-`model_ref`, UTC `started_at` and `completed_at` timestamps, durable `call_index`, API dialect, token
+`model_ref`, `agent_instance` and `agent_kind`, UTC `started_at` and `completed_at` timestamps, durable `call_index`, API dialect, token
 and cache usage, status, finish reason, latency, error details, tool calls, reasoning, and captured
 payloads. `call_index` and timestamps do not establish causal ordering between concurrent calls.
 
