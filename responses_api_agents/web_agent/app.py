@@ -713,7 +713,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                         and step_index + 2 >= self.config.max_steps
                     ):
                         metadata = dict(base_body.metadata or {})
-                        template = json.loads(metadata.get("chat_template_kwargs", "{}"))
+                        template = json.loads(metadata.get("chat_template_kwargs") or "{}")
                         if not isinstance(template, dict):
                             raise ValueError("chat_template_kwargs must encode a JSON object")
                         template["enable_thinking"] = False
