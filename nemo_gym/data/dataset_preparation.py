@@ -21,7 +21,7 @@ from itertools import chain, count
 from math import sqrt
 from pathlib import Path
 from shutil import copyfileobj
-from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
@@ -66,6 +66,7 @@ from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, valida
 from nemo_gym.data.task_data import (
     SERVER_DIR_MARKERS,
     TaskDataSchemaError,
+    TaskDataValidationReport,
     TaskDataValidator,
     find_server_dir,
     load_task_data_schema,
@@ -116,9 +117,10 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     task_data_validation: Literal["off", "warn", "error", "auto"] = Field(
         default="auto",
         description=(
-            "Validate each dataset row against the owning server's task_data.py schema during "
-            "collation. 'warn' prints a per-file report, 'error' fails collation on schema "
-            "violations, 'off' skips validation. The default 'auto' resolves to 'error' in "
+            "Validate each dataset row as a run request and against the owning server's task_data.py "
+            "schema during collation. 'warn' prints a per-file report, 'error' fails collation on invalid "
+            "rows, 'off' skips the task_data.py check and both reports (rows that fail the request check "
+            "are still left out of the metrics). The default 'auto' resolves to 'error' in "
             "example_validation mode (the repo's PR gate, where all committed data is known "
             "clean) and 'warn' in train_preparation mode (user datasets must not break "
             "mid-pipeline). Servers without a task_data.py are always skipped."
@@ -428,15 +430,59 @@ def _materialized_task_parts(sample: Mapping[str, Any]) -> tuple[TaskId, Mapping
 
 
 def compute_sample_metrics(sample_dict_str: str, *, require_responses: bool = True) -> Tuple[DatasetMetrics, bool]:
+    """A row's metrics, and whether the row is left out of the metrics (rejected, or not a complete run request)."""
+    metrics, rejection = _compute_sample_metrics(sample_dict_str, require_responses=require_responses)
+    return metrics or DatasetMetrics(), metrics is None or rejection is not None
+
+
+def _validate_run_request(row: object) -> BaseRunRequest | None:
+    """``row`` as a run request, or None when it omits ``responses_create_params`` and is otherwise valid.
+
+    Some agents, such as ``toolsandbox_agent`` and ``aviary_agent``, fill in an omitted request with an empty input.
+    Their request models live in their ``app.py``, which data tooling does not import.
+    So a row without ``responses_create_params`` is checked as if it carried that empty request.
+    Raises ``ValidationError`` when the row is not a valid run request either way.
+    """
+    try:
+        return BaseRunRequest.model_validate(row)
+    except ValidationError:
+        if not isinstance(row, dict) or "responses_create_params" in row:
+            raise
+    BaseRunRequest.model_validate({**row, "responses_create_params": {"input": []}})
+    return None
+
+
+def _describe_validation_error(error: ValidationError) -> str:
+    """The first error's location and message, and how many errors there were in all.
+
+    A union field such as ``tools`` reports one error per union member, so a single misshapen tool can produce
+    hundreds of errors; the first one names the field that needs fixing.
+    """
+    first = error.errors()[0]
+    # A row that is not a JSON object fails at the top level, with no location.
+    location = ".".join(str(part) for part in first["loc"]) or "row"
+    return f"{location}: {first['msg']} ({error.error_count()} validation errors)"
+
+
+def _compute_sample_metrics(
+    sample_dict_str: str, *, require_responses: bool = True
+) -> tuple[DatasetMetrics | None, str | None]:
+    """A row's metrics, and why the row is rejected (None when it is not).
+
+    The metrics are None for a row that omits ``responses_create_params`` when responses are required.
+    Such a row is not rejected, since its agent may fill the request in, but it is left out of the metrics.
+    """
     try:
         sample_dict = json.loads(sample_dict_str)
-    except json.JSONDecodeError:
-        return DatasetMetrics(), True
+    except json.JSONDecodeError as e:
+        return DatasetMetrics(), f"not valid JSON: {e.msg}"
 
     try:
         materialized_task = _materialized_task_parts(sample_dict) if isinstance(sample_dict, Mapping) else None
-    except (ValidationError, ValueError):
-        return DatasetMetrics(), True
+    except ValidationError as e:
+        return DatasetMetrics(), f"invalid task row: {_describe_validation_error(e)}"
+    except ValueError as e:
+        return DatasetMetrics(), f"invalid task row: {e}"
     if materialized_task is not None:
         _, task_input = materialized_task
         task_input_words = AvgMinMax()
@@ -447,17 +493,19 @@ def compute_sample_metrics(sample_dict_str: str, *, require_responses: bool = Tr
                 number_of_tasks=1,
                 task_input_json_dumped_number_of_words=task_input_words,
             ),
-            False,
+            None,
         )
 
     try:
-        sample = BaseRunRequest.model_validate(sample_dict)
-    except ValidationError:
+        sample = _validate_run_request(sample_dict)
+    except ValidationError as e:
         if not require_responses and isinstance(sample_dict, dict):
             # The selected Environment Server owns task-input validation. Response-specific
             # metrics are unavailable for these rows, but they are still dataset examples.
-            return DatasetMetrics(number_of_examples=1), False
-        return DatasetMetrics(), True
+            return DatasetMetrics(number_of_examples=1), None
+        return DatasetMetrics(), _describe_validation_error(e)
+    if sample is None:
+        return (None if require_responses else DatasetMetrics(number_of_examples=1)), None
 
     responses_create_params = sample.responses_create_params
     responses_create_params = responses_create_params.model_dump(exclude_unset=True)
@@ -492,7 +540,7 @@ def compute_sample_metrics(sample_dict_str: str, *, require_responses: bool = Tr
         number_of_turns=number_of_turns_metrics,
         temperature=temperature_metrics,
     )
-    return metrics, False
+    return metrics, None
 
 
 def _observe_task_metric(metrics: DatasetMetrics, name: str, value: DatasetMetricValue) -> None:
@@ -535,7 +583,26 @@ class DatasetValidatorState(BaseModel):
     metrics: DatasetMetrics = Field(default_factory=DatasetMetrics)
     key_counts: Counter = Field(default_factory=Counter)
     offending_example_idxs: List[int] = Field(default_factory=list)
+    # Source rows (each counted once, however many times the dataset repeats it), the rejected ones among them, and
+    # why the first few were rejected. The reasons stay capped so a large broken dataset reports in bounded memory.
+    number_of_source_rows: int = 0
+    number_of_rejected_source_rows: int = 0
+    rejected_source_row_reasons: list[str] = Field(default_factory=list)
     other_metrics: Dict[str, Any] = Field(default_factory=dict)
+
+    MAX_RECORDED_REJECTIONS: ClassVar[int] = TaskDataValidationReport.MAX_RECORDED_ERRORS
+
+    def rejection_summary(self, dataset_fpath: str) -> str:
+        """Counts and the first recorded reasons, in the format of the task_data validation report."""
+        parts = [
+            f"{dataset_fpath}: {self.number_of_rejected_source_rows}/{self.number_of_source_rows} rows failed "
+            "request validation (servers reject these rows with HTTP 422)."
+        ]
+        parts.extend(f"  row {reason}" for reason in self.rejected_source_row_reasons)
+        unrecorded = self.number_of_rejected_source_rows - len(self.rejected_source_row_reasons)
+        if unrecorded > 0:
+            parts.append(f"  ... and {unrecorded} more rows")
+        return "\n".join(parts)
 
 
 def _declares_prepared_dataset(value: object, dataset: DatasetConfig) -> bool:
@@ -600,7 +667,9 @@ class TrainDataProcessor(BaseModel):
 
         self._print_title("Validate samples and aggregate metrics")
         dataset_type_to_aggregate_metrics = self.validate_samples_and_aggregate_metrics(
-            server_instance_configs, config.overwrite_metrics_conflicts
+            server_instance_configs,
+            config.overwrite_metrics_conflicts,
+            task_data_validation=config.effective_task_data_validation,
         )
 
         self._print_title("Collate samples and aggregate metrics")
@@ -828,10 +897,22 @@ class TrainDataProcessor(BaseModel):
         *,
         require_responses: bool = True,
         dataset_metrics_hook: DatasetMetricHook | None = None,
+        num_repeats: int = 1,
     ) -> None:
-        metrics, is_offending = compute_sample_metrics(sample_dict_str, require_responses=require_responses)
-        if is_offending:
+        metrics, rejection = _compute_sample_metrics(sample_dict_str, require_responses=require_responses)
+        # Repeated lines are identical copies of one source row: count and describe each source row once.
+        is_source_row = sample_idx % num_repeats == 0
+        if is_source_row:
+            state.number_of_source_rows += 1
+        if metrics is None:
             state.offending_example_idxs.append(sample_idx)
+            return
+        if rejection is not None:
+            state.offending_example_idxs.append(sample_idx)
+            if is_source_row:
+                state.number_of_rejected_source_rows += 1
+                if len(state.rejected_source_row_reasons) < state.MAX_RECORDED_REJECTIONS:
+                    state.rejected_source_row_reasons.append(f"{sample_idx // num_repeats}: {rejection}")
             return
 
         sample_dict = json.loads(sample_dict_str)
@@ -888,6 +969,7 @@ class TrainDataProcessor(BaseModel):
                 require_responses=dataset_config.taskset is None
                 and not (dataset_config.type == "benchmark" and dataset_config.prompt_config),
                 dataset_metrics_hook=dataset_metrics_hook,
+                num_repeats=dataset_config.num_repeats,
             )
 
         postprocess_other_metrics(state.metrics, state.other_metrics)
@@ -994,9 +1076,20 @@ class TrainDataProcessor(BaseModel):
             return conflicting_metrics_fpath
 
     def validate_samples_and_aggregate_metrics(
-        self, server_instance_configs: List[ServerInstanceConfig], overwrite_metrics_conflicts: bool
+        self,
+        server_instance_configs: List[ServerInstanceConfig],
+        overwrite_metrics_conflicts: bool,
+        *,
+        task_data_validation: str = "warn",
     ) -> Dict[str, DatasetMetrics]:
+        """Validate every dataset row and write each dataset's metrics sidecar.
+
+        Rows that fail request validation (not JSON, or not a valid run request) are reported per dataset with
+        ``task_data_validation``'s mode: printed in ``warn`` mode, raised together after every dataset is read in
+        ``error`` mode, and not reported in ``off`` mode. They are left out of the metrics either way.
+        """
         conflicting_fpaths: List[str] = []
+        rejection_summaries: list[str] = []
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics] = defaultdict(DatasetMetrics)
         for c in server_instance_configs:
             for d in c.datasets:
@@ -1004,6 +1097,15 @@ class TrainDataProcessor(BaseModel):
                     c, self._schema_lookup_configs(server_instance_configs)
                 )
                 state = self._validate_samples_and_aggregate_metrics_single_dataset(d, dataset_metrics_hook)
+
+                if state.number_of_rejected_source_rows and task_data_validation != "off":
+                    summary = state.rejection_summary(str(d.jsonl_fpath))
+                    if task_data_validation == "error":
+                        # Collation fails below, so write no sidecar: one that leaves out the rejected rows would
+                        # conflict with the metrics of the fixed file on the next run.
+                        rejection_summaries.append(summary)
+                        continue
+                    print(f"[request validation]\n{summary}")
 
                 dataset_type_to_aggregate_metrics[d.type].add(state.metrics)
 
@@ -1043,6 +1145,9 @@ class TrainDataProcessor(BaseModel):
 
                 print(f"Aggregate metrics for {metrics_fpath}")
                 pprint(aggregate_metrics_dict)
+
+        if rejection_summaries:
+            raise ValueError("\n".join(rejection_summaries))
 
         if conflicting_fpaths:
             conflicting_fpaths_str = "\n- ".join([""] + conflicting_fpaths)
