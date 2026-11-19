@@ -380,6 +380,13 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     - ``compaction.auto`` (a boolean). Automatic compaction summarizes the session and continues from the
       summary, in model calls that do not extend the scored call's prefix. With it off, a run that fills the
       context ends with OpenCode's context-overflow error, which the adapter reports as a context limit.
+    - ``compaction.reserved`` (OpenCode 1) or ``compaction.buffer`` (OpenCode 2), a positive integer: the token
+      buffer OpenCode keeps below ``context_window``. On OpenCode 1, automatic compaction starts after a call whose
+      tokens reach ``context_window`` minus this buffer; unset, the buffer is the smaller of 20000 and
+      ``max_output_tokens``. It moves only that trigger. The config refuses the other version's name when it loads
+      (``_compaction_buffer_name_error``); the seed refuses it again, and a buffer of ``context_window`` or more,
+      which would compact after every call. ``compaction.prune`` stays refused: it rewrites earlier tool output, so
+      later calls stop extending the earlier calls' prefix.
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
@@ -396,16 +403,19 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     )
     if unsupported:
         return (
-            "supports permission, tools, snapshot, attachment, compaction.auto, agent.build.steps and subagents only; "
-            f"unsupported: {unsupported}"
+            "supports permission, tools, snapshot, attachment, compaction.auto, compaction.reserved (OpenCode 1), "
+            f"compaction.buffer (OpenCode 2), agent.build.steps and subagents only; unsupported: {unsupported}"
         )
     if "snapshot" in opencode_config and type(opencode_config["snapshot"]) is not bool:
         return "snapshot must be a boolean"
     compaction = opencode_config.get("compaction", {})
-    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto"}:
-        return "compaction supports only auto"
+    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto", "reserved", "buffer"}:
+        return "compaction supports only auto and reserved (OpenCode 1), or auto and buffer (OpenCode 2)"
     if "auto" in compaction and not isinstance(compaction["auto"], bool):
         return "compaction.auto must be true or false"
+    for key in ("reserved", "buffer"):
+        if key in compaction and (type(compaction[key]) is not int or compaction[key] <= 0):
+            return f"compaction.{key} must be a positive integer"
     agent = opencode_config.get("agent", {})
     if not isinstance(agent, Mapping):
         return "agent must be a mapping of agent names to definitions"
@@ -420,6 +430,34 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
         elif (error := _subagent_definition_error(str(name), definition)) is not None:
             return error
     return None
+
+
+def _is_opencode2(opencode_version: Any) -> bool:
+    """Whether ``opencode_version`` selects OpenCode 2, whose interfaces the ``opencode2`` package covers."""
+    try:
+        return opencode_major(opencode_version) >= 2
+    except (AttributeError, ValueError):
+        return False
+
+
+def _compaction_buffer_name_error(opencode_version: Any, opencode_config: Mapping[str, Any]) -> str | None:
+    """Return why ``opencode_config`` names the compaction buffer as the other OpenCode version does, or ``None``.
+
+    OpenCode 1 names the buffer ``compaction.reserved`` and OpenCode 2 ``compaction.buffer``. Each version is given only
+    its own name: OpenCode 1.17 drops a compaction key it does not know, so a run given ``buffer`` would compact at the
+    default threshold without an error.
+    """
+    compaction = opencode_config.get("compaction")
+    if not isinstance(compaction, Mapping):
+        return None
+    major = 2 if _is_opencode2(opencode_version) else 1
+    key, other = ("buffer", "reserved") if major == 2 else ("reserved", "buffer")
+    if other not in compaction:
+        return None
+    return (
+        f"opencode_version {opencode_version} is OpenCode {major}: remove compaction.{other} and set "
+        f"compaction.{key} (OpenCode {major}'s name for the buffer)"
+    )
 
 
 def _configured_subagents(opencode_config: Mapping[str, Any]) -> list[str]:
@@ -449,6 +487,14 @@ def _continues_the_prompt(messages: Sequence[Mapping[str, Any]], index: int) -> 
     # After an automatic compaction's summary, OpenCode continues the prompt with a user message: a synthetic
     # "Continue if you have next steps" text, or a replay of the prompt when the compaction was for an overflow.
     return index > 0 and messages[index - 1]["info"].get("summary") is True
+
+
+def _is_compaction_summary(info: Mapping[str, Any]) -> bool:
+    """Whether an exported assistant message is a compaction summary.
+
+    OpenCode 1.17 marks a summary ``summary: true`` and names ``compaction`` as its agent; either marker is enough.
+    """
+    return info.get("summary") is True or info.get("agent") == "compaction"
 
 
 def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
@@ -568,6 +614,11 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # captured call with no message ID, every call is reported as an unmatched assistant message, and the summary call
     # of a compaction is counted as a step too.
     return_session_trajectory: bool = True
+    # Sandbox sessions only. Leave OpenCode's compaction summaries out of the response output. A summary is an
+    # assistant message like any other, so a run that ends on a compaction otherwise hands a verifier that grades the
+    # last assistant text the summary instead of an answer. Off by default, so the output keeps every assistant
+    # message; the compaction record in the observations keeps the summary either way.
+    exclude_compaction_summaries: bool = False
     # Sandbox sessions only. Let OpenCode's run load the task repository's project config and instruction files
     # (AGENTS.md or CLAUDE.md, opencode.json, .opencode/), as it does when started in that repository. The configuration
     # Gym passes is merged last and still wins. Off by default, so a repository cannot add instructions, agents, plugins
@@ -583,6 +634,16 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
                 "OpenCode replacement selects the build agent; remove --agent from extra_args "
                 "or use system_prompt_mode='append'."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_compaction_buffer_name(self) -> Self:
+        # Refused when the config loads: a config that every seed would refuse stops the server at startup, and the
+        # local path, which has no seed, does not hand OpenCode the other version's name. The seed checks again, for a
+        # config changed after it loaded.
+        error = _compaction_buffer_name_error(self.opencode_version, self.opencode_config)
+        if error is not None:
+            raise ValueError(error)
         return self
 
     @property
@@ -662,10 +723,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     @property
     def _opencode2(self) -> bool:
         """Whether ``opencode_version`` selects OpenCode 2, whose interfaces the ``opencode2`` package covers."""
-        try:
-            return opencode_major(self.config.opencode_version) >= 2
-        except (AttributeError, ValueError):
-            return False
+        return _is_opencode2(self.config.opencode_version)
 
     async def _ensure_local_runtime(self) -> str | None:
         """Install the local runtime once; for OpenCode 2, return the pinned release binary to run."""
@@ -1146,6 +1204,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         config_error = _session_opencode_config_error(self.config.opencode_config)
         if config_error is not None:
             raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
+        # The config refused the other version's name for the compaction buffer when it loaded; this refuses it in a
+        # config changed after that.
+        buffer_name_error = _compaction_buffer_name_error(self.config.opencode_version, self.config.opencode_config)
+        if buffer_name_error is not None:
+            raise AgentSeedRejectedError(f"OpenCode sandbox config: {buffer_name_error}")
+        compaction = self.config.opencode_config.get("compaction", {})
+        key = "buffer" if self._opencode2 else "reserved"
+        # The allowlist made a set buffer a positive integer. OpenCode compacts once a call comes within the buffer of
+        # context_window, so a buffer of the whole window compacts after every call until the budget ends.
+        if compaction.get(key, 0) >= self.config.context_window:
+            raise HTTPException(422, f"OpenCode sandbox config: compaction.{key} must be below context_window")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
@@ -1603,6 +1672,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         gym_reasoning = self.config.model_server is not None
         for message in export.get("messages", []):
             if message.get("info", {}).get("role") != "assistant":
+                continue
+            if self.config.exclude_compaction_summaries and _is_compaction_summary(message["info"]):
                 continue
             parts = message.get("parts", [])
             # The empty-answer decision needs the whole message; each part still converts on its own.

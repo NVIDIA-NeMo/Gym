@@ -17,13 +17,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from omegaconf import OmegaConf
 from pydantic import ValidationError
-from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
+from stirrup.core.models import AssistantMessage, Reasoning, TokenUsage, ToolCall, ToolMessage, UserMessage
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, OutcomeAction, agent_outcome_policy
 from nemo_gym.cli.env import validate_server_configs
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import AGENT_INVALID_OUTPUT, MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
+    MODEL_REQUEST_ERROR,
+    EpisodeId,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
@@ -461,6 +467,50 @@ class TestApp:
         assert output_items[1]["type"] == "function_call_output"
         assert output_items[1]["call_id"] == "call_1"
         assert output_items[1]["output"] == "ok"
+
+    def test_output_history_keeps_reasoning_returned_in_its_own_field(self) -> None:
+        call = ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"ls"}')
+        history = [
+            [
+                AssistantMessage(
+                    content="Listing the inputs.", tool_calls=[call], reasoning=Reasoning(content="Look first.")
+                ),
+                ToolMessage(content="a.xlsx", name="code_exec", tool_call_id="call_1"),
+                AssistantMessage(content="Done.", reasoning=Reasoning(content="")),
+            ]
+        ]
+
+        _, output_items = convert_stirrup_history_to_output_items(history)
+
+        assert [item["type"] for item in output_items] == [
+            "reasoning",
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert output_items[0]["summary"] == [{"type": "summary_text", "text": "Look first."}]
+        response = NeMoGymResponse(
+            id="r",
+            created_at=0,
+            model="m",
+            object="response",
+            output=output_items,
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        assert response.output[0].type == "reasoning"
+
+    def test_output_history_without_reasoning_is_unchanged(self) -> None:
+        call = ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"ls"}')
+        inline = AssistantMessage(content="<think>Look first.</think>Listing.", tool_calls=[call])
+        history = [[inline, ToolMessage(content="a.xlsx", name="code_exec", tool_call_id="call_1")]]
+
+        _, output_items = convert_stirrup_history_to_output_items(history)
+
+        assert [item["type"] for item in output_items] == ["message", "function_call", "function_call_output"]
+        assert output_items[0]["content"][0]["text"] == "<think>Look first.</think>Listing."
 
 
 class TestObservations:
