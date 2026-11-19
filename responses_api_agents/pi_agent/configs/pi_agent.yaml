@@ -15,3 +15,5 @@ pi_agent:
       model: ${policy_model_name}
       pi_version: 0.80.2
       timeout: 900
+      # max_output_tokens (default 131072) caps each model call as max_tokens. An endpoint whose model allows fewer
+      # refuses every call; set it within that cap (--max-output-tokens on a task-folder run).

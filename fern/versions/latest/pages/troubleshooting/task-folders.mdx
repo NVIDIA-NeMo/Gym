@@ -120,16 +120,65 @@ tool in to that registry, and give OpenSandbox the pull credentials in `images.a
 
 ## The sandbox cannot reach the Model Server
 
-**Symptom.** Episodes fail after the agent starts, with a connection error or a request timeout in the failure
+**Symptom.** The run stops before any episode with `... so use_absolute_ip=true cannot advertise this host to a
+sandbox`. Or episodes fail after the agent starts, with a connection error or a request timeout in the failure
 reason, and the collector retries them.
 
 **Cause.** Some harnesses, such as `hermes_agent` and `codex_agent`, call the Model Server from inside the sandbox.
 For them, `gym eval run` makes the Model Server advertise the machine's network address instead of loopback, which
 a sandbox reaches only when the network routes to it and no firewall blocks the port.
 
-**Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. A deployment that
-needs other servers reachable sets `absolute_ip_server_types` or `default_host` (see
+On a task-folder run, when the hostname does not resolve, or resolves to loopback, Gym advertises the address of
+the interface the default route uses, on a laptop often its Wi-Fi or VPN address, and logs a warning naming it. The
+run stops only when there is no such route, for example offline. Any other run, a `--benchmark` run included, stops
+when the hostname gives no usable address, as it always has.
+
+**Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. When the default
+route's interface is not the one the sandboxes reach (a VPN, several networks), set the Model Server's own `host`,
+such as `++policy_model.responses_api_models.openai_model.host=<address>` with `--model-type openai_model`. Offline,
+add `+default_host=<an address the sandboxes reach>`. A deployment that needs other servers reachable sets
+`absolute_ip_server_types` or `default_host` (see
 [Multi-Node Configuration](/main/reference/configuration#multi-node-configuration)).
+
+The Model Server listens on that one address, not on loopback or `0.0.0.0`, and checks no credential on incoming
+calls. During the run, any machine that can reach the address and port, such as another host on the same Wi-Fi,
+office network or VPN, can send it requests, which it forwards to `<url>` with your `--model-api-key`. The other
+servers stay on loopback. `+default_host` moves every server to the address, including the head server, whose
+`/global_config_dict_yaml` endpoint returns the merged configuration (credentials masked unless
+`head_server_serve_credentials` is `true`). Run on a network you trust.
+
+## The model rejects every request
+
+**Symptom.** With OpenCode (`opencode_agent`) or Pi (`pi_agent`), every episode fails at the agent stage, ungraded,
+with a failure reason such as `HTTP 400: max_tokens is too large`. The terminal's dropped-rollout line reads
+`class=model_request_rejected`, and the run summary names `model_request_rejected` as each such task's
+`failure_kind`. When the reason is an output limit, the line after `Run summary written to` names
+`--max-output-tokens`. Other harnesses, and `--benchmark` runs, handle such a refusal as on any other run:
+`openai_model` answers it with HTTP 500, and a Model Server that passes the 400 on, such as `vllm_model`, hands it to
+the harness, which reports it as a graded `model_request_error`.
+
+**Cause.** The endpoint refused the request because the run's own settings are invalid, so the episode is not
+graded. A common case is a harness output limit above the model's cap: OpenCode and Pi
+ask for up to 131,072 output tokens per model call unless their `max_output_tokens` is set. Most hosted models allow
+fewer, for example:
+
+| Model | Output-token cap |
+| --- | --- |
+| GPT-5 family | 128,000 |
+| gpt-4.1 | 32,768 |
+| gpt-4o, gpt-4o-mini | 16,384 |
+| o1, o3-mini, o4-mini | 100,000 |
+| Claude | 64,000 or 128,000, depending on the model |
+
+A parameter the model does not accept, such as a `temperature` other than 1 on an OpenAI reasoning model, fails the
+same way. Any other 400, and a refusal that names the model's context window, is handled as on any other run:
+`openai_model` answers it with HTTP 500, which the collector retries, and a Model Server that passes the 400 on, such
+as `vllm_model`, has it graded. OpenCode 2 (`opencode_version` 2 or later) can report a provider error with a
+generic message such as `Bad request`; such a refusal also stays graded, as before.
+
+**Fix.** Pass `--max-output-tokens <n>` with `n` at or below the model's cap, such as `--max-output-tokens 32768`
+for gpt-4.1. Your provider's model documentation gives the cap. The OpenCode commands in `environments/hello_*` pass
+16384, which fits every model above.
 
 ## A harness cannot install its runtime in the sandbox
 

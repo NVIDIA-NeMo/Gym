@@ -4,6 +4,7 @@
 
 import ast
 import fcntl
+import importlib.util
 import json
 import os
 import re
@@ -1190,6 +1191,36 @@ class TestAnswerAndSolutions:
         ):
             assert (EXAMPLES / name / "solution" / "solve.sh").is_file(), name
         assert (EXAMPLES / "hello_parameterized_tasks" / "solution" / "answer.template.md").is_file()
+
+
+class TestHelloMCPToolExample:
+    def test_verifier_requires_a_logged_call_for_the_name(self, tmp_path, monkeypatch):
+        # tests/test.sh as the sandbox runs it, with its absolute paths moved under tmp_path in one pass, against the
+        # log the task's own server writes: the greeting alone, or a call for another name, scores 0.
+        example = EXAMPLES / "hello_mcp_tool"
+        script = (example / "tests" / "test.sh").read_text()
+        script = re.sub(r"/(logs|workspace)/", lambda match: f"{tmp_path}{match[0]}", script)
+        spec = importlib.util.spec_from_file_location(
+            "hello_tools_server", example / "environment" / "tools" / "server.py"
+        )
+        server = importlib.util.module_from_spec(spec)
+        # A __pycache__ beside server.py would join the image's build inputs and force a rebuild of a recorded image.
+        monkeypatch.setattr(sys, "dont_write_bytecode", True)
+        spec.loader.exec_module(server)
+        monkeypatch.setattr(server, "CALLS_LOG", tmp_path / str(server.CALLS_LOG).lstrip("/"))
+        greeting = tmp_path / "workspace" / "tool-greeting.txt"
+        greeting.parent.mkdir()
+
+        def reward() -> str:
+            subprocess.run(["bash", "-c", script], check=True, capture_output=True)
+            return (tmp_path / "logs" / "verifier" / "reward.txt").read_text()
+
+        greeting.write_text("Hello, NeMo Gym!\n")
+        assert reward() == "0\n"
+        server.get_greeting("World")
+        assert reward() == "0\n"
+        greeting.write_text(server.get_greeting("NeMo Gym"))
+        assert reward() == "1\n"
 
 
 class TestPublish:

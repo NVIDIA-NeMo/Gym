@@ -24,7 +24,7 @@ import shutil
 from asyncio import Semaphore
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from time import monotonic, time
+from time import time
 from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
@@ -1097,7 +1097,9 @@ class PiAgent(SimpleResponsesAPIAgent):
                         timeout=timeout,
                         close_timeout=self.config.session_close_timeout_seconds,
                         files=files,
-                        deadline=monotonic() + timeout,
+                        # On the event loop's clock, which `execute` and `asyncio.timeout_at` read; under uvloop on
+                        # macOS it differs from `monotonic()`, and a deadline taken from that is already expired.
+                        deadline=asyncio.get_running_loop().time() + timeout,
                     )
                 except TimeoutError:
                     # The supervisor stops Pi at the deadline, and execute returns. If the provider's exec limit

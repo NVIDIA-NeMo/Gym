@@ -12,7 +12,12 @@ from nemo_gym.agents.agent_outcome import (
     choose_action,
     failure_outcome_policy,
 )
-from nemo_gym.core.failure_kinds import AGENT_INVALID_OUTPUT, MODEL_POLICY_RESPONSE_TIMEOUT, MODEL_TRANSPORT_ERROR
+from nemo_gym.core.failure_kinds import (
+    AGENT_INVALID_OUTPUT,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    MODEL_REQUEST_REJECTED,
+    MODEL_TRANSPORT_ERROR,
+)
 from nemo_gym.core.failure_records import FailureBoundary, ModelFailureDetails
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 
@@ -29,6 +34,14 @@ def test_status_kind_default_and_partial_overrides():
     )
     with pytest.raises(ValidationError, match="Unregistered failure"):
         OutcomePolicyConfig(default_action="retry", by_failure_kind={"typo": "fail"})
+
+
+def test_a_rejected_request_fails_without_grading_or_retry():
+    # It carries no HTTP status, so no status rule (400 verifies) can grade it as the model's answer.
+    assert (
+        choose_action(failure_kind=MODEL_REQUEST_REJECTED, http_status=None, config=AgentOutcomePolicyConfig())
+        == OutcomeAction.FAIL
+    )
 
 
 def test_event_adapter_does_not_search_an_inner_http_status():

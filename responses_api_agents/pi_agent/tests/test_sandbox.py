@@ -536,6 +536,23 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
     agent.server_client.post.assert_not_called()
 
 
+def test_first_activation_deadline_is_on_the_event_loop_clock(setup, monkeypatch):
+    """`asyncio.timeout_at` reads the event loop's clock, which uvloop on macOS runs ahead of `time.monotonic()`.
+    With the loop's clock far ahead, a deadline taken from `monotonic()` is already expired, and the activation times
+    out before Pi starts."""
+    agent, sandbox = setup
+    monkeypatch.setattr(asyncio.BaseEventLoop, "time", lambda self: monotonic() + 10_000)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        assert sandbox.launch.called
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+
+
 async def test_install_failure_preserves_stdout_and_stderr(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [

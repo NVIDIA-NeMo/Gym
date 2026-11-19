@@ -32,6 +32,7 @@ from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_sp
 from nemo_gym.cli.main import main
 from nemo_gym.config.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.data.tasks.harbor.prepare import AgentSelection
 
 
 def _make_agent_instance_config(name: str, dataset_specs: list) -> ResponsesAPIAgentServerInstanceConfig:
@@ -308,3 +309,58 @@ def test_aggregate_rollouts_sets_up_telemetry_before_aggregating_and_shuts_it_do
         "aggregate",
         "shutdown",
     ]
+
+
+_REFUSED_LIMIT = (
+    "HTTP 400: litellm.BadRequestError: AzureException BadRequestError - max_tokens is too large: 131072. This model "
+    "supports at most 32768 completion tokens, whereas you provided 131072."
+)
+
+
+@pytest.mark.parametrize(
+    ("kind", "message", "has_output_limit", "hinted"),
+    [
+        ("model_request_rejected", _REFUSED_LIMIT, True, True),
+        (
+            "model_request_rejected",
+            "max_tokens: 64001 > 64000, which is the maximum allowed number of output tokens for claude-opus-4-1",
+            True,
+            True,
+        ),
+        ("model_request_rejected", "max_tokens=131072 cannot be greater than max_model_len=32768", True, True),
+        # The harness has no limit of its own, so the flag would be refused.
+        ("model_request_rejected", _REFUSED_LIMIT, False, False),
+        # A parameter the model does not take, or another invalid setting, is no limit to lower.
+        (
+            "model_request_rejected",
+            "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+            True,
+            False,
+        ),
+        (
+            "model_request_rejected",
+            "Unsupported value: 'temperature' does not support 0.2 with this model.",
+            True,
+            False,
+        ),
+        # A graded request error is the model's own result.
+        ("model_request_error", _REFUSED_LIMIT, True, False),
+    ],
+    ids=["openai", "anthropic", "vllm", "no-limit-setting", "unsupported-parameter", "other-setting", "other-kind"],
+)
+def test_output_limit_hint_names_the_flag_only_for_a_refused_limit_the_harness_can_lower(
+    kind, message, has_output_limit, hinted
+):
+    agent = AgentSelection(Path("agent.yaml"), "agent", "agent", has_output_limit=has_output_limit)
+    refused = {"status": "failed", "failure_kind": kind, "failure": {"message": message}}
+    summary = {"tasks": [refused, refused | {"failure_kind": None}, {"status": "result", "failure_kind": None}]}
+
+    hint = cli_eval._output_limit_hint(summary, agent)
+
+    if hinted:
+        assert hint == (
+            "1 rollout(s) were not graded: the model endpoint refused the harness's output-token limit as above the "
+            "model's cap (model_request_rejected). Run again with a lower limit: --max-output-tokens <n>."
+        )
+    else:
+        assert hint is None

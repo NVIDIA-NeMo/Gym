@@ -24,11 +24,13 @@ from openai.types.shared import ReasoningEffort
 from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.client import MAX_NUM_TRIES, NeMoGymAsyncOpenAI, PermanentEndpointError
+from nemo_gym.config import FORWARD_CONFIGURATION_REFUSALS_KEY_NAME
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    is_configuration_refusal,
 )
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
 from nemo_gym.telemetry import MeteredSemaphore
@@ -290,7 +292,17 @@ class SimpleModelServer(SimpleResponsesAPIModel):
 
     def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
         # OpenAI and subclasses such as LiteLLM retain their opt-in HTTP policy.
-        return error.status in self.config.propagate_upstream_http_status_codes
+        if error.status in self.config.propagate_upstream_http_status_codes:
+            return True
+        # A task-folder run whose harness reports a refusal of invalid run settings as a rejected request asks for
+        # that 400 with the provider's reason; every other 400 stays the historical 500.
+        global_config = getattr(self.server_client, "global_config_dict", None) or {}
+        if error.status != 400 or not global_config.get(FORWARD_CONFIGURATION_REFUSALS_KEY_NAME):
+            return False
+        content = getattr(error, "response_content", None)
+        return is_configuration_refusal(
+            content.decode(errors="replace") if isinstance(content, bytes) else str(content or error.message)
+        )
 
     def model_post_init(self, context):
         self._client = NeMoGymAsyncOpenAI(

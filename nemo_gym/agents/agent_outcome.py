@@ -15,6 +15,7 @@ from nemo_gym.core.failure_kinds import (
     FAILURE_KINDS,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    MODEL_REQUEST_REJECTED,
     MODEL_SERVER_QUEUE_TIMEOUT,
     MODEL_TRANSPORT_ERROR,
     PROVIDER_COMMAND_OUTCOME_UNKNOWN,
@@ -28,8 +29,9 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_UNAVAILABLE,
     FailureClassificationConfig,
     classify_failure,
+    is_configuration_refusal,
 )
-from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
+from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport, ModelFailureDetails
 from nemo_gym.core.failure_transport import FailureHeader
 
 # Compatibility imports for existing agent/environment policy consumers.
@@ -80,6 +82,45 @@ class AgentOutcome(BaseModel):
         return self
 
 
+def reject_configuration_refusal(outcome: AgentOutcome, *, error_message: str) -> AgentOutcome:
+    """``model_request_rejected`` for an HTTP 400 whose message says the run's own settings are invalid, else ``outcome``.
+
+    An output limit above the model's cap, or a parameter the model does not accept, is refused on every call whatever
+    the conversation holds: the run's configuration is at fault, so the attempt is not graded. Any other 400 stays
+    ``model_request_error`` and graded, and so does a refusal that names the context window, the model's own limit.
+    """
+    if (
+        outcome.failure_kind == MODEL_REQUEST_ERROR
+        and outcome.status_code == 400
+        and is_configuration_refusal(error_message)
+    ):
+        return AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED)
+    return outcome
+
+
+def report_rejected_request(report: FailureReport) -> FailureReport:
+    """``report`` selecting a ``model_request_rejected`` failure caused by the HTTP 400 it selected, else ``report``.
+
+    ``reject_configuration_refusal`` changes only the outcome, and an Environment Server fails a reply whose selected
+    failure disagrees with its outcome, whatever its policy. So a report that selects that model request error gains
+    an agent-boundary rejection caused by it, and selects the rejection. Every original event keeps its id; a report
+    that selects nothing, or something else, is unchanged.
+    """
+    selected = report.events.get(report.failure_id) if report.failure_id is not None else None
+    if selected is None or selected.failure_kind != MODEL_REQUEST_ERROR or selected.http_status != 400:
+        return report
+    rejection = FailureEvent(
+        boundary=FailureBoundary.AGENT,
+        failure_kind=MODEL_REQUEST_REJECTED,
+        failure_reason="The model endpoint refused the run's own request settings",
+        stage=selected.stage,
+        cause_id=selected.event_id,
+    )
+    return FailureReport(
+        failure_id=rejection.event_id, events={**report.events, rejection.event_id: rejection}, omitted=report.omitted
+    )
+
+
 class AgentOutcomePolicyConfig(OutcomePolicyConfig):
     """Existing Environment Server defaults for classified failed agent responses."""
 
@@ -109,6 +150,8 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
                 ),
                 OutcomeAction.RETRY,
             ),
+            # A request the endpoint refused as invalid never reached the model: not graded, not retried.
+            MODEL_REQUEST_REJECTED: OutcomeAction.FAIL,
             PROVIDER_OOM_KILLED: OutcomeAction.VERIFY,
             "unknown": OutcomeAction.RETRY,
         }

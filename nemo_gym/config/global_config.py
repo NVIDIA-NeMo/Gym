@@ -32,7 +32,7 @@ from os import environ, getenv
 from pathlib import Path
 from platform import python_version
 from random import randint
-from socket import gethostbyname, gethostname, socket
+from socket import AF_INET, SOCK_DGRAM, gethostbyname, gethostname, socket
 from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type
 
 import hydra
@@ -170,8 +170,19 @@ ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
 # When set, an agent without an environment server fails config validation.
 # When unset, Gym generates a legacy_agent relay for the agent and logs a deprecation warning.
 ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME = "error_on_agent_without_environment_server"
+# When set, `openai_model` returns an upstream HTTP 400 that names invalid run settings (an output limit above the
+# model's cap, a parameter the model does not accept) with its status and body, instead of HTTP 500, and an agent's
+# `report_outcome` reports such a 400 as `model_request_rejected`, which is not graded. Only a task-folder run sets
+# it, for a harness that reports such a refusal; every other run keeps the graded `model_request_error`.
+FORWARD_CONFIGURATION_REFUSALS_KEY_NAME = "forward_configuration_refusals"
+# When set with `use_absolute_ip` and `absolute_ip_server_types`, a hostname that does not resolve or resolves to
+# loopback advertises the address of the default route's interface instead of failing (laptops: a macOS `*.local`
+# name, Debian and Ubuntu's 127.0.1.1). Only a task-folder run sets it; every other config names its address itself.
+ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME = "absolute_ip_route_fallback"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
+    FORWARD_CONFIGURATION_REFUSALS_KEY_NAME,
+    ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
     DEFAULT_HOST_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
@@ -595,6 +606,27 @@ def _openai_version_matches_nemo_gym_constraint(version: str) -> bool:
         return Requirement(req_str).specifier.contains(Version(version), prereleases=True)
     except Exception:
         return True
+
+
+def _advertisable(address: str) -> bool:
+    """Whether ``address`` can name this host to a sandbox: not loopback, not unspecified."""
+    parsed = ip_address(address)
+    return not (parsed.is_loopback or parsed.is_unspecified)
+
+
+def _default_route_address() -> Optional[str]:
+    """This host's address on the interface its default route uses, or ``None`` without one.
+
+    Connecting a UDP socket sends nothing; it only selects the route and the local address the kernel would use.
+    The target is a documentation address (TEST-NET-1), so no real host is named.
+    """
+    try:
+        with socket(AF_INET, SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))
+            address = probe.getsockname()[0]
+    except OSError:
+        return None
+    return address if _advertisable(address) else None
 
 
 class GlobalConfigDictParser(BaseModel):
@@ -1889,17 +1921,45 @@ Found global config dict yaml:
                 "Set +default_host=<host address reachable from the sandbox>, or set +use_absolute_ip=false "
                 "only when the caller shares the servers' network namespace."
             )
+            # Only a task-folder run falls back to the default route's address, and only scoped to the servers a
+            # sandbox must reach: unscoped, that address would reach every server, the head server's config endpoint
+            # included. Every other config fails here as it always has and names its address itself.
+            route_fallback = bool(global_config_dict.get(ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME)) and (
+                global_config_dict.get(ABSOLUTE_IP_SERVER_TYPES_KEY_NAME) is not None
+            )
             try:
-                default_host = gethostbyname(hostname)
+                resolved = gethostbyname(hostname)
             except OSError as exc:
+                if not route_fallback:
+                    raise ConfigError(
+                        f"Cannot resolve host {hostname!r} for use_absolute_ip=true. {address_hint}"
+                    ) from exc
+                resolved = None
+            if resolved is not None and _advertisable(resolved):
+                default_host = resolved
+            elif not route_fallback:
                 raise ConfigError(
-                    f"Cannot resolve host {hostname!r} for use_absolute_ip=true. {address_hint}"
-                ) from exc
-            address = ip_address(default_host)
-            if address.is_loopback or address.is_unspecified:
-                raise ConfigError(
-                    f"Host {hostname!r} resolves to {default_host}, which cannot advertise this host to a sandbox. "
+                    f"Host {hostname!r} resolves to {resolved}, which cannot advertise this host to a sandbox. "
                     f"{address_hint}"
+                )
+            else:
+                # Laptops and desktops: a macOS `*.local` name often has no DNS entry, and Debian/Ubuntu map the
+                # hostname to 127.0.1.1. The address of the interface the default route leaves through is what a
+                # local container (Docker's bridge) or another machine reaches this host on. Only the server
+                # types `absolute_ip_server_types` names move to it (a task-folder run names the model server).
+                found = "does not resolve" if resolved is None else f"resolves to {resolved}"
+                default_host = _default_route_address()
+                if default_host is None:
+                    raise ConfigError(
+                        f"Host {hostname!r} {found}, and no non-loopback address was found on the default route, "
+                        f"so use_absolute_ip=true cannot advertise this host to a sandbox. {address_hint}"
+                    )
+                logger.warning(
+                    "Host %r %s; advertising %s, the address of the default route's interface, to sandboxes. "
+                    "Set +default_host=<address> if they reach this host on another address.",
+                    hostname,
+                    found,
+                    default_host,
                 )
         # `absolute_ip_server_types` scopes the resolved address to the servers a sandbox must reach (a Harbor run
         # names the model server): the head server, whose unauthenticated config endpoint returns the merged

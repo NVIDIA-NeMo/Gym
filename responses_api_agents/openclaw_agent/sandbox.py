@@ -8,7 +8,6 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from time import monotonic
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
@@ -160,7 +159,9 @@ class OpenClawSandboxSession(AgentSessionState):
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
-            deadline=monotonic() + timeout,
+            # On the event loop's clock, which `execute` and `asyncio.timeout_at` read; under uvloop on macOS it
+            # differs from `monotonic()`, and a deadline taken from that is already expired.
+            deadline=asyncio.get_running_loop().time() + timeout,
         )
         if self.session.closing:
             raise asyncio.CancelledError

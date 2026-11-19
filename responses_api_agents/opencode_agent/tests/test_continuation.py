@@ -444,6 +444,24 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
     assert sandbox.disconnect.await_count == 1 and sandbox.stop.await_count == 0
 
 
+def test_continuation_deadline_is_on_the_event_loop_clock(setup, tmp_path, monkeypatch):
+    """Each activation's deadline is a time on the event loop's clock, which `asyncio.timeout_at` and the session read;
+    with `monotonic()` far behind it, a deadline taken from `monotonic()` would be expired before OpenCode starts."""
+    from time import monotonic
+
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: monotonic() - 10_000)
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        for index in (1, 2):
+            response = activate(client, index)
+            assert response.status_code == 200, response.text
+            assert roots(response.json()["_ng_agent_observations"])[0]["status"] == "completed"
+            assert sandbox.launch.call_count == index
+        close(client, request)
+
+
 @pytest.mark.parametrize("mode", ["append", "replace"])
 def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path, mode):
     agent, sandbox = setup

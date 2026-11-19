@@ -64,6 +64,7 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.core.failure_kinds import MODEL_REQUEST_REJECTED
 from nemo_gym.data.tasks.harbor.build_options import (
     _block_from_overrides,
     _merged_cli_config,
@@ -97,6 +98,7 @@ from nemo_gym.data.tasks.harbor.prepare import (
     _listed,
     build_run,
     harbor_benchmark,
+    harness_output_limit,
     prepare_target,
     resolve_agent,
     resolve_sandbox_config,
@@ -1649,6 +1651,7 @@ def run_target(args: argparse.Namespace, overrides: list[str], *, benchmark: Har
             agent = resolve_agent(agent_name)
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
+        harness_output_limit(overrides, agent)
     except (ValueError, OSError, yaml.YAMLError, ConfigError) as exc:
         args._parser.error(str(exc))
     if agent.impl_name == ORACLE_AGENT:
@@ -1663,7 +1666,9 @@ def run_target(args: argparse.Namespace, overrides: list[str], *, benchmark: Har
             f"{_listed(prepared.skipped)}\nUse --skip-unloadable to explicitly run only the loadable subset."
         )
     try:
-        config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
+        config_path, tokens = build_run(
+            prepared, agent, sandbox=sandbox, overrides=overrides, benchmark_run=benchmark is not None
+        )
     except (HarborTaskError, OSError) as exc:
         args._parser.error(str(exc))
     tokens = _merge_config_paths(tokens)
@@ -1761,10 +1766,45 @@ def _write_summary(
         if callable(expected):
             expected = expected()
         path = write_run_summary(rollouts, expected=expected, **kwargs)
+        hint = _output_limit_hint(json.loads(path.read_text()), kwargs["agent"])
     except Exception:
         logger.warning("Could not write the run summary beside %s", rollouts, exc_info=True)
         return
     print(f"Run summary written to {path}")
+    if hint is not None:
+        print(hint)
+
+
+# A provider's refusal of the requested output limit names the limit parameter and says it is over the model's cap,
+# as OpenAI ("max_tokens is too large: 131072. This model supports at most 32768 completion tokens") and Anthropic
+# ("max_tokens: 64001 > 64000, which is the maximum allowed number of output tokens") word it. A parameter the model
+# does not take ("Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens' instead") is not one.
+_OUTPUT_LIMIT_REFUSAL = re.compile(
+    r"max_(?:completion_|output_|new_)?tokens\b.*?(?:too large|at most|maximum|exceed|cannot be greater than max_model_len)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _output_limit_hint(summary: Mapping[str, Any], agent: AgentSelection) -> str | None:
+    """The next step for rollouts the model endpoint refused for an output-token limit above the model's cap
+    (``model_request_rejected`` with such a provider message), or ``None``.
+
+    Only a harness with its own output-limit setting gets it: ``--max-output-tokens`` is refused for any other.
+    """
+    if not agent.has_output_limit:
+        return None
+    refused = [
+        task
+        for task in summary.get("tasks", [])
+        if task.get("failure_kind") == MODEL_REQUEST_REJECTED
+        and _OUTPUT_LIMIT_REFUSAL.search(str((task.get("failure") or {}).get("message") or ""))
+    ]
+    if not refused:
+        return None
+    return (
+        f"{len(refused)} rollout(s) were not graded: the model endpoint refused the harness's output-token limit as "
+        "above the model's cap (model_request_rejected). Run again with a lower limit: --max-output-tokens <n>."
+    )
 
 
 def _prepare_for_agent(

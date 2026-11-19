@@ -38,8 +38,9 @@ score, which is their sum, and the result names them as ``reward_components`` (k
 ``failure_kind``. Only a Gym-side failure (sandbox lost, transfer failed) masks the sample. A
 failed agent response whose harness classified the cause (``ng_agent_outcome``) goes through
 ``agent_outcome_policy`` before verification, as on ``single_agent_turn``: by default a
-transport or unknown cause is retried ungraded instead of scoring 0. A task that cannot be set up is a handled episode failure:
-terminal when the task itself is at fault (unknown task, changed folder, unsupported
+transport or unknown cause is retried ungraded instead of scoring 0, and a request the endpoint refused for
+invalid run settings fails as ``model_request_rejected``. A task that cannot be set up is a handled episode
+failure: terminal when the task itself is at fault (unknown task, changed folder, unsupported
 settings), retryable when the sandbox provider failed.
 """
 
@@ -56,7 +57,7 @@ from uuid import uuid4
 
 from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, ValidationError, model_validator
 
 from environment_servers.harbor.entrypoint import (
     ENTRYPOINT_FAILED_KIND,
@@ -87,9 +88,11 @@ from environment_servers.harbor.verifier import (
 from nemo_gym import RESULTS_DIR
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
+    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentContinuationRequirements,
+    AgentOutcome,
     AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
@@ -109,6 +112,7 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     EPISODE_FAILED,
+    MODEL_REQUEST_REJECTED,
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     FailureBoundary,
@@ -1355,9 +1359,14 @@ class HarborEnvironmentServer(
         """A failed response whose harness classified the cause is routed by the deployment's policy before any
         grading: a transport or unknown cause is retried ungraded, as on ``single_agent_turn``, instead of
         handing test.sh a half-finished sandbox and recording a real 0. In a multi-step task this ends the
-        episode at the turn that failed; a verify cause is graded as before."""
+        episode at the turn that failed; a verify cause is graded as before.
+
+        A request the endpoint refused for invalid run settings names ``model_request_rejected`` as its failure kind,
+        so the run summary and the dropped-rollout line say why the episode was not graded; any other cause stays
+        the environment-side failure it always was."""
         action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
         if action != OutcomeAction.VERIFY:
+            cause = _reported_cause(agent_response)
             raise self._failure(
                 stage="agent",
                 failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
@@ -1365,6 +1374,9 @@ class HarborEnvironmentServer(
                 partial_response=agent_response,
                 agent_observations=handle.observations,
                 trajectory=handle.trajectory,
+                failure_kind=MODEL_REQUEST_REJECTED
+                if cause is not None and cause.failure_kind == MODEL_REQUEST_REJECTED
+                else None,
             )
 
     async def _require_turn_continuation(self) -> None:
@@ -2118,6 +2130,16 @@ class HarborEnvironmentServer(
                 "trajectory": trajectory,
             },
         )
+
+
+def _reported_cause(response: NeMoGymResponse) -> AgentOutcome | None:
+    """The registered cause a failed response's harness reported (``ng_agent_outcome``), or ``None`` when it
+    reported none, an ``unknown`` one, or malformed metadata."""
+    try:
+        outcome = AgentOutcome.model_validate_json((response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY) or "")
+    except ValidationError:
+        return None
+    return outcome if failure_kinds.is_registered(outcome.failure_kind) else None
 
 
 def _opensandbox_message(exc: Exception) -> str | None:

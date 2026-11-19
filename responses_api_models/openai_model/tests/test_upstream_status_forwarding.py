@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A model server answers an upstream rejected credential or rate limit with that status, never a bare 500."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,7 +24,7 @@ def _upstream_error(status: int, body: bytes) -> ClientResponseError:
     return error
 
 
-def _model_server(upstream_status: int, body: bytes) -> SimpleModelServer:
+def _model_server(upstream_status: int, body: bytes, global_config_dict: dict | None = None) -> SimpleModelServer:
     config = SimpleModelServerConfig(
         host="0.0.0.0",
         port=8081,
@@ -33,7 +34,9 @@ def _model_server(upstream_status: int, body: bytes) -> SimpleModelServer:
         entrypoint="",
         name="judge_model_server",
     )
-    server = SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+    server = SimpleModelServer(
+        config=config, server_client=MagicMock(spec=ServerClient, global_config_dict=global_config_dict or {})
+    )
     server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
     error = _upstream_error(upstream_status, body)
     server._client.create_response = AsyncMock(side_effect=error)
@@ -58,6 +61,47 @@ def test_the_responses_route_forwards_the_upstream_status_and_body(status) -> No
 @pytest.mark.parametrize("status", [400, 500, 503])
 def test_other_upstream_statuses_stay_a_500_of_the_route(status) -> None:
     assert _route_reply(_model_server(status, b"{}")).status_code == 500
+
+
+OUTPUT_CAP_REFUSAL = (
+    b'{"error": {"message": "max_tokens is too large: 131072. This model supports at most 32768 completion tokens, '
+    b'whereas you provided 131072.", "type": "invalid_request_error", "param": "max_tokens"}}'
+)
+
+
+@pytest.mark.parametrize(
+    "forward,body,status",
+    [
+        # A task-folder run whose harness reports a configuration refusal asks for its 400 and body.
+        (True, OUTPUT_CAP_REFUSAL, 400),
+        (
+            True,
+            b'{"error": {"message": "Unsupported parameter: \'temperature\' is not supported with this model."}}',
+            400,
+        ),
+        # Any other 400 stays a 500, as without the setting.
+        (True, b'{"error": {"message": "Invalid prompt: flagged by the content filter."}}', 500),
+        (
+            True,
+            b'{"error": {"message": "maximum context length is 32768 tokens", "code": "context_length_exceeded"}}',
+            500,
+        ),
+        (
+            True,
+            b'{"error": {"message": "max_tokens is too large: input length and max_tokens exceed the context"}}',
+            500,
+        ),
+        # Without the setting even a configuration refusal stays a 500.
+        (False, OUTPUT_CAP_REFUSAL, 500),
+    ],
+)
+def test_a_configuration_refusal_is_forwarded_only_when_the_run_asks_for_it(forward, body, status) -> None:
+    settings = {"forward_configuration_refusals": True} if forward else {}
+    reply = _route_reply(_model_server(400, body, settings))
+
+    assert reply.status_code == status
+    if status == 400:
+        assert reply.json() == json.loads(body)
 
 
 class _JudgeRequest(BaseVerifyRequest):

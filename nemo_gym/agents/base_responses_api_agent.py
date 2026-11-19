@@ -49,7 +49,13 @@ from nemo_gym.agents.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
-from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, policy_timeout_failure
+from nemo_gym.agents.agent_outcome import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentOutcome,
+    policy_timeout_failure,
+    reject_configuration_refusal,
+    report_rejected_request,
+)
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
@@ -60,6 +66,7 @@ from nemo_gym.config.config_types import (
     ResourcesServerRef,
 )
 from nemo_gym.config.global_config import (
+    FORWARD_CONFIGURATION_REFUSALS_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     ROLLOUT_CORRELATION_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
@@ -73,8 +80,8 @@ from nemo_gym.core.episode_context import (
     skips_token_capture,
 )
 from nemo_gym.core.episode_types import EpisodeId, TaskId
-from nemo_gym.core.failure_kinds import FailureStage
-from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.failure_kinds import MODEL_REQUEST_REJECTED, FailureStage
+from nemo_gym.core.failure_records import FailureBoundary, FailureReport
 from nemo_gym.core.model_call_sampling import (
     MODEL_SAMPLING_NULL,
     current_model_sampling_segment,
@@ -1636,18 +1643,44 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return AgentOutcome(failure_kind="unknown")
 
     def report_outcome(self, response: NeMoGymResponse, native_result: Mapping[str, Any]) -> NeMoGymResponse:
-        """Attach validated evidence through the existing string-valued response metadata."""
+        """Attach validated evidence through the existing string-valued response metadata.
+
+        On a run that sets ``forward_configuration_refusals`` (a task-folder run of a harness that reports such a
+        refusal), an HTTP 400 whose message says the run's own settings are invalid, such as an output limit above the
+        model's cap, is reported as ``model_request_rejected`` (see ``reject_configuration_refusal``). When the reply
+        carries the Model Server's ``failure_report``, the rejection is selected there too, caused by that 400.
+        """
         if response.status != "failed":
             return response
         outcome = AgentOutcome.model_validate(self.classify_outcome(native_result))
-        return response.model_copy(
-            update={
-                "metadata": {
-                    **(response.metadata or {}),
-                    AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
-                }
-            }
-        )
+        update: dict[str, Any] = {}
+        if self._configuration_refusals_forwarded():
+            # ``model_copy(update=...)`` keeps an ``error`` given as a dict unvalidated.
+            error = response.error
+            message = error.get("message") if isinstance(error, Mapping) else getattr(error, "message", None)
+            outcome = reject_configuration_refusal(outcome, error_message=message or "")
+            report = (response.model_extra or {}).get("failure_report")
+            if outcome.failure_kind == MODEL_REQUEST_REJECTED and report is not None:
+                # A malformed report stays as it is: the Environment Server fails it closed.
+                try:
+                    parsed = FailureReport.model_validate(report)
+                except ValidationError:
+                    parsed = None
+                rejected = report_rejected_request(parsed) if parsed is not None else None
+                if rejected is not None and rejected is not parsed:
+                    update["failure_report"] = rejected.model_dump(mode="json")
+        update["metadata"] = {
+            **(response.metadata or {}),
+            AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
+        }
+        return response.model_copy(update=update)
+
+    def _configuration_refusals_forwarded(self) -> bool:
+        """Whether the run reports a refusal of its own settings as a rejected request (``report_outcome``)."""
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if not isinstance(global_config, Mapping):
+            return False
+        return bool(global_config.get(FORWARD_CONFIGURATION_REFUSALS_KEY_NAME, False))
 
     def report_rollout_stop(self, response: NeMoGymResponse, session: SandboxSession) -> NeMoGymResponse:
         """Mark the response of a run that ``POST /rollouts/{rollout_id}/stop`` ended.
