@@ -4,7 +4,7 @@ description: >-
   Use when deciding which NeMo Gym tasks to train on with RL: profiling rewards
   over repeated rollouts with gym eval profile, reading per-task pass rates and
   reward spread, finding tasks that never or always pass, and reporting
-  coverage honestly for partial runs. Not for running evaluations, comparing
+  coverage honestly for partial runs. Not for benchmark scoring runs, comparing
   runs or explaining score gaps, planning benchmark repeats, or debugging
   crashed runs.
 license: Apache-2.0
@@ -41,10 +41,11 @@ Hand off when the main job is different:
 ## Prerequisites
 
 - NeMo Gym (`pip install "nemo-gym>=0.7"`) for `gym env start`, `gym eval run` and `gym eval profile`.
+- `uv` on the `PATH` (`pip install uv`) to start servers: `gym env start` builds each server's environment with it.
 - A model endpoint and its API key, only when rollouts still have to be collected.
 - Python for the bundled script. It needs no packages and no Gym checkout.
 
-## Workflow
+## Instructions
 
 ### 1. Collect repeated rollouts
 
@@ -80,7 +81,7 @@ Use enough repeats. A task with pass rate p gets the same reward on all n repeat
 | 5% | 81% | 66% | 44% |
 | 10% | 66% | 43% | 19% |
 | 25% | 32% | 10% | 1% |
-| 50% | 13% | 1% | 0% |
+| 50% | 13% | 1% | <1% |
 
 Use at least 8 repeats when choosing training tasks, and more when the environment has many hard tasks.
 
@@ -109,11 +110,11 @@ python3 <skill folder>/scripts/summarize_profile.py results/rollouts_reward_prof
 
 It reads the materialized inputs and agent metrics beside the profile, prints coverage first (measured, never saved and masked rollouts), then sorts the tasks into groups (see Examples). It catches what the profile file alone hides:
 
-- **Tasks with no measured rollout.** nemo-gym 0.7.0 (the PyPI release) leaves them out of `_reward_profiling.jsonl` entirely. The main branch keeps a row with `num_rollouts: 0` and no reward fields, except for a task whose every planned rollout was saved and masked. The summary that `gym eval profile` prints says `N without rollouts dropped from output` either way. Count tasks from the materialized inputs, never from the profile file alone.
-- **The headline mean.** `mean/reward` in `_agent_metrics.json` averages measured rollouts only. Report it with its coverage, for example "0.51 over 41 of 48 planned rollouts; task 10 not measured", never as the environment's pass rate. When several agents ran the same tasks, each agent has its own mean. The `_aggregate_metrics.json` that `gym eval run` writes can also count selected failure classes as 0 (`count_failure_classes_as_zero`); the profile never does.
+- **Tasks with no measured rollout.** nemo-gym 0.7.0 and earlier leave them out of `_reward_profiling.jsonl` entirely. Later versions (the main branch today) keep a row with `num_rollouts: 0` and no reward fields, except for a task whose every planned rollout was saved and masked. The summary that `gym eval profile` prints says `N without rollouts dropped from output` either way. Count tasks from the materialized inputs, never from the profile file alone.
+- **The headline mean.** `mean/reward` in `_agent_metrics.json` averages measured rollouts only. Report it with its coverage, for example "0.51 over 41 of 48 planned rollouts; task 10 not measured", never as the environment's pass rate. When several agents ran the same tasks, each agent has its own mean. The `_aggregate_metrics.json` that `gym eval run` writes can count some failed or missing rollouts as 0, depending on the version and settings such as `count_failure_classes_as_zero`; the profile never does.
 - **Per-repeat counts.** In `_repeat_level_metrics.json`, `missing_count` counts only tasks that were measured in another repeat. A task missing from every repeat is never counted there, so a repeat can cover fewer tasks than planned while its `missing_count` stays 0. Compare `sample_count` with the number of planned tasks.
 - **Masked rollouts.** An environment can mark a saved result as not a real measurement. `gym eval profile` leaves masked rollouts out of every per-task count and statistic, so a row's `expected_num_rollouts` is its planned count minus its masked rollouts. The printed completion line still counts them as saved, and `_agent_metrics.json` reports `coverage/masked_rollouts`.
-- **Failed rollouts.** A failed `/run` request stops the run unless `+route_failures_to_sidecar=true` is set (on the main branch it is written to `<stem>_failures.jsonl` first); with the option, the failure goes to that file and the run continues. Failures that the agent or environment returns as a result go to that file too. Either way they are not in `rollouts.jsonl`, so the profile counts them as never saved.
+- **Failed rollouts.** A failed `/run` request stops the run unless `+route_failures_to_sidecar=true` is set (after 0.7.0 it is written to `<stem>_failures.jsonl` first); with the option, the failure goes to that file and the run continues. Failures that the agent or environment returns as a result go to that file too. Either way they are not in `rollouts.jsonl`, so the profile counts them as never saved. Read that file before rerunning: `--resume` skips failures recorded as final.
 
 ### 4. Choose the training tasks
 
@@ -171,22 +172,22 @@ Mean reward 0.51 over the 41 measured rollouts only.
 
 | Script | Purpose | Arguments |
 |---|---|---|
-| `scripts/summarize_profile.py` | Coverage and task groups from `gym eval profile` output, every number read from the files | `<stem>_reward_profiling.jsonl`, optional `--inputs <stem>_materialized_inputs.jsonl` (found automatically beside the profile), optional `--json` |
+| `scripts/summarize_profile.py` | Coverage and task groups from `gym eval profile` output, every number read from the files | `<stem>_reward_profiling.jsonl`, optional `--inputs <stem>_materialized_inputs.jsonl` (found automatically beside the profile), optional `--json` (lists every task; the text report lists up to 20 per group) |
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `gym env start` stops with `model endpoint(s) never answered` (after waiting up to 600 s by default) | Nothing is listening at `policy_base_url`: wrong URL, or the server is down or still starting | Check the URL in `env.yaml`, and check that `curl -i <policy_base_url>/models` gets an HTTP answer. A hostname that does not resolve is reported as such instead |
-| `gym eval run` saves no rollout: it fails with `ClientResponseError: 500, message='Internal Server Error'` on `/run`, or, on the main branch for many environments, ends with `None of the N dispatched rollouts produced a result` | The model endpoint rejected the requests. The `gym env start` log shows `[upstream_request_failed] ... status=401` or `403` for a bad or missing API key | Fix `policy_api_key`, then rerun |
+| `gym eval run` saves no rollout: it fails with `ClientResponseError: 500, message='Internal Server Error'` on `/run`, or, after 0.7.0 for many environments, ends with `None of the N dispatched rollouts produced a result` | The model endpoint rejected the requests. The `gym env start` log shows `[upstream_request_failed] ... status=401` or `403` for a bad or missing API key | Fix `policy_api_key`, then rerun |
 | The `gym env start` log shows `status=404` for `.../v1/responses` | The endpoint or model does not serve the Responses API (some NVIDIA API models serve only chat completions) | Use `--model-type vllm_model` |
-| Sandboxed environment: the run stops, or rollouts go missing, with sandbox or container errors in the logs | The sandbox was not ready or not reachable (Docker not running, provider unreachable, container still starting). On the main branch, recorded failures carry `_ng_failure_class` values that start with `provider_` | Fix the sandbox provider, then rerun with `--resume`. Use `nemo-gym-debugging` for the details |
+| Sandboxed environment: the run stops, or rollouts go missing, with sandbox or container errors in the logs | The sandbox was not ready or not reachable (Docker not running, provider unreachable, container still starting). After 0.7.0, recorded failures carry `_ng_failure_class` values that start with `provider_` | Fix the sandbox provider, then rerun with `--resume`. Use `nemo-gym-debugging` in the Gym repo for the details |
 | `gym eval profile`: `do not have matching rollout keys` | Planned rollouts were never saved | Rerun with `--resume`, or add `++allow_partial_rollouts=True` and report coverage |
 | `gym eval profile`: `Rollout results contain rows with no matching materialized input rows` | The inputs file belongs to a different run | Use the `<stem>_materialized_inputs.jsonl` written next to the same rollouts file |
-| `gym eval profile`: `Duplicate result row for rollout key` (or `Duplicate materialized input row`) | Two runs wrote into one file. On the main branch, a run that retried masked results also keeps the superseded rows | Collect each run into its own `--output`. `gym eval profile` cannot read a run with superseded rows yet; say so rather than editing the file |
+| `gym eval profile`: `Duplicate result row for rollout key` (or `Duplicate materialized input row`) | Two runs wrote into one file. Some versions after 0.7.0 also keep the superseded rows of retried masked results | Collect each run into its own `--output`. `gym eval profile` cannot read a run with superseded rows yet; say so rather than editing the file |
 | With `++allow_partial_rollouts=True`: `Reward profile completion: 0/N rollout rows` and an empty profile | Nothing was saved | Fix collection first; there is nothing to profile |
 | `UserWarning: N repeat(s) are missing rollouts for some tasks` | Repeats have different numbers of measured rollouts (missing or masked rollouts) | Expected for a partial or masked run; report coverage as in step 3 |
-| `UserWarning: wandb is not installed, so the histogram/* stats are being skipped` | wandb is optional on the main branch | Harmless: the profile files do not include those statistics anyway |
+| `UserWarning: wandb is not installed, so the histogram/* stats are being skipped` | wandb is optional after 0.7.0 | Harmless: the profile files do not include those statistics anyway |
 | `gym: command not found` | NeMo Gym is not installed in this environment | `pip install "nemo-gym>=0.7"` to collect or profile. The summary script works on existing profile files without it |
 
 ## Limitations

@@ -13,7 +13,7 @@
 
 Two keys identify a rollout everywhere: `_ng_task_index` (the task, numbered from 0 in input order unless the input rows already carry one; identical input rows share one index) and `_ng_rollout_index` (the repeat; when several agents run the same task, it keeps counting across them). Join files on both.
 
-A failed `/run` request stops the run unless `+route_failures_to_sidecar=true` is set (on the main branch it is written to the failures file first); with the option, the failure goes to the failures file and the run continues. Failures that the agent or environment returns as a result are written there too. Rollouts in that file are not in `rollouts.jsonl`.
+A failed `/run` request stops the run unless `+route_failures_to_sidecar=true` is set (after 0.7.0 it is written to the failures file first); with the option, the failure goes to the failures file and the run continues. Failures that the agent or environment returns as a result are written there too. Rollouts in that file are not in `rollouts.jsonl`.
 
 ## Per-task rows: `<stem>_reward_profiling.jsonl`
 
@@ -32,9 +32,9 @@ There is no confidence interval per task: a single task's repeated outcomes are 
 
 A task with no measured rollout:
 
-- nemo-gym 0.7.0 (the PyPI release) writes no row for it.
-- The main branch writes a row with only `_ng_task_index` (and `agent_ref` when several agents ran the task), `num_rollouts: 0`, `expected_num_rollouts`, `missing_num_rollouts` and `reward_profile_completion_pct: 0.0`.
-- In either version, a task whose every planned rollout was saved and masked has no row, and when no rollout at all was measured the file is empty.
+- nemo-gym 0.7.0 and earlier write no row for it.
+- Later versions (the main branch today) write a row with only `_ng_task_index` (and `agent_ref` when several agents ran the task), `num_rollouts: 0`, `expected_num_rollouts`, `missing_num_rollouts` and `reward_profile_completion_pct: 0.0`.
+- Either way, a task whose every planned rollout was saved and masked has no row, and when no rollout at all was measured the file is empty.
 
 ## Per-agent entries: `<stem>_agent_metrics.json`
 
@@ -56,7 +56,7 @@ One entry per agent and `_ng_rollout_index`; the file holds `[]` when there is o
 - `UserWarning: N repeat(s) are missing rollouts for some tasks ...`: repeats cover different task sets, because of missing or masked rollouts, so their statistics are not directly comparable. It fires off `missing_count`, so a task missing from every repeat does not trigger it.
 - A zero standard error (every value identical) collapses the interval to the mean and says so.
 - A 95% interval on a 0 to 1 reward can fall below 0 or above 1 with few tasks. That signals too few tasks or repeats, not a bug.
-- On the main branch, where wandb is optional, `wandb is not installed, so the histogram/* stats are being skipped` is harmless: those statistics never reach the profile files.
+- After 0.7.0, where wandb is optional, `wandb is not installed, so the histogram/* stats are being skipped` is harmless: those statistics never reach the profile files.
 
 ## What `gym eval profile` prints
 
@@ -66,4 +66,4 @@ Input rows: 12 total; 9 complete; 2 partial; 1 without rollouts dropped from out
 Masked from quality metrics: 0 rollout rows (kept in completion accounting above).
 ```
 
-The completion lines are measured against the materialized inputs, so they are the trustworthy coverage numbers; they count masked rollouts as saved. "Dropped from output" means the task has no statistics; on the main branch it may still have a row with `num_rollouts: 0`.
+The completion lines are measured against the materialized inputs, so they are the trustworthy coverage numbers; they count masked rollouts as saved. "Dropped from output" means the task has no statistics; after 0.7.0 it may still have a row with `num_rollouts: 0`.
