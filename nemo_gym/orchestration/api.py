@@ -478,12 +478,25 @@ _COMMAND_AND_RUN = (
 )
 
 
+# `gym eval run` options for a task TARGET that exist only as command-line flags: a `run` key of that name is not
+# read, so a submitted target refuses it rather than run every task.
+_TARGET_FLAGS = frozenset({"only_tasks", "exclude_tasks", "skip_unloadable"})
+
+
 class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval prepare`. Flattened to +key=value tokens.
     prepare: dict[str, Any] = {}
     # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
     # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
+    # A Harbor task TARGET (a task folder, a folder of task folders, or a `harbor:<dataset>` reference) with the
+    # harness (`agent`) and sandbox provider that run it. `gym eval run` receives them as its TARGET, `--agent` and
+    # `--sandbox`, ahead of the `run` overrides, which are `+key=value` tokens and can carry neither a positional
+    # argument nor a command-line flag. The run prepares the target itself; `prepare`, when set, still runs exactly
+    # as configured before it (for example a dataset adapter that writes the task folders the target names).
+    target: str | None = Field(default=None, min_length=1)
+    agent: str | None = Field(default=None, min_length=1)
+    sandbox: str | None = Field(default=None, min_length=1)
     # Shell script the driver runs INSTEAD of `gym eval run`, for a benchmark whose
     # harness is not Gym's own runner -- one that provisions external machines and
     # drives Gym from there, for instance. `prepare` still runs first, and the
@@ -508,6 +521,26 @@ class BenchmarkRunConfig(_StrictModel):
         # the command reads as NEMO_GYM_POLICY_*. SubmitConfig checks a saved command, where the policy is known.
         if self.command is not None and self.run and not (info.context and info.context.get(SAVED_CONFIG)):
             raise ValueError(f"A benchmark {_COMMAND_AND_RUN}")
+        if self.target is None and (self.agent is not None or self.sandbox is not None):
+            raise ValueError(
+                "A benchmark sets `agent` or `sandbox` without a `target`; they apply to a task `target`."
+            )
+        if self.target is not None and self.agent is None:
+            raise ValueError(
+                "A benchmark sets a `target` without an `agent`; a task target needs a harness to run it."
+            )
+        if self.target is not None and (flags := sorted(_TARGET_FLAGS & set(self.run))):
+            # `gym eval run` reads these from its command line, not its config: under `run` they would be ignored.
+            raise ValueError(
+                f"A benchmark with a `target` sets {', '.join(f'`{flag}`' for flag in flags)} under `run`, where "
+                "`gym eval run` does not read them: it takes task selection and the unloadable waiver only as "
+                "command-line flags, which a submitted target does not pass."
+            )
+        if self.target is not None and self.command is not None:
+            raise ValueError(
+                "A benchmark sets both `command` and `target`, but a target runs through `gym eval run`, "
+                "which `command` replaces. Drop one."
+            )
         if self.command is not None and self.resume_config is not None:
             raise ValueError(
                 "A benchmark sets both `command` and `resumable`, but a resumed job only passes "
@@ -515,6 +548,15 @@ class BenchmarkRunConfig(_StrictModel):
                 "Drop `resumable`, or run through `gym eval run`."
             )
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_target(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # A benchmark without a task target saves the same config as before the fields existed.
+        data = handler(self)
+        for key in ("target", "agent", "sandbox"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
     # True enables auto-resume with ResumeConfig defaults; pass a ResumeConfig to tune
     # max_retries/max_walltime. False (default) leaves fire-and-forget submission unchanged.

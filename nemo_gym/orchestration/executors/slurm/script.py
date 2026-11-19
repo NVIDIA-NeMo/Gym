@@ -85,7 +85,7 @@ from nemo_gym.orchestration.executors.slurm.resume_script import (
     render_resume_epilogue,
     render_resume_prologue,
 )
-from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args
+from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args, render_target_args
 from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
 from nemo_gym.orchestration.jobs import (
     ARTIFACTS_DIRNAME,
@@ -1292,7 +1292,17 @@ def build_sbatch_script(
         run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
         run_args.setdefault("require_complete", True)
         run_args = _with_resume_flag(run_args, resume is not None)
-        gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
+        # A task target goes first (`gym eval run` reads its first bare token as TARGET), and its rows live in the
+        # job directory, not in the fresh checkout this allocation works in.
+        target_args = render_target_args(
+            benchmark.target,
+            agent=benchmark.agent,
+            sandbox=benchmark.sandbox,
+            output_root=f"{remote_bench_dir}/{ARTIFACTS_DIRNAME}/harbor",
+        )
+        gym_cmd = render_gym_cmd(
+            "eval run", "GYM_CMD", target_args + [output_path] + extra_flags + flatten_run_args(run_args)
+        )
         # A job queued by `gym eval resubmit` resets the attempt budget and enables resume before exporters open:
         # a fresh start would delete the run's rollouts, whatever its original config says.
         # The auto-resume prologue, when there is one, has moved the variables into `_gym_resubmit` and
