@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Auto Ontology's interactive pipeline (auto_ontology.retrieval.interactive) in place of its ReAct agent: the pipeline
+# auto-ontology-eval runs on BIRD-Interact, in c-Interact and a-Interact. The configs that run it chain this file after
+# their release and mode: auto_ontology_interactive.yaml, full_auto_ontology_interactive.yaml and
+# full_auto_ontology_a_interact.yaml.
+
+auto_ontology_agent:
+  responses_api_agents:
+    auto_ontology_agent:
+      pipeline: interactive
+      # The knowledge base's children_knowledge links, as auto-ontology-eval gives them to the pipeline. The ADK does
+      # not show agents that field; set this to null to give the pipeline only what the ADK shows.
+      knowledge_dir: benchmarks/bird_interact/data/${bird_interact_release}/databases
+      # The flags auto-ontology-eval's BIRD-Interact runs set (its submission's .env). A copy: the Auto Ontology team
+      # keeps it in sync. Auto Ontology 1.3.0 reads INTERACTIVE only; the others steered the pipeline it replaced.
+      environment:
+        INTERACTIVE: "true"
+        DB_PROBE_JSONB_PATH_CHECK: "true"
+        DB_PROBE_JOIN_PATH_CHECK: "true"
+        DB_PROBE_PROACTIVE: "true"
+        DB_PROBE_VALUE_GAP_LOOKUP: "true"
+        DETECT_VACUOUS_GROUP_BY: "true"
+        RELEVANCE_FILTER_INCLUDE_COLUMNS: "true"
+        HUB_SIBLING_EXPANSION_ENABLED: "true"
+        HUB_SIBLING_CAP: "6"
+        TABLE_BRIDGE_RECONCILIATION_ENABLED: "true"
+        DEFAULT_MODELS_API_KEY: ${auto_ontology_api_key}

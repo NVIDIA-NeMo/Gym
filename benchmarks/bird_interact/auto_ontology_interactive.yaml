@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BIRD-Interact Lite in c-Interact with Auto Ontology's interactive pipeline (auto_ontology/interactive.yaml) in place of
+# its ReAct agent. Same sandbox, catalog image and tasks as auto_ontology_agent.yaml. See README.md, "Auto Ontology".
+#
+#   gym eval run --config benchmarks/bird_interact/auto_ontology_interactive.yaml --model-type vllm_model \
+#     --split benchmark --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+#     --output results/bird_interact_lite_c_auto_ontology_interactive.jsonl ++auto_ontology_api_key=<key>
+
+config_paths:
+  - benchmarks/bird_interact/auto_ontology_agent.yaml
+  - benchmarks/bird_interact/auto_ontology/interactive.yaml

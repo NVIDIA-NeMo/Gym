@@ -36,12 +36,20 @@ ENV POSTGRES_HOST=localhost \
     POSTGRES_USER=root \
     POSTGRES_PASSWORD=catalog \
     POSTGRES_DATABASE=auto_ontology
-COPY benchmarks/bird_interact/auto_ontology/build_catalog.py /opt/bird-catalog/
+COPY benchmarks/bird_interact/auto_ontology/build_catalog.py benchmarks/bird_interact/auto_ontology/column_meanings.py \
+     /opt/bird-catalog/
+# With COLUMN_MEANINGS=true, the catalog holds the release's column meanings as column descriptions, as
+# auto-ontology-eval builds it. The release's files are copied either way; only the catalog build reads them.
+ARG BIRD_INTERACT_RELEASE=lite
+ARG COLUMN_MEANINGS=false
+COPY benchmarks/bird_interact/data/${BIRD_INTERACT_RELEASE}/databases /opt/bird-catalog/databases
 
 # The catalog, in its own stage: `--target runtime` builds the rest without the model keys.
 FROM runtime AS catalog
+ARG COLUMN_MEANINGS
 RUN --mount=type=secret,id=models,required=true \
-    /opt/auto-ontology/.venv/bin/python /opt/bird-catalog/build_catalog.py /run/secrets/models
+    /opt/auto-ontology/.venv/bin/python /opt/bird-catalog/build_catalog.py /run/secrets/models \
+      $([ "$COLUMN_MEANINGS" = true ] && echo --column-meanings /opt/bird-catalog/databases)
 
 # Last, so editing it does not rebuild the catalog.
 COPY benchmarks/bird_interact/auto_ontology/start-catalog /opt/bird-catalog/
