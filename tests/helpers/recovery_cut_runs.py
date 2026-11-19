@@ -84,6 +84,24 @@ def _cut_run(
     return artifacts / "rollouts.jsonl"
 
 
+def _hang_until_cut(job, *, allocation):
+    """Resume the run as ``allocation`` and dispatch every unfinished row, none of which ends before the cut."""
+    source = job / "source.jsonl"
+
+    def prepare():
+        inputs = [json.loads(line) for line in source.read_text().splitlines()]
+        return inputs, RunManifest.create(source, json.loads(json.dumps(inputs)), {}, {}).model_copy(
+            update={"max_rollout_attempts": 3}
+        )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("SLURM_JOB_ID", allocation)
+        with RolloutStore.start_or_resume(job / "artifacts" / "rollouts.jsonl", prepare, resume=True) as store:
+            for row in store.pending():
+                store.record_dispatch(row)
+    (job / ".gym_job_chain").write_text(f"{allocation}\n")
+
+
 def _decide(job, *, allocation_cut, live_job=False):
     raw = subprocess.run(
         [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
