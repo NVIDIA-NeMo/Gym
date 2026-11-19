@@ -58,7 +58,7 @@ def _require_luxor_sdk() -> tuple[Any, Any, Any, Any]:
     except ImportError as exc:
         raise ModuleNotFoundError(
             "The Luxor AI SDK (luxor-ai) is required for the luxor sandbox provider. Install "
-            "nemo-gym[luxor] before using env.sandbox.provider.name=luxor."
+            "nemo-gym[sandbox] before using env.sandbox.provider.name=luxor."
         ) from exc
     return AsyncClient, CommandTimeoutError, SessionNotFoundError, SessionTerminatedError
 
@@ -86,6 +86,7 @@ class LuxorConnectionConfig(LuxorConfigBase):
     """Luxor API client connection settings."""
 
     auth_token: str | None = None
+    api_key: str | None = None
     base_url: str | None = None
     gateway_url: str | None = None
     timeout_s: float | None = None
@@ -104,8 +105,14 @@ class LuxorCreateConfig(LuxorConfigBase):
     probe_command: str | None = "printf nemo-gym-luxor-ready"
     probe_expected_stdout: str | None = "nemo-gym-luxor-ready"
     probe_timeout_s: float = 30.0
+    # SandboxSpec.image -> Luxor registry ref, as written by nemo_gym.sandbox.providers.luxor.build.
+    image_map: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.image_map, Mapping) or not all(
+            isinstance(key, str) and key and isinstance(value, str) and value for key, value in self.image_map.items()
+        ):
+            raise TypeError("create.image_map must map non-empty image names to non-empty Luxor image refs")
         if not math.isfinite(self.ready_timeout_s) or self.ready_timeout_s <= 0:
             raise ValueError("create.ready_timeout_s must be > 0")
         if not math.isfinite(self.max_duration_s) or self.max_duration_s <= 0:
@@ -150,6 +157,8 @@ class LuxorProviderOptions:
     tags: tuple[str, ...] = ()
     sticky: bool = False
     wait_for_runtime: bool = False
+    # Scheduling hint from OpenSandbox-oriented agent configs; a Luxor sandbox gets SandboxSpec.resources in full.
+    resource_requests: Mapping[str, Any] | str | None = None
 
     @classmethod
     def from_mapping(cls, options: Mapping[str, Any] | None) -> "LuxorProviderOptions":
@@ -177,6 +186,9 @@ class LuxorProviderOptions:
         return cls(**normalized)
 
     def __post_init__(self) -> None:
+        requests = self.resource_requests
+        if requests is not None and requests != "limits" and not isinstance(requests, Mapping):
+            raise TypeError("provider_options.resource_requests must be a mapping or 'limits'")
         if isinstance(self.idle_timeout_minutes, bool):
             raise TypeError("provider_options.idle_timeout_minutes must be an integer")
         if self.idle_timeout_minutes is not None and self.idle_timeout_minutes <= 0:
@@ -269,6 +281,7 @@ class LuxorProvider:
             AsyncClient, _, _, _ = _require_luxor_sdk()
             kwargs = {
                 "auth_token": self._connection.auth_token,
+                "api_key": self._connection.api_key,
                 "base_url": self._connection.base_url,
                 "gateway_url": self._connection.gateway_url,
                 "timeout": self._connection.timeout_s,
@@ -368,6 +381,7 @@ class LuxorProvider:
         source_count = sum(value is not None for value in (spec.image, options.template, options.snapshot_id))
         if source_count > 1:
             raise ValueError("Set only one of SandboxSpec.image, provider_options.template, or snapshot_id")
+        image = self._create.image_map.get(spec.image, spec.image) if spec.image else None
         ready_timeout_s = float(
             spec.ready_timeout_s if spec.ready_timeout_s is not None else self._create.ready_timeout_s
         )
@@ -389,7 +403,7 @@ class LuxorProvider:
             "metadata": self._metadata(spec.metadata),
             "tags": list(options.tags) or None,
             "env": {str(key): str(value) for key, value in spec.env.items()} or None,
-            "image": spec.image,
+            "image": image,
             "from_template_spec": options.template,
             "snapshot_id": options.snapshot_id,
             "volumes": [dict(item) for item in options.volumes] or None,
@@ -419,6 +433,12 @@ class LuxorProvider:
                 await self._terminate_partial(partial, str(getattr(partial, "id", "<unknown>")))
             raise LuxorCreateError(
                 f"Failed to create Luxor sandbox within {ready_timeout_s:g}s; image={spec.image!r}"
+                + (
+                    ""
+                    if image is None or image != spec.image
+                    else ". Luxor starts sandboxes from its own registry images; build one from an OCI image with "
+                    "nemo_gym.sandbox.providers.luxor.build and map it in create.image_map"
+                )
             ) from exc
 
         state = _LuxorSandbox(sdk=sandbox, workdir=spec.workdir)

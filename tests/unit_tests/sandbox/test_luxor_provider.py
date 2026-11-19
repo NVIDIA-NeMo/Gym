@@ -178,7 +178,7 @@ def test_sdk_call_shapes_match_installed_version() -> None:
     luxor = pytest.importorskip("luxor_ai", reason="luxor-ai optional sandbox dependency is not installed")
     assert luxor_provider._require_luxor_sdk()[0] is luxor.AsyncClient
     inspect.signature(luxor.AsyncClient).bind(
-        auth_token="token", base_url="https://api", gateway_url="https://gateway", timeout=60
+        auth_token="token", api_key="key", base_url="https://api", gateway_url="https://gateway", timeout=60
     )
     inspect.signature(luxor.AsyncClient.create).bind(
         object(),
@@ -220,7 +220,7 @@ def test_missing_sdk_has_actionable_error(monkeypatch: pytest.MonkeyPatch) -> No
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fail_luxor_import)
-    with pytest.raises(ModuleNotFoundError, match=r"nemo-gym\[luxor\]"):
+    with pytest.raises(ModuleNotFoundError, match=r"nemo-gym\[sandbox\]"):
         luxor_provider._require_luxor_sdk()
 
 
@@ -736,3 +736,65 @@ async def test_aclose_closes_and_releases_client(provider_and_client: tuple[Luxo
     assert client.close_calls == 1
     assert provider._client_instance is None
     await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_resolves_image_through_image_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(luxor_provider, "_require_luxor_sdk", fake_sdk_types)
+    client = FakeClient()
+    provider = LuxorProvider(create={"image_map": {"docker.io/acme/task:1": "ws/gym-task@sha256:abc"}})
+    provider._client_instance = client
+
+    await provider.create(SandboxSpec(image="docker.io/acme/task:1"))
+    await provider.create(SandboxSpec(image="ws/already-luxor"))
+    await provider.create(SandboxSpec())
+    assert [call["image"] for call in client.create_calls] == ["ws/gym-task@sha256:abc", "ws/already-luxor", None]
+
+
+@pytest.mark.asyncio
+async def test_create_failure_for_unmapped_image_points_at_build_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(luxor_provider, "_require_luxor_sdk", fake_sdk_types)
+    client = FakeClient()
+    client.create_error = RuntimeError("not found")
+    provider = LuxorProvider(create={"image_map": {"docker.io/acme/mapped:1": "ws/mapped"}})
+    provider._client_instance = client
+
+    with pytest.raises(LuxorCreateError, match="providers.luxor.build"):
+        await provider.create(SandboxSpec(image="docker.io/acme/unmapped:1"))
+    with pytest.raises(LuxorCreateError) as mapped:
+        await provider.create(SandboxSpec(image="docker.io/acme/mapped:1"))
+    assert "providers.luxor.build" not in str(mapped.value)
+
+
+@pytest.mark.parametrize("image_map", [["a"], {"a": ""}, {"": "b"}, {"a": 3}])
+def test_image_map_validation(image_map: Any) -> None:
+    with pytest.raises(TypeError, match="image_map"):
+        LuxorCreateConfig(image_map=image_map)
+
+
+@pytest.mark.asyncio
+async def test_resource_requests_option_is_accepted_and_not_sent(
+    provider_and_client: tuple[LuxorProvider, FakeClient],
+) -> None:
+    provider, client = provider_and_client
+    await provider.create(SandboxSpec(provider_options={"resource_requests": {"cpu": 0.5, "memory_mib": 2048}}))
+    await provider.create(SandboxSpec(provider_options={"resource_requests": "limits"}))
+    assert all("resource_requests" not in call for call in client.create_calls)
+    with pytest.raises(TypeError, match="resource_requests"):
+        LuxorProviderOptions.from_mapping({"resource_requests": 3})
+
+
+def test_client_receives_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs: Any) -> None:
+            calls.append(kwargs)
+
+    monkeypatch.setattr(
+        luxor_provider,
+        "_require_luxor_sdk",
+        lambda: (FakeAsyncClient, FakeCommandTimeoutError, FakeSessionNotFoundError, FakeSessionTerminatedError),
+    )
+    LuxorProvider(connection={"api_key": "key"})._client()  # pragma: allowlist secret
+    assert calls == [{"api_key": "key"}]  # pragma: allowlist secret

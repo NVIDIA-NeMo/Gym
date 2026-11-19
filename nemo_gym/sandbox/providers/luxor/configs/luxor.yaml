@@ -19,6 +19,8 @@ sandbox:
       probe_command: printf nemo-gym-luxor-ready
       probe_expected_stdout: nemo-gym-luxor-ready
       probe_timeout_s: 30
+      # SandboxSpec.image -> Luxor registry ref; generate it with nemo_gym.sandbox.providers.luxor.build.
+      image_map: {}
     operations:
       close_timeout_s: 120
       close_poll_interval_s: 0.5

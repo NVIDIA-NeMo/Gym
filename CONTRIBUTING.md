@@ -131,7 +131,7 @@ For the complete unit suite, also install the sandbox provider SDKs:
 
 ```bash
 uv sync --extra dev --extra telemetry --extra mlflow --extra wandb \
-  --extra sandbox --extra openshell --extra luxor
+  --extra sandbox --extra openshell
 gym dev test
 ```
 
