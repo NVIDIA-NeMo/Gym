@@ -6,6 +6,7 @@ import asyncio
 import math
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
@@ -93,21 +94,26 @@ async def execute_sqlite_async(
     db_path: Path,
     sql: str,
     semaphore: asyncio.Semaphore,
+    executor: ThreadPoolExecutor,
     timeout_s: float = 30.0,
 ) -> Optional[ResultSet]:
-    """Execute SQL asynchronously in a worker thread, bounded by semaphore.
+    """Execute SQL asynchronously in a thread of ``executor``, bounded by semaphore.
 
     Returns ``None`` on timeout or query exception.
 
-    ``timeout_s`` is enforced inside the query by ``execute_sqlite`` so a timed-out query frees its thread
-    before the semaphore is released. The outer ``wait_for`` is only a backstop with an extra
-    ``_OUTER_TIMEOUT_BUFFER_S``: the progress handler checks elapsed time periodically and may fire slightly
-    after the deadline, and the inner timeout must win so that no query is left running in the background.
+    ``executor`` should be dedicated to these queries and have at least as many workers as the semaphore admits,
+    so that an admitted query starts at once instead of queueing behind slow ones in a shared pool.
+
+    ``timeout_s`` is enforced inside the query by ``execute_sqlite``, which frees its thread when the query is
+    aborted. The outer ``wait_for`` is a backstop with an extra ``_OUTER_TIMEOUT_BUFFER_S``: the progress handler
+    checks elapsed time periodically and may fire slightly after the deadline, and the inner timeout should win.
+    It is also the only limit on the copy of the database, which the progress handler cannot interrupt; a copy that
+    runs past it keeps its thread until it finishes.
     """
     async with semaphore:
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(execute_sqlite, db_path, sql, timeout_s),
+                asyncio.get_running_loop().run_in_executor(executor, execute_sqlite, db_path, sql, timeout_s),
                 timeout=timeout_s + _OUTER_TIMEOUT_BUFFER_S,
             )
         except TimeoutError:
@@ -202,16 +208,17 @@ async def execute_and_compare(
     gold_sql: str,
     pred_sql: str,
     semaphore: asyncio.Semaphore,
+    executor: ThreadPoolExecutor,
     condition_cols: list | None = None,
     ignore_order: bool = True,
     timeout_s: float = 30.0,
 ) -> tuple[bool, ResultSet | None, ResultSet | None, str | None]:
     """Execute both queries and compare. Returns (match, gold_rows, pred_rows, error_msg)."""
-    gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s)
+    gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, executor, timeout_s)
     if gold_rows is None:
         return False, gold_rows, None, "gold_sql_error"
 
-    pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s)
+    pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, executor, timeout_s)
     if pred_rows is None:
         return False, gold_rows, pred_rows, "pred_sql_error"
 
