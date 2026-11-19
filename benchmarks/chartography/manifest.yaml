@@ -10,6 +10,26 @@ modality: multimodal
 licensing: CC-BY-4.0
 authors:
 - Tuomas Rintamaki
+maintainers:
+- trintamaki
+intended_use:
+- evaluation
+capabilities:
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- data_analysis
+- data_analysis/data_visualization
+- reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+domains:
+- data_science
+- statistics
+primary_metric: pass@1[avg-of-10]/all_pass
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -25,6 +45,10 @@ datasets:
   prepare_script: benchmarks/chartography/prepare.py
   num_repeats: 10
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/surge-ai/chartography
+  ref: 3f1bf837232d3918c2cc35c6e2418c9e70d2a57b  # pragma: allowlist secret
+  reconciled: '2026-11-10'
 lifecycle: active

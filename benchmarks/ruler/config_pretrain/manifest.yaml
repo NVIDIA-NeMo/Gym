@@ -3,13 +3,29 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: long_context
 description: RULER text-completion evaluation; preparation requires model, length,
   and data_format=default or base.
 modality: text
 licensing: unknown
 authors:
 - Jonathan Li
+maintainers:
+- bxyu-nvidia
+intended_use:
+- evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/multi_source_synthesis
+- reasoning
+- reasoning/spatial_temporal_reasoning
+domains:
+- general
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -26,6 +42,10 @@ datasets:
   prepare_script: benchmarks/ruler/prepare_utils.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/NVIDIA-NeMo/Skills
+  ref: 54d2e113c2f64bf74bda72e15f23f01b524850da  # pragma: allowlist secret
+  reconciled: '2026-03-27'
 lifecycle: active

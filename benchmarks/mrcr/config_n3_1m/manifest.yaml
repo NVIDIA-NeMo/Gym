@@ -3,13 +3,32 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: long_context
 description: MRCR multi-round coreference resolution with prefix-gated SequenceMatcher
   grading. Uses the Nemotron-3-Super tokenizer with a 1048576 token cap.
 modality: text
 licensing: MIT
 authors:
 - Marta Stepniewska-Dziubinska
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- context_management
+- context_management/reference_resolution
+- reasoning
+- reasoning/spatial_temporal_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- general
+primary_metric: pass@1[avg-of-1]/accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -26,6 +45,6 @@ datasets:
   prepare_script: benchmarks/mrcr/prepare_n3_1m.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 prompt_source: prepared
 lifecycle: active

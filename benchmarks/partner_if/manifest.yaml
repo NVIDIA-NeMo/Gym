@@ -14,6 +14,26 @@ modality: text
 licensing: internal
 authors:
 - Katherine Huang
+maintainers:
+- katherineh123
+intended_use:
+- evaluation
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/hierarchy_following
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/web_search
+- coding
+- coding/repository_coding
+domains:
+- computer_science
+- general
+primary_metric: pass@1[avg-of-3]/all_if_pass
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0
@@ -29,6 +49,6 @@ datasets:
   jsonl_fpath: benchmarks/partner_if/data/partner_if_benchmark.jsonl
   prepare_script: benchmarks/partner_if/prepare.py
   num_repeats: 3
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
 lifecycle: active

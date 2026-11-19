@@ -10,6 +10,27 @@ modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- evaluation_and_judging
+- evaluation_and_judging/error_analysis
+- evaluation_and_judging/consistency_checking
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- mathematics
+primary_metric: unknown
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -26,6 +47,6 @@ datasets:
   prompt_config: benchmarks/prompts/judge/math-proof-judge.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/prompts/judge/math-proof-judge.yaml
 lifecycle: active

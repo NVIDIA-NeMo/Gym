@@ -10,6 +10,27 @@ modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- knowledge
+- knowledge/procedural_knowledge
+- multilingual_and_multicultural
+- multilingual_and_multicultural/language_consistency
+domains:
+- mathematics
+- language_linguistics
+primary_metric: pass@1[avg-of-1]/symbolic_accuracy_weighted
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -26,6 +47,6 @@ datasets:
   prompt_config: benchmarks/prompts/generic/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: low+medium+high+top
 standard_prompt_config: benchmarks/prompts/generic/default.yaml
 lifecycle: active

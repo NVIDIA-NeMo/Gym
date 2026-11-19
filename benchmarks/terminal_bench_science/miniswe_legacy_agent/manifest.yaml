@@ -11,6 +11,16 @@ modality: text
 licensing: Apache-2.0
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities: unknown
+domains: unknown
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0
@@ -31,6 +41,10 @@ datasets:
   jsonl_fpath: benchmarks/terminal_bench_science/data/example.jsonl
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: agent
+adopted_from:
+  source: https://github.com/harbor-framework/terminal-bench-science
+  ref: f81afac4f11048e77a15dfc8fb1dbfb897fea0ce  # pragma: allowlist secret
+  reconciled: '2026-10-23'
 lifecycle: deprecated

@@ -10,6 +10,25 @@ description: MATH-500 in 12 default Indic languages using the English prompt and
 modality: text
 licensing: Apache-2.0
 authors: [anushaknvidia]
+maintainers:
+- anushaknvidia
+intended_use:
+- evaluation
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/procedural_knowledge
+- multimodal_input_understanding
+- multimodal_input_understanding/messy_text_understanding
+domains:
+- mathematics
+- language_linguistics
+primary_metric: pass@1[avg-of-1]/symbolic_accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range: [0, 1]
   higher_is_better: true
@@ -28,4 +47,8 @@ standard_prompt_config: benchmarks/prompts/generic/math.yaml
 canonical_split: test
 session_model: episode
 state: none
+adopted_from:
+  source: https://huggingface.co/datasets/ai4bharat/indic-math-500
+  ref: 29557d8eaa22621b82f3af5557ab60babcf3feb5  # pragma: allowlist secret
+  reconciled: '2026-10-14'
 lifecycle: active

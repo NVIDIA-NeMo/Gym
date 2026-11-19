@@ -3,13 +3,31 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: long_context
 description: Long-context RULER v2 verifier with WER-fallback soft string match across
   3 match types plus a multichoice route
 modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/multi_source_synthesis
+- reasoning
+- reasoning/deductive_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- general
+primary_metric: ruler2_suite_avg/pass@1[avg-of-1]/accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -26,6 +44,6 @@ datasets:
   prompt_config: benchmarks/ruler2/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test+validation
 standard_prompt_config: benchmarks/ruler2/prompts/default.yaml
 lifecycle: active

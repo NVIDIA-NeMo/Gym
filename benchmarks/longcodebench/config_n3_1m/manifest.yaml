@@ -3,13 +3,30 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: knowledge
+domain: long_context
 description: LongCodeBench multiple-choice questions filtered to at most 1048576 prompt
   tokens using the Nemotron-3-Super tokenizer.
 modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- coding
+- coding/code_understanding
+- coding/repository_coding
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- coding/debugging_and_testing
+domains:
+- computer_science
+primary_metric: pass@1[avg-of-1]/accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -27,6 +44,6 @@ datasets:
   prompt_config: benchmarks/prompts/generic/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 standard_prompt_config: benchmarks/prompts/generic/default.yaml
 lifecycle: active

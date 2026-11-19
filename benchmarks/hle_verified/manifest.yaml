@@ -9,6 +9,26 @@ modality: text
 licensing: unknown
 authors:
 - fsiino-nvidia
+maintainers:
+- gnalbandyan
+intended_use:
+- evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- writing_and_editing
+- writing_and_editing/general_qa
+domains:
+- mathematics
+- physics
+- humanities
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -25,6 +45,6 @@ datasets:
   prompt_config: benchmarks/hle_verified/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/hle_verified/prompts/default.yaml
 lifecycle: active

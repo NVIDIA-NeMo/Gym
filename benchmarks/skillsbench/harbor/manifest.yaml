@@ -10,6 +10,46 @@ licensing: Apache-2.0
 authors:
   - benchflow-ai
   - NVIDIA NeMo Gym contributors
+maintainers:
+- abukharin-nv
+intended_use:
+- evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/file_operations
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- reasoning
+- reasoning/quantitative_reasoning
+- coding
+- coding/scientific_coding
+- coding/debugging_and_testing
+- coding/repository_coding
+- coding/code_generation
+- data_analysis
+- data_analysis/tabular_data_analysis
+- data_analysis/data_transformation
+- knowledge
+- knowledge/expert_knowledge
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- planning_and_autonomy
+- planning_and_autonomy/optimization
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+domains:
+- computer_science
+- engineering
+- artificial_intelligence
+- earth_environmental_science
+- general
+- cybersecurity
+- finance
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
 reward:
   range: [0.0, 1.0]
   higher_is_better: true
@@ -24,6 +64,14 @@ datasets:
     prepare_script: benchmarks/skillsbench/prepare.py
     num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: agent
+adopted_from:
+  source: https://github.com/benchflow-ai/skillsbench
+  ref: 12ebd8653093e0734c7902835cb20c054196026c  # pragma: allowlist secret
+  reconciled: '2026-10-27'
 lifecycle: active
+setups:
+- name: skillsbench/harbor_opensandbox
+  config_path: ../harbor_opensandbox.yaml
+  description: Official benchflow-ai/skillsbench tasks through Harbor and OpenSandbox.

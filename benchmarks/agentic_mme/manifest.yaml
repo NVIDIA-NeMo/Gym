@@ -10,6 +10,35 @@ modality: text, image
 licensing: Apache-2.0
 authors:
 - DanialTaheri
+maintainers:
+- DanialTaheri
+intended_use:
+- evaluation
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- multimodal_input_understanding
+- multimodal_input_understanding/scene_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/spatial_temporal_reasoning
+- tool_and_computer_use
+- tool_and_computer_use/web_search
+- tool_and_computer_use/tool_calling
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/evidence_synthesis
+- knowledge
+domains:
+- general
+- data_science
+- sports_recreation
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -27,4 +56,8 @@ datasets:
 model_server: policy_model
 canonical_split: train
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/Crystal1047/Agentic-MME
+  ref: b9ea9d3f68ff896d83fec666b6143da594c054a8  # pragma: allowlist secret
+  reconciled: '2026-11-09'
 lifecycle: active

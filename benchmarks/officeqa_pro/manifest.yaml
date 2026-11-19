@@ -9,13 +9,37 @@ modality: multimodal
 # Code license; the separately downloaded dataset is CC-BY-SA-4.0.
 licensing: Apache-2.0
 authors: [Jarno Seppänen]
+maintainers:
+- jseppanen
+intended_use:
+- evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/multi_source_synthesis
+- retrieval_and_grounding/evidence_synthesis
+- reasoning
+- reasoning/quantitative_reasoning
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/terminal_and_cli_use
+domains:
+- finance
+- economics
+- politics_government
+primary_metric: pass@1[avg-of-5]/accuracy_no_net
+requirements:
+  gpu: false
+  network: allowlist
 reward: {range: [0.0, 1.0], higher_is_better: true}
 determinism: stochastic
 config_path: config.yaml
 resources_server: officeqa
 agent_server: opencode_agent
 model_server: policy_model
-canonical_split: officeqa_pro
+canonical_split: full
 prompt_source: prepared
 datasets:
 - name: officeqa_pro
@@ -25,4 +49,8 @@ datasets:
   num_repeats: 5
 session_model: episode
 state: per_session
+adopted_from:
+  source: https://huggingface.co/datasets/databricks/officeqa
+  ref: 763a8366abf2a3605c381d53586d844dc60fa756  # pragma: allowlist secret
+  reconciled: '2026-11-09'
 lifecycle: active

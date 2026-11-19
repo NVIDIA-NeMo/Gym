@@ -11,6 +11,27 @@ modality: text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- bxyu-nvidia
+intended_use:
+- evaluation
+capabilities:
+- coding
+- coding/repository_coding
+- coding/code_editing
+- coding/debugging_and_testing
+- coding/systems_coding
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/file_operations
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- computer_science
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -27,6 +48,10 @@ datasets:
   prepare_script: benchmarks/deepswe/prepare.py
   num_repeats: 10
 model_server: policy_model
-canonical_split: test
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/datacurve-ai/deep-swe
+  ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9  # pragma: allowlist secret
+  reconciled: '2026-08-21'
 lifecycle: active

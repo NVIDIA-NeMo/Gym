@@ -10,6 +10,32 @@ modality: text
 licensing: Apache-2.0
 authors:
 - bxyu-nvidia
+maintainers:
+- bxyu-nvidia
+intended_use:
+- evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/multi_source_synthesis
+- retrieval_and_grounding/evidence_synthesis
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- tool_and_computer_use
+- tool_and_computer_use/web_search
+- tool_and_computer_use/tool_calling
+- tool_and_computer_use/multi_step_tool_use
+domains:
+- media_entertainment
+- general
+- history
+- humanities
+- sports_recreation
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -25,6 +51,10 @@ datasets:
   prepare_script: benchmarks/browsecomp/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/openai/simple-evals
+  ref: 5e623c2b400af62a1278e23595f95b0853d7fe8a  # pragma: allowlist secret
+  reconciled: '2026-04-21'
 lifecycle: active

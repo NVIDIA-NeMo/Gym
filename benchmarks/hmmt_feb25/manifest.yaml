@@ -9,6 +9,25 @@ modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- knowledge
+- knowledge/procedural_knowledge
+- reasoning/spatial_temporal_reasoning
+domains:
+- mathematics
+primary_metric: pass@1[avg-of-4]/symbolic_accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -25,6 +44,6 @@ datasets:
   prompt_config: benchmarks/prompts/generic/math.yaml
   num_repeats: 4
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/prompts/generic/math.yaml
 lifecycle: active

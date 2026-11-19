@@ -10,6 +10,30 @@ modality: multimodal
 licensing: MIT
 authors:
 - rystewart-nvidia
+maintainers:
+- rystewart-nvidia
+intended_use:
+- evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/evidence_synthesis
+- tool_and_computer_use
+- tool_and_computer_use/file_operations
+- tool_and_computer_use/multi_step_tool_use
+- memory_and_state
+- memory_and_state/skill_use
+- memory_and_state/procedural_memory
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- law
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0
@@ -24,7 +48,11 @@ datasets:
   prepare_script: benchmarks/legal_agent_bench/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: agent
 lifecycle: active
 resources_server: null
+adopted_from:
+  source: https://github.com/harveyai/harvey-labs
+  ref: f46ef86e4788545622db25dcffa3aebb7a139929  # pragma: allowlist secret
+  reconciled: '2026-07-17'

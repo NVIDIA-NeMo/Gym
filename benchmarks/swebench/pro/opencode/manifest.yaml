@@ -11,6 +11,29 @@ modality: text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- ffrujeri
+- ananthsub
+- init-nikhil
+- yaoyu-33
+intended_use:
+- evaluation
+capabilities:
+- coding
+- coding/repository_coding
+- coding/debugging_and_testing
+- coding/code_editing
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/multi_step_tool_use
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+domains:
+- computer_science
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0
@@ -30,4 +53,8 @@ datasets:
 model_server: policy_model
 canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro
+  ref: 7ab5114912baf22bb098818e604c02fe7ad2c11f  # pragma: allowlist secret
+  reconciled: '2026-08-31'
 lifecycle: active

@@ -3,12 +3,33 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: knowledge
 description: FrontierScience research rubric grading via single-pass LLM judge
 modality: text
 licensing: unknown
 authors:
 - jiacheng-xu
+maintainers:
+- jiacheng-xu
+intended_use:
+- evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/causal_reasoning
+- reasoning/deductive_reasoning
+- writing_and_editing
+- writing_and_editing/informational_writing
+domains:
+- physics
+- chemistry
+- biology
+primary_metric: pass@1[avg-of-1]/accuracy
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -25,6 +46,6 @@ datasets:
   prompt_config: benchmarks/prompts/generic/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 standard_prompt_config: benchmarks/prompts/generic/default.yaml
 lifecycle: active

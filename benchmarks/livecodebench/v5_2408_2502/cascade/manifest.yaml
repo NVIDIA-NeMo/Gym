@@ -10,6 +10,25 @@ modality: text
 licensing: unknown
 authors:
 - bxyu-nvidia
+maintainers:
+- bxyu-nvidia
+intended_use:
+- evaluation
+capabilities:
+- coding
+- coding/code_generation
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- knowledge
+- knowledge/procedural_knowledge
+domains:
+- computer_science
+primary_metric: pass@1[avg-of-3]/accuracy
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -27,6 +46,6 @@ datasets:
   prompt_config: benchmarks/livecodebench/prompts/cascade.yaml
   num_repeats: 3
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 standard_prompt_config: benchmarks/livecodebench/prompts/cascade.yaml
 lifecycle: active

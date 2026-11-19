@@ -10,6 +10,26 @@ modality: text
 licensing: CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1
 authors:
 - Dane
+maintainers:
+- OliviaViessmann
+intended_use:
+- evaluation
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+domains:
+- chemistry
+primary_metric: pass@1[avg-of-5]/accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -25,6 +45,6 @@ datasets:
   prepare_script: benchmarks/litmus-bench/prepare.py
   num_repeats: 5
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: validation
 prompt_source: prepared
 lifecycle: active

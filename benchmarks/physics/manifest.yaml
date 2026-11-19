@@ -10,6 +10,25 @@ modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- physics
+- mathematics
+primary_metric: unknown
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -26,6 +45,6 @@ datasets:
   prompt_config: benchmarks/physics/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 standard_prompt_config: benchmarks/physics/prompts/default.yaml
 lifecycle: active

@@ -9,6 +9,33 @@ modality: text
 licensing: CC-BY-4.0
 authors:
 - Sanyam Kapoor
+maintainers:
+- activatedgeek
+intended_use:
+- evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/file_operations
+- tool_and_computer_use/terminal_and_cli_use
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/structured_output
+- knowledge
+- knowledge/expert_knowledge
+- data_analysis
+- data_analysis/exploratory_analysis
+- data_analysis/tabular_data_analysis
+- data_analysis/experiment_analysis
+- coding
+- coding/scientific_coding
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+domains:
+- biology
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0
@@ -25,6 +52,6 @@ datasets:
   num_repeats: 4
 resources_server: null
 model_server: null
-canonical_split: benchmark
+canonical_split: full
 prompt_source: agent
 lifecycle: active

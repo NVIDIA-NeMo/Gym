@@ -10,6 +10,21 @@ modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- coding
+- coding/code_editing
+- coding/code_understanding
+- coding/code_generation
+domains:
+- computer_science
+primary_metric: pass@1[avg-of-1]/accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -26,6 +41,6 @@ datasets:
   prompt_config: benchmarks/human_eval_infilling/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: random_span
 standard_prompt_config: benchmarks/human_eval_infilling/prompts/default.yaml
 lifecycle: active

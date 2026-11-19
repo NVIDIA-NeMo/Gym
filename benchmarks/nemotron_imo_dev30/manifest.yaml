@@ -9,6 +9,25 @@ modality: text
 licensing: CC-BY-4.0 AND CC-BY-NC-SA-4.0
 authors:
 - i-vainn
+maintainers:
+- i-vainn
+intended_use:
+- evaluation
+capabilities:
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- knowledge
+- knowledge/procedural_knowledge
+- planning_and_autonomy/self_verification
+domains:
+- mathematics
+primary_metric: pass@1[avg-of-4]/score
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -25,6 +44,10 @@ datasets:
   prompt_config: benchmarks/nemotron_imo_dev30/prompts/default.yaml
   num_repeats: 4
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test+train
 standard_prompt_config: benchmarks/nemotron_imo_dev30/prompts/default.yaml
+adopted_from:
+  source: https://huggingface.co/datasets/nvidia/Nemotron-IMO-Bench
+  ref: 223023e8406f7117cbb7e43f9bc2cd3dc21f38c3  # pragma: allowlist secret
+  reconciled: '2026-10-19'
 lifecycle: active

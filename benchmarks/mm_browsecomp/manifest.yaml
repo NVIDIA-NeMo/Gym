@@ -10,6 +10,29 @@ modality: multimodal
 licensing: MIT
 authors:
 - smohsenitahe
+maintainers:
+- DanialTaheri
+intended_use:
+- evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/multi_source_synthesis
+- tool_and_computer_use
+- tool_and_computer_use/web_search
+- tool_and_computer_use/multi_step_tool_use
+- multimodal_input_understanding
+- multimodal_input_understanding/cross_modal_understanding
+- multimodal_input_understanding/scene_understanding
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- planning_and_autonomy/long_horizon_execution
+domains:
+- general
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -25,6 +48,10 @@ datasets:
   prepare_script: benchmarks/mm_browsecomp/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/MMBrowseComp/MM-BrowseComp
+  ref: cf82a2390aa7a7ed3d96f72969d22548eff3e101  # pragma: allowlist secret
+  reconciled: '2026-11-11'
 lifecycle: active
