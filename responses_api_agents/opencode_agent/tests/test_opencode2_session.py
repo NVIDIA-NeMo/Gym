@@ -61,8 +61,10 @@ def opencode2(setup):  # noqa: F811
         yield agent, sandbox
 
 
-async def test_a_session_installs_the_pinned_release_and_runs_opencode_2_standalone(opencode2):
+@pytest.mark.parametrize("deadline_ms", [None, 1000])
+async def test_a_session_installs_the_pinned_release_and_runs_opencode_2_standalone(opencode2, deadline_ms):
     agent, sandbox = opencode2
+    agent.config.model_call_timeout_ms = deadline_ms
     events = record(sandbox)
     response, closed = await episode(agent, sandbox)
     assert response.status == "completed"
@@ -76,6 +78,9 @@ async def test_a_session_installs_the_pinned_release_and_runs_opencode_2_standal
     assert sandbox.files[f"{directory}/nemo-gym-plugin/index.js"] == PLUGIN_SOURCE.read_text()
     assert not [path for path in sandbox.files if path.endswith((".mjs", "assistant_message_header.js"))]
     params, config = launch_config(sandbox)
+    timeout = config["providers"]["nemo_gym"]["settings"]["timeout"]
+    assert timeout == (deadline_ms if deadline_ms is not None else False)
+    assert type(timeout) is (int if deadline_ms is not None else bool)
     assert params["command"] == [
         f"{RUNTIME}/opencode",
         "run",
@@ -154,8 +159,10 @@ async def test_configured_image_input_and_limits_reach_opencode_2(opencode2, att
     assert "attachment" not in config
 
 
-async def test_sampling_steps_and_a_replaced_prompt_reach_opencode_2(opencode2):
+@pytest.mark.parametrize("deadline_ms", [None, 1000])
+async def test_sampling_steps_and_a_replaced_prompt_reach_opencode_2(opencode2, deadline_ms):
     agent, sandbox = opencode2
+    agent.config.model_call_timeout_ms = deadline_ms
     agent.config.system_prompt = "Be {careful}."
     agent.config.system_prompt_mode = "replace"
     agent.config.opencode_config = {
@@ -166,6 +173,9 @@ async def test_sampling_steps_and_a_replaced_prompt_reach_opencode_2(opencode2):
     response, _ = await episode(agent, sandbox, temperature=0.25, top_p=0.5)
     assert response.status == "completed"
     params, config = launch_config(sandbox)
+    timeout = config["providers"]["nemo_gym"]["settings"]["timeout"]
+    assert timeout == (deadline_ms if deadline_ms is not None else False)
+    assert type(timeout) is (int if deadline_ms is not None else bool)
     # OpenCode 2 does not apply per-agent sampling; the plugin sets it on every model call.
     assert config["plugins"][0]["options"]["sampling"] == {"temperature": 0.25, "top_p": 0.5}
     assert config["providers"]["nemo_gym"]["models"]["dummy_model"]["capabilities"]["temperature"] is True
