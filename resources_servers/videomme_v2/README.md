@@ -142,6 +142,12 @@ Group IDs are scoped by level. Group metadata stays outside model input.
 
 Schema 1 (the default) also accepts raw-only cohorts. An optional `task_levels`
 mapping must cover all frozen task IDs and enables raw per-level breakdowns.
+As in the official scorer, `/L<n>/raw_acc` counts questions by their own level
+and `/L<n>/nonlinear_score` counts groups by the group's level, which must be
+the level of its last question; one group's questions may have different
+levels (the official annotation gives the first three questions of a logic
+group their own levels). Without `task_levels`, each question takes its group's
+level, so a cohort of the official data lists every question's level there.
 Without group metadata, `/nonlinear_available` is false and no numeric
 `/nonlinear_score` is emitted; without level metadata, no per-level raw score
 is emitted. A few questions from different groups cannot produce a group score.
