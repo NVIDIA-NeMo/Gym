@@ -1,0 +1,27 @@
+# nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 (or -NVFP4) served by vLLM v0.32.0 (model card), e.g. on one
+# GB200/GB300 node with TP4:
+#   vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 --served-model-name nemotron-3.5-super-vl \
+#     --tensor-parallel-size 4 --trust-remote-code --async-scheduling --enable-mamba-shared-prefix-checkpoint \
+#     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser nemotron_v3 \
+#     --speculative_config.method mtp --speculative_config.num_speculative_tokens 3 \
+#     --max-model-len 262144 --max-num-seqs 32 --limit-mm-per-prompt '{"image": 512, "video": 0}'
+# Set policy_base_url (http://<host>:8000/v1) and policy_api_key in env.yaml.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: nemotron-3.5-super-vl
+      return_token_id_information: false
+      # vLLM runs the nemotron_v3 reasoning parser; past reasoning is sent back as reasoning_content.
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      # The engine's context-length 400 goes back to the caller (arc_agi_3_agent trims its history and retries).
+      propagate_context_overflow_errors: true
+      # Nemotron 3.5's template drops past reasoning by default; the harness's prompts keep it (as the kit's Qwen
+      # models with preserve_thinking). Requests' own template kwargs win over these.
+      chat_template_kwargs:
+        truncate_history_thinking: false
+      extra_body: null
+      default_headers: {}
