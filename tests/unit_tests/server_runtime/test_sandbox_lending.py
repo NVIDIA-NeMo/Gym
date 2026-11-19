@@ -382,8 +382,15 @@ def test_model_only_needs_a_model_server_and_no_explicit_network_policy() -> Non
         )
 
 
-async def test_model_only_lends_a_sandbox_that_reaches_only_the_model_server(monkeypatch) -> None:
-    monkeypatch.setattr(sandbox_lending, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
+@pytest.mark.parametrize("override", [None, "https://model.example/nested"])
+async def test_model_only_lends_a_sandbox_that_reaches_only_the_model_server(monkeypatch, override) -> None:
+    config = {
+        "sandbox": {"opensandbox": {}},
+        "policy_model": {
+            "responses_api_models": {"test": {"host": "10.1.2.3", "port": 8000, "sandbox_url": override}}
+        },
+    }
+    monkeypatch.setattr(sandbox_lending, "get_global_config_dict", lambda: config)
     asked = []
 
     def server_url(name: str) -> str:
@@ -405,11 +412,14 @@ async def test_model_only_lends_a_sandbox_that_reaches_only_the_model_server(mon
     await lender.lend("session", TASK)
 
     (sandbox,) = _RecordingSandbox.created
-    assert asked == ["policy_model"]
+    assert asked == (["policy_model"] if override is None else [])
     assert sandbox.provider == {"opensandbox": {}}
     assert sandbox.spec.provider_options == {
         "keep": True,
-        "network_policy": {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.1.2.3"}]},
+        "network_policy": {
+            "defaultAction": "deny",
+            "egress": [{"action": "allow", "target": "10.1.2.3" if override is None else "model.example"}],
+        },
     }
 
 
@@ -446,7 +456,13 @@ def test_model_and_tools_needs_tool_servers_and_only_it_takes_them() -> None:
 
 
 async def test_model_and_tools_lends_a_sandbox_that_reaches_the_model_and_tool_servers(monkeypatch) -> None:
-    monkeypatch.setattr(sandbox_lending, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
+    config = {
+        "sandbox": {"opensandbox": {}},
+        "policy_model": {"responses_api_models": {"test": {"host": "10.1.2.3", "port": 8000}}},
+        "agentic_mme": {"resources_servers": {"test": {"host": "10.4.5.6", "port": 9000}}},
+        "search": {"resources_servers": {"test": {"host": "10.1.2.3", "port": 7000}}},
+    }
+    monkeypatch.setattr(sandbox_lending, "get_global_config_dict", lambda: config)
     urls = {
         "policy_model": "http://10.1.2.3:8000",
         "agentic_mme": "http://10.4.5.6:9000",
@@ -487,6 +503,14 @@ async def test_model_and_tools_lends_a_sandbox_that_reaches_the_model_and_tool_s
 async def test_model_only_on_a_provider_without_network_policies_is_refused_before_a_sandbox_starts(
     workdir, started, monkeypatch
 ) -> None:
+    monkeypatch.setattr(
+        sandbox_lending,
+        "get_global_config_dict",
+        lambda: {
+            "sandbox": {"local": {}},
+            "policy_model": {"responses_api_models": {"test": {"host": "10.1.2.3", "port": 8000}}},
+        },
+    )
     monkeypatch.setattr(sandbox_lending, "get_server_url", lambda name: "http://10.1.2.3:8000")
     lender = LentSandboxes(
         "sandbox",
