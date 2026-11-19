@@ -914,6 +914,41 @@ class TestGenRMCompareResourcesServer:
             adjusted_short.group_answer_length_penalty_coeff == adjusted_long.group_answer_length_penalty_coeff == 0.2
         )
 
+    async def test_verify_applies_group_reasoning_coefficient(self, config):
+        config = config.model_copy(update={"num_rollouts_per_prompt": 2, "group_reasoning_length_penalty_coeff": 0.06})
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5) * 2 + (-1.0,) * 3 + (0.0, 0.0))
+
+        def request(group, index, coefficient):
+            body = self._verify_request(index, group_id=group)
+            body.response.output = [
+                NeMoGymResponseReasoningItem(
+                    id=f"reasoning-{index}",
+                    summary=[NeMoGymSummary(text=("think " * 40) if index else "think", type="summary_text")],
+                ),
+                NeMoGymResponseOutputMessage(
+                    id=f"message-{index}",
+                    status="completed",
+                    role="assistant",
+                    content=[NeMoGymResponseOutputText(text="same answer")],
+                ),
+            ]
+            return body.model_copy(update={"group_reasoning_length_penalty_coeff": coefficient})
+
+        zero_short, zero_long, adjusted_short, adjusted_long = await asyncio.gather(
+            *(
+                server.verify(request_with_session(), request(group, index, coefficient))
+                for group, coefficient in (("zero", 0.0), ("adjusted", 0.2))
+                for index in range(2)
+            )
+        )
+        assert zero_short.reward_length_adjustment == zero_long.reward_length_adjustment == 0
+        assert adjusted_short.reward > adjusted_long.reward
+        assert adjusted_long.group_reasoning_length_penalty_coeff == 0.2
+        assert adjusted_long.group_answer_length_penalty_coeff == 0.0
+        with pytest.raises(HTTPException, match="length coefficients"):
+            await server.verify(request_with_session(), request("adjusted", 0, 0.3))
+
     async def test_singleton_cohort_rejects_overrides_and_keeps_static_reward(self, config):
         config = config.model_copy(update={"num_rollouts_per_prompt": 1})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
