@@ -869,6 +869,18 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # client uses text first, which some audio model chat templates distinguish.
     audio_content_order: Literal["before_text", "after_text"] = "before_text"
 
+    minimum_request_interval_seconds: float = Field(
+        default=0,
+        ge=0,
+        description="Serialize upstream calls with this cooldown after each attempt; requires single-attempt transport.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_pacing_transport(self) -> "VLLMModelConfig":
+        if self.minimum_request_interval_seconds and (self.max_http_attempts != 1 or self.max_num_tries != 1):
+            raise ValueError("request pacing requires max_http_attempts=1 and max_num_tries=1")
+        return self
+
     @model_validator(mode="after")
     def _validate_chat_conversion_options(self) -> "VLLMModelConfig":
         if self.is_responses_native:
@@ -1019,6 +1031,13 @@ class VLLMModel(SimpleResponsesAPIModel):
     _warned_request_chat_template_kwargs_dropped: bool = PrivateAttr(default=False)
     _tar_audio_reader: TarAudioReader = PrivateAttr(default_factory=TarAudioReader)
     _generation_cut_control_urls: Dict[str, str] = PrivateAttr(default_factory=dict)
+    _pacing_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+    _next_request_at: float = PrivateAttr(default=0)
+
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        if self.config.minimum_request_interval_seconds:
+            return "request pacing is process-local"
+        return super().multiple_workers_unsupported_reason()
 
     def _validate_capture_request(
         self, body: NeMoGymResponseCreateParamsNonStreaming | NeMoGymChatCompletionCreateParamsNonStreaming
@@ -1472,10 +1491,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._apply_sampling_overrides(body_dict, api="responses")
 
         note_generation_request(body_dict)
-        client = self._resolve_client(request)
-        execution = start_model_execution(request, upstream_attempted=True)
+        execution = start_model_execution(request, upstream_attempted=False)
         try:
-            response_dict = await self._call_endpoint(client, client.create_response(**body_dict))
+            response_dict = await self._call_endpoint(
+                request, lambda client: client.create_response(**body_dict), execution=execution
+            )
         except ClientResponseError as error:
             execution.update(response_source="upstream", upstream_status_code=error.status)
             raise
@@ -2007,7 +2027,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if summary_request:
             _bound_output_budget(body_dict, self.config.compaction_summary_max_tokens)
         note_generation_request(body_dict)
-        client = self._resolve_client(request)
+        client: NeMoGymAsyncOpenAI | None = None
         # Rank-affine routing downstream: expose the Gym session (one per rollout)
         # as the backend's canonical conversation id so a disaggregated server can
         # pin every turn of a conversation to the ADP rank holding its prefix.
@@ -2052,7 +2072,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         extra_headers = (
             self._external_capture_handler.request_headers() if self._external_capture_handler is not None else {}
         )
-        execution["upstream_attempted"] = True
         context = current_capture_context()
         transport_options: dict[str, Any] = (
             {"_resend_after_disconnect": False}
@@ -2065,12 +2084,22 @@ class VLLMModel(SimpleResponsesAPIModel):
             transport_options["_headers"] = {MODEL_SAMPLING_HEADER: MODEL_SAMPLING_NULL}
         if extra_headers:
             transport_options["_headers"] = {**transport_options.get("_headers", {}), **extra_headers}
+
+        async def dispatch_chat(payload: Dict[str, Any]) -> Dict[str, Any]:
+            def create_call(selected_client: NeMoGymAsyncOpenAI) -> Awaitable[Dict[str, Any]]:
+                nonlocal client
+                client = selected_client
+                return selected_client.create_chat_completion(**payload)
+
+            return await self._call_endpoint(request, create_call, execution=execution)
+
         try:
             try:
                 chat_completion_dict = await self._engine_chat_completion(
-                    client, transport_options, body_dict, summary=summary_request
+                    dispatch_chat, transport_options, body_dict, summary=summary_request
                 )
             except ClientResponseError as refusal:
+                assert client is not None
                 if not await self._refit_output_budget(
                     execution,
                     client,
@@ -2083,7 +2112,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 ):
                     raise
                 chat_completion_dict = await self._engine_chat_completion(
-                    client, transport_options, body_dict, summary=summary_request
+                    dispatch_chat, transport_options, body_dict, summary=summary_request
                 )
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
@@ -2252,6 +2281,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                             "vLLM response generation token IDs disagree with choice logprob token IDs."
                         )
                 else:
+                    assert client is not None
                     tokenize_response = await client.create_tokenize(**self._get_tokenize_chat_body(body_dict))
                     prompt_token_ids = self._require_token_id_list(
                         tokenize_response.get("tokens"),
@@ -2479,13 +2509,19 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._validate_single_choice_token_request(completion_body)
 
         note_generation_request(body_dict)
-        client = self._resolve_client(request)
+        client: NeMoGymAsyncOpenAI | None = None
 
-        execution = start_model_execution(request, upstream_attempted=True)
+        def create_call(selected_client: NeMoGymAsyncOpenAI) -> Awaitable[Dict[str, Any]]:
+            nonlocal client
+            client = selected_client
+            return client.create_completion(**completion_body)
+
+        execution = start_model_execution(request, upstream_attempted=False)
         try:
             try:
-                completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
+                completion_dict = await self._call_endpoint(request, create_call, execution=execution)
             except ClientResponseError as refusal:
+                assert client is not None
                 if not await self._refit_output_budget(
                     execution,
                     client,
@@ -2495,7 +2531,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     lambda: self._completion_tokenize_body(prompt, completion_body),
                 ):
                     raise
-                completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
+                completion_dict = await self._call_endpoint(request, create_call, execution=execution)
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             result_content_str = e.response_content.decode(errors="replace")
@@ -2527,6 +2563,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.return_token_id_information:
             choice_dict = completion_dict["choices"][0]
             if choice_dict.get("prompt_token_ids") is None:
+                assert client is not None
                 tokenize_response = await client.create_tokenize(
                     **self._completion_tokenize_body(prompt, completion_body)
                 )
@@ -2979,14 +3016,21 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
     async def _engine_chat_completion(
-        self, client: NeMoGymAsyncOpenAI, transport_options: Dict[str, Any], body: Dict[str, Any], *, summary: bool
+        self,
+        dispatch_chat: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]],
+        transport_options: Dict[str, Any],
+        body: Dict[str, Any],
+        *,
+        summary: bool,
     ) -> Dict[str, Any]:
         """One chat call to the engine; a compaction summary call goes through the summary recovery."""
         if summary:
-            return await self._create_compaction_summary(client, {**transport_options, **body})
-        return await self._call_endpoint(client, client.create_chat_completion(**transport_options, **body))
+            return await self._create_compaction_summary(dispatch_chat, {**transport_options, **body})
+        return await dispatch_chat({**transport_options, **body})
 
-    async def _create_compaction_summary(self, client: NeMoGymAsyncOpenAI, body: Dict[str, Any]) -> Dict[str, Any]:
+    async def _create_compaction_summary(
+        self, dispatch_chat: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]], body: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Serve a compaction summary the session can use, or refuse with 422 after the configured attempts.
 
         The first attempt is OpenCode's own request. A later attempt asks the model, in its own words, to summarize
@@ -3025,7 +3069,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     },
                 ]
             note_generation_request(body)
-            result = await self._call_endpoint(client, client.create_chat_completion(**deepcopy(body)))
+            result = await dispatch_chat(deepcopy(body))
             choice = (result.get("choices") or [{}])[0]
             if choice.get("finish_reason") == "abort":
                 return result  # A provider abort keeps its own classification downstream.
@@ -3071,12 +3115,37 @@ class VLLMModel(SimpleResponsesAPIModel):
                 },
             )
 
-    async def _call_endpoint(self, client: NeMoGymAsyncOpenAI, call: Awaitable[Dict[str, Any]]) -> Dict[str, Any]:
+    async def _call_endpoint(
+        self,
+        request: Request,
+        create_call: Callable[[NeMoGymAsyncOpenAI], Awaitable[Dict[str, Any]]],
+        *,
+        execution: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Pace prepared upstream calls across every supported API path."""
+        if not self.config.minimum_request_interval_seconds:
+            client = self._resolve_client(request)
+            return await self._await_endpoint(client, create_call(client), execution)
+        async with self._pacing_lock:
+            await asyncio.sleep(max(0, self._next_request_at - monotonic()))
+            # Endpoint publication and health may change while this call is queued.
+            client = self._resolve_client(request)
+            try:
+                return await self._await_endpoint(client, create_call(client), execution)
+            finally:
+                # Completion-based cooldown also covers client-side serialization and connection setup.
+                self._next_request_at = monotonic() + self.config.minimum_request_interval_seconds
+
+    async def _await_endpoint(
+        self, client: NeMoGymAsyncOpenAI, call: Awaitable[Dict[str, Any]], execution: Dict[str, Any] | None
+    ) -> Dict[str, Any]:
         """Await one engine call and record how the endpoint answered.
 
         A 5xx or a connection error counts against the endpoint. Any other answer, a 4xx
         included, shows the engine alive and resets its count.
         """
+        if execution is not None:
+            execution["upstream_attempted"] = True
         try:
             result = await call
         except ClientResponseError as error:
