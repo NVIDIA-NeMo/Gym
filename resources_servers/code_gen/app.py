@@ -91,7 +91,7 @@ class UnitTests(BaseModel):
 
 class AssertionTests(BaseModel):
     type: Literal["assertions"]
-    tests: List[str] = Field(min_length=1)
+    tests: list[str] = Field(min_length=1)
 
 
 class CompCodingRunRequest(BaseRunRequest):
