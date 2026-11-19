@@ -180,7 +180,7 @@ def test_identity_entrypoints_export_only_the_served_worker_app(tmp_path, monkey
 
     from benchmarks.model_identity import prepare
     from environment_servers.nemo_user_sim.app import UserSimEnvironmentServer
-    from nemo_gym.server_runtime import BaseServer
+    from nemo_gym.server_runtime import SimpleServer
 
     monkeypatch.setattr(prepare, "DATA", tmp_path / "panel.jsonl")
     spec = prepare.DATA.with_suffix(".spec.yaml")
@@ -199,7 +199,7 @@ def test_identity_entrypoints_export_only_the_served_worker_app(tmp_path, monkey
         built.append(cls.__name__)
         return app
 
-    monkeypatch.setattr(BaseServer, "run_webserver", classmethod(run_webserver))
+    monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(run_webserver))
     root = Path(__file__).resolve().parents[3]
     namespace = runpy.run_path(str(root / entrypoint), run_name="__mp_main__" if spawn_copy else "identity_worker")
     if worker and not spawn_copy:
