@@ -1,0 +1,72 @@
+---
+title: "ARC-AGI-3 Pivot Windows (PivotRL)"
+description: "Train on short windows of recorded ARC-AGI-3 games, restored exactly at one model call and scored by oracle progress."
+position: 7
+---
+
+A pivot window restores a recorded ARC-AGI-3 game at one of its model calls (the pivot) and lets the policy continue it
+for a few calls. The recorded harness itself replays the game up to the pivot, so the game, the harness state and its
+live Python sandbox are exactly the recorded ones. The reward is oracle progress: the number of actions an oracle needs
+to complete the level at the pivot, minus the number it needs at the end of the window.
+
+| Component | What it does |
+|---|---|
+| [`arc_agi_3_pivot`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/arc_agi_3_pivot) resources server | Restores each pivot in a harness worker process, plays the policy's replies through the harness, and scores the window |
+| [`arc_agi_3_pivot_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/arc_agi_3_pivot_agent) | Plays the window: one chat completion per harness request, then `/step` with the reply |
+| `single_agent_turn_legacy` environment server | Owns each episode: seeds both sessions, runs the agent's activation, verifies, and closes both sessions on every path |
+
+## Prerequisites
+
+- Linux. The harness's Python sandbox does not run on macOS.
+- The first start of the resources server installs, under `resources_servers/arc_agi_3_pivot/.runtime/`, the Kaggle
+  kit's harness (a public Kaggle dataset) and a Python 3.12 worker environment. Pivots recorded under Python 3.12
+  restore exactly only under 3.12.
+- An OpenAI-compatible policy model served through a Gym model server, such as the vLLM model server.
+
+## Run the committed example
+
+The repository ships an example pool of five pivots from two games. Start the servers, then collect rollouts:
+
+```bash
+COMMON=(--config resources_servers/arc_agi_3_pivot/configs/arc_agi_3_pivot.yaml
+        --config responses_api_models/vllm_model/configs/vllm_model.yaml)
+gym env start "${COMMON[@]}" &
+gym eval run --no-serve "${COMMON[@]}" --agent arc_agi_3_pivot_agent \
+    --input resources_servers/arc_agi_3_pivot/data/example.jsonl --num-repeats 2 --concurrency 8 \
+    --output results/pivot_rollouts.jsonl
+```
+
+To train on your own pool, record attempts with `record.py`, build rows with `create_dataset.py`, and point the
+server's `pool_dir` at the pool. The
+[README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/arc_agi_3_pivot#setup) gives both commands.
+
+## Required training settings
+
+A window's first request is the pivot's recorded request, which already holds assistant turns this rollout did not
+generate. Training-token capture roots that history as prompt context, and each later call of the window chains to the
+previous one.
+
+| Setting | Why |
+|---|---|
+| `token_capture.enabled: true` (NeMo RL) | The agent's output carries no token ids; capture records them from the model server. |
+| `grpo.masked_reward_policy: exclude` (NeMo RL) | Masked windows must not enter the group baseline with their placeholder reward of 0. |
+| Train on rows that restore | A window that never reached the model has no captured call. `create_dataset.py` keeps only restored pivots. |
+
+With Gym's own capture, set `token_id_capture.root_seeded_first_call: true`; otherwise the first call is unresolved and
+the rollout is masked.
+
+## Masked windows
+
+A window is masked, not scored, when:
+
+- the pivot does not restore exactly (`environment_prepare_failed`);
+- the harness's next request does not extend the previous one plus the policy's reply, for example after it compacts
+  its context or sends a helper request (`model_context_limit`);
+- a model call fails before the window ends (`model_request_error`);
+- the oracle cannot measure the window (`verifier_error`).
+
+Pivots after the harness's first context compaction restore only from recordings that keep each reply's token usage.
+The README's
+[restore and known limits](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/arc_agi_3_pivot#how-a-window-runs)
+and [training tokens](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/arc_agi_3_pivot#training-tokens)
+sections give the details.
