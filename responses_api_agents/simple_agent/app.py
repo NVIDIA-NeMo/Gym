@@ -24,7 +24,7 @@ from time import monotonic, perf_counter, time
 from typing import Any, ClassVar
 from uuid import uuid4
 
-from aiohttp import ClientResponseError
+from aiohttp import ClientResponseError, ClientTimeout
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import (
@@ -216,6 +216,8 @@ class SimpleAgentOutcomePolicyConfig(OutcomePolicyConfig):
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
+    request_max_transport_attempts: int | None = Field(default=None, strict=True, ge=1, le=1)
+    request_timeout_seconds: float | None = Field(default=None, strict=True, gt=0, allow_inf_nan=False)
     max_steps: int = None
     max_model_retries: int = Field(
         default=2,
@@ -344,6 +346,15 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleAgent(SimpleResponsesAPIAgent):
+    def _model_request_options(self) -> dict[str, Any]:
+        """Optional caller transport controls; unset keeps existing client defaults."""
+        options: dict[str, Any] = {}
+        if self.config.request_max_transport_attempts == 1:
+            options.update(_max_num_tries=1, _resend_after_disconnect=False)
+        if self.config.request_timeout_seconds is not None:
+            options["timeout"] = ClientTimeout(total=self.config.request_timeout_seconds)
+        return options
+
     checkpoint_mode = "exported"
     config: SimpleAgentConfig
     # With checkpointing, each legacy /run's loop reply, by its session key.
@@ -561,6 +572,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             json=new_body,
                             cookies=model_server_cookies,
                             **({"headers": {"x-session-id": invocation_id}} if collect_trajectory else {}),
+                            **self._model_request_options(),
                         )
                         try:
                             await raise_for_status(response)
@@ -1151,6 +1163,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         json=self._strip_resource_only_metadata(body.responses_create_params),
                         cookies=cookies,
                         headers=headers,
+                        **self._model_request_options(),
                     )
                     await raise_for_status(response)
                     model_response_json = await get_response_json(response)

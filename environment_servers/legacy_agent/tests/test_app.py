@@ -56,14 +56,14 @@ def _config(**limits: float | None) -> LegacyAgentEnvironmentServerConfig:
     )
 
 
-def _app(*responses: _Upstream) -> tuple[TestClient, _Client]:
+def _app(*responses: _Upstream, **config) -> tuple[TestClient, _Client]:
     client = _Client(
         head_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create({}),
         calls=[],
         responses=list(responses),
     )
-    server = LegacyAgentEnvironmentServer(config=_config(), server_client=client)
+    server = LegacyAgentEnvironmentServer(config=_config(**config), server_client=client)
     return TestClient(server.setup_webserver()), client
 
 
@@ -99,6 +99,16 @@ def test_run_returns_upstream_status_and_repeated_set_cookie_headers() -> None:
     assert response.headers.get_list("set-cookie") == ["a=1", "b=2"]
     assert "transfer-encoding" not in response.headers
     assert response.headers["content-length"] == str(len(response.content))
+
+
+@pytest.mark.parametrize("attempts", [None, 1])
+def test_single_attempt_applies_only_to_the_relayed_run(attempts):
+    app, client = _app(_Upstream(b"{}"), _Upstream(b"{}"), agent_run_max_transport_attempts=attempts)
+    assert app.post("/run", json={"responses_create_params": {"input": "task"}}).status_code == 200
+    assert app.post("/aggregate_metrics", json={"verify_responses": []}).status_code == 200
+    options = {k: v for k, v in client.calls[0][2].items() if k.startswith("_")}
+    assert options == ({"_max_num_tries": 1, "_resend_after_disconnect": False} if attempts == 1 else {})
+    assert "_max_num_tries" not in client.calls[1][2]
 
 
 def test_aggregate_metrics_is_forwarded_to_the_agent() -> None:
