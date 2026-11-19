@@ -2006,6 +2006,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             plugin_options=options,
             owner_plugins=self.config.plugins,
         )
+        if self.config.model_call_timeout_ms is not None:
+            config["providers"][opencode2_config.PROVIDER]["settings"]["timeout"] = self.config.model_call_timeout_ms
         payload = {
             "instructions": system if self.config.system_prompt_mode == "append" else "",
             "path_prefix": self.config.sandbox_path_prefix,

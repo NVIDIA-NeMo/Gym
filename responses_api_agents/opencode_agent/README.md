@@ -284,7 +284,7 @@ stricter, single-activation contract described above. The intentional difference
 | --- | --- | --- |
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
 | Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
-| `model_call_timeout_ms` | Positive integer milliseconds per Gym-routed model call; unset preserves the provider option or OpenCode default | OpenCode 1 honors the value; unset disables the native deadline. OpenCode 2 sessions currently keep it disabled even when configured. |
+| `model_call_timeout_ms` | Positive integer milliseconds per Gym-routed model call; unset preserves the provider option or OpenCode default | OpenCode 1 and 2 honor the value; unset disables the native deadline. |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
 | Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; `max_output_tokens` (a per-call limit) accepted when at least the configured limit; other controls rejected explicitly |
 
