@@ -28,6 +28,8 @@ Sources:
 """
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -36,6 +38,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 
@@ -145,29 +148,48 @@ def _build_venv(dest: Path) -> None:
     )
 
 
+@contextlib.contextmanager
+def install_lock(dest: Path) -> Iterator[None]:
+    """Hold ``<dest>.lock`` (an exclusive ``flock``): concurrent installs, also from other processes, run one at a time,
+    so the next one finds the finished install. The kernel releases the lock if its holder dies."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest.with_name(dest.name + ".lock"), "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def ensure_official_harness(source: str | None, dest: Path = DEFAULT_DEST) -> Path:
-    """Return a verified install at ``dest``, installing it from ``source`` (default ``git``) when absent."""
+    """Return a verified install at ``dest``, installing it from ``source`` (default ``git``) when absent.
+
+    Concurrent calls (several servers on one checkout) share one install: the first installs under ``install_lock``
+    and the others then verify its result. The source tree is staged in a directory of its own next to ``dest`` and
+    renamed into place; the venv is then built there (a venv records absolute paths), still under the lock. A failed
+    install removes what it built, so a later call retries."""
     manifest = load_manifest()
-    if dest.exists():
-        verify_install(dest, manifest)
-        return dest
-    with tempfile.TemporaryDirectory(prefix="arc3_official_") as tmp:
-        staged = _stage_source(source or "git", Path(tmp), manifest)
-        verify_tree(staged, manifest)
-        partial = dest.with_name(dest.name + ".partial")
-        if partial.exists():
-            shutil.rmtree(partial)
-        partial.mkdir(parents=True)
-        shutil.copytree(staged, partial / "src", ignore=shutil.ignore_patterns(*IGNORED_PARTS))
-        verify_tree(partial / "src", manifest)
-    # The venv is built in its final place (a venv records absolute paths); a failed build removes the install.
-    partial.rename(dest)
-    try:
-        _build_venv(dest)
-        verify_install(dest, manifest)
-    except BaseException:
-        shutil.rmtree(dest, ignore_errors=True)
-        raise
+    with install_lock(dest):
+        if dest.exists():
+            verify_install(dest, manifest)
+            return dest
+        with tempfile.TemporaryDirectory(prefix="arc3_official_") as tmp:
+            staged = _stage_source(source or "git", Path(tmp), manifest)
+            verify_tree(staged, manifest)
+            partial = Path(tempfile.mkdtemp(prefix=dest.name + ".partial-", dir=dest.parent))
+            try:
+                shutil.copytree(staged, partial / "src", ignore=shutil.ignore_patterns(*IGNORED_PARTS))
+                verify_tree(partial / "src", manifest)
+                partial.rename(dest)
+            except BaseException:
+                shutil.rmtree(partial, ignore_errors=True)
+                raise
+        try:
+            _build_venv(dest)
+            verify_install(dest, manifest)
+        except BaseException:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise
     return dest
 
 

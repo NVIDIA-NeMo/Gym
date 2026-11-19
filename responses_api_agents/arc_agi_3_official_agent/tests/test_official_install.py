@@ -75,7 +75,7 @@ def test_install_from_a_directory_and_reuse(tmp_path: Path, fake_manifest: dict)
     assert sorted(setup._tree_files(dest / "src")) == sorted(FILES)  # .git and caches are not part of it
     assert setup.ensure_official_harness(None, dest) == dest  # verified, not rebuilt
     assert fake_manifest["builds"] == [dest]
-    assert not dest.with_name("install.partial").exists()
+    assert sorted(p.name for p in dest.parent.iterdir() if p.name.startswith("install")) == ["install", "install.lock"]
 
 
 def test_install_from_a_tarball_with_one_top_directory(tmp_path: Path, fake_manifest: dict) -> None:
@@ -135,3 +135,58 @@ def test_build_venv_needs_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(setup.shutil, "which", lambda name: None)
     with pytest.raises(FileNotFoundError, match="uv"):
         setup._build_venv(tmp_path)
+
+
+INSTALLER = """
+import sys, time
+from pathlib import Path
+from responses_api_agents.arc_agi_3_official_agent import setup_official_harness as setup
+
+setup.MANIFEST_PATH = Path(sys.argv[1])
+
+
+def build_venv(dest):  # a "venv" whose python runs this interpreter; slow, to widen the overlap
+    with open(sys.argv[4], "a") as log:
+        log.write("built\\n")
+    time.sleep(0.5)
+    python = dest / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text(f'#!/bin/sh\\nexec "{sys.executable}" "$@"\\n')
+    python.chmod(0o755)
+
+
+setup._build_venv = build_venv
+print(setup.ensure_official_harness(sys.argv[2], Path(sys.argv[3])))
+"""
+
+
+def test_concurrent_installs_from_two_processes_share_one(tmp_path: Path, fake_manifest: dict) -> None:
+    """Two servers starting at once on one checkout: one installs (source and venv), the other waits for it and
+    verifies the result, instead of failing on a directory the first one is filling."""
+    import subprocess
+
+    source = fake_tree(tmp_path / "source")
+    dest, log = tmp_path / "agent" / ".arc3_official_harness", tmp_path / "builds.log"
+    repo = Path(__file__).resolve().parents[3]
+    args = [sys.executable, "-c", INSTALLER, str(setup.MANIFEST_PATH), str(source), str(dest), str(log)]
+    processes = [
+        subprocess.Popen(args, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)
+    ]
+    outputs = [p.communicate(timeout=60) for p in processes]
+    assert [p.returncode for p in processes] == [0, 0], outputs
+    assert log.read_text().splitlines() == ["built"]  # installed once
+    assert sorted(p.name for p in dest.parent.iterdir()) == [".arc3_official_harness", ".arc3_official_harness.lock"]
+
+
+def test_a_failed_install_is_retried_by_a_later_call(
+    tmp_path: Path, fake_manifest: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = fake_tree(tmp_path / "source")
+    dest = tmp_path / "install"
+    build = setup._build_venv
+    monkeypatch.setattr(setup, "_build_venv", lambda dest: (_ for _ in ()).throw(RuntimeError("uv sync failed")))
+    with pytest.raises(RuntimeError, match="uv sync failed"):
+        setup.ensure_official_harness(str(source), dest)
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("install")) == ["install.lock"]
+    monkeypatch.setattr(setup, "_build_venv", build)
+    assert setup.ensure_official_harness(str(source), dest) == dest

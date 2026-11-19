@@ -27,6 +27,8 @@ An install is a directory with ``harness/`` (the Kaggle ``...-harness`` dataset 
 """
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -37,6 +39,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 
 
@@ -160,29 +163,49 @@ def _stage_source(source: str, workdir: Path) -> Path:
     raise FileNotFoundError(f"ARC-AGI-3 harness source {source!r} is not a directory, a tarball or kaggle:<ref>")
 
 
+@contextlib.contextmanager
+def install_lock(dest: Path) -> Iterator[None]:
+    """Hold ``<dest>.lock`` (an exclusive ``flock``): concurrent installs, also from other processes, run one at a time,
+    so the next one finds the finished install. The kernel releases the lock if its holder dies."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest.with_name(dest.name + ".lock"), "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def ensure_harness(source: str | None, dest: Path = DEFAULT_DEST) -> Path:
-    """Return a verified harness install at ``dest``, installing it from ``source`` when ``dest`` is absent."""
+    """Return a verified harness install at ``dest``, installing it from ``source`` when ``dest`` is absent.
+
+    Concurrent calls (several servers on one checkout) share one install: the first installs under ``install_lock``
+    and the others then verify its result. The install is built in a directory of its own next to ``dest`` and renamed
+    into place when complete; a failed install leaves nothing at ``dest``, so a later call retries."""
     manifest = load_manifest()
-    if dest.exists():
-        verify_install(dest, manifest)
-        return dest
-    if not source:
-        raise FileNotFoundError(
-            f"The ARC-AGI-3 harness is not installed at {dest}; set harness_source (directory, tarball or kaggle:<ref>)"
-        )
-    with tempfile.TemporaryDirectory(prefix="arc3_harness_") as tmp:
-        staged = _stage_source(source, Path(tmp))
-        verify_install(staged, manifest)
-        partial = dest.with_name(dest.name + ".partial")
-        if partial.exists():
-            shutil.rmtree(partial)
-        partial.mkdir(parents=True)
-        shutil.copytree(staged / "harness", partial / "harness")
-        (partial / "config").mkdir()
-        for rel in manifest["config_files"]:
-            shutil.copy2(staged / "config" / rel, partial / "config" / rel)
-        verify_install(partial, manifest)
-        partial.rename(dest)
+    with install_lock(dest):
+        if dest.exists():
+            verify_install(dest, manifest)
+            return dest
+        if not source:
+            raise FileNotFoundError(
+                f"The ARC-AGI-3 harness is not installed at {dest}; set harness_source (directory, tarball or "
+                "kaggle:<ref>)"
+            )
+        with tempfile.TemporaryDirectory(prefix="arc3_harness_") as tmp:
+            staged = _stage_source(source, Path(tmp))
+            verify_install(staged, manifest)
+            partial = Path(tempfile.mkdtemp(prefix=dest.name + ".partial-", dir=dest.parent))
+            try:
+                shutil.copytree(staged / "harness", partial / "harness")
+                (partial / "config").mkdir()
+                for rel in manifest["config_files"]:
+                    shutil.copy2(staged / "config" / rel, partial / "config" / rel)
+                verify_install(partial, manifest)
+                partial.rename(dest)
+            except BaseException:
+                shutil.rmtree(partial, ignore_errors=True)
+                raise
     return dest
 
 

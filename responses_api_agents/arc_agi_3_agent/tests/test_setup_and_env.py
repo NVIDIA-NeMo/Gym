@@ -162,6 +162,71 @@ class TestSetupHarness:
         )
 
 
+INSTALLER = """
+import sys, time
+from pathlib import Path
+from responses_api_agents.arc_agi_3_agent import setup_harness as setup
+
+setup.MANIFEST_PATH = Path(sys.argv[1])
+stage = setup._stage_source
+
+
+def slow_stage(source, workdir):  # widen the window in which two installers overlap
+    with open(sys.argv[4], "a") as log:
+        log.write("staged\\n")
+    time.sleep(0.5)
+    return stage(source, workdir)
+
+
+setup._stage_source = slow_stage
+print(setup.ensure_harness(sys.argv[2], Path(sys.argv[3])))
+"""
+
+
+def test_concurrent_installs_from_two_processes_share_one(tmp_path: Path) -> None:
+    """Two servers starting at once on one checkout: one installs, the other waits and verifies its install."""
+    import subprocess
+    import sys
+
+    source = tmp_path / "src"
+    manifest = make_tree(source)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    dest, log = tmp_path / "install" / ".arc3_harness", tmp_path / "stagings.log"
+    repo = Path(__file__).resolve().parents[3]
+    args = [sys.executable, "-c", INSTALLER, str(manifest_path), str(source), str(dest), str(log)]
+    processes = [
+        subprocess.Popen(args, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)
+    ]
+    outputs = [p.communicate(timeout=60) for p in processes]
+    assert [p.returncode for p in processes] == [0, 0], outputs
+    assert log.read_text().splitlines() == ["staged"]  # installed once
+    setup_harness.verify_install(dest, manifest)
+    assert sorted(p.name for p in dest.parent.iterdir()) == [".arc3_harness", ".arc3_harness.lock"]
+
+
+def test_a_failed_install_leaves_nothing_and_a_later_call_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "src"
+    manifest = make_tree(source)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr(setup_harness, "MANIFEST_PATH", manifest_path)
+    dest = tmp_path / "install" / ".arc3_harness"
+    copytree = setup_harness.shutil.copytree
+
+    def failing_copy(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(setup_harness.shutil, "copytree", failing_copy)
+    with pytest.raises(OSError, match="disk full"):
+        setup_harness.ensure_harness(str(source), dest)
+    assert sorted(p.name for p in dest.parent.iterdir()) == [".arc3_harness.lock"]
+    monkeypatch.setattr(setup_harness.shutil, "copytree", copytree)
+    assert setup_harness.ensure_harness(str(source), dest) == dest
+
+
 class TestSetupHarnessSources:
     def test_from_directory_and_main(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
         source = tmp_path / "src"
