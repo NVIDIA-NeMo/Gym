@@ -167,11 +167,14 @@ def _normalize_rows(rows: list[tuple]) -> list[tuple]:
 
 
 def _display_value(value: object) -> object:
-    """A value as the agent sees it in a preview: decimals as numbers and dates as ISO strings."""
+    """A value as the agent sees it in a preview: decimals as numbers, dates as ISO strings, binary as bytes."""
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, (datetime.date, datetime.time)):
         return value.isoformat()
+    if isinstance(value, memoryview):
+        # psycopg2 returns `bytea` as a memoryview, whose repr is its address.
+        return bytes(value)
     return value
 
 
