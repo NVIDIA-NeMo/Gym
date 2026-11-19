@@ -954,8 +954,11 @@ class DockerProvider:
 
     async def list_by_metadata(self, labels: Mapping[str, str]) -> list[SandboxHandle]:
         """Handles of this provider's containers, running or not, that carry every label in ``labels``."""
+        # Only Gym's own containers are ever listed: a query that asks for another marker value matches none of them.
+        if labels.get(SANDBOX_LABEL, "1") != "1":
+            return []
         argv = [self._binary, "ps", "--all", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}"]
-        for key, value in {SANDBOX_LABEL: "1", **labels}.items():
+        for key, value in {**labels, SANDBOX_LABEL: "1"}.items():
             argv += ["--filter", f"label={key}={value}"]
         code, out, err = await self._run(argv, timeout_s=self._exec_config.default_timeout_s)
         if code != 0:

@@ -1278,3 +1278,24 @@ async def test_close_by_metadata_skips_a_container_removed_after_the_listing(
 
     assert result == CloseByMetadataResult(gone=("gone",))
     assert daemon.removed == []
+
+
+async def test_close_by_metadata_never_selects_a_container_without_the_gym_marker(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = {"nemo-gym.nvidia.com/worker": "dead"}
+    daemon = _LabeledContainers(
+        {
+            "not-ours": {docker_provider.SANDBOX_LABEL: "0", **worker},
+            "ours": {docker_provider.SANDBOX_LABEL: "1", **worker},
+        }
+    )
+    provider, rec = _make_provider(monkeypatch, daemon)
+
+    refused = await close_by_metadata(provider, {docker_provider.SANDBOX_LABEL: "0", **worker})
+    assert refused == CloseByMetadataResult()
+    assert rec.calls == []
+
+    closed = await close_by_metadata(provider, {docker_provider.SANDBOX_LABEL: "1", **worker})
+    assert closed.closed == ("ours",)
+    assert set(daemon.containers) == {"not-ours"}

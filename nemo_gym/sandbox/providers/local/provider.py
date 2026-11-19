@@ -150,9 +150,10 @@ class LocalProvider:
             finally:
                 if record is not None:
                     # A process the command left running in the background keeps the group alive.
-                    # The sandbox keeps its record until close ends the group.
-                    if record.is_running():
-                        inst.setdefault("process_groups", []).append(record)
+                    # The record then tracks those processes, and the sandbox keeps it until close ends the group.
+                    tracked = record.track_members()
+                    if tracked is not None:
+                        inst.setdefault("process_groups", []).append(tracked)
                     else:
                         record.forget()
         return SandboxExecResult(

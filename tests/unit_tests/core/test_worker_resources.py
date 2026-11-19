@@ -18,6 +18,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -162,6 +163,7 @@ def test_replacing_a_routing_id_already_used_is_logged(
     assert f"replaces {used}, which this worker already used" in caplog.text
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 def test_a_child_process_group_is_recorded_until_forgotten(worker: Path) -> None:
     child = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
@@ -179,6 +181,7 @@ def test_a_child_process_group_is_recorded_until_forgotten(worker: Path) -> None
     assert recorded_process_groups(ROUTING_ID) == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 def test_ending_a_record_kills_its_group_and_removes_the_record(worker: Path) -> None:
     child = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
@@ -194,15 +197,22 @@ def test_ending_a_record_kills_its_group_and_removes_the_record(worker: Path) ->
         child.wait()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 def test_a_group_whose_leader_exited_still_runs_while_a_member_does(worker: Path) -> None:
     # The usual way a command leaves a background server: the shell exits, its child keeps the group.
     shell = subprocess.Popen(["sh", "-c", "sleep 30 & echo $!"], start_new_session=True, stdout=subprocess.PIPE)
     try:
         record = record_process_group(shell.pid)
         assert record is not None
-        shell.stdout.readline()  # the member started before the shell exits
+        member = int(shell.stdout.readline())  # the member started before the shell exits
         shell.wait()
-        assert record.is_running()
+        # Without tracked members, a leaderless group cannot be told apart from a group that reused its ID.
+        assert not record.is_running()
+        tracked = record.track_members()
+        assert tracked is not None and [pid for pid, _ in tracked.members] == [member]
+        assert recorded_process_groups(ROUTING_ID) == [tracked]
+        assert tracked.is_running()
+        record = tracked
         record.end()
         for _ in range(500):
             if not record.is_running():
@@ -216,6 +226,7 @@ def test_a_group_whose_leader_exited_still_runs_while_a_member_does(worker: Path
         shell.stdout.close()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 def test_a_record_whose_process_id_was_reused_is_not_running(worker: Path) -> None:
     child = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
@@ -232,6 +243,7 @@ def test_a_record_whose_process_id_was_reused_is_not_running(worker: Path) -> No
         child.wait()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 def test_a_child_that_does_not_lead_its_group_is_not_running(worker: Path) -> None:
     child = subprocess.Popen(["sleep", "30"])
     try:
@@ -244,6 +256,7 @@ def test_a_child_that_does_not_lead_its_group_is_not_running(worker: Path) -> No
         child.wait()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 def test_two_records_of_one_process_id_are_removed_independently(worker: Path) -> None:
     child = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
@@ -277,6 +290,7 @@ def test_unreadable_records_are_skipped(worker: Path) -> None:
     assert recorded_process_groups("never-started") == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 async def test_the_local_provider_works_and_runs_commands_under_this_worker(worker: Path) -> None:
     provider = LocalProvider()
     handle = await provider.create(SandboxSpec())
@@ -299,6 +313,7 @@ async def test_the_local_provider_works_and_runs_commands_under_this_worker(work
     assert not handle.raw["workspace"].exists()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 async def test_the_local_provider_keeps_a_background_process_recorded_until_close(worker: Path) -> None:
     provider = LocalProvider()
     handle = await provider.create(SandboxSpec())
@@ -316,3 +331,51 @@ async def test_the_local_provider_keeps_a_background_process_recorded_until_clos
         time.sleep(0.01)
     assert not record.is_running()
     assert recorded_process_groups(ROUTING_ID) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
+def test_a_stale_record_never_claims_a_group_that_reused_its_id(worker: Path) -> None:
+    # Another leaderless group now holds the number: its leader exited, and its member keeps the group.
+    other = subprocess.Popen(["sh", "-c", "sleep 30 & echo $!"], start_new_session=True, stdout=subprocess.PIPE)
+    try:
+        other_member = int(other.stdout.readline())
+        other.wait()
+        start_ticks = worker_resources._start_ticks(other_member)
+        assert start_ticks is not None
+        # A stale record of an earlier group with the same ID, whose own leader and members are gone.
+        stale = ProcessGroupRecord(pgid=other.pid, start_ticks=1, members=((other_member, start_ticks + 1),))
+        untracked = ProcessGroupRecord(pgid=other.pid, start_ticks=1)
+
+        assert not stale.is_running() and not untracked.is_running()
+        stale.end()
+        untracked.end()
+        assert os.getpgid(other_member) == other.pid
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(other.pid, signal.SIGKILL)
+        other.stdout.close()
+
+
+def test_concurrent_first_use_hands_out_one_routing_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(worker_resources, "_routing_id", None)
+    real_uuid4 = worker_resources.uuid.uuid4
+    entered = threading.Barrier(8, timeout=5)
+
+    def slow_uuid4() -> object:
+        # Widen the window between the check and the assignment, where an unsynchronized getter would race.
+        time.sleep(0.01)
+        return real_uuid4()
+
+    monkeypatch.setattr(worker_resources.uuid, "uuid4", slow_uuid4)
+    seen: list[str] = []
+
+    def first_use() -> None:
+        entered.wait()
+        seen.append(worker_routing_id())
+
+    threads = [threading.Thread(target=first_use) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(set(seen)) == 1 and seen[0] == worker_routing_id()

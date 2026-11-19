@@ -29,6 +29,9 @@ The ID groups everything the worker creates on the host:
   A reader checks the record against ``/proc`` before it signals the group, so a reused process ID is never killed.
 
 A record stays while its group runs, including processes a command left running in the background.
+Once a group's leader has exited, its group ID could be reused by an unrelated group.
+So a command that returns with processes still in its group adds those processes and their start times to the record,
+and the group counts as running only while one of them still runs in it.
 Whoever owns the group, such as a local sandbox at its close, ends it with ``ProcessGroupRecord.end``.
 Ending the groups of a worker that died is the reap's job.
 Process group records need Linux's ``/proc``; elsewhere children run unrecorded.
@@ -41,6 +44,7 @@ import secrets
 import signal
 import stat
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,17 +59,20 @@ PROCESS_GROUPS_DIR_NAME = ".process-groups"
 _routing_id: tuple[int, str, bool] | None = None
 # The process that registered removal of its worker directory at exit.
 _cleanup_registered_pid: int | None = None
+# Held through every read and write of _routing_id, so two threads never hand out two IDs for one process.
+_routing_lock = threading.Lock()
 
 
 def worker_routing_id() -> str:
     """This worker's routing ID: the one session routing set, else one generated once for this process."""
     global _routing_id
-    pid = os.getpid()
-    if _routing_id is None or _routing_id[0] != pid:
-        _routing_id = (pid, uuid.uuid4().hex, True)
-    elif not _routing_id[2]:
-        _routing_id = (pid, _routing_id[1], True)
-    return _routing_id[1]
+    with _routing_lock:
+        pid = os.getpid()
+        if _routing_id is None or _routing_id[0] != pid:
+            _routing_id = (pid, uuid.uuid4().hex, True)
+        elif not _routing_id[2]:
+            _routing_id = (pid, _routing_id[1], True)
+        return _routing_id[1]
 
 
 def set_worker_routing_id(routing_id: str) -> None:
@@ -78,15 +85,16 @@ def set_worker_routing_id(routing_id: str) -> None:
     global _routing_id
     if not routing_id or os.sep in routing_id or routing_id in (os.curdir, os.pardir):
         raise ValueError(f"A routing ID must be a non-empty path component, got {routing_id!r}")
-    pid = os.getpid()
-    if _routing_id is not None and _routing_id[0] == pid and _routing_id[2] and _routing_id[1] != routing_id:
-        LOGGER.warning(
-            "Routing ID %s replaces %s, which this worker already used; what it created under %s cannot be reaped",
-            routing_id,
-            _routing_id[1],
-            _routing_id[1],
-        )
-    _routing_id = (pid, routing_id, False)
+    with _routing_lock:
+        pid = os.getpid()
+        if _routing_id is not None and _routing_id[0] == pid and _routing_id[2] and _routing_id[1] != routing_id:
+            LOGGER.warning(
+                "Routing ID %s replaces %s, which this worker already used; what it created under %s cannot be reaped",
+                routing_id,
+                _routing_id[1],
+                _routing_id[1],
+            )
+        _routing_id = (pid, routing_id, False)
 
 
 def workspace_root() -> Path:
@@ -134,24 +142,50 @@ class ProcessGroupRecord:
 
     ``start_ticks`` is field 22 of ``/proc/<pid>/stat``: clock ticks since boot.
     A change of the wall clock does not move it.
+    ``members`` holds ``(process ID, start ticks)`` of the processes left in the group when its command returned.
     """
 
     pgid: int
     start_ticks: int
+    members: tuple[tuple[int, int], ...] = ()
     # The record's file, removed by ``forget``; ``None`` for a record that was never written.
     path: Path | None = field(default=None, compare=False)
 
     def is_running(self) -> bool:
-        """Whether the recorded group still has a process.
+        """Whether the recorded group, and not another group that reused its ID, still has a process.
 
-        A leader that still runs must have the recorded start time; one that differs is a reused process ID.
-        Once the leader has exited, its members keep the group.
-        Linux does not hand out a process ID still in use as a group ID, so a process in group ``pgid`` is one of ours.
+        While the leader runs, it must have the recorded start time; one that differs is a reused process ID.
+        Once the leader has exited, the group ID can be reused after the group empties, so a process in group ``pgid``
+        proves nothing alone.
+        The group is then ours only while a recorded member still runs, with its recorded start time, in that group.
+        Linux does not hand out a process ID still in use as a group ID, so such a member means the group is the
+        original one.
         """
         leader_ticks = _start_ticks(self.pgid)
-        if leader_ticks is not None and leader_ticks != self.start_ticks:
-            return False
-        return _group_has_members(self.pgid)
+        if leader_ticks is not None:
+            return leader_ticks == self.start_ticks and _group_has_members(self.pgid)
+        return any(_start_ticks(pid) == ticks and _process_group_of(pid) == self.pgid for pid, ticks in self.members)
+
+    def track_members(self) -> "ProcessGroupRecord | None":
+        """The record with the group's current processes as its members, written to its file; ``None`` when empty.
+
+        Call it when the command that leads the group returns, before its leader's process ID can be reused.
+        An empty group costs one signal-0 system call; only a group with processes left is looked up in ``/proc``.
+        """
+        if not _group_has_members(self.pgid):
+            return None
+        members = tuple(
+            (pid, ticks) for pid in _processes_in_group(self.pgid) if (ticks := _start_ticks(pid)) is not None
+        )
+        if not members:
+            return None
+        tracked = ProcessGroupRecord(pgid=self.pgid, start_ticks=self.start_ticks, members=members, path=self.path)
+        if self.path is not None:
+            try:
+                self.path.write_text(_record_text(tracked), encoding="ascii")
+            except OSError as error:
+                LOGGER.warning("Could not record the members of child process group %d: %r", self.pgid, error)
+        return tracked
 
     def end(self) -> None:
         """Kill the group if it still runs, then remove its record."""
@@ -189,7 +223,7 @@ def record_process_group(pid: int) -> ProcessGroupRecord | None:
     try:
         records = _private_dir(worker_workspace_dir() / PROCESS_GROUPS_DIR_NAME)
         path = records / f"{pid}-{secrets.token_hex(4)}"
-        path.write_text(f"{pid} {ticks}", encoding="ascii")
+        path.write_text(_record_text(ProcessGroupRecord(pgid=pid, start_ticks=ticks)), encoding="ascii")
     except OSError as error:
         LOGGER.warning("Could not record child process group %d of this worker: %r", pid, error)
         return None
@@ -205,8 +239,9 @@ def recorded_process_groups(routing_id: str) -> list[ProcessGroupRecord]:
         return records
     for entry in entries:
         try:
-            pgid, ticks = entry.read_text("ascii").split()
-            records.append(ProcessGroupRecord(pgid=int(pgid), start_ticks=int(ticks), path=entry))
+            pgid, ticks, *members = entry.read_text("ascii").split()
+            parsed = tuple((int(pid), int(start)) for pid, start in (member.split(":") for member in members))
+            records.append(ProcessGroupRecord(pgid=int(pgid), start_ticks=int(ticks), members=parsed, path=entry))
         except (OSError, ValueError):
             LOGGER.warning("Skipping unreadable process group record %s", entry)
     return records
@@ -265,3 +300,33 @@ def _group_has_members(pgid: int) -> bool:
         # A process in the group exists but belongs to another user.
         return True
     return True
+
+
+def _record_text(record: ProcessGroupRecord) -> str:
+    """A record's file: the group ID and leader start ticks, then ``pid:start`` for each tracked member."""
+    return " ".join([str(record.pgid), str(record.start_ticks), *(f"{pid}:{ticks}" for pid, ticks in record.members)])
+
+
+def _process_group_of(pid: int) -> int | None:
+    try:
+        return os.getpgid(pid)
+    except (ProcessLookupError, PermissionError):
+        return None
+
+
+def _processes_in_group(pgid: int) -> list[int]:
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    return [int(entry) for entry in entries if entry.isdigit() and _process_group_of(int(entry)) == pgid]
+
+
+def _reset_routing_lock_after_fork() -> None:
+    # A fork can copy the lock while another thread holds it; the child starts with a free one.
+    global _routing_lock
+    _routing_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_routing_lock_after_fork)
