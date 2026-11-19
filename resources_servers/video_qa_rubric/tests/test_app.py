@@ -323,21 +323,27 @@ async def test_a_failed_model_call_is_masked_only_in_the_single_turn_setting() -
     assert calls == []
 
 
+@pytest.mark.parametrize("penalty", [None, -0.5])
 @pytest.mark.parametrize(
     ("items", "graded"),
     [
-        # Ended on a tool call or result, or on a reasoning-only turn: no answer, whatever was said earlier.
-        ((message("An orange square."), CALL, TOOL_RESULT, THINKING), False),
+        # The last assistant message is the answer, whatever comes after it.
+        ((message("An orange square."), THINKING), True),
+        ((message("An orange square."), CALL, TOOL_RESULT, THINKING), True),
+        ((CALL, TOOL_RESULT, THINKING, message("An orange square moves right.")), True),
+        # No assistant message, or one with nothing after its reasoning: no answer.
         ((CALL, TOOL_RESULT), False),
         ((THINKING,), False),
         ((CALL, TOOL_RESULT, message("<think>still thinking")), False),
-        ((CALL, TOOL_RESULT, THINKING, message("An orange square moves right.")), True),
     ],
 )
-async def test_with_empty_answer_reward_the_answer_must_come_last(items, graded) -> None:
-    server, calls = make_server(judgment(), empty_answer_reward=-0.5)
+async def test_the_last_assistant_message_is_graded_and_only_no_answer_gets_empty_answer_reward(
+    items, graded, penalty
+) -> None:
+    server, calls = make_server(judgment(), empty_answer_reward=penalty)
     result = await server.verify(request_with(*items))
-    assert (result.outcome, result.reward) == (("graded", 1.0) if graded else ("empty_answer", -0.5))
+    no_answer = ("empty_answer", 0.0 if penalty is None else penalty)
+    assert (result.outcome, result.reward) == (("graded", 1.0) if graded else no_answer)
     assert result.evaluation_completed and not result.mask_sample and len(calls) == graded
 
 
@@ -345,12 +351,6 @@ async def test_a_response_without_output_scores_zero_even_with_empty_answer_rewa
     server, calls = make_server(empty_answer_reward=-0.5)
     result = await server.verify(request_with())
     assert (result.outcome, result.reward, result.mask_sample, calls) == ("empty_answer", 0, False, [])
-
-
-async def test_without_empty_answer_reward_the_last_assistant_message_is_graded() -> None:
-    server, calls = make_server(judgment())
-    result = await server.verify(request_with(message("An orange square."), CALL, TOOL_RESULT, THINKING))
-    assert (result.outcome, result.reward, len(calls)) == ("graded", 1.0, 1)
 
 
 async def test_a_replayed_row_is_graded_again_from_its_saved_answer() -> None:

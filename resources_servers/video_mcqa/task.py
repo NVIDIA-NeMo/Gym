@@ -72,7 +72,8 @@ class VerifierMetadata:
 
     ``question`` and ``options`` are the question as asked: its text and its option texts in label order, without
     labels. A judge model that reads an answer (answer policy llm_extraction_v1) gets the question from them, never
-    from the model's request.
+    from the model's request. Prepared rows carry both. Rule-scored results saved before rows carried them have
+    neither; the rule policies and aggregation do not read them.
     """
 
     task_id: str
@@ -83,13 +84,13 @@ class VerifierMetadata:
     video_id: str
     video_source: str
     video_sha256: str
-    question: str
-    options: tuple[str, ...]
+    question: str | None = None
+    options: tuple[str, ...] | None = None
     level: int | None = None
     group_id: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("task_id", "dataset_source", "video_id", "video_source", "question"):
+        for name in ("task_id", "dataset_source", "video_id", "video_source"):
             _text(getattr(self, name), name)
         _digest(self.dataset_revision, 40, "dataset_revision")
         _digest(self.video_sha256, 64, "video_sha256")
@@ -97,12 +98,16 @@ class VerifierMetadata:
             raise ValueError(f"option_count must be an integer from two to {len(LABELS)}")
         if not isinstance(self.expected_answer, str) or self.expected_answer not in tuple(LABELS[: self.option_count]):
             raise ValueError("expected_answer must be one available uppercase choice label")
-        if not isinstance(self.options, (tuple, list)) or len(self.options) != self.option_count:
-            raise ValueError("options must hold one text per choice, in label order")
-        for option in self.options:
-            _text(option, "option")
-        # A row read back from JSON holds a list.
-        object.__setattr__(self, "options", tuple(self.options))
+        if (self.question is None) != (self.options is None):
+            raise ValueError("question and options are given together or not at all")
+        if self.question is not None:
+            _text(self.question, "question")
+            if not isinstance(self.options, (tuple, list)) or len(self.options) != self.option_count:
+                raise ValueError("options must hold one text per choice, in label order")
+            for option in self.options:
+                _text(option, "option")
+            # A row read back from JSON holds a list.
+            object.__setattr__(self, "options", tuple(self.options))
         if self.level is not None and (type(self.level) is not int or self.level < 1):
             raise ValueError("level must be a positive integer or None")
         if self.group_id is not None:

@@ -262,8 +262,9 @@ def llm_extraction_prompt(metadata: VerifierMetadata, final_answer: str) -> str:
 def parse_llm_choice(reply: str | None, *, option_count: int) -> str:
     """The option the judge reports: an available label or ``NO_CHOICE``.
 
-    A reasoning block the judge's server returns inline is dropped first. A reply that names neither raises
-    ``ValueError``: it is an unusable reading, not a wrong answer.
+    A reasoning block the judge's server returns inline is dropped first. A reply that names neither, such as a
+    ``choice`` that is missing, null or not a string, raises ``ValueError``: it is an unusable reading, not a wrong
+    answer.
     """
     text = final_answer_text(reply)
     match = _JSON_OBJECT.search(text)
@@ -273,7 +274,10 @@ def parse_llm_choice(reply: str | None, *, option_count: int) -> str:
         verdict = None
     if not isinstance(verdict, dict):
         raise ValueError(f"The judge's reply has no JSON object: {text[:300]!r}")
-    choice = str(verdict.get("choice", "")).strip()
+    choice = verdict.get("choice")
+    if not isinstance(choice, str):
+        raise ValueError(f"The judge's choice is not a string: {choice!r:.50}")
+    choice = choice.strip()
     if choice.lower() == NO_CHOICE:
         return NO_CHOICE
     if choice.upper() not in tuple(LABELS[:option_count]):

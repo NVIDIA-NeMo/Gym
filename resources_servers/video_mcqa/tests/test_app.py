@@ -224,6 +224,26 @@ async def test_a_row_gym_counts_as_zero_stays_missing(tmp_path, benchmark) -> No
     assert measured_metrics[f"{prefix}/is_complete"] is False
 
 
+@pytest.mark.parametrize("benchmark", ["videomme_v1", "lvbench"])
+async def test_saved_rule_scored_results_without_question_and_options_aggregate_again(tmp_path, benchmark) -> None:
+    server, rows, _ = make_server(tmp_path, benchmark=benchmark)
+    results = [await measured(server, rows[0]), await measured(server, rows[1], r"\boxed{A}", index=1)]
+    # Results saved before rows carried the question and its options.
+    saved = copy.deepcopy(results)
+    for result in saved:
+        del result["verifier_metadata"]["question"], result["verifier_metadata"]["options"]
+    again = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=saved))
+    current = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=results))
+    prefix = "Video_MME" if benchmark == "videomme_v1" else "LVBench"
+    assert again.key_metrics[f"{prefix}/raw_acc"] == 50 and again.key_metrics[f"{prefix}/is_complete"] is True
+    assert {key: value for key, value in again.agent_metrics.items() if prefix in key} == {
+        key: value for key, value in current.agent_metrics.items() if prefix in key
+    }
+    # Replaying a saved answer grades it as before.
+    replayed = await server.verify(VideoMCQAVerifyRequest.model_validate(saved[0]))
+    assert (replayed.outcome, replayed.reward) == ("correct", 1.0)
+
+
 async def test_no_returned_results_is_provisional_not_perfect(tmp_path) -> None:
     server, _, _ = make_server(tmp_path)
     metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))

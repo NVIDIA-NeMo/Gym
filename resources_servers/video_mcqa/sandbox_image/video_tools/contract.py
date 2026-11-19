@@ -115,6 +115,9 @@ class ToolSettings(BaseModel):
     # Base64 bytes of tool images one episode sends to the model. From the tool result that would pass it on, the
     # plugin sends a notice in place of each result's images, the same in every later request.
     max_tool_media_bytes: PositiveInt = 400 << 20
+    # Tool images one episode sends to the model, counted and capped the same way: at most the model server's image
+    # limit per request (vLLM's --limit-mm-per-prompt image count), so set the two together.
+    max_tool_media_images: PositiveInt = 8192
     # Absolute sandbox directories outside the workspace whose files the tools also read: OpenCode's temporary
     # directory, where its bash tool keeps scratch files such as frames the model cut.
     scratch_roots: tuple[str, ...] = ("/tmp/opencode",)
