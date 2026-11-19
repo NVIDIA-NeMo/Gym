@@ -98,8 +98,8 @@
     },
     {
       "id": "profile-command-and-outputs",
-      "prompt": "I ran `gym eval run --no-serve ... --output results/rollouts.jsonl --num-repeats 8` for my NeMo Gym environment. How do I get per-task pass rates and reward variance from it, and which files will I get?",
-      "expected_output": "Runs gym eval profile --inputs results/rollouts_materialized_inputs.jsonl --rollouts results/rollouts.jsonl, using the materialized inputs file that gym eval run wrote next to the rollouts. It writes results/rollouts_reward_profiling.jsonl, with one row per task (mean/reward, std/reward, min/reward, max/reward, num_rollouts, expected_num_rollouts), plus results/rollouts_agent_metrics.json and results/rollouts_repeat_level_metrics.json. Coverage (missing rollouts) should be checked before using the numbers.",
+      "prompt": "My `gym eval run --no-serve ... --output results/rollouts.jsonl --num-repeats 8` job for my NeMo Gym environment is still running. When it finishes, how do I get per-task pass rates and reward variance from it, and which files will I get?",
+      "expected_output": "Gives the command gym eval profile --inputs results/rollouts_materialized_inputs.jsonl --rollouts results/rollouts.jsonl, which uses the materialized inputs file that gym eval run writes next to the rollouts. Says it writes results/rollouts_reward_profiling.jsonl, with one row per task (mean/reward, std/reward, min/reward, max/reward, num_rollouts, expected_num_rollouts), plus results/rollouts_agent_metrics.json and results/rollouts_repeat_level_metrics.json, and that coverage (missing rollouts) should be checked before using the numbers.",
       "assertions": [
         "Gives a gym eval profile command that takes the rollouts file and the materialized inputs file written next to it",
         "Names the per-task output file and its reward statistics",
@@ -149,7 +149,7 @@
     {
       "id": "negative-score-gap-vs-model-card",
       "prompt": "My AIME 2025 score in NeMo Gym is 6 points lower than the number in the model card. What should I check first?",
-      "expected_output": "Checks whether the two numbers are comparable before treating the gap as real: benchmark version and data, prompt and answer extraction, sampling settings such as temperature and maximum output tokens, the grader or judge, the number of repeats and run-to-run noise, and how failed or missing rollouts were counted. This is a results-comparison question, not reward profiling for training.",
+      "expected_output": "Says to check whether the two numbers are comparable before treating the gap as real: benchmark version and data, prompt and answer extraction, sampling settings such as temperature and maximum output tokens, the grader or judge, the number of repeats and run-to-run noise, and how failed or missing rollouts were counted. This is a results-comparison question, not reward profiling for training.",
       "assertions": [
         "Lists comparability factors such as the prompt, sampling settings, grader or benchmark version",
         "Mentions run-to-run noise or the number of repeats"
@@ -160,8 +160,8 @@
     },
     {
       "id": "negative-crashed-run",
-      "prompt": "gym eval run crashed with 'ray.exceptions.RayActorError: The actor died unexpectedly before finishing this task'. How do I fix it?",
-      "expected_output": "Treats it as a crashed run: find why the actor died in the Ray or worker logs (often running out of memory or a killed process), check memory, resource limits and concurrency, fix the cause, then resume or rerun the collection.",
+      "prompt": "My gym eval run crashed with 'ray.exceptions.RayActorError: The actor died unexpectedly before finishing this task'. What usually causes this, and what should I check before I rerun it?",
+      "expected_output": "Explains that this is a crashed run, not a reward question: the actor usually died because its process ran out of memory or was killed. Tells the user to find the cause in the Ray or worker logs, check memory, resource limits and concurrency, fix the cause, then resume or rerun the collection.",
       "assertions": [
         "Suggests finding the cause in the Ray or worker logs",
         "Mentions running out of memory or resource limits as a likely cause",
@@ -185,8 +185,8 @@
     },
     {
       "id": "negative-server-latency-profiling",
-      "prompt": "Profile the latency and throughput of my NeMo Gym resources server. Which endpoint is slow?",
-      "expected_output": "Treats this as performance profiling of a server: measure request latency and throughput per endpoint, for example with request timing, a load test or a Python profiler such as py-spy, and find the slowest endpoint. Reward profiling does not apply.",
+      "prompt": "How do I profile my NeMo Gym resources server to find which endpoint is slow? I want to measure its latency and throughput myself.",
+      "expected_output": "Explains how to profile the server's performance: measure request latency and throughput per endpoint, for example by timing requests, running a load test or using a Python profiler such as py-spy, then compare the endpoints to find the slowest. Reward profiling does not apply.",
       "assertions": [
         "Proposes measuring latency or throughput per endpoint",
         "Suggests a concrete method such as timing requests, a load test or a profiler"
