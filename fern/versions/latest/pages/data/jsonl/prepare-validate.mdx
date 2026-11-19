@@ -271,10 +271,20 @@ gym dataset collate \
 
 Collate checks every row twice:
 
-- **Request check.** The row must be JSON and a valid run request: `responses_create_params` in the Responses API
-  format. Servers reject other rows with HTTP 422. A common case is tools in Chat Completions format
+- **Request check.** The row must be JSON and must pass the request model of the server that receives it.
+  Collate finds that server the way rollout collection routes the row:
+  - A task row (`task_id` and `task_input`, or a flat row in a dataset with a `taskset`) goes to the environment server
+    that `environment_server_routes` names for its taskset. That server validates `task_input` with the `TaskInput` in
+    its `task_input.py`. A task row whose taskset has no route is rejected, because rollout collection refuses it.
+  - A flat row follows `environment_routing_mode`: by default it goes to its agent, or to the one environment server
+    that fronts the agent. An agent, or an environment server without `task_input.py`, validates the row as a run
+    request: `responses_create_params` in the Responses API format. `single_agent_turn_legacy` validates it as its
+    `TaskInput`.
+
+  Servers reject rows that fail the check with HTTP 422. A common case is tools in Chat Completions format
   (`{"type": "function", "function": {"name": ...}}`): Responses API tools carry `name`, `description`,
-  `parameters` and `strict` on the tool itself.
+  `parameters` and `strict` on the tool itself. Collate checks a row after it applies the prompt template and turns a
+  taskset's flat row into a task row, which is the shape the server receives.
 - **`task_data.py` check.** The row's task fields must match the owning server's schema, such as a required
   `question`. Print a server's schema with `gym env schema --resources-server <name>`. Servers without a
   `task_data.py` skip this check.
@@ -287,12 +297,15 @@ Collate checks every row twice:
 - **`off`** skips the `task_data.py` check and both reports.
 
 `train_preparation` defaults to `warn`. Pass `+task_data_validation=error` to fail collation when any row is bad.
-Each report gives the number of failing rows and the first five errors, so it stays short on large datasets:
+Each report names the servers that receive the file's rows, and gives the number of failing rows and the first five
+errors, so it stays short on large datasets. It also counts rows it could not check, with the reason, such as a
+resources server that several agents reference with no `agent:` pin:
 
 ```text
-data/train.jsonl: 5/10 rows failed request validation (servers reject these rows with HTTP 422).
-  row 0: responses_create_params.tools.0.FunctionToolParam.name: Field required (528 validation errors)
-  row 2: responses_create_params.tools.0.FunctionToolParam.name: Field required (528 validation errors)
+data/train.jsonl: 5/10 rows failed request validation (the server that receives them refuses them).
+  rows go to: math_environment (single_agent_turn) (10 rows)
+  row 1: math_environment (single_agent_turn): task_input.responses_create_params.tools.0.FunctionToolParam.name: Field required (44 validation errors)
+  row 3: math_environment (single_agent_turn): task_input.responses_create_params.tools.0.FunctionToolParam.name: Field required (44 validation errors)
   ...
 ```
 

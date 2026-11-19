@@ -17,11 +17,12 @@ import warnings
 from abc import abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Mapping
+from dataclasses import dataclass
 from itertools import chain, count
 from math import sqrt
 from pathlib import Path
 from shutil import copyfileobj
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Self, Tuple, Union
+from typing import Any, Callable, ClassVar, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
@@ -41,13 +42,19 @@ from nemo_gym.config.config_types import (
 )
 from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_ROUTING_MODE_KEY_NAME,
+    ENVIRONMENT_SERVER_NAME_KEY_NAME,
+    ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKIP_TOKEN_CAPTURE_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
+    ConfigError,
     GlobalConfigDictParser,
+    environment_server_agent_names,
     get_global_config_dict,
     resolve_dataset_agent,
 )
@@ -70,6 +77,7 @@ from nemo_gym.data.task_data import (
     find_server_dir,
     load_task_data_schema,
 )
+from nemo_gym.data.task_input import TaskInputContract, TaskInputModuleError, load_task_input_module
 from nemo_gym.data.task_materialization import materialize_task
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 
@@ -519,6 +527,136 @@ def _compute_sample_metrics(
     return metrics, None
 
 
+@dataclass(frozen=True)
+class _Receiver:
+    """The server that receives a kind of row, and how it validates the row.
+
+    A typed environment server validates rows with its task input module (``contract``).
+    An agent, or an environment server without a task input module (a relay), validates a flat row as a ``BaseRunRequest``.
+    """
+
+    name: str
+    contract: Optional[TaskInputContract] = None
+    # Why every row of this kind is refused before it reaches a server (rollout collection refuses it).
+    refusal: Optional[str] = None
+    # Why rows of this kind are not checked.
+    not_checked: Optional[str] = None
+
+
+def _identity_keys(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The collector identity a flat row keeps outside ``task_input`` when it becomes a task row."""
+    return {
+        key: row[key]
+        for key in (
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            ROLLOUT_ID_KEY_NAME,
+            ATTEMPT_INDEX_KEY_NAME,
+            SKIP_TOKEN_CAPTURE_KEY_NAME,
+        )
+        if key in row
+    }
+
+
+def _as_task_row(row: dict[str, Any], *, taskset: str, task_index: int) -> dict[str, Any]:
+    """A flat row of a taskset dataset as collation writes it: a task row that keeps its collector identity.
+
+    Collector identity stays outside ``task_data``, so shards and retries keep their capture keys after materialization.
+    A row's request to skip token capture stays outside too.
+    """
+    identity = _identity_keys(row)
+    task_row = materialize_task(row, taskset=taskset, task_index=task_index)
+    task_row.update(identity)
+    return task_row
+
+
+def _dispatched_row(
+    row: dict[str, Any], dataset: DatasetConfig, prompt_config: Any, *, task_index: int
+) -> dict[str, Any]:
+    """``row`` in the shape its receiver validates: prompt template applied, then a taskset's flat row materialized.
+
+    Collation applies the same two steps when it writes the row, so the row checked is the row dispatched.
+    """
+    if prompt_config is not None:
+        row = apply_prompt_to_row(row, prompt_config)
+    row = {key: value for key, value in row.items() if key != AGENT_REF_KEY}
+    if dataset.taskset is not None and not is_materialized_task_row(row):
+        row = _as_task_row(row, taskset=dataset.taskset, task_index=task_index)
+    return row
+
+
+def _request_rejection(row: dict[str, Any], receiver: _Receiver, *, task_source: str) -> Optional[str]:
+    """Why ``receiver`` refuses the dispatched ``row``, or None when it accepts it (or is not checked)."""
+    if receiver.refusal is not None:
+        return receiver.refusal
+    if receiver.not_checked is not None:
+        return None
+    contract = receiver.contract
+    try:
+        if is_materialized_task_row(row):
+            if contract is None:
+                return f"{receiver.name} relays to an agent's /run, which takes flat rows, not task rows"
+            contract.task.validate_python({"task_id": row["task_id"], "task_input": row["task_input"]})
+        elif contract is None:
+            BaseRunRequest.model_validate(row)
+        elif contract.accepts_flat_rows:
+            # The server materializes a flat row by its task_source, as single_agent_turn_legacy's /run does.
+            contract.task.validate_python(materialize_task(row, taskset=task_source, task_index=0))
+        else:
+            return f"{receiver.name} accepts only task rows (task_id and task_input), not flat rows"
+    except ValidationError as e:
+        return f"{receiver.name}: {_describe_validation_error(e)}"
+    except ValueError as e:
+        return f"{receiver.name}: {e}"
+    return None
+
+
+class _RequestCheck:
+    """Checks one dataset's rows against the request model of the server that receives each of them."""
+
+    def __init__(
+        self,
+        *,
+        dataset: DatasetConfig,
+        prompt_config: Any,
+        flat_receiver: _Receiver,
+        task_receiver: Callable[[str], _Receiver],
+        task_source: str,
+    ) -> None:
+        self._dataset = dataset
+        self._prompt_config = prompt_config
+        self._flat_receiver = flat_receiver
+        self._task_receiver = task_receiver
+        self._task_source = task_source
+        # Repeated lines are copies of the source row just checked, so they share its outcome.
+        self._last_rejection: Optional[str] = None
+
+    def check(
+        self, state: "DatasetValidatorState", row: object, source_index: int, is_source_row: bool
+    ) -> Optional[str]:
+        """Why the receiver refuses ``row``, or None; counts each source row's receiver and unchecked rows."""
+        if not is_source_row:
+            return self._last_rejection
+        self._last_rejection = None
+        if not isinstance(row, dict):
+            return None  # Rejected while computing metrics; nothing reaches this point.
+        try:
+            dispatched = _dispatched_row(row, self._dataset, self._prompt_config, task_index=source_index)
+        except (KeyError, ValueError) as e:
+            self._last_rejection = f"cannot be prepared for dispatch: {e}"
+            return self._last_rejection
+        if is_materialized_task_row(dispatched):
+            receiver = self._task_receiver(str(dispatched["task_id"].get("taskset")))
+        else:
+            receiver = self._flat_receiver
+        state.receivers[receiver.name] += 1
+        if receiver.refusal is None and receiver.not_checked is not None:
+            state.not_checked_source_rows[receiver.not_checked] += 1
+            return None
+        self._last_rejection = _request_rejection(dispatched, receiver, task_source=self._task_source)
+        return self._last_rejection
+
+
 def _observe_task_metric(metrics: DatasetMetrics, name: str, value: DatasetMetricValue) -> None:
     if not name:
         raise ValueError("Dataset metric names must not be empty")
@@ -564,20 +702,29 @@ class DatasetValidatorState(BaseModel):
     number_of_source_rows: int = 0
     number_of_rejected_source_rows: int = 0
     rejected_source_row_reasons: list[str] = Field(default_factory=list)
+    # Source rows that could not be checked, by reason, and the servers that receive the rows.
+    # Both are keyed by configured server names and fixed reasons, so they stay as small as the run config.
+    not_checked_source_rows: Counter = Field(default_factory=Counter)
+    receivers: Counter = Field(default_factory=Counter)
     other_metrics: Dict[str, Any] = Field(default_factory=dict)
 
     MAX_RECORDED_REJECTIONS: ClassVar[int] = TaskDataValidationReport.MAX_RECORDED_ERRORS
 
     def rejection_summary(self, dataset_fpath: str) -> str:
         """Counts and the first recorded reasons, in the format of the task_data validation report."""
+        receivers = ", ".join(f"{name} ({count} rows)" for name, count in sorted(self.receivers.items()))
         parts = [
             f"{dataset_fpath}: {self.number_of_rejected_source_rows}/{self.number_of_source_rows} rows failed "
-            "request validation (servers reject these rows with HTTP 422)."
+            "request validation (the server that receives them refuses them)."
         ]
+        if receivers:
+            parts.append(f"  rows go to: {receivers}")
         parts.extend(f"  row {reason}" for reason in self.rejected_source_row_reasons)
         unrecorded = self.number_of_rejected_source_rows - len(self.rejected_source_row_reasons)
         if unrecorded > 0:
             parts.append(f"  ... and {unrecorded} more rows")
+        for reason, count in sorted(self.not_checked_source_rows.items()):
+            parts.append(f"  {count} rows not checked: {reason}")
         return "\n".join(parts)
 
 
@@ -606,6 +753,11 @@ class TrainDataProcessor(BaseModel):
     # agent's rows may live on the environment server that drives it (the Harbor layout), which declares
     # no datasets itself and would otherwise never be seen by the lookup.
     _all_server_instance_configs: List[ServerInstanceConfig] = PrivateAttr(default_factory=list)
+    # The run config, which says which server receives each row, as rollout collection routes it.
+    # None when the processor runs without one: flat rows then go to their agent's /run, and task rows are not checked.
+    _global_config_dict: Optional[DictConfig] = PrivateAttr(default=None)
+    # Task input contracts by environment server implementation, loaded once per collation.
+    _task_input_contracts: Dict[str, Union[TaskInputContract, None, str]] = PrivateAttr(default_factory=dict)
 
     def _schema_lookup_configs(
         self, server_instance_configs: List[ServerInstanceConfig]
@@ -667,6 +819,7 @@ class TrainDataProcessor(BaseModel):
                     for dataset, raw in zip(inner.datasets, declared, strict=True)
                 ]
         self._all_server_instance_configs = list(server_instance_configs)
+        self._global_config_dict = global_config_dict
 
         # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
         # the task schema and verifier) or by agents (self-contained environments that verify
@@ -859,14 +1012,28 @@ class TrainDataProcessor(BaseModel):
         sample_dict_str: str,
         *,
         require_responses: bool = True,
+        request_check: Optional["_RequestCheck"] = None,
         dataset_metrics_hook: DatasetMetricHook | None = None,
         num_repeats: int = 1,
     ) -> None:
-        metrics, rejection = _compute_sample_metrics(sample_dict_str, require_responses=require_responses)
+        """Add one row to ``state``: its metrics, or its rejection.
+
+        With a ``request_check``, the receiver's request model, applied to the dispatched row, decides whether the row is rejected.
+        Metrics then come from the source row.
+        A row whose source shape is not a run request, such as a taskset's flat row or a prompt template's input row, counts as an example.
+        Without a ``request_check``, a flat row must be a run request when ``require_responses`` is set.
+        """
+        metrics, rejection = _compute_sample_metrics(
+            sample_dict_str, require_responses=require_responses and request_check is None
+        )
         # Repeated lines are identical copies of one source row: count and describe each source row once.
         is_source_row = sample_idx % num_repeats == 0
         if is_source_row:
             state.number_of_source_rows += 1
+        if rejection is None and request_check is not None:
+            rejection = request_check.check(
+                state, json.loads(sample_dict_str), sample_idx // num_repeats, is_source_row
+            )
         if rejection is not None:
             state.offending_example_idxs.append(sample_idx)
             if is_source_row:
@@ -915,6 +1082,7 @@ class TrainDataProcessor(BaseModel):
         self,
         dataset_config: DatasetConfig,
         dataset_metrics_hook: DatasetMetricHook | None = None,
+        request_check: Optional["_RequestCheck"] = None,
     ) -> DatasetValidatorState:
         state = DatasetValidatorState()
 
@@ -924,10 +1092,11 @@ class TrainDataProcessor(BaseModel):
                 state,
                 sample_idx,
                 sample_dict_str,
-                # Benchmark prompt templates create the input during collation;
-                # count the original task rows before validating rendered inputs.
+                # Without a request check, benchmark prompt templates create the input during collation.
+                # Count the original task rows before validating rendered inputs.
                 require_responses=dataset_config.taskset is None
                 and not (dataset_config.type == "benchmark" and dataset_config.prompt_config),
+                request_check=request_check,
                 dataset_metrics_hook=dataset_metrics_hook,
                 num_repeats=dataset_config.num_repeats,
             )
@@ -1044,9 +1213,16 @@ class TrainDataProcessor(BaseModel):
     ) -> Dict[str, DatasetMetrics]:
         """Validate every dataset row and write each dataset's metrics sidecar.
 
-        Rows that fail request validation (not JSON, or not a valid run request) are reported per dataset with
-        ``task_data_validation``'s mode: printed in ``warn`` mode, raised together after every dataset is read in
-        ``error`` mode, and not reported in ``off`` mode. They are left out of the metrics either way.
+        Each row is checked against the request model of the server that receives it.
+        The row is checked in the shape that server validates: prompt template applied, and a taskset's flat row materialized.
+        The receiver is found the way rollout collection routes the row.
+        A task row goes to the environment server its ``environment_server_routes`` entry names.
+        A flat row goes where ``environment_routing_mode`` sends it.
+        A typed environment server validates with its task input module.
+        An agent, or a relay, validates a flat row as a ``BaseRunRequest``.
+        Rows that fail, or are not JSON, are reported per dataset with ``task_data_validation``'s mode.
+        ``warn`` mode prints them, ``error`` mode raises once every dataset is read, and ``off`` mode reports nothing.
+        They are left out of the metrics either way, and the metrics of the other rows come from the source rows.
         """
         conflicting_fpaths: List[str] = []
         rejection_summaries: list[str] = []
@@ -1056,8 +1232,14 @@ class TrainDataProcessor(BaseModel):
                 dataset_metrics_hook = self._dataset_metrics_hook_for(
                     c, self._schema_lookup_configs(server_instance_configs)
                 )
-                state = self._validate_samples_and_aggregate_metrics_single_dataset(d, dataset_metrics_hook)
+                request_check = self._request_check_for(c, d, task_data_validation=task_data_validation)
+                state = self._validate_samples_and_aggregate_metrics_single_dataset(
+                    d, dataset_metrics_hook, request_check
+                )
 
+                if state.not_checked_source_rows and not state.number_of_rejected_source_rows:
+                    if task_data_validation != "off":
+                        print(f"[request validation]\n{state.rejection_summary(str(d.jsonl_fpath))}")
                 if state.number_of_rejected_source_rows and task_data_validation != "off":
                     summary = state.rejection_summary(str(d.jsonl_fpath))
                     if task_data_validation == "error":
@@ -1170,7 +1352,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
 
     @classmethod
     def _owning_environment_server(
-        cls, c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+        cls,
+        c: ServerInstanceConfig,
+        server_instance_configs: List[ServerInstanceConfig],
+        routed_instance: Optional[str] = None,
     ) -> Optional[ServerInstanceConfig]:
         """The environment-server instance that drives a self-contained agent's episodes.
 
@@ -1181,15 +1366,22 @@ This could be due to a change in how metrics are calculated, leading to outdated
         one agent (one per taskset, each routing its own rows to one harness instance); they share
         the implementation the first one stands for here, and :meth:`_taskset_folder` tells them
         apart by the dataset's taskset.
+        ``routed_instance``, the instance the dataset's taskset routes to, wins when it names the agent.
+        That is the server that receives the rows.
         """
-        return next(iter(cls._environment_servers_naming(c, server_instance_configs)), None)
+        naming = cls._environment_servers_naming(c, server_instance_configs)
+        routed = next((other for other in naming if other.name == routed_instance), None)
+        return routed or next(iter(naming), None)
 
     @classmethod
     def _owning_environment_server_impl(
-        cls, c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+        cls,
+        c: ServerInstanceConfig,
+        server_instance_configs: List[ServerInstanceConfig],
+        routed_instance: Optional[str] = None,
     ) -> Optional[str]:
         """The implementation key of :meth:`_owning_environment_server`, or None."""
-        owner = cls._owning_environment_server(c, server_instance_configs)
+        owner = cls._owning_environment_server(c, server_instance_configs, routed_instance)
         return next(iter(owner.environment_servers)) if owner is not None else None
 
     @classmethod
@@ -1216,9 +1408,130 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 return Path(folder)
         return None
 
+    def _request_check_for(
+        self, c: ServerInstanceConfig, d: DatasetConfig, *, task_data_validation: str
+    ) -> _RequestCheck:
+        """The request check for declaring instance ``c``'s dataset ``d``, routed as rollout collection routes."""
+        prompt_config = load_prompt_config(d.prompt_config) if d.type == "benchmark" and d.prompt_config else None
+        return _RequestCheck(
+            dataset=d,
+            prompt_config=prompt_config,
+            flat_receiver=self._flat_row_receiver(c, d, task_data_validation=task_data_validation),
+            task_receiver=lambda taskset: self._task_row_receiver(taskset, task_data_validation=task_data_validation),
+            task_source=c.name,
+        )
+
+    def _routed_instance(self, d: DatasetConfig) -> Optional[str]:
+        """The environment server instance ``d``'s taskset routes to (a Harbor entry is named after its taskset)."""
+        routes = self._global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME) if self._global_config_dict else None
+        name = routes.get(d.taskset or d.name) if isinstance(routes, Mapping) else None
+        return name if isinstance(name, str) else None
+
+    def _task_row_receiver(self, taskset: str, *, task_data_validation: str) -> _Receiver:
+        """The environment server a task row of ``taskset`` goes to: its ``environment_server_routes`` entry."""
+        if self._global_config_dict is None:
+            return _Receiver(name="unknown", not_checked="no run config to route task rows by")
+        routes = self._global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+        instance_name = routes.get(taskset) if isinstance(routes, Mapping) else None
+        if not isinstance(instance_name, str) or not instance_name:
+            return _Receiver(
+                name=f"taskset {taskset}",
+                refusal=f"no environment_server_routes entry for taskset {taskset!r}, so rollout collection refuses it",
+            )
+        return self._environment_server_receiver(instance_name, task_data_validation=task_data_validation)
+
+    def _flat_row_receiver(self, c: ServerInstanceConfig, d: DatasetConfig, *, task_data_validation: str) -> _Receiver:
+        """The server a flat row of ``c``'s dataset ``d`` goes to, following ``environment_routing_mode``.
+
+        ``agent`` (the default): the dataset's agent, or the one environment server that fronts it.
+        ``legacy``: ``environment_server_name``.
+        ``taskset``: rollout collection refuses flat rows.
+        """
+        config = self._global_config_dict
+        if config is None:
+            return _Receiver(name=f"{c.name} /run")
+        mode = config.get(ENVIRONMENT_ROUTING_MODE_KEY_NAME) or "agent"
+        if mode == "taskset":
+            return _Receiver(name="no server", refusal="environment_routing_mode=taskset refuses flat rows")
+        if mode == "legacy":
+            name = config.get(ENVIRONMENT_SERVER_NAME_KEY_NAME)
+            if not isinstance(name, str) or not name:
+                return _Receiver(
+                    name="no server", refusal="environment_routing_mode=legacy needs environment_server_name"
+                )
+            return self._environment_server_receiver(name, task_data_validation=task_data_validation)
+        try:
+            agent = resolve_dataset_agent(
+                config, c.name, pin=d.agent if isinstance(d, BenchmarkDatasetConfig) else None
+            )
+        except ConfigError as e:
+            return _Receiver(name=f"{c.name} (no agent)", not_checked=f"no agent resolves for {c.name}: {e}")
+        if agent is None:
+            return _Receiver(name=f"{c.name} (no agent)", not_checked=f"no single agent runs the rows of {c.name}")
+        fronting = [
+            str(name)
+            for name, block in config.items()
+            if isinstance(block, DictConfig)
+            and any(
+                isinstance(server, DictConfig) and agent in environment_server_agent_names(server)
+                for server in (block.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME) or {}).values()
+            )
+        ]
+        if not fronting:
+            return _Receiver(name=f"agent {agent} /run")
+        if len(fronting) > 1:
+            return _Receiver(
+                name=f"agent {agent}",
+                refusal=(
+                    f"agent {agent!r} is fronted by several environment servers {sorted(fronting)}, so rollout "
+                    "collection cannot route its flat rows"
+                ),
+            )
+        return self._environment_server_receiver(fronting[0], task_data_validation=task_data_validation)
+
+    def _environment_server_receiver(self, instance_name: str, *, task_data_validation: str) -> _Receiver:
+        """Environment server instance ``instance_name`` as a receiver, with its task input contract when typed."""
+        block = self._global_config_dict.get(instance_name) if self._global_config_dict is not None else None
+        servers = block.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME) if isinstance(block, DictConfig) else None
+        if not isinstance(servers, DictConfig) or len(servers) != 1:
+            return _Receiver(
+                name=instance_name,
+                refusal=f"{instance_name!r} is routed to but is not an environment server instance",
+            )
+        implementation = str(next(iter(servers)))
+        name = f"{instance_name} ({implementation})"
+        if implementation not in self._task_input_contracts:
+            self._task_input_contracts[implementation] = self._load_task_input_contract(
+                implementation, task_data_validation=task_data_validation
+            )
+        contract = self._task_input_contracts[implementation]
+        if isinstance(contract, str):
+            return _Receiver(name=name, not_checked=contract)
+        return _Receiver(name=name, contract=contract)
+
+    @staticmethod
+    def _load_task_input_contract(
+        implementation: str, *, task_data_validation: str
+    ) -> Union[TaskInputContract, None, str]:
+        """The implementation's task input contract, None for a relay, or why its rows cannot be checked."""
+        server_dir = find_server_dir(implementation, base_folder="environment_servers")
+        if server_dir is None:
+            return f"no environment_servers/{implementation} folder"
+        try:
+            return load_task_input_module(server_dir)
+        except TaskInputModuleError as e:
+            if task_data_validation == "error":
+                raise
+            if task_data_validation != "off":
+                warnings.warn(f"Not checking rows sent to {implementation}: {e}", stacklevel=2)
+            return f"the task input module of {implementation} does not load"
+
     @classmethod
     def _schema_home_for(
-        cls, c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+        cls,
+        c: ServerInstanceConfig,
+        server_instance_configs: List[ServerInstanceConfig],
+        routed_instance: Optional[str] = None,
     ) -> Optional[tuple[str, str]]:
         """``(implementation, base_folder)`` whose ``task_data.py`` validates ``c``'s datasets, or None.
 
@@ -1236,7 +1549,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
             return None
         if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
             return None
-        impl_key = cls._owning_environment_server_impl(c, server_instance_configs)
+        impl_key = cls._owning_environment_server_impl(c, server_instance_configs, routed_instance)
         if impl_key is not None:
             env_dir = find_server_dir(impl_key, base_folder="environment_servers")
             if env_dir is not None and (env_dir / "task_data.py").is_file():
@@ -1250,6 +1563,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
         d: Union[DatasetConfig, BenchmarkDatasetConfig],
         server_instance_configs: List[ServerInstanceConfig],
         task_data_validation: str = "warn",
+        routed_instance: Optional[str] = None,
     ) -> Optional[TaskDataValidator]:
         """The validator for ``c``'s dataset ``d``, or None when no schema applies.
 
@@ -1258,8 +1572,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
         ``warn`` mode too, and the rows are then checked for the server's reserved keys alone, as an untyped
         dataset's are (the seed refuses every episode of that taskset with the same error); in ``error`` mode it
         fails the collation, as a row the schema rejects would.
+        ``routed_instance`` is the environment server the dataset's taskset routes to.
+        It owns the schema when it names the agent.
         """
-        home = cls._schema_home_for(c, server_instance_configs)
+        home = cls._schema_home_for(c, server_instance_configs, routed_instance)
         if home is None:
             return None
         impl_key, base_folder = home
@@ -1369,6 +1685,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         d,
                         self._schema_lookup_configs(server_instance_configs),
                         task_data_validation=task_data_validation,
+                        routed_instance=self._routed_instance(d),
                     )
                 with open(prepare_path, "w") as target:
                     for row_index, line in enumerate(self._iter_dataset_lines(d)):
@@ -1402,22 +1719,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                                     f"{row['task_id'].get('taskset')!r} differs from the dataset taskset {d.taskset!r}"
                                 )
                         elif d.taskset is not None:
-                            # Keep collector identity outside task_data so shards and retries
-                            # retain their capture keys after materialization, and keep a row's
-                            # request to skip token capture.
-                            identity = {
-                                key: row[key]
-                                for key in (
-                                    TASK_INDEX_KEY_NAME,
-                                    ROLLOUT_INDEX_KEY_NAME,
-                                    ROLLOUT_ID_KEY_NAME,
-                                    ATTEMPT_INDEX_KEY_NAME,
-                                    SKIP_TOKEN_CAPTURE_KEY_NAME,
-                                )
-                                if key in row
-                            }
-                            row = materialize_task(row, taskset=d.taskset, task_index=source_task_index)
-                            row.update(identity)
+                            row = _as_task_row(row, taskset=d.taskset, task_index=source_task_index)
                         target.write(f"{json.dumps(row)}\n")
 
                 if validator is not None and (not validator.report.clean or validator.report.unknown_keys):

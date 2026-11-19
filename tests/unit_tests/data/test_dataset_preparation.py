@@ -1194,8 +1194,9 @@ class TestRequestValidationReport:
 
         message = str(error.value)
         assert f"{data_fpath}: 2/3 rows failed request validation" in message
-        assert "  row 0: responses_create_params.tools.0." in message
-        assert "  row 2: responses_create_params.tools.0." in message
+        assert "  rows go to: test_agent /run (3 rows)" in message
+        assert "  row 0: test_agent /run: responses_create_params.tools.0." in message
+        assert "  row 2: test_agent /run: responses_create_params.tools.0." in message
         assert "  row 1:" not in message
 
     def test_error_mode_lists_every_failing_file_and_writes_no_sidecar(self, tmp_path: Path) -> None:

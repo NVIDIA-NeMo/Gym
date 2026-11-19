@@ -8,20 +8,10 @@ import re
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from environment_servers.swe_together.task_input import SOURCE_REVISION, TaskData
 
 
-SOURCE_REVISION = "891d19eb4b3a64a47c3d49bbd066a311e0133254"  # pragma: allowlist secret
 MANIFEST = Path(__file__).with_name("task-manifest.json")
-
-
-class TaskData(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    task_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-    image: str
-    image_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
-    workdir: str = Field(default="/workspace", pattern=r"^/")
-    source_revision: str = SOURCE_REVISION
 
 
 def load_task(directory: Path, task: TaskData) -> dict:

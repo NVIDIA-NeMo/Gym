@@ -157,13 +157,22 @@ def test_prepared_materialized_task_rows_are_valid_rollout_inputs(tmp_path: Path
     assert report.datasets[0].rows == 2
 
 
+_SWE_TOGETHER_TASK_DATA = {
+    "task_id": "task-1",
+    "image": "example.com/task-1:tag",
+    "image_digest": "sha256:" + "0" * 64,
+}
+
+
 @pytest.mark.parametrize("prompt_source", ["prepared", "agent"])
-@pytest.mark.parametrize("environment_server", ["swe_together", None])
-def test_tasks_of_another_environment_server_are_checked_as_task_envelopes(
-    tmp_path: Path, prompt_source: str, environment_server: str | None
+@pytest.mark.parametrize(
+    ("environment_server", "task_data"), [("swe_together", _SWE_TOGETHER_TASK_DATA), (None, {"instance_id": "1"})]
+)
+def test_tasks_of_a_server_that_builds_its_own_request_need_no_responses_create_params(
+    tmp_path: Path, prompt_source: str, environment_server: str | None, task_data: dict
 ) -> None:
     # As swe_together's prepare writes them: the server builds the request, so the task input holds task_data only.
-    row = {"task_id": {"taskset": "demo", "task_id": "1"}, "task_input": {"task_data": {"instance_id": "1"}}}
+    row = {"task_id": {"taskset": "demo", "task_id": "1"}, "task_input": {"task_data": task_data}}
     path = _benchmark_rows(tmp_path, [row], prompt_source=prompt_source, environment_server=environment_server)
 
     report = validate_environment(path)
@@ -171,7 +180,22 @@ def test_tasks_of_another_environment_server_are_checked_as_task_envelopes(
     assert report.datasets[0].rows == 1
 
 
-@pytest.mark.parametrize("environment_server", ["single_agent_turn", "swe_together", None])
+def test_tasks_are_checked_against_the_task_input_of_the_server_their_taskset_routes_to(tmp_path: Path) -> None:
+    row = {"task_id": {"taskset": "demo", "task_id": "1"}, "task_input": {"task_data": {"instance_id": "1"}}}
+    path = _benchmark_rows(tmp_path, [row], prompt_source="agent", environment_server="swe_together")
+
+    with pytest.raises(EnvironmentValidationError, match=r"row 1 is not a valid task at task_input\.task_data\."):
+        validate_environment(path)
+
+
+def test_a_task_row_routed_to_a_relay_is_refused(tmp_path: Path) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row()], prompt_source="agent", environment_server="legacy_agent")
+
+    with pytest.raises(EnvironmentValidationError, match="relays to an agent's /run and receives only flat rows"):
+        validate_environment(path)
+
+
+@pytest.mark.parametrize("environment_server", ["single_agent_turn", "harbor", None])
 @pytest.mark.parametrize(
     ("row", "location"),
     [
