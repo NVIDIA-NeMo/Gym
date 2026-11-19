@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from threading import Lock
@@ -92,7 +93,7 @@ from nemo_gym.models.token_capture import (
     token_capture_config,
 )
 from nemo_gym.models.token_capture.records import ModelRef
-from nemo_gym.telemetry.model_call import model_call_spans_enabled, record_model_call_spans
+from nemo_gym.telemetry import llm_execution_span, model_call_spans_enabled, record_model_call_spans
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
@@ -702,7 +703,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     )
     # Optional ``/path/to/file.py:callable``. With the ``model_call`` span group on, it turns each engine response
     # into attributes and spans for the engine's side of the call; see ``nemo_gym.telemetry.model_call``.
-    # Unset, there is no ``gym.model.llm_execute`` span.
+    # Unset, only Gym boundary and execution spans are recorded.
     llm_span_breakdown_hook: Optional[str] = None
 
     uses_reasoning_parser: bool
@@ -2074,26 +2075,27 @@ class VLLMModel(SimpleResponsesAPIModel):
             transport_options["_headers"] = {**transport_options.get("_headers", {}), **extra_headers}
         sent_us = time_ns() // 1_000 if spans_on else 0
         try:
-            try:
-                chat_completion_dict = await self._engine_chat_completion(
-                    client, transport_options, body_dict, summary=summary_request
-                )
-            except ClientResponseError as refusal:
-                if not await self._refit_output_budget(
-                    execution,
-                    client,
-                    refusal,
-                    body_dict,
-                    _CHAT_BUDGET_KEYS,
-                    # A count before generation, so the shared field selection applies even in a subclass that
-                    # refuses to retokenize a prompt after generation.
-                    lambda: VLLMModel._get_tokenize_chat_body(body_dict),
-                ):
-                    raise
-                chat_completion_dict = await self._engine_chat_completion(
-                    client, transport_options, body_dict, summary=summary_request
-                )
-            received_us = time_ns() // 1_000 if spans_on else 0
+            with llm_execution_span(sent_us) if spans_on else nullcontext() as execute_span:
+                try:
+                    chat_completion_dict = await self._engine_chat_completion(
+                        client, transport_options, body_dict, summary=summary_request
+                    )
+                except ClientResponseError as refusal:
+                    if not await self._refit_output_budget(
+                        execution,
+                        client,
+                        refusal,
+                        body_dict,
+                        _CHAT_BUDGET_KEYS,
+                        # A count before generation, so the shared field selection applies even in a subclass that
+                        # refuses to retokenize a prompt after generation.
+                        lambda: VLLMModel._get_tokenize_chat_body(body_dict),
+                    ):
+                        raise
+                    chat_completion_dict = await self._engine_chat_completion(
+                        client, transport_options, body_dict, summary=summary_request
+                    )
+                received_us = time_ns() // 1_000 if spans_on else 0
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             if transport_io_enabled:
@@ -2301,6 +2303,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 started_us=started_us,
                 sent_us=sent_us,
                 received_us=received_us,
+                execute_span=execute_span,
                 finished_us=time_ns() // 1_000,
                 replica_idx=self._replica_index(client) if self.config.llm_span_breakdown_hook else None,
                 tokenize_start_us=tokenize_start_us,
@@ -2512,20 +2515,21 @@ class VLLMModel(SimpleResponsesAPIModel):
         execution = start_model_execution(request, upstream_attempted=True)
         sent_us = time_ns() // 1_000 if spans_on else 0
         try:
-            try:
-                completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
-            except ClientResponseError as refusal:
-                if not await self._refit_output_budget(
-                    execution,
-                    client,
-                    refusal,
-                    completion_body,
-                    _COMPLETIONS_BUDGET_KEYS,
-                    lambda: self._completion_tokenize_body(prompt, completion_body),
-                ):
-                    raise
-                completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
-            received_us = time_ns() // 1_000 if spans_on else 0
+            with llm_execution_span(sent_us) if spans_on else nullcontext() as execute_span:
+                try:
+                    completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
+                except ClientResponseError as refusal:
+                    if not await self._refit_output_budget(
+                        execution,
+                        client,
+                        refusal,
+                        completion_body,
+                        _COMPLETIONS_BUDGET_KEYS,
+                        lambda: self._completion_tokenize_body(prompt, completion_body),
+                    ):
+                        raise
+                    completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
+                received_us = time_ns() // 1_000 if spans_on else 0
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             result_content_str = e.response_content.decode(errors="replace")
@@ -2571,6 +2575,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 started_us=started_us,
                 sent_us=sent_us,
                 received_us=received_us,
+                execute_span=execute_span,
                 finished_us=time_ns() // 1_000,
                 replica_idx=self._replica_index(client) if self.config.llm_span_breakdown_hook else None,
                 tokenize_start_us=tokenize_start_us,

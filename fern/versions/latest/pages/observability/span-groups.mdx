@@ -64,6 +64,7 @@ With the `model_call` group on, the `vllm_model` server records its own side of 
 
 | Span | Covers |
 | --- | --- |
+| `gym.model.llm_execute` | The logical engine call, including transport and any retries, whether or not a hook is configured. |
 | `gym.model.prepare` | From when the server began handling the request until it was sent to the engine. |
 | `gym.model.postprocess` | From when the engine's response came back until the server returns. |
 | `gym.model.tokenize` | A fallback `/tokenize` call to the engine, when one was needed. `postprocess` is then split into `postprocess`, `tokenize` and `finalize`. |
@@ -73,11 +74,14 @@ and `nemo.gym.rollout.id` when the request reached the model server under the ro
 neither a `traceparent` nor that prefix starts its own trace for each call, so filter on these attributes to group the
 calls of one rollout.
 
-Gym does not know what happened between the request leaving and the response coming back. An optional hook describes
-it: it decides which attributes go on the current `gym.model.*` span and which child spans exist under
-`gym.model.llm_execute`, a span Gym opens from the moment the request was sent until the response came back. Without a
-hook there is no `llm_execute` span. Set `llm_span_breakdown_hook` of the `vllm_model` server to
-`/path/to/file.py:callable`:
+Gym creates and activates `gym.model.llm_execute` before sending the engine request, even without a hook.
+HTTP client spans are its children. Backend-native spans can join that HTTP branch when trace context is
+propagated by every intermediary.
+
+An optional hook interprets the engine response, sets attributes on the outer `gym.model.*` span, and emits
+breakdown spans directly under `llm_execute`, alongside the HTTP client spans. The hook does not depend on
+HTTP instrumentation. Use native tracing and the hook independently or together, avoiding duplicate phases.
+Set `llm_span_breakdown_hook` of the `vllm_model` server to `/path/to/file.py:callable`:
 
 ```yaml
 policy_model:
@@ -97,14 +101,16 @@ hook(engine_response, *, span, emit_span, sent_us, received_us, replica_idx)
 - `emit_span(name, start_us, end_us, attributes=None)` records a child span of `llm_execute` named
   `gym.model.<name>` with explicit epoch-microsecond times, so it appears in the trace where the time was spent.
 - `sent_us` and `received_us` are when the model server sent the request to the engine and got the response back.
-  They are the bounds of `llm_execute`. `replica_idx` is the generation replica the session was routed to
+  They describe the request boundaries within `llm_execute`. `replica_idx` is the generation replica the session was routed to
   (`None` if unknown).
 
 Gym adds nothing to what the hook records: attribute names, prefixes and span attributes are the hook's. A hook that
 cannot be loaded, or that raises, is logged once and skipped; it never fails a request.
 
-`llm_span_breakdown_hook` is unset by default, and then only the spans in the table are recorded. While the `model_call`
-group is off, the model server takes no timestamps and does no work.
+`llm_span_breakdown_hook` is unset by default; Gym still records its boundary spans and `llm_execute`.
+The execution span ends when the engine call returns, fails, or is cancelled, before response postprocessing.
+Hook spans are added after the response using the ended execution span as their parent.
+While the `model_call` group is off, no execution span is created, no timestamps are taken, and no hook is loaded or called.
 
 ### Groups You Should Not Disable
 

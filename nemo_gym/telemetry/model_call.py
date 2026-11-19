@@ -26,8 +26,9 @@ A model server sees one request go out to an engine and one response come back. 
 Gym does not know what happened between the request leaving and the response coming back. An
 optional **hook** describes it: it sets attributes on the current span and draws child spans under
 ``gym.model.llm_execute``, which Gym opens from the moment the request was sent until the response
-came back, with the names, times and attributes the hook chooses. Without a hook, there is no
-``llm_execute`` span.
+came back, with the names, times and attributes the hook chooses. The execution span is active
+during the request, independently of the hook: HTTP client spans and hook breakdown spans are
+siblings beneath it. Native backend spans can join through propagated HTTP trace context.
 
 A hook is configured as ``/path/to/file.py:callable`` and loaded from that file, so it can live
 in the project that owns the engine without Gym importing it. It runs in the model server's own
@@ -50,10 +51,16 @@ prompts, responses or token ids.
 
 import importlib.util
 import logging
-from typing import Any, Callable, Mapping, Optional
+from contextlib import contextmanager
+from time import time_ns
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Optional
 
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
 
 
 logger = logging.getLogger(__name__)
@@ -111,6 +118,28 @@ def _tracer() -> Any:
     return trace.get_tracer("nemo_gym.model_call")
 
 
+@contextmanager
+def llm_execution_span(sent_us: int) -> Iterator[Optional["Span"]]:
+    """Activate the logical engine-call span before transport, ending it on success, error, or cancellation.
+
+    Call only when model-call spans are enabled. The returned span may be passed to
+    ``record_model_call_spans`` after the response, so hook spans share its identity without
+    keeping the execution span active during response processing.
+    """
+    from opentelemetry import trace
+
+    if not trace.get_current_span().is_recording():
+        yield None
+        return
+
+    execute = _tracer().start_span("gym.model.llm_execute", start_time=sent_us * 1_000)
+    try:
+        with trace.use_span(execute, end_on_exit=False):
+            yield execute
+    finally:
+        execute.end(end_time=time_ns())
+
+
 def record_model_call_spans(
     engine_response: Mapping[str, Any],
     *,
@@ -124,8 +153,9 @@ def record_model_call_spans(
     hook: Optional[str] = None,
     rollout_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    execute_span: Optional["Span"] = None,
 ) -> None:
-    """Record the spans of one engine call: ``prepare`` and ``postprocess``, and ``llm_execute`` if there is a *hook*.
+    """Record Gym boundaries and optional hook children under the existing execution span.
 
     Args:
         engine_response: The engine's decoded response, before it is validated into a Gym type.
@@ -139,6 +169,7 @@ def record_model_call_spans(
         hook: A ``/path/to/file.py:callable``; see the module docstring.
         rollout_id: The rollout this call belongs to, when the request carried one.
         session_id: The Gym session of the request, one per rollout.
+        execute_span: The span created around the engine request, already ended before postprocessing.
 
     The rollout and session ids go on the current span so the calls of one rollout can be grouped even when the
     request carried no trace context.
@@ -181,16 +212,13 @@ def record_model_call_spans(
         emit_span("postprocess", received_us, finished_us)
 
     run = _get_hook(hook) if hook else None
-    if run is None:
+    if run is None or execute_span is None:
         return
-    execute = tracer.start_span(
-        "gym.model.llm_execute", context=trace.set_span_in_context(parent), start_time=sent_us * 1_000
-    )
     try:
         run(
             engine_response,
             span=parent,
-            emit_span=emit_span_under(execute),
+            emit_span=emit_span_under(execute_span),
             sent_us=sent_us,
             received_us=received_us,
             replica_idx=replica_idx,
@@ -198,5 +226,3 @@ def record_model_call_spans(
     except Exception:
         logger.warning("llm_span_breakdown_hook %r failed; skipping it from now on", hook, exc_info=True)
         _hooks[hook] = None
-    finally:
-        execute.end(end_time=received_us * 1_000)

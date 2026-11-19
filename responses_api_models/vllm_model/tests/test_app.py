@@ -2161,6 +2161,10 @@ class TestApp:
         client.create_chat_completion = AsyncMock(return_value=self._served_completion("served"))
         server._clients = [client]
         touched = []
+        monkeypatch.setattr(
+            "responses_api_models.vllm_model.app.llm_execution_span",
+            lambda *a, **k: fail("disabled tracing must not create an execution scope"),
+        )
         monkeypatch.setattr("responses_api_models.vllm_model.app.model_call_spans_enabled", lambda: False)
         monkeypatch.setattr(
             "responses_api_models.vllm_model.app.record_model_call_spans", lambda *a, **k: touched.append("record")

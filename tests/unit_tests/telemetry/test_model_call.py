@@ -14,13 +14,20 @@
 # limitations under the License.
 """The model-call hook host: loading, calling with the right arguments, and isolating failures."""
 
+import asyncio
 import logging
 import textwrap
+from unittest.mock import patch
 
 import pytest
 
 from nemo_gym.telemetry import model_call
-from nemo_gym.telemetry.model_call import load_hook, model_call_spans_enabled, record_model_call_spans
+from nemo_gym.telemetry.model_call import (
+    llm_execution_span,
+    load_hook,
+    model_call_spans_enabled,
+    record_model_call_spans,
+)
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from tests.unit_tests.telemetry.conftest import requires_lens
 
@@ -90,7 +97,10 @@ def _record(tracer, response, **kwargs):
     kwargs.setdefault("received_us", T0 + 160)
     kwargs.setdefault("finished_us", T0 + 170)
     with tracer.start_as_current_span("gym.model.responses"):
-        record_model_call_spans(response, **kwargs)
+        with patch.object(model_call, "time_ns", return_value=kwargs["received_us"] * 1_000):
+            with llm_execution_span(kwargs["sent_us"]) as execute:
+                pass
+        record_model_call_spans(response, execute_span=execute, **kwargs)
 
 
 def _by_name(get_finished_spans):
@@ -102,7 +112,12 @@ def test_without_a_hook_only_the_model_servers_own_spans_are_recorded(spans):
     _record(tracer, _response(), replica_idx=3)
 
     by_name = _by_name(finished)
-    assert set(by_name) == {"gym.model.responses", "gym.model.prepare", "gym.model.postprocess"}
+    assert set(by_name) == {
+        "gym.model.responses",
+        "gym.model.prepare",
+        "gym.model.llm_execute",
+        "gym.model.postprocess",
+    }
     assert dict(by_name["gym.model.responses"].attributes) == {}
     prepare, postprocess = by_name["gym.model.prepare"], by_name["gym.model.postprocess"]
     assert (prepare.start_time, prepare.end_time) == ((T0 - 5) * 1_000, T0 * 1_000)
@@ -137,6 +152,7 @@ def test_a_tokenize_call_splits_the_post_processing(spans):
         "gym.model.postprocess",
         "gym.model.tokenize",
         "gym.model.finalize",
+        "gym.model.llm_execute",
     }
     times = {
         name: (by_name[f"gym.model.{name}"].start_time // 1_000, by_name[f"gym.model.{name}"].end_time // 1_000)
@@ -231,3 +247,72 @@ def test_model_call_spans_enabled_follows_the_model_call_group(spans):
 
     set_enabled_span_groups(GymSpanGroup.resolve("server"))
     assert not model_call_spans_enabled()
+
+
+def test_http_context_and_hook_children_share_the_execution_parent(spans, hook_file):
+    from opentelemetry import trace
+    from opentelemetry.propagate import extract, inject
+
+    tracer, finished = spans
+    with tracer.start_as_current_span("gym.model.responses") as parent:
+        with llm_execution_span(T0) as execute:
+            assert trace.get_current_span() is execute
+            with tracer.start_as_current_span("HTTP POST", kind=trace.SpanKind.CLIENT) as http:
+                headers = {}
+                inject(headers)
+                assert headers["traceparent"].split("-")[2] == format(http.get_span_context().span_id, "016x")
+                downstream = tracer.start_span("backend.server", context=extract(headers), kind=trace.SpanKind.SERVER)
+                downstream.end()
+            assert trace.get_current_span() is execute
+        assert trace.get_current_span() is parent
+        assert not execute.is_recording()
+        record_model_call_spans(
+            _response(),
+            started_us=T0 - 5,
+            sent_us=T0,
+            received_us=T0 + 160,
+            finished_us=T0 + 170,
+            hook=f"{hook_file}:hook",
+            replica_idx=3,
+            execute_span=execute,
+        )
+    by_name = _by_name(finished)
+    execute = by_name["gym.model.llm_execute"]
+    assert by_name["backend.server"].parent.span_id == by_name["HTTP POST"].context.span_id
+    assert by_name["backend.server"].context.trace_id == execute.context.trace_id
+    assert by_name["HTTP POST"].parent.span_id == execute.context.span_id
+    assert by_name["gym.model.decode"].parent.span_id == execute.context.span_id
+    assert by_name["gym.model.postprocess"].parent.span_id == parent.get_span_context().span_id
+    assert sum(span.name == "gym.model.llm_execute" for span in finished()) == 1
+
+
+@pytest.mark.parametrize("error", [RuntimeError("engine failed"), asyncio.CancelledError()])
+def test_execution_ends_and_restores_context_on_failure_or_cancellation(spans, error):
+    from opentelemetry import trace
+
+    tracer, finished = spans
+    with tracer.start_as_current_span("gym.model.responses") as parent:
+        with pytest.raises(type(error)):
+            with llm_execution_span(T0) as execute:
+                raise error
+        assert trace.get_current_span() is parent
+        assert not execute.is_recording()
+    execute = _by_name(finished)["gym.model.llm_execute"]
+    assert execute.end_time >= execute.start_time
+    if isinstance(error, RuntimeError):
+        assert execute.status.status_code == trace.StatusCode.ERROR
+
+
+def test_execution_without_a_recording_parent_does_not_create_a_span(spans):
+    _, finished = spans
+    with llm_execution_span(T0) as execute:
+        assert execute is None
+    assert not finished()
+
+
+def test_model_call_helpers_are_available_to_server_integrations():
+    import nemo_gym.telemetry as telemetry
+
+    assert telemetry.llm_execution_span is model_call.llm_execution_span
+    assert telemetry.model_call_spans_enabled is model_call.model_call_spans_enabled
+    assert telemetry.record_model_call_spans is model_call.record_model_call_spans
