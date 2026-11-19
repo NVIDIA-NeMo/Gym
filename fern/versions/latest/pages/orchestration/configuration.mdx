@@ -8,6 +8,8 @@ A submit config is a YAML file with the top-level sections `services`, `compute`
 
 Fields without a default are required.
 
+For several independently pinned drivers in one allocation, use the separate [shared allocation config](/orchestration/how-to/shared-allocation) with `kind: shared_allocation` and ordinary submit configs under `members`.
+
 ## env values
 
 `env` appears on every service and on the driver. Every value must start with one of three prefixes; a missing or misspelled prefix is an error, not a guess.

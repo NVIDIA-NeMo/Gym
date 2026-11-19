@@ -1,0 +1,111 @@
+---
+title: "Shared Allocation"
+description: "Run independently pinned benchmark drivers against shared model services in one Slurm allocation."
+position: 7
+---
+
+A **shared allocation** starts model services once and runs several benchmark drivers concurrently against them. This can improve utilization when short generations leave a model underused by one benchmark. Each member keeps its own Gym pin, driver image, preparation, run settings, and exports.
+
+<Warning>
+This is experimental. Grouped recovery and resubmission are unsupported: a preemption or time limit ends the group. Keep ordinary submission for runs that need automatic continuation. Validate the configuration with a small Slurm run before using it for a full suite.
+</Warning>
+
+## Configuration
+
+Use `kind: shared_allocation` with `members`, `job`, and `admission`. Each member is an ordinary [submit config](/orchestration/configuration) containing exactly one benchmark, whose name matches the member key. YAML anchors can share the infrastructure fields. Replace the image, account, path, and commit placeholders below with your values; the admission commit must contain the shared-allocation implementation.
+
+```yaml
+kind: shared_allocation
+job:
+  output_path: /shared/evaluations
+admission:
+  container: your-gym-image
+  gym_install:
+    ref: YOUR_CONTROLLER_COMMIT
+  max_inflight: 256
+  max_queued: 2048
+members:
+  gpqa:
+    services: &services
+      policy:
+        type: vllm
+        container: your-vllm-image
+        model: your/model
+    compute: &compute
+      cluster:
+        type: slurm
+        account: your-account
+    otel: &otel
+      enabled: false
+    job: &member_job
+      output_path: /shared/evaluations
+    driver:
+      container: your-first-driver-image
+      gym_install:
+        ref: YOUR_GPQA_COMMIT
+      policy_model: policy
+      benchmarks:
+        gpqa:
+          run:
+            config_paths: [benchmarks/gpqa/config.yaml]
+  aime25:
+    services: *services
+    compute: *compute
+    otel: *otel
+    job: *member_job
+    driver:
+      container: your-second-driver-image
+      gym_install:
+        ref: YOUR_AIME_COMMIT
+      policy_model: policy
+      benchmarks:
+        aime25:
+          run:
+            config_paths: [benchmarks/aime25/config.yaml]
+```
+
+The group owns the output root; members' `job.output_path` values are retained in their saved configuration but do not select their output directories. Member-level `job.export` and benchmark exports keep their usual meaning. Group-level exports are rejected.
+
+```bash
+gym eval submit --config shared.yaml --resolve-only --json
+gym eval submit --config shared.yaml --dry-run
+gym eval submit --config shared.yaml
+```
+
+The same config composition and overrides work as for ordinary submission. `--select` is unsupported: choose the group's members explicitly in its config.
+
+## Compatibility and admission
+
+All members must have identical services, compute settings (including node-pool order), and telemetry configuration. This version supports vLLM services and one policy endpoint colocated with the drivers. Separate Ray services, prefill/decode services, a per-node policy endpoint, custom benchmark `command`, resumable benchmarks, and Lustre metadata sampling are rejected.
+
+**Policy admission** gives the group one concurrent-request limit. An independently pinned service streams requests to the policy endpoint and holds a permit until each response finishes or disconnects. `max_inflight` bounds active POST requests and `max_queued` bounds waiting POST requests. When both are full it returns HTTP 503 with `Retry-After: 1`; it never retries requests. GET requests bypass this budget. Existing callers retain their retry policy, and their timeouts include queueing time. Choose these limits for the serving capacity and expected caller concurrency; a large waiting queue can cause caller timeouts.
+
+The controller binds `policy_base_url` to admission and allocates non-overlapping Gym port ranges, starting at `first_driver_port` (default `20000`) with `driver_port_count` ports per member (default `400`). The admission port defaults to `18001`. Conflicting configured service ports, direct policy endpoint overrides, and explicit member head/range ports are rejected. Fixed ports in custom resources servers or raw service command flags remain the recipe author's responsibility. Admission limits requests through this route; it is not a network access-control boundary.
+
+Driver supervision is enabled for every member. Generation parameters, repeat counts, task selection, and scoring remain those of each member's recipe. No outer retry loop resets their budgets. Different pins must support the usual `gym eval run` policy binding and port range settings.
+
+## Lifecycle and records
+
+There is one scheduler job and one standard submission record. Its benchmark entry is named `shared-allocation`, with executor `slurm-shared`. Use `gym job status`, `gym job logs`, and `gym job cancel` as for other submissions. Logs default to the controller; `--source gpqa` selects that member, and `--source gym_admission` selects admission. These commands report the allocation's state. Per-member rollout evidence and supervision receipts live in the member directories; aggregate member result inspection and recovery are not implemented.
+
+```text
+<output_path>/<gym_job_id>/
+  gym-job.json
+  resolved-config.yaml
+  shared-allocation/
+    job.sh
+    members.json
+    logs/
+    otel/                         # when enabled: one collector for the group
+    gpqa/
+      driver.sh
+      resolved-config.yaml
+      logs/                       # driver logs and worker cleanup receipt
+      artifacts/                  # native rollouts and exports
+    aime25/
+      ...
+```
+
+`members.json` records each member's directory, allocated ports, and policy route. The resolved group config retains the original member settings. Both member telemetry and export metadata use the group's Gym job ID.
+
+A member that finishes or fails releases its worker after cleanup while the others continue. Shared services remain until every member has finished. A shared service failure stops active members; cancellation also waits for worker cleanup before stopping services. The allocation fails if any member fails. The controller does not change Slurm's hard termination deadline, which can interrupt cleanup or telemetry flushing.

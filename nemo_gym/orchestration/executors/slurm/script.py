@@ -16,6 +16,7 @@
 import json
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -1153,6 +1154,22 @@ def planned_log_sources(config: SubmitConfig, compute: SlurmComputeConfig) -> li
     ]
 
 
+@dataclass(frozen=True)
+class SlurmScriptParts:
+    """Rendered phases shared by single-driver and shared-allocation submission."""
+
+    directives: str
+    resume_prologue: str
+    ray_prelude: str
+    service_commands: str
+    health_checks: str
+    prepare_command: str
+    driver_command: str
+
+    def render(self) -> str:
+        return _SCRIPT_TEMPLATE.format(**vars(self))
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -1160,6 +1177,22 @@ def build_sbatch_script(
     compute: SlurmComputeConfig,
     remote_bench_dir: Path,
 ) -> str:
+    return build_sbatch_parts(config, benchmark_name, benchmark, compute, remote_bench_dir).render()
+
+
+def build_sbatch_parts(
+    config: SubmitConfig,
+    benchmark_name: str,
+    benchmark: BenchmarkRunConfig,
+    compute: SlurmComputeConfig,
+    remote_bench_dir: Path,
+    *,
+    shared_services_dir: Path | None = None,
+    extra_watched_services: tuple[str, ...] = (),
+) -> SlurmScriptParts:
+    """Render phases without submitting; a shared controller owns service startup and shutdown."""
+    service_dir = shared_services_dir or remote_bench_dir
+    gym_job_id = service_dir.parent.name
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
 
     resume = benchmark.resume_config
@@ -1193,7 +1226,7 @@ def build_sbatch_script(
             [
                 _render_collector_service(
                     config,
-                    remote_bench_dir,
+                    service_dir,
                     is_multi_node=is_multi_node,
                     driver_node=driver_node,
                     account=compute.account,
@@ -1283,9 +1316,7 @@ def build_sbatch_script(
     driver_env = dict(config.driver.env)
     if instrumented:
         driver_env = {
-            **driver_telemetry_env(
-                remote_bench_dir.parent.name, config.otel.gym_span_groups, logs=config.otel.gym_logs
-            ),
+            **driver_telemetry_env(gym_job_id, config.otel.gym_span_groups, logs=config.otel.gym_logs),
             **driver_env,
         }
     if benchmark.command is None:
@@ -1333,7 +1364,7 @@ def build_sbatch_script(
                             name,
                             settings,
                             benchmark_name=benchmark_name,
-                            gym_job_id=remote_bench_dir.parent.name,
+                            gym_job_id=gym_job_id,
                             bench_dir=remote_bench_dir,
                         )
                     ),
@@ -1432,6 +1463,7 @@ def build_sbatch_script(
         for name, service in config.deployed_services.items()
         for step in (_ray_steps(name, service, config, compute) if isinstance(service, RayServiceConfig) else [name])
     ]
+    watched.extend(extra_watched_services)
     marker_definition = (
         f'{EVAL_SUCCEEDED_MARKER_ENV}={shlex.quote(str(remote_bench_dir / EVAL_SUCCEEDED_FILENAME))}".${{SLURM_JOB_ID}}"\n'
         if export_tail is not None
@@ -1453,7 +1485,7 @@ def build_sbatch_script(
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.
         driver_command += "\n" + render_resume_epilogue()
     end_snapshot = f"_gym_md_stats {END}\n" if md_stats else ""
-    if observed:
+    if observed and shared_services_dir is None:
         driver_command += "\n" + _render_collector_shutdown(
             config, remote_bench_dir, driver_node, before_exit=end_snapshot
         )
@@ -1467,7 +1499,7 @@ def build_sbatch_script(
             if part
         )
 
-    return _SCRIPT_TEMPLATE.format(
+    return SlurmScriptParts(
         directives=directives,
         resume_prologue=resume_prologue,
         ray_prelude=ray_prelude,
