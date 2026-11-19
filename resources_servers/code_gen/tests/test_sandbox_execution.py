@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from assertion_harness.check import _checked
 from sandbox_execution import (
     check_assertions_in_sandbox,
     check_correctness_in_sandbox,
@@ -362,6 +363,13 @@ _STATEFUL_SOLUTION = (
         ("while True:\n    pass", ["assert True"], [-3]),
         ("def f(:", ["assert True"], [-1]),
         ("x = bytearray(320 * 1024 * 1024)", ["assert True"], [-4]),
+        # Candidate code that emptied the suite or left a partial result still fails.
+        ("import sys\nsys._getframe(1).f_locals['tests'].clear()", ["assert False"], [-4]),
+        (
+            "import os, sys\nsys._getframe(1).f_locals['result'].append([True])\nos._exit(0)",
+            ["assert False"],
+            [-4],
+        ),
     ],
 )
 async def test_assertions_run_as_written(tmp_path, provider, config, generation, tests, expected) -> None:
@@ -376,3 +384,25 @@ async def test_assertions_run_as_written(tmp_path, provider, config, generation,
         work_dir=str(tmp_path / "work"),
     )
     assert result == expected, metadata
+
+
+@pytest.mark.parametrize(
+    "results, metadata, ok",
+    [
+        ([True, True], {}, True),
+        ([True, -2], {"error_code": -2}, True),
+        ([-3], {"error_code": -3}, True),
+        ([], {}, False),
+        ([True], {}, False),
+        ([True, True, True], {}, False),
+        ([True, -2, True], {}, False),
+        ([True, 1], {}, False),
+        ([True, True], None, False),
+        ("[True, True]", {}, False),
+    ],
+)
+def test_only_well_formed_assertion_results_are_accepted(results, metadata, ok) -> None:
+    checked = _checked(results, metadata, num_tests=2)
+    assert (checked == (results, metadata)) is ok
+    if not ok:
+        assert checked[0] == [-4]
