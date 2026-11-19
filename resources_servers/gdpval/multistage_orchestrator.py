@@ -79,6 +79,8 @@ from nemo_gym.config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
+    environment_server_for_agent,
+    environment_servers_by_agent,
 )
 from nemo_gym.core import (
     AGENT_TIMEOUT,
@@ -113,8 +115,6 @@ from nemo_gym.rollouts import journal_path_for as rollout_attempts_path_for
 from nemo_gym.rollouts.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,
     _RUN_FAILURE_ERRORS,
-    _environment_server_for_agent,
-    _environment_servers_by_agent,
     _record_rollout_outcome,
 )
 from nemo_gym.rollouts.rollout_records import prepare_append
@@ -916,8 +916,8 @@ def find_gdpval_reference_elos(global_config_dict: Mapping[str, Any]) -> Dict[st
 
 def environment_server_for_row(row: Mapping[str, Any], global_config_dict: Any) -> str:
     """Name the environment server a row runs through: its stamped one, or the one fronting its agent."""
-    return row.get(NG_ENVIRONMENT_SERVER_KEY) or _environment_server_for_agent(
-        row[AGENT_REF_KEY_NAME]["name"], _environment_servers_by_agent(global_config_dict)
+    return row.get(NG_ENVIRONMENT_SERVER_KEY) or environment_server_for_agent(
+        row[AGENT_REF_KEY_NAME]["name"], environment_servers_by_agent(global_config_dict)
     )
 
 

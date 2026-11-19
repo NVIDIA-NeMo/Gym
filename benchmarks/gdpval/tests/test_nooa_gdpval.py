@@ -26,11 +26,8 @@ def test_nooa_recipe_preserves_gdpval_tools_grading_and_dispatch(
 ) -> None:
     pytest.importorskip("nooa")
     pytest.importorskip("datasets")
-    from nemo_gym.rollout_collection import (
-        RolloutCollectionHelper,
-        _environment_server_for_agent,
-        _environment_servers_by_agent,
-    )
+    from nemo_gym.config import environment_server_for_agent, environment_servers_by_agent
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
     from nemo_gym.train_data_utils import TrainDataProcessor
     from resources_servers.gdpval.app import GDPValResourcesServerConfig
     from responses_api_agents.nooa_agent.config import NOOAAgentConfig
@@ -136,7 +133,7 @@ def test_nooa_recipe_preserves_gdpval_tools_grading_and_dispatch(
     )
     assert row["task_source"] == resources.name
     assert row["agent_ref"]["name"] == agent.name
-    assert _environment_server_for_agent(agent.name, _environment_servers_by_agent(config)) == environment.name
+    assert environment_server_for_agent(agent.name, environment_servers_by_agent(config)) == environment.name
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment, server_client=MagicMock(spec=ServerClient))
     request = adapter._episode_request_from_row(row)
     task_input = request.task.task_input

@@ -21,8 +21,11 @@ import pytest
 import yaml
 from omegaconf import OmegaConf
 
-from nemo_gym.config.global_config import environment_server_agent_refs, legacy_environment_server_name
-from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
+from nemo_gym.config.global_config import (
+    environment_server_agent_refs,
+    environment_servers_by_agent,
+    legacy_environment_server_name,
+)
 from tests.helpers.agent_environment_migration import (
     AGENT_CONFIG,
     MULTI_AGENT_CONFIG,
@@ -90,7 +93,7 @@ def test_leaves_an_agent_fronted_by_another_config(tmp_path: Path) -> None:
 
     assert agent.read_text() == AGENT_CONFIG
     assert server.read_text() == server_text
-    assert _environment_servers_by_agent(_parse(agent, server, strict=True)) == {"my_simple_agent": ["custom_relay"]}
+    assert environment_servers_by_agent(_parse(agent, server, strict=True)) == {"my_simple_agent": ["custom_relay"]}
 
 
 def test_leaves_a_rename_of_a_repository_agent(tmp_path: Path) -> None:
@@ -104,7 +107,7 @@ def test_leaves_a_rename_of_a_repository_agent(tmp_path: Path) -> None:
     assert config.read_text() == before
     base = SCRIPT.parents[1] / "resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
     resolved = _parse(base, config, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["workplace_assistant_environment_server"]}
+    assert environment_servers_by_agent(resolved) == {"renamed_agent": ["workplace_assistant_environment_server"]}
 
 
 @pytest.mark.parametrize(
@@ -137,7 +140,7 @@ def test_migrated_rename_parses_with_one_server(
     assert overlay.read_text() == before
     # A generated relay would hide a missing server, so require the migrated one.
     resolved = _parse(base, overlay, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"renamed_agent": [expected_server]}
+    assert environment_servers_by_agent(resolved) == {"renamed_agent": [expected_server]}
     assert list(resolved[expected_server]["environment_servers"]) == [expected_type]
 
 
@@ -164,7 +167,7 @@ def test_migrated_renames_point_a_multi_agent_server_at_the_new_names(tmp_path: 
     assert overlay.read_text() == before
     # Parsing fails on a reference to a retired agent, so this checks both fields followed the rename.
     resolved = _parse(base, overlay, strict=True)
-    assert _environment_servers_by_agent(resolved) == {
+    assert environment_servers_by_agent(resolved) == {
         "renamed_user": ["my_conversation"],
         "renamed_assistant": ["my_conversation"],
     }
@@ -184,7 +187,7 @@ def test_leaves_a_rename_beside_its_legacy_wrapper(tmp_path: Path, check: bool) 
 
     assert config.read_text() == before
     resolved = _parse(config, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["my_relay"]}
+    assert environment_servers_by_agent(resolved) == {"renamed_agent": ["my_relay"]}
 
 
 @pytest.mark.parametrize(
@@ -237,7 +240,7 @@ def test_prior_migration_output_keeps_its_server(
 
     resolved = _parse(base, overlay, strict=True)
 
-    assert _environment_servers_by_agent(resolved) == {"renamed_agent": [expected_server]}
+    assert environment_servers_by_agent(resolved) == {"renamed_agent": [expected_server]}
     assert list(resolved[expected_server].environment_servers) == [expected_type]
     assert resolved[expected_server].environment_servers[expected_type].entrypoint == "app.py"
     assert resolved.renamed_agent.responses_api_agents.simple_agent.resources_server.name == "my_resources"
