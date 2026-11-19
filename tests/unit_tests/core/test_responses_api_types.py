@@ -2489,6 +2489,47 @@ def test_requests_with_sdk_iterable_fields_encode_copy_and_dump_repeatedly(model
     assert orjson.loads(orjson.dumps(params.model_copy(deep=True).model_dump(exclude_unset=True))) == payload
 
 
+@pytest.mark.parametrize(
+    "tool",
+    [
+        # The tool the Codex CLI (0.144.4 to 0.155.1) sends for web_search = "cached", "live" and "indexed".
+        {"type": "web_search", "external_web_access": False},
+        {"type": "web_search", "external_web_access": True},
+        {
+            "type": "web_search",
+            "external_web_access": True,
+            "indexed_web_access": True,
+            "filters": {"allowed_domains": ["docs.nvidia.com"]},
+            "user_location": {"type": "approximate", "country": "US", "timezone": "America/Los_Angeles"},
+            "search_context_size": "high",
+            "search_content_types": ["text", "image"],
+        },
+    ],
+    ids=["cached", "live", "indexed_with_every_option"],
+)
+def test_web_search_tool_options_round_trip(tool: dict) -> None:
+    """A model server that relays requests forwards the web_search options it was sent unchanged."""
+    payload = {"input": "q", "tools": [tool]}
+    params = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload)
+
+    assert params.model_dump(mode="json", exclude_unset=True) == payload
+    assert orjson.loads(orjson.dumps(params.model_dump(exclude_unset=True))) == payload
+
+
+@pytest.mark.parametrize(
+    "tool, field",
+    [
+        ({"type": "web_search", "external_web_access": "sometimes"}, "external_web_access"),
+        ({"type": "web_search", "search_content_types": "text"}, "search_content_types"),
+        ({"type": "web_search", "live": True}, "live"),
+    ],
+    ids=["non_boolean_access", "content_types_not_a_list", "unknown_option"],
+)
+def test_web_search_tool_options_stay_typed(tool: dict, field: str) -> None:
+    with pytest.raises(ValidationError, match=field):
+        NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": "q", "tools": [tool]})
+
+
 def test_response_accepts_provider_specific_service_tier() -> None:
     """Third-party providers return tier strings outside the SDK's fixed enum.
 
