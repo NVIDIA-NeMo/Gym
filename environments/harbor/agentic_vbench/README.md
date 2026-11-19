@@ -74,8 +74,10 @@ concurrent episodes, since every episode starts one sandbox from a task image of
 `--config`.
 
 The overlay names the OpenCode harness's block, so it loads only with `--agent opencode_agent`. `dataset.toml` also
-admits `pi_agent`, the other sandboxed session harness that sends the model the images its tools read:
-[`harbor_sandbox_pi.yaml`](harbor_sandbox_pi.yaml) has the same server block and sets `image_input` on Pi.
+admits `pi_agent` and `openclaw_agent`, the other sandboxed session harnesses that send the model the images their
+tools read: [`harbor_sandbox_pi.yaml`](harbor_sandbox_pi.yaml) and
+[`harbor_sandbox_openclaw.yaml`](harbor_sandbox_openclaw.yaml) have the same server block and set `image_input` on
+their harness.
 
 ```sh
 gym eval run agentic_vbench --agent pi_agent --sandbox docker \
@@ -83,11 +85,12 @@ gym eval run agentic_vbench --agent pi_agent --sandbox docker \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
-Pi installs its runtime into the sandbox at session start (or reads one the image carries; see the
-[harness README](../../../responses_api_agents/pi_agent/README.md)). The run's rows and outputs are per harness
+Both install their runtime into the sandbox at session start (or read one the image carries; see the
+[Pi](../../../responses_api_agents/pi_agent/README.md) and
+[OpenClaw](../../../responses_api_agents/openclaw_agent/README.md) READMEs). A run's rows and outputs are per harness
 (`tasks_pi_agent.jsonl`, `run_config_pi_agent.yaml`). The published numbers and the full-set run below are
-OpenCode's; no Pi run of the benchmark has been recorded here yet, and a harness is an experimental variable, so
-compare Pi scores with Pi scores.
+OpenCode's; no Pi or OpenClaw run of the benchmark has been recorded here yet, and a harness is an experimental
+variable, so compare a harness's scores with its own.
 
 The task Dockerfiles build their images (they download the task's clips from Hugging Face at build
 time), so `gym eval run` and `gym dataset validate` build them once at prepare through the top-level `builds:` block

@@ -18,10 +18,11 @@ license = "Apache 2.0"
 # The task prompt is text and the videos are files in the task's own image, so a harness can run the tasks when it
 # works inside a lent sandbox and sends the model the images its tools read there (the frames the model extracts).
 # `opencode_agent` is the harness the benchmark's published numbers use (OpenCode inside the task container) and the
-# one the README's full-set numbers come from. `pi_agent` is the second such harness (`image_input`, see
-# `harbor_sandbox_pi.yaml`); its scores are its own baseline, not the published ones. Harnesses that drop tool images
-# (Hermes, Codex, mini-SWE-agent) would run blind to the clips and are not listed.
-allowed_agents = ["opencode_agent", "pi_agent"]
+# one the README's full-set numbers come from. `pi_agent` and `openclaw_agent` are the other harnesses with that
+# switch (`image_input`, see `harbor_sandbox_pi.yaml` and `harbor_sandbox_openclaw.yaml`); their scores are their own
+# baselines, not the published ones. A harness that does not send the model the images its tools read would run
+# blind to the clips and still get a score, so none is listed.
+allowed_agents = ["opencode_agent", "pi_agent", "openclaw_agent"]
 
 [gym.defaults]
 # The benchmark's published runs gave every verifier three times its declared 1800 s: the repurpose judges

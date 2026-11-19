@@ -17,10 +17,11 @@ domain = "agent"
 # The generated tasks derive from the benchmark's own clips and verifiers (PhiloLabs/agentic-vbench, Apache-2.0).
 license = "Apache 2.0"
 # The harnesses a run may train: OpenCode inside the task container, as the benchmark's published runs
-# (`harbor_train.yaml`), and Pi (`harbor_train_pi.yaml`), the second sandboxed session harness that sends the model
-# the frames its tools read. Each harness has its own rows and run configuration (README, "Harnesses"). Another sandboxed session harness is possible with
+# (`harbor_train.yaml`), and Pi and OpenClaw (`harbor_train_pi.yaml`, `harbor_train_openclaw.yaml`), the other
+# sandboxed session harnesses that send the model the frames their tools read. Each harness has its own rows and run
+# configuration (README, "Harnesses"). Another sandboxed session harness is possible with
 # `--allow-unsupported-pairing` but is not what the entry validates.
-allowed_agents = ["opencode_agent", "pi_agent"]
+allowed_agents = ["opencode_agent", "pi_agent", "openclaw_agent"]
 
 [gym.defaults]
 # The benchmark's published runs gave every verifier three times its declared budget: the repurpose judges
