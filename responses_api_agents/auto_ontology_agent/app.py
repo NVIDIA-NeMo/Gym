@@ -20,6 +20,10 @@ Environment Server's ``ask_user`` and ``submit_sql``, and each turn's request ho
 episode in the same sandbox, with ``ask_user`` added to Auto Ontology's tools, and sends the query Auto Ontology
 accepts to ``submit_sql``. The agent keeps the user's answers and its submissions across the turns.
 
+BIRD-Interact's a-Interact (``a_interact.py``) runs with Auto Ontology's interactive pipeline only: one activation,
+whose request names the database, the request and the BIRD-COIN budget. The agent buys the schema, the column meanings
+and the knowledge base through the granted tools, as auto-ontology-eval does, then runs the whole task in the sandbox.
+
 This process imports only NeMo Gym: Auto Ontology runs in the sandbox.
 """
 
@@ -33,12 +37,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter, time
-from typing import Any, Optional, cast
+from typing import Any, Literal, Optional, cast
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentContinuationCapabilities,
@@ -57,6 +63,7 @@ from nemo_gym.agents import (
     assert_model_url_reachable_from_sandbox,
     restrict_sandbox_network,
 )
+from nemo_gym.client import raise_for_status, request
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
@@ -78,7 +85,7 @@ from nemo_gym.sandbox import (
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from responses_api_agents.auto_ontology_agent import c_interact
+from responses_api_agents.auto_ontology_agent import a_interact, c_interact
 
 
 LOG = logging.getLogger(__name__)
@@ -87,6 +94,8 @@ RUNNER_SOURCE = Path(__file__).with_name("episode_runner.py")
 # Where the sandbox gets the episode runner, through SandboxSpec.files, and the episode's files.
 SANDBOX_DIR = "/tmp/nemo-gym-auto-ontology"
 SANDBOX_RUNNER = f"{SANDBOX_DIR}/episode_runner.py"
+# A c-Interact turn of the interactive pipeline takes at most the question budget plus this many steps.
+INTERACTIVE_STEP_MARGIN = 5
 
 
 class AutoOntologyEpisodeError(RuntimeError):
@@ -112,6 +121,11 @@ class AutoOntologyAgentConfig(BaseResponsesAPIAgentConfig):
     # The name Auto Ontology sends. Its openai/ prefix selects Auto Ontology's
     # OpenAI-compatible client; the Model Server sends its own model name.
     model: str = Field(default="openai/policy", pattern=r"^(openai|azure|aws)/")
+    # The Gym Model Server of Auto Ontology's non-reasoning role, which its
+    # interactive pipeline calls for extraction and merging; None runs that
+    # role on the policy too. auto-ontology-eval runs it on a second model.
+    non_reasoning_model_server: Optional[ModelServerRef] = None
+    non_reasoning_model: str = Field(default="openai/non-reasoning", pattern=r"^(openai|azure|aws)/")
     # A sandbox provider block of the global config, and the sandbox to start
     # with it: at least the catalog image.
     sandbox_provider: str
@@ -138,6 +152,14 @@ class AutoOntologyAgentConfig(BaseResponsesAPIAgentConfig):
     # network share loopback, so each takes its own, at random from this range.
     catalog_ports: tuple[int, int] = (20000, 60000)
     catalog_port_attempts: int = Field(default=3, gt=0)
+    # What runs a c-Interact turn: Auto Ontology's ReAct agent, with ask_user added, or its interactive pipeline
+    # (auto_ontology.retrieval.interactive), the one auto-ontology-eval runs on BIRD-Interact. The pipeline runs
+    # BIRD-Interact only, in c-Interact or a-Interact.
+    pipeline: Literal["react", "interactive"] = "react"
+    # The interactive pipeline only: a folder with each database's knowledge base, <db>/<db>_kb.jsonl, whose
+    # children_knowledge links the pipeline gets for the entries the task shows, as auto-ontology-eval gives them.
+    # The BIRD-Interact ADK does not show agents that field. Relative to the repository root. None gives no links.
+    knowledge_dir: Optional[str] = None
 
 
 @dataclass(kw_only=True)
@@ -151,8 +173,8 @@ class AutoOntologySessionState(AgentSessionState):
     activation: Optional[asyncio.Task[NeMoGymResponse]] = None
     activation_request: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     episode: Optional[dict[str, Any]] = None
-    # c-Interact: the grant of the Environment Server's tools, the ask_user tool as Auto Ontology offers it, what the
-    # agent knows across turns, and a record of each turn.
+    # BIRD-Interact: the grant of the Environment Server's tools. c-Interact: the ask_user tool as Auto Ontology offers
+    # it, what the agent knows across turns, and a record of each turn, as of a-Interact's one activation.
     tool_access: Optional[DirectHTTPToolAccess] = None
     ask_tool: Optional[dict[str, Any]] = None
     dialogue: Optional[c_interact.Dialogue] = None
@@ -166,6 +188,7 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._episodes = asyncio.Semaphore(self.config.max_concurrent_episodes)
+        self._children_by_database: dict[str, dict[int, list[int]]] = {}
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """The model call that ended the episode, from the runner's ``model_failure``."""
@@ -185,10 +208,10 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(
                 "Auto Ontology does not support sandbox access: it runs in its own sandbox, from the Auto Ontology image"
             )
-        # A multi-turn session (c-Interact) reads its task from each turn's request.
-        if request.continuation is not None:
+        # BIRD-Interact reads its task from the requests: each turn's in c-Interact, the one activation's in a-Interact.
+        if request.continuation is not None or self.config.pipeline == "interactive":
             if request.agent_context is not None and request.agent_context.fields():
-                raise AgentSeedRejectedError("A multi-turn Auto Ontology session reads its task from each turn")
+                raise AgentSeedRejectedError("A BIRD-Interact Auto Ontology session reads its task from its requests")
             return None
         return super().parse_agent_context(request)
 
@@ -198,8 +221,8 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
     def _continuation_close_timeout(self) -> float:
         return self.config.close_timeout_seconds
 
-    def _c_interact_tool_access(self, body: AgentSeedSessionRequest) -> DirectHTTPToolAccess:
-        """The grant of the Environment Server's ask_user and submit_sql, which the sandbox calls over HTTP."""
+    def _bird_interact_tool_access(self, body: AgentSeedSessionRequest) -> DirectHTTPToolAccess:
+        """The grant of the Environment Server's BIRD-Interact tools, which the agent and the sandbox call over HTTP."""
         accesses = self.effective_tool_accesses(body)
         if unusable := [a.name for a in accesses if a.required and not isinstance(a, DirectHTTPToolAccess)]:
             raise AgentSeedRejectedError(
@@ -208,15 +231,16 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         direct = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
         if len(direct) != 1:
             raise AgentSeedRejectedError(
-                f"A multi-turn Auto Ontology session needs one direct HTTP grant, of {c_interact.ASK_TOOL} and "
-                f"{c_interact.SUBMIT_TOOL}; it was granted {len(direct)}"
+                f"A BIRD-Interact Auto Ontology session needs one direct HTTP grant of the server's tools; it was "
+                f"granted {len(direct)}"
             )
         return direct[0]
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AutoOntologySessionState:
         tool_access = None
-        if body.continuation is not None:
-            tool_access = self._c_interact_tool_access(body)
+        if body.continuation is not None or self.config.pipeline == "interactive":
+            # c-Interact's turns, or a-Interact's one activation, which only the interactive pipeline runs.
+            tool_access = self._bird_interact_tool_access(body)
         elif required := [grant.name for grant in self.effective_tool_accesses(body) if grant.required]:
             raise AgentSeedRejectedError(f"Auto Ontology uses its own tools and cannot use the grants {required}")
         # The base class refuses a context that does not satisfy AutoOntologyTask, a missing one included.
@@ -225,10 +249,22 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
         provider_name = next(iter(provider_config), None)
         model_base_url = self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key)
-        # The sandbox calls the Model Server, and in c-Interact the Environment Server's tools.
+        model_urls = [model_base_url]
+        if self.config.non_reasoning_model_server is not None:
+            model_urls.append(
+                self.resolve_model_base_url(self.config.non_reasoning_model_server.name, body.episode_id.capture_key)
+            )
+            # A restricted network opens the policy's host, on every port: the other Model Server must share it.
+            hosts = {urlparse(url).hostname for url in model_urls}
+            if self.config.network_access != "inherit" and len(hosts) > 1:
+                raise AgentSeedRejectedError(
+                    f"The non-reasoning Model Server must share the policy's host under network_access "
+                    f"{self.config.network_access}; they are on {sorted(map(str, hosts))}"
+                )
+        # The sandbox calls the Model Servers, and in BIRD-Interact the Environment Server's tools.
         tool_urls = [str(tool_access.base_url)] if tool_access is not None else []
         try:
-            for url in [model_base_url, *tool_urls]:
+            for url in [*model_urls, *tool_urls]:
                 assert_model_url_reachable_from_sandbox(url, provider_name=provider_name)
         except ValueError as error:
             raise AgentSeedRejectedError(str(error)) from error
@@ -315,7 +351,7 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         if state.episode is None:
             gaps.append(ObservationGap(code="observation_capture_failed"))
         trajectory = None
-        if state.request.continuation is not None:
+        if state.tool_access is not None:
             # Each turn's input and answer. This server does not see the model calls, so it cannot report the turns:
             # it says so, rather than report a trajectory with no turns, which rollout health reads as none taken.
             trajectory = TrajectoryRecord(
@@ -342,9 +378,86 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         state: AutoOntologySessionState,
         body: NeMoGymResponseCreateParamsNonStreaming,
     ) -> NeMoGymResponse:
-        assert state.task is not None
+        if state.task is None:
+            return await self._run_a_interact(state, body)
         state.episode = await self._run_in_sandbox(state, state.task.model_dump())
         return self._answer(state.episode, body)
+
+    async def _call_granted_tool(self, access: DirectHTTPToolAccess, name: str) -> dict[str, Any]:
+        """Call the granted tool ``name`` once, with no arguments: a retry could be charged twice."""
+        response = await request(
+            "POST",
+            f"{str(access.base_url).rstrip('/')}/{name}",
+            json={},
+            headers=dict(access.headers),
+            cookies=dict(access.cookies),
+            _max_num_tries=1,
+        )
+        await raise_for_status(response)
+        reply = json.loads((await response.content.read()).decode(errors="replace"))
+        if not isinstance(reply, dict) or "observation" not in reply:
+            raise a_interact.AInteractTextError(f"The tool {name} replied without an observation: {str(reply)[:500]}")
+        return reply
+
+    async def _run_a_interact(
+        self, state: AutoOntologySessionState, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
+        """Run a whole a-Interact task: buy the task's context, then run the interactive pipeline in the sandbox."""
+        if state.tool_access is None:
+            raise TypeError("Expected an a-Interact Auto Ontology session")
+        try:
+            task = a_interact.read_request(*request_texts(body))
+        except a_interact.AInteractTextError as error:
+            raise HTTPException(422, str(error)) from error
+        bought = {name: await self._call_granted_tool(state.tool_access, name) for name in a_interact.PURCHASES}
+        knowledge, children = c_interact.interactive_knowledge(
+            a_interact.knowledge_entries(bought[a_interact.KNOWLEDGE_TOOL]["observation"]),
+            self._knowledge_children(task.database),
+        )
+        payload = {
+            "pipeline": "interactive",
+            "mode": "a_interact",
+            "database": task.database,
+            "question": task.question,
+            "schema": bought[a_interact.SCHEMA_TOOL]["observation"],
+            "knowledge": knowledge,
+            "knowledge_children": children,
+            "budget": {"initial": task.budget, "remaining": bought[a_interact.PURCHASES[-1]]["coins_left"]},
+            "tools": {name: tool_endpoint(state.tool_access, name) for name in a_interact.EPISODE_TOOLS},
+        }
+        _, message = request_texts(body)
+        invocation = AgentInvocation(
+            invocation_id="root",
+            activation_id=1,
+            in_session=True,
+            conversation=[NeMoGymEasyInputMessage(role="user", content=message)],
+        )
+        started = perf_counter()
+        try:
+            state.episode = episode = await self._run_in_sandbox(state, payload)
+        except BaseException as error:
+            state.invocations.append(
+                invocation.model_copy(
+                    update={
+                        "status": "failed" if isinstance(error, Exception) else "incomplete",
+                        "error_type": type(error).__name__,
+                        "duration_ms": (perf_counter() - started) * 1000,
+                    }
+                )
+            )
+            raise
+        response = self._answer(episode, body)
+        state.invocations.append(
+            invocation.model_copy(
+                update={
+                    "status": "completed",
+                    "stop_reason": str(episode.get("reason")),
+                    "duration_ms": (perf_counter() - started) * 1000,
+                    "conversation": [*invocation.conversation, *response.output],
+                }
+            )
+        )
+        return response
 
     async def _run_in_sandbox(
         self, state: AutoOntologySessionState, task: dict[str, Any], *, turn: Optional[int] = None
@@ -361,9 +474,19 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             **task,
             "model": self.config.model,
             "env_file": f"{self.config.catalog_workdir}/.env",
-            # The sandbox calls the Model Server itself, on the rollout's route.
+            # The sandbox calls the Model Servers itself, on the rollout's route.
             "model_base_url": self.resolve_model_base_url(
                 self.config.model_server.name, state.request.episode_id.capture_key
+            ),
+            **(
+                {
+                    "non_reasoning_model": self.config.non_reasoning_model,
+                    "non_reasoning_model_base_url": self.resolve_model_base_url(
+                        self.config.non_reasoning_model_server.name, state.request.episode_id.capture_key
+                    ),
+                }
+                if self.config.non_reasoning_model_server is not None
+                else {}
             ),
             # The sandbox's own catalog port wins over the configured settings.
             "environment": {
@@ -454,14 +577,35 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         dialogue = state.dialogue
         turn = c_interact.read_turn(message)
         question = c_interact.advance(dialogue, turn)
-        task = {
-            "question": question,
-            "evidence": c_interact.evidence(dialogue, turn),
-            "database": dialogue.task.database,
-            "custom_prompts": c_interact.asking_prompt(dialogue),
+        tools = {
             "tools": [{"definition": state.ask_tool, **tool_endpoint(state.tool_access, c_interact.ASK_TOOL)}],
             "submit": tool_endpoint(state.tool_access, c_interact.SUBMIT_TOOL),
         }
+        if self.config.pipeline == "interactive":
+            knowledge, children = c_interact.interactive_knowledge(
+                dialogue.task.knowledge, self._knowledge_children(dialogue.task.database)
+            )
+            task = {
+                "pipeline": "interactive",
+                "database": dialogue.task.database,
+                "schema": dialogue.task.schema,
+                "knowledge": knowledge,
+                "knowledge_children": children,
+                "max_questions": dialogue.task.max_questions,
+                # As auto-ontology-eval bounds a turn: the question budget, and a margin for a pipeline that asks on.
+                "max_steps": dialogue.task.max_questions + INTERACTIVE_STEP_MARGIN,
+                "turn": {"kind": turn.kind, "text": question, "execution_error": c_interact.execution_error(turn)},
+                "state_path": f"{state.session.root_dir}/interactive_state.pickle",
+                **tools,
+            }
+        else:
+            task = {
+                "question": question,
+                "evidence": c_interact.evidence(dialogue, turn),
+                "database": dialogue.task.database,
+                "custom_prompts": c_interact.asking_prompt(dialogue),
+                **tools,
+            }
         invocation = AgentInvocation(
             invocation_id="root" if activation_id == 1 else f"activation-{activation_id}",
             activation_id=activation_id,
@@ -505,6 +649,23 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             )
         )
         return response
+
+    def _knowledge_children(self, database: str) -> dict[int, list[int]]:
+        """Each knowledge entry's children_knowledge, from ``knowledge_dir``; none without it."""
+        if self.config.knowledge_dir is None:
+            return {}
+        if database not in self._children_by_database:
+            # A relative folder is relative to the repository root, as the bird_interact server's database_dir is.
+            root = Path(self.config.knowledge_dir)
+            path = (root if root.is_absolute() else PARENT_DIR / root) / database / f"{database}_kb.jsonl"
+            children: dict[int, list[int]] = {}
+            for line in path.read_text().splitlines():
+                if line.strip():
+                    entry = json.loads(line)
+                    if entry.get("id") is not None and isinstance(entry.get("children_knowledge"), list):
+                        children[entry["id"]] = entry["children_knowledge"]
+            self._children_by_database[database] = children
+        return self._children_by_database[database]
 
     # ----- routes ----- #
 

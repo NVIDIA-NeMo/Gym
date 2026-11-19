@@ -2,7 +2,8 @@
 
 This agent runs [Auto Ontology](https://github.com/NVIDIA/auto-ontology)'s ReAct text-to-SQL agent in Gym: its
 own loop, prompts and tools, on the policy model. `benchmarks/birdbench/auto_ontology_agent.yaml` pairs it with BIRD
-dev. It also takes part in BIRD-Interact's c-Interact, which the `bird_interact` Environment Server runs (see below).
+dev. It also takes part in BIRD-Interact's c-Interact and a-Interact, which the `bird_interact` Environment Server runs
+(see below).
 
 ## How an episode runs
 
@@ -53,6 +54,46 @@ Environment Server (bird_interact, c_interact)
   result; the episode goes on.
 - **An episode that raises** writes its error to the result file, and the activation fails with that error.
 
+### The interactive pipeline
+
+With `pipeline: interactive`, the agent runs Auto Ontology's interactive pipeline
+(`auto_ontology.retrieval.interactive`) in place of its ReAct agent: the pipeline auto-ontology-eval runs on
+BIRD-Interact, with checks that decide whether to ask, each answer merged into the question, and the follow-up
+rewritten to stand alone. It writes its SQL with Auto Ontology's text-to-SQL, which is the ReAct agent from Auto
+Ontology 1.3.0. The agent does what auto-ontology-eval's adapter (`ontology_sql_eval/bird_interact/server.py` at
+e727e4d6) does around it, in c-Interact and in a-Interact:
+
+- **The session** is created as the adapter creates it: the schema and visible knowledge, the question budget,
+  `skip_evidence_refinement` and `numeric_type_alignment`.
+- **A question** (`AskUserAction`) goes to the server's question tool, and the answer, without the server's note on
+  questions left, goes back to the pipeline. **The query** (`SubmitSQLAction`) goes to the server's submit tool,
+  without the `<database>.` before each table, and the reply goes back as the result.
+- **The knowledge's links:** with `knowledge_dir`, the pipeline also gets each visible entry's `children_knowledge`
+  (up to 5, among the visible entries), from `<knowledge_dir>/<db>/<db>_kb.jsonl`, as the adapter reads them. The
+  BIRD-Interact ADK does not show agents that field; leave `knowledge_dir` unset to give the pipeline only what the
+  ADK shows.
+- **Settings** the pipeline reads (`INTERACTIVE`) go in `environment`. The BIRD-Interact configs copy the flags
+  auto-ontology-eval's runs set; Auto Ontology 1.3.0 reads only `INTERACTIVE` of them.
+- **The models:** Auto Ontology's reasoning role runs on the policy, and its non-reasoning role on
+  `non_reasoning_model_server` when it is set (auto-ontology-eval runs Claude Sonnet 5.5 there beside Claude Opus 5.5),
+  else on the policy too. Both are Gym Model Servers, so Gym captures every call on the rollout's route.
+
+**c-Interact.** Each turn steps the pipeline until it submits, at most the question budget plus 5 steps. The session is
+saved in the sandbox's session folder after each turn and loaded at the next, with its connections made again.
+
+**a-Interact** runs as one activation, as auto-ontology-eval runs it. The agent first buys the schema, the column
+meanings and the knowledge base through the server's tools (3 BIRD-COIN; the column meanings are paid for but not read,
+as the catalog can hold them). Then one call in the sandbox runs phase 1, its retries and the follow-up within the
+budget, by auto-ontology-eval's rules (`ontology_sql_eval/bird_interact/budget.py`): phase 1's queries and questions
+leave 4 coins; the pipeline asks while the budget still pays for a submission; a submission is never refused, and one
+that spends the budget ends the task; a retry that repeats a failed query ends the phase; the follow-up gets
+auto-ontology-eval's instructions on extending phase 1's query. Each query Auto Ontology runs on the database goes to
+the server's `execute`, which charges it, or refuses it once the budget is spent, and is then read from the sandbox's
+own copy of the database: `execute` shows at most 20 rows as text, and Auto Ontology needs the whole result, as
+auto-ontology-eval's connector returns it. The ReAct agent is told the balance, in auto-ontology-eval's words.
+
+A seed for the interactive pipeline must grant the server's tools over direct HTTP and carry no task context.
+
 ## The sandbox's network
 
 The episode calls the policy's Model Server from the sandbox. The config runs local Docker sandboxes on the host
@@ -66,12 +107,15 @@ taken. On a remote sandbox provider, give the Model Server an address the sandbo
 |---|---|---|
 | `model_server` | required | The policy's Model Server |
 | `model` | `openai/policy` | The name Auto Ontology sends. The `openai/` prefix selects its OpenAI-compatible client; the Model Server uses its own model name |
+| `non_reasoning_model_server`, `non_reasoning_model` | none, `openai/non-reasoning` | The Model Server of Auto Ontology's non-reasoning role, and the name it sends; none runs that role on the policy |
 | `sandbox_provider`, `sandbox_config` | required | The sandbox of each episode: a provider block of the global config, and the image |
 | `catalog_python`, `catalog_workdir`, `catalog_start_command` | the catalog image's | In the image: the Python with Auto Ontology, the folder whose `.env` names the databases and embedding endpoint, and the command that starts the catalog |
 | `environment` | none | Auto Ontology's settings in the sandbox, such as the embedding key (`DEFAULT_MODELS_API_KEY`) or `TEXT_TO_SQL_REACT_MAX_TOOL_CALLS`. They cannot change the model |
 | `catalog_ports` | 20000 to 60000 | The ports an episode's catalog may take |
 | `setup_timeout_seconds`, `episode_timeout_seconds`, `close_timeout_seconds` | 300, 1800, 60 | Limits on the seed, the episode and the close |
 | `max_concurrent_episodes` | 8 | Episodes this server runs at once. Each session holds its sandbox and Postgres from seed to close, so the run's concurrency bounds the sandboxes |
+| `pipeline` | `react` | Auto Ontology's ReAct agent, or its interactive pipeline (BIRD-Interact only, c-Interact or a-Interact) |
+| `knowledge_dir` | none | The interactive pipeline's knowledge links: a folder with `<db>/<db>_kb.jsonl` |
 
 ## Known limits
 
@@ -85,9 +129,10 @@ taken. On a remote sandbox provider, give the Model Server an address the sandbo
   fails the episode. An episode that ends with no query for another reason, such as its tool budget, is graded.
 - **Request controls:** Auto Ontology's loop sets its own sampling, limits and instructions. An activation that sets
   another field, such as `temperature`, `max_output_tokens`, `tool_choice` or `instructions`, is refused with a 422.
-- **BIRD-Interact:** c-Interact only; a-Interact's tools would stand in for Auto Ontology's own. Auto Ontology runs
-  read-only queries, so it cannot solve a management task. The close's records hold each turn's input and answer; the
-  model calls are in the Model Server's capture. The trajectory reports the turns unavailable (`turns_unavailable`).
+- **BIRD-Interact:** the ReAct agent runs c-Interact only; a-Interact runs with the interactive pipeline, which uses
+  the server's tools for questions, queries and submissions and Auto Ontology's catalog for the rest. Auto Ontology
+  runs read-only queries, so it cannot solve a management task. The trajectory holds each activation's input and
+  answer; the model calls are in the Model Server's capture, so it reports the turns unavailable (`turns_unavailable`).
 - **The Environment Server's tools:** a call the server refuses (HTTP 4xx) replies with the refusal, and a refused
   question does not count against the allowance. A call the server does not answer (a refused connection, a timeout
   or HTTP 5xx) fails the activation as an infrastructure error, so the task is not graded as the model's failure.
