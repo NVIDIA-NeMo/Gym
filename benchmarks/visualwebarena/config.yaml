@@ -54,6 +54,9 @@ visualwebarena_benchmark_agent:
       max_image_history: 3
       visual_observation_text: none
       resources_request_timeout_secs: 1800
+      # Shared-site writers queue before browser creation; allow the queue to
+      # drain within the existing four-hour rollout deadline.
+      seed_request_timeout_secs: 10800
       model_request_timeout_secs: 1200
       run_timeout_secs: 14400
       task_image_root: ${visualwebarena_source_root}

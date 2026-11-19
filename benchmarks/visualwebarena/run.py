@@ -35,6 +35,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise RuntimeError("site-control requests must not redirect")
 
 
+class _WorkersNotIdleError(RuntimeError):
+    """Resource workers have not yet proved that collection has quiesced."""
+
+
 class SiteControl:
     """Reset one owned site deployment and verify all declared browser workers are idle."""
 
@@ -78,7 +82,7 @@ class SiteControl:
             counts = [health.get(key) for key in ("sessions", "creating", "cleanup_pending", "late_release_pending")]
             counts.append((health.get("browser_provider") or {}).get("active_leases"))
             if health.get("status") != "ok" or any(type(count) is not int or count != 0 for count in counts):
-                raise RuntimeError("site reset requires all declared resource workers to be healthy and idle")
+                raise _WorkersNotIdleError("site reset requires all declared resource workers to be healthy and idle")
             observations.append(health)
         return observations
 
@@ -152,7 +156,13 @@ def _population(rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], 
 
 
 def _check_results(
-    path: Path, expected: set[str], *, run_id: str, epoch: int, state_root: Path | None = None
+    path: Path,
+    expected: set[str],
+    *,
+    run_id: str,
+    epoch: int,
+    state_root: Path | None = None,
+    allow_missing: bool = False,
 ) -> list[dict[str, Any]]:
     rows = _read_jsonl(path)
     seen = set()
@@ -187,9 +197,83 @@ def _check_results(
             if recorded != receipt or receipt.get("state_sha256") != digest:
                 raise RuntimeError("protected rollout receipt disagrees with the retained baseline evidence")
         seen.add(task_id)
-    if seen != expected:
+    if not allow_missing and seen != expected:
         raise RuntimeError("phase output has missing or extra task IDs")
     return rows
+
+
+def _collect_phase(
+    phase_dir: Path,
+    command: list[str],
+    expected: set[str],
+    *,
+    run_id: str,
+    epoch: int,
+    state_root: Path,
+    control: SiteControl,
+    max_attempts: int,
+    timeout_seconds: float,
+) -> list[dict[str, Any]]:
+    """Resume native collector gaps under the same lease, retaining every valid row."""
+    deadline = time.monotonic() + timeout_seconds
+    retained: dict[str, str] = {}
+    for attempt in range(1, max_attempts + 1):
+        invocation = list(command)
+        if attempt > 1:
+            if not (phase_dir / "rollouts_manifest.json").is_file():
+                raise RuntimeError("cannot resume phase without its native Gym manifest")
+            cleanup_deadline = min(deadline, time.monotonic() + control.timeout_seconds)
+            while True:
+                try:
+                    idle = control.require_idle()
+                    break
+                except urllib.error.HTTPError:
+                    raise
+                except (_WorkersNotIdleError, urllib.error.URLError, TimeoutError, ConnectionError):
+                    remaining = cleanup_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    time.sleep(min(control.poll_seconds, remaining))
+            _write_json(phase_dir / f"idle-before-retry-{attempt}.json", idle)
+            invocation.extend(["--resume", "+resubmit=true"])
+        suffix = "" if attempt == 1 else f"-retry-{attempt}"
+        _write_json(phase_dir / f"command{suffix}.json", invocation)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("phase collection deadline reached")
+        with (phase_dir / f"collector{suffix}.log").open("w") as log:
+            subprocess.run(invocation, check=True, timeout=remaining, stdout=log, stderr=subprocess.STDOUT)
+        rows = _check_results(
+            phase_dir / "rollouts.jsonl",
+            expected,
+            run_id=run_id,
+            epoch=epoch,
+            state_root=state_root,
+            allow_missing=True,
+        )
+        observed = {str(row["task_id"]) for row in rows}
+        if retained or observed != expected:
+            current = {
+                str(row["task_id"]): hashlib.sha256(
+                    json.dumps(row, sort_keys=True, ensure_ascii=True).encode()
+                ).hexdigest()
+                for row in rows
+            }
+            if any(current.get(task_id) != digest for task_id, digest in retained.items()):
+                raise RuntimeError("phase resume changed or removed a previously valid rollout")
+            retained = current
+        if observed == expected:
+            if epoch:
+                _write_json(phase_dir / "idle-after.json", control.require_idle())
+            return rows
+        _write_json(
+            phase_dir / f"incomplete-attempt-{attempt}.json",
+            {
+                "missing_task_ids": sorted(expected - observed, key=int),
+                "retained_full_row_sha256": retained,
+            },
+        )
+    raise RuntimeError("phase output has missing or extra task IDs after bounded native resumes")
 
 
 def run(
@@ -202,6 +286,7 @@ def run(
     task_ids: set[str] | None = None,
     concurrency: int = 1,
     phase_timeout_seconds: float = 86400,
+    phase_max_attempts: int = 3,
     stage: Literal["all", "read-only", "mutating", "protected"] = "all",
 ) -> Path:
     """Collect normal waves then protected epochs, retaining all native Gym artifacts."""
@@ -209,8 +294,8 @@ def run(
     if not config.is_file():
         raise FileNotFoundError(f"Gym configuration does not exist: {config}")
     selected = set(by_id) if task_ids is None else task_ids
-    if not selected or not selected <= set(by_id) or concurrency < 1:
-        raise ValueError("select existing task IDs and positive concurrency")
+    if not selected or not selected <= set(by_id) or concurrency < 1 or phase_max_attempts < 1:
+        raise ValueError("select existing task IDs, positive concurrency and positive phase_max_attempts")
     state_root = state_root.expanduser().resolve()
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     output_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -232,6 +317,7 @@ def run(
         "protocol": "visualwebarena-clean-state-v1",
         "stage": stage,
         "requested_concurrency": concurrency,
+        "phase_max_attempts": phase_max_attempts,
         "run_id": run_id,
         "tasks": sorted(selected, key=int),
         "config": str(config.resolve()),
@@ -313,15 +399,20 @@ def run(
                     "--concurrency",
                     str(min(concurrency, len(ids))),
                 ]
-                _write_json(phase_dir / "command.json", command)
-                with (phase_dir / "collector.log").open("w") as log:
-                    collecting = True
-                    subprocess.run(
-                        command, check=True, timeout=phase_timeout_seconds, stdout=log, stderr=subprocess.STDOUT
+                collecting = True
+                results.extend(
+                    _collect_phase(
+                        phase_dir,
+                        command,
+                        ids,
+                        run_id=run_id,
+                        epoch=epoch,
+                        state_root=state_root,
+                        control=control,
+                        max_attempts=phase_max_attempts,
+                        timeout_seconds=phase_timeout_seconds,
                     )
-                if epoch:
-                    _write_json(phase_dir / "idle-after.json", control.require_idle())
-                results.extend(_check_results(phase_output, ids, run_id=run_id, epoch=epoch, state_root=state_root))
+                )
                 collecting = False
             combined = output_dir / "rollouts.jsonl"
             combined.write_text(
@@ -384,6 +475,7 @@ def main() -> None:
         "--task-ids", help="Comma-separated runtime row indices; input must still contain all 908 rows"
     )
     parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--phase-max-attempts", type=int, default=3)
     parser.add_argument("--stage", choices=["all", "read-only", "mutating", "protected"], default="all")
     args = parser.parse_args()
     control = SiteControl(
@@ -401,6 +493,7 @@ def main() -> None:
         control=control,
         task_ids=set(args.task_ids.split(",")) if args.task_ids else None,
         concurrency=args.concurrency,
+        phase_max_attempts=args.phase_max_attempts,
         stage=args.stage,
     )
 

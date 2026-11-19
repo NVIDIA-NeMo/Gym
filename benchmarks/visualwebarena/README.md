@@ -146,6 +146,25 @@ root; rollout verifier metadata carries the receipt hash. Direct collection of
 these eight tasks without their coordinator context fails as infrastructure
 instead of silently grading a contaminated site.
 
+The VisualWebArena profile allows three hours for session seeding within the
+existing four-hour rollout deadline. Same-site writers can wait behind other
+episodes before a browser is acquired; size this wait for the deployment's
+queue and keep it below the overall rollout deadline.
+
+Within one invocation, the coordinator allows up to three collection attempts
+per phase (`--phase-max-attempts`; use `1` to disable additional attempts).
+If Gym exits successfully but some task results are missing, it uses native
+`--resume` with a fresh infrastructure-attempt budget. The same phase input,
+run ID, epoch and filesystem lease remain active. Existing valid rows,
+including zero scores, must remain identical; only gaps are collected. Before
+a retry, all declared workers must prove cleanup and idle within the bounded
+control/phase deadline. Missing native manifests, changed cached results,
+invalid rows and collector-process errors abort the invocation. Each phase's
+overall timeout includes its attempts and cleanup waits. Completed rows and
+retry commands, logs, missing IDs and retained-row hashes stay in the phase
+directory. Process-level restarts still require deployment supervision and
+reconciliation of the existing run's state and recovery records.
+
 Use a fresh output directory. Native Gym phase inputs, collector logs,
 rollouts and recovery artifacts remain under it. The final merged output and
 summary are written only after every requested task has exactly one valid,

@@ -140,6 +140,8 @@ def test_nano_omni_profile_composes_without_output_repair(tmp_path) -> None:
     assert agent.nano_omni_parse_retry_delay_secs == 1.0
     assert agent.max_steps == 100
     assert agent.max_image_history == 3
+    # With32 loops,31 earlier five-minute writers can precede one queued seed.
+    assert 31 * 5 * 60 <= agent.seed_request_timeout_secs < agent.run_timeout_secs
     assert agent.max_task_image_bytes == 32 * 1024 * 1024
     assert agent.datasets[0].jsonl_fpath == "benchmarks/visualwebarena/data/visualwebarena.jsonl"
     assert agent.task_image_root == source_root

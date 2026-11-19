@@ -21,13 +21,15 @@ class _Control:
     def __init__(self):
         self.resets = 0
         self.busy = False
+        self.timeout_seconds = 0.02
+        self.poll_seconds = 0.001
 
     def reset(self):
         self.resets += 1
 
     def require_idle(self):
         if self.busy:
-            raise RuntimeError("worker still active")
+            raise getattr(runner, "_WorkersNotIdleError", RuntimeError)("worker still active")
         return [{"status": "ok", "sessions": 0}]
 
 
@@ -320,3 +322,131 @@ def test_next_normal_run_resets_state_left_by_success_or_failed_protected_epoch(
     arguments["output_dir"] = arguments["output_dir"].with_name("second-run")
     runner.run(**arguments, control=control, task_ids={"0"})
     assert control.resets == 2
+
+
+@pytest.mark.parametrize("task_ids", [{"0", "2"}, {"346", "678"}])
+def test_incomplete_collection_resumes_gaps_without_resetting_or_replaying_valid_zeroes(
+    collection_boundary, monkeypatch, task_ids
+):
+    arguments, calls, _ = collection_boundary
+    control = _Control()
+    policy_calls = []
+    commands = []
+    timeouts = []
+    retained_line = None
+    waited_for_cleanup = False
+    require_idle = control.require_idle
+
+    def idle_after_cleanup():
+        nonlocal waited_for_cleanup
+        if len(commands) == 1 and not waited_for_cleanup:
+            waited_for_cleanup = True
+            raise getattr(runner, "_WorkersNotIdleError", RuntimeError)("previous attempt is still closing")
+        return require_idle()
+
+    monkeypatch.setattr(control, "require_idle", idle_after_cleanup)
+
+    def collect(command, **kwargs):
+        nonlocal retained_line
+        commands.append(command)
+        timeouts.append(kwargs["timeout"])
+        inputs = runner._read_jsonl(runner.Path(command[command.index("--input") + 1]))
+        calls.append(inputs)
+        output = runner.Path(command[command.index("--output") + 1])
+        existing = runner._read_jsonl(output) if output.exists() else []
+        cached = {row["task_id"] for row in existing}
+        if cached:
+            assert "--resume" in command and "+resubmit=true" in command
+            assert output.read_text() == retained_line
+        else:
+            assert "--resume" not in command
+        assert control.resets == 1
+        pending = [row for row in inputs if row["web_task"]["task_id"] not in cached]
+        for item in pending[:1]:
+            task = WebTask.model_validate(item["web_task"])
+            policy_calls.append(task.task_id)
+            receipt = state.verify_initial_state(
+                task, None, {}, state_root=str(arguments["state_root"]), required=True
+            )
+            result = {
+                "benchmark": "visualwebarena",
+                "task_id": task.task_id,
+                "reward": 0 if not cached else 1,
+                "mask_sample": False,
+                "verifier_result": {"valid_sample": True, "metadata": {"shared_state": receipt}},
+            }
+            with output.open("a") as stream:
+                stream.write(json.dumps(result) + "\n")
+        if not cached:
+            retained_line = output.read_text()
+        output.with_name("rollouts_manifest.json").write_text("{}")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(runner.subprocess, "run", collect)
+    output = runner.run(**arguments, control=control, task_ids=task_ids)
+    assert len(commands) == 2 and control.resets == 1
+    assert waited_for_cleanup and timeouts[1] < timeouts[0]
+    assert set(policy_calls) == task_ids and len(policy_calls) == len(task_ids)
+    assert [row["reward"] for row in runner._read_jsonl(output)] == [0, 1]
+    summary = json.loads((arguments["output_dir"] / "summary.json").read_text())
+    assert summary["tasks"] == 2 and summary["raw_score"] == summary["full_successes"] == 1
+
+
+def test_missing_phase_outputs_have_a_bounded_retry_budget(collection_boundary, monkeypatch):
+    arguments, calls, _ = collection_boundary
+    control = _Control()
+
+    def collect(command, **kwargs):
+        calls.append(command)
+        output = runner.Path(command[command.index("--output") + 1])
+        output.write_text("")
+        output.with_name("rollouts_manifest.json").write_text("{}")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(runner.subprocess, "run", collect)
+    with pytest.raises(RuntimeError, match="missing or extra task IDs"):
+        runner.run(**arguments, control=control, task_ids={"0"})
+    assert len(calls) == 3 and control.resets == 1
+    assert not (arguments["output_dir"] / "summary.json").exists()
+
+
+@pytest.mark.parametrize("problem", ["busy", "no_manifest", "changed_cached"])
+def test_phase_resume_keeps_cleanup_manifest_and_cached_result_guards(collection_boundary, monkeypatch, problem):
+    arguments, calls, _ = collection_boundary
+    control = _Control()
+    count = 0
+
+    def collect(command, **kwargs):
+        nonlocal count
+        count += 1
+        output = runner.Path(command[command.index("--output") + 1])
+        rows = [
+            {
+                "task_id": "0",
+                "benchmark": "visualwebarena",
+                "reward": 0,
+                "mask_sample": False,
+                "verifier_result": {"valid_sample": True},
+            }
+        ]
+        if count == 2:
+            assert "--resume" in command
+            rows[0]["reward"] = 1
+            rows.append({**rows[0], "task_id": "2"})
+        output.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        if problem != "no_manifest":
+            output.with_name("rollouts_manifest.json").write_text("{}")
+        control.busy = problem == "busy"
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(runner.subprocess, "run", collect)
+    message = {
+        "busy": "worker still active",
+        "no_manifest": "native Gym manifest",
+        "changed_cached": "previously valid",
+    }[problem]
+    with pytest.raises(RuntimeError, match=message):
+        runner.run(**arguments, control=control, task_ids={"0", "2"})
+    assert count == (2 if problem == "changed_cached" else 1)
+    assert control.resets == 1 and not (arguments["output_dir"] / "summary.json").exists()
+    assert bool(list(arguments["state_root"].glob("requires-recovery-*.json"))) == (problem == "busy")
