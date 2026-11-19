@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, List
 
 import yaml
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 from rich.table import Table
 
 from nemo_gym._moved_paths import moved_names_getattr
@@ -971,20 +971,30 @@ def _rejudge_saved_judge_failures(
     else:
         run_config = dict(global_config_dict)
     scored = 0
+    raised = False
+    before = _saved_artifact_state(output)
     try:
         scored = asyncio.run(rejudge_saved_judge_failures(run_config, output))
     except Exception as error:  # an optional pass after the run is saved; recovery still sees the failures
+        raised = True
         print(f"Saved judge failures were not re-judged: {type(error).__name__}: {error}", flush=True)
     # A pass that raised after saving its grades can still have completed a strict run: settled completeness,
-    # not a normal return, decides whether its metrics are rebuilt.
+    # not a normal return, decides whether its metrics are rebuilt. A pass can also save evidence without returning
+    # a count: grades before it raised, or new judge failures from re-grades that all failed again. The saved files,
+    # not the count, show that.
+    changed = _saved_artifact_state(output) != before
     complete = complete_only and _saved_run_complete(output)
-    if not scored and not complete:
+    if not scored and not complete and not changed and not (complete_only and raised):
         return complete
     if scored:
         print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
     if collection_config.disable_aggregation or not aggregate:
         return complete
     if complete_only and not complete:
+        # A strict run that stays incomplete publishes no score, but its quality summary must describe the rows the
+        # pass settled: the aggregation that rewrites it is skipped with the metrics.
+        if scored or raised or changed:
+            _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
         return complete
     try:
         aggregation = RolloutAggregationConfig.model_validate(
@@ -1007,12 +1017,35 @@ class _SettledHealthSettings(RunHealthConfig):
     health_check_workers: int | None = None
     health_check_ignored_checks: List[str] = Field(default_factory=list)
 
+    @field_validator("health_check_ignored_checks", mode="before")
+    @classmethod
+    def _normalize_ignored_checks(cls, value: Any) -> List[str]:
+        """The forms collection and aggregation accept, a comma-separated string included."""
+        from nemo_gym.rollouts.rollout_health import normalize_ignored_checks
+
+        return list(normalize_ignored_checks(value))
+
+
+def _saved_artifact_state(output: Path) -> tuple[Any, ...]:
+    """The rollouts file and failures sidecar as saved, to tell whether a pass changed either."""
+    from nemo_gym.utils.path_utils import failures_path_for
+
+    state = []
+    for path in (output, failures_path_for(output)):
+        try:
+            stat = path.stat()
+            state.append((stat.st_size, stat.st_mtime_ns))
+        except OSError:
+            state.append(None)
+    return tuple(state)
+
 
 def _refresh_settled_source(
-    run_config: DictConfig | Mapping[str, Any], output: Path, *, workdir: Path
+    run_config: DictConfig | Mapping[str, Any], output: Path, *, workdir: Path, metrics: bool = True
 ) -> dict[str, bool]:
     """Recompute the settled run's aggregate metrics in place and rewrite its quality summary from the settled rows,
-    as the run's own completion does after its saved-answer pass.
+    as the run's own completion does after its saved-answer pass. ``metrics=False`` rewrites only the quality summary,
+    for a strict run that stays incomplete and publishes no score.
 
     A settled run's rollouts file holds superseded outcomes (a masked row and the grade that settled it). A health
     check that selects the Store's attempts itself reads it as it is; an earlier one reads it only through a
@@ -1032,11 +1065,12 @@ def _refresh_settled_source(
         run_config = dict(run_config)
     refreshed = {"metrics_recomputed": False, "health_summary_recomputed": False}
     try:
-        aggregation = RolloutAggregationConfig.model_validate(
-            run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
-        )
-        asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
-        refreshed["metrics_recomputed"] = True
+        if metrics:
+            aggregation = RolloutAggregationConfig.model_validate(
+                run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
+            )
+            asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
+            refreshed["metrics_recomputed"] = True
     except Exception as error:
         print(
             f"Metrics were not recomputed after the re-judgment ({type(error).__name__}: {error}); "
