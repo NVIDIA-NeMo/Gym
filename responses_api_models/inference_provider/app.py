@@ -22,7 +22,7 @@ For training workloads that require token IDs, use vllm_model instead.
 
 from asyncio import Semaphore
 from time import time
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from fastapi import Request
 from pydantic import Field
@@ -40,12 +40,47 @@ from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
+def _reasoning_to_fields(messages: List[Dict[str, Any]], *, interleaved: bool) -> None:
+    """Move replayed assistant reasoning into the provider's reasoning fields.
+
+    Responses history is converted to Chat Completions with reasoning represented as
+    ``<think>`` tags. Providers that run a reasoning parser need the prior reasoning
+    in their structured fields to preserve the model's working state across turns.
+    """
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+
+        reasoning: Optional[str] = None
+        content = message.get("content")
+        if isinstance(content, str):
+            matches, remaining_content = ChatCompletionsConverter._parse_think_tags(content)
+            message["content"] = remaining_content
+            if matches:
+                reasoning = matches[0]
+        elif isinstance(content, list):
+            for content_item in content:
+                if not isinstance(content_item, dict) or not isinstance(content_item.get("text"), str):
+                    continue
+                matches, remaining_content = ChatCompletionsConverter._parse_think_tags(content_item["text"])
+                content_item["text"] = remaining_content
+                if matches and reasoning is None:
+                    reasoning = matches[0]
+
+        if reasoning and interleaved:
+            message["reasoning_content"] = reasoning
+            message["reasoning"] = reasoning
+
+
 class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     base_url: str
     api_key: str
     model: str
 
     uses_reasoning_parser: bool = False
+    # Replay prior assistant reasoning in the provider's structured fields, matching vllm_model.
+    # Disable this for providers that reject reasoning_content/reasoning on assistant messages.
+    uses_interleaved_reasoning: bool = True
     num_concurrent_requests: int = 1000
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
@@ -109,13 +144,7 @@ class InferenceProvider(SimpleResponsesAPIModel):
                 body_dict["user"] = rollout_id
 
         if self.config.uses_reasoning_parser:
-            for message_dict in body_dict.get("messages", []):
-                if message_dict.get("role") != "assistant" or "content" not in message_dict:
-                    continue
-                content = message_dict["content"]
-                if isinstance(content, str):
-                    _, remaining_content = self._converter._extract_reasoning_from_content(content)
-                    message_dict["content"] = remaining_content
+            _reasoning_to_fields(body_dict.get("messages", []), interleaved=self.config.uses_interleaved_reasoning)
 
         async with self._semaphore:
             chat_completion_dict = await self._client.create_chat_completion(**body_dict)
