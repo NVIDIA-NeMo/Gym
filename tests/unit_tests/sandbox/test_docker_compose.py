@@ -2261,7 +2261,7 @@ async def test_forwarding_and_volumes_of_a_service_on_its_own_provider_go_throug
         assert helper.metadata == expected and seed.metadata == expected
         assert side.metadata["storage"] == "gpu"
         assert seed.provider_options["volumes"] == [
-            {"source": f"{group.project}/data", "target": "/tmp/compose-volumes", "read_only": False, "storage": "gpu"}
+            {"source": f"{group.project}/data", "target": "/.nemo-gym-copy-up", "read_only": False, "storage": "gpu"}
         ]
         assert side.provider_options["volumes"] == [
             {"source": f"{group.project}/data", "target": "/data", "read_only": False, "storage": "gpu"}
@@ -2311,10 +2311,10 @@ async def test_the_volume_copy_up_seed_keeps_the_services_pull_policy(policy, ma
         },
     ) as group:
         helper, seed, app = provider.created
-        copy_up = {"source": f"{group.project}/data", "target": "/tmp/compose-volumes", "read_only": False}
+        copy_up = {"source": f"{group.project}/data", "target": "/.nemo-gym-copy-up", "read_only": False}
         data = {"source": f"{group.project}/data", "target": "/data", "read_only": False}
         assert helper.image == "alpine:3.22" and helper.provider_options == {
-            "volumes": [{**copy_up, "source": None, "storage": "cpu"}]
+            "volumes": [{"source": None, "target": "/tmp/compose-volumes", "read_only": False, "storage": "cpu"}]
         }
         assert seed.image == "img" and seed.provider_options == {
             "run_args": ["--init"],
@@ -2327,6 +2327,47 @@ async def test_the_volume_copy_up_seed_keeps_the_services_pull_policy(policy, ma
             "volumes": [caller_mount, {**data, "storage": "cpu"}],
         }
         assert group.pull_policies == {"app": policy}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target, staging",
+    [
+        ("/tmp", "/.nemo-gym-copy-up"),
+        ("/tmp/compose-volumes", "/.nemo-gym-copy-up"),
+        ("/.nemo-gym-copy-up", "/.nemo-gym-copy-up-1"),
+        ("/.nemo-gym-copy-up/data/", "/.nemo-gym-copy-up-1"),
+    ],
+)
+async def test_the_copy_up_seed_stages_the_volume_outside_the_image_directory_it_copies(target, staging):
+    """Review: the seed mounted the volume at the helper's root, ``/tmp/compose-volumes``, so a target of ``/tmp``
+    ran ``cp -a /tmp/. /tmp/compose-volumes/`` (a copy into itself) and a target of that root copied the empty
+    volume instead of the image's files. The seed stages the volume at a path that is neither the target nor inside
+    it, and checks and copies into that path; the helper and the service keep their own mount targets."""
+    provider = RecordingProvider("cpu", 1)
+    document = {
+        "services": {"app": {"image": "img", "volumes": [{"type": "volume", "source": "data", "target": target}]}},
+        "volumes": {"data": {}},
+    }
+    async with make_compose(provider, document, default_command=["sleep", "1"], poll_interval_s=0.01) as group:
+        helper, seed, app = provider.created
+        source = f"{group.project}/data"
+        assert [mount["target"] for mount in helper.provider_options["volumes"]] == ["/tmp/compose-volumes"]
+        assert seed.provider_options["volumes"] == [
+            {"source": source, "target": staging, "read_only": False, "storage": "cpu"}
+        ]
+        assert app.provider_options["volumes"] == [
+            {"source": source, "target": target, "read_only": False, "storage": "cpu"}
+        ]
+        (copy,) = [command for _, command, _ in provider.execs if "cp -a" in command]
+        quoted = shlex.quote(target)
+        assert copy == (
+            f'if test -n "$(ls -A {staging})"; then :; '
+            f"elif test -d {quoted}; then cp -a {quoted}/. {staging}/; "
+            f"elif test -e {quoted}; then exit 1; fi"
+        )
+        normalized = target.rstrip("/") + "/"
+        assert not (staging + "/").startswith(normalized) and not normalized.startswith(staging + "/")
 
 
 @pytest.mark.asyncio

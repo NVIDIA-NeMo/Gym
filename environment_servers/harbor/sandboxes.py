@@ -54,6 +54,7 @@ from nemo_gym.data.tasks.harbor import (
     check_task_compose_fields,
     check_task_compose_services,
     check_task_sidecar_extra_hosts,
+    exec_as_any_user_sidecars,
     load_compose_document,
     overlay_files,
     plan_task_compose_volumes,
@@ -489,8 +490,9 @@ class HarborSandboxMixin:
         """The checks prepare ran on the task's Compose document, with this deployment's inputs: ``main``'s restated
         build dropped, the field check against the providers the services run on, the volume planner against the
         blocks' ``volume_sources``, the services the task's artifacts and collect hooks name present in the merged
-        document, and no ``extra_hosts`` on a sidecar whose recorded image runs as a non-root user (``image_configs``
-        is the record file the seed already read, or it is read here). Mutates and returns ``document`` (its fields
+        document, and no ``extra_hosts`` on a sidecar whose recorded image runs as a non-root user, unless its
+        provider runs each command as any user (``image_configs`` is the record file the seed already read, or it is
+        read here). Mutates and returns ``document`` (its fields
         in their normalized forms, its bind mounts planned). The seed runs it before anything is provisioned, so a
         document the deployment cannot run (a job-level overlay file with a field the group cannot run, a bind
         source no ``volume_sources`` entry maps, a service reset away that a collect hook names, host entries on a
@@ -499,7 +501,6 @@ class HarborSandboxMixin:
         ``_compose_document`` runs it again on the document the group starts. Raises :class:`ImageConfigError` or
         :class:`HarborTaskError` naming the task, the files and the field."""
         global_config_dict = get_global_config_dict()
-        provider = resolve_provider_config(self._provider_ref(task), global_config_dict)
         if task.built_image is None:
             # A pull or overlay task's main build: (and the pull_policy: build that goes with it) that only restates
             # Harbor's own build of the Dockerfile is dropped; a key that would change the image is the task's
@@ -512,16 +513,12 @@ class HarborSandboxMixin:
         # sidecar against the GPU block's) and `platform` against this deployment's, so a field the deployment cannot
         # apply fails here, before a sandbox. A provider instance in place of the config (tests) has no registry
         # name; the adapter checks it live.
-        gpu_provider = (
-            resolve_provider_config(self.config.gpu_sandbox_provider, global_config_dict)
-            if self.config.gpu_sandbox_provider
-            else None
-        )
+        provider, gpu_provider = self._compose_provider_names(task, global_config_dict)
         check_task_compose_fields(
             task,
             document,
-            provider=_provider_name(provider),
-            gpu_provider=_provider_name(gpu_provider),
+            provider=provider,
+            gpu_provider=gpu_provider,
             platform=self._compose_platform(),
             overlay=self.config.compose_overlay,
         )
@@ -537,13 +534,34 @@ class HarborSandboxMixin:
         )
         # The two checks prepare runs after those, in its order: the services the task's artifacts and collect hooks
         # name are in the merged document (an overlay file can reset one away), and a sidecar whose recorded image
-        # runs as a non-root user declares no extra_hosts (the group starts it without host injection;
-        # `adapt_non_root_sidecars` would raise the same inside the group's start).
+        # runs as a non-root user declares no extra_hosts unless its provider runs each command as any user (the
+        # group starts it without host injection; `adapt_non_root_sidecars` would raise the same inside the start).
         check_task_compose_services(task, document, overlay=self.config.compose_overlay)
         if image_configs is None:
             image_configs = self._compose_image_configs(task)
-        check_task_sidecar_extra_hosts(task, document, image_configs, overlay=self.config.compose_overlay)
+        check_task_sidecar_extra_hosts(
+            task,
+            document,
+            image_configs,
+            provider=provider,
+            gpu_provider=gpu_provider,
+            overlay=self.config.compose_overlay,
+        )
         return document
+
+    def _compose_provider_names(
+        self, task: HarborTask, global_config_dict: Mapping[str, Any]
+    ) -> tuple[str | None, str | None]:
+        """The registry names of the task's block's provider (the GPU block's when the task declares GPUs) and of
+        the GPU block's (``None`` without one), which the per-service checks route each service between as the
+        group does. A provider instance in place of the config (tests) has no registry name: ``None``."""
+        provider = resolve_provider_config(self._provider_ref(task), global_config_dict)
+        gpu_provider = (
+            resolve_provider_config(self.config.gpu_sandbox_provider, global_config_dict)
+            if self.config.gpu_sandbox_provider
+            else None
+        )
+        return _provider_name(provider), _provider_name(gpu_provider)
 
     def _compose_document(self, task: HarborTask, episode_key: str | None = None) -> dict[str, Any]:
         """The published overlay (with the job-level overlay files merged on) resolved against recorded image
@@ -565,9 +583,16 @@ class HarborSandboxMixin:
         # each recorded image has to be for (and the one `_compose_platform` spelled for the field check above).
         platform = sandbox_platform(self.config.sandbox_provider_options)
         document = resolve_compose(document, task.image, image_configs, platform=platform)
-        # A non-root sidecar runs without host injection and so takes no extra_hosts: prepare and the check above
-        # refused that already.
-        adapt_non_root_sidecars(document, image_configs)
+        # A non-root sidecar runs without host injection and so takes no extra_hosts (prepare and the check above
+        # refused that already), unless its provider runs each command as any user: it keeps its user and hosts.
+        provider_name, gpu_provider_name = self._compose_provider_names(task, global_config_dict)
+        adapt_non_root_sidecars(
+            document,
+            image_configs,
+            exec_as_any_user=exec_as_any_user_sidecars(
+                task, document, provider=provider_name, gpu_provider=gpu_provider_name
+            ),
+        )
         if "opensandbox" in provider:
             opensandbox_shm_labels(document)
         # Checked above too (`check_task_compose_services`, before the resolution): the last line before the adapter.

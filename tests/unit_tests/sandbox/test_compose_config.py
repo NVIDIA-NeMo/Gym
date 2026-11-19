@@ -129,6 +129,30 @@ def test_non_root_sidecars_keep_their_user_and_resolve_peer_urls():
     assert "x-sandbox" not in workspace
 
 
+def test_a_non_root_sidecar_on_a_provider_that_runs_commands_as_any_user_keeps_its_user_and_hosts():
+    """Docker names each command's user itself (``SupportsSandboxExecAsAnyUser``): a sidecar there keeps the user
+    resolution gave it, an explicit Compose ``user`` over its image's or the image's own, takes host injection and
+    may declare ``extra_hosts``. The workaround stays for the other sidecars of the same document."""
+    overlay = deepcopy(OVERLAY)
+    overlay["services"]["browser"]["user"] = "2000"
+    overlay["services"]["browser"]["extra_hosts"] = {"licence.example": "198.51.100.7"}
+    overlay["services"]["other"] = {"image": SIDECAR, "environment": ["BROWSER_URL=http://workspace:18073"]}
+    document = resolve_compose(overlay, MAIN, IMAGE_CONFIGS)
+    assert non_root_sidecar_users(document, IMAGE_CONFIGS, exec_as_any_user={"browser"}) == {"other": "pwuser"}
+    check_sidecar_extra_hosts(document, IMAGE_CONFIGS, exec_as_any_user={"browser"})
+    adapted = adapt_non_root_sidecars(deepcopy(document), IMAGE_CONFIGS, exec_as_any_user={"browser"})
+    browser = adapted["services"]["browser"]
+    assert browser["user"] == "2000" and "x-sandbox" not in browser
+    assert browser["extra_hosts"] == {"licence.example": "198.51.100.7"}
+    assert adapter_plans(adapted)["browser"]["user"] == 2000
+    # The image's own non-root user stays too, as the user every command of the sidecar names.
+    both = adapt_non_root_sidecars(deepcopy(document), IMAGE_CONFIGS, exec_as_any_user={"browser", "other"})
+    assert both["services"]["other"]["user"] == "pwuser" and "x-sandbox" not in both["services"]["other"]
+    # `other` runs where users switch inside the sandbox: on its image's user, without host injection.
+    assert "user" not in adapted["services"]["other"]
+    assert adapted["services"]["other"]["x-sandbox"] == {"hosts": [], "resolve_environment": ["BROWSER_URL"]}
+
+
 def test_explicit_entrypoint_does_not_inherit_image_cmd_and_healthcheck_defaults():
     configs = {
         MAIN: IMAGE_CONFIGS[MAIN],
