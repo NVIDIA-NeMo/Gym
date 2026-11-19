@@ -15570,6 +15570,209 @@ class TestRunRecordWriter:
         if record_omitted:
             assert failures[1][TASK_INDEX_KEY_NAME] == 2 and failures[1][NG_OMITTED_ROLLOUT_KEY] is True
 
+    def test_the_sink_receives_each_record_as_the_shard_holds_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        received: list[tuple[str, dict]] = []
+        writer = _RunRecordWriter(
+            tmp_path, "step_1", record_omitted_rollouts=True, sink=lambda kind, record: received.append((kind, record))
+        )
+        writer.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+        writer.write({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "agent_run_error"})
+        writer.write(
+            {
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "kill_shaped",
+                NG_NO_PERSIST_KEY: True,
+            }
+        )
+
+        assert [kind for kind, _ in received] == ["rollout", "failure", "omitted"]
+        assert [record for _, record in received] == self._lines(writer.rollouts_fpath) + self._lines(
+            writer.failures_fpath
+        )
+
+    def test_the_sink_gets_nothing_the_shard_does_not_keep(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        received: list[str] = []
+        writer = _RunRecordWriter(tmp_path, "step_1", sink=lambda kind, record: received.append(kind))
+        writer.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_NO_PERSIST_KEY: True})
+        superseded = writer
+        _RunRecordWriter(tmp_path, "step_1")
+        with pytest.raises(RuntimeError, match="replaced by another writer"):
+            superseded.write({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+
+        assert received == []
+
+    def test_a_sink_that_raises_leaves_the_record_and_later_records_in_place(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        received: list[dict] = []
+
+        def sink(kind: str, record: dict) -> None:
+            if record[TASK_INDEX_KEY_NAME] == 0:
+                raise OSError("table store unavailable")
+            received.append(record)
+
+        rows = [
+            {TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "a"}}
+            for index in range(2)
+        ]
+        writer = _RunRecordWriter(tmp_path, "step_1", sink=sink, status_rows=rows)
+        with pytest.raises(OSError, match="table store unavailable"):
+            writer.write({**rows[0], "reward": 1.0})
+        writer.write({**rows[1], "reward": 0.0})
+        writer.flush_status()
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in self._lines(writer.rollouts_fpath)] == [0, 1]
+        assert [record[TASK_INDEX_KEY_NAME] for record in received] == [1]
+        status = json.loads(writer.status_fpath.read_text())
+        assert status["members"]["a"]["completed_rollout_count"] == 2
+
+    def test_a_sink_that_edits_its_record_leaves_the_shard_and_its_status_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.rollouts import batch_status
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        # Every write but the last is throttled, so the status still holds the earlier rows when the sink edits them.
+        monkeypatch.setattr(batch_status, "BATCH_STATUS_WRITE_INTERVAL_SECONDS", 3600)
+
+        def sink(kind: str, record: dict) -> None:
+            record[AGENT_REF_KEY_NAME]["name"] = "table-a"
+
+        rows = [
+            {TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "a"}}
+            for index in range(3)
+        ]
+        writer = _RunRecordWriter(tmp_path, "step_1", sink=sink, rows=rows, status_rows=rows)
+        for row in rows:
+            writer.write({**row, "reward": 1.0})
+
+        assert {row[AGENT_REF_KEY_NAME]["name"] for row in self._lines(writer.rollouts_fpath)} == {"a"}
+        status = json.loads(writer.status_fpath.read_text())
+        assert status["tracking"] == "enabled"
+        member = status["members"]["a"]
+        assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (3, 0)
+
+    async def test_a_replayed_label_replaces_the_shard_but_not_what_the_sink_received(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import RUN_ID_KEY
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for row in examples:
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(row=row, result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                    )
+                    futures.append(future)
+                return iter(futures)
+
+        rows = [
+            TestEnrichRunResult._row("g1_g0_a0"),
+            {**TestEnrichRunResult._row("g2_g0_a0"), TASK_INDEX_KEY_NAME: 4, ROLLOUT_INDEX_KEY_NAME: 0},
+        ]
+        received: list[dict] = []
+        run_dir = tmp_path / "run"
+        for _ in range(2):
+            for completion in Helper().run_examples(
+                rows,
+                record_output_dir=run_dir,
+                record_shard="step_1",
+                record_sink=lambda kind, record: received.append(record),
+            ):
+                await completion
+
+        shard = self._lines(run_dir / "rollouts-step_1.jsonl")
+        assert (len(shard), len(received)) == (2, 4)
+        # Each record names the call that wrote it, so the caller keeps the last call's records for the label.
+        replay = shard[0][RUN_ID_KEY]
+        assert {record[RUN_ID_KEY] for record in shard} == {replay}
+        assert len({record[RUN_ID_KEY] for record in received}) == 2
+        assert [record for record in received if record[RUN_ID_KEY] == replay] == shard
+
+    def test_an_async_sink_is_refused(self, tmp_path: Path) -> None:
+        async def sink(kind: str, record: dict) -> None:
+            pass
+
+        class Sink:
+            async def __call__(self, kind: str, record: dict) -> None:
+                pass
+
+        for refused in (sink, Sink()):
+            with pytest.raises(TypeError, match="called, not awaited"):
+                RolloutCollectionHelper().run_examples(
+                    [], record_output_dir=tmp_path, record_shard="s", record_sink=refused
+                )
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_the_sink_gets_a_failure_row_with_the_model_calls_made_before_it_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Through the real dispatcher: the returned typed record leaves the calls out, the sink's failure row has them."""
+        from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        capture_dir = tmp_path / "capture"
+        failure = {
+            NG_FAILURE_CLASS_KEY: "agent_request_failed",
+            "failure_kind": "agent_request_failed",
+            "failure_reason": "tool crashed",
+            "ng_agent_observations": {"source": "agent", "records": []},
+        }
+
+        async def post(*args, **kwargs):
+            TestEnrichRunResult._store_call(
+                capture_dir, maybe_rollout_id_from_run_body(kwargs["json"]), "c1", "before"
+            )
+            return FakeResponse(200, dict(failure))
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        setup = RolloutCollectionHelper.setup_server_client
+
+        def with_capture(helper, head_server_config=None):
+            client = setup(helper, head_server_config)
+            client.global_config_dict = {
+                **(client.global_config_dict or {}),
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+            }
+            return client
+
+        monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", with_capture)
+        received: list[tuple[str, dict]] = []
+        run_dir = tmp_path / "run"
+        [completion] = list(
+            RolloutCollectionHelper().run_examples(
+                [failing_row()],
+                record_output_dir=run_dir,
+                record_shard="s",
+                route_failures_to_sidecar=True,
+                record_sink=lambda kind, record: received.append((kind, record)),
+            )
+        )
+        _, returned = await completion
+
+        assert isinstance(returned, RolloutFailureRecord)
+        [(kind, record)] = received
+        assert kind == "failure" and [record] == self._lines(run_dir / "rollouts-s_failures.jsonl")
+        assert [call["model_call_id"] for call in record["ng_trajectory"]["model_calls"]] == ["c1"]
+        assert record["ng_agent_observations"]["source"] == "agent"
+        assert record["_ng_failure_record"]["failure"]["failure_reason"] == "tool crashed"
+
+    def test_a_sink_without_a_shard_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="record_sink .* needs record_output_dir"):
+            RolloutCollectionHelper().run_examples([failing_row()], record_sink=lambda kind, record: None)
+
     def test_reopening_a_shard_replaces_it(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
 
