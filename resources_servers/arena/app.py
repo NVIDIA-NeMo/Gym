@@ -36,7 +36,7 @@ from nemo_gym.server_runtime import (
     observe_llm_judge_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
+from nemo_gym.verification import call_judge, record_parsed_judge_verdict
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,
@@ -50,7 +50,7 @@ from resources_servers.arena.taxonomy import get_prompt_slices
 
 logger = logging.getLogger(__name__)
 
-JUDGE_CONTENT_FILTERED = "arena:judge_content_filtered"
+JUDGE_NO_VERDICT = "arena:judge_no_verdict"
 
 
 class ArenaResourcesServerConfig(BaseResourcesServerConfig):
@@ -248,66 +248,52 @@ class ArenaResourcesServer(SimpleResourcesServer):
             if not images:
                 raise ValueError("vision_arena_v1 requires prompt images")
 
-        async def grade() -> ArenaVerifyResponse:
-            # Run both game orderings concurrently to reduce latency. If one fails, the other is cancelled and
-            # awaited before the failure propagates, so it does not keep a judge slot after the row is returned.
-            orderings = [
+        # Game 1 puts the policy answer first, game 2 the baseline answer.
+        pairs = [(policy_answer, body.baseline_answer), (body.baseline_answer, policy_answer)]
+
+        async def play(indexes: list[int]) -> list[ArenaGame]:
+            # Run the games concurrently to reduce latency. If one fails, the others are cancelled and awaited
+            # before the failure propagates, so none keeps a judge slot after the row is returned.
+            games = [
                 asyncio.ensure_future(
-                    self._run_judge_game(
-                        body.question,
-                        policy_answer,
-                        body.baseline_answer,
-                        system_message,
-                        prompt_template,
-                        images=images,
-                    )
-                ),
-                asyncio.ensure_future(
-                    self._run_judge_game(
-                        body.question,
-                        body.baseline_answer,
-                        policy_answer,
-                        system_message,
-                        prompt_template,
-                        images=images,
-                    )
-                ),
+                    self._run_judge_game(body.question, *pairs[index], system_message, prompt_template, images=images)
+                )
+                for index in indexes
             ]
             try:
-                game1, game2 = await asyncio.gather(*orderings)
+                return list(await asyncio.gather(*games))
             except BaseException:
-                for ordering in orderings:
-                    ordering.cancel()
-                await asyncio.gather(*orderings, return_exceptions=True)
+                for game in games:
+                    game.cancel()
+                await asyncio.gather(*games, return_exceptions=True)
                 raise
 
-            # The judge provider's content filter blocks the same game on every retry: keep the row as a terminal
-            # masked outcome (no _ng_failure_class), excluded from the score but not left for re-judging.
-            if filtered := [
-                f"game {index}"
-                for index, game in enumerate((game1, game2), start=1)
-                if game.response.incomplete_details and game.response.incomplete_details.reason == "content_filter"
+        async def grade() -> ArenaVerifyResponse:
+            games = await play([0, 1])
+            # A game without a verdict (output cut at its token cap, filtered, empty or without a label) is asked
+            # once more: a judge that stalls in its reasoning often gives a verdict on the next call.
+            if retry := [index for index, game in enumerate(games) if game.verdict is None]:
+                for index, game in zip(retry, await play(retry)):
+                    games[index] = game
+            game1, game2 = games
+
+            # A game still without a verdict is a judge fault, not a policy loss. The row stays in the run with
+            # reward 0: the win rates leave it out and count it as a failed rollout, which max_rollout_failure_rate
+            # bounds. A failed judge call still raises, and judge_failsafe masks that row for re-judging.
+            if missing := [
+                f"game {index} ({self._describe_missing_verdict(game.response)})"
+                for index, game in enumerate(games, start=1)
+                if game.verdict is None
             ]:
                 return ArenaVerifyResponse(
                     **body.model_dump(),
                     reward=0.0,
-                    mask_sample=True,
-                    failure_kind=JUDGE_CONTENT_FILTERED,
-                    failure_reason="The judge's content filter blocked " + " and ".join(filtered),
+                    failure_kind=JUDGE_NO_VERDICT,
+                    failure_reason="The judge gave no verdict for " + " and ".join(missing),
                     policy_answer=policy_answer,
                     policy_reasoning=policy_reasoning,
-                    games=[game1, game2],
+                    games=games,
                 )
-
-            # A game without a verdict is a judge fault (output cut at its token cap, empty or without a label),
-            # not a policy loss: fail the row so judge_failsafe types it judge_failed, masks it and leaves its
-            # saved answer to be judged again.
-            if missing := [
-                f"game {index} ({self._describe_missing_verdict(game.response)})"
-                for index, game in enumerate((game1, game2), start=1)
-                if game.verdict is None
-            ]:
-                raise JudgeError("The judge gave no verdict for " + " and ".join(missing))
 
             # Game 1: policy is A. Game 2: policy is B.
             # Strong verdicts (>>) are counted `verdict_weight` times.
