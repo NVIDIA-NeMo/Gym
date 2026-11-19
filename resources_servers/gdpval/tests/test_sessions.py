@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxExecResult
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
@@ -500,6 +500,66 @@ def test_a_close_whose_stop_fails_still_frees_the_directory_for_a_retry(
     )
 
     assert _post_seed(client, retry).status_code == 200
+
+
+def _failing_starts(monkeypatch, *errors: BaseException) -> list[AsyncSandbox]:
+    """Make the first sandbox starts raise ``errors`` in order, then start for real; returns every sandbox started."""
+    started: list[AsyncSandbox] = []
+    pending = list(errors)
+    real_start = AsyncSandbox.start
+
+    async def start(self: AsyncSandbox, spec=None, **kwargs):
+        started.append(self)
+        if pending:
+            raise pending.pop(0)
+        return await real_start(self, spec, **kwargs)
+
+    monkeypatch.setattr(AsyncSandbox, "start", start)
+    return started
+
+
+def test_a_sandbox_that_was_not_ready_in_time_is_replaced_by_a_new_one(server, root, tmp_path, monkeypatch):
+    started = _failing_starts(monkeypatch, SandboxCreateError("sandbox was not ready within 300s"))
+    client = TestClient(server.setup_webserver())
+
+    assert _post_seed(client, _seed(tmp_path)).status_code == 200
+
+    assert len(started) == 2
+    assert started[0] is not started[1]
+    assert (root / REFERENCE).read_text() == "the brief"
+
+
+def test_a_seed_fails_once_every_start_attempt_failed_and_releases_its_claim(tmp_path, root, monkeypatch, references):
+    server = _server(tmp_path, sandbox_start_attempts=3)
+    errors = [SandboxCreateError(f"attempt {n} not ready") for n in range(1, 4)]
+    started = _failing_starts(monkeypatch, *errors)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+
+    failed = _post_seed(client, _seed(tmp_path, session_id="a"))
+
+    assert failed.status_code == 500
+    assert len(started) == 3
+    assert list(references.iterdir()) == []
+    assert _post_seed(client, _seed(tmp_path, session_id="b")).status_code == 200
+
+
+def test_a_start_failure_that_is_not_a_create_error_is_not_retried(server, root, tmp_path, monkeypatch):
+    started = _failing_starts(monkeypatch, ValueError("invalid sandbox spec"))
+
+    with pytest.raises(ValueError, match="invalid sandbox spec"):
+        _post_seed(TestClient(server.setup_webserver()), _seed(tmp_path))
+
+    assert len(started) == 1
+
+
+def test_one_start_attempt_keeps_the_first_failure(tmp_path, root, monkeypatch):
+    server = _server(tmp_path, sandbox_start_attempts=1)
+    started = _failing_starts(monkeypatch, SandboxCreateError("not ready"))
+
+    with pytest.raises(SandboxCreateError, match="not ready"):
+        _post_seed(TestClient(server.setup_webserver()), _seed(tmp_path))
+
+    assert len(started) == 1
 
 
 def test_sessions_of_different_repeats_do_not_conflict(server, root, tmp_path, references):

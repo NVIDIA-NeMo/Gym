@@ -57,6 +57,10 @@ architecture your sandboxes run on; an arm64 build leaves out the pins in
 `sandbox_config.provider_options.image_auth: {username: ..., password: ...}`, and select the architecture with
 `sandbox_config.provider_options.platform: {os: linux, arch: arm64}` when it is not the provider's default.
 
+A sandbox the provider cannot create, or that is not ready within the provider's timeout, is replaced by a new one:
+each seed starts up to `sandbox_start_attempts` sandboxes (default 2) before it fails. This covers the timeouts a
+provider hits when many sandboxes start at once, at the start of a large run.
+
 ## Office to PDF conversion
 
 The judge reads Office deliverables as PDFs that LibreOffice renders. Comparison mode preconverts them beside the

@@ -24,7 +24,7 @@ from typing import Any, Mapping, Optional, Sequence
 from fastapi import HTTPException
 
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxConfig, resolve_provider_config
+from nemo_gym.sandbox import AsyncSandbox, SandboxConfig, SandboxCreateError, resolve_provider_config
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.preconvert import (
     OFFICE_EXTENSIONS,
@@ -64,8 +64,13 @@ async def start_task_sandbox(
     reference_dir: Path,
     reference_files: list[str],
     workdir: Optional[str] = None,
+    start_attempts: int = 1,
 ) -> AsyncSandbox:
-    """Start a sandbox and stage the task's reference files under the working directory."""
+    """Start a sandbox and stage the task's reference files under the working directory.
+
+    A start that fails with ``SandboxCreateError`` (the provider could not create the sandbox, or it was not ready
+    in time) is retried with a new sandbox, up to ``start_attempts`` starts in all.
+    """
     if not sandbox_config.image:
         raise ValueError(
             "Set sandbox_config.image (or GDPVAL_SANDBOX_IMAGE) to an OCI image built from "
@@ -79,8 +84,22 @@ async def start_task_sandbox(
         metadata={"task_id": task_id},
         named_configs=global_config_dict,
     )
-    sandbox = AsyncSandbox(resolve_provider_config(sandbox_provider, global_config_dict))
-    await sandbox.start(spec)
+    provider_config = resolve_provider_config(sandbox_provider, global_config_dict)
+    for attempt in range(1, start_attempts + 1):
+        sandbox = AsyncSandbox(provider_config)
+        try:
+            await sandbox.start(spec)
+            break
+        except SandboxCreateError as error:
+            if attempt == start_attempts:
+                raise
+            LOGGER.warning(
+                "Sandbox for task %s failed to start (attempt %d of %d), retrying: %s",
+                task_id,
+                attempt,
+                start_attempts,
+                error,
+            )
     try:
         for rel_path in reference_files:
             await sandbox.upload(reference_dir / rel_path, sandbox_path(rel_path, workdir))

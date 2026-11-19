@@ -456,6 +456,9 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # Names a top-level sandbox provider block.
     sandbox_provider: str
     sandbox_config: GDPValSandboxConfig
+    # Sandboxes started per seed before it fails. A provider that is slow while many sandboxes start at once
+    # times out some of them; a new sandbox a few minutes later usually starts.
+    sandbox_start_attempts: int = Field(default=2, ge=1)
 
 
 # Tool descriptions and request-model titles reproduce the tool JSON of the certified runs.
@@ -863,6 +866,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     reference_dir=reference_dir,
                     reference_files=reference_files,
                     workdir=self._sandbox_workdir,
+                    start_attempts=self.config.sandbox_start_attempts,
                 )
             except BaseException:
                 self._claimed_directories.pop(directory, None)
