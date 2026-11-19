@@ -111,6 +111,50 @@ def test_a_setup_of_a_shadowed_manifest_does_not_take_its_name_from_a_later_root
     assert _selected("suite/fast") == _listed("suite/fast") == declared.with_name("config.yaml").resolve()
 
 
+def test_a_process_reads_each_tree_once_for_several_selections(
+    roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import nemo_gym.environment.registry as registry
+
+    _, later = roots
+    for name in ("alpha", "beta", "gamma"):
+        _write_manifest(later, "environments", name, _manifest(name))
+    reads: list[Path] = []
+
+    def counted(tree: Path):
+        reads.append(tree)
+        return declared_manifests(tree)
+
+    declared_manifests = registry.declared_manifests
+    monkeypatch.setattr(registry, "declared_manifests", counted)
+    for name in ("alpha", "beta", "gamma", "alpha"):
+        assert _selected(name) == (later / "environments" / name / "config.yaml").resolve()
+
+    # The earlier root has no environments/ tree, so it holds no name and is read again for each one.
+    assert reads.count(later / "environments") == 1
+
+
+def test_a_manifest_that_changes_moves_or_is_added_during_the_process_is_seen(roots: tuple[Path, Path]) -> None:
+    _, later = roots
+    demo = _write_manifest(later, "environments", "demo", _manifest("demo"))
+    assert _selected("demo") == demo.with_name("config.yaml").resolve()
+
+    # Changed: the manifest now runs another config.
+    demo.with_name("other.yaml").write_text("{}\n", encoding="utf-8")
+    demo.write_text(demo.read_text(encoding="utf-8") + "config_path: other.yaml\n", encoding="utf-8")
+    assert _selected("demo") == demo.with_name("other.yaml").resolve()
+
+    # Moved: the folder is now group/demo.
+    moved = later / "environments/group/demo"
+    moved.parent.mkdir()
+    shutil.move(demo.parent, moved)
+    assert _selected("demo") == (moved / "other.yaml").resolve()
+
+    # Added: a manifest written after the first selection.
+    added = _write_manifest(later, "environments", "added", _manifest("added"))
+    assert _selected("added") == _listed("added") == added.with_name("config.yaml").resolve()
+
+
 def test_an_absolute_folder_selects_its_config(roots: tuple[Path, Path], tmp_path: Path) -> None:
     folder = tmp_path / "elsewhere/my_benchmark"
     folder.mkdir(parents=True)
