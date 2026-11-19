@@ -17,7 +17,7 @@ pi_reasoning_gym_agent:
       concurrency: 8
       command: pi
       model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
-      pi_version: 0.80.2
+      pi_version: 1.5.2
       timeout: 900
       system_prompt: |
         You are a precise reasoning assistant with a bash tool. Use Python to calculate or verify results when helpful.

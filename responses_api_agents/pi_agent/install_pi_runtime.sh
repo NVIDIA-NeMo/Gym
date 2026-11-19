@@ -87,6 +87,6 @@ if [ ! -f "$runtime/ready" ]; then
     "$runtime/node/lib/node_modules/npm/bin/npm-cli.js" install \
     --prefix "$runtime/pi" --ignore-scripts --no-audit --no-fund \
     "@earendil-works/pi-coding-agent@${pi_version}"
-  "$runtime/node/bin/node" "$runtime/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" --version
+  "$runtime/node/bin/node" "$runtime/pi/node_modules/.bin/pi" --version
   touch "$runtime/ready"
 fi

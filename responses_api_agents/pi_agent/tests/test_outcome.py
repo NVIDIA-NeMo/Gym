@@ -71,7 +71,6 @@ def test_pinned_pi_classifies_model_server_http_error(
     monkeypatch: pytest.MonkeyPatch, status: int, message: str, context_overflow: bool, delayed: bool
 ) -> None:
     node, package = _pinned_pi_package()
-    sdk = package / "node_modules/@earendil-works/pi-ai/dist"
     server = SimpleModelServer(
         config=SimpleModelServerConfig(
             host="127.0.0.1",
@@ -112,8 +111,8 @@ const wire = JSON.parse(fs.readFileSync(0, 'utf8'));
 globalThis.fetch = async () => new Response(wire.body, {
   status: wire.status, headers: {'content-type': wire.content_type},
 });
-const {streamSimple} = await import(process.argv[1]);
-const {isContextOverflow} = await import(process.argv[2]);
+const {streamSimple} = await import("@earendil-works/pi-ai/api/openai-completions");
+const {isContextOverflow} = await import("@earendil-works/pi-ai");
 const model = {id: 'test', name: 'test', api: 'openai-completions', provider: 'openai',
   baseUrl: 'http://gym.invalid/v1', reasoning: false, input: ['text'],
   cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}, contextWindow: 262144, maxTokens: 32768};
@@ -126,14 +125,8 @@ assert.equal(result.usage.input + result.usage.output, 0);
 assert.equal(isContextOverflow(result, model.contextWindow), wire.context_overflow);
 """
     result = subprocess.run(
-        [
-            node,
-            "--input-type=module",
-            "-e",
-            script,
-            (sdk / "api/openai-completions.js").as_uri(),
-            (sdk / "index.js").as_uri(),
-        ],
+        [node, "--input-type=module", "-e", script],
+        cwd=package,
         input=json.dumps(
             {
                 "status": response.status_code,

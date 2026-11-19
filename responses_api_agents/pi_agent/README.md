@@ -99,7 +99,7 @@ benchmark whose Resources server serves its tools over direct HTTP does not pair
 
 ## Runtime and model requirements
 
-Use an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
+Use an exact `pi_version` (default **1.5.2**), and a Gym `model_server`.
 For a Resources-owned task sandbox, supply direct `SandboxAccess` with an absolute
 task working directory. Without access, configure agent-owned creation as noted below.
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
@@ -199,7 +199,7 @@ reasoning tokens. Under the default `output_token_policy: fixed`, an adapter-own
 `max_tokens`, preserving any smaller upstream cap; under `remaining_context` the extension removes the cap
 (see [Local CLI compatibility](#local-cli-compatibility)). Limits must be positive JavaScript-safe integers. Request-level
 `max_output_tokens` is rejected in sandbox sessions because a total-response budget is not implemented. Model Server
-configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
+configuration must not replace the agent's cap with a larger value.
 
 ## Lifecycle and ownership
 
@@ -332,7 +332,8 @@ request fields. On this compatibility path, the configured model and per-call to
 remain authoritative; forwarding request-level sampling fields or `max_output_tokens`
 does not add support for them or enforce a total-response budget.
 
-pi must be on PATH (auto-installed on the first local invocation, or `npm install -g @earendil-works/pi-coding-agent`).
+Local setup checks `pi --version` against the configured pin. It installs Pi on the first invocation if needed.
+To upgrade an existing installation, run `npm install -g @earendil-works/pi-coding-agent@1.5.2` with Node 22.19.0 or later.
 Put `policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
 
 ```bash

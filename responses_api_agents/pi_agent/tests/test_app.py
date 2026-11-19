@@ -840,7 +840,7 @@ class TestConfigYaml:
         assert config.resources_server is None
         assert config.model_server == ModelServerRef(type="responses_api_models", name="policy_model")
         assert config.num_workers == 1
-        assert config.pi_version == "0.80.2"
+        assert config.pi_version == "1.5.2"
 
 
 @pytest.mark.parametrize(

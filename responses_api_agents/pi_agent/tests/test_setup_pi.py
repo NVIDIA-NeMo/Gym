@@ -86,3 +86,9 @@ def test_an_interrupted_node_toolchain_is_unpacked_again(host: Path, monkeypatch
     # A finished toolchain is reused without another download.
     monkeypatch.setattr(setup.urllib.request, "urlretrieve", lambda url, destination: pytest.fail("downloaded again"))
     assert setup._install_node_locally() == prefix / "bin"
+
+
+def test_local_setup_rejects_a_stale_pi_on_path(host: Path) -> None:
+    _executable(host / "system" / "pi", "echo 0.80.2")
+    with pytest.raises(RuntimeError, match=r"Expected Pi 1\.5\.2.*Got: 0\.80\.2"):
+        setup.ensure_pi("1.5.2")

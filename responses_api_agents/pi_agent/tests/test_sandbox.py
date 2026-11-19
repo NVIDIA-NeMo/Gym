@@ -2127,11 +2127,10 @@ def _pinned_pi_package() -> tuple[str, Path]:
     node, pi = shutil.which("node"), shutil.which("pi")
     if not node or not pi:
         pytest.skip("Installed Pi and Node are required for the real Pi contract")
-    package = Path(pi).resolve().parents[1]
-    manifest = package / "package.json"
-    if not manifest.exists() or json.loads(manifest.read_text()).get("version") != pinned:
+    manifest = next((p / "package.json" for p in Path(pi).resolve().parents if (p / "package.json").is_file()), None)
+    if manifest is None or json.loads(manifest.read_text()).get("version") != pinned:
         pytest.skip(f"This integration targets the pinned Pi {pinned}")
-    return node, package
+    return node, manifest.parent
 
 
 @contextmanager
@@ -2252,15 +2251,15 @@ async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies
     Yields the activation to await; close runs on exit, and its response is left on the yielded namespace.
     """
     agent, sandbox = setup
-    node, package = _pinned_pi_package()
+    node, _ = _pinned_pi_package()
     # Pi sends fetch, including gym_mcp.mjs's, through proxies set in the environment.
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         monkeypatch.delenv(name, raising=False)
     runtime = tmp_path / "runtime"
     (runtime / "node/bin").mkdir(parents=True)
     (runtime / "node/bin/node").symlink_to(node)
-    (runtime / "pi/node_modules/@earendil-works").mkdir(parents=True)
-    (runtime / "pi/node_modules/@earendil-works/pi-coding-agent").symlink_to(package)
+    (runtime / "pi/node_modules/.bin").mkdir(parents=True)
+    (runtime / "pi/node_modules/.bin/pi").symlink_to(shutil.which("pi"))
     agent.config.finish_tool_names = ["finish"]
     workdir = tmp_path / "work"
     workdir.mkdir()
@@ -2355,7 +2354,8 @@ async def test_pinned_pi_stops_before_inference_when_a_required_grant_is_down(se
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
 @pytest.mark.parametrize(
-    ("summary_status", "requests_with_tools"), [(200, [True, True, False, True]), (503, [True, True, False])]
+    ("summary_status", "requests_with_tools"),
+    [(200, [True, True, False, True]), (503, [True, True, False, False, False, False])],
 )
 async def test_pinned_pi_reports_a_context_overflow_after_a_long_turn(
     setup, tmp_path, monkeypatch, summary_status, requests_with_tools
@@ -2776,7 +2776,7 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     execute = sandbox.exec.side_effect
 
     async def report_version(command, **kwargs):
-        if command.endswith("/dist/cli.js --version"):
+        if command.endswith("/.bin/pi --version"):
             return SimpleNamespace(return_code=return_code, error_type=None, stdout=f"{reported}\n", stderr="")
         return await execute(command, **kwargs)
 
@@ -2793,7 +2793,7 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     assert state.runtime == "/opt"
     assert not any(path.endswith("/install_pi_runtime.sh") for path in sandbox.files)
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
-    assert "/opt/node/bin/node /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version" in commands
+    assert "/opt/node/bin/node /opt/pi/node_modules/.bin/pi --version" in commands
 
 
 def test_required_tool_grant_under_model_only_is_a_terminal_seed_refusal(setup):
@@ -2844,7 +2844,7 @@ async def test_preinstalled_runtime_check_that_cannot_run_stays_retryable(setup)
     execute = sandbox.exec.side_effect
 
     async def time_out(command, **kwargs):
-        if command.endswith("/dist/cli.js --version"):
+        if command.endswith("/.bin/pi --version"):
             return SimpleNamespace(return_code=None, error_type="timeout", stdout="", stderr="")
         return await execute(command, **kwargs)
 
