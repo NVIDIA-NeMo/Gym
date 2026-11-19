@@ -549,9 +549,13 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     expected_final_stage_index: Optional[int] = None
     expected_stage_row_count: Optional[int] = None
     accepted_stage_row_count: Optional[int] = None
-    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index")
-    ng_rollout_index: Optional[int] = Field(default=None, alias="_ng_rollout_index")
-    ng_attempt_index: Optional[int] = Field(default=None, alias="_ng_attempt_index")
+    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index", exclude_if=lambda value: value is None)
+    ng_rollout_index: Optional[int] = Field(
+        default=None, alias="_ng_rollout_index", exclude_if=lambda value: value is None
+    )
+    ng_attempt_index: Optional[int] = Field(
+        default=None, alias="_ng_attempt_index", exclude_if=lambda value: value is None
+    )
 
 
 # The reference model has no deliverable for this task, so no battle can be
