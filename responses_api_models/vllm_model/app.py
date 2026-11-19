@@ -833,6 +833,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     # Total time limit for each HTTP attempt to the engine, not for the whole call; None means no limit.
     # A timed-out attempt is retried like any other transport error, so the call's attempt count is unchanged.
+    # With stream_upstream a timeout lands after the engine has answered 200, so it ends the call instead,
+    # and the limit must cover the whole generation.
     request_timeout_seconds: Optional[PositiveFloat] = None
     # Stream each /v1/chat/completions call from the engine and assemble the reply, so a gateway that cuts a
     # request sending nothing for minutes lets a long generation finish. Plain chat completions only.
@@ -886,6 +888,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             ):
                 if getattr(self, option):
                     raise ValueError(f"stream_upstream assembles plain chat completions and requires {option}=false")
+            for key in ("extra_body", "sampling_overrides"):
+                if (getattr(self, key) or {}).get("logprobs"):
+                    raise ValueError(
+                        f"stream_upstream cannot return complete logprobs and requires {key} without logprobs"
+                    )
         if self.is_responses_native:
             # stream_keepalive_s is also refused by setup_webserver, but only after a local engine has started.
             for option in (
@@ -1332,7 +1339,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise ValueError("Framework context requires continue_final_assistant_message=false")
                 validate_framework_context_options(overrides)
             if overrides.get("stream") or self.config.stream_upstream:
-                raise ValueError("external staging requires non-streaming backend requests")
+                raise ValueError(
+                    "external staging requires non-streaming backend requests: set stream_upstream=false "
+                    "and drop stream from extra_body and sampling_overrides"
+                )
             if self.config.use_completions_api:
                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
             if self.config.is_responses_native:
@@ -1752,6 +1762,14 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise HTTPException(
                 status_code=400,
                 detail="Top-k token capture does not support logprob_token_ids; omit it to collect the sampler's top-k.",
+            )
+
+        if self.config.stream_upstream and body_dict.get("logprobs"):
+            # With a reasoning or tool parser, vLLM skips a stream's chunks for held-back tokens, so the
+            # assembled logprobs silently miss entries that a non-streamed reply has.
+            raise HTTPException(
+                status_code=400,
+                detail="stream_upstream cannot return complete logprobs: set stream_upstream=false or drop logprobs from the request.",
             )
 
         # Normalize after all request overrides and capture controls. vLLM treats

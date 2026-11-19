@@ -912,6 +912,8 @@ class TestApp:
         return_token_id_information: bool = False,
         dynamo_frontend: bool = False,
         stream_upstream: bool = False,
+        uses_reasoning_parser: bool = False,
+        continue_final_assistant_message: bool = False,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -923,7 +925,8 @@ class TestApp:
             name="",
             return_token_id_information=return_token_id_information,
             dynamo_frontend=dynamo_frontend,
-            uses_reasoning_parser=False,
+            uses_reasoning_parser=uses_reasoning_parser,
+            continue_final_assistant_message=continue_final_assistant_message,
             propagate_context_overflow_errors=propagate_context_overflow_errors,
             use_completions_api=use_completions_api,
             route_around_failing_endpoints=route_around_failing_endpoints,
@@ -1498,6 +1501,167 @@ class TestApp:
         }
         with raises(ValueError, match=f"stream_upstream .* requires {option}=false"):
             VLLMModelConfig(**fields)
+
+    @mark.parametrize("key", ["extra_body", "sampling_overrides"])
+    def test_stream_upstream_refuses_config_pinned_logprobs(self, key: str) -> None:
+        """logprobs pinned in server config is refused at startup, not as a per-request 400 blaming the request."""
+        fields = {
+            "host": "0.0.0.0",
+            "port": 8081,
+            "base_url": "http://vllm/v1",
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "entrypoint": "",
+            "name": "",
+            "return_token_id_information": False,
+            "uses_reasoning_parser": False,
+            "stream_upstream": True,
+            key: {"logprobs": True},
+        }
+        with raises(ValueError, match=f"stream_upstream .* requires {key} without logprobs"):
+            VLLMModelConfig(**fields)
+
+    @mark.parametrize("responses_api", [False, True])
+    def test_stream_upstream_refuses_logprobs_request(self, monkeypatch: MonkeyPatch, responses_api: bool) -> None:
+        """A request asking for logprobs is refused: with a parser, the stream skips held-back tokens' chunks,
+        so the assembled logprobs would silently miss entries a non-streamed reply has."""
+        server = self._setup_server(monkeypatch, stream_upstream=True)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(return_value=self._provider_reply("stop"))
+        server._clients = [provider]
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses" if responses_api else "/v1/chat/completions",
+            json={
+                "input": [{"role": "user", "content": "hi"}],
+                "metadata": {"extra_body": json.dumps({"logprobs": True})},
+            }
+            if responses_api
+            else {"messages": [{"role": "user", "content": "hi"}], "logprobs": True},
+        )
+        assert response.status_code == 400
+        assert "stream_upstream" in response.json()["detail"] and "logprobs" in response.json()["detail"]
+        provider.create_chat_completion.assert_not_called()
+
+    def test_stream_upstream_external_staging_refusal_names_it(self, monkeypatch: MonkeyPatch) -> None:
+        """The staging refusal tells a user who set stream_upstream which key to change."""
+        with raises(
+            ValueError,
+            match="external staging requires non-streaming backend requests: set stream_upstream=false",
+        ):
+            self._setup_server(monkeypatch, stream_upstream=True, external_staging_backend="megatron_worker")
+
+    async def test_stream_upstream_round_trip_matches_non_streaming(self, monkeypatch: MonkeyPatch) -> None:
+        """A streamed engine reply and the same reply in one JSON body give the same vllm_model output.
+
+        One case is a reasoning-only reply: the assembled message must still carry content: null, or the
+        reasoning-parser block that reads message["content"] raises KeyError."""
+        from aiohttp import ClientSession, web
+        from aiohttp.test_utils import TestServer
+
+        import nemo_gym.client.http_client as gym_http_client
+
+        def chunk(delta: dict, finish_reason: str | None = None) -> bytes:
+            choice = {"index": 0, "delta": delta, "finish_reason": finish_reason}
+            return (
+                b"data: "
+                + json.dumps(
+                    {"id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m", "choices": [choice]}
+                ).encode()
+                + b"\n\n"
+            )
+
+        cases = [
+            (
+                {
+                    "id": "c1",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "m",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "length",
+                            "message": {"role": "assistant", "content": None, "reasoning_content": "still thinking"},
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 6, "total_tokens": 9},
+                },
+                [
+                    chunk({"role": "assistant", "content": ""}),
+                    chunk({"reasoning_content": "still "}),
+                    chunk({"reasoning_content": "thinking"}),
+                    chunk({}, "length"),
+                    b"data: [DONE]\n\n",
+                ],
+            ),
+            (
+                {
+                    "id": "c1",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "m",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "the answer",
+                                "reasoning_content": "some thought",
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 6, "total_tokens": 9},
+                },
+                [
+                    chunk({"role": "assistant", "content": ""}),
+                    chunk({"reasoning_content": "some thought"}),
+                    chunk({"content": "the answer"}),
+                    chunk({}, "stop"),
+                    b"data: [DONE]\n\n",
+                ],
+            ),
+        ]
+        usage_event = b'data: {"id":"c1","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":6,"total_tokens":9}}\n\n'
+        for json_reply, sse_writes in cases:
+            sse_writes = [*sse_writes[:-1], usage_event, sse_writes[-1]]
+            outputs = []
+            for stream_upstream in (False, True):
+                server = self._setup_server(
+                    monkeypatch,
+                    stream_upstream=stream_upstream,
+                    uses_reasoning_parser=True,
+                    continue_final_assistant_message=True,
+                )
+
+                async def handler(request: web.Request) -> web.StreamResponse:
+                    if (await request.json()).get("stream"):
+                        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+                        await response.prepare(request)
+                        for data in sse_writes:
+                            await response.write(data)
+                        return response
+                    return web.json_response(json_reply)
+
+                engine_app = web.Application()
+                engine_app.router.add_post("/v1/chat/completions", handler)
+                async with TestServer(engine_app) as engine, ClientSession() as session:
+                    monkeypatch.setattr(gym_http_client, "get_global_aiohttp_client", lambda: session)
+                    server._clients = [
+                        NeMoGymAsyncOpenAI(
+                            base_url=str(engine.make_url("/v1")), api_key="k"
+                        )  # pragma: allowlist secret
+                    ]
+                    request = MagicMock()
+                    request.session = {SESSION_ID_KEY: "session-1"}
+                    request.headers = {}
+                    body = NeMoGymChatCompletionCreateParamsNonStreaming(
+                        messages=[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "partial"}]
+                    )
+                    outputs.append((await server.chat_completions(request, body)).model_dump())
+            assert outputs[0] == outputs[1]
 
     @mark.parametrize(
         "max_model_retries,abort_count",

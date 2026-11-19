@@ -446,26 +446,40 @@ async def _read_chat_stream(response: ClientResponse) -> Dict[str, Any]:
         return await get_response_json(response)  # The endpoint answered without streaming.
     completion: Dict[str, Any] = {}
     choices: Dict[int, Dict[str, Any]] = {}
-    buffer, done = b"", False
+    buffer, done = bytearray(), False
     try:
         # Whole chunks, not lines: aiohttp's line reader raises LineTooLong, which is not a ClientError.
         async for data in response.content.iter_any():
-            *events, buffer = (buffer + data.replace(b"\r", b"")).split(b"\n\n")
-            for event in events:
+            # Search only the new bytes for the separator (from one byte back, since it can straddle the
+            # boundary); splitting the whole buffer again each read makes one large event quadratic.
+            search_from = max(len(buffer) - 1, 0)
+            buffer += data.replace(b"\r", b"")
+            start = 0
+            while (end := buffer.find(b"\n\n", search_from)) != -1:
+                event, start, search_from = buffer[start:end], end + 2, end + 2
                 payload = b"\n".join(line[5:].strip() for line in event.split(b"\n") if line.startswith(b"data:"))
                 if payload == b"[DONE]":
                     done = True
                 elif payload:
-                    _add_chat_chunk(completion, choices, orjson.loads(payload))
+                    try:
+                        chunk = orjson.loads(payload)
+                    except orjson.JSONDecodeError as error:
+                        raise ClientPayloadError("Chat completion stream sent an event that is not JSON") from error
+                    if not isinstance(chunk, dict):
+                        raise ClientPayloadError("Chat completion stream sent an event that is not a JSON object")
+                    _add_chat_chunk(completion, choices, chunk)
+            if start:
+                del buffer[:start]
     finally:
         response.close()  # A no-op after a full read; drops a half-read stream instead of pooling its connection.
     if not done or not choices or any(c["fields"].get("finish_reason") is None for c in choices.values()):
-        # aiohttp's error for a cut-off body, so the failure is recorded like a truncated reply.
+        # aiohttp's error for a cut-off body, so the failure is recorded like a body cut off mid-read.
         raise ClientPayloadError("Chat completion stream ended before it finished")
     completion["object"] = "chat.completion"
     completion["choices"] = []
     for _, choice in sorted(choices.items()):
-        message = {"role": "assistant", **{key: "".join(parts) for key, parts in choice["text"].items()}}
+        texts = {key: "".join(parts) for key, parts in choice["text"].items()}
+        message = {"role": "assistant", "content": None, **texts}
         if choice["calls"]:
             message["tool_calls"] = [
                 {
@@ -483,7 +497,7 @@ async def _read_chat_stream(response: ClientResponse) -> Dict[str, Any]:
 def _add_chat_chunk(completion: Dict[str, Any], choices: Dict[int, Dict[str, Any]], chunk: Dict[str, Any]) -> None:
     """Fold one ``chat.completion.chunk`` into the reply being assembled. Text pieces are joined at the end."""
     if chunk.get("error"):
-        # A gateway reports a failure that follows the 200 status inside the stream.
+        # An endpoint can report a failure inside the stream, after the 200 status.
         raise ClientPayloadError(f"Chat completion stream failed: {chunk['error']}")
     completion.update((k, v) for k, v in chunk.items() if k not in ("object", "choices") and v is not None)
     for part in chunk.get("choices") or []:
