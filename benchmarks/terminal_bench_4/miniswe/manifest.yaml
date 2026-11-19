@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: The pinned 66-task Terminal-Bench 4.1 dataset in its Harbor task folders, run by mini-SWE 2.4.6
   agent sessions through the Harbor environment server with separate official verification.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

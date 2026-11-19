@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: agent
 description: Financial research over SEC filings with grounded answer verification,
   without web search.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - ushnish-de

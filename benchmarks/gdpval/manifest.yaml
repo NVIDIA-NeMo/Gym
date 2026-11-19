@@ -6,7 +6,9 @@ integration_profile: external-rollout-driver
 domain: other
 description: GDPVal professional deliverable tasks with Stirrup and rubric scoring;
   preparation uses the upstream train split.
-modality: multimodal
+modality:
+- text
+- image
 licensing: unknown
 authors:
 - Serge Panev

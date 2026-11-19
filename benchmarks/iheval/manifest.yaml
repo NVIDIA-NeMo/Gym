@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: instruction_following
 description: IHEval instruction hierarchy across task execution, safety, tool use,
   and rule following.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - Maria Bagdasarova

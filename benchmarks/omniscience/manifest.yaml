@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
 description: AA-Omniscience v1.1 factual knowledge QA with LLM judge verification
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - gwarmstrong

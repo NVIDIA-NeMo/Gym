@@ -7,7 +7,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: other
 description: IN22-Gen bidirectional English-Indic translation with reference chrF, chrF++, and BLEU metrics.
-modality: text
+modality:
+- text
 licensing: CC-BY-4.0
 authors: [NVIDIA NeMo Gym contributors]
 reward:

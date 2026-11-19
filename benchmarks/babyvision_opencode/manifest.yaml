@@ -6,7 +6,9 @@ integration_profile: custom-gym-agent-loop
 domain: other
 description: BabyVision visual-reasoning puzzles solved by OpenCode with a Python
   image toolkit, GPT-judged final answers.
-modality: text, image
+modality:
+- text
+- image
 licensing: MIT
 authors:
 - Danial MohseniTaheri

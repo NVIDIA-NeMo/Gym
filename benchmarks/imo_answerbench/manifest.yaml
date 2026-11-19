@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: math
 description: Math QA verified by a Skills-style autograder LLM judge with math-verify
   symbolic fallback
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

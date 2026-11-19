@@ -6,7 +6,8 @@ integration_profile: external-rollout-driver
 domain: instruction_following
 description: Frozen evaluation-only real-world Agentic IF single-turn text challenge
   with strict-v2.2 judging.
-modality: text
+modality:
+- text
 licensing: internal
 authors:
 - Eric Yang

@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: knowledge
 description: RAGTruth hallucination detection over QA, summary, and data-to-text slices;
   reward is binary verdict accuracy.
-modality: text
+modality:
+- text
 licensing: MIT
 authors:
 - Maria Bagdasarova

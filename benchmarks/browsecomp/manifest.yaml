@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: agent
 description: BrowseComp web research with an independent answer judge; default preparation
   selects 400 tasks with seed 42.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - bxyu-nvidia

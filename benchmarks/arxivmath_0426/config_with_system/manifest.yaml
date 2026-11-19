@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: math
 description: ArXivMath April 2026 with a system prompt, symbolic-first grading, and
   an autograder LLM fallback.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - wedu-nvidia

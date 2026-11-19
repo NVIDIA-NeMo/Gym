@@ -6,7 +6,9 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: Opencode visual coding with resource-owned task sandboxes and independent
   quality grading.
-modality: image,text
+modality:
+- text
+- image
 licensing: Apache-2.0
 authors:
 - Fuxiao Liu

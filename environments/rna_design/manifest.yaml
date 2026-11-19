@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: agent
 description: RNA inverse folding benchmark and training environment. Each rollout is a design campaign with a
   fixed tool-call budget, rewarded 1.0 when it solves the target structure.
-modality: text
+modality:
+- text
 licensing: MIT
 authors:
 - Christian Munley

@@ -5,7 +5,9 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: agent
 description: OfficeQA Pro document retrieval and reasoning over U.S. Treasury Bulletins.
-modality: multimodal
+modality:
+- text
+- image
 # Code license; the separately downloaded dataset is CC-BY-SA-4.0.
 licensing: Apache-2.0
 authors: [Jarno Seppänen]

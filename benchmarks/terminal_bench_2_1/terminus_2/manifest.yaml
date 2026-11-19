@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: Terminal-Bench 2.1 tasks with prepared instruction messages, sandboxed
   agent execution, and task-provided verification.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

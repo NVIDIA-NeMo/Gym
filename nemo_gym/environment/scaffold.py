@@ -285,7 +285,7 @@ def _manifest(composition: _Composition) -> EnvironmentManifest:
         "integration_profile": composition.profile,
         "domain": "other",
         "description": f"{_TODO}: Describe the {composition.name} {composition.kind.value}.",
-        "modality": "text",
+        "modality": ["text"],
         "licensing": "unknown",
         "authors": [_TODO],
         # Written out so the author sees every selection field; "unknown" stays valid until someone knows.
