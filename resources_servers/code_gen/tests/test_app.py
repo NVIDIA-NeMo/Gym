@@ -380,7 +380,7 @@ class TestSandboxVerify:
         ((args, kwargs),) = calls
         assert args[2] == timeout
         assert (kwargs["memory_limit_mb"], kwargs["deadline_s"]) == (memory_limit_mb, deadline_s)
-        assert res.limits == {"time_limit_s": timeout, "memory_limit_mb": memory_limit_mb}
+        assert res.limits.model_dump() == {"time_limit_s": timeout, "memory_limit_mb": memory_limit_mb}
 
     @pytest.mark.parametrize(
         "resource_limits, time_limit_s, memory_limit_mb",
@@ -406,7 +406,7 @@ class TestSandboxVerify:
         assert tests == ["assert f(1) == 1"]
         assert (kwargs["time_limit_s"], kwargs["memory_limit_mb"]) == (time_limit_s, memory_limit_mb)
         assert res.reward == 1.0
-        assert res.limits == {"time_limit_s": time_limit_s, "memory_limit_mb": memory_limit_mb}
+        assert res.limits.model_dump() == {"time_limit_s": time_limit_s, "memory_limit_mb": memory_limit_mb}
 
     async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
         async def _failing(*args, **kwargs):

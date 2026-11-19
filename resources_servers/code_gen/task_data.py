@@ -52,10 +52,10 @@ class ResourceLimits(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    time_limit_s: Optional[float] = Field(
+    time_limit_s: float | None = Field(
         default=None, gt=0, allow_inf_nan=False, description="Per test case; omitted uses the server's timeout."
     )
-    memory_limit_mb: Optional[int] = Field(
+    memory_limit_mb: int | None = Field(
         default=None, gt=0, description="Address space above the grading baseline; omitted keeps the 4 GB guard."
     )
 
@@ -72,7 +72,7 @@ class TaskData(BaseModel):
         ),
         json_schema_extra={"consumed_by": ["verify"], "legacy_location": "verifier_metadata"},
     )
-    resource_limits: Optional[ResourceLimits] = Field(
+    resource_limits: ResourceLimits | None = Field(
         default=None,
         description="The task's own time and memory limits, applied independently instead of the server's.",
         json_schema_extra={"consumed_by": ["verify"], "legacy_location": "verifier_metadata"},
