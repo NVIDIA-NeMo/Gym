@@ -89,7 +89,6 @@ agent_sandbox:
   docker:
     create:
       network: bridge
-      cap_drop: [ALL]
       security_opt: [no-new-privileges]
       pids_limit: 256
       apply_resource_limits: true

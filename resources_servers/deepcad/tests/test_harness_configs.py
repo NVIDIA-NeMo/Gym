@@ -55,6 +55,10 @@ def test_mixed_config_routes_file_input_to_stock_session_boundary(
             offline=True,
         )
     )
+    # Agent uploads run as root into private directories created by the image user.
+    assert not config.agent_sandbox.docker.create.get("cap_drop", [])
+    assert config.sandbox.docker.create.cap_drop == ["ALL"]
+    assert config.agent_sandbox.docker.create.security_opt == ["no-new-privileges"]
     _, row = prepared(tmp_path, file_input=True, harness=harness)
     rows = RolloutCollectionHelper().preprocess_examples([row], global_config_dict=config)
     RolloutCollectionHelper._validate_environment_servers(rows, config)
