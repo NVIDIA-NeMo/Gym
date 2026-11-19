@@ -73,7 +73,7 @@ from environment_servers.bird_interact.task_data import BirdInteractTask
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ModelServerRef
 from nemo_gym.core import EpisodeId, MaterializedTask, NeMoGymResponse, TaskId
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
 from nemo_gym.server_runtime import END_ACTIVATION_HEADER
 from nemo_gym.trajectory import AgentObservationBundle
 
@@ -443,6 +443,20 @@ class TestGrading:
 
         assert executed == {"error": None, "row_count": 1, "preview": ["(1,)"]}
         assert graded == {"solution_error": "The ground-truth SQL failed: no such column: nope"}
+
+    def test_a_task_setup_that_fails_fails_the_runner_command(self, tmp_path: Path) -> None:
+        request_path = tmp_path / "setup.json"
+        request = {
+            "database": str(tmp_path / "episode.sqlite"),
+            "source": str(DATA / "example_databases/bookshop/bookshop.sql"),
+            "preprocess_sql": ["SELECT nope"],
+            "timeout_seconds": 5,
+        }
+        request_path.write_text(json.dumps(request))
+
+        # A non-zero exit, so the server runs the setup again on a fresh sandbox, and then fails the episode.
+        with pytest.raises(RuntimeError, match="Setup SQL failed: no such column: nope"):
+            main(["setup", str(request_path)])
 
 
 class TestTestCases:
@@ -1516,6 +1530,46 @@ class TestPostgreSQL:
     def test_postgresql_needs_its_image(self) -> None:
         with pytest.raises(ValidationError, match="benchmarks/bird_interact/Dockerfile"):
             _server(database_engine="postgresql")
+
+    @pytest.mark.parametrize(
+        ("engine", "sandbox_config", "image"),
+        [
+            ("sqlite", {}, "python:3.12-slim"),
+            ("postgresql", {"image": "bird-interact-postgres:lite"}, "bird-interact-postgres:lite"),
+        ],
+    )
+    async def test_the_sandbox_starts_the_configured_image_or_the_sqlite_one(
+        self, engine: str, sandbox_config: dict, image: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _answer_for_the_image_server(monkeypatch)
+        server, _ = _server(turns=[_submit(CORRECT_1)], database_engine=engine, sandbox_config=sandbox_config)
+        images: list[str] = []
+        start = type(server).start_episode_sandbox
+
+        async def start_and_record(self: Any, request: Any, cleanup: Any, spec: SandboxSpec, *args, **kwargs) -> Any:
+            images.append(spec.image)
+            return await start(self, request, cleanup, spec, *args, **kwargs)
+
+        monkeypatch.setattr(type(server), "start_episode_sandbox", start_and_record)
+
+        response = await _run(server)
+
+        assert response.failure is None, response.failure
+        assert images == [image]
+
+    async def test_the_a_interact_instructions_name_postgresql(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _answer_for_the_image_server(monkeypatch)
+        server, client = _server(
+            "a_interact",
+            turns=["Done."],
+            database_engine="postgresql",
+            sandbox_config={"image": "bird-interact-postgres:lite"},
+        )
+
+        await _run(server)
+
+        system = client.agent_inputs[0]["input"][0]["content"]
+        assert "writes PostgreSQL queries" in system and "SQLite" not in system
 
     async def test_the_episode_runs_on_the_task_database_in_the_image(
         self, sandbox_workspace: Path, monkeypatch: pytest.MonkeyPatch
