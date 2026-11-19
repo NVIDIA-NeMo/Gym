@@ -531,7 +531,6 @@ class AnthropicConverter:
             else:
                 raise NotImplementedError(f"Unsupported Responses output item for Anthropic response: {item_type}")
 
-        usage = response.usage.model_dump() if response.usage is not None else None
         message = NeMoGymAnthropicMessage.model_validate(
             {
                 # Reuse the Responses envelope id instead of minting a new one.
@@ -545,10 +544,7 @@ class AnthropicConverter:
                 "content": content,
                 "stop_reason": self._stop_reason_from_response(response, has_tool_use),
                 "stop_sequence": None,
-                "usage": {
-                    "input_tokens": (usage or {}).get("input_tokens", 0),
-                    "output_tokens": (usage or {}).get("output_tokens", 0),
-                },
+                "usage": self._responses_usage_to_anthropic(response.usage),
             }
         )
         result = message.model_dump(mode="json", exclude_none=True)
@@ -557,6 +553,26 @@ class AnthropicConverter:
             if value is not None:
                 result[field] = value
         return result
+
+    def _responses_usage_to_anthropic(self, usage: Optional[NeMoGymResponseUsage]) -> Dict[str, int]:
+        """Responses usage as an Anthropic usage object.
+
+        Responses counts cache reads and writes inside ``input_tokens``; Anthropic reports them apart from it, in
+        ``cache_read_input_tokens`` and ``cache_creation_input_tokens``.
+        """
+        if usage is None:
+            return {"input_tokens": 0, "output_tokens": 0}
+        details = usage.input_tokens_details
+        cached = details.cached_tokens if details is not None else None
+        written = details.cache_write_tokens if details is not None else None
+        anthropic_usage = {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens}
+        if written is not None:
+            anthropic_usage["input_tokens"] = max(anthropic_usage["input_tokens"] - written, 0)
+            anthropic_usage["cache_creation_input_tokens"] = written
+        if cached is not None:
+            anthropic_usage["input_tokens"] = max(anthropic_usage["input_tokens"] - cached, 0)
+            anthropic_usage["cache_read_input_tokens"] = cached
+        return anthropic_usage
 
     def _iter_output_dicts(self, response: NeMoGymResponse) -> List[Dict[str, Any]]:
         # The Anthropic mapping drops token metadata, so skip copying the token lists of training variants
@@ -887,16 +903,17 @@ class AnthropicConverter:
         pending_text.clear()
 
     def _usage_to_responses_usage(self, usage: Optional[Dict[str, Any]]) -> Optional[NeMoGymResponseUsage]:
+        """An Anthropic usage object as Responses usage, whose ``input_tokens`` includes the cache's writes and reads
+        (Anthropic reports them apart from ``input_tokens``) and whose ``cached_tokens`` are the reads."""
         if usage is None:
             return None
-        input_tokens = usage.get("input_tokens", 0)
+        read = usage.get("cache_read_input_tokens")
+        written = usage.get("cache_creation_input_tokens")
+        input_tokens = (usage.get("input_tokens") or 0) + (written or 0) + (read or 0)
         output_tokens = usage.get("output_tokens", 0)
         return NeMoGymResponseUsage(
             input_tokens=input_tokens,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(
-                cached_tokens=usage.get("cache_read_input_tokens"),
-                cache_write_tokens=usage.get("cache_creation_input_tokens"),
-            ),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=read, cache_write_tokens=written),
             output_tokens=output_tokens,
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
             total_tokens=input_tokens + output_tokens,

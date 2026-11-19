@@ -549,9 +549,13 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     expected_final_stage_index: Optional[int] = None
     expected_stage_row_count: Optional[int] = None
     accepted_stage_row_count: Optional[int] = None
-    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index")
-    ng_rollout_index: Optional[int] = Field(default=None, alias="_ng_rollout_index")
-    ng_attempt_index: Optional[int] = Field(default=None, alias="_ng_attempt_index")
+    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index", exclude_if=lambda value: value is None)
+    ng_rollout_index: Optional[int] = Field(
+        default=None, alias="_ng_rollout_index", exclude_if=lambda value: value is None
+    )
+    ng_attempt_index: Optional[int] = Field(
+        default=None, alias="_ng_attempt_index", exclude_if=lambda value: value is None
+    )
 
 
 # The reference model has no deliverable for this task, so no battle can be
@@ -602,6 +606,9 @@ _AGENT_TIMEOUT = {
 
 # The ``judge_response.manual_imputation`` values of a row scored as a loss without a judgment.
 _IMPUTED_LOSS_KINDS = frozenset({"eval_missing_as_loss", "model_failure_as_loss"})
+
+# The rubric judge's submission text for collected files that hold no extractable text.
+_NO_READABLE_SUBMISSION_TEXT = "[The submitted files contain no readable text.]"
 
 # Stop reasons the agent reports when the model itself ended the run without a deliverable.
 _MODEL_STOP_FAILURE_KINDS = {
@@ -1176,6 +1183,27 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 **_gdpval_failure("missing_rubric", terminal=True),
             )
 
+        directory = Path(body.deliverables_dir) if body.deliverables_dir else None
+        if directory is not None and not directory.is_dir():
+            # The persisted files are gone (a cleaned persist dir, a reverify on another host). Grading the
+            # agent's final message instead would score its claims about files nobody can see.
+            return GDPValVerifyResponse(
+                **(body.model_dump() | lost_session_verification(f"deliverables_dir {directory} is not a directory")),
+                verify_mode="rubric",
+            )
+        # Collection publishes the finish marker atomically with the submitted files, so a directory with the
+        # marker holds the whole submission: its files are graded, never the agent's claims about them. A
+        # directory without the marker (a hand-made text deliverable) still falls back to the response text below.
+        collected = directory is not None and (directory / persisted_layout.FINISH_PARAMS_FILE).is_file()
+        if collected and not any(is_deliverable(path) for path in directory.iterdir()):
+            return GDPValVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                verify_mode="rubric",
+                judge_response={"manual_imputation": "no_deliverable_as_zero"},
+                **(_model_stop_failure(body) or {}),
+            )
+
         judges = self._resolve_judges()
         # Route tasks with audio/video deliverables per modality: video goes to
         # video-capable judge(s) (error/warn when none); audio a judge can't read
@@ -1206,6 +1234,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
             read = await asyncio.to_thread(read_deliverable_files, body.deliverables_dir)
             if read:
                 deliverable_text = read
+            elif collected:
+                # Submitted files with no extractable text (a blank workbook, a scanned PDF): the judge sees the
+                # files' renders, if any, and this note, not the agent's description of the files.
+                deliverable_text = _NO_READABLE_SUBMISSION_TEXT
             blocks = await asyncio.to_thread(
                 convert_deliverables_to_content_blocks,
                 body.deliverables_dir,

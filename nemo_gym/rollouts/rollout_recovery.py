@@ -634,6 +634,7 @@ _COLLECTION_OPTIONS = frozenset(
         "checkpoint_timeout_s",
         "dispatch_budget_s",
         "drain_margin_s",
+        "dispatch_reservation_interval_s",
         "dispatch_longest_first",
         "retry_terminal_timeouts",
         "allow_unsafe_resume",
@@ -1426,7 +1427,7 @@ class RunManifest(BaseModel):
         """Whether a saved configuration digest names this configuration, in this or an earlier recorded form."""
         return saved_digest == self.config_digest or saved_digest in _LEGACY_CONFIG_DIGESTS.get(self.config_digest, {})
 
-    def write(self, path: Path) -> None:
+    def write(self, path: Path, *, write_config_identity: bool = True) -> None:
         # Publish a complete manifest, or leave the previous one intact. An empty pending_rejudge is omitted so a
         # manifest without admissions keeps the version-2 shape that readers without the field accept.
         value = self.model_dump(mode="json")
@@ -1435,7 +1436,7 @@ class RunManifest(BaseModel):
         atomic_write_json(path, value)
         # The identity behind config_digest, so a later resume can name the settings that differ. Readers trust it only
         # while its digest is the manifest's config_digest.
-        if self.config_digest in _CONFIG_IDENTITIES:
+        if write_config_identity and self.config_digest in _CONFIG_IDENTITIES:
             atomic_write_json(config_identity_path_for(path), _CONFIG_IDENTITIES[self.config_digest], mode=0o600)
 
     @classmethod

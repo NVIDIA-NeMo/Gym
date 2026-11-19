@@ -42,9 +42,18 @@ from nemo_gym.core import (
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
-from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
+from responses_api_agents.opencode_agent.app import (
+    OpenCodeAgent,
+    OpenCodeAgentConfig,
+    _sandbox_prepare_command,
+    _session_opencode_config_error,
+)
 from responses_api_agents.opencode_agent.legacy_app import OpenCodeLegacyAgent
-from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
+from responses_api_agents.opencode_agent.runtime import (
+    OPENCODE_V2_VERSION,
+    OPENCODE_VERSION,
+    UNRESTRICTED_IMAGE_ATTACHMENT,
+)
 
 
 def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
@@ -618,6 +627,12 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
             config["provider"]["nemo_gym"]["options"]["baseURL"]
             == "http://model.example:9000/ng-rollout/opencode-smoke-a2/v1"
         )
+        # As on opencode_sandboxed_agent with opencode_model_call_timeout null, only the run's own deadline bounds a
+        # model call. Here the provider timeout is off and there is no chunkTimeout; the relay's chunkTimeout is its
+        # run budget.
+        options = config["provider"]["nemo_gym"]["options"]
+        assert options["timeout"] is False
+        assert "chunkTimeout" not in options
         assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).status_code == 409
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
@@ -1075,6 +1090,19 @@ def test_compaction_and_build_steps_reach_opencode(setup, mode):
     assert agent.config.opencode_config == {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
 
 
+def test_compaction_reserved_reaches_opencode(setup):
+    """OpenCode then compacts after a call of 32000 - 8000 tokens, instead of 32000 - min(20000, 4096)."""
+    agent, sandbox = setup
+    agent.config.opencode_config = {"compaction": {"auto": True, "reserved": 8000}}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert config["compaction"] == {"auto": True, "reserved": 8000}
+    assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"]["input"] == 32000
+
+
 _ANALYST = {
     "mode": "subagent",
     "steps": 10,
@@ -1189,13 +1217,92 @@ def test_step_limit_counts_compaction_passes_and_keeps_the_prompt(messages, pass
     assert not reached_step_limit({"messages": messages}, passes + 1)
 
 
+def compacted_events() -> str:
+    """events() with an automatic compaction before the final answer, in the message shapes OpenCode 1.17.11 saves.
+    Every message's info is also in usage_messages, as in the export opencode_agent writes, which usage counts from."""
+    prompt, answer = json.loads(events())["messages"]
+    summary = {
+        "info": {
+            "role": "assistant",
+            "summary": True,
+            "mode": "compaction",
+            "agent": "compaction",
+            "finish": "stop",
+            "tokens": {"input": 100, "output": 20, "reasoning": 5, "cache": {"read": 7, "write": 0}},
+        },
+        "parts": [{"type": "text", "text": "Summary of the work so far"}],
+    }
+    messages = [prompt, _compaction(), summary, _CONTINUE, answer]
+    return json.dumps({"messages": messages, "usage_messages": [message["info"] for message in messages]})
+
+
+@pytest.mark.parametrize("exclude", [False, True])
+def test_exclude_compaction_summaries_leaves_them_out_of_the_output(setup, exclude):
+    agent, sandbox = setup
+    agent.config.exclude_compaction_summaries = exclude
+    sandbox.events = compacted_events()
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+    assert result.status_code == 200, result.text
+    output = [
+        (item["type"], item["content"][0]["text"] if item["type"] == "message" else None)
+        for item in result.json()["output"]
+    ]
+    answer = [("reasoning", None), ("function_call", None), ("function_call_output", None), ("message", "Fixed")]
+    assert output == (answer if exclude else [("message", "Summary of the work so far"), *answer])
+    # Either way, usage counts the summary call (107 input, 25 output tokens) and the answer's (13, 3).
+    usage = result.json()["usage"]
+    assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (120, 28, 148)
+    assert usage["input_tokens_details"]["cached_tokens"] == 7 + 3
+    assert usage["output_tokens_details"]["reasoning_tokens"] == 5 + 1
+
+
+@pytest.mark.parametrize("marker", [{"summary": True}, {"agent": "compaction"}])
+def test_either_marker_identifies_a_compaction_summary(setup, marker):
+    """OpenCode 1.17.11 sets both markers on a summary; either one alone still identifies it."""
+    from nemo_gym.trajectory import AgentObservationBundle
+
+    agent, _ = setup
+    agent.config.exclude_compaction_summaries = True
+    export = {
+        "messages": [
+            {"info": {"role": "assistant", **marker}, "parts": [{"type": "text", "text": "Summary"}]},
+            {"info": {"role": "assistant", "agent": "build"}, "parts": [{"type": "text", "text": "Answer"}]},
+        ]
+    }
+    output = agent._session_output(export, AgentObservationBundle(source="opencode"))
+    assert [item.content[0].text for item in output] == ["Answer"]
+
+
 @pytest.mark.parametrize(
     ("opencode_config", "detail"),
     [
         ({"provider": {"other": {}}}, "unsupported: ['provider']"),
-        ({"compaction": {"auto": False, "prune": True}}, "compaction supports only auto"),
+        ({"compaction": {"auto": False, "prune": True}}, "compaction supports only auto and reserved"),
+        ({"compaction": {"reserved": 8000, "prune": False}}, "compaction supports only auto and reserved"),
         ({"compaction": {"auto": "false"}}, "compaction.auto must be true or false"),
-        ({"compaction": None}, "compaction supports only auto"),
+        ({"compaction": None}, "compaction supports only auto and reserved"),
+        ({"compaction": {"reserved": 0}}, "compaction.reserved must be a positive integer"),
+        ({"compaction": {"reserved": -8000}}, "compaction.reserved must be a positive integer"),
+        ({"compaction": {"reserved": 8000.5}}, "compaction.reserved must be a positive integer"),
+        ({"compaction": {"reserved": "8000"}}, "compaction.reserved must be a positive integer"),
+        ({"compaction": {"reserved": True}}, "compaction.reserved must be a positive integer"),
+        ({"compaction": {"buffer": 0}}, "compaction.buffer must be a positive integer"),
+        ({"compaction": {"buffer": True}}, "compaction.buffer must be a positive integer"),
+        # The whole context window (32000 here) or more: OpenCode would compact after every call.
+        ({"compaction": {"reserved": 32000}}, "compaction.reserved must be below context_window"),
+        ({"compaction": {"reserved": 40000}}, "compaction.reserved must be below context_window"),
+        # OpenCode 2's name for the buffer, which OpenCode 1.17.11 does not read: the error says what to set instead.
+        # The config refuses it when it loads; the seed refuses it again in a config changed after that, as here.
+        (
+            {"compaction": {"buffer": 8000}},
+            "remove compaction.buffer and set compaction.reserved (OpenCode 1's name for the buffer)",
+        ),
+        (
+            {"compaction": {"reserved": 8000, "buffer": 8000}},
+            "remove compaction.buffer and set compaction.reserved (OpenCode 1's name for the buffer)",
+        ),
         ({"agent": {"plan": {"steps": 4}}}, "agent.plan is not a subagent name"),
         ({"agent": {"build": {"prompt": "other"}}}, "agent.build supports only steps"),
         ({"agent": {"build": {"steps": 0}}}, "agent.build.steps must be a positive integer"),
@@ -1219,6 +1326,45 @@ def test_seed_rejects_opencode_config_outside_the_session_allowlist(setup, openc
     assert response.status_code == 422
     assert detail in response.json()["detail"]
     sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("name", ["reserved", "buffer"])
+def test_the_allowlist_takes_either_versions_name_for_the_compaction_buffer(name):
+    """The allowlist does not know the OpenCode version, so a preset can be checked without an agent; the config, when
+    it loads, and the seed then refuse the name its version does not use."""
+    assert _session_opencode_config_error({"compaction": {"auto": True, name: 8000}}) is None
+
+
+@pytest.mark.parametrize(
+    ("opencode_version", "other", "detail"),
+    [
+        (
+            OPENCODE_V2_VERSION,
+            "reserved",
+            "remove compaction.reserved and set compaction.buffer (OpenCode 2's name for the buffer)",
+        ),
+        (
+            OPENCODE_VERSION,
+            "buffer",
+            "remove compaction.buffer and set compaction.reserved (OpenCode 1's name for the buffer)",
+        ),
+    ],
+)
+def test_the_config_refuses_the_other_versions_compaction_buffer_name_when_it_loads(
+    setup, opencode_version, other, detail
+):
+    """A config that every seed would refuse stops the agent server before it starts, and a local run, which has no
+    seed, never hands OpenCode the other version's name."""
+    agent, _ = setup
+    settings = agent.config.model_dump() | {"opencode_version": opencode_version}
+    with pytest.raises(ValidationError) as refused:
+        OpenCodeAgentConfig(**(settings | {"opencode_config": {"compaction": {"auto": True, other: 8000}}}))
+    assert f"opencode_version {opencode_version} is OpenCode" in str(refused.value)
+    assert detail in str(refused.value)
+    # The version's own name loads.
+    own = "buffer" if other == "reserved" else "reserved"
+    config = OpenCodeAgentConfig(**(settings | {"opencode_config": {"compaction": {"auto": True, own: 8000}}}))
+    assert config.opencode_config == {"compaction": {"auto": True, own: 8000}}
 
 
 def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
