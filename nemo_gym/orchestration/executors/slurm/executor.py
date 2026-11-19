@@ -40,7 +40,7 @@ from nemo_gym.orchestration.api import (
     VllmPDServiceConfig,
 )
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.capabilities import Resubmittable
+from nemo_gym.orchestration.executors.capabilities import Inspectable, Resubmittable
 from nemo_gym.orchestration.executors.connection import (
     Connection,
     get_connection,
@@ -76,12 +76,21 @@ from nemo_gym.orchestration.executors.slurm.script import (
     build_sbatch_script,
     planned_log_sources,
 )
+from nemo_gym.orchestration.executors.slurm_status import (
+    parse_read_files_output,
+    parse_status_output,
+    render_read_files_script,
+    render_status_script,
+)
 from nemo_gym.orchestration.jobs import (
     ARTIFACTS_DIRNAME,
     LOGS_DIRNAME,
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
+    JobKey,
+    JobRef,
     LogSource,
+    ObservedStatus,
     SubmissionRecord,
     new_gym_job_id,
     utc_now,
@@ -135,7 +144,7 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
         raise ValueError(f"Mount src paths do not exist:\n{details}")
 
 
-class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable):
+class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Inspectable):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
     Every service and the driver are launched via `srun --container-image` so they
@@ -284,6 +293,22 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable):
             return None
         ref = install.ref if install is not None else None
         return ref if ref is not None and re.fullmatch(r"[0-9a-f]{40}", ref) else None
+
+    def connection_key(self, record: SubmissionRecord) -> str:
+        return record.hostname or "local"
+
+    def query_states(self, refs: list[JobRef]) -> dict[JobKey, ObservedStatus]:
+        """One script on one connection: a single squeue, a single sacct and each job directory's state files."""
+        if not refs:
+            return {}
+        with get_connection(refs[0].record.hostname) as conn:
+            output = conn.run(render_status_script(refs))
+        return parse_status_output(output, refs)
+
+    def read_run_files(self, record: SubmissionRecord, paths: list[Path]) -> dict[Path, str | None]:
+        with get_connection(record.hostname) as conn:
+            output = conn.run(render_read_files_script(paths))
+        return parse_read_files_output(output, paths)
 
     @staticmethod
     def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:

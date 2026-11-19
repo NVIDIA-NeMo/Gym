@@ -4,7 +4,7 @@ description: "The manifest, resolved config, and local index that gym eval submi
 position: 5
 ---
 
-`gym eval submit` describes what to submit; the job record describes what **was** submitted. It exists so a run can be found again, by a person, a collection script, or a future status command, without re-reading the original config.
+`gym eval submit` describes what to submit; the job record describes what **was** submitted. It exists so a run can be found again, by a person, a collection script, or `gym job status`, without re-reading the original config.
 
 The record format is deliberately executor-neutral. Nothing in it is named after Slurm, and the `executor` field says how to interpret the executor-shaped parts.
 
