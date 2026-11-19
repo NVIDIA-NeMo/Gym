@@ -48,6 +48,10 @@ class EpisodeError(RuntimeError):
     """An episode without a verified measurement."""
 
 
+class CleanupUnconfirmed(EpisodeError):
+    """The runtime did not establish that it released the simulator and SDK session."""
+
+
 class HorizonScores(BaseModel):
     within_native: StrictBool
     within_budget: StrictBool
@@ -114,6 +118,7 @@ class Episode:
             "horizon.json",
             "native/result.json",
             "native/outcome.json",
+            "native/actor/transcript.jsonl",
             "native/actor/ttc-runtime.json",
             "native/evaluation/metadata.json",
             "native/evaluation/sensors.mp4",
@@ -147,7 +152,7 @@ class Episode:
             try:
                 async with asyncio.timeout(timeout):
                     stdout, _ = await process.communicate()
-                if process.returncode != 0 and log is None:
+                if process.returncode != 0:
                     raise EpisodeError(f"{Path(args[0]).name} exited with status {process.returncode}")
                 return stdout or b""
             except BaseException:
@@ -180,40 +185,48 @@ class Episode:
             .decode()
             .strip()
         )
-        await self.execute(
-            str(self.bridge_python),
-            supervisor,
-            "--cleanup-receipt",
-            str(cleanup),
-            "--cleanup-id",
-            self.directory.name,
-            "--",
-            *self.engine,
-            "run",
-            "--config",
-            str(config_path),
-            "--output",
-            str(evidence),
-            *(("--policy", str(self.policy)) if self.policy else ()),
-            timeout=self.timeout,
-            log=self.directory / "engine.log",
-        )
-        await self.execute(
-            str(self.simulation_python),
-            "-c",
-            CLEANUP_AUDIT,
-            str(cleanup),
-            self.directory.name,
-            timeout=self.cleanup_timeout,
-        )
+        try:
+            await self.execute(
+                str(self.bridge_python),
+                supervisor,
+                "--cleanup-receipt",
+                str(cleanup),
+                "--cleanup-id",
+                self.directory.name,
+                "--",
+                *self.engine,
+                "run",
+                "--config",
+                str(config_path),
+                "--output",
+                str(evidence),
+                *(("--policy", str(self.policy)) if self.policy else ()),
+                timeout=self.timeout,
+                log=self.directory / "engine.log",
+            )
+        finally:
+            try:
+                await self.execute(
+                    str(self.simulation_python),
+                    "-c",
+                    CLEANUP_AUDIT,
+                    str(cleanup),
+                    self.directory.name,
+                    timeout=self.cleanup_timeout,
+                )
+            except (EpisodeError, OSError, TimeoutError) as error:
+                raise CleanupUnconfirmed("Nanoverse did not confirm process cleanup") from error
 
-        recorded = json.loads((evidence / "result.json").read_text())
-        sdk = recorded.get("sdk_summary") or {}
-        ttc = json.loads((evidence / "actor" / "ttc-runtime.json").read_text())
+        try:
+            recorded = json.loads((evidence / "result.json").read_text())
+            sdk = recorded.get("sdk_summary") or {}
+            ttc = json.loads((evidence / "actor" / "ttc-runtime.json").read_text())
+        except (OSError, ValueError) as error:
+            raise CleanupUnconfirmed("EmberBridge SDK or TTC cleanup evidence could not be read") from error
         if sdk.get("closed") is not True or sdk.get("faults") or ttc.get("state") != "closed":
-            raise EpisodeError("EmberBridge did not confirm SDK and TTC cleanup")
+            raise CleanupUnconfirmed("EmberBridge did not confirm SDK and TTC cleanup")
         if any(ttc.get(key) for key in ("fault", "cleanup_error", "daemon_cleanup_error", "export_error")):
-            raise EpisodeError("TTC reported a cleanup error")
+            raise CleanupUnconfirmed("TTC reported a cleanup error")
 
         result = json.loads(await self.execute(*self.engine, "result", str(evidence), timeout=self.cleanup_timeout))
         (self.directory / "engine-result.json").write_text(json.dumps(result, indent=2) + "\n")

@@ -11,19 +11,32 @@ from statistics import mean
 from typing import Literal
 
 from fastapi import Body, HTTPException
-from pydantic import Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.core.failure_kinds import ENVIRONMENT_SERVER_FAILED
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.core.failure_kinds import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
+    ENVIRONMENT_SERVER_FAILED,
+    HARNESS_TERMINATION_UNCONFIRMED,
+    MODEL_CONTEXT_LIMIT,
+)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, observe_verifier
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.robodojo_agent.cases import bind_case
-from responses_api_agents.robodojo_agent.episode import Episode, EpisodeError
+from responses_api_agents.robodojo_agent.episode import CleanupUnconfirmed, Episode, EpisodeError
 
 
 LOGGER = logging.getLogger(__name__)
+POLICY_FAILURE_KINDS = {
+    "policy_failure.decision_budget": AGENT_LIMIT,
+    "policy_failure.context": MODEL_CONTEXT_LIMIT,
+    "policy_failure.no_progress": AGENT_INVALID_OUTPUT,
+}
 
 
 class RoboDojoAgentConfig(BaseResponsesAPIAgentConfig):
@@ -43,6 +56,8 @@ class RoboDojoAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 class RoboDojoRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
     case_id: str = Field(min_length=1)
 
 
@@ -58,11 +73,13 @@ class RoboDojoResponse(BaseVerifyResponse):
     extended_success: bool | None = None
     evidence_dir: str
     video_path: str | None = None
+    trajectory_path: str | None = None
 
 
 class RoboDojoAgent(SimpleResponsesAPIAgent):
     config: RoboDojoAgentConfig
     _gpu: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+    _cleanup_unconfirmed: bool = PrivateAttr(default=False)
 
     def multiple_workers_unsupported_reason(self) -> str:
         return "one RoboDojo agent instance owns one local GPU"
@@ -116,42 +133,75 @@ class RoboDojoAgent(SimpleResponsesAPIAgent):
             metadata={"episode_engine": "ember_bridge"},
         )
         common = {
-            **body.model_dump(),
+            "responses_create_params": body.responses_create_params,
+            "case_id": body.case_id,
             "response": response,
             "assigned_case_id": case.case_id,
             "layout_sha256": case.layout.sha256,
             "evidence_dir": str(directory),
         }
-        try:
-            async with self._gpu:
+        outcome = None
+        failure_kind = None
+        failure_reason = None
+        async with self._gpu:
+            try:
+                if self._cleanup_unconfirmed:
+                    raise CleanupUnconfirmed("An earlier episode did not release the GPU")
                 outcome, scores = await runner.run(bound)
-            if scores.task_step_limit != case.native_step_limit or scores.control_budget != bound["step_limit"]:
-                raise EpisodeError("Native horizon does not match the frozen case")
-            if config.evidence_export_root is not None:
+            except CleanupUnconfirmed as error:
+                self._cleanup_unconfirmed = True
+                failure_kind, failure_reason = HARNESS_TERMINATION_UNCONFIRMED, str(error)
+            except asyncio.CancelledError:
+                self._cleanup_unconfirmed = True
+                raise
+            except TimeoutError:
+                failure_kind, failure_reason = AGENT_TIMEOUT, "RoboDojo supervisor exceeded its episode deadline"
+            except (EpisodeError, OSError, ValueError, KeyError) as error:
+                failure_kind = ENVIRONMENT_SERVER_FAILED
+                failure_reason = f"{type(error).__name__}: RoboDojo native measurement failed"
+                LOGGER.warning("RoboDojo case %s could not be scored", body.case_id, exc_info=True)
+            else:
+                if scores.task_step_limit != case.native_step_limit or scores.control_budget != bound["step_limit"]:
+                    failure_kind = ENVIRONMENT_PROTOCOL_VIOLATION
+                    failure_reason = "Native horizon does not match the frozen case"
+                elif outcome == "policy_failure.deadline":
+                    failure_kind = AGENT_TIMEOUT
+                    failure_reason = "The episode deadline expired without verified model-side attribution"
+        if config.evidence_export_root is not None:
+            try:
                 directory = await asyncio.to_thread(runner.export_evidence, config.evidence_export_root)
                 common["evidence_dir"] = str(directory)
-        except (EpisodeError, OSError, TimeoutError, ValueError, KeyError) as error:
-            LOGGER.warning(
-                "RoboDojo case %s could not be scored; evidence in %s", body.case_id, directory, exc_info=True
-            )
+            except OSError:
+                LOGGER.warning("Could not export RoboDojo evidence from %s", directory, exc_info=True)
+        video = directory / "native" / "evaluation" / "sensors.mp4"
+        trajectory = directory / "native" / "actor" / "transcript.jsonl"
+        common.update(
+            outcome_class=outcome,
+            video_path=str(video) if video.is_file() else None,
+            trajectory_path=str(trajectory) if trajectory.is_file() else None,
+        )
+        if failure_kind is not None:
             return RoboDojoResponse(
                 **common,
                 reward=0,
                 mask_sample=True,
-                failure_kind=ENVIRONMENT_SERVER_FAILED,
-                failure_reason=f"{type(error).__name__}: RoboDojo native measurement failed; see evidence_dir",
+                failure_kind=failure_kind,
+                failure_reason=failure_reason,
             )
-        video = directory / "native" / "evaluation" / "sensors.mp4"
-        return RoboDojoResponse(
-            **common,
-            reward=float(scores.within_budget),
-            outcome_class=outcome,
-            native_score=scores.score_within_native,
-            extended_score=scores.score_within_budget,
-            native_success=scores.within_native,
-            extended_success=scores.within_budget,
-            video_path=str(video) if video.is_file() else None,
-        )
+
+        async def verified_grade() -> RoboDojoResponse:
+            return RoboDojoResponse(
+                **common,
+                reward=float(scores.within_budget),
+                native_score=scores.score_within_native,
+                extended_score=scores.score_within_budget,
+                native_success=scores.within_native,
+                extended_success=scores.within_budget,
+                failure_kind=POLICY_FAILURE_KINDS.get(outcome),
+                failure_reason=outcome if outcome in POLICY_FAILURE_KINDS else None,
+            )
+
+        return await observe_verifier(verified_grade, enabled=True, verifier_name=config.name)()
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         result = await super().aggregate_metrics(body)

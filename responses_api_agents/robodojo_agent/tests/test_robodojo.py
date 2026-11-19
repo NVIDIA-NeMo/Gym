@@ -12,9 +12,23 @@ from omegaconf import OmegaConf
 
 from benchmarks.robodojo.prepare import prepare
 from nemo_gym.client import ServerClient
+from nemo_gym.core.episode_context import rollout_context
+from nemo_gym.core.failure_kinds import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    ENVIRONMENT_SERVER_FAILED,
+    HARNESS_TERMINATION_UNCONFIRMED,
+)
+from nemo_gym.trajectory import grading_result_binding
 from responses_api_agents.robodojo_agent.app import RoboDojoAgent, RoboDojoAgentConfig, RoboDojoRequest
 from responses_api_agents.robodojo_agent.cases import bind_case
-from responses_api_agents.robodojo_agent.episode import CLEANUP_AUDIT, HORIZON_AUDIT, SUPERVISOR_PATH, Episode
+from responses_api_agents.robodojo_agent.episode import (
+    CLEANUP_AUDIT,
+    HORIZON_AUDIT,
+    SUPERVISOR_PATH,
+    Episode,
+    EpisodeError,
+)
 
 
 CASE = "general_pickup__standard__g1__l0"
@@ -89,7 +103,7 @@ def test_prepare_and_bind_the_same_frozen_layout(runtime, tmp_path):
         bind_case(**kwargs)
 
 
-@pytest.mark.parametrize("fault", ["success", None, "unscored", "unclean"])
+@pytest.mark.parametrize("fault", ["success", "decision_budget", "deadline", "unscored", "unclean"])
 def test_run_uses_native_horizon_and_masks_missing_measurement(runtime, tmp_path, monkeypatch, fault):
     template, manifest, _, digest = runtime
     commands = []
@@ -116,12 +130,12 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(runtime, tmp_path
             return json.dumps(
                 {
                     "schema": "ember_bridge.evaluation_result.v1",
-                    "counted": fault in (None, "success"),
+                    "counted": fault in ("decision_budget", "deadline", "success"),
                     "class": (
                         "scored"
                         if fault == "success"
-                        else "policy_failure.deadline"
-                        if fault is None
+                        else f"policy_failure.{fault}"
+                        if fault in ("decision_budget", "deadline")
                         else "infrastructure.worker"
                     ),
                 }
@@ -130,7 +144,7 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(runtime, tmp_path
             if fault == "success":
                 assert args[-2:] == ("scored", "native_x2")
                 return b'{"within_native":true,"within_budget":true,"score_within_native":1,"score_within_budget":1,"task_step_limit":200,"control_budget":400}'
-            assert args[-2:] == ("policy_failure.deadline", "native_x2")
+            assert args[-2:] == (f"policy_failure.{fault}", "native_x2")
             return b'{"within_native":false,"within_budget":false,"score_within_native":0.3,"score_within_budget":0.4,"task_step_limit":200,"control_budget":400}'
         raise AssertionError(args)
 
@@ -156,24 +170,40 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(runtime, tmp_path
     )
     agent = RoboDojoAgent(config=config, server_client=client)
     row = RoboDojoRequest(case_id=CASE, responses_create_params={"input": []})
-    result = asyncio.run(agent.run(row))
+    with rollout_context("robodojo-test"):
+        result = asyncio.run(agent.run(row))
     assert result.case_id == result.assigned_case_id == CASE
     assert result.layout_sha256 == digest
     assert result.reward == float(fault == "success")
-    if fault in ("unscored", "unclean"):
+    if fault in ("unscored", "unclean", "deadline"):
         assert result.mask_sample is True
         assert result.native_score is None
-        assert not any(HORIZON_AUDIT in command for command in commands)
+        assert result.ng_verifier_invocations == []
+        assert (
+            result.failure_kind
+            == {
+                "unscored": ENVIRONMENT_SERVER_FAILED,
+                "unclean": HARNESS_TERMINATION_UNCONFIRMED,
+                "deadline": AGENT_TIMEOUT,
+            }[fault]
+        )
         return
     assert result.mask_sample is False
+    assert result.failure_kind == (None if fault == "success" else AGENT_LIMIT)
     assert result.native_score == (1 if fault == "success" else 0.3)
     assert result.extended_score == (1 if fault == "success" else 0.4)
     assert Path(result.video_path).is_file()
     assert (Path(result.evidence_dir) / "horizon.json").is_file()
+    (invocation,) = result.ng_verifier_invocations
+    assert invocation.grading_record.verdict == "scored"
+    assert invocation.grading_record.score == result.reward
+    assert invocation.grading_record.result_binding_sha256 == grading_result_binding(result)
 
 
 def test_timeout_terminates_an_owned_subprocess(tmp_path):
     episode = Episode(tmp_path, Path(sys.executable), Path(sys.executable), None, 5, 1)
     with pytest.raises(TimeoutError):
         asyncio.run(episode.execute(sys.executable, "-c", "import time; time.sleep(10)", timeout=0.1))
+    with pytest.raises(EpisodeError, match="exited with status 9"):
+        asyncio.run(episode.execute(sys.executable, "-c", "raise SystemExit(9)", timeout=5, log=tmp_path / "log"))
     assert asyncio.run(episode.execute(sys.executable, "-c", "print('closed')", timeout=5)) == b"closed\n"
