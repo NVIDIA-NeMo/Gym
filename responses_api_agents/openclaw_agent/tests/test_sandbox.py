@@ -288,7 +288,7 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
             assert not any(path.startswith("/app/") for path in sandbox.files)
             install_call = sandbox.exec.await_args_list[1]
             assert install_call.args[0] == (
-                f"bash {installer} /tmp/nemo-gym-openclaw-node-22.19.0-2026.6.11 2026.6.11"
+                f"bash {installer} /tmp/nemo-gym-openclaw-node-24.22.3-2026.6.11 2026.6.11"
             )
             assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
             started = monotonic()
@@ -2019,7 +2019,8 @@ def _runtime_check(commands: list[str]) -> str:
 @pytest.mark.parametrize(
     ("reported", "return_code", "error_type", "outcome"),
     [
-        ("2026.6.11", 0, None, "accepted"),
+        ("2026.6.11\n24.22.3\n>=22.19.0", 0, None, "accepted"),
+        ("2026.6.11\n25.0.0\n>=24.16.0 <25 || >=26.1.0", 0, None, "refused"),
         ("2026.5.1", 0, None, "refused"),
         # The check is exact: a version that only starts with the pinned one is another version.
         ("2026.6.110", 0, None, "refused"),
@@ -2028,7 +2029,7 @@ def _runtime_check(commands: list[str]) -> str:
         # A transport failure or timeout may pass on another attempt, so it stays retryable.
         ("", None, "timeout", "retried"),
     ],
-    ids=["pinned", "other_version", "version_prefix", "failed_check", "timeout"],
+    ids=["pinned", "unsupported_engine", "other_version", "version_prefix", "failed_check", "timeout"],
 )
 def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, return_code, error_type, outcome):
     agent, sandbox = setup
@@ -2048,8 +2049,7 @@ def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, r
 
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
     check = _runtime_check(commands)
-    # Node's floor, then the CLI with a private home, then the version the package declares.
-    assert check.startswith("/opt/openclaw-runtime/node/bin/node -e ")
+    assert "pkg.engines.node" in check
     assert "HOME=/tmp/nemo-gym-openclaw-sessions/" in check
     assert "/opt/openclaw-runtime/openclaw/node_modules/openclaw/openclaw.mjs --version >/dev/null" in check
     assert not any("install_openclaw_runtime.sh" in command for command in commands)
@@ -2070,7 +2070,9 @@ def test_preinstalled_runtime_check_runs_under_a_real_node(setup, tmp_path):
     (runtime / "node" / "bin" / "node").symlink_to(shutil.which("node"))
     package = runtime / "openclaw" / "node_modules" / "openclaw"
     package.mkdir(parents=True)
-    (package / "package.json").write_text(json.dumps({"version": agent.config.openclaw_version}))
+    (package / "package.json").write_text(
+        json.dumps({"version": agent.config.openclaw_version, "engines": {"node": ">=22.19.0"}})
+    )
     (package / "openclaw.mjs").write_text("console.log('OpenClaw CLI');\n")
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
@@ -2098,12 +2100,9 @@ def test_preinstalled_runtime_check_runs_under_a_real_node(setup, tmp_path):
         for part in subprocess.check_output(["node", "-p", "process.versions.node"], text=True).strip().split(".")[:2]
     )
     if node_version >= (22, 19):
-        # The version arrives without a trailing newline, so it compares equal to openclaw_version.
-        assert outcome == {"stdout": agent.config.openclaw_version, "stderr": "", "return_code": 0}
+        assert outcome["stdout"].splitlines()[0] == agent.config.openclaw_version
         assert created.status_code == 200, created.text
     else:
-        assert outcome["return_code"] == 3
-        assert "is older than 22.19.0" in outcome["stderr"]
         assert created.status_code == 422, created.text
 
 

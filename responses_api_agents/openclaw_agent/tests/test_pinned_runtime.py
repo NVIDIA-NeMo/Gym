@@ -16,6 +16,8 @@ from fastapi import Request
 
 from nemo_gym.agents import HARNESS_RUNNER_SCRIPT, SUPERVISOR_SCRIPT, shell_assignments
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from responses_api_agents.openclaw_agent.app import parse_openclaw_session
+from responses_api_agents.openclaw_agent.setup_openclaw import DEFAULT_OPENCLAW_VERSION
 from responses_api_agents.openclaw_agent.tests.test_sandbox import seed, setup, staged  # noqa: F401
 
 
@@ -25,12 +27,24 @@ async def test_pinned_non_tty_cli_stays_in_supervised_group_and_stops(setup, tmp
     node = os.environ.get("GYM_TEST_OPENCLAW_NODE") or shutil.which("node")
     if entrypoint is None or node is None:
         pytest.skip("Set GYM_TEST_OPENCLAW_ENTRYPOINT and GYM_TEST_OPENCLAW_NODE to the pinned runtime")
-    assert json.loads(Path(entrypoint).with_name("package.json").read_text())["version"] == "2026.6.11"
+    assert json.loads(Path(entrypoint).with_name("package.json").read_text())["version"] == DEFAULT_OPENCLAW_VERSION
     requested = asyncio.Event()
     release = asyncio.Event()
 
     async def hold_model_call(request: web.Request) -> web.Response:
-        await request.read()
+        body = await request.json()
+        if not any(message["role"] == "tool" for message in body["messages"]):
+            tool = {
+                "index": 0,
+                "id": "call_read_input",
+                "type": "function",
+                "function": {"name": "read", "arguments": json.dumps({"path": str(workdir / "input.txt")})},
+            }
+            delta = {"role": "assistant", "tool_calls": [tool]}
+            chunk = {"id": "chatcmpl-first", "choices": [{"index": 0, "delta": delta, "finish_reason": "tool_calls"}]}
+            return web.Response(
+                text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n", content_type="text/event-stream"
+            )
         requested.set()
         await release.wait()
         return web.json_response({"error": "test finished"}, status=503)
@@ -43,11 +57,13 @@ async def test_pinned_non_tty_cli_stays_in_supervised_group_and_stops(setup, tmp
         site = web.TCPSite(runner, "127.0.0.1", 0)
         await site.start()
         agent, sandbox = setup
+        agent.config.openclaw_version = DEFAULT_OPENCLAW_VERSION
         agent.server_client._build_server_base_url.return_value = f"http://127.0.0.1:{runner.addresses[0][1]}"
         directory = tmp_path / "session"
         (directory / "home/.openclaw").mkdir(parents=True)
         workdir = tmp_path / "task"
         workdir.mkdir()
+        (workdir / "input.txt").write_text("retained after stop")
         request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "openclaw-smoke-a2"}})
         body = seed()
         body.sandbox_access.workdir = str(workdir)
@@ -106,6 +122,22 @@ async def test_pinned_non_tty_cli_stays_in_supervised_group_and_stops(setup, tmp
             receipt = json.loads((directory / "cleanup.json").read_text())
             assert receipt["cleanup_confirmed"] is True
             assert receipt["timed_out"] is False
+            # The worker stopped during the second model call. Read the first tool exchange from SQLite.
+            export = await asyncio.create_subprocess_exec(
+                node,
+                str(Path(__file__).resolve().parents[1] / "export_sessions.mjs"),
+                entrypoint,
+                str(directory / "home/.openclaw"),
+                str(tmp_path / "transcripts"),
+                directory.name,
+            )
+            assert await asyncio.wait_for(export.wait(), 30) == 0
+            transcript = tmp_path / "transcripts/main/sessions" / f"{directory.name}.jsonl"
+            items = parse_openclaw_session(transcript.read_text())
+            call, result = (item for item in items if item.type in {"function_call", "function_call_output"})
+            assert call.name == "read" and call.call_id == result.call_id
+            assert json.loads(call.arguments) == {"path": str(workdir / "input.txt")}
+            assert "retained after stop" in result.output
             for item in observed:
                 stat = Path(f"/proc/{item['pid']}/stat")
                 assert not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"
