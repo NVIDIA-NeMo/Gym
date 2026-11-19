@@ -94,7 +94,9 @@ class SandboxHermesObserver:
             }
         }
         self._compactions: list[dict[str, Any]] = []
-        self._history: dict[str, tuple[list[dict[str, Any]], int]] = {}
+        # Per invocation: the history compactions removed from model context, then the length and last message of
+        # the latest compacted list, which locate where the turns added after it begin.
+        self._history: dict[str, tuple[list[dict[str, Any]], int, dict[str, Any] | None]] = {}
         self._summary_usage_unknown = False
         self._summary_details_unknown = False
         self._gaps: list[dict[str, Any]] = []
@@ -284,8 +286,13 @@ class SandboxHermesObserver:
                 # That no-op is not a completed compaction.
                 changed = count_before is not None and count_after != count_before
                 if changed and isinstance(result, tuple) and isinstance(result[0], list):
-                    retained, offset = self._history.get(invocation_id, ([], 0))
-                    self._history[invocation_id] = (retained + before[offset:], len(result[0]))
+                    retained, start = (
+                        (self._history[invocation_id][0], self._continuation_start(invocation_id, before))
+                        if invocation_id in self._history
+                        else ([], 0)
+                    )
+                    last = deepcopy(result[0][-1]) if result[0] else None
+                    self._history[invocation_id] = (retained + before[start:], len(result[0]), last)
                 if failed or changed or response_ids:
                     after = getattr(compressor, _COMPRESSED_TOKENS_ATTR, None)
                     with self._lock:
@@ -384,9 +391,22 @@ class SandboxHermesObserver:
         if self._summary_details_unknown or self._summary_usage_unknown:
             result.update(dict.fromkeys(field for _, _, field in _USAGE_DETAIL_FIELDS))
         if invocation_id in self._history:
-            retained, offset = self._history[invocation_id]
-            result["messages"] = [*retained, *(result.get("messages") or [])[offset:]]
+            messages = result.get("messages") or []
+            start = self._continuation_start(invocation_id, messages)
+            result["messages"] = [*self._history[invocation_id][0], *messages[start:]]
         return result
+
+    def _continuation_start(self, invocation_id: str, messages: list[dict[str, Any]]) -> int:
+        """Index of the first message added after the invocation's latest compaction.
+
+        Hermes later merges the summary message into the assistant message after it, so the conversation can be
+        shorter than the compacted list was. Find the compacted list's last message instead of trusting its length.
+        """
+        _, length, last = self._history[invocation_id]
+        for index in range(min(length, len(messages)) - 1, -1, -1):
+            if messages[index] == last:
+                return index + 1
+        return length
 
     def _record_conversation(
         self,

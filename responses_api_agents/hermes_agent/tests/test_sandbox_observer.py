@@ -131,6 +131,37 @@ def test_export_keeps_history_and_output_across_multiple_compactions():
     assert result["messages"] == compacted_again
 
 
+def test_export_keeps_turns_after_hermes_merges_the_summary_into_the_next_message():
+    summary = {"role": "assistant", "content": "[CONTEXT COMPACTION] summary"}
+    tail_call = {"role": "assistant", "content": "", "tool_calls": [{"id": "call-2"}]}
+    tail = [tail_call, {"role": "tool", "tool_call_id": "call-2", "content": "two"}]
+    restated = {"role": "user", "content": "[STILL IN PROGRESS] request"}
+
+    class MergingAgent(_Agent):
+        def _compress_context(self, messages, *args, **kwargs):
+            self.context_compressor.compression_count += 1
+            return [messages[0], summary, *tail, restated], "system"
+
+    agent = MergingAgent()
+    observer = SandboxHermesObserver().instrument(agent)
+    original = [
+        {"role": "user", "content": "request"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "one"},
+        *tail,
+    ]
+    agent._compress_context(original, "system")
+    added = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call-3"}]},
+        {"role": "tool", "tool_call_id": "call-3", "content": "three"},
+        {"role": "assistant", "content": "done"},
+    ]
+    # Hermes folds the summary into the assistant message that follows it, one message fewer than it returned.
+    merged = [original[0], {**tail_call, "content": summary["content"]}, tail[1], restated, *added]
+    result = {"messages": merged, "completed": True}
+    assert observer.restore_messages(result)["messages"] == original + added
+
+
 @pytest.mark.parametrize("usage", [True, False])
 def test_summary_calls_keep_invocation_identity_and_usage(monkeypatch, usage):
     from types import SimpleNamespace
