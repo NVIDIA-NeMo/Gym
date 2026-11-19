@@ -38,7 +38,7 @@ which tasks fail and why, [nemo-gym-blade-analysis](../nemo-gym-blade-analysis/S
 3. **Do the one action the table names** (section 4): run the same command without `--inspect`, or add the
    one option the row names, with its reason. A decision with no row, or a STOP you cannot explain:
    stop and report it.
-4. **Never** use plain `gym eval resubmit`, edit a run's files, or regenerate a saved answer.
+4. **Never** use plain `gym eval resubmit` or `gym job resubmit`, edit a run's files, or regenerate a saved answer.
 5. **Done** only when the inspect says `SUCCESS` (section 6). Report the health, the corrections of
    section 7 and every operator action with its reason.
 
@@ -259,7 +259,7 @@ When the operator has asked you to complete or recover a run, inspect it and, if
 run the recovery the decision permits in the same turn and babysit it. Keep an intentionally stopped run
 stopped unless the operator asks to continue it. A STOP that needs an owner's approval or a fix still waits.
 
-Plain `gym eval resubmit` without `--recover` resets the budgets and the per-rollout attempt allowance:
+Plain `gym eval resubmit` without `--recover`, and `gym job resubmit`, which is the same plain command, reset the budgets and the per-rollout attempt allowance:
 it is not a substitute for any row below. Every row is the same command as the inspect, without
 `--inspect` and with the option the row names. Facts about single benchmarks (agent time limits,
 GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
