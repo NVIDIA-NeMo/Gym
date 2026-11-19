@@ -14,7 +14,7 @@ Top-level ``hash_id``/``dataset``/``source`` are provenance columns undeclared o
 request model (silently dropped in transit by pydantic's default extra='ignore').
 """
 
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -42,7 +42,7 @@ class AssertionTests(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["assertions"] = Field(description="Test format.")
-    tests: List[str] = Field(
+    tests: list[str] = Field(
         min_length=1, description="Python statements, usually asserts, run in order in the candidate's module."
     )
 
@@ -63,7 +63,7 @@ class ResourceLimits(BaseModel):
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    unit_tests: Optional[Union[UnitTests, AssertionTests]] = Field(
+    unit_tests: UnitTests | AssertionTests | None = Field(
         default=None,
         description=(
             "Test cases the extracted code must pass. Optional on the wire (verifier_metadata is "
