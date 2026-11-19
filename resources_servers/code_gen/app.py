@@ -24,6 +24,7 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
 from sandbox_execution import check_correctness_in_sandbox, task_deadline_s
+from task_data import ResourceLimits
 
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.metrics import (
@@ -83,13 +84,6 @@ class UnitTests(BaseModel):
     inputs: List[str]
     outputs: List[str]
     fn_name: Optional[str] = None
-
-
-class ResourceLimits(BaseModel):
-    """A task's own limits; each one it leaves out falls back to the server's."""
-
-    time_limit_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-    memory_limit_mb: int | None = Field(default=None, gt=0)
 
 
 class CompCodingRunRequest(BaseRunRequest):
