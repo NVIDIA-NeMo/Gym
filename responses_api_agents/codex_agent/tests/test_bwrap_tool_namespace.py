@@ -21,6 +21,7 @@ turns a skip into a failure (cluster validation); NEMO_GYM_TEST_CODEX_RUNTIME, a
 installed by install_codex_runtime.sh, adds the run with the real Codex CLI.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -37,29 +38,35 @@ CODEX_RUNTIME = os.environ.get("NEMO_GYM_TEST_CODEX_RUNTIME")
 REQUIRED = os.environ.get("NEMO_GYM_REQUIRE_BWRAP") == "1"
 
 
-def _user_namespaces_work() -> bool:
+def _nested_user_namespaces_unavailable() -> str | None:
+    """None when bwrap can create a user and pid namespace inside another one, else why not.
+
+    The tool namespace is a bwrap inside the sandbox's bwrap. A host can allow the outer namespace and refuse the
+    nested one, e.g. when an AppArmor user-namespace restriction confines processes inside an unprivileged namespace.
+    """
     if BWRAP is None or not sys.platform.startswith("linux"):
-        return False
-    probe = subprocess.run(
-        [BWRAP, "--unshare-user", "--unshare-pid", "--ro-bind", "/", "/", "--proc", "/proc", "true"],
-        capture_output=True,
-        timeout=30,
-    )
-    return probe.returncode == 0
+        return "needs Linux and bwrap"
+    namespace = ["--unshare-user", "--unshare-pid", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev"]
+    probe = subprocess.run([BWRAP, *namespace, BWRAP, *namespace, "true"], capture_output=True, text=True, timeout=30)
+    if probe.returncode == 0:
+        return None
+    return f"bwrap ({BWRAP}) cannot create a nested user namespace here: {probe.stderr.strip()[-300:]}"
 
 
-AVAILABLE = _user_namespaces_work()
-if REQUIRED and not AVAILABLE:
-    raise RuntimeError(f"NEMO_GYM_REQUIRE_BWRAP=1 but bwrap ({BWRAP}) cannot create user namespaces here")
+UNAVAILABLE = _nested_user_namespaces_unavailable()
+if REQUIRED and UNAVAILABLE:
+    raise RuntimeError(f"NEMO_GYM_REQUIRE_BWRAP=1, but {UNAVAILABLE}")
 
 pytestmark = [
     pytest.mark.sandbox,
-    pytest.mark.skipif(not AVAILABLE, reason="needs Linux, bwrap and user namespaces"),
+    pytest.mark.skipif(UNAVAILABLE is not None, reason=UNAVAILABLE or ""),
 ]
 
 
 def _assert_ok(report: dict) -> None:
-    assert report["ok"], report
+    # The whole report: pytest's assertion repr truncates it, hiding the setup output and checks that explain a failure.
+    if not report["ok"]:
+        pytest.fail(json.dumps(report, indent=1, default=str), pytrace=False)
 
 
 async def test_tool_commands_cannot_kill_the_harness(tmp_path: Path) -> None:

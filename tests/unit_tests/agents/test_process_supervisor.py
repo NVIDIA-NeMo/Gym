@@ -174,7 +174,13 @@ def test_forced_stop_reaches_processes_that_leave_the_harness_during_the_stop(tm
     }[escape]
     (tmp_path / "worker.sh").write_text(worker)
     try:
-        result = _supervise(tmp_path, "bash", "worker.sh", timeout="1", cwd=tmp_path)
+        # The worker touches `ready` once its trap is set. A stop that comes earlier (a slow, loaded host) kills
+        # the shell before it can spawn anything, which tests nothing, so the run is repeated with more time.
+        for timeout in ("1", "4", "10"):
+            result = _supervise(tmp_path, "bash", "worker.sh", timeout=timeout, cwd=tmp_path)
+            if (tmp_path / "ready").exists():
+                break
+        assert (tmp_path / "ready").exists(), "the worker never set its trap before the stop"
         assert result.returncode == 0, result.stderr
         receipt = _receipt(tmp_path)
         assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is True, receipt
