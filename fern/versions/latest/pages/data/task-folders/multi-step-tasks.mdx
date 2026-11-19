@@ -220,7 +220,7 @@ gym eval run <dataset> --agent opencode_agent ... \
   ++harbor_environment_server.environment_servers.harbor.turn_sessions=continue
 ```
 
-`continue` needs a harness that declares multi-turn continuation; today only `opencode_agent` does. Otherwise, or
+`continue` needs a harness that can continue a session in a lent sandbox; today only `opencode_agent` can. Otherwise, or
 when the task's steps switch agent users, each multi-step episode fails at seed, unretried, before its sandbox starts.
 
 Each step keeps its own instruction, budget, verification and early stop. Between steps the harness process exits and
