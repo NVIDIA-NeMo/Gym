@@ -12,6 +12,7 @@ from sandbox_limits import address_space_bytes, limit_address_space
 
 # Result codes shared with the stdin/stdout harness.
 _COMPILE_ERROR, _ASSERTION_FAILED, _TIME_LIMIT, _RUNTIME_ERROR = -1, -2, -3, -4
+_FAILURE_CODES = frozenset({_COMPILE_ERROR, _ASSERTION_FAILED, _TIME_LIMIT, _RUNTIME_ERROR})
 _MAX_ERROR_CHARS = 300
 
 
@@ -69,6 +70,21 @@ def _run_assertions(generation, tests, time_limit_s, memory_limit_mb, result, me
     metadata_list.append({**metadata, "memory": memory})
 
 
+def _checked(results: object, metadata: object, num_tests: int) -> tuple[list[bool | int], dict[str, object]]:
+    """Accept only what the child produces: every test passed, or passes up to one failure code."""
+    if isinstance(results, list) and isinstance(metadata, dict):
+        passed = 0
+        while passed < len(results) and results[passed] is True:
+            passed += 1
+        if passed == num_tests == len(results):
+            return results, metadata
+        if passed < num_tests and len(results) == passed + 1:
+            last = results[-1]
+            if type(last) is int and last in _FAILURE_CODES:
+                return results, metadata
+    return [_RUNTIME_ERROR], _error_metadata(_RUNTIME_ERROR, "Malformed assertion results")
+
+
 def check_assertions(
     generation: str, tests: list[str], *, time_limit_s: float, memory_limit_mb: int, deadline_s: float
 ) -> tuple[list[bool | int], dict[str, object]]:
@@ -93,8 +109,13 @@ def check_assertions(
         if timed_out:
             p.kill()
             p.join(timeout=5)
-        if result:
-            return list(result)[0], list(metadata_list)[0]
+        try:
+            results, metadatas = list(result), list(metadata_list)
+        except (OSError, EOFError):
+            # The candidate shares the child's process and can break its connection to the Manager.
+            results, metadatas = [], []
+        if results:
+            return _checked(results[0], metadatas[0] if metadatas else None, len(tests))
         if timed_out:
             return [_TIME_LIMIT], _error_metadata(_TIME_LIMIT, "Time Limit Exceeded")
         return [_RUNTIME_ERROR], _error_metadata(_RUNTIME_ERROR, "Exited before its assertions completed")
