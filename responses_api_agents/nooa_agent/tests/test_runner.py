@@ -1018,3 +1018,28 @@ async def test_fatal_transport_then_policy_stop_finalizes_root_as_failed(source:
     assert root.error_type == ("PolicyCallBudgetExceeded" if source == "model" else "ConnectionError")
     assert isinstance(caught.value.__cause__, PolicyCallBudgetExceeded if source == "model" else ConnectionError)
     assert runner._server_client.post.await_count == 1
+
+
+def test_embedded_trace_export_is_enabled_once_per_process(monkeypatch, tmp_path) -> None:
+    from responses_api_agents.nooa_agent import runner as runner_module
+    from responses_api_agents.nooa_agent import sandbox_entrypoint
+
+    enabled = []
+    monkeypatch.setattr(runner_module, "_PROCESS_TRACE_DIR", None)
+    monkeypatch.setattr(sandbox_entrypoint, "enable_trace_export", lambda trace_dir: enabled.append(trace_dir))
+    runner_module._enable_process_trace_export(tmp_path / "embedded")
+    runner_module._enable_process_trace_export(tmp_path / "other")
+    assert enabled == [str(tmp_path / "embedded")]
+
+
+def test_embedded_trace_export_failure_is_logged_not_raised(monkeypatch, tmp_path) -> None:
+    from responses_api_agents.nooa_agent import runner as runner_module
+    from responses_api_agents.nooa_agent import sandbox_entrypoint
+
+    def broken(trace_dir: str) -> None:
+        raise RuntimeError("no exporter")
+
+    monkeypatch.setattr(runner_module, "_PROCESS_TRACE_DIR", None)
+    monkeypatch.setattr(sandbox_entrypoint, "enable_trace_export", broken)
+    runner_module._enable_process_trace_export(tmp_path / "embedded")
+    assert runner_module._PROCESS_TRACE_DIR == tmp_path / "embedded"

@@ -66,6 +66,15 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int | None = Field(
         default=None, gt=0, description="Known policy context window used by NOOA's context planner."
     )
+    artifacts_dir: Path = Field(
+        default=Path("nooa-artifacts"),
+        description=(
+            "Host directory for per-rollout NOOA artifacts, relative to the server's cwd. Every rollout's NOOA trace "
+            "(OpenTelemetry spans plus the message journal that reconstructs each model call) is copied to "
+            "<artifacts_dir>/<rollout_id>/traces.jsonl; a rollout whose trace could not be captured says so in its "
+            "observation gaps."
+        ),
+    )
 
     sandbox_runner_timeout_seconds: float = Field(
         default=21420,
