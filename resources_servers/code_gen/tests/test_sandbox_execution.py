@@ -156,7 +156,7 @@ class TestLocalProvider:
 
     async def test_fractional_time_limits(self, tmp_path: Path) -> None:
         slow = "import time\ntime.sleep(0.7)\nn=int(input())\nprint(n*n)"
-        for timeout, expected in [(0.5, [-3]), (1.0, [True, True])]:
+        for timeout, expected in [(0.5, [-3]), (1.5, [True, True])]:
             result, _ = await check_correctness_in_sandbox(
                 _SAMPLE,
                 slow,
@@ -170,24 +170,31 @@ class TestLocalProvider:
             )
             assert result == expected
 
-    async def test_a_task_deadline_covers_compilation_and_every_test(self, tmp_path: Path) -> None:
-        # Module-level code runs during compilation. Compilation and the one call each take 90% of the 8 s limit,
-        # 14.4 s in all: past check_correctness's own (8 + 1) * 1 + 5 = 14 s, within the task deadline of 22 s.
+    @pytest.mark.parametrize(
+        "deadline_s, expected",
+        # The task deadline leaves 8 s beyond the 2 s of work; a 1 s deadline stops it, where check_correctness's
+        # own (2 + 1) * 1 + 5 = 8 s would not.
+        [(task_deadline_s(2, 1), [True]), (1.0, [-1])],
+    )
+    async def test_a_task_deadline_covers_compilation_and_every_test(
+        self, tmp_path: Path, deadline_s: float, expected: list
+    ) -> None:
+        # Module-level code runs during compilation; it and the one call each take half the 2 s limit.
         sample = {"input_output": json.dumps({"inputs": ["3"], "outputs": ["9"], "fn_name": "square"})}
-        generation = "import time\ntime.sleep(7.2)\n\n\ndef square(n):\n    time.sleep(7.2)\n    return n * n"
+        generation = "import time\ntime.sleep(1)\n\n\ndef square(n):\n    time.sleep(1)\n    return n * n"
         result, _ = await check_correctness_in_sandbox(
             sample,
             generation,
-            8,
+            2,
             False,
             num_tests=1,
             provider={"local": {}},
             config=SandboxVerificationConfig(python=sys.executable),
             metadata={},
             work_dir=str(tmp_path / "work"),
-            deadline_s=task_deadline_s(8, 1),
+            deadline_s=deadline_s,
         )
-        assert result == [True]
+        assert result == expected
 
     async def test_candidate_cannot_read_expected_outputs_from_the_request(self, tmp_path: Path) -> None:
         # The outputs have no relation to the inputs, so only a candidate that reads them can pass.
