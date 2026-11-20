@@ -396,6 +396,8 @@ def test_parallel_judging_uses_isolated_judges_and_preserves_order(tmp_path) -> 
     criteria = [{"id": f"C-{index}", "title": f"Criterion {index}", "match_criteria": "Pass."} for index in range(3)]
     state = {"active": 0, "max_active": 0}
     lock = threading.Lock()
+    overlap = threading.Event()
+    deadline = time.monotonic() + 5  # shared by all judges, so serial judging fails after 5 s, not 15
     created = []
 
     class Judge:
@@ -413,7 +415,10 @@ def test_parallel_judging_uses_isolated_judges_and_preserves_order(tmp_path) -> 
             with lock:
                 state["active"] += 1
                 state["max_active"] = max(state["max_active"], state["active"])
-            time.sleep(0.02)
+                if state["active"] > 1:
+                    overlap.set()
+            # Wait for a second judge instead of sleeping; a slow runner can start it after a fixed sleep ends.
+            overlap.wait(timeout=max(0.0, deadline - time.monotonic()))
             with lock:
                 state["active"] -= 1
             return {"verdict": "pass", "reasoning": self.context["criterion_id"]}
