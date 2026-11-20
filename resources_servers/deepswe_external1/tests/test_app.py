@@ -17,6 +17,8 @@ import resources_servers.deepswe_external1.app as module
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.metrics import select_measured
 from nemo_gym.sandbox import SandboxExecResult
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.testing import fake_sandbox
 from nemo_gym.server_runtime import ResourcesSeedRejectedError
 from resources_servers.deepswe.app import VerifierResult
 from resources_servers.deepswe.validate_golden import _empty_response
@@ -54,14 +56,17 @@ def request() -> Request:
     return Request({"type": "http", "session": {SESSION_ID_KEY: "session"}})
 
 
-def sandbox(sandbox_id: str, events: list[str]) -> AsyncMock:
-    box = AsyncMock()
-    box.serialize.return_value = {"sandbox_id": sandbox_id}
+def sandbox(sandbox_id: str, events: list[str]) -> AsyncSandbox:
+    box = fake_sandbox(sandbox_id)
+    box.serialize = AsyncMock(return_value={"sandbox_id": sandbox_id})
+    box.exec = AsyncMock()
+    box.upload = AsyncMock()
+    box.download = AsyncMock()
 
     async def stop() -> None:
         events.append("stop-" + sandbox_id)
 
-    box.stop.side_effect = stop
+    box.provider.on_close.side_effect = stop
     return box
 
 
@@ -166,7 +171,7 @@ async def test_collection_distinguishes_invalid_submission_from_infrastructure(
         assert (
             result.failure_reason == "RuntimeError: DeepSWE collect hook exited with code 1: simulated collect failure"
         )
-    agent.stop.assert_awaited_once()
+    agent.provider.on_close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -242,7 +247,7 @@ async def test_seed_rejects_preexisting_invalid_head(
         await setup(box)
 
     box.exec.side_effect = execute
-    box.start_with_setup.side_effect = start
+    box.start_with_setup = AsyncMock(side_effect=start)
     monkeypatch.setattr(module, "AsyncSandbox", MagicMock(return_value=box))
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda name, config: {})
@@ -375,7 +380,7 @@ async def test_verification_does_not_impose_an_eight_request_limit(task: InlineT
     assert len({result.log_dir for result in results}) == 9
     assert len(sandboxes) == 18
     for box in sandboxes:
-        box.stop.assert_awaited_once()
+        box.provider.on_close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -397,17 +402,17 @@ async def test_failures_are_masked_and_owned_sandboxes_are_released(task: Inline
     )
     server._run_verifier = AsyncMock(side_effect=RuntimeError("grader"))
     if failure == "agent_cleanup":
-        agent.stop.side_effect = RuntimeError("delete unavailable")
+        agent.provider.on_close.side_effect = RuntimeError("delete unavailable")
     result = await server.verify(request(), body(task))
     assert not result.evaluation_completed and result.mask_sample and result.reward == 0
     # Golden mode collects the verifier's own solution, so even a collection failure stays a verifier error.
     assert result.failure_kind == "verifier_error" and result.verifier_error
     assert result.failure_stage
-    agent.stop.assert_awaited_once()
+    agent.provider.on_close.assert_awaited_once()
     if failure in {"verifier", "same_id"}:
-        verifier.stop.assert_awaited_once()
+        verifier.provider.on_close.assert_awaited_once()
     else:
-        verifier.stop.assert_not_awaited()
+        verifier.provider.on_close.assert_not_awaited()
     if failure == "agent_cleanup":
         assert result.cleanup_errors == ["agent"]
         assert server._create_sandbox.await_count == 1
@@ -432,7 +437,7 @@ async def test_agent_requires_matching_seeded_session(task: InlineTask, mismatch
     result = await server.verify(request(), data)
     assert result.mask_sample and not result.evaluation_completed
     assert result.failure_kind == "session_lost" and result.failure_reason
-    assert agent.stop.await_count == (mismatch != "absent")
+    assert agent.provider.on_close.await_count == (mismatch != "absent")
 
 
 def _saved_row(result) -> dict:
@@ -459,7 +464,7 @@ async def test_agent_mode_names_the_stage_that_failed_and_keeps_recovery_aligned
 ) -> None:
     """A collection failure is an environment failure; a verifier failure after a collected patch stays a verifier
     error, so recovery grades the saved patch again only in the second case."""
-    from nemo_gym.orchestration.recovery import REVERIFY_VERIFIER, reverification_cause
+    from nemo_gym.eval.recovery.grading import REVERIFY_VERIFIER, reverification_cause
 
     server = make_server(task, mode="agent")
     server.config.include_model_patch_in_response = True
@@ -491,8 +496,8 @@ async def test_shutdown_releases_unfinished_sessions(task: InlineTask) -> None:
     seed_agent_run(server, task, agent)
     app = server.setup_webserver()
     async with app.router.lifespan_context(app):
-        agent.stop.assert_not_awaited()
-    agent.stop.assert_awaited_once()
+        agent.provider.on_close.assert_not_awaited()
+    agent.provider.on_close.assert_awaited_once()
     assert not server._session_id_to_sandbox and not server._seeded_agent_sandboxes
 
 
@@ -534,7 +539,7 @@ async def test_sandbox_spec_and_native_setup(
         specs.append(spec)
         await setup(box)
 
-    box.start_with_setup.side_effect = start
+    box.start_with_setup = AsyncMock(side_effect=start)
     constructor = MagicMock(return_value=box)
     monkeypatch.setattr(module, "AsyncSandbox", constructor)
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
@@ -636,7 +641,7 @@ async def test_seed_session_preserves_descriptor(task: InlineTask) -> None:
 async def test_verifier_cleanup_error_does_not_replace_completed_grade(task: InlineTask) -> None:
     server = make_server(task)
     agent, verifier = sandbox("A", []), sandbox("B", [])
-    verifier.stop.side_effect = RuntimeError("delete unavailable")
+    verifier.provider.on_close.side_effect = RuntimeError("delete unavailable")
     server._create_sandbox = AsyncMock(side_effect=[agent, verifier])
     server._execute_golden = AsyncMock()
     server._collect_model_patch = AsyncMock(return_value=b"patch")

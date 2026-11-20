@@ -1,0 +1,60 @@
+---
+title: "Evaluate SWE-bench Pro v2 with OpenCode"
+description: "Prepare the SWE-bench Pro v2 tasks and run a sandboxed OpenCode agent."
+position: 6
+---
+
+[opencode.yaml](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro_v2/opencode.yaml) pairs a
+sandboxed OpenCode agent with the SWE-bench Pro v2 Resources Server (642 validated tasks). The agent edits the task
+repository in the sandbox; the server extracts its patch and grades it in a clean sandbox with each task's own
+upstream `test.sh`. v2 uses different images and a different verifier from v1, so v1 and v2 scores are not
+interchangeable. For v1, see the SWE-bench Pro with Hermes tutorial.
+
+## Requirements
+
+- A `model-provider.yaml` that supplies `policy_model`, `policy_model_name` and a `sandbox` provider.
+- An OpenSandbox deployment with network-policy enforcement, access to the GHCR task images and a reachable policy Model Server.
+- OpenCode matching `opencode_version`, preinstalled or installed from binaries and an installer already mounted in the sandbox.
+  Set `remote_opencode_install_script_path`, `remote_opencode_binary_path` and `remote_opencode_musl_binary_path` on
+  `swebench_pro_v2_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent` in your provider overlay.
+  Alternatively, use `preinstalled_opencode: true` with an image that contains the matching binary.
+
+The preset locks agent egress to the policy-model host. Keep the head server on loopback and retain
+`absolute_ip_server_types: [responses_api_models]`. An unsupported provider fails closed. The verifier keeps
+network access. The selected OpenCode agent budget is 10800 seconds; the verifier budget is 3000 seconds.
+Upstream uses 3000 seconds for its agent, so its scores require an explicit time-budget comparison.
+
+## Prepare the tasks
+
+```bash
+python benchmarks/swebench/pro_v2/prepare.py
+python benchmarks/swebench/pro_v2_hard/prepare.py
+```
+
+Preparation verifies upstream checksums, writes 642 full-set and 51 HARD-51 rows, pins image digests,
+and stages the static ripgrep binary used by the offline agent.
+
+## Run the evaluation
+
+```bash
+gym eval run --benchmark swebench/pro_v2/opencode --config model-provider.yaml -o rollouts.jsonl
+```
+
+To start the servers and collect rollouts separately:
+
+```bash
+gym env start --config benchmarks/swebench/pro_v2/opencode.yaml --config model-provider.yaml
+```
+
+```bash
+gym eval run --no-serve \
+  --config benchmarks/swebench/pro_v2/opencode.yaml --config model-provider.yaml \
+  -i benchmarks/swebench/data/swebench_pro_v2_benchmark.jsonl -o rollouts.jsonl \
+  +agent_name=swebench_pro_v2_opencode_sandboxed_agent
+```
+
+Select `swebench/pro_v2_hard/opencode` to run only HARD-51. It replaces the full dataset and uses the same
+resource and agent instances. Both presets use three repeats per task.
+
+The [server README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/swebench_pro_v2/README.md)
+covers gold/empty patch controls, failure handling and the offline agent phase.

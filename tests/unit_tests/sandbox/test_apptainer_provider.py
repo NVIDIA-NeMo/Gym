@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
@@ -31,6 +32,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from tests.unit_tests.sandbox.cli_testing import is_running, requires_sh, stand_in_cli
 
 
 pytestmark = pytest.mark.sandbox
@@ -1043,3 +1045,42 @@ async def test_create_uses_daemonize_for_instance_start(
     # The readiness probe (exec) must NOT use the daemonizing path.
     exec_calls = [c for c in rec.calls if "exec" in c["argv"]]
     assert exec_calls and all(c["daemonize"] is False for c in exec_calls)
+
+
+@pytest.mark.parametrize("workdir_arg", [None, ["--workdir", "/custom"], ["--workdir=/custom"], ["-W", "/custom"]])
+async def test_containment_uses_private_disk_backed_workdir(fake_binary, monkeypatch, tmp_path, workdir_arg):
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+    provider, rec = _make_provider(
+        monkeypatch,
+        lambda argv: (0, "", ""),
+        create={"extra_start_args": ["--containall", *(workdir_arg or [])]},
+        probe={"command": None},
+    )
+    handle = await provider.create(SandboxSpec(image="ubuntu:22.04"))
+    try:
+        await provider.exec(handle, "true")
+        argv = rec.calls[0]["argv"]
+        if workdir_arg:
+            assert _contains_seq(argv, workdir_arg)
+            assert not (staging / ".apptainer-workdir").exists()
+        else:
+            private = staging / ".apptainer-workdir"
+            assert _contains_seq(argv, ["--workdir", str(private)])
+            assert private.stat().st_mode & 0o777 == 0o700
+    finally:
+        await provider.close(handle)
+    assert not staging.exists()
+
+
+@requires_sh
+@pytest.mark.parametrize("daemonize", [False, True])
+async def test_a_cancelled_apptainer_command_is_killed(fake_binary: str, tmp_path: Path, daemonize: bool) -> None:
+    # A cancellation is not the command's own timeout: no SIGTERM grace, the group is killed at once.
+    cli = stand_in_cli(tmp_path)
+    provider = apptainer_provider.ApptainerProvider(exec={"timeout_grace_s": 30})
+    with anyio.move_on_after(0.5):
+        await provider._run([str(cli.path)], timeout_s=None, daemonize=daemonize)
+    assert not is_running(cli.last_pid())
+    cli.hang.unlink()
+    assert (await provider._run([str(cli.path)], timeout_s=10, daemonize=daemonize))[0] == 0

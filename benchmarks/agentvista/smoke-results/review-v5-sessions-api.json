@@ -1,0 +1,64 @@
+{
+  "harness_version": "5.0.0",
+  "model": "nvidia/moonshotai/kimi-k3",
+  "pipeline": [
+    "single_agent_turn_legacy Environment Server",
+    "AgentVista seed/activation/close",
+    "AgentVista Resources Server",
+    "original answer judge"
+  ],
+  "scope": "one public task per harness; regression smoke, not a benchmark accuracy estimate",
+  "budgets": {
+    "default_max_turns": 3,
+    "opencode_max_steps": 3,
+    "opencode_actor_seconds": 240,
+    "context_tokens": 65536,
+    "output_tokens": 32768
+  },
+  "results": [
+    {
+      "harness": "default",
+      "http_status": 200,
+      "task_id": "agentvista-000",
+      "elapsed_seconds": 128.29,
+      "mask_sample": false,
+      "reward": 0.0,
+      "verify_status": "FAIL",
+      "failure_kind": null,
+      "failure_reason": null,
+      "execution_health": {},
+      "error": null
+    },
+    {
+      "harness": "opencode",
+      "http_status": 200,
+      "task_id": "agentvista-000",
+      "elapsed_seconds": 256.95,
+      "mask_sample": false,
+      "reward": 0.0,
+      "verify_status": "FAIL",
+      "failure_kind": null,
+      "failure_reason": null,
+      "execution_health": {
+        "termination": "timeout",
+        "finish_reason": "tool-calls",
+        "output_tokens_limit": 32768,
+        "last_step_output_tokens": 134,
+        "returncode": -15,
+        "timed_out": true,
+        "native_errors": 0,
+        "tool_calls": 2,
+        "tool_errors": 0,
+        "execution_healthy": false,
+        "task_success": false
+      },
+      "error": null
+    }
+  ],
+  "limitations": [
+    "OpenCode exhausted the bounded actor deadline with retained output; this is judged under the existing evaluation policy, and is not reported as healthy execution.",
+    "Typed tool/model observation joins and complete usage are unavailable; close returns an explicit observation gap.",
+    "No full-dataset evaluation or rebuilt runtime image is claimed."
+  ],
+  "source_pin": "responses_api_agents/agentvista_agent/runtime/source-pin.json"
+}

@@ -106,8 +106,8 @@ def sandboxes() -> list[FakeSandbox]:
 def server(monkeypatch, sandboxes) -> ScaleSWEResourcesServer:
     server = ScaleSWEResourcesServer(config=config(), server_client=MagicMock(spec=ServerClient))
 
-    async def create(body, files=None):
-        sandboxes.append(FakeSandbox())
+    async def create(body, files=None, *, for_agent=False):
+        sandboxes.append(FakeSandbox(for_agent=for_agent))
         return sandboxes[-1]
 
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=create))
@@ -130,8 +130,8 @@ def use_verifier_exec(monkeypatch, server, sandboxes, result: SandboxExecResult)
     async def run_without_logs(**kwargs):
         return await verification.run_verification(**{**kwargs, "log_dir": None})
 
-    async def create(body, files=None):
-        sandboxes.append(FakeSandbox())
+    async def create(body, files=None, *, for_agent=False):
+        sandboxes.append(FakeSandbox(for_agent=for_agent))
         if files:  # A verifier sandbox.
             sandboxes[-1].exec = AsyncMock(return_value=result)
         return sandboxes[-1]
@@ -225,6 +225,8 @@ def test_http_lifecycle_replays_the_first_verdict_until_close(server, grading, s
     task_sandbox.stop.assert_awaited_once()
     verifier_sandbox.stop.assert_awaited_once()
     assert not server._resources_sessions and not server._session_id_to_sandbox
+    # Only the agent's sandbox gets the egress block; grading installs test dependencies.
+    assert task_sandbox.for_agent is True and verifier_sandbox.for_agent is False
 
 
 @pytest.mark.parametrize("disconnect", [ServerDisconnectedError, ClientOSError])
@@ -533,7 +535,7 @@ async def test_close_records_are_kept_for_the_retry_window_only(server, monkeypa
 async def test_close_fences_a_seed_in_progress(server, sandboxes, close_waits):
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def slow_create(body, files=None):
+    async def slow_create(body, files=None, *, for_agent=False):
         entered.set()
         await release.wait()
         sandboxes.append(FakeSandbox())
@@ -596,7 +598,7 @@ async def test_slow_stop_at_close_is_waited_for_again_never_cut_short(server):
     release = asyncio.Event()
     cut_short = []
 
-    async def slow_stop():
+    async def slow_stop(**_):
         try:
             await release.wait()
         except asyncio.CancelledError:
@@ -613,7 +615,7 @@ async def test_slow_stop_at_close_is_waited_for_again_never_cut_short(server):
     release.set()
     await server.close_resources_session(close())
     # The retried close joined the stop that was still running instead of starting another.
-    sandbox.stop.assert_awaited_once()
+    sandbox.stop.assert_awaited_once_with(timeout_s=None)  # the wait bounds the caller, never the stop
     assert not cut_short
     assert "attempt" in server._fences and not server._session_id_to_sandbox
 
@@ -624,7 +626,7 @@ async def test_failed_seed_cleanup_is_bounded_and_keeps_the_sandbox_for_close(se
     sandbox = FakeSandbox(exec=AsyncMock(side_effect=OSError("exec stream lost")))
     release = asyncio.Event()
 
-    async def stop():
+    async def stop(**_):
         if sandbox.stop.await_count == 1:
             if stop_failure == "slow":
                 await release.wait()
@@ -676,7 +678,11 @@ async def test_shutdown_stops_every_environment_server_sandbox_even_when_one_sto
     failing, slow, cookie_sandbox = sandboxes
     release = asyncio.Event()
     failing.stop.side_effect = OSError("provider unavailable")
-    slow.stop.side_effect = release.wait
+
+    async def slow_stop(**_):
+        await release.wait()
+
+    slow.stop.side_effect = slow_stop
 
     started = monotonic()
     with caplog.at_level(logging.ERROR, logger=scale_swe_app.__name__):
@@ -702,7 +708,7 @@ async def test_seed_in_progress_at_shutdown_stops_its_own_sandbox(server, sandbo
     await lifespan.__aenter__()
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def slow_create(body, files=None):
+    async def slow_create(body, files=None, *, for_agent=False):
         entered.set()
         await release.wait()
         sandboxes.append(FakeSandbox())
@@ -823,8 +829,8 @@ def slow_verifier_stops(server, stop) -> None:
     """Give every verifier sandbox the server creates from now on ``stop`` as its stop."""
     create_task_sandbox = server._create_sandbox.side_effect
 
-    async def create(body, files=None):
-        sandbox = await create_task_sandbox(body, files)
+    async def create(body, files=None, *, for_agent=False):
+        sandbox = await create_task_sandbox(body, files, for_agent=for_agent)
         if files:  # A verifier sandbox.
             sandbox.stop.side_effect = stop
         return sandbox
@@ -839,7 +845,7 @@ async def test_slow_verifier_stop_is_left_to_close_never_cut_short(server, gradi
     release = asyncio.Event()
     cut_short = []
 
-    async def slow_stop():
+    async def slow_stop(**_):
         try:
             await release.wait()
         except asyncio.CancelledError:

@@ -1,0 +1,70 @@
+---
+title: "Lustre Metadata Load"
+description: "Measure how many Lustre metadata requests a submitted job makes, per phase."
+position: 6
+---
+
+Lustre answers file lookups, opens, stats and locks on its metadata servers (MDTs). A job that sends too many of these requests slows the filesystem down for every user. Cluster admins judge a job by its metadata requests per second, per node, to each MDT. `lustre_md_stats` on the Slurm compute records those numbers, so you can compare a job before and after a fix.
+
+```yaml
+compute:
+  cluster:
+    type: slurm
+    account: my-account
+    lustre_md_stats: true
+```
+
+It is off by default. When it is off, the job script is unchanged. Kubernetes compute has no such field.
+
+## What it records
+
+The job reads `lctl get_param mdc.*.md_stats` on every node of its allocation at four points:
+
+| Phase | When |
+| --- | --- |
+| `start` | After the resume prologue, before any service starts. |
+| `services_ready` | After the health checks, just before the driver. |
+| `driver_end` | Right after the driver step returns. |
+| `end` | The last step before the job exits normally. |
+
+A one-node job reads in the batch shell. A multi-node job reads all its nodes in one `srun` step on the host, without a container, because `lctl` is a host tool. Each read has a 30 second limit. If `lctl` is missing or a read fails, the job prints one warning line for that phase and goes on. The job's exit status never changes.
+
+The rows go to `<benchmark dir>/logs/lustre-md-stats-<slurm job id>.tsv`, tab-separated, one row per node, MDT and operation:
+
+```text
+phase           epoch       node     mdt      op           count
+services_ready  1763380412  node001  MDT000b  intent_lock  116859
+```
+
+The file has no header line. `count` is the node's request counter for that MDT and operation. It counts from when the filesystem was mounted, so one value says nothing. The difference between two phases is what the node sent in between. `lctl` leaves out an operation whose count is 0, and the report counts it as 0.
+
+## Read the results
+
+```bash
+gym eval lustre-stats <job.output_path>/<gym job id>/<benchmark>
+```
+
+```text
+<benchmark dir>/logs/lustre-md-stats-4242.tsv: 2 node(s), phases start, services_ready, driver_end, end
+  interval                    seconds  requests  req/s  peak node req/s  top MDTs                        top ops
+  start->services_ready           100      4100   41.0  21.0 (n1)        MDT000b 40.0/s, MDT0000 1.0/s   intent_lock 40.0/s, close 1.0/s
+  services_ready->driver_end     1000    608000  608.0  508.0 (n1)       MDT000b 607.0/s, MDT0000 1.0/s  intent_lock 600.0/s, getattr 7.0/s, close 1.0/s
+  driver_end->end                  10        50    5.0  3.0 (n2)         MDT000b 4.0/s, MDT0000 1.0/s    intent_lock 4.0/s, close 1.0/s
+  total                          1110    612150  551.5  459.6 (n1)       MDT000b 550.5/s, MDT0000 1.0/s  intent_lock 544.2/s, getattr 6.3/s, close 1.0/s
+```
+
+Each row is one interval. `start->services_ready` is service startup, `services_ready->driver_end` is the evaluation, and `driver_end->end` is what runs after the driver. `total` runs from the first recorded phase to the last.
+
+- `requests` and `req/s` add up all nodes of the job.
+- `peak node req/s` is the busiest node's rate, with its name.
+- `top MDTs` and `top ops` are the three largest, in requests per second over all nodes. The MDT that holds the filesystem root is often the busiest.
+
+`--json` prints every MDT and operation, as request counts. A resumed run has one file per Slurm job, and the command reports each one.
+
+## Caveats
+
+- The counters are per node, not per process. They include every process on the node: node daemons, and other jobs when the node is shared.
+- They count the requests the node's Lustre client sent. They do not measure the load on the server.
+- A job killed at its time limit, cancelled, or lost with a node has no `end` row. If it was killed while the driver ran, it has no `driver_end` row either, so the evaluation interval is not measured. The report stops at the last recorded phase.
+- Times are whole seconds, so the rate of a short interval is rough. An interval shorter than a second has no rate.
+- The requests of the resume prologue happen before `start`, so no interval includes them.

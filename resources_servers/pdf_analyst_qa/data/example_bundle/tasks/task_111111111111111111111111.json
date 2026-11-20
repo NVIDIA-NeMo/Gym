@@ -1,0 +1,9 @@
+{
+  "task_id": "task_111111111111111111111111",
+  "workspace_id": "workspace_111111111111111111111111",
+  "data_split": "rl",
+  "question": "According to Table 1 in the Example Observatory Report, how many cloud-free observation nights did South Valley Observatory have in 2026? Return only the integer.",
+  "final_answer": "23",
+  "answer_contract": "bare_value",
+  "units": null
+}
