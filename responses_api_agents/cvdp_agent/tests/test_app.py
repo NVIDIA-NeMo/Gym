@@ -294,6 +294,16 @@ class TestAgenticSandboxSpec:
         spec = agent._build_spec(body, "build rtl", {}, agent._resolve_image())
         assert spec.env["NV_MODEL_URL"] == f"http://model.example/ng-rollout/3-0{segment}"
 
+    def test_sandbox_untrained_model_url_keeps_the_model_servers_sampling(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "nemo_gym.agents.base_responses_api_agent.current_model_sampling_segment", lambda: "temperature-1"
+        )
+        agent = self._agent(deps_provision="archive")
+        agent._model_url = MagicMock(return_value="http://model.example")
+        spec = agent._build_spec(self._run_request(), "build rtl", {}, agent._resolve_image())
+        assert spec.env["NV_MODEL_URL"].endswith("/ng-sampling/temperature-1")
+        assert spec.env["NV_UNTRAINED_MODEL_URL"].endswith("/ng-sampling/null")
+
     def test_local_sif_rejected_for_open_sandbox(self) -> None:
         agent = self._agent(image="/tmp/cvdp.sif")
         with pytest.raises(ValueError, match="Apptainer"):
@@ -1255,8 +1265,9 @@ class ProbeAgent:
 """
 
 
-def test_sandbox_entrypoint_resolver_accepts_untrained_role(tmp_path: Path) -> None:
-    """Hermes resolves its compression URL with ``trained=False``; the guest's single model URL must serve it."""
+@pytest.mark.parametrize("untrained_url", ["http://model/ng-rollout/rollout-1/ng-sampling/null", None])
+def test_sandbox_entrypoint_resolver_routes_the_untrained_role(tmp_path: Path, untrained_url: str | None) -> None:
+    """Hermes resolves its compression URL with ``trained=False``; an older parent sends only the run URL."""
     import subprocess
     import sys
 
@@ -1277,6 +1288,8 @@ def test_sandbox_entrypoint_resolver_accepts_untrained_role(tmp_path: Path) -> N
         "NV_AGENT_CLASS": "ProbeAgent",
         "NV_AGENT_CFG_CLASS": "ProbeConfig",
     }
+    if untrained_url:
+        env["NV_UNTRAINED_MODEL_URL"] = untrained_url
 
     # The entrypoint creates the CVDP task directories in its working directory.
     completed = subprocess.run(
@@ -1284,4 +1297,7 @@ def test_sandbox_entrypoint_resolver_accepts_untrained_role(tmp_path: Path) -> N
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert json.loads((traj_dir / "response.json").read_text()) == ["http://model/ng-rollout/rollout-1/v1"] * 2
+    assert json.loads((traj_dir / "response.json").read_text()) == [
+        "http://model/ng-rollout/rollout-1/v1",
+        f"{untrained_url or 'http://model/ng-rollout/rollout-1'}/v1",
+    ]

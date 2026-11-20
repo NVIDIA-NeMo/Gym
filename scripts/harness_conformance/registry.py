@@ -30,7 +30,7 @@ class HarnessDefinition:
     npm_version_key: str | None = None
     npm_version_default: str | None = None
     builtin: bool = False
-    runtime_modules: tuple[str, ...] = ()
+    runtime_info: Callable[[], dict[str, str]] | None = None
     runtime_files: dict[str, str] = field(default_factory=dict)
     runtime_metadata: dict[str, str] = field(default_factory=dict)
     requires_root: bool = False
@@ -68,6 +68,18 @@ class HarnessDefinition:
         )
         overrides = self.scenario_settings.get(getattr(scenario, "name", None))
         return OmegaConf.merge(settings, overrides(scenario)) if overrides else settings
+
+
+def _hermes_runtime() -> dict[str, str]:
+    # Hermes runs from a pinned upstream checkout in its own Python environment, not from this one.
+    from nemo_gym.rollouts.harness_capabilities import digest_file
+    from responses_api_agents.hermes_agent.runtime import HERMES_PYTHON_VERSION, HERMES_SOURCE, source_checkout
+
+    return {
+        "hermes_source": HERMES_SOURCE,
+        "python_version": HERMES_PYTHON_VERSION,
+        "lock_sha256": digest_file(source_checkout() / "uv.lock"),
+    }
 
 
 def _prepare_crewai() -> None:
@@ -206,6 +218,7 @@ HARNESSES = {
     ),
     "hermes": HarnessDefinition(
         agent="HermesAgent",
+        runtime_info=_hermes_runtime,
         base_settings=lambda directory, timeout: {
             "harness_overrides": {
                 "max_turns": 6,

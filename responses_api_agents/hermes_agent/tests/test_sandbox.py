@@ -2030,3 +2030,15 @@ async def test_hermes_explains_unsupported_glibc_before_downloading_wheels(tmp_p
             SandboxPlatform("x86_64", "gnu", minor), tmp_path / "bundle"
         )
     assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize(("reported", "supported"), [("glibc 2.17", False), ("", False), ("glibc 2.28", True)])
+def test_portable_runtime_refuses_an_image_whose_glibc_cannot_load_it(monkeypatch, reported, supported):
+    from responses_api_agents.hermes_agent import runtime
+
+    monkeypatch.setattr(runtime.os, "confstr", lambda name: reported)
+    if supported:
+        runtime._require_supported_glibc()
+    else:
+        with pytest.raises(RuntimeError, match=r"Hermes requires glibc 2\.28 or newer"):
+            runtime._require_supported_glibc()

@@ -188,7 +188,9 @@ def _sha256(path: Path) -> str:
 
 async def _python_archive(platform: SandboxPlatform, *, version: str = PYTHON_VERSION) -> Path:
     """Return the host-cache path to the target platform's Python archive after checking its published SHA-256."""
-    checksums = {PYTHON_VERSION: _PYTHON_SHA256, "3.14.7": _PYTHON_314_SHA256}[version]
+    checksums = {PYTHON_VERSION: _PYTHON_SHA256, "3.14.7": _PYTHON_314_SHA256}.get(version)
+    if checksums is None:
+        raise RuntimeError(f"No pinned Python {version} build; add its checksums to sandbox_python.py")
     expected = checksums.get(f"{platform.arch}/{platform.libc}")
     if expected is None:
         raise RuntimeError(f"No pinned Python build for {platform.arch}/{platform.libc}")

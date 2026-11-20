@@ -129,9 +129,10 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
 
     def interrupt(*_: object) -> None:
         nonlocal stop_reason
-        # Close publishes this marker before signalling the supervisor. A deadline does not.
+        # In the sandbox, close publishes this marker before signalling the supervisor and a deadline does not.
+        # The host worker has no deadline of its own, so its SIGTERM is always a cancellation.
         stop_request_path = payload.get("stop_request_path")
-        stop_reason = "cancelled" if stop_request_path and Path(stop_request_path).exists() else "wall_time"
+        stop_reason = "wall_time" if stop_request_path and not Path(stop_request_path).exists() else "cancelled"
         # Save first: a blocked tool or API call may not unwind before the hard cleanup.
         if output_path is not None:
             partial = progress()
@@ -211,16 +212,18 @@ def main() -> int:
             try:
                 result = _run(json.load(sys.stdin), Path(sys.argv[2]))
             except Exception as error:
-                json.dump(
-                    {
-                        "error": str(error),
-                        "error_type": type(error).__name__,
-                        "observations": getattr(error, "_sandbox_observations", None),
-                    },
-                    result_pipe,
+                result_pipe.write(
+                    json.dumps(
+                        {
+                            "error": str(error),
+                            "error_type": type(error).__name__,
+                            "observations": getattr(error, "_sandbox_observations", None),
+                        }
+                    )
                 )
                 return 1
-            json.dump(result, result_pipe)
+            # Serialize before writing so an unserializable value fails here, not as a half-written result.
+            result_pipe.write(json.dumps(result))
         return 0
     input_path, output_path = map(Path, sys.argv[-2:])
     return _run_worker(input_path, output_path)

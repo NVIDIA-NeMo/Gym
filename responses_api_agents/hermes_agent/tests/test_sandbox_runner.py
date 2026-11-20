@@ -403,7 +403,7 @@ def test_interruption_uses_supplied_stop_request_path(tmp_path, monkeypatch, res
             return {"completed": True, "messages": self._session_messages}
 
         def interrupt(self, message):
-            assert message == ("sandbox cancellation" if marker == "present" else "sandbox timeout")
+            assert message == ("sandbox timeout" if marker == "absent" else "sandbox cancellation")
 
     import yaml
 
@@ -431,7 +431,8 @@ def test_interruption_uses_supplied_stop_request_path(tmp_path, monkeypatch, res
             marker_path.touch()
     output_path = tmp_path / "output.json"
     result = sandbox_runner._run(payload, tmp_path, output_path=output_path)["result"]
-    expected = "cancelled" if marker == "present" else "wall_time"
+    # Only the sandbox has a deadline. The host worker (no marker path) stops only when Gym shuts down.
+    expected = "wall_time" if marker == "absent" else "cancelled"
     assert result["stop_reason"] == expected
     assert result["interrupted"] and not result["completed"]
     checkpoint = json.loads(output_path.read_text())["result"]

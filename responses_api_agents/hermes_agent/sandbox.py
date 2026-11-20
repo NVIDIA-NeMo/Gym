@@ -20,6 +20,7 @@ from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreami
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.hermes_agent.runtime import (
+    HERMES_MIN_GLIBC_MINOR,
     HERMES_PYTHON_VERSION,
     HERMES_SOURCE,
     source_checkout,
@@ -28,9 +29,6 @@ from responses_api_agents.hermes_agent.runtime import (
 
 
 LOG = logging.getLogger(__name__)
-
-
-HERMES_MIN_GLIBC_MINOR = 28
 
 
 class HermesPlatformUnsupportedError(RuntimeError):
@@ -63,7 +61,8 @@ class HermesPythonRuntime(SandboxPythonRuntime):
                     stdout=output,
                     check=True,
                 )
-            site = scratch / "python/lib/python3.14/site-packages"
+            minor = ".".join(self.python_version.split(".")[:2])
+            site = scratch / f"python/lib/python{minor}/site-packages"
             # Export already applied the upstream overrides. Install exactly those hashes.
             subprocess.run(
                 [

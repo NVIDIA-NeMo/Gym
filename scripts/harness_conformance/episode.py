@@ -6,7 +6,6 @@
 import argparse
 import asyncio
 import importlib
-import importlib.util
 import json
 import os
 import shutil
@@ -45,31 +44,18 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
             raise RuntimeError(f"{harness} conformance requires {command} on PATH")
     if definition.builtin:
         return {"installation": "builtin"}
-    if harness == "hermes":
-        # Hermes runs from a pinned upstream checkout in its own Python environment, not from this one.
-        from responses_api_agents.hermes_agent.runtime import HERMES_PYTHON_VERSION, HERMES_SOURCE, source_checkout
-
+    if definition.runtime_info:
         return {
             "installation": "agent_session" if use_agent_sessions else "host_worker",
-            "hermes_source": HERMES_SOURCE,
-            "python_version": HERMES_PYTHON_VERSION,
-            "lock_sha256": digest_file(source_checkout() / "uv.lock"),
+            **definition.runtime_info(),
         }
-    if use_agent_sessions and not definition.runtime_modules:
+    if use_agent_sessions:
         root = Path(__file__).resolve().parents[2]
         return {
             "installation": "agent_session",
             **definition.runtime_metadata,
             **{key: digest_file(root / path) for key, path in definition.runtime_files.items()},
         }
-    if definition.runtime_modules:
-        modules = [importlib.util.find_spec(name) for name in definition.runtime_modules]
-        if any(module is None for module in modules):
-            raise RuntimeError(
-                f"sync responses_api_agents/{harness}_agent with uv sync --locked in this isolated Python environment"
-            )
-        source = Path(modules[0].origin)
-        return {"source": str(source), "sha256": digest_file(source)}
     if not shutil.which(harness):
         raise RuntimeError(f"install the {harness} runtime and put it on PATH before running probes")
     version = subprocess.run(

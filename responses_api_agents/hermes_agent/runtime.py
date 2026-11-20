@@ -58,6 +58,7 @@ def source_checkout(source_spec: str = HERMES_SOURCE) -> Path:
     return source
 
 
+HERMES_MIN_GLIBC_MINOR = 28
 _HOST_PYTHON_LOCK = threading.Lock()
 
 
@@ -71,6 +72,19 @@ def host_python() -> Path:
         return _host_python()
 
 
+def _require_supported_glibc() -> None:
+    """Refuse a task image whose glibc cannot load the portable runtime, as a session seed does."""
+    try:
+        name, _, version = (os.confstr("CS_GNU_LIBC_VERSION") or "").partition(" ")
+    except (ValueError, OSError):
+        name, version = "", ""
+    if name != "glibc" or tuple(int(part) for part in version.split(".")[:2]) < (2, HERMES_MIN_GLIBC_MINOR):
+        raise RuntimeError(
+            f"Hermes requires glibc 2.{HERMES_MIN_GLIBC_MINOR} or newer for its locked wheels. "
+            f"This image reports {name or 'no glibc'} {version}".rstrip()
+        )
+
+
 @functools.cache
 def _host_python() -> Path:
     bundled = Path(sys.prefix) / "hermes-runtime"
@@ -79,6 +93,8 @@ def _host_python() -> Path:
         expected = os.environ.get("HERMES_SPEC") or recorded["source"]
         if recorded["default"] != HERMES_SOURCE or recorded["source"] != expected:
             raise RuntimeError(f"Portable Hermes at {bundled} was built from a different source")
+        if sys.platform == "linux":
+            _require_supported_glibc()
         return bundled / "bin/python3"
     source = source_checkout()
     env = os.environ.copy()
@@ -115,5 +131,12 @@ def builtin_toolsets() -> frozenset[str]:
 def stage_source(source: Path, site_packages: Path) -> None:
     """Copy the host checkout and its runtime assets into the bundle's local site-packages staging directory."""
     tree = site_packages / "hermes-source"
-    shutil.copytree(source, tree, symlinks=True, ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__"))
+    skip = shutil.ignore_patterns(".git", ".venv", "__pycache__")
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        # Upstream's tests, documentation site and desktop apps are not part of the runtime.
+        top_level = {"tests", "website", "apps"} if Path(directory) == source else set()
+        return set(skip(directory, names)) | (top_level & set(names))
+
+    shutil.copytree(source, tree, symlinks=True, ignore=ignore)
     (site_packages / "hermes-source.pth").write_text("hermes-source\n")
