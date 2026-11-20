@@ -803,7 +803,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "runs-on: ubuntu-latest" in workflow
     assert "UV_VERSION=\"$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)\"" in workflow
     assert 'curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh' in workflow
-    assert "https://astral.sh/uv/0.13.8/install.sh" not in workflow
+    assert "https://astral.sh/uv/0." not in workflow  # no hard-coded uv version; read from docker/Dockerfile
     assert "E2E_MODEL: ${{ matrix.model }}" in workflow
     assert "E2E_PROVIDER_CONFIG: ${{ matrix.config }}" in workflow
     assert "run: bash tests/e2e/run_inference_provider_e2e.sh" in workflow

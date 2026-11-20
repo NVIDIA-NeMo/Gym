@@ -168,8 +168,8 @@ dependencies = [
     "uvloop",
 
     # Hydra and OmegaConf: CLI Configuration utilities
-    # Updated Mon Nov 16, 2026: hydra-core>=1.4.0rc3 (security bump; 1.4 is a pre-release line that
-    # also supports omegaconf 2.4, which resources_servers/vlm_eval_kit pins in its isolated venv).
+    # Updated Mon Nov 16, 2026: hydra-core>=1.4.0rc3 (security bump; the fix only exists on the 1.4
+    # pre-release line, which pulls in omegaconf 2.4). Move the floor to 1.4.0 once it ships stable.
     # hydra-core license: MIT https://github.com/facebookresearch/hydra/blob/737fc3349ef3a4031035645f7e8c80be66a57042/LICENSE
     # omegaconf license: BSD 3-Clause https://github.com/omry/omegaconf/blob/117f7de07285e4d1324b9229eaf873de15279457/LICENSE
     "hydra-core>=1.4.0rc3",
