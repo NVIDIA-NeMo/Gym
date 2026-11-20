@@ -1,0 +1,13 @@
+multi_object_tracking_resources_server:
+  resources_servers:
+    multi_object_tracking:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Multi-object box tracking verifier for multi-image prompts on a 0-1000 grid
+      value: Score each tracked object's per-frame boxes by IoU over its visible frames with the GOT-10k verifier and average over objects
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/multi_object_tracking/data/example.jsonl
+        num_repeats: 1
