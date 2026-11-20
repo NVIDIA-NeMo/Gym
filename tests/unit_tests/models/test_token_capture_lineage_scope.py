@@ -149,10 +149,21 @@ def ledger(request, tmp_path):
 REPLAYED = [USER, ANSWER, JUDGE_PROMPT]
 
 
-async def test_a_judge_s_first_request_replaying_the_assistant_s_turns_is_a_root(lineage, tmp_path_factory):
+def _first_call_resolution(store) -> tuple[ParentResolutionStatus, str]:
+    """What a lineage scope's first request carrying unmatched model turns resolves to.
+
+    The file store roots it. The memory-only index cannot tell an evicted rollout from a lineage scope that
+    never called, so it leaves the request unresolved.
+    """
+    if isinstance(store, InMemoryLineageStore):
+        return (ParentResolutionStatus.UNRESOLVED, "no_match")
+    return (ParentResolutionStatus.ROOT, FIRST_CALL_REASON)
+
+
+async def test_a_judge_s_first_request_replaying_the_assistant_s_turns_is_a_root(tmp_path, tmp_path_factory):
     # The judge's lineage scope has made no call, so the replayed turns are input, not the judge's earlier output.
-    store, commit = lineage
-    await commit(_assistant_call())
+    TokenCaptureStore(tmp_path).append(_assistant_call())
+    store = FileLineageStore(tmp_path)
     transcript_as_text = [{"role": "user", "content": "Grade this transcript: solve the task / the answer is 4"}]
 
     judge = await store.resolve(ROLLOUT, REPLAYED, identity=JUDGE)
@@ -225,12 +236,30 @@ async def test_a_lineage_scope_with_only_a_failed_custody_row_does_not_start_ove
     user = await ledger.resolve(ROLLOUT, REPLAYED, identity=USER_SIM)
 
     assert (judge.status, judge.reason) == (ParentResolutionStatus.UNRESOLVED, "no_match")
-    assert (user.status, user.reason) == (ParentResolutionStatus.ROOT, FIRST_CALL_REASON)
+    assert (user.status, user.reason) == _first_call_resolution(ledger)
 
 
-async def test_the_memory_index_keeps_a_request_unresolved_when_it_holds_no_call_of_the_rollout():
-    # An evicted rollout looks the same as one that made no call, so the memory-only index cannot call it a root.
-    resolution = await InMemoryLineageStore().resolve(ROLLOUT, REPLAYED, identity=JUDGE)
+async def test_the_memory_index_does_not_root_a_continuation_after_its_rollout_was_evicted():
+    # After the eviction, the judge's put recreates the rollout with only the judge's lineage scope. The
+    # assistant's next request carries its own earlier output, so a root would turn that output into prompt.
+    store = InMemoryLineageStore(max_rollouts=1)
+    await store.put(_assistant_call())
+    continuation = [USER, ANSWER, {"role": "user", "content": "continue"}]
+    before = await store.resolve(ROLLOUT, continuation, identity=ASSISTANT)
+    await store.put(_assistant_call().model_copy(update={"capture_key": "another-rollout"}))
+    await store.put(_judge_call())
+
+    after = await store.resolve(ROLLOUT, continuation, identity=ASSISTANT)
+
+    assert before.status == ParentResolutionStatus.RESOLVED and before.match.model_call_id == "a1"
+    assert (after.status, after.reason) == (ParentResolutionStatus.UNRESOLVED, "no_match")
+
+
+async def test_the_memory_index_keeps_a_lineage_scope_s_first_request_unresolved():
+    store = InMemoryLineageStore()
+    await store.put(_assistant_call())
+
+    resolution = await store.resolve(ROLLOUT, REPLAYED, identity=JUDGE)
 
     assert (resolution.status, resolution.reason) == (ParentResolutionStatus.UNRESOLVED, "no_match")
 
@@ -259,7 +288,7 @@ async def test_another_agent_instance_s_call_on_another_model_server_is_not_a_mo
         ROLLOUT, REPLAYED, identity=CallIdentity(agent_instance="judge", model_ref=MODEL_SERVER_B)
     )
 
-    assert (resolution.status, resolution.reason) == (ParentResolutionStatus.ROOT, FIRST_CALL_REASON)
+    assert (resolution.status, resolution.reason) == _first_call_resolution(store)
 
 
 async def test_a_request_no_model_server_served_is_not_a_model_server_change(lineage):
@@ -271,7 +300,7 @@ async def test_a_request_no_model_server_served_is_not_a_model_server_change(lin
         ROLLOUT, never_served, identity=CallIdentity(agent_instance="assistant", model_ref=MODEL_SERVER_B)
     )
 
-    assert (resolution.status, resolution.reason) == (ParentResolutionStatus.ROOT, FIRST_CALL_REASON)
+    assert (resolution.status, resolution.reason) == _first_call_resolution(store)
 
 
 async def test_an_unnamed_request_does_not_see_named_calls(lineage):

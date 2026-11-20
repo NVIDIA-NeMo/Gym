@@ -137,7 +137,8 @@ class TokenCaptureSnapshot:
     engine_refusals: tuple[EngineRefusalRecord, ...] = ()
     # The agent instances with a lost call of their own; ``None`` is the unnamed agent.
     incomplete_agent_instances: frozenset[str | None] = frozenset()
-    # A mark with no model call, or one that cannot be placed on an agent instance: it masks every agent instance.
+    # A mark or failure with no known identity, or one that names no agent instance in an episode that names
+    # them: it masks every agent instance.
     incomplete_episode: bool = False
 
     def incomplete_for(self, agent_instance: str | None) -> bool:

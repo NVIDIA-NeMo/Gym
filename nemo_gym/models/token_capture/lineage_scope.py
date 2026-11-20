@@ -21,7 +21,8 @@ continues the assistant's chain, and two agent instances with identical first pr
 of each other. The calls of a single-agent episode form one lineage scope.
 
 Outcomes are per agent instance: a failure or a pending call belongs to the agent instance that made the
-call, and a failure with no model call, or whose call's identity is unknown, belongs to the whole episode.
+call. A failure is episode-wide when nothing about its identity is known, or when the episode names its
+agent instances and the failure names none.
 Delivery and the manifest both use these helpers, so they agree on every attribution.
 """
 
@@ -108,7 +109,8 @@ def inherited_identity_columns(rows: list[Mapping[str, Any]]) -> list[dict[str, 
     """Return each ledger row's identity columns, inheriting them from its call's intent row when it has none.
 
     A row whose call has no named agent instance, on the row or on its intent, keeps whatever identity it
-    has, which may be none: such a row applies to the whole episode.
+    has. ``is_episode_wide`` decides from those columns whether the row applies to the whole episode: it does
+    when they are empty, or when the episode names its agent instances and they name none.
     """
     intents = {
         row["model_call_id"]: CallIdentity.from_columns(row).columns()

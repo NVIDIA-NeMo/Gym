@@ -598,6 +598,9 @@ class InMemoryLineageStore:
     Production wiring uses ``FileLineageStore`` when a token store exists.
     Its index is memory-only.
     Eviction or restart leaves affected continuations unresolved.
+    It cannot tell an evicted rollout from a lineage scope that never called, so it does not root a
+    lineage scope's first call with ``first_call``: a request that carries model turns it cannot match
+    stays unresolved.
     That failure mode is safe but can mask otherwise usable rollouts.
     Multi-worker deployments require a shared ``LineageResolver``.
     The resolution index evicts rollouts under memory bounds, so this store
@@ -621,16 +624,6 @@ class InMemoryLineageStore:
         status, node, reason = resolve_within_lineage_scope(scopes, scope, request_items)
         if status == ParentResolutionStatus.RESOLVED:
             return self.index.for_rollout(rollout_id, scope).resolve(request_items)
-        rows = self._ledgers.get(rollout_id) or []
-        if (
-            (status, reason) == (ParentResolutionStatus.UNRESOLVED, "no_match")
-            and scope not in scopes
-            and not _rows_of_lineage_scope(rows, scope)
-            # The index is memory-only, so an evicted rollout looks like one that made no call. Another
-            # lineage scope's calls show the rollout is still indexed, and eviction drops a rollout whole.
-            and (scopes or any("model_call_id" in row for row in rows))
-        ):
-            return LineageResolution(ParentResolutionStatus.ROOT, reason=FIRST_CALL_REASON)
         return LineageResolution(status, reason=reason)
 
     async def put(self, entry: TokenEntry) -> None:
