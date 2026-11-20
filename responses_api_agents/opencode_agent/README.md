@@ -596,6 +596,10 @@ What OpenCode 2 does differently, and a recipe may notice:
   `ContextOverflowError`. OpenCode 2 retries 429, 408, 409, 5xx and transport failures itself, up to 10 times.
   When a stream breaks after output started, it saves the error on that step and continues with a new one; that
   step keeps the error as `recoveredError`, and only an error on the last reply fails the run.
+- When the run reaches its time limit, OpenCode 2 handles the stop signal by saving the step it was running with an
+  `aborted` error (`Step interrupted`). The adapter reports that run as timed out (`incomplete`), as it does an
+  OpenCode 1 run stopped at the time limit, so the environment verifies the work done so far. An aborted last step
+  without that stop still fails the run.
 - After a reply truncated at `max_output_tokens`, OpenCode 2 asks the model to continue, twice; a third truncated
   reply ends the run with an `output-limit` error and exit code 1, which the adapter reports as a failed run. With
   OpenCode 1, a run whose last reply was truncated is reported as incomplete (`max_output_tokens`).
