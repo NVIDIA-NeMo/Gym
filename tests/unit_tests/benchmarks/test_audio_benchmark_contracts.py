@@ -16,7 +16,6 @@ import yaml
 from benchmarks import audio_manifest
 from nemo_gym.environment.benchmarks import BenchmarkConfig, _benchmark_config_name, _is_benchmark_config
 from nemo_gym.environment.manifest import load_manifest
-from resources_servers.audio_eval.score import evaluator_settings, resolve
 
 
 pytestmark = pytest.mark.usefixtures("mock_port_allocation")
@@ -37,7 +36,8 @@ def discover() -> dict[str, str]:
 
 AUDIO_BENCHMARKS = discover()
 # Every profile file the contract tests check: the benchmarks' own, plus the audio_eval server's example profile, so the
-# two profile tests below exercise a real file even where no benchmark has merged yet.
+# profile test below exercises a real file even where no benchmark has merged yet. Scorer resolution is tested in
+# resources_servers/audio_eval/tests/test_score.py, alongside the scorer behavior with its component dependencies.
 PROFILE_FILES = {
     **{
         name: ROOT / "benchmarks" / name / "profiles.json"
@@ -103,18 +103,3 @@ def test_profile_contracts_resolve_and_have_no_unread_keys(name: str) -> None:
         assert {"METRICS_TYPE"} <= set(contract["skills"]) <= {"EVAL_ARGS", "METRICS_TYPE"}, profile
         assert judged or "EVAL_ARGS" in contract["skills"], profile
         assert isinstance(audio_manifest.request_controls(contract)["max_output_tokens"], int), profile
-
-
-@pytest.mark.parametrize("name", sorted(PROFILE_FILES))
-def test_profile_scorers_are_found_by_name(name: str) -> None:
-    """The evaluator and metrics a profile names exist as modules (a missing third-party library is not an error here)."""
-    profiles = audio_manifest.load_profiles(PROFILE_FILES[name])["profiles"]
-    for profile, contract in profiles.items():
-        evaluator, _ = evaluator_settings(contract)
-        for kind, scorer in (("evaluators", evaluator), ("metrics", contract["skills"]["METRICS_TYPE"])):
-            if scorer is None:
-                continue
-            try:
-                resolve(kind, scorer)
-            except ImportError as error:
-                assert not (error.name or "").startswith("resources_servers"), (profile, kind, scorer, error)

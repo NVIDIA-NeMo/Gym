@@ -6,12 +6,14 @@ import asyncio
 from pathlib import Path
 
 import pytest
+import yaml
 
 from resources_servers.audio_eval import score
 from resources_servers.audio_eval._scoring.evaluation.evaluator.audio import AudioEvaluator
 from resources_servers.audio_eval._scoring.evaluation.evaluator.base import BaseEvaluator
 from resources_servers.audio_eval._scoring.evaluation.metrics.audio_metrics import AudioMetrics
 from resources_servers.audio_eval._scoring.evaluation.metrics.base import BaseMetrics
+from resources_servers.audio_eval.profiles import load_profiles
 from resources_servers.audio_eval.score import (
     assistant_text,
     check_finite,
@@ -26,6 +28,19 @@ from resources_servers.audio_eval.score import (
 
 
 SCORING = Path(score.__file__).parent / "_scoring"
+ROOT = Path(__file__).resolve().parents[3]
+AUDIO_SERVERS = ("audio_eval", "asr_with_pc", "voicebench")
+# Match the profile files checked by the core benchmark contracts; resolving scorers belongs with the component's
+# runtime tests, which install the scoring dependencies and exercise their behavior.
+PROFILE_FILES = {
+    **{
+        path.parent.name: path.with_name("profiles.json")
+        for path in sorted((ROOT / "benchmarks").glob("*/manifest.yaml"))
+        if (yaml.safe_load(path.read_text()) or {}).get("resources_server") in AUDIO_SERVERS
+        and path.with_name("profiles.json").exists()
+    },
+    "audio_eval-example": ROOT / "resources_servers" / "audio_eval" / "data" / "example_profiles.json",
+}
 
 
 def test_evaluator_settings_parse_the_profile_arguments():
@@ -128,6 +143,21 @@ def test_generation_failure_and_assistant_text():
 
 
 # --- scorers are found by name, with no registry file ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", sorted(PROFILE_FILES))
+def test_profile_scorers_are_found_by_name(name: str) -> None:
+    """The evaluator and metrics a profile names exist as modules (a missing third-party library is not an error here)."""
+    profiles = load_profiles(PROFILE_FILES[name])["profiles"]
+    for profile, contract in profiles.items():
+        evaluator, _ = evaluator_settings(contract)
+        for kind, scorer in (("evaluators", evaluator), ("metrics", contract["skills"]["METRICS_TYPE"])):
+            if scorer is None:
+                continue
+            try:
+                resolve(kind, scorer)
+            except ImportError as error:
+                assert not (error.name or "").startswith("resources_servers"), (profile, kind, scorer, error)
 
 
 def test_the_audio_scorers_resolve_by_name():
