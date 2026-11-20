@@ -36,6 +36,17 @@ class UnitTests(BaseModel):
     )
 
 
+class AssertionTests(BaseModel):
+    """Assertions run after the candidate's code; app.py grades with this model too."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["assertions"] = Field(description="Test format.")
+    tests: list[str] = Field(
+        min_length=1, description="Python statements, usually asserts, run in order in the candidate's module."
+    )
+
+
 class ResourceLimits(BaseModel):
     """A task's own limits; app.py grades with this model too."""
 
@@ -52,7 +63,7 @@ class ResourceLimits(BaseModel):
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    unit_tests: Optional[UnitTests] = Field(
+    unit_tests: UnitTests | AssertionTests | None = Field(
         default=None,
         description=(
             "Test cases the extracted code must pass. Optional on the wire (verifier_metadata is "

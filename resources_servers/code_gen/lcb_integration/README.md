@@ -2,4 +2,4 @@ This is taken directly from https://github.com/LiveCodeBench/LiveCodeBench/tree/
 
 Local changes:
 - `testing_util.py`: timers use `signal.setitimer`, so time limits can be fractional.
-- `correctness.py`: optional task memory limit (set before `run_test`) and optional deadline.
+- `correctness.py`: optional task memory limit (`../sandbox_limits.py`, set before `run_test`) and optional deadline.
