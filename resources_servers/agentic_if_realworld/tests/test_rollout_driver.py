@@ -244,6 +244,19 @@ def test_untyped_verify_503_is_not_a_deferred_judge_failure(tmp_path, monkeypatc
 
     from responses_api_agents.simple_agent.tests.test_app import _mock_response
 
-    post = AsyncMock(return_value=_mock_response(status=503))
-    with pytest.raises(ClientResponseError):
+    response = _mock_response(status=503)
+    response.raise_for_status.side_effect = ClientResponseError(
+        request_info=SimpleNamespace(
+            url="http://resources/verify", real_url="http://resources/verify", method="POST", headers={}
+        ),
+        history=(),
+        status=503,
+        message="Service Unavailable",
+        headers={},
+    )
+    post = AsyncMock(return_value=response)
+    with pytest.raises(ClientResponseError) as raised:
         collect(tmp_path, monkeypatch, {}, parallel=1, client=SimpleNamespace(post=post))
+    assert raised.value.status == 503
+    assert post.await_count == 1
+    response.release.assert_called_once()

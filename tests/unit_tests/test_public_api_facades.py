@@ -225,3 +225,9 @@ def test_judge_provider_credential_kind_is_exported_from_core():
     from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
 
     assert importlib.import_module("nemo_gym.core").PROVIDER_CREDENTIALS_REJECTED == PROVIDER_CREDENTIALS_REJECTED
+
+
+def test_judge_call_failure_is_exported_from_verification():
+    from nemo_gym.verification.judge import judge_call_failed
+
+    assert importlib.import_module("nemo_gym.verification").judge_call_failed is judge_call_failed
