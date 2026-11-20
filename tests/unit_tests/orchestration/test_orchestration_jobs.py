@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import logging
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -29,9 +30,20 @@ from nemo_gym.orchestration.jobs import (
     MANIFEST_NAME,
     RESOLVED_CONFIG_NAME,
     SCHEMA_VERSION,
+    BenchmarkInfo,
     BenchmarkJob,
+    Failure,
+    FailureCategory,
+    JobInfo,
+    JobRef,
+    JobState,
+    JobStatus,
+    LogSource,
+    ObservedStatus,
     SubmissionRecord,
+    SubmissionStatus,
     benchmark_artifact_dirs,
+    list_submissions,
     local_index_dir,
     new_gym_job_id,
 )
@@ -401,3 +413,177 @@ def test_benchmark_artifact_dirs_is_none_without_a_record(tmp_path: Path, monkey
 
     assert benchmark_artifact_dirs("gym-job-unknown") is None
     assert benchmark_artifact_dirs(str(tmp_path / "run")) is None
+
+
+# --- Log sources and the status types ------------------------------------------------------------------------
+
+
+def _with_log_sources(record: SubmissionRecord) -> SubmissionRecord:
+    sources = [
+        LogSource(name="driver", kind="driver", location="logs/driver-{job_id}.log"),
+        LogSource(name="vllm", kind="service", instance="node-1", location="logs/vllm-{job_id}.log"),
+    ]
+    benchmarks = [b.model_copy(update={"log_sources": sources}) for b in record.benchmarks]
+    return record.model_copy(update={"benchmarks": benchmarks})
+
+
+def test_log_sources_survive_the_manifest_bytes():
+    record = _with_log_sources(_record())
+
+    restored = SubmissionRecord.load(json.loads(record.dumps()))
+
+    assert restored == record
+    assert restored.benchmarks[0].log_sources[1].instance == "node-1"
+
+
+def test_a_record_written_before_log_sources_existed_still_loads_with_none():
+    payload = json.loads(_with_log_sources(_record()).dumps())
+    for benchmark in payload["benchmarks"]:
+        del benchmark["log_sources"]
+
+    restored = SubmissionRecord.load(payload)
+
+    assert restored.schema_version == SCHEMA_VERSION
+    assert [b.log_sources for b in restored.benchmarks] == [[]]
+    assert restored.benchmarks[0].job_id == "12345"
+
+
+def test_a_log_source_is_either_the_driver_or_a_service():
+    with pytest.raises(ValueError):
+        LogSource(name="x", kind="sidecar", location="logs/x-{job_id}.log")
+
+
+def test_a_log_source_is_not_split_by_instance_unless_it_says_so():
+    assert LogSource(name="vllm", kind="service", location="logs/vllm-{job_id}.log").instance is None
+
+
+def test_a_job_ref_is_keyed_by_the_submission_and_the_benchmark():
+    record = _record()
+
+    ref = JobRef(record, record.benchmarks[0])
+
+    assert ref.key == ("gym-job-20260909T100203Z-abc123", "gsm8k")
+
+
+def test_a_submission_status_survives_json_with_enum_keyed_counts():
+    status = SubmissionStatus(
+        record=_record(),
+        jobs=[
+            JobStatus(
+                benchmark="gsm8k",
+                state=JobState.FAILED,
+                job_id="12346",
+                detail="FAILED",
+                exit_code=1,
+                failure=Failure(
+                    category=FailureCategory.INCOMPLETE,
+                    message="Chain stopped at the walltime cap",
+                    source="job directory",
+                    logs="gym job logs gym-job-x gsm8k --tail 100",
+                ),
+            )
+        ],
+        state=JobState.FAILED,
+        counts={JobState.FAILED: 1},
+    )
+
+    restored = SubmissionStatus.model_validate_json(status.model_dump_json())
+
+    assert restored == status
+    assert restored.counts[JobState.FAILED] == 1
+    assert restored.jobs[0].failure.category is FailureCategory.INCOMPLETE
+
+
+def test_observed_statuses_do_not_share_their_state_files():
+    first = ObservedStatus(state=JobState.RUNNING)
+    first.files[".gym_chain_incomplete"] = "stopped"
+
+    assert ObservedStatus(state=JobState.RUNNING).files == {}
+
+
+def _log_source() -> LogSource:
+    return LogSource(name="driver", kind="driver", location="logs/driver-{job_id}.log")
+
+
+def test_a_job_info_says_why_the_config_is_missing_and_survives_json():
+    info = JobInfo(
+        record=_with_log_sources(_record()),
+        benchmarks=[
+            BenchmarkInfo(
+                benchmark="gsm8k",
+                job_dir="/jobs/x/gsm8k",
+                job_ids=["12345", "12400"],
+                log_sources=[_log_source()],
+            )
+        ],
+        config_unavailable="the run directory is not readable",
+    )
+
+    restored = JobInfo.model_validate_json(info.model_dump_json())
+
+    assert restored == info
+    assert restored.config is None
+    assert restored.benchmarks[0].job_ids == ["12345", "12400"]
+
+
+def test_observed_statuses_do_not_share_their_job_ids():
+    first = ObservedStatus(state=JobState.RUNNING)
+    first.job_ids.append("12345")
+
+    assert ObservedStatus(state=JobState.RUNNING).job_ids == []
+
+
+# --- The local index -----------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def index(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    return local_index_dir()
+
+
+def _indexed(gym_job_id: str, submitted_at: str) -> SubmissionRecord:
+    record = _record(gym_job_id=gym_job_id, submitted_at=submitted_at)
+    record.write_local_index()
+    return record
+
+
+def test_the_index_lists_the_newest_submissions_first_and_at_most_the_limit(index):
+    for gym_job_id, submitted_at in [
+        ("b", "2026-10-02T00:00:00Z"),
+        ("c", "2026-10-03T00:00:00Z"),
+        ("a", "2026-10-01T00:00:00Z"),
+    ]:
+        _indexed(gym_job_id, submitted_at)
+
+    assert [r.gym_job_id for r in list_submissions()] == ["c", "b", "a"]
+    assert [r.gym_job_id for r in list_submissions(limit=2)] == ["c", "b"]
+
+
+def test_a_machine_that_never_submitted_has_an_empty_index(index):
+    assert not index.exists()
+    assert list_submissions() == []
+
+
+def test_a_file_that_is_not_a_readable_record_is_skipped_with_a_warning_and_the_rest_still_list(index, caplog):
+    _indexed("good", "2026-10-01T00:00:00Z")
+    (index / "broken.json").write_text("{not json")
+    (index / "from-the-future.json").write_text(json.dumps({**json.loads(_record().dumps()), "schema_version": 99}))
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
+        listed = list_submissions()
+
+    assert [r.gym_job_id for r in listed] == ["good"]
+    assert "broken.json" in caplog.text and "from-the-future.json" in caplog.text
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", '"not a record"', "123"])
+def test_valid_json_that_is_not_a_record_is_skipped_with_a_warning(index, caplog, payload):
+    _indexed("good", "2026-10-01T00:00:00Z")
+    (index / "odd.json").write_text(payload)
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
+        assert [r.gym_job_id for r in list_submissions()] == ["good"]
+        assert [r.gym_job_id for r in list_submissions(limit=1)] == ["good"]
+
+    assert "odd.json" in caplog.text

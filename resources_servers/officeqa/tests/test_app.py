@@ -252,7 +252,7 @@ async def test_concurrent_seed_and_close_cannot_leave_a_sandbox(server, sandbox)
     await asyncio.gather(seeding, closing)
     assert not server._sessions
     assert not server._locks._locks
-    sandbox.stop.assert_awaited_once()
+    sandbox.stop.assert_awaited_once_with(timeout_s=server.config.sandbox_stop_timeout)
 
 
 @pytest.mark.asyncio

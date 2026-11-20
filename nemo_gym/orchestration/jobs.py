@@ -51,7 +51,9 @@ import secrets
 import socket
 import sys
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
@@ -87,6 +89,32 @@ EVAL_SUCCEEDED_FILENAME = "eval.succeeded"
 EXPORT_RESULT_SUFFIX = ".result.json"
 
 
+# State files a job writes into its job directory. An executor returns the ones it can read in
+# `ObservedStatus.files`, and the status operation reads them. `.gym_chain_incomplete` holds a
+# reason and is written when a chain of resumed jobs stops before the run finished; `eval.exit`
+# holds the exit code of `gym eval run`.
+CHAIN_INCOMPLETE_FILE = ".gym_chain_incomplete"
+EVAL_EXIT_FILE = "eval.exit"
+
+
+class LogSource(BaseModel):
+    """One log a benchmark's job writes, as the executor planned it at submit time.
+
+    `kind` is `driver` for the process that runs the benchmark and `service` for every other
+    step of the job. `instance` names one instance of a service that runs several; it is None
+    for a source that is not split by instance. `location` is where the log is, in the
+    executor's terms and opaque to everyone else: for the Slurm executor a path relative to the
+    job directory with a `{job_id}` placeholder, because the scheduler's id is not known at
+    submit time and changes when a job is resumed; for a container-based executor, a container
+    name. A reader fills in the placeholder with the id of the job it wants.
+    """
+
+    name: str
+    kind: Literal["driver", "service"]
+    instance: str | None = None
+    location: str
+
+
 class BenchmarkJob(BaseModel):
     """One benchmark's submission.
 
@@ -94,6 +122,11 @@ class BenchmarkJob(BaseModel):
     (for the Slurm executor, a failed `sbatch`), in which case `error` says why.
     The other benchmarks in the same submission are unaffected -- one failure
     does not discard the record for the ones that did start.
+
+    `log_sources` is the list of logs the job was set up to write, computed at
+    submit time by the same code that renders the job's log flags, so the plan
+    and the job cannot disagree. A plan is intent, not proof that a file exists.
+    A record written before this field existed has none.
     """
 
     benchmark: str
@@ -104,6 +137,7 @@ class BenchmarkJob(BaseModel):
     gym_commit: str | None = None
     # Set by a recovery that raised the walltime: the Slurm walltime this benchmark's job now runs with.
     walltime: str | None = None
+    log_sources: list[LogSource] = []
 
 
 class SubmissionTelemetry(BaseModel):
@@ -302,6 +336,148 @@ def restore_index_entry(gym_job_id: str, run_dir: str | Path) -> SubmissionRecor
     return record
 
 
+class JobState(StrEnum):
+    """What is happening to one benchmark's job, in terms every executor shares.
+
+    Each executor maps its own scheduler's vocabulary onto this; the native string
+    survives only as a status's `detail`. `UNKNOWN` means the executor could not tell
+    (a scheduler that is unreachable, or no longer remembers the job).
+    """
+
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    UNKNOWN = "UNKNOWN"
+
+
+# Nothing is left to stop for a job in one of these states.
+FINISHED_STATES = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED})
+
+
+class FailureCategory(StrEnum):
+    """Which kind of thing went wrong, so a reader knows how far to trust a `Failure`."""
+
+    ENQUEUE = "ENQUEUE"
+    SCHEDULER = "SCHEDULER"
+    INCOMPLETE = "INCOMPLETE"
+    RUN = "RUN"
+    EXPORT = "EXPORT"
+    CANCELLED = "CANCELLED"
+
+
+class Failure(BaseModel):
+    """Why a benchmark's job failed, with where the reason came from.
+
+    `source` says what produced `message` (the scheduler, the record, a file the job wrote),
+    and `logs` is a command that shows the job's logs. The logs themselves are never parsed
+    to guess a cause.
+    """
+
+    category: FailureCategory
+    message: str
+    exit_code: int | None = None
+    source: str
+    logs: str | None = None
+
+
+class Progress(BaseModel):
+    """How far a run got, in counts only: rollouts `done` of `total`, and how many `failed`."""
+
+    done: int
+    total: int
+    failed: int
+
+
+class ObservedStatus(BaseModel):
+    """What an executor saw of one benchmark's job: the primitive behind every status.
+
+    `state` is set by the executor from its own vocabulary, and `detail` keeps the native
+    string (a Slurm `TIMEOUT`, say). `job_id` is the id actually observed, which can differ
+    from the record's when a job was resumed or started outside Gym, and `job_ids` is every job
+    id seen for the benchmark, oldest first (the whole chain when a run was resumed). `files` holds
+    the state files the job wrote into its directory, by name, read in the same call as the
+    scheduler's answer; a file that is missing or unreadable is absent.
+    """
+
+    state: JobState
+    detail: str | None = None
+    exit_code: int | None = None
+    reason: str | None = None
+    job_id: str | None = None
+    job_ids: list[str] = []
+    files: dict[str, str] = {}
+
+
+class JobStatus(BaseModel):
+    """The status of one benchmark's job as shown to a user.
+
+    Built from an `ObservedStatus` and the files the job wrote. `progress` is None until an
+    executor reports it.
+    """
+
+    benchmark: str
+    state: JobState
+    job_id: str | None = None
+    detail: str | None = None
+    exit_code: int | None = None
+    failure: Failure | None = None
+    progress: Progress | None = None
+
+
+class SubmissionStatus(BaseModel):
+    """The status of every selected benchmark of one submission.
+
+    `state` rolls the benchmarks up into one value and `counts` says how many are in each
+    state, so a mixed result is not hidden behind one word. Both describe only the benchmarks
+    in `jobs`.
+    """
+
+    record: SubmissionRecord
+    jobs: list[JobStatus]
+    state: JobState
+    counts: dict[JobState, int]
+
+
+class BenchmarkInfo(BaseModel):
+    """Where one benchmark's job lives and what it writes: its directory, the job ids observed for it
+    (the whole chain when a run was resumed), and the logs it was set up to write."""
+
+    benchmark: str
+    job_dir: str
+    job_ids: list[str] = []
+    log_sources: list[LogSource] = []
+
+
+class JobInfo(BaseModel):
+    """A description of one submission and where its parts are, with no live state.
+
+    `config` is the resolved config the submission was made with, or None when the executor
+    cannot read it, in which case `config_unavailable` says why.
+    """
+
+    record: SubmissionRecord
+    benchmarks: list[BenchmarkInfo]
+    config: dict[str, object] | None = None
+    config_unavailable: str | None = None
+
+
+# One benchmark's job: the submission's id and the benchmark's name.
+JobKey = tuple[str, str]
+
+
+class JobRef(NamedTuple):
+    """A record paired with one of its benchmark jobs, so one call can span many submissions."""
+
+    record: SubmissionRecord
+    job: BenchmarkJob
+
+    @property
+    def key(self) -> JobKey:
+        return (self.record.gym_job_id, self.job.benchmark)
+
+
 def utc_now() -> datetime:
     """The clock the run directory is named from.
 
@@ -348,6 +524,26 @@ def local_index_dir() -> Path:
     """Where this machine remembers its own submissions."""
     base = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
     return Path(base) / "nemo-gym" / "jobs"
+
+
+def list_submissions(*, limit: int | None = None) -> list[SubmissionRecord]:
+    """The submissions in this machine's job index, newest first, at most `limit` of them.
+
+    Reads the index only, so it needs no executor and no network. A file that cannot be read as a
+    record is skipped with a warning: one bad file must not hide the rest.
+    """
+    index = local_index_dir()
+    records: list[SubmissionRecord] = []
+    for path in sorted(index.glob("*.json")) if index.is_dir() else []:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("Job record must be a JSON object")
+            records.append(SubmissionRecord.load(payload))
+        except (OSError, ValueError) as error:
+            logger.warning("Skipping %s in the job index: %s", path, error)
+    records.sort(key=lambda record: record.submitted_at, reverse=True)
+    return records if limit is None else records[:limit]
 
 
 def load_submission_record(gym_job_id: str) -> SubmissionRecord:

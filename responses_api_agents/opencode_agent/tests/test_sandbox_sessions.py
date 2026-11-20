@@ -1464,7 +1464,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
 
-    async def disconnect():
+    async def disconnect(**_):
         clock[0] = 200.0
 
     sandbox.disconnect.side_effect = disconnect
@@ -1481,7 +1481,7 @@ async def test_concurrent_closes_share_the_saved_reply(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -2516,7 +2516,7 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, tmp_path
         await asyncio.wait_for(sandbox.started.wait(), 2)
         assert f"{directory}/process_supervisor.sh" in sandbox.files
 
-        async def release():
+        async def release(**_: object):
             assert state.session.cleanup["cleanup_confirmed"] is True
             assert state.session.artifacts is not None
             sandbox.files.clear()

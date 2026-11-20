@@ -80,7 +80,7 @@ def record(sandbox):
         return await run(command, **kwargs)
 
     sandbox.exec.side_effect = exec_
-    sandbox.disconnect.side_effect = lambda: events.append("disconnect")
+    sandbox.disconnect.side_effect = lambda **_: events.append("disconnect")
     return events
 
 
