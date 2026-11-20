@@ -13,7 +13,7 @@ from typing import Any
 
 from nemo_gym import PARENT_DIR, component_search_roots
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.environment.manifest import load_listed_manifest
+from nemo_gym.environment.manifest import load_manifest
 from nemo_gym.environment.registry import EnvironmentCatalogEntry
 from nemo_gym.environment.validation import EnvironmentValidationReport, ResolvedComponent, validate_environment
 from nemo_gym.verification.verifier_fixture import (
@@ -185,8 +185,8 @@ def prepare_verifier_run(
 
     manifest_path = entry.manifest_path.expanduser().resolve()
     config_path = entry.config_path.expanduser().resolve()
-    validation = validation or validate_environment(manifest_path, config_path, name=entry.name)
-    manifest = load_listed_manifest(manifest_path, entry.name)
+    validation = validation or validate_environment(manifest_path, config_path)
+    manifest = load_manifest(manifest_path)
 
     resources_component = next(
         (component for component in validation.components if component.role == "resources_server"),

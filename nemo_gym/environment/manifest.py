@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import posixpath
 from datetime import date
 from enum import StrEnum
 from functools import cache
@@ -251,92 +250,6 @@ class ManifestRequirements(_ManifestModel):
     )
 
 
-class _ListedConfig(_ManifestModel):
-    """A config that a main manifest lists. It shares the main manifest's facts and sets only those that differ.
-
-    A field left out takes the main manifest's value; ``null`` sets it to none, as for a harness with no model server.
-    ``requirements`` is combined field by field, so setting only ``network`` keeps the inherited ``gpu``; a list such as
-    ``datasets`` or ``maintainers`` replaces the inherited one whole. The composition fields mirror this config as the
-    main manifest's mirror the main config, and ``gym env validate --sync`` writes them here.
-    """
-
-    name: NonEmptyString = Field(
-        description=(
-            "Catalog name of the config: its path under benchmarks/ or environments/ without .yaml, as "
-            "`gym eval run --benchmark` takes it."
-        )
-    )
-    config_path: NonEmptyString = Field(description="Config path relative to the main manifest.")
-    description: NonEmptyString | None = Field(default=None, description="What this config changes.")
-    maintainers: list[GitHubLogin] | None = Field(
-        default=None,
-        min_length=1,
-        json_schema_extra={"uniqueItems": True},
-        description="GitHub logins of the people who maintain this config, when they are not the main manifest's.",
-    )
-    requirements: ManifestRequirements | None = Field(
-        default=None,
-        description=(
-            "The requirements that differ, field by field: a field it sets replaces the inherited one, and a field it "
-            "leaves out keeps the inherited value."
-        ),
-    )
-    primary_metric: NonEmptyString | None = Field(
-        default=None,
-        description="The headline metric, when this config reports another one, for example after more repeats.",
-    )
-    integration_profile: IntegrationProfile | None = None
-    dataset_owner: NonEmptyString | None = None
-    resources_server: NonEmptyString | None = None
-    agent_server: NonEmptyString | None = None
-    model_server: NonEmptyString | None = None
-    datasets: list[ManifestDataset] | None = None
-    rollout_driver: PythonCallable | None = None
-    grading_mode: NonEmptyString | None = None
-    harbor_target: NonEmptyString | None = None
-    standard_prompt_config: NonEmptyString | None = Field(
-        default=None,
-        description=(
-            "The config's own prompt template. A protocol sets it when it prompts under other rules. A setup sets it "
-            "only when its harness needs the benchmark's prompt in another form, such as in the user message because "
-            "the harness owns the system prompt. Such a setup runs another agent server than its parent, and its "
-            "description says how the prompt was adapted."
-        ),
-    )
-
-
-class ManifestSetup(_ListedConfig):
-    """A config that runs the same tasks, prompt wording, scoring and task limits with another harness or runtime.
-
-    Task limits are the turn and time budgets and the tool caps, such as a search limit, that the benchmark sets. When
-    a harness has no setting for one of them, the setup's description says so. A runtime is what drives or hosts the
-    run with the same harness, such as another sandbox provider, or a standard rollout instead of an adaptive
-    evaluation driver. A ``*_legacy_agent`` config is not listed as a setup. It is being migrated off: the agent runs
-    the whole episode behind the ``legacy_agent`` relay instead of the Environment Server, often through an older
-    adapter of the same harness. It runs by name as a plain catalog config until it is removed.
-    """
-
-
-class ManifestProtocol(_ListedConfig):
-    """A task variant: a config that runs a benchmark's tasks under another prompt, scoring or task limits.
-
-    Its score is not comparable with the main config's. A config that changes the tools runs the tasks in another
-    environment; until a manifest can name environments separately, it is listed as a protocol whose description says
-    so. Serving the same tools another way, for example over MCP, is not a change of tools.
-
-    It may list its own setups: configs that run the protocol with another harness or runtime. They take the
-    protocol's facts, not only the main manifest's. A setup lists nothing, so the nesting stops there.
-    """
-
-    description: NonEmptyString = Field(description="How the protocol's prompt, scoring, task limits or tools differ.")
-    setups: list[ManifestSetup] = Field(
-        default_factory=list,
-        description=(
-            "Configs that run this protocol's tasks, prompt, scoring and task limits with another harness or runtime."
-        ),
-    )
-
-
 def _profile_schema_conditions() -> list[dict[str, Any]]:
     nonempty_string = {"minLength": 1, "type": "string"}
     nonempty_datasets = {"minItems": 1, "type": "array"}
@@ -415,10 +328,6 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
             },
             "else": {"properties": {"rollout_driver": {"type": "null"}}},
         },
-        {
-            "if": {"properties": {"kind": {"const": EnvironmentKind.ENVIRONMENT.value}}, "required": ["kind"]},
-            "then": {"properties": {"protocols": {"maxItems": 0}}},
-        },
     ]
 
 
@@ -435,10 +344,7 @@ class EnvironmentManifest(_ManifestModel):
 
     name: NonEmptyString
     version: NonEmptyString = Field(
-        description=(
-            "Version of the resolved composition, shared by the setups and protocols listed here; Semantic "
-            "Versioning is recommended."
-        )
+        description="Version of the resolved composition; Semantic Versioning is recommended."
     )
     experimental: bool = Field(
         default=True,
@@ -528,15 +434,6 @@ class EnvironmentManifest(_ManifestModel):
     adopted_from: AdoptedFrom | None = None
     lifecycle: Lifecycle = Lifecycle.ACTIVE
 
-    setups: list[ManifestSetup] = Field(
-        default_factory=list,
-        description="Configs that run these tasks, prompt, scoring and task limits with another harness or runtime.",
-    )
-    protocols: list[ManifestProtocol] = Field(
-        default_factory=list,
-        description="Task variants: benchmark configs that run these tasks under another prompt, scoring or limits.",
-    )
-
     @field_validator("authors", "maintainers", "intended_use", "capabilities", "domains", "overlaps_with")
     @classmethod
     def validate_unique_items(cls, value: list[str] | str | None, info: ValidationInfo) -> list[str] | str | None:
@@ -611,71 +508,9 @@ class EnvironmentManifest(_ManifestModel):
             raise ValueError("a benchmark manifest requires a benchmark dataset")
         return self
 
-    @model_validator(mode="after")
-    def validate_listed_configs(self) -> "EnvironmentManifest":
-        if self.protocols and self.kind != EnvironmentKind.BENCHMARK:
-            raise ValueError("protocols are only valid for benchmarks")
-        listed_configs = self.listed_configs()
-        names = [self.name, *(listed.name for listed in listed_configs)]
-        if len(names) != len(set(names)):
-            raise ValueError("the main manifest and each setup and protocol need their own name")
-        config_paths = [posixpath.normpath(listed.config_path) for listed in (self, *listed_configs)]
-        if len(config_paths) != len(set(config_paths)):
-            raise ValueError("the main manifest and each setup and protocol need their own config_path")
-        for listed in listed_configs:
-            try:
-                resolve_listed_manifest(self, listed)
-            except ValidationError as error:
-                issue = error.errors(include_url=False, include_context=False, include_input=False)[0]
-                location = ".".join(str(part) for part in issue["loc"])
-                inherited = "the main manifest" if self.listing_protocol(listed) is None else "its protocol"
-                raise ValueError(
-                    f"{listed.name}, combined with {inherited}: {f'{location}: ' if location else ''}{issue['msg']}"
-                ) from error
-        return self
-
-    def listed_configs(self) -> tuple[ManifestSetup | ManifestProtocol, ...]:
-        """The setups, then each protocol followed by its own setups, in the order the manifest lists them."""
-        return (*self.setups, *(listed for protocol in self.protocols for listed in (protocol, *protocol.setups)))
-
-    def listing_protocol(self, listed: ManifestSetup | ManifestProtocol) -> ManifestProtocol | None:
-        """The protocol that lists ``listed`` as one of its setups; ``None`` when the main manifest lists it."""
-        return next((protocol for protocol in self.protocols if listed in protocol.setups), None)
-
 
 class ManifestError(ConfigError):
     """A manifest could not be read, parsed, or validated."""
-
-
-def resolve_listed_manifest(
-    main: EnvironmentManifest, listed: ManifestSetup | ManifestProtocol
-) -> EnvironmentManifest:
-    """The complete manifest of a setup or protocol: the facts it inherits with the ones it sets.
-
-    A setup a protocol lists inherits the protocol's complete manifest; any other listed config inherits the main
-    manifest's. Its ``config_path`` stays relative to the main manifest, and it lists no setups or protocols of its
-    own. The catalog, validation and publication all get a setup or protocol from here, so none of them combines them.
-    """
-    protocol = main.listing_protocol(listed)
-    inherited = main if protocol is None else resolve_listed_manifest(main, protocol)
-    data = inherited.model_dump(mode="json", exclude={"setups", "protocols"})
-    own = listed.model_dump(mode="json", exclude_unset=True, exclude={"setups"})
-    # Requirements are separate facts, so a setup that names only its network need keeps the inherited GPU need.
-    if isinstance(own.get("requirements"), dict) and isinstance(data.get("requirements"), dict):
-        own["requirements"] = {**data["requirements"], **own["requirements"]}
-    data.update(own)
-    return EnvironmentManifest.model_validate(data)
-
-
-def load_listed_manifest(path: str | Path, name: str) -> EnvironmentManifest:
-    """The manifest named ``name``: the main manifest at ``path`` or a setup or protocol it lists."""
-    main = load_manifest(path)
-    if name == main.name:
-        return main
-    listed = next((listed for listed in main.listed_configs() if listed.name == name), None)
-    if listed is None:
-        raise ManifestError(f"Environment manifest '{path}' lists no setup or protocol named '{name}'.")
-    return resolve_listed_manifest(main, listed)
 
 
 def resolve_manifest_config_path(manifest_path: str | Path, manifest: EnvironmentManifest) -> Path:
@@ -737,13 +572,6 @@ def dump_manifest(manifest: EnvironmentManifest | Mapping[str, Any]) -> str:
         data.pop("prompt_source")
     # Required nullable composition fields must survive a load/dump round trip.
     data["resources_server"] = manifest.resources_server
-    # A setup or protocol keeps exactly the fields it sets, including a null that clears a main manifest's value.
-    for key in ("setups", "protocols"):
-        listed = [entry.model_dump(mode="json", exclude_unset=True) for entry in getattr(manifest, key)]
-        if listed:
-            data[key] = listed
-        else:
-            data.pop(key, None)
     return yaml.safe_dump(
         data,
         sort_keys=False,

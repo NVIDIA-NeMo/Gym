@@ -60,7 +60,7 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile, load_manifest
+from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
     VerifierReport,
@@ -264,9 +264,7 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
         conflict_paths = glob(str(test_config.resolved_dir_path / "data/*conflict*"))
         assert not conflict_paths, f"Found conflicting paths: {conflict_paths}"
         for entry in manifest_entries:
-            validation = validate_environment(
-                entry.manifest_path, entry.config_path, name=entry.name, validate_datasets=False
-            )
+            validation = validate_environment(entry.manifest_path, entry.config_path, validate_datasets=False)
             _run_manifest_verifier(entry, update_expected=False, validation=validation)
         print(f"The verifier fixtures for {test_config.dir_path} have been successfully validated!")
         return
@@ -998,23 +996,17 @@ def validate() -> None:
     entry = _manifest_entry(command_config)
     if command_config.manifest_path is not None or entry is not None:
         _reject_manifest_command_extras(command_dict, _MANIFEST_VALIDATE_KEYS)
-        json_output = command_dict.get(JSON_OUTPUT_KEY_NAME, False)
-        if entry is not None:
-            if entry.manifest_path is None:
-                raise ConfigError(
-                    f"'{entry.name}' has no manifest; validate its config with --environment or --benchmark."
-                )
-            report = validate_environment(
-                entry.manifest_path, entry.config_path, name=entry.name, sync=command_config.sync
+        manifest_path = command_config.manifest_path if entry is None else entry.manifest_path
+        if manifest_path is None:
+            raise ConfigError(
+                f"'{entry.name}' has no manifest; validate its config with --environment or --benchmark."
             )
-            _print_validation_report(report, json_output=json_output)
-            return
-        # A manifest file is validated whole: the main manifest, then each setup and protocol it lists, one report
-        # (or JSON line) each.
-        main = load_manifest(command_config.manifest_path)
-        for name in (None, *(listed.name for listed in main.listed_configs())):
-            report = validate_environment(command_config.manifest_path, name=name, sync=command_config.sync)
-            _print_validation_report(report, json_output=json_output)
+        report = validate_environment(
+            manifest_path,
+            entry.config_path if entry is not None else None,
+            sync=command_config.sync,
+        )
+        _print_validation_report(report, json_output=command_dict.get(JSON_OUTPUT_KEY_NAME, False))
         return
     unsupported = [
         key for key in ("catalog_kind", "sync", "update_expected", "json") if command_dict.get(key) is not None
@@ -1080,7 +1072,7 @@ def publish_environment_manifest() -> None:
     if entry.manifest_path is None:
         raise ConfigError(f"'{entry.name}' has no manifest and cannot be published.")
 
-    validation = validate_environment(entry.manifest_path, entry.config_path, name=entry.name)
+    validation = validate_environment(entry.manifest_path, entry.config_path)
     verifier = _run_manifest_verifier(entry, update_expected=False, validation=validation)
     report = finalize_publication(entry, validation, verifier)
     if command_dict.get(JSON_OUTPUT_KEY_NAME, False):
@@ -1183,8 +1175,6 @@ def _inspect_environment(
     if entry.manifest_path is not None:
         details["manifest"] = str(entry.manifest_path.resolve())
     for label, value in (
-        ("setup of", entry.setup_of),
-        ("protocol of", entry.protocol_of),
         ("version", entry.version),
         ("profile", entry.integration_profile),
         ("modality", entry.modality),
@@ -1274,10 +1264,6 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
     }
     if entry.status is None:
         payload.pop("status")
-    # Only a config a main manifest lists as a setup or protocol carries the main manifest's name.
-    payload.update(
-        {key: value for key, value in (("setup_of", entry.setup_of), ("protocol_of", entry.protocol_of)) if value}
-    )
     return payload
 
 

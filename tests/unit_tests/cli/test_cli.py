@@ -1525,36 +1525,8 @@ class TestOnboardingCommandAdapters:
 
         assert resolver.call_args.args[0] == "alpha"
         assert resolver.call_args.args[1].value == "environment"
-        validator.assert_called_once_with(
-            self._ENTRY.manifest_path, self._ENTRY.config_path, name=self._ENTRY.name, sync=True
-        )
+        validator.assert_called_once_with(self._ENTRY.manifest_path, self._ENTRY.config_path, sync=True)
         assert json.loads(capsys.readouterr().out) == {"name": "alpha", "kind": "environment"}
-
-    def test_validate_a_manifest_file_validates_each_setup_and_protocol_it_lists(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys
-    ) -> None:
-        manifest_path = tmp_path / "manifest.yaml"
-        monkeypatch.setattr(
-            nemo_gym.cli.env,
-            "_command_overrides",
-            lambda: OmegaConf.create({"manifest_path": str(manifest_path), "json": True}),
-        )
-        listed = [SimpleNamespace(name="alpha/codex"), SimpleNamespace(name="alpha/with_system")]
-        monkeypatch.setattr(
-            nemo_gym.cli.env, "load_manifest", lambda path: SimpleNamespace(listed_configs=lambda: listed)
-        )
-
-        def validator(path: str, *, name: str | None, sync: bool) -> MagicMock:
-            report = MagicMock()
-            report.to_dict.return_value = {"name": name or "alpha"}
-            return report
-
-        monkeypatch.setattr(nemo_gym.cli.env, "validate_environment", validator)
-
-        validate()
-
-        lines = capsys.readouterr().out.splitlines()
-        assert [json.loads(line)["name"] for line in lines] == ["alpha", "alpha/codex", "alpha/with_system"]
 
     def test_validation_human_report(self, capsys) -> None:
         report = SimpleNamespace(
@@ -1664,7 +1636,7 @@ class TestOnboardingCommandAdapters:
 
         nemo_gym.cli.env.publish_environment_manifest()
 
-        validator.assert_called_once_with(self._ENTRY.manifest_path, self._ENTRY.config_path, name=self._ENTRY.name)
+        validator.assert_called_once_with(self._ENTRY.manifest_path, self._ENTRY.config_path)
         runner.assert_called_once_with(self._ENTRY, update_expected=False, validation=validation)
         finalizer.assert_called_once_with(self._ENTRY, validation, verifier)
         assert json.loads(capsys.readouterr().out)["status"] == "experimental"
@@ -2428,9 +2400,7 @@ def test_server_data_validation_checks_manifest_verifiers(
         nemo_gym.cli.env._validate_data_single(config)
         assert verifier.call_count == 2
         for entry in entries:
-            validation.assert_any_call(
-                entry.manifest_path, entry.config_path, name=entry.name, validate_datasets=False
-            )
+            validation.assert_any_call(entry.manifest_path, entry.config_path, validate_datasets=False)
             verifier.assert_any_call(entry, update_expected=False, validation=validation.return_value)
 
 
