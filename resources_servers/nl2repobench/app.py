@@ -11,6 +11,7 @@ import re
 import shlex
 import sys
 import tempfile
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +20,7 @@ from time import monotonic
 from traceback import format_exc
 from typing import Any, ClassVar, Literal
 
-from fastapi import Request
+from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config_types import ModelServerRef
@@ -546,9 +547,10 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # reward 0, graded=false, evaluation_completed=false; grade later from the saved workspace (for nl2repo-tasks: its
     # own grade.py). Mirrors the ProgramBench resources server's trace-only mode. Added 2026-11-03.
     trace_only: bool = False
-    # Starting the verifier sandbox is retried this many times in all before the row is masked as inconclusive: a sandbox
-    # the provider could not start says nothing about the agent's code, so it must not score as a 0.
-    verifier_sandbox_start_attempts: int = Field(default=3, ge=1)
+    # Grading is attempted this many times in all, each on a fresh verifier sandbox, when the infrastructure fails (the
+    # sandbox cannot start, or the provider reports an error rather than a test result) before the row is masked as
+    # inconclusive: that says nothing about the agent's code, so it must not score as a 0.
+    verifier_attempts: int = Field(default=3, ge=1)
     verifier_sandbox_retry_delay_s: float = Field(default=5.0, ge=0)
 
 
@@ -731,24 +733,19 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         # mode == "no_internet_preinstalled", or mode == "official" with
         # enforce_agent_no_network=True: deny-all except the policy_model host below.
 
-        model_egress_target = self._model_egress_target()
-        network_policy = options.setdefault("network_policy", {"defaultAction": "deny", "egress": []})
-        if not isinstance(network_policy, dict):
+        # Deny-all except the model host, whatever provider_options inherited: an allow-all default or any allow rule
+        # would break that contract, so the policy is rebuilt. Inherited deny rules are redundant but harmless; kept.
+        inherited = options.get("network_policy")
+        if inherited is not None and not isinstance(inherited, dict):
             raise TypeError("NL2RepoBench sandbox network_policy must be a mapping")
-        # An inherited provider_options policy must not widen the contract: this mode is deny-all except the model host.
-        if network_policy.setdefault("defaultAction", "deny") != "deny":
-            raise ValueError(
-                "NL2RepoBench sandbox network_policy.defaultAction must be 'deny' when the agent has no internet "
-                f"(agent_network_mode={mode!r}, enforce_agent_no_network={self.config.enforce_agent_no_network}), "
-                f"got {network_policy['defaultAction']!r}"
-            )
+        inherited_egress = (inherited or {}).get("egress", [])
+        if not isinstance(inherited_egress, list):
+            raise TypeError("NL2RepoBench sandbox network_policy.egress must be a list")
+        egress = [rule for rule in inherited_egress if isinstance(rule, dict) and rule.get("action") == "deny"]
+        model_egress_target = self._model_egress_target()
         if model_egress_target is not None:
-            egress = network_policy.setdefault("egress", [])
-            if not isinstance(egress, list):
-                raise TypeError("NL2RepoBench sandbox network_policy.egress must be a list")
-            model_rule = {"action": "allow", "target": model_egress_target}
-            if model_rule not in egress:
-                egress.append(model_rule)
+            egress.append({"action": "allow", "target": model_egress_target})
+        options["network_policy"] = {"defaultAction": "deny", "egress": egress}
 
         return options
 
@@ -1054,6 +1051,31 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                         f"{chmod_result.stderr or chmod_result.stdout or '(no output)'}"
                     )
 
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await self.shutdown()
+
+        app.router.lifespan_context = lifespan
+        return app
+
+    async def shutdown(self) -> None:
+        """Stop every agent sandbox still held, so a restart or stop does not leave them to their TTL."""
+        sessions, self._agent_sessions = list(self._agent_sessions.items()), {}
+        await asyncio.gather(
+            *(
+                self._stop_sandbox(session.sandbox, task_id=session.task_id, phase="shutdown-agent")
+                for _, session in sessions
+            )
+        )
+
     def has_session_state(self, session_id: str) -> bool:
         return session_id in self._agent_sessions
 
@@ -1071,22 +1093,6 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             return
         await session.sandbox.stop()
         self._agent_sessions.pop(session_id, None)
-
-    async def _create_verifier_sandbox(self, task: Task) -> AsyncSandbox:
-        attempts = self.config.verifier_sandbox_start_attempts
-        for attempt in range(1, attempts + 1):
-            try:
-                return await self._create_sandbox(task, phase="verifier")
-            except Exception:
-                if attempt == attempts:
-                    raise
-                print(
-                    f"NL2RepoBench verifier sandbox start failed for {task_id(task)} (attempt {attempt}/{attempts}): "
-                    f"{format_exc()}",
-                    file=sys.stderr,
-                )
-                await asyncio.sleep(self.config.verifier_sandbox_retry_delay_s)
-        raise AssertionError("unreachable")
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
         try:
@@ -1338,31 +1344,43 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         if workspace_error is None and self.config.trace_only:
             result = VerifierResult(evaluation_completed=False, reward=0.0, test_case_count=task.test_case_count)
         elif workspace_error is None:
-            try:
-                started = monotonic()
-                sandbox = await self._create_verifier_sandbox(task)
-                sandbox_start_time_s = monotonic() - started
-                started = monotonic()
-                result = await self._run_verifier(sandbox, task, workspace_tar)
-                verification_time_s = monotonic() - started
-            except Exception as error:
-                print(f"NL2RepoBench verifier failed for {current_task_id}: {format_exc()}", file=sys.stderr)
-                reason = f"{type(error).__name__}: {error}"
-                masked = {
-                    "reward": 0.0,
-                    "mask_sample": True,
-                    "failure_kind": error.failure_kind if isinstance(error, NgFailureEvent) else VERIFIER_ERROR,
-                    "failure_reason": f"NL2RepoBench verification was inconclusive: {reason}",
-                }
-                result = VerifierResult(
-                    evaluation_completed=False,
-                    reward=0.0,
-                    verifier_error=reason,
-                    test_case_count=task.test_case_count,
-                )
-            finally:
-                if sandbox is not None:
-                    await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
+            attempts = self.config.verifier_attempts
+            for attempt in range(1, attempts + 1):
+                sandbox = None
+                try:
+                    started = monotonic()
+                    sandbox = await self._create_sandbox(task, phase="verifier")
+                    sandbox_start_time_s = monotonic() - started
+                    started = monotonic()
+                    result = await self._run_verifier(sandbox, task, workspace_tar)
+                    verification_time_s = monotonic() - started
+                    masked = None
+                    break
+                except Exception as error:
+                    print(
+                        f"NL2RepoBench verifier failed for {current_task_id} (attempt {attempt}/{attempts}): "
+                        f"{format_exc()}",
+                        file=sys.stderr,
+                    )
+                    reason = f"{type(error).__name__}: {error}"
+                    masked = {
+                        "reward": 0.0,
+                        "mask_sample": True,
+                        "failure_kind": error.failure_kind if isinstance(error, NgFailureEvent) else VERIFIER_ERROR,
+                        "failure_reason": f"NL2RepoBench verification was inconclusive after {attempt} "
+                        f"attempt(s): {reason}",
+                    }
+                    result = VerifierResult(
+                        evaluation_completed=False,
+                        reward=0.0,
+                        verifier_error=reason,
+                        test_case_count=task.test_case_count,
+                    )
+                finally:
+                    if sandbox is not None:
+                        await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
+                if attempt < attempts:
+                    await asyncio.sleep(self.config.verifier_sandbox_retry_delay_s)
 
         # test_output is captured in-memory and returned directly, not written under log_dir, so
         # log_dir is a nominal per-session path; clearing is a no-op unless something else wrote
