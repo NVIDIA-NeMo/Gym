@@ -1257,17 +1257,24 @@ async def test_task_timeout_reaches_the_sandbox_supervisor(agent, state, tmp_pat
     )
 
 
+@pytest.mark.parametrize(
+    "ending",
+    [
+        {"partial": True, "error": "Context length exceeded: max compression attempts (3) reached."},
+        # Hermes 0.23.2 marks an exhausted context `failed`; its `failure_reason` keeps it a model limit.
+        {
+            "failed": True,
+            "failure_reason": "context_overflow",
+            "failure_retryable": False,
+            "compression_exhausted": True,
+            "error": "This conversation has grown too long for policy_model to read, and Hermes couldn't shrink it",
+        },
+    ],
+)
 @pytest.mark.parametrize("captured", [False, True])
-async def test_context_limit_keeps_partial_work_verifiable(agent, state, captured):
+async def test_context_limit_keeps_partial_work_verifiable(agent, state, captured, ending):
     messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Partial answer"}]
-    output = {
-        "result": {
-            "completed": False,
-            "partial": True,
-            "error": "Context length exceeded: max compression attempts (3) reached.",
-            "messages": messages,
-        }
-    }
+    output = {"result": {"completed": False, **ending, "messages": messages}}
     if captured:
         output["observations"] = {"invocations": [{"invocation_id": "root", "status": "failed", "messages": messages}]}
     state.execute = AsyncMock(return_value=output)
@@ -1821,6 +1828,41 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
             "model_context_limit",
         ),
         ({"partial": True, "error": "Model generated invalid tool call: nonexistent"}, "agent_invalid_output"),
+        # Hermes 0.23.2 endings, identified by their `failure_reason` rather than their chat wording.
+        (
+            {
+                "failed": True,
+                "failure_reason": "context_overflow",
+                "compression_exhausted": True,
+                "error": "This conversation has grown too long for policy_model to read, and Hermes couldn't shrink it",
+            },
+            "model_context_limit",
+        ),
+        (
+            {
+                "failed": True,
+                "failure_reason": "context_overflow",
+                "compaction_disabled": True,
+                "error": "This conversation is too long for policy_model and automatic shrinking is turned off",
+            },
+            "model_context_limit",
+        ),
+        (
+            {
+                "partial": True,
+                "failure_reason": "truncated",
+                "error": "The model's reply was cut off before it finished (it hit its output length limit)",
+            },
+            "agent_limit",
+        ),
+        (
+            {
+                "failed": True,
+                "failure_reason": "truncated",
+                "error": "The model's reply was cut off before it finished (it hit its output length limit)",
+            },
+            "agent_limit",
+        ),
     ],
 )
 def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, expected_kind):
@@ -1847,6 +1889,35 @@ def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, exp
     }
     policy = AgentOutcomePolicyConfig(by_failure_kind=actions)
     assert agent_outcome_policy(reported, config=policy) == actions[expected_kind]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "failed": True,
+            "failure_reason": "context_overflow",
+            "compression_exhausted": True,
+            "turn_exit_reason": "context_compression_timeout",
+            "error": "Context compression timed out before it could shrink the conversation",
+        },
+        {
+            "failed": True,
+            "failure_reason": "context_overflow",
+            "error": "The requested output length exceeds the provider's output cap for this model",
+        },
+    ],
+)
+def test_compression_timeout_and_output_cap_are_not_context_limits(agent, result):
+    """Hermes also stamps these with `context_overflow`; a slow compression call or a rejected cap is not the model's."""
+    assert agent.classify_outcome(result).failure_kind == "unknown"
+    response = agent._response_from_result(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        result=result | {"messages": []},
+        model_name="model",
+        retain_provider_failure=True,
+    )
+    assert response.metadata["provider_failed"] == "true"
 
 
 @pytest.mark.parametrize("status", [400, 413])

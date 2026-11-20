@@ -82,6 +82,9 @@ class SandboxHermesObserver:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._executing_tool: ContextVar[tuple[str, str] | None] = ContextVar("executing_tool", default=None)
+        # Hermes runs `delegate_task` on its sequential path, outside `_invoke_tool`, so each parent's running
+        # delegation is the call that spawns its children.
+        self._running_delegations: dict[str, str] = {}
         self._child_index = 0
         self._started_ticks: dict[tuple[str, str], float] = {}
         self._tools: dict[tuple[str, str], dict[str, Any]] = {}
@@ -341,10 +344,11 @@ class SandboxHermesObserver:
             self._child_index += 1
             invocation_id = f"{parent_id}.child-{self._child_index}"
             executing = self._executing_tool.get()
+            spawned_by = executing[1] if executing and executing[0] == parent_id else None
             self._invocations[invocation_id] = {
                 "invocation_id": invocation_id,
                 "parent_invocation_id": parent_id,
-                "spawned_by_tool_call_id": executing[1] if executing and executing[0] == parent_id else None,
+                "spawned_by_tool_call_id": spawned_by or self._running_delegations.get(parent_id),
                 "model_response_ids": [],
                 "messages": [],
                 "status": "unknown",
@@ -354,6 +358,8 @@ class SandboxHermesObserver:
     def _tool_started(self, invocation_id: str, call_id: Any, name: Any, args: Any) -> None:
         key = (invocation_id, str(call_id or ""))
         with self._lock:
+            if name == "delegate_task" and key[1]:
+                self._running_delegations[invocation_id] = key[1]
             if key in self._tools:
                 self._gap("duplicate_tool_call", invocation_id, key[1])
             self._tools[key] = {
@@ -374,6 +380,8 @@ class SandboxHermesObserver:
         with self._lock:
             if key not in self._tools:
                 self._tool_started(invocation_id, call_id, name, args)
+            if self._running_delegations.get(invocation_id) == key[1]:
+                del self._running_delegations[invocation_id]
             tool = self._tools[key]
             failed = self._failed_result(name, result)
             started = self._started_ticks.pop(key, None)

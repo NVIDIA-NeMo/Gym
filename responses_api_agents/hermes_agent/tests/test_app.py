@@ -542,7 +542,7 @@ class TestSanity:
                 tool_call = {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "mcp__weather__get_weather", "arguments": '{"city": "Paris"}'},
+                    "function": {"name": "mcp__weather_v1_0__get_weather", "arguments": '{"city": "Paris"}'},
                 }
                 messages = [
                     {"role": "user", "content": "what is the weather"},
@@ -559,7 +559,7 @@ class TestSanity:
             monkeypatch,
             sandbox,
             config=_config(enabled_toolsets=["terminal"]),
-            tool_accesses=[_mcp_access("weather"), _mcp_access("search", required=False)],
+            tool_accesses=[_mcp_access("weather-v1.0"), _mcp_access("search", required=False)],
         )
 
         response = await hermes.responses(
@@ -567,17 +567,19 @@ class TestSanity:
         )
 
         runner_input = json.loads(sandbox.uploaded["/session/input.json"])
-        assert runner_input["mcp_servers"] == ["weather", "search"]
-        assert runner_input["required_mcp_servers"] == ["weather"]
-        assert runner_input["enabled_toolsets"] == ["terminal", "weather", "search"]
+        assert runner_input["mcp_servers"] == ["weather-v1.0", "search"]
+        assert runner_input["required_mcp_servers"] == ["weather-v1.0"]
+        assert runner_input["enabled_toolsets"] == ["terminal", "weather-v1.0", "search"]
         mcp_servers = yaml.safe_load(runner_input["config_yaml"])["mcp_servers"]
-        assert mcp_servers["weather"] == {
+        assert mcp_servers["weather-v1.0"] == {
             "url": "http://resources:8000/mcp",
-            "headers": {"X-NeMo-Gym-Session-Token": "token-weather"},
+            "headers": {"X-NeMo-Gym-Session-Token": "token-weather-v1.0"},
             "tools": {"resources": False, "prompts": False},
         }
         # Verifiers see Gym's MCP naming, not Hermes'.
-        assert [item.name for item in response.output if item.type == "function_call"] == ["mcp__weather__get_weather"]
+        assert [item.name for item in response.output if item.type == "function_call"] == [
+            "mcp__weather-v1.0__get_weather"
+        ]
 
     async def test_provider_timeout_without_output_confirms_cleanup_and_fails(self, monkeypatch) -> None:
         class _Sandbox:
@@ -987,6 +989,17 @@ class TestResultClassification:
             {"failed": True, "error": "First response truncated due to output length limit"},
             {"partial": True, "error": "Response truncated due to output length limit"},
             {"partial": True, "error": "Context length exceeded (100 tokens). Cannot compress further."},
+            {
+                "failed": True,
+                "failure_reason": "context_overflow",
+                "compression_exhausted": True,
+                "error": "This conversation has grown too long for model to read, and Hermes couldn't shrink it",
+            },
+            {
+                "failed": True,
+                "failure_reason": "truncated",
+                "error": "The model's reply was cut off before it finished (it hit its output length limit)",
+            },
             {"partial": True, "error": "Model generated invalid tool call: invalid"},
             {"completed": True},
             {"completed": False, "stop_reason": "max_iterations"},

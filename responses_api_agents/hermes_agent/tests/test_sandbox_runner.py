@@ -22,7 +22,12 @@ import uvicorn
 
 from nemo_gym.agents import STOP_REQUEST_FILE, SUPERVISOR_SCRIPT
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.core import (
+    AGENT_LIMIT,
+    MODEL_CONTEXT_LIMIT,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_runtime import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.trajectory import AgentInvocation
 from resources_servers.example_mcp_weather.app import (
@@ -875,3 +880,108 @@ def test_training_token_bundles_follow_their_exact_turn(tmp_path, max_turns):
     assert {key: replay.get(key) for key in bundles[0]} == bundles[0]
     turns = [m for m in output["result"]["messages"] if m["role"] == "assistant"]
     assert [{key: m.get(key) for key in bundles[0]} for m in turns] == bundles
+
+
+def _length_cut(index: int, **message) -> dict:
+    """A chat completion cut at the output limit, carrying one distinct sampled token bundle."""
+    response = _completion(
+        {"prompt_token_ids": [100 + index], "generation_token_ids": [200 + index], "generation_log_probs": [-0.5]}
+        | message
+    )
+    response["choices"][0]["finish_reason"] = "length"
+    return response
+
+
+def _hermes(**overrides) -> HermesAgent:
+    return HermesAgent(
+        config=HermesAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            name="hermes",
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "policy_model"},
+            **overrides,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+def test_continuation_ceiling_keeps_every_sampled_fragment_for_training(tmp_path) -> None:
+    """At its continuation ceiling Hermes stitches the fragments into one row without token IDs; Gym keeps them."""
+    with _ModelServer([_length_cut(i, content=f"part-{i} ") for i in range(6)]) as model:
+        result = _run(_payload(model.base_url, max_turns=8, max_tokens=64), tmp_path)["result"]
+    response = _hermes()._response_from_result(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="fix bug"), result=result, model_name="model", n_input=1
+    )
+
+    assert len(model.requests) == 4
+    assert result["error"] == "Response remained truncated after 4 continuation attempts"
+    assert _hermes().classify_outcome(result).failure_kind == AGENT_LIMIT
+    messages = [item for item in response.output if item.type == "message"]
+    assert [item.generation_token_ids for item in messages] == [[200], [201], [202], [203]]
+    assert [item.content[0].text for item in messages] == [f"part-{i}" for i in range(4)]
+    assert not any("_length_continuation" in key for row in result["messages"] for key in row)
+
+
+def test_truncation_retries_stay_within_configured_max_tokens(tmp_path) -> None:
+    """Hermes doubles the output cap on each continuation; Gym's max_tokens stays the per-call budget."""
+    with _ModelServer([_length_cut(i, content=f"part-{i} ") for i in range(6)]) as model:
+        _run(_payload(model.base_url, max_turns=8, max_tokens=64), tmp_path)
+
+    assert [request["max_tokens"] for request in model.requests] == [64] * 4
+
+
+def test_truncated_tool_call_limit_is_an_agent_limit(tmp_path) -> None:
+    """Hermes retries a length-cut tool call four times, then ends with `failure_reason: truncated`."""
+    call = {"id": "call", "type": "function", "function": {"name": "terminal", "arguments": '{"command": "ec'}}
+    with _ModelServer([_length_cut(i, content=None, tool_calls=[call]) for i in range(6)]) as model:
+        result = _run(_payload(model.base_url, max_turns=8, max_tokens=64), tmp_path)["result"]
+
+    assert len(model.requests) == 5
+    assert result["failure_reason"] == "truncated"
+    assert _hermes().classify_outcome(result).failure_kind == AGENT_LIMIT
+
+
+def test_configured_context_length_reaches_the_pinned_worker(tmp_path) -> None:
+    """The configured window reaches Hermes: a prompt that fills it is a model context limit, not a truncation."""
+    agent = _hermes(context_length=65536)
+    answers = []
+    for index in range(6):
+        answer = _length_cut(index, content=f"part-{index} ")
+        answer["usage"] = {"prompt_tokens": 65500, "completion_tokens": 64, "total_tokens": 65564}
+        answers.append(answer)
+    with _ModelServer(answers) as model:
+        result = _run(
+            _payload(model.base_url, config_yaml=agent._build_config(), max_turns=8, max_tokens=64), tmp_path
+        )["result"]
+
+    assert result["error"] == "Prompt used 65500 of 65536 context tokens; no room to answer"
+    assert agent.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT
+
+
+def test_delegated_child_records_the_delegate_task_call_that_spawned_it(tmp_path) -> None:
+    """Hermes runs delegate_task on its sequential tool path; the child still names the call that spawned it.
+
+    Hermes 0.23.2 runs a top-level delegation in the background, so the child may not answer before the parent
+    finishes; it is registered when spawned.
+    """
+    delegate = {
+        "id": "call-delegate",
+        "type": "function",
+        "function": {"name": "delegate_task", "arguments": json.dumps({"goal": "Reply with the word done."})},
+    }
+    answers = [
+        _completion({"content": None, "tool_calls": [delegate]}) | {"id": "chatcmpl-parent-1"},
+        _completion({"content": "done"}) | {"id": "chatcmpl-child"},
+        _completion({"content": "The child finished."}) | {"id": "chatcmpl-parent-2"},
+    ]
+    answers[0]["choices"][0]["finish_reason"] = "tool_calls"
+    with _ModelServer(answers) as model:
+        output = _run(_payload(model.base_url, enabled_toolsets=["delegation"], max_turns=4), tmp_path)
+
+    children = [
+        invocation
+        for invocation in output["observations"]["invocations"]
+        if invocation.get("parent_invocation_id") == "root"
+    ]
+    assert [child["spawned_by_tool_call_id"] for child in children] == ["call-delegate"]

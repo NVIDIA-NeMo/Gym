@@ -41,11 +41,55 @@ def _model_api_kwargs(kwargs: dict[str, Any], *, preserve_reasoning_history: boo
     return kwargs
 
 
+def _keep_sampled_continuation_fragments(collapse: Any) -> Any:
+    """Keep each sampled continuation fragment when Hermes stops continuing a truncated reply.
+
+    At its continuation ceiling Hermes replaces the turn's fragment rows, which carry Gym's token IDs and log
+    probabilities, with one stitched assistant row that has none. The turn ends right after, so restore the rows
+    as a recovered continuation leaves them: fragments and continuation prompts, unflagged.
+    """
+
+    def collapse_and_keep(
+        agent: Any, messages: list[Any], current_turn_user_idx: Any, *, finish_reason: str, parts: Any = None
+    ) -> str:
+        valid_index = isinstance(current_turn_user_idx, int) and current_turn_user_idx >= 0
+        start = current_turn_user_idx + 1 if valid_index else 0
+        before = list(messages[start:])
+        partial = collapse(agent, messages, current_turn_user_idx, finish_reason=finish_reason, parts=parts)
+        # Only the ceiling ("length") ends the turn here; the error path's trail may end on an unanswered prompt.
+        if finish_reason != "length" or not any(
+            isinstance(row, dict) and row.get("_length_continuation_fragment") for row in before
+        ):
+            return partial
+        for row in before:
+            if isinstance(row, dict):
+                row.pop("_length_continuation_fragment", None)
+                row.pop("_length_continuation_nudge", None)
+        messages[start:] = before
+        agent._session_messages = messages
+        return partial
+
+    collapse_and_keep._gym_keeps_fragments = True
+    return collapse_and_keep
+
+
+def _install_continuation_fragment_capture() -> None:
+    try:
+        from agent import turn_truncation
+    except ImportError:  # Not running inside the pinned Hermes runtime.
+        return
+    if not getattr(turn_truncation.collapse_continuation_trail, "_gym_keeps_fragments", False):
+        turn_truncation.collapse_continuation_trail = _keep_sampled_continuation_fragments(
+            turn_truncation.collapse_continuation_trail
+        )
+
+
 def configure_model_calls(agent: Any, *, preserve_reasoning_history: bool) -> None:
     """Adapt primary and delegated Hermes calls to Gym's model and training contracts."""
     if getattr(agent, "_gym_model_calls_configured", False):
         return
     agent._disable_streaming = agent._disable_streaming_seed = True
+    _install_continuation_fragment_capture()
     original_build_kwargs = agent._build_api_kwargs
     original_build_message = agent._build_assistant_message
     original_handle_max_iterations = agent._handle_max_iterations
@@ -56,6 +100,13 @@ def configure_model_calls(agent: Any, *, preserve_reasoning_history: bool) -> No
             preserve_reasoning_history=preserve_reasoning_history,
         )
         kwargs["stream"] = False
+        # Hermes doubles the output cap on each truncation retry, up to 32,768 tokens. Gym's `max_tokens` is the
+        # per-call budget that runs are compared and trained under, so keep every call within it.
+        configured = getattr(agent, "max_tokens", None)
+        if isinstance(configured, int):
+            for key in ("max_tokens", "max_completion_tokens"):
+                if isinstance(kwargs.get(key), int) and kwargs[key] > configured:
+                    kwargs[key] = configured
         return kwargs
 
     summary_responses: list[dict[str, Any]] | None = None

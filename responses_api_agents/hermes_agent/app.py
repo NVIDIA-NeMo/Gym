@@ -119,6 +119,38 @@ _OUTPUT_LIMIT_ERRORS = frozenset(
 )
 
 
+# Hermes 0.23.2 stamps every terminal failure with a `failure_reason` (agent/turn_failure_copy.py
+# `stamp_failure`) and words its error for a chat user. These two end the turn on a model limit. Context
+# overflow also sets `failed`, so without its reason it would read as a provider failure.
+_CONTEXT_OVERFLOW_REASON = "context_overflow"
+_OUTPUT_TRUNCATED_REASON = "truncated"
+
+
+def _is_context_overflow(result: Mapping[str, Any]) -> bool:
+    """Whether Hermes ended because the conversation no longer fits the model's context window."""
+    if result.get("failure_reason") == _CONTEXT_OVERFLOW_REASON:
+        # Hermes stamps two other endings the same way: a compression call that timed out and an output cap the
+        # endpoint rejected. Those are infrastructure and configuration failures, so require that compression
+        # ran out of room or was turned off.
+        return bool(result.get("compression_exhausted") or result.get("compaction_disabled")) and (
+            result.get("turn_exit_reason") != "context_compression_timeout"
+        )
+    error = str(result.get("error") or "")
+    return bool(result.get("partial")) and (
+        error.startswith("Context length exceeded")
+        or re.fullmatch(r"Prompt used [0-9]+ of [0-9]+ context tokens; no room to answer", error) is not None
+    )
+
+
+def _is_model_limit_ending(result: Mapping[str, Any]) -> bool:
+    """A Hermes ending that `failed` because of a model limit, which the verifier grades."""
+    return (
+        result.get("error") == _TRUNCATION_ERROR
+        or result.get("failure_reason") == _OUTPUT_TRUNCATED_REASON
+        or _is_context_overflow(result)
+    )
+
+
 def _is_limit_result(result: Mapping[str, Any]) -> bool:
     """Recognize explicit Hermes budget and output-limit results.
 
@@ -127,6 +159,7 @@ def _is_limit_result(result: Mapping[str, Any]) -> bool:
     error = str(result.get("error") or "")
     return (
         result.get("stop_reason") in {"wall_time", "max_iterations"}
+        or result.get("failure_reason") == _OUTPUT_TRUNCATED_REASON
         or error == _TRUNCATION_ERROR
         or (
             bool(result.get("partial"))
@@ -364,8 +397,9 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     compression_threshold_tokens: Optional[int] = Field(default=None, gt=0)
     # The model's context window, as Hermes' `model.context_length`. Compression triggers at
     # compression_threshold of it. Unset, Hermes probes the endpoint, which the Gym model server does not
-    # answer, and falls back to 128,000 tokens.
-    context_length: Optional[int] = Field(default=None, gt=0)
+    # answer, and falls back to its window for a model name it recognizes, else 256,000 tokens. Hermes refuses
+    # windows under 64,000 tokens.
+    context_length: Optional[int] = Field(default=None, ge=64_000)
     chat_template_kwargs_enabled: bool = True
     api_key: Optional[str] = None
     delegation_max_iterations: int = 50
@@ -390,10 +424,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """Map the Hermes worker's result flags and errors to Gym outcome kinds."""
         error = str(native_result.get("error") or "")
-        if native_result.get("partial") and (
-            error.startswith("Context length exceeded")
-            or re.fullmatch(r"Prompt used [0-9]+ of [0-9]+ context tokens; no room to answer", error)
-        ):
+        if _is_context_overflow(native_result):
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if _is_limit_result(native_result):
             return AgentOutcome(failure_kind=AGENT_LIMIT)
@@ -494,10 +525,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if self.config.context_length is not None:
             model = {"default": model, "context_length": self.config.context_length}
         config: dict[str, Any] = {
+            # No root `provider`: Hermes applies `model.context_length` only to the configured provider's route (the
+            # previous "auto" dropped it), and a configured provider would also become the fallback for failed
+            # auxiliary calls, sending compression to the trained policy route.
             "model": model,
-            "provider": "auto",
+            # Hermes 0.23.2's own CLI toolset; its tool set differs from the previous pin's (for example `todo_list`).
             "toolsets": ["hermes-cli"],
-            # Keep tool names visible to Gym verifiers and match the action space of the previous Hermes pin.
             "agent": {"max_turns": self.config.max_turns},
             "memory": {
                 "memory_enabled": False,
@@ -946,9 +979,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         # The pinned Hermes marks provider/API failures with `failed`, but model-limit and
         # invalid-tool outcomes with `partial`. Keep those partial patches gradable. Its model-caused
-        # `failed` outcomes are first-response truncation (run_agent.py) and a terminal rejection of the
-        # request by the model endpoint (HTTP 400, 413, 422): both reach the verifier unmasked.
-        failed = bool(result.get("failed")) and result.get("error") != _TRUNCATION_ERROR
+        # `failed` outcomes are context overflow and output truncation (by `failure_reason`) and a terminal
+        # rejection of the request by the model endpoint (HTTP 400, 413, 422): all reach the verifier unmasked.
+        failed = bool(result.get("failed")) and not _is_model_limit_ending(result)
         rejection_status = _model_rejection_status(result.get("error")) if failed else None
         provider_failed = failed and rejection_status is None
         if provider_failed and not retain_provider_failure:
