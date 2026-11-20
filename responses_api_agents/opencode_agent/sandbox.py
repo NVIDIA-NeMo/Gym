@@ -46,9 +46,13 @@ from responses_api_agents.opencode_agent.snapshot import NoRootSessionError, sna
 
 LOG = logging.getLogger(__name__)
 
-# Reads of the conversation a relaunch may resume: how many, and the wait before the second (doubled for the third).
+# Reads of the conversation a relaunch may reprompt: how many, and the wait before the second (doubled for the third).
 _CONVERSATION_READ_ATTEMPTS = 3
 _CONVERSATION_READ_RETRY_DELAY_S = 2.0
+
+
+class UnparsableConversationError(Exception):
+    """The saved OpenCode conversation was downloaded from the sandbox but cannot be parsed."""
 
 
 def format_error_message(message: str, *, output: str = "", stderr: str = "") -> str:
@@ -178,7 +182,7 @@ class OpenCodeSandboxSession(AgentSessionState):
 
     A ``checkpointed`` session pauses its harness in place at a checkpoint, and relaunches it in
     ``launch-K`` directories under the same root when a pause failed or a crash interrupted it,
-    resuming the conversation kept in the root. A session a restore installed has no sandbox
+    reprompting the conversation kept in the root. A session a restore installed has no sandbox
     connection (``session`` is ``None``) until its replacement attempt's seed re-binds it;
     ``restored`` keeps what the checkpoint exported until then.
     """
@@ -225,14 +229,21 @@ class OpenCodeSandboxSession(AgentSessionState):
     # Every model-call label read so far; the label file only grows, so an earlier read stays valid.
     _labels: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
     checkpointed: bool = False
-    # Whether the last launch resumed the saved conversation with ``resume_opencode.sh`` instead of ``opencode run``.
-    resumed_conversation: bool = False
+    # Whether the last launch reprompted the saved conversation with ``reprompt_opencode.sh`` instead of running
+    # ``opencode run``.
+    reprompted_conversation: bool = False
+    # Tool calls that relaunches found unfinished in the conversation they reprompted, counted once each by ID.
+    # OpenCode told the model each was interrupted; the session's observations carry a gap for them.
+    interrupted_tool_calls: int = 0
+    interrupted_tool_call_ids: list[str] = field(default_factory=list)
     # Launches of the harness so far, and what each ended with, for the checkpoint and the reply's evidence.
     launch_count: int = 0
     launch_records: list[dict[str, JsonValue]] = field(default_factory=list)
-    # The activation this session completed and its reply, given again to a caller that sends it again.
+    # The activation this session completed, its reply, and the SHA-256 of the request that produced it. The reply
+    # is given again to a caller that sends the same request again; a different one is a conflict.
     completed_activation: int = 0
     completed_reply: dict[str, JsonValue] | None = None
+    completed_request_digest: str | None = None
     restored: dict[str, JsonValue] | None = None
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
@@ -274,8 +285,13 @@ class OpenCodeSandboxSession(AgentSessionState):
             raise RuntimeError(f"Cannot prepare OpenCode launch directory: {result.stderr}")
 
     async def inspect_conversation(self, *, timeout: float) -> dict[str, JsonValue] | None:
-        """Export the conversation OpenCode saved in this session's root, or ``None`` when there is none."""
-        with tempfile.TemporaryDirectory(prefix="opencode-resume-") as directory:
+        """Export the conversation OpenCode saved in this session's root, or ``None`` when there is none.
+
+        A conversation that cannot be downloaded is not a missing one: the read is repeated, then raises, so the
+        caller does not set aside a conversation that may be intact. One that was downloaded and cannot be parsed
+        raises ``UnparsableConversationError``: reading it again would not help, and the caller starts afresh.
+        """
+        with tempfile.TemporaryDirectory(prefix="opencode-reprompt-") as directory:
             for attempt in range(1, _CONVERSATION_READ_ATTEMPTS + 1):
                 try:
                     async with asyncio.timeout(timeout):
@@ -286,7 +302,6 @@ class OpenCodeSandboxSession(AgentSessionState):
                     break
                 except Exception as error:
                     # Reading is safe to repeat, and a sandbox a restore just forked can refuse its first commands.
-                    # A conversation that cannot be read is not a missing one: the caller would set it aside.
                     if attempt == _CONVERSATION_READ_ATTEMPTS:
                         raise RuntimeError(f"Cannot read the saved OpenCode conversation: {error}") from error
                     LOG.warning(
@@ -308,17 +323,17 @@ class OpenCodeSandboxSession(AgentSessionState):
             except NoRootSessionError:
                 LOG.info("OpenCode had saved no conversation yet in %s", self.persistent_directory)
                 return None
-            except Exception:
-                LOG.warning("The saved OpenCode conversation cannot be read", exc_info=True)
-                return None
+            except Exception as error:
+                LOG.warning("The saved OpenCode conversation cannot be parsed", exc_info=True)
+                raise UnparsableConversationError(repr(error)) from error
 
-    async def discard_conversation(self, *, timeout: float) -> None:
+    async def set_conversation_aside(self, *, timeout: float) -> None:
         """Set the saved conversation aside, so the next launch starts afresh in an empty data directory."""
         data = f"{self.persistent_directory}/data"
         # Moving it only if present, so running it again is safe.
         result = await exec_idempotent(
             self.session.sandbox,
-            f"if [ -e {quote(data)} ]; then mv -- {quote(data)} {quote(data)}.discarded-{self.launch_count}; fi",
+            f"if [ -e {quote(data)} ]; then mv -- {quote(data)} {quote(data)}.set-aside-{self.launch_count}; fi",
             what="Setting the saved OpenCode conversation aside",
             cwd="/",
             timeout_s=timeout,
@@ -479,10 +494,10 @@ class OpenCodeSandboxSession(AgentSessionState):
         if media:
             for path in await stage_media(self.session.sandbox, media):
                 command.extend(["--file", path])
-        if payload.get("resume") is not None:
-            # The request body resume_opencode.sh re-posts: the saved last user message, with no new parts.
+        if payload.get("reprompt") is not None:
+            # The request body reprompt_opencode.sh re-posts: the saved last user message, with no new parts.
             await upload_text(
-                self.session.sandbox, path=f"{directory}/resume.json", text=json.dumps(payload["resume"])
+                self.session.sandbox, path=f"{directory}/reprompt.json", text=json.dumps(payload["reprompt"])
             )
         env = payload["env"]
         params = {
@@ -501,6 +516,18 @@ class OpenCodeSandboxSession(AgentSessionState):
         return SandboxCommand(
             argv=["bash", f"{self.persistent_directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"]
         )
+
+    def _interruption_gaps(self) -> list[ObservationGap]:
+        """The gap that marks a rollout whose relaunches interrupted tool calls; empty when none did."""
+        if not self.interrupted_tool_calls:
+            return []
+        return [
+            ObservationGap(
+                code="tool_call_interrupted_by_relaunch",
+                detail=f"{self.interrupted_tool_calls} tool call(s) were running when a launch ended; "
+                "OpenCode reported them to the model as interrupted",
+            )
+        ]
 
     def take_export_gaps(self) -> list[ObservationGap]:
         """Hand over export failures recorded since the last call, so each is reported once."""
@@ -736,6 +763,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 if gap.code == "turns_unavailable":
                     gap.detail = (gap.detail or "") + "; capture_lifecycle=" + lifecycle
             observations.gaps.extend(self._capture_gaps)
+            observations.gaps.extend(self._interruption_gaps())
             if self.is_continuation:
                 assert self.activation_id is not None
                 scope_opencode_activation(
@@ -758,6 +786,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                     ObservationGap(code="agent_artifact_unavailable"),
                     ObservationGap(code="observation_capture_failed"),
                     *self._capture_gaps,
+                    *self._interruption_gaps(),
                 ],
             )
             if self.is_continuation:

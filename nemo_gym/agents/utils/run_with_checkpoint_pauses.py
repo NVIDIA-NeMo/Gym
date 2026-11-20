@@ -158,9 +158,7 @@ async def _pause(session: SandboxSession[Any]) -> HarnessPauseResult:
             # A request that failed in transport leaves the pause unknown: stopping is the safe fallback.
             if isinstance(error, TimeoutError) or attempt == PAUSE_ATTEMPTS:
                 return HarnessPauseResult(status="unconfirmed", error=f"pause request failed: {error!r}")
-            LOG.warning(
-                "%s harness pause attempt %d/%d failed: %r", session.harness, attempt, PAUSE_ATTEMPTS, error
-            )
+            LOG.warning("%s harness pause attempt %d/%d failed: %r", session.harness, attempt, PAUSE_ATTEMPTS, error)
         await _retry_delay(attempt)
     raise AssertionError("unreachable")
 

@@ -924,6 +924,31 @@ def test_rejected_request_does_not_consume_activation(setup):
     sandbox.launch.assert_awaited_once()
 
 
+@pytest.mark.parametrize("interrupted", [0, 2])
+def test_tool_calls_that_a_relaunch_interrupted_are_a_gap_of_the_captured_observations(setup, tmp_path, interrupted):
+    agent, sandbox = setup
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        # What the relaunches of a checkpointed session count when they reprompt its conversation.
+        active_sessions(agent)[session_id].interrupted_tool_calls = interrupted
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    gaps = closed.json()["agent_observations"]["gaps"]
+    assert not any(gap["code"] == "observation_capture_failed" for gap in gaps)
+    details = [gap["detail"] for gap in gaps if gap["code"] == "tool_call_interrupted_by_relaunch"]
+    if interrupted:
+        assert details == [
+            "2 tool call(s) were running when a launch ended; OpenCode reported them to the model as interrupted"
+        ]
+    else:
+        assert details == []
+
+
 async def activate(agent, sandbox):
     request = Request(
         {"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "opencode-smoke-a2"}}
