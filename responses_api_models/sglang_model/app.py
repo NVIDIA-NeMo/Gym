@@ -4,19 +4,22 @@
 
 import json
 import re
-from copy import deepcopy
+from dataclasses import dataclass
 from time import time
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 from uuid import uuid4
 
-from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request
+from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
+from fastapi import HTTPException, Request
+from jinja2 import TemplateError
 from pydantic import Field
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import (
+    TOKEN_METADATA_FIELDS,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models import Body
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -25,7 +28,7 @@ from responses_api_models.sglang_model.tool_parsers import (
     normalize_tool_call_arguments,
     parse_qwen3_coder_tool_calls,
 )
-from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
+from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig, merge_chat_extra_body
 
 
 class SGLangModelConfig(VLLMModelConfig):
@@ -38,27 +41,31 @@ class SGLangModelConfig(VLLMModelConfig):
     sglang_tool_format: Literal["hermes", "qwen3_coder"] = "hermes"
 
 
+@dataclass
+class _SampledTurn:
+    messages: List[Dict[str, Any]]
+    prompt: List[int]
+    sampled: List[int]
+    rendering: Tuple[str, str, Optional[str]]
+
+
 class SGLangModel(VLLMModel):
     """Responses-API adapter that preserves exact sampled token IDs."""
 
     config: SGLangModelConfig
 
     _SGLANG_TOOL_CALL_PATTERN: ClassVar = re.compile(
-        r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+        r"<tool_call>((?:(?!</?tool_call>).)*)</tool_call>",
         re.DOTALL,
     )
-    _SGLANG_ARGS_PATTERN: ClassVar = re.compile(
-        r'"arguments"\s*:\s*(.*)\}\s*$',
-        re.DOTALL,
-    )
+    _SESSION_CAPACITY: ClassVar = 8192
     _SGLANG_EOS_MARKERS: ClassVar = ("<|im_end|>", "<|endoftext|>")
 
     def _post_init(self) -> None:
         super()._post_init()
         self._sglang_tokenizer: Any = None
         self._sglang_chat_template: Optional[str] = None
-        self._sglang_session_seq: Dict[str, Dict[str, Any]] = {}
-        self._sglang_eos_nl_ids: Optional[List[int]] = None
+        self._sglang_session_seq: Dict[str, _SampledTurn] = {}
 
     def _get_sglang_tokenizer(self) -> Any:
         if self._sglang_tokenizer is None:
@@ -89,6 +96,14 @@ class SGLangModel(VLLMModel):
             body.model_dump(exclude_unset=True),
         )
 
+    def _responses_to_chat_request(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, request: Request | None = None
+    ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
+        # The shared converter omits tool controls when the request has no tools.
+        if not body.tools and (body.tool_choice != "auto" or not body.parallel_tool_calls):
+            raise HTTPException(422, "SGLang supports only automatic tool choice and parallel tool calls.")
+        return super()._responses_to_chat_request(body, request)
+
     def _full_sglang_tokenize(
         self,
         messages: List[Any],
@@ -112,71 +127,64 @@ class SGLangModel(VLLMModel):
             encoded = encoded[0]
         return [int(token_id) for token_id in encoded]
 
-    def _sglang_eos_nl(self) -> List[int]:
-        if self._sglang_eos_nl_ids is None:
-            encoded = self._get_sglang_tokenizer()(
-                "<|im_end|>\n",
-                add_special_tokens=False,
-            )
-            self._sglang_eos_nl_ids = [int(token_id) for token_id in encoded["input_ids"]]
-        return self._sglang_eos_nl_ids
-
-    def _sglang_followup_fragment_ids(
+    def _sglang_followup_ids(
         self,
-        new_messages: List[Any],
+        state: _SampledTurn,
+        new_messages: List[Dict[str, Any]],
+        tools: Any,
         chat_template_kwargs: Dict[str, Any],
-    ) -> Optional[List[int]]:
-        """Render the new messages and next assistant header as a token fragment.
-
-        The fragment is derived by differencing two template renders against an
-        anchor assistant turn. Returning ``None`` asks the caller to fall back
-        to a complete render when the template is not splice-friendly.
-        """
+    ) -> List[int]:
+        """Render only the delimiter and new input around the exact sampled IDs."""
         tokenizer = self._get_sglang_tokenizer()
-        chat_template = self._get_sglang_chat_template()
-        anchor = [{"role": "assistant", "content": "X"}]
-        try:
-            full = tokenizer.apply_chat_template(
-                anchor + list(new_messages),
-                tools=None,
-                chat_template=chat_template,
-                add_generation_prompt=True,
-                tokenize=False,
-                **chat_template_kwargs,
-            )
-            base = tokenizer.apply_chat_template(
-                anchor,
-                tools=None,
-                chat_template=chat_template,
-                add_generation_prompt=False,
-                tokenize=False,
-                **chat_template_kwargs,
-            )
-        except Exception:
-            return None
-        if not isinstance(full, str) or not isinstance(base, str) or not full.startswith(base):
-            return None
-        encoded = tokenizer(full[len(base) :], add_special_tokens=False)
-        return [int(token_id) for token_id in encoded["input_ids"]]
+        marker = f"gym_{uuid4().hex}"
+        anchor = [*state.messages[:-1], {"role": "assistant", "content": marker}]
+
+        def tail(messages: List[Dict[str, Any]], *, generation_prompt: bool) -> str:
+            try:
+                rendered = tokenizer.apply_chat_template(
+                    normalize_tool_call_arguments(messages),
+                    tools=tools,
+                    chat_template=self._get_sglang_chat_template(),
+                    add_generation_prompt=generation_prompt,
+                    tokenize=False,
+                    **chat_template_kwargs,
+                )
+            except (TemplateError, ValueError) as exc:
+                raise HTTPException(409, "The chat template cannot render this continuation.") from exc
+            if rendered.count(marker) != 1:
+                raise HTTPException(409, "The chat template cannot identify the sampled assistant boundary.")
+            return rendered.partition(marker)[2]
+
+        boundary = tail(anchor, generation_prompt=False)
+        base = boundary
+        if state.messages[-1].get("tool_calls"):
+            anchor[-1]["tool_calls"] = state.messages[-1]["tool_calls"]
+            base = tail(anchor, generation_prompt=False)
+            if not base.endswith(boundary):
+                raise HTTPException(409, "The chat template has a different boundary for tool calls.")
+        full = tail(anchor + new_messages, generation_prompt=True)
+        if not full.startswith(base):
+            raise HTTPException(409, "The chat template rewrites the sampled assistant boundary.")
+        closing = tokenizer(boundary, add_special_tokens=False)["input_ids"]
+        fragment = full[len(base) :]
+        continuation = tokenizer(boundary + fragment, add_special_tokens=False)["input_ids"]
+        overlap = min(len(closing), len(state.sampled))
+        while overlap and state.sampled[-overlap:] != closing[:overlap]:
+            overlap -= 1
+        if continuation[:overlap] == closing[:overlap]:
+            continuation = continuation[overlap:]
+        else:
+            # The sampled boundary prevents a tokenizer merge with the first new message.
+            continuation = closing[overlap:] + tokenizer(fragment, add_special_tokens=False)["input_ids"]
+        return state.prompt + state.sampled + continuation
 
     @staticmethod
-    def _sglang_msg_sig(message: Dict[str, Any]) -> Tuple[Any, str, str]:
-        return (
-            message.get("role"),
-            json.dumps(message.get("content"), sort_keys=True, default=str),
-            json.dumps(message.get("tool_calls"), sort_keys=True, default=str),
-        )
-
-    @classmethod
-    def _sglang_messages_match(
-        cls,
-        left: List[Any],
-        right: List[Any],
-    ) -> bool:
-        return len(left) == len(right) and all(
-            cls._sglang_msg_sig(left_message) == cls._sglang_msg_sig(right_message)
-            for left_message, right_message in zip(left, right)
-        )
+    def _template_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Strip training metadata and normalize absent optional message fields for rendering and replay."""
+        return [
+            {key: value for key, value in message.items() if key not in TOKEN_METADATA_FIELDS and value is not None}
+            for message in messages
+        ]
 
     def _sglang_rendering_sig(
         self,
@@ -196,87 +204,29 @@ class SGLangModel(VLLMModel):
         messages: List[Any],
         tools: Any,
         chat_template_kwargs: Dict[str, Any],
-    ) -> Tuple[List[int], Optional[str]]:
-        """Build a prompt, splicing the preceding turn's exact sampled IDs."""
-        try:
-            session_id = request.session.get(SESSION_ID_KEY)
-        except Exception:
-            session_id = None
-        if session_id is not None:
-            state = self._sglang_session_seq.get(session_id)
-            rendering_sig = self._sglang_rendering_sig(
-                tools,
-                chat_template_kwargs,
-            )
-            if state is not None and state.get("rendering_sig") != rendering_sig:
-                raise RuntimeError(
-                    "SGLang session tools or chat-template inputs changed after "
-                    "sampled tokens were cached. Start a new session instead of "
-                    "re-tokenizing the existing trajectory."
-                )
-            if state is not None:
-                previous_messages = state["messages"]
-                previous_count = len(previous_messages)
-                if (
-                    len(messages) > previous_count
-                    and messages[previous_count].get("role") == "assistant"
-                    and all(message.get("role") != "assistant" for message in messages[previous_count + 1 :])
-                    and self._sglang_messages_match(
-                        messages[:previous_count],
-                        previous_messages,
-                    )
-                ):
-                    fragment = self._sglang_followup_fragment_ids(
-                        messages[previous_count + 1 :],
-                        chat_template_kwargs,
-                    )
-                    if fragment is not None:
-                        return state["seq"] + fragment, session_id
-        return (
-            self._full_sglang_tokenize(
-                messages,
-                tools,
-                chat_template_kwargs,
-            ),
-            session_id,
-        )
+    ) -> Tuple[List[int], str]:
+        """Build a first prompt or continue the last sampled turn in this session."""
+        session_id = request.session[SESSION_ID_KEY]
+        visible = self._template_messages(messages)
+        state = self._sglang_session_seq.get(session_id)
+        if state is None:
+            if request.session.get(self._session_marker) == session_id or any(
+                msg.get("generation_token_ids") is not None for msg in messages
+            ):
+                raise HTTPException(409, "Exact sampled session state is unavailable. Start a new session.")
+            return self._full_sglang_tokenize(visible, tools, chat_template_kwargs), session_id
+        if state.rendering != self._sglang_rendering_sig(tools, chat_template_kwargs):
+            raise HTTPException(409, "SGLang session tools or chat-template inputs changed. Start a new session.")
+        prefix_length = len(state.messages)
+        if visible[:prefix_length] != state.messages or any(
+            msg["role"] == "assistant" for msg in visible[prefix_length:]
+        ):
+            raise HTTPException(409, "History differs from the sampled session. Start a new session for a branch.")
+        return self._sglang_followup_ids(state, visible[prefix_length:], tools, chat_template_kwargs), session_id
 
-    def _update_sglang_session_seq(
-        self,
-        session_id: Optional[str],
-        messages: List[Any],
-        prompt_token_ids: List[int],
-        generation_token_ids: List[int],
-        tools: Any,
-        chat_template_kwargs: Dict[str, Any],
-    ) -> None:
-        """Cache the exact token sequence through the generated assistant turn."""
-        if session_id is None:
-            return
-        eos_newline_ids = self._sglang_eos_nl()
-        sequence = list(prompt_token_ids) + list(generation_token_ids)
-        max_overlap = min(len(sequence), len(eos_newline_ids))
-        overlap = next(
-            (
-                overlap_size
-                for overlap_size in range(max_overlap, 0, -1)
-                if sequence[-overlap_size:] == eos_newline_ids[:overlap_size]
-            ),
-            0,
-        )
-        sequence += eos_newline_ids[overlap:]
-
-        self._sglang_session_seq.pop(session_id, None)
-        while len(self._sglang_session_seq) >= 8192:
-            self._sglang_session_seq.pop(next(iter(self._sglang_session_seq)), None)
-        self._sglang_session_seq[session_id] = {
-            "messages": list(messages),
-            "seq": sequence,
-            "rendering_sig": self._sglang_rendering_sig(
-                tools,
-                chat_template_kwargs,
-            ),
-        }
+    @property
+    def _session_marker(self) -> str:
+        return f"sglang_sampled_{self.config.name}"
 
     def _parse_sglang_generation(
         self,
@@ -287,6 +237,7 @@ class SGLangModel(VLLMModel):
         reasoning_content: Optional[str] = None
         if self.config.uses_reasoning_parser and "</think>" in text:
             reasoning_content, _, remainder = text.partition("</think>")
+            reasoning_content = reasoning_content.removeprefix("<think>")
         else:
             remainder = text
 
@@ -295,30 +246,28 @@ class SGLangModel(VLLMModel):
             return reasoning_content, content, tool_calls
 
         tool_calls: List[Dict[str, Any]] = []
-        for match in self._SGLANG_TOOL_CALL_PATTERN.finditer(remainder):
-            block = match.group(1)
+
+        def extract_call(match: re.Match[str]) -> str:
             try:
-                parsed = json.loads(block)
+                parsed = json.loads(match.group(1))
             except json.JSONDecodeError:
-                continue
-            arguments_match = self._SGLANG_ARGS_PATTERN.search(block)
-            arguments = (
-                arguments_match.group(1).strip()
-                if arguments_match is not None
-                else json.dumps(parsed.get("arguments", {}))
-            )
+                return match.group()
+            if not isinstance(parsed, dict):
+                return match.group()
+            name = parsed.get("name")
+            arguments = parsed.get("arguments", {})
+            if not isinstance(name, str) or not name.strip() or not isinstance(arguments, dict):
+                return match.group()
             tool_calls.append(
                 {
                     "id": f"call_{uuid4().hex}",
                     "type": "function",
-                    "function": {
-                        "name": parsed.get("name"),
-                        "arguments": arguments,
-                    },
+                    "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
                 }
             )
+            return ""
 
-        content = self._SGLANG_TOOL_CALL_PATTERN.sub("", remainder).strip()
+        content = self._SGLANG_TOOL_CALL_PATTERN.sub(extract_call, remainder).strip()
         return reasoning_content, content, tool_calls
 
     def _sglang_length_finish(
@@ -367,7 +316,56 @@ class SGLangModel(VLLMModel):
         body_dict: Dict[str, Any],
     ) -> NeMoGymChatCompletion:
         """Generate exact training tokens through SGLang's native endpoint."""
-        client = self._resolve_client(request)
+        metadata = body_dict.get("metadata") or {}
+
+        def metadata_options(key: str) -> dict:
+            try:
+                value = json.loads(metadata.get(key) or "{}")
+            except json.JSONDecodeError as exc:
+                raise HTTPException(422, f"metadata.{key} must encode a JSON object.") from exc
+            if not isinstance(value, dict):
+                raise HTTPException(422, f"metadata.{key} must encode a JSON object.")
+            return value
+
+        extra_body = metadata_options("extra_body")
+        defaults = (self.config.extra_body or {}) | extra_body
+        body_dict = merge_chat_extra_body(body_dict, extra_body=defaults)
+        self._apply_sampling_overrides(body_dict, api="chat")
+        supported = {
+            "messages",
+            "model",
+            "metadata",
+            "tools",
+            "max_tokens",
+            "max_completion_tokens",
+            "temperature",
+            "top_p",
+            "top_k",
+            "stop",
+            "user",
+        }
+        default_controls = {
+            "n": 1,
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "response_format": {"type": "text"},
+            "presence_penalty": 0,
+            "frequency_penalty": 0,
+            "logit_bias": {},
+            "logprobs": False,
+            "top_logprobs": 0,
+            "stream": False,
+            "store": False,
+            "modalities": ["text"],
+            "service_tier": "auto",
+        }
+        unsupported = sorted(
+            key
+            for key, value in body_dict.items()
+            if value is not None and key not in supported and value != default_controls.get(key)
+        )
+        if unsupported:
+            raise HTTPException(422, f"Unsupported SGLang request control(s): {', '.join(unsupported)}.")
 
         messages = body_dict["messages"]
         if self.config.replace_developer_role_with_system:
@@ -376,13 +374,7 @@ class SGLangModel(VLLMModel):
                     message["role"] = "system"
         tools = body_dict.get("tools")
 
-        chat_template_kwargs: Dict[str, Any] = {}
-        if self.config.chat_template_kwargs:
-            chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
-        metadata = body_dict.get("metadata") or {}
-        chat_template_kwargs.update(
-            json.loads(metadata.get("chat_template_kwargs", "{}")),
-        )
+        chat_template_kwargs = (self.config.chat_template_kwargs or {}) | metadata_options("chat_template_kwargs")
 
         tokenizer = self._get_sglang_tokenizer()
         prompt_token_ids, session_id = self._build_sglang_prompt_ids(
@@ -397,10 +389,14 @@ class SGLangModel(VLLMModel):
             return self._sglang_length_finish(prompt_token_ids)
 
         sampling_params: Dict[str, Any] = {"spaces_between_special_tokens": False}
-        max_new_tokens = body_dict.get("max_completion_tokens") or body_dict.get("max_tokens") or None
+        max_new_tokens = body_dict.get("max_completion_tokens")
+        if max_new_tokens is None:
+            max_new_tokens = body_dict.get("max_tokens")
         if max_new_tokens is None:
             max_new_tokens = remaining_context - 8
             max_new_tokens = max(1, max_new_tokens)
+        elif not isinstance(max_new_tokens, int) or max_new_tokens < 1:
+            raise HTTPException(422, "SGLang requires a positive output token limit.")
         else:
             max_new_tokens = min(max_new_tokens, remaining_context)
         sampling_params["max_new_tokens"] = max_new_tokens
@@ -408,6 +404,8 @@ class SGLangModel(VLLMModel):
             if body_dict.get(key) is not None:
                 sampling_params[key] = body_dict[key]
 
+        previous_turn = self._sglang_session_seq.get(session_id)
+        client = self._resolve_client(request)
         try:
             result = await client.create_generate(
                 input_ids=prompt_token_ids,
@@ -415,35 +413,24 @@ class SGLangModel(VLLMModel):
                 return_logprob=True,
             )
         except ClientResponseError as error:
-            try:
-                error_body = error.response_content.decode()
-            except Exception:
-                error_body = str(error)
-            if any(
-                fragment in error_body
-                for fragment in (
-                    "context length",
-                    "longer than",
-                    "max_total",
-                    "is longer",
-                )
-            ):
+            error_body = getattr(error, "response_content", b"").decode(errors="replace") or error.message
+            if any(fragment in error_body for fragment in ("context length", "longer than", "max_total", "is longer")):
+                self._note_endpoint_success(client)
                 return self._sglang_length_finish(prompt_token_ids)
+            if error.status >= 500:
+                self._note_endpoint_failure(client)
+            else:
+                self._note_endpoint_success(client)
             raise
+        except ClientConnectionError:
+            self._note_endpoint_failure(client)
+            raise
+        self._note_endpoint_success(client)
 
         meta_info = result.get("meta_info") or {}
         generation_token_ids, generation_log_probs = extract_generated_tokens_and_logprobs(
             result,
         )
-        self._update_sglang_session_seq(
-            session_id,
-            messages,
-            prompt_token_ids,
-            generation_token_ids,
-            tools,
-            chat_template_kwargs,
-        )
-
         generated_text = tokenizer.decode(
             generation_token_ids,
             skip_special_tokens=False,
@@ -453,8 +440,8 @@ class SGLangModel(VLLMModel):
         while stripped:
             stripped = False
             generated_text = generated_text.rstrip("\n")
-            for eos_marker in self._SGLANG_EOS_MARKERS:
-                if generated_text.endswith(eos_marker):
+            for eos_marker in (getattr(tokenizer, "eos_token", None), *self._SGLANG_EOS_MARKERS):
+                if eos_marker and generated_text.endswith(eos_marker):
                     generated_text = generated_text[: -len(eos_marker)]
                     stripped = True
         reasoning_content, content, tool_calls = self._parse_sglang_generation(
@@ -489,7 +476,7 @@ class SGLangModel(VLLMModel):
                 }
             )
 
-        return NeMoGymChatCompletion.model_validate(
+        response = NeMoGymChatCompletion.model_validate(
             {
                 "id": f"chtcmpl-{uuid4().hex}",
                 "object": "chat.completion",
@@ -510,6 +497,19 @@ class SGLangModel(VLLMModel):
                 },
             }
         )
+        if self._sglang_session_seq.get(session_id) is not previous_turn:
+            raise HTTPException(409, "The sampled session changed during generation. Replay its accepted turn.")
+        self._sglang_session_seq.pop(session_id, None)
+        if len(self._sglang_session_seq) >= self._SESSION_CAPACITY:
+            del self._sglang_session_seq[next(iter(self._sglang_session_seq))]
+        self._sglang_session_seq[session_id] = _SampledTurn(
+            self._template_messages([*messages, message]),
+            prompt_token_ids,
+            generation_token_ids,
+            self._sglang_rendering_sig(tools, chat_template_kwargs),
+        )
+        request.session[self._session_marker] = session_id
+        return response
 
 
 if __name__ == "__main__":

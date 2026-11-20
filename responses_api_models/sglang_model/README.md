@@ -22,7 +22,9 @@ prefix. Both behaviors preserve the trainer's prefix contiguity invariant.
 
 The session cache is process-local. Run one Gym worker per model-server
 instance, or provide sticky routing that keeps every turn of a session on the
-same worker.
+same worker. Preserve the session cookie throughout the rollout. A continuation
+returns HTTP 409 if its sampled state was evicted or its history was edited.
+Start a new session for an independent trajectory.
 
 ## Configuration
 
@@ -49,8 +51,8 @@ be selected silently.
 From the Gym checkout:
 
 ```bash
-uv run --extra dev pytest responses_api_models/sglang_model/tests
+uv run --project responses_api_models/sglang_model --locked python -m pytest responses_api_models/sglang_model/tests
 ```
 
-The direct tests mock the tokenizer and SGLang HTTP client; they do not load
-weights or require a GPU.
+The tests exercise chat-template rendering and use a fake SGLang HTTP client.
+They run on CPU without model weights.
