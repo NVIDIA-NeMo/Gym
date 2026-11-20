@@ -102,7 +102,7 @@ _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
 def _reported_model_error(assistant: Mapping[str, Any], cleanup: Mapping[str, Any], *, will_retry: bool) -> bool:
-    """Recognize Pi 0.80.2's final agent_end error report without hiding worker or cleanup failures."""
+    """Recognize the pinned Pi's final agent_end error report without hiding worker or cleanup failures."""
     return (
         cleanup["return_code"] == 0
         and not cleanup["timed_out"]
@@ -144,9 +144,9 @@ def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
     A finish tool call that succeeded is a submission; gym_mcp.mjs marks only those results terminal. Pi reports each
     call's result when the call ends, but the turn's tool results only after all of the turn's calls end, so a finish
     call batched with a slower tool shows only in the former. A run whose last reply stopped (`stop` or `length`)
-    without a tool call has ended, and the deadline then cut only Pi's compaction call after the run, unless the reply
-    was an empty `length` reply that Pi counts as a context overflow: Pi compacts to retry it (Pi 0.80.2 then exits
-    with code 1, a failure).
+    without a tool call has ended, and the deadline then cut only Pi's compaction call after the run, unless Pi
+    compacts to retry the `length` reply, as it may for a reply it counts as a context overflow or one cut below the
+    output cap.
     """
     if any(
         event.get("type") == "tool_execution_end"
@@ -168,9 +168,9 @@ def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
     last = events[replies[-1]][1]["message"]
     # Pi keeps a provider's `stop` for a reply with tool calls, and then runs them.
     called_tools = any(isinstance(part, dict) and part.get("type") == "toolCall" for part in last.get("content") or [])
-    # pi-ai also counts an empty `length` reply at a full context as an overflow, and Pi compacts to retry it (Pi
-    # 0.80.2 then exits with code 1, a failure). Pi never retries a `stop` reply, so its compaction for an overflow
-    # after one runs after the run has ended.
+    # Pi recovers a `length` reply it counts as a context overflow, or one cut below the output cap, by compacting
+    # (reason `overflow`) and retrying it. Pi never retries a `stop` reply, so its compaction for an overflow after
+    # one runs after the run has ended.
     recovering = last.get("stopReason") == "length" and any(
         event.get("type") == "compaction_start" and event.get("reason") == "overflow"
         for _, event in events[replies[-1] + 1 :]
@@ -738,14 +738,18 @@ class PiAgent(SimpleResponsesAPIAgent):
     """Runs the pi CLI (pi --print --mode json --no-session)"""
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read Pi 0.80.2's terminal assistant error; tested on that pinned version."""
+        """Read the pinned Pi's terminal assistant error, such as `400: {...}`, `HTTP 503: ...` or `Connection error.`.
+
+        tests/test_outcome.py and the pinned-Pi tests in test_sandbox.py check these against the pinned Pi.
+        """
         if native_result.get("stopReason") != "error":
             return AgentOutcome(failure_kind="unknown")
         message = str(native_result.get("errorMessage") or "")
         match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
         if match:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
-        if message in {"Connection error.", "Connection error", "fetch failed", "Request timed out."}:
+        # Pi appends the underlying cause, as in `Connection error.: connect ECONNREFUSED 127.0.0.1:8000`.
+        if re.match(r"(?:Connection error\.?|fetch failed|Request timed out\.)(?::\s|$)", message):
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return AgentOutcome(failure_kind="unknown")
 
@@ -796,7 +800,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         if self.config.model_server is None:
             raise HTTPException(422, "Pi requires a sandbox-reachable Gym model_server")
         if not self.config.pi_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.pi_version):
-            raise HTTPException(422, "Pi requires an exact pi_version, for example 0.80.2")
+            raise HTTPException(422, "Pi requires an exact pi_version, for example 1.5.2")
         if self.config.command != "pi" or self.config.extra_args or self.config.env:
             raise HTTPException(422, "Pi does not support command, extra_args, or env overrides")
 
@@ -859,8 +863,9 @@ class PiAgent(SimpleResponsesAPIAgent):
                     f"error_type={prepared.error_type}): {details[-16000:]}"
                 )
             if self.config.sandbox_runtime_dir:
+                # Pi's entry script enables Node's compile cache, which would leave files in the task's /tmp.
                 checked = await sandbox.exec(
-                    f"{shlex.quote(runtime + '/node/bin/node')} "
+                    f"NODE_DISABLE_COMPILE_CACHE=1 {shlex.quote(runtime + '/node/bin/node')} "
                     f"{shlex.quote(runtime + '/pi/node_modules/.bin/pi')} --version",
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
@@ -1082,6 +1087,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
             "PI_SKIP_VERSION_CHECK": "1",
             "PI_TELEMETRY": "0",
+            # Pi's entry script enables Node's compile cache, which would leave files in the task's /tmp.
+            "NODE_DISABLE_COMPILE_CACHE": "1",
             "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
             **mcp_env,
         }
@@ -1163,8 +1170,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                 compaction_started = True
             elif event.get("type") == "compaction_end":
                 # Pi recovers from an overflow by compacting, then retrying. A compaction that started and failed (a 503,
-                # a dropped connection) ends the run with no retry. Pi's verdict that the retry overflowed again comes
-                # with no start.
+                # a dropped connection), after Pi's own retries of the compaction call, ends the run without retrying
+                # the overflowed call. Pi's verdict that the retry overflowed again comes with no start.
                 failure = event.get("errorMessage")
                 if compaction_started and event.get("reason") == "overflow" and isinstance(failure, str):
                     recovery_error = failure
@@ -1206,10 +1213,12 @@ class PiAgent(SimpleResponsesAPIAgent):
         assert cleanup is not None
         model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
         compaction_failure = None
-        if recovery_error and stop_reasons and stop_reasons[-1] == "error":
+        if recovery_error and stop_reasons and stop_reasons[-1] in ("error", "length"):
             # Pi's overflow recovery failed on its compaction call, so the failed call was never retried, even when
-            # Gym does not count its error as an overflow. Pi wraps the compaction call's error in its own message,
-            # which classify_outcome leaves unknown: retryable by default, even if that call hit the context limit.
+            # Gym does not count its error as an overflow. Pi also recovers a `length` reply cut below the output cap
+            # this way, so that reply is not the run's result either. Pi wraps the compaction call's error in its own
+            # message, which classify_outcome leaves unknown: retryable by default, even if that call hit the context
+            # limit.
             model_limit, terminal_error = False, recovery_error
             compaction_failure = {"stopReason": "error", "errorMessage": recovery_error}
         terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
@@ -1309,10 +1318,12 @@ class PiAgent(SimpleResponsesAPIAgent):
                 )
             )
         if error:
-            assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
+            # Classify a failed compaction call, not the overflow or cut-off reply it was recovering from.
+            assistant = compaction_failure or next(
+                (m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {}
+            )
             if not execution_error and _reported_model_error(assistant, cleanup, will_retry=retrying):
-                # Classify a failed compaction call, not the overflow it was recovering from.
-                return self.report_outcome(response, compaction_failure or assistant)
+                return self.report_outcome(response, assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
         return response
 
@@ -1388,7 +1399,11 @@ class PiAgent(SimpleResponsesAPIAgent):
         # Local callers still get automatic installation. Sandbox sessions never
         # enter this path, so their host does not need Pi, Node, or npm.
         if self._local_setup_task is None:
-            self._local_setup_task = asyncio.create_task(asyncio.to_thread(ensure_pi, self.config.pi_version))
+            # The version check runs the launcher and environment overrides that the run below uses.
+            overrides = {key: value for key, value in self.config.env.items() if value}
+            self._local_setup_task = asyncio.create_task(
+                asyncio.to_thread(ensure_pi, self.config.pi_version, command=self.config.command_parts, env=overrides)
+            )
         setup_task = self._local_setup_task
         try:
             # Share one installation across concurrent local calls. Cancelling

@@ -85,8 +85,10 @@ if [ ! -f "$runtime/ready" ]; then
   "$runtime/node/bin/node" --version
   PATH="$runtime/node/bin:$PATH" "$runtime/node/bin/node" \
     "$runtime/node/lib/node_modules/npm/bin/npm-cli.js" install \
-    --prefix "$runtime/pi" --ignore-scripts --no-audit --no-fund \
+    --prefix "$runtime/pi" --ignore-scripts --bin-links --no-audit --no-fund \
     "@earendil-works/pi-coding-agent@${pi_version}"
-  "$runtime/node/bin/node" "$runtime/pi/node_modules/.bin/pi" --version
+  # Gym runs Pi through npm's bin link, which a task's npm config could otherwise turn off (--bin-links above).
+  # Pi's entry script enables Node's compile cache, which would leave files in the task's /tmp.
+  NODE_DISABLE_COMPILE_CACHE=1 "$runtime/node/bin/node" "$runtime/pi/node_modules/.bin/pi" --version
   touch "$runtime/ready"
 fi

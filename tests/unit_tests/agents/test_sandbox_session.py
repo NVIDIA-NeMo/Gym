@@ -1028,6 +1028,8 @@ async def test_expire_before_launch_works_whatever_the_sandbox_uploads(session, 
     "name,options,independent",
     [
         ("local", {}, True),
+        # Uploads are host-side copies in a worker thread; only commands take the exec semaphore.
+        ("bwrap", {"bwrap_path": "/bin/sh", "ro_binds": ["/usr"]}, True),
         ("opensandbox", {"operations": {"background_exec": True}}, True),
         # A running foreground command holds one of the shared HTTP pool's connections.
         ("opensandbox", {"operations": {"background_exec": False}}, False),
