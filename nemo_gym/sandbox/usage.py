@@ -76,10 +76,6 @@ class SandboxUsageSummary:
     unavailable_reason: str | None = None
 
 
-def sampling_enabled() -> bool:
-    return os.getenv("NEMO_GYM_SANDBOX_USAGE", "1").strip().lower() not in ("0", "false", "off", "no")
-
-
 def usage_sample_interval() -> float:
     try:
         value = float(os.getenv("NEMO_GYM_SANDBOX_USAGE_SAMPLE_INTERVAL_SECONDS", DEFAULT_SAMPLE_INTERVAL_S))
@@ -177,6 +173,8 @@ class SandboxUsageTracker:
         self.stopped = False
         self.final: set[tuple[str, str]] = set()
         self.final_failure: str | None = None
+        # Sources dropped with ``discard_source()``: they record nothing and have no summary.
+        self.discarded_sources: set[str] = set()
 
     async def sample(self) -> tuple[SandboxUsageSample, ...]:
         try:
@@ -193,7 +191,11 @@ class SandboxUsageTracker:
             LOGGER.debug("Sandbox usage sample unavailable", exc_info=True)
             self.last_failure = "final_read_failed"
             return ()
-        taken = tuple(sample for sample in taken if isinstance(sample, SandboxUsageSample))
+        taken = tuple(
+            sample
+            for sample in taken
+            if isinstance(sample, SandboxUsageSample) and sample.source not in self.discarded_sources
+        )
         for sample in taken:
             self.samples.setdefault((sample.source, sample.scope), []).append(sample)
         self.last_failure = None if taken else "final_read_failed"
@@ -213,6 +215,17 @@ class SandboxUsageTracker:
         while True:
             await asyncio.sleep(self.interval)
             await self.sample()
+
+    def discard_source(self, source: str) -> None:
+        """Drop a measurement that stopped describing this sandbox, with the samples it already took.
+
+        A measurement of the commands run through this handle (``exec_rusage``) ends when the sandbox is lent: the
+        borrower's commands bypass the handle, so its total would be a part reported as the whole, and the provider
+        stops reporting it. Without its samples there is no summary to mark as missing its final read.
+        """
+        self.discarded_sources.add(source)
+        for key in [key for key in self.samples if key[0] == source]:
+            del self.samples[key]
 
     def start(self) -> None:
         self.first = asyncio.create_task(self.sample())
