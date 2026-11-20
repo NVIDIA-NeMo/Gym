@@ -41,12 +41,8 @@ check_judge_key_file() {
 check_generation_budget() {
     CONTEXT="${CONTEXT:-163840}"
     [[ "$CONTEXT" =~ ^[1-9][0-9]*$ ]] || die "CONTEXT must be a positive integer."
-    if (( CONTEXT < 163840 )) && [[ -z "${MAX_OUTPUT_TOKENS:-}" ]]; then
-        die "For CONTEXT below 163840, set MAX_OUTPUT_TOKENS explicitly after reserving space for the full conversation."
-    fi
     MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-120000}"
     [[ "$MAX_OUTPUT_TOKENS" =~ ^[1-9][0-9]*$ ]] || die "MAX_OUTPUT_TOKENS must be a positive integer."
-    (( MAX_OUTPUT_TOKENS < CONTEXT )) || die "MAX_OUTPUT_TOKENS must leave room for input tokens within CONTEXT."
     export CONTEXT MAX_OUTPUT_TOKENS
 }
 

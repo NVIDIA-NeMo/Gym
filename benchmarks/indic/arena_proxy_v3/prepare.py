@@ -184,7 +184,7 @@ def _source_paths(*, source_dir: Path | None, language: str, revision: str) -> t
     from huggingface_hub import hf_hub_download
 
     return tuple(
-        Path(hf_hub_download(repo_id=SOURCE_ID, repo_type="dataset", revision=revision, filename=filename))
+        Path(hf_hub_download(repo_id=SOURCE_ID, repo_type="dataset", revision=revision, filename=filename, token=True))
         for filename in filenames
     )
 
@@ -206,14 +206,14 @@ def prepare(
     """Prepare validated combined/per-language JSONL and an auditable exclusion report.
 
     Without ``source_dir``, use the Hugging Face dataset and its configured revision.
-    Authentication, when required, comes from the Hub's normal token cache or HF_TOKEN;
+    Hub downloads require authentication from its normal token cache or HF_TOKEN;
     no credentials are written to the benchmark directory or preparation report.
     """
     selected = list(languages)
     if not selected or len(set(selected)) != len(selected) or set(selected) - set(LANGUAGES):
         raise ValueError(f"languages must be unique nonempty selections from {LANGUAGES}")
     if limit is not None and limit <= 0:
-        raise ValueError("limit must be a positive number of prepared rows per language")
+        raise ValueError("limit must be a positive number of source rows per language")
     report: dict[str, object] = {
         "source_repo": SOURCE_ID,
         "source_revision": revision if source_dir is None else SOURCE_REVISION,
@@ -242,7 +242,9 @@ def prepare(
         if expected_ids is not None and ids != expected_ids:
             raise ValueError(f"{language}: source IDs differ across languages")
         expected_ids = ids
-        by_language[language] = rows[:limit] if limit is not None else rows
+        # The reference selects its source prefix before excluding failed translations.
+        selected_ids = {row["question_id"] for row in sources[:limit]}
+        by_language[language] = [row for row in rows if row["question_id"] in selected_ids]
         report["coverage"][language] = {
             "source_rows": len(sources),
             "eligible_rows": len(rows),
@@ -276,7 +278,7 @@ def main() -> None:
     parser.add_argument("--languages", nargs="+", choices=LANGUAGES, default=LANGUAGES)
     parser.add_argument("--output-dir", type=Path, default=DIRECTORY / "data")
     parser.add_argument("--revision", default=SOURCE_REVISION)
-    parser.add_argument("--limit", type=int, help="First N eligible rows per language, after validating all 400 rows")
+    parser.add_argument("--limit", type=int, help="First N source rows per language, then exclude failed translations")
     args = parser.parse_args()
     prepare(
         source_dir=args.source_dir,

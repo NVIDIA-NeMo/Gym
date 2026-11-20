@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: ../../benchmarks/indic/arena_proxy_v3/generation_model.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      context_length: ${oc.env:CONTEXT,163840}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      preserve_reasoning_in_assistant_content: true
+      request_timeout_seconds: null
+      propagate_context_overflow_errors: true
+      refit_output_budget_to_window: false
+      refit_output_budget_to_prompt: false
+      chat_template_kwargs:
+        enable_thinking: true
+      extra_body:
+        temperature: ${oc.env:TEMPERATURE,1.0}
+        top_p: ${oc.env:TOP_P,0.95}
+        top_k: ${oc.env:TOP_K,-1}
+        seed: 42

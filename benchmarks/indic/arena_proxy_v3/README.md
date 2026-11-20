@@ -11,6 +11,8 @@ contain 5,200 prompts and 5,200 GPT-5.4-mini references. The one Tamil translati
 with status `hard_error` is recorded and excluded from evaluation: 5,199 eligible
 tasks, of which 4,799 are Indic and 400 are English. Source files and frozen
 references remain unchanged on the Hub.
+The repository is private (verified November 20, 2026); Hub downloads use the
+authenticated Hugging Face login, with no token embedded in this checkout.
 
 ## Prepare
 
@@ -21,7 +23,7 @@ component environments on a login node before requesting compute:
 
 ```bash
 gym env prefetch --config benchmarks/indic/arena_proxy_v3/config.yaml \
-  --model-type openai_model \
+  --config benchmarks/indic/arena_proxy_v3/generation.yaml \
   +policy_base_url=http://127.0.0.1:8000/v1 \
   +policy_api_key=EMPTY +policy_model_name=prewarm
 ```
@@ -32,6 +34,7 @@ resources server environment includes the summary's `numpy`, `pandas`, and
 set `SUMMARY_PYTHON_BIN` if your server environments live outside the checkout.
 
 ```bash
+umask 077
 python benchmarks/indic/arena_proxy_v3/prepare.py
 ```
 
@@ -49,7 +52,8 @@ joins references by ID, preserves all input messages, and writes combined and
 per-language Gym JSONL files plus `preparation_report.json`. Original upstream
 LMArena answer fields are not used as this benchmark's reference. Use
 `--languages en hi ta --limit 3` for a small smoke dataset; the full source files
-are validated before limiting. Prepared data and upload staging are gitignored.
+are validated first. As in the reference, the limit selects the source prefix
+before failed translations are excluded. Prepared data and upload staging are gitignored.
 
 ## GPU generation, then CPU judging
 
@@ -84,10 +88,13 @@ thinking enabled, and seed 42. vLLM defaults target Nemotron models:
 `PARSER=nemotron_v3`, `TOOL_PARSER=qwen3_coder`, `TP=8`, `DP=1`, `EP=1`.
 For other architectures, supply the appropriate parsers and parallelism;
 `PARSER=none TOOL_PARSER=none EP=0` disables those model-specific options.
-If you lower `CONTEXT` below 163,840, you must explicitly set
-`MAX_OUTPUT_TOKENS` to leave room for the **longest tokenized input** plus the
-chat template. The original standalone generator dynamically reduced output
-budgets for short contexts; this Gym preset uses a fixed configured budget.
+The benchmark's model server extends Gym's existing `vllm_model`. It forwards the
+original text messages to `/v1/chat/completions`, measures them with `/tokenize`,
+and sets `max_tokens = min(120000, CONTEXT - prompt_tokens - 64)` for each call,
+matching the reference. `MAX_OUTPUT_TOKENS` can lower the cap for a separate
+experiment; use the same cap on both setups. The policy request has no total
+timeout. A thinking preflight checks that the served parser separates reasoning
+from the final answer before generating benchmark rows.
 `LIMIT=3 LANGUAGES="en hi ta"` makes a small smoke submission.
 
 The helper prints `RUN_DIR`, the generation job ID, and the dependent judge job
@@ -120,6 +127,11 @@ umask 077
 hf auth login
 hf auth whoami
 ```
+
+The preparation code requests authenticated downloads with `token=True`, which
+reads the stored login. It pins the dataset revision and verifies every source
+file's SHA-256 before preparing inputs. Keep the credential directory private
+(`0700`) and token files owner-readable only (`0600`).
 
 Do not supply a token in command arguments, YAML, source files, chat, or Slurm
 exports. Decline Git credential storage unless you specifically need it. Keep
@@ -178,6 +190,38 @@ The summary validates the exact expected task population and rejects duplicate
 or mismatched rows. Missing or failed tasks suppress incomplete language scores
 and the Indic headline. Its preparation-report hash and coverage checks also
 suppress the full Indic headline for smoke or unverified input populations.
+
+For an apples-to-apples comparison, use the same checkpoint, local vLLM image,
+parallelism, context, sampling settings, parser settings, frozen data, baseline,
+and judge model/parameters in both runs. Start a fresh `RUN_DIR` after changing
+generation settings. The prompts, verdict parser, and Arena-Elo scorer are shared
+with the reference protocol; stochastic generation and a hosted judge can still
+produce different answers or judgments on separate runs.
+
+Compare saved reference judgments with the Gym judgments using:
+
+```bash
+resources_servers/arena_judge/.venv/bin/python -m benchmarks.indic.arena_proxy_v3.summarize "$RUN_DIR/judgments/rollouts.jsonl" \
+  --inputs "$RUN_DIR/inputs/arena_proxy_v3_benchmark.jsonl" \
+  --reference-verdicts "$REFERENCE_INDIC_DIR"/*.jsonl "$REFERENCE_EN_DIR/en.jsonl" \
+  --output "$RUN_DIR/comparison.json"
+```
+
+Supply the reference's per-language judgment files for exactly the selected
+languages. The comparison validates task coverage and metadata, records file
+hashes, and recomputes both sets with the same scorer and prepared-input order.
+This makes their bootstrap confidence intervals comparable: historical reference
+intervals used asynchronous completion order and can differ just from row order.
+The comparison reports verdict differences; judgment files alone cannot prove
+that checkpoint or sampling settings matched. A recovered successful Gym judgment
+counts even if its historical failure remains in the failure sidecar.
+
+Compare completed runs with valid provider responses. Gym retains its transport
+retries, cancellation handling, and response-schema validation. In particular,
+exclude reference runs containing aborted generations: the standalone script
+can record an aborted HTTP 200 response, while Gym treats it as an infrastructure
+failure. Neither missing judgments nor unresolved Gym failures produce an official
+headline here.
 
 Grading is observed by the existing Arena resources server through
 `observe_llm_judge_grading` and `call_judge`. Judge failures remain infrastructure

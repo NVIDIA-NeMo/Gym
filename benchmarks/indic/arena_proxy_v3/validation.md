@@ -85,7 +85,66 @@ NVIDIA judge-key file. Endpoint/model availability and score agreement with a
 reference run remain unverified. The benchmark stays experimental and
 `verified: false`. No PR or full repository test run was made.
 
-The batch preset uses a fixed output-token budget. Default source settings fit
-the supplied corpus; a shorter context requires an explicitly chosen output
-budget with room for the longest tokenized input. This differs from the source
-standalone script's adaptive budget when context becomes tight.
+## Score comparison follow-up (November 20, 2026)
+
+The benchmark now extends the existing Gym vLLM model server through its request
+and converter hooks. It uses the reference chat endpoint, plain-text messages,
+sampling parameters, server-side token count, and per-prompt output budget
+`min(120000, context_length - prompt_tokens - 64)`. It also preserves the reference
+final-answer extraction before Gym conversion, including prefixes and repeated
+or unfinished thinking blocks, and has no total policy-request timeout. The
+reference thinking preflight runs before collection. Gym core, the agent,
+environment server, judge prompts, and scoring implementation were not changed.
+
+The preparer now applies smoke limits to the source prefix before translation
+exclusions. The summary counts a successfully reverified saved answer despite its
+historical failure sidecar, while retaining Gym's authoritative managed-outcome
+selection and rejecting inconsistent saved-answer identities. Optional
+`--reference-verdicts` compares complete saved judgment populations using the
+same prepared-input order for both bootstraps, with artifact hashes, verdict
+differences, and a guarded 12-language Indic average/delta. English remains separate.
+
+181 focused tests passed, with clean exits:
+
+```text
+tests/unit_tests/benchmarks/test_indic_arena_proxy_v3.py             39
+tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_generation.py  31
+tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_metrics.py     58
+tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_publish.py      5
+resources_servers/arena_judge/tests/test_app.py                     48
+```
+
+These checks used Python 3.13.14 with `-S` and explicit dependency paths to avoid
+the adjacent GPQA environment's editable-package imports. Module-path assertions
+confirmed the tests loaded this checkout's code. The generation tests exercise
+the full Gym Responses-to-chat model path, not just the budgeting helper.
+
+Offline differential harnesses executed the supplied source functions directly:
+42 generation cases matched tokenize/chat payloads, budgets, final answers, and
+length status across conversation types, context sizes, and thinking-tag cases;
+14 judge cases matched request bodies and accepted text/verdicts across both
+templates, including empty, invalid, and truncated replies. Six additional
+sanitization/thinking cases matched. These harnesses did not make model calls.
+
+Ruff, formatting, shell syntax, diff checks, and scoped pre-commit hooks passed.
+The private guardword catalog remained unavailable, so that hook skipped its
+content scan; a separate scan of the staged files checked credential signatures
+and confirmed that downloaded data was not staged.
+
+Existing Gym transport retry, cancellation, and schema-validation policies remain.
+Use completed, valid-response reference runs for comparison; the standalone
+generator can persist HTTP 200 responses with `finish_reason=abort`, which Gym
+treats as an infrastructure failure. Historical reference CIs may differ solely
+because they used asynchronous completion order. Matching the offline contract
+does not establish identical stochastic generations or live hosted-judge results.
+
+The existing cached Hugging Face login was verified as `anushakamathofficial`;
+its credential directory is `0700`, and token files are `0600`, owned by the user.
+The dataset is now private. An authenticated full Hub preparation verified all
+26 pinned source files and produced 5,199 rows with SHA-256
+`9d8d4544f4d2770b7f22fcfe73d2227321133062848a1c9b3d8318951b90dbcb`.
+The downloaded cache and prepared data are owner-only. The code requests cached
+authentication with `token=True`; no token value is embedded or printed.
+
+A live paired evaluation still needs a checkpoint, Slurm account, and NVIDIA
+judge-key file path. No GPU job or live judge request was submitted in this follow-up.

@@ -178,6 +178,28 @@ def test_prepare_reports_full_validation_before_limiting_and_hashes(tmp_path: Pa
     assert "DO NOT COPY" not in output.read_text()
 
 
+def test_limit_matches_reference_source_prefix_before_translation_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_dir = _write_source(tmp_path, monkeypatch, languages=("ta",))
+    filename = "lmarena_v3_chat400_ta.jsonl"
+    source_path = source_dir / filename
+    sources = [json.loads(line) for line in source_path.read_text().splitlines()]
+    sources[0]["metadata"]["chat400"]["translation"]["status"] = "hard_error"
+    source_path.write_text("".join(json.dumps(row) + "\n" for row in sources))
+    monkeypatch.setitem(
+        module.SOURCE_CHECKSUMS, filename, {"sha256": hashlib.sha256(source_path.read_bytes()).hexdigest()}
+    )
+
+    output = module.prepare(source_dir=source_dir, languages=["ta"], output_dir=tmp_path / "limited", limit=1)
+    assert output.read_text() == ""
+    report = json.loads((output.parent / "preparation_report.json").read_text())
+    assert report["coverage"]["ta"]["eligible_rows"] == 1
+    assert report["coverage"]["ta"]["prepared_rows"] == 0
+    full_output = module.prepare(source_dir=source_dir, languages=["ta"], output_dir=tmp_path / "full")
+    assert json.loads(full_output.read_text())["uid"] == "ta:question-2"
+
+
 def test_source_content_change_rejected_before_replacing_prepared_output(tmp_path: Path, monkeypatch) -> None:
     source_dir = _write_source(tmp_path, monkeypatch, languages=("hi",))
     output_dir = tmp_path / "prepared"
@@ -208,6 +230,7 @@ def test_downloads_use_frozen_hub_revision_and_original_filenames(monkeypatch, t
             "repo_type": "dataset",
             "revision": module.SOURCE_REVISION,
             "filename": filename,
+            "token": True,
         }
         for filename in ("lmarena_v3_chat400_hi.jsonl", "references/gpt-5.4-mini/hi.jsonl")
     ]

@@ -27,7 +27,7 @@ vllm_args=(
     serve "$MODEL_PATH" --served-model-name "$MODEL_KEY" --host 127.0.0.1 --port "$VLLM_PORT"
     --tensor-parallel-size "${TP:-8}" --data-parallel-size "${DP:-1}"
     --max-model-len "${CONTEXT:-163840}" --gpu-memory-utilization "${GPU_UTIL:-0.85}"
-    --max-num-seqs "${CONCURRENCY:-256}" --trust-remote-code
+    --max-num-seqs 256 --trust-remote-code
     --default-chat-template-kwargs '{"enable_thinking":true}'
 )
 [[ "${EP:-1}" != 1 ]] || vllm_args+=(--enable-expert-parallel)
@@ -52,9 +52,14 @@ for ((attempt=0; attempt<${STARTUP_ATTEMPTS:-540}; attempt++)); do
 done
 ((ready)) || die "vLLM did not become healthy before the startup deadline."
 
+"$PYTHON_BIN" "$BENCHMARK_DIR/generation_preflight.py" \
+    --base-url "http://127.0.0.1:$VLLM_PORT/v1" --model "$MODEL_KEY" \
+    --top-p "${TOP_P:-0.95}" --top-k "${TOP_K:--1}"
+
 export ARENA_PROXY_INPUT_JSONL="$INPUT_JSONL"
 "$GYM_BIN" eval run \
-    --config "$BENCHMARK_DIR/config.yaml" --config "$BENCHMARK_DIR/slurm/dataset.yml" --model-type openai_model \
+    --config "$BENCHMARK_DIR/config.yaml" --config "$BENCHMARK_DIR/slurm/dataset.yml" \
+    --config "$BENCHMARK_DIR/generation.yaml" \
     --agent indic_arena_proxy_v3_agent --model "$MODEL_KEY" \
     --model-url "http://127.0.0.1:$VLLM_PORT/v1" --model-api-key EMPTY \
     --split benchmark --output "$GENERATIONS" --resume \
@@ -62,5 +67,4 @@ export ARENA_PROXY_INPUT_JSONL="$INPUT_JSONL"
     --temperature "${TEMPERATURE:-1.0}" --top-p "${TOP_P:-0.95}" \
     --max-output-tokens "${MAX_OUTPUT_TOKENS:-120000}" \
     +skip_verification=true +require_complete=true \
-    ++head_server.host=127.0.0.1 "++head_server.port=$HEAD_PORT" \
-    "++policy_model.responses_api_models.openai_model.extra_body={top_k:${TOP_K:--1},seed:42,chat_template_kwargs:{enable_thinking:true}}"
+    ++head_server.host=127.0.0.1 "++head_server.port=$HEAD_PORT"
