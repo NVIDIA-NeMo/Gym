@@ -17,9 +17,10 @@ python -m resources_servers.nl2repobench.prepare \
 
 The preparation step copies each task's four flat upstream files (`start.md`, `test_case_count.txt`,
 `test_commands.json`, `test_files.json`) from `test_files/<proName>/` into the resources server's gitignored
-control-plane cache, and writes one Gym JSONL row per task with the fixed instruction
-("According to the start.md in the workspace, implement the entire project as per the requirements described in
-start.md.") followed by the spec text, plus `verifier_metadata` carrying the task's test commands and expected
+control-plane cache, and writes one Gym JSONL row per task. The row's prompt is the fixed instruction
+`FIXED_INSTRUCTION` in `prepare.py` (NL2RepoBench's own task prompt, plus a line saying the task has no network), and
+it does **not** inline the spec: `start.md` is uploaded into the agent sandbox's `/workspace` at `seed_session`, and
+the agent reads it there. The row also carries `verifier_metadata` with the task's test commands and expected
 test-case count. The task's immutable per-task base image
 (`ghcr.io/multimodal-art-projection/nl2repobench/<proName>:1.0`) is recorded alongside the row, and the resources
 server rejects a row whose image differs from the pinned image for its task ID.
@@ -54,9 +55,10 @@ snapshot instead of `git diff`:
    `workspace_tar_max_bytes` as a hard cap before proceeding.
 3. The agent sandbox is stopped, and a **fresh** verifier sandbox is created, from the task's pinned per-task image
    unless `verify_image_override` or `verify_image_registry_template` says otherwise (trusted network, no egress
-   restriction; the image ships the test dependencies but no reference solution). Starting it is attempted
-   `verifier_sandbox_start_attempts` times (default 3) before the row is masked.
-4. The tarball is uploaded and restored into `/workspace`. With `grading_protocol: gym_strict` (the default) it is
+   restriction; the image ships the test dependencies but no reference solution). Grading is attempted
+   `verifier_attempts` times (default 3), each on a fresh sandbox, when the infrastructure fails, before the row is
+   masked.
+4. The tarball is uploaded and restored into `/workspace`. With `grading_protocol: gym_strict` (the server's default; the shipped benchmark configs set `upstream`) it is
    extracted as is; with `upstream` the agent's packaging files and its files at the held-out test paths are deleted
    first, as NL2RepoBench's own post-processor does.
 5. The task's `test_commands.json` commands (e.g. `pip install -e .` followed by a `pytest` invocation) are run in

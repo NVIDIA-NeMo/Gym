@@ -121,8 +121,22 @@ natural-language spec (`start.md`) and must write a complete, installable Python
 hidden pytest suite against the agent's workspace in a fresh sandbox; there is no reference solution and no
 golden-patch mode. The 104-task upstream set is the one Gym ships a config for.
 
-Two agent harnesses are wired to the same resources server: OpenCode (`benchmarks/nl2repobench/opencode.yaml`) and
-the OpenHands SDK (`benchmarks/nl2repobench/openhands.yaml`). A sandbox provider config is required. Start it with:
+**Prepare the data.** Preparation downloads the pinned upstream task files into the resources server's gitignored
+cache and writes the model-visible rows. Each row carries a fixed instruction (NL2RepoBench's own task prompt) and
+the task's pinned image; the spec itself is not in the prompt, it is uploaded to `/workspace/start.md` when the
+sandbox is seeded.
+
+```bash
+# download the pinned upstream revision and prepare it
+python -m benchmarks.nl2repobench.prepare
+
+# or prepare from a local NL2RepoBench checkout, without downloading
+python -m resources_servers.nl2repobench.prepare --source-dir /path/to/NL2RepoBench --no-download
+```
+
+**Run it.** Two agent harnesses are wired to the same resources server: OpenCode
+(`benchmarks/nl2repobench/opencode.yaml`) and the OpenHands SDK (`benchmarks/nl2repobench/openhands.yaml`). A sandbox
+provider config is required (the sandbox provider must reach the per-task images on `ghcr.io`):
 
 ```bash
 gym env start \
@@ -131,7 +145,13 @@ gym env start \
   --config responses_api_models/<model>/configs/<model>.yaml
 ```
 
-Three settings change what a score means; report them with the result:
+The OpenHands harness installs its SDK inside the sandbox. In `block_target_v2` and `no_internet_preinstalled` that
+install cannot run (the guard blocks `python -m venv`, and the sandbox has no egress), so build the offline bundle
+once with `bash responses_api_agents/openhands_sdk_sandboxed_agent/build_bundle.sh <outdir>` and pass it as
+`bundle_path`. `build_bundle.sh` needs `uv` and internet on an x86_64 Linux machine.
+
+Three settings change what a score means; report them with the result. The shipped configs use
+`grading_protocol: upstream` and `agent_network_mode: official`:
 
 - **Network mode** (`agent_network_mode`): `official` gives the agent open egress, so treat its score as an upper bound.
   `block_target_v2` denies source-hosting domains and wraps pip, git, curl and similar tools. `no_internet_preinstalled`
@@ -141,13 +161,13 @@ Three settings change what a score means; report them with the result:
 - **Grading protocol** (`grading_protocol`): `upstream` follows NL2RepoBench's own post-processor and reports the
   official `reward` together with a `clean_reward` that ignores nested pytest summaries; `gym_strict` grades the
   agent's workspace as it is.
-- **Image choices**: the agent image (generic or per-task) and the verifier image (the pinned per-task image unless
-  overridden) are part of the protocol.
+- **Images**: the agent runs in a generic image in `official` and `block_target_v2`, and in the task's pinned
+  image in `no_internet_preinstalled`; the verifier uses the pinned per-task image unless overridden.
 
 A verdict that is not about the agent (a lost session, a verifier sandbox that never started, a sandbox-provider
-error) is returned as a masked sample rather than a score of 0. Upstream NL2RepoBench with the OpenHands harness has
-no completed end-to-end run yet, so treat that combination as untested. The
-[benchmark README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/nl2repobench/README.md) lists every
+error) is retried on a fresh verifier sandbox and then returned as a masked sample rather than a score of 0. Upstream
+NL2RepoBench with the OpenHands harness has no completed end-to-end run yet, so treat that combination as untested.
+The [benchmark README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/nl2repobench/README.md) lists every
 dataset, harness and mode combination that has been run, and the
 [resources server README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/nl2repobench/README.md)
 describes the verification flow.
