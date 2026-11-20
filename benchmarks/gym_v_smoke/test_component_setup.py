@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.server_runtime.supervisor.server_venv import setup_env_command
+from nemo_gym.server_runtime.supervisor import setup_env_command
 
 
 ROOT = Path(__file__).resolve().parents[2]
