@@ -57,37 +57,38 @@ model_server: policy_model
 canonical_split: full
 prompt_source: prepared
 lifecycle: active
-setups:
+protocols:
 - name: widesearch/configs/widesearch_claude_code
   config_path: configs/widesearch_claude_code.yaml
-  description: Broad web research with official strict table and item matching using the claude_code harness and Exa search.
-- name: widesearch/configs/widesearch_cline
-  config_path: configs/widesearch_cline.yaml
-  description: Broad web research with official strict table and item matching using the cline harness and Exa search.
-- name: widesearch/configs/widesearch_codex
-  config_path: configs/widesearch_codex.yaml
-  description: Broad web research with official strict table and item matching using the codex harness and Exa search.
-- name: widesearch/configs/widesearch_hermes
-  config_path: configs/widesearch_hermes.yaml
-  description: Broad web research with official strict table and item matching using the hermes harness and Exa search.
-- name: widesearch/configs/widesearch_kilocode
-  config_path: configs/widesearch_kilocode.yaml
-  description: Broad web research with official strict table and item matching using the kilocode harness and Exa search.
-- name: widesearch/configs/widesearch_nemo_fabric_deepagents
-  config_path: configs/widesearch_nemo_fabric_deepagents.yaml
-  description: Broad web research with official strict table and item matching using the deepagents harness and Exa search.
-- name: widesearch/configs/widesearch_openclaw
-  config_path: configs/widesearch_openclaw.yaml
-  description: Broad web research with official strict table and item matching using the openclaw harness and Exa search.
-- name: widesearch/configs/widesearch_opencode
-  config_path: configs/widesearch_opencode.yaml
-  description: Broad web research with official strict table and item matching using the opencode harness and Exa search.
-- name: widesearch/configs/widesearch_pi
-  config_path: configs/widesearch_pi.yaml
-  description: Broad web research with official strict table and item matching using the pi harness and Exa search.
-- name: widesearch/configs/widesearch_prime_agent
-  config_path: configs/widesearch_prime_agent.yaml
-  description: Broad web research with official strict table and item matching using the prime harness and Exa search.
-- name: widesearch/configs/widesearch_simple_strands
-  config_path: configs/widesearch_simple_strands.yaml
-  description: Broad web research with official strict table and item matching using the simple_strands harness and Exa search.
+  description: Broad web research with official strict table and item matching, run with the main config's claude_code harness and Exa search, but with 200 turns and 7200 s instead of 30 turns and 900 s and Claude Code's Read tool turned off.
+  setups:
+  - name: widesearch/configs/widesearch_cline
+    config_path: configs/widesearch_cline.yaml
+    description: Broad web research with official strict table and item matching using the cline harness and Exa search. It sets the protocol's 7200 s budget; cline has no turn limit setting.
+  - name: widesearch/configs/widesearch_codex
+    config_path: configs/widesearch_codex.yaml
+    description: Broad web research with official strict table and item matching using the codex harness and Exa search. It sets the protocol's 7200 s budget; codex has no turn limit setting.
+  - name: widesearch/configs/widesearch_hermes
+    config_path: configs/widesearch_hermes.yaml
+    description: Broad web research with official strict table and item matching using the hermes harness and Exa search. It sets the protocol's 200-turn budget; hermes has no run time setting.
+  - name: widesearch/configs/widesearch_kilocode
+    config_path: configs/widesearch_kilocode.yaml
+    description: Broad web research with official strict table and item matching using the kilocode harness and Exa search. It sets the protocol's 7200 s budget; kilocode has no turn limit setting.
+  - name: widesearch/configs/widesearch_nemo_fabric_deepagents
+    config_path: configs/widesearch_nemo_fabric_deepagents.yaml
+    description: Broad web research with official strict table and item matching using the deepagents harness and Exa search. It sets the protocol's 7200 s budget and blocks the web_fetch_exa tool; deepagents has no turn limit setting.
+  - name: widesearch/configs/widesearch_openclaw
+    config_path: configs/widesearch_openclaw.yaml
+    description: Broad web research with official strict table and item matching using the openclaw harness and Exa search. It sets the protocol's 7200 s budget; openclaw has no turn limit setting.
+  - name: widesearch/configs/widesearch_opencode
+    config_path: configs/widesearch_opencode.yaml
+    description: Broad web research with official strict table and item matching using the opencode harness and Exa search. It sets the protocol's 7200 s budget; opencode has no turn limit setting.
+  - name: widesearch/configs/widesearch_pi
+    config_path: configs/widesearch_pi.yaml
+    description: Broad web research with official strict table and item matching using the pi harness and Exa search. It sets the protocol's 7200 s budget; pi has no turn limit setting.
+  - name: widesearch/configs/widesearch_prime_agent
+    config_path: configs/widesearch_prime_agent.yaml
+    description: Broad web research with official strict table and item matching using the prime harness and Exa search. It sets the protocol's 7200 s budget; prime has no turn limit setting.
+  - name: widesearch/configs/widesearch_simple_strands
+    config_path: configs/widesearch_simple_strands.yaml
+    description: Broad web research with official strict table and item matching using the simple_strands harness and Exa search. It sets the protocol's 200-turn and 7200 s budgets.

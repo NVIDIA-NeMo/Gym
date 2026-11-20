@@ -46,37 +46,38 @@ model_server: policy_model
 canonical_split: full
 prompt_source: prepared
 lifecycle: active
-setups:
+protocols:
 - name: deepsearchqa/configs/deepsearchqa_claude_code
   config_path: configs/deepsearchqa_claude_code.yaml
-  description: Multi-step web research with answer-set F1 scoring using the claude_code harness and Exa search.
-- name: deepsearchqa/configs/deepsearchqa_cline
-  config_path: configs/deepsearchqa_cline.yaml
-  description: Multi-step web research with answer-set F1 scoring using the cline harness and Exa search.
-- name: deepsearchqa/configs/deepsearchqa_codex
-  config_path: configs/deepsearchqa_codex.yaml
-  description: Multi-step web research with answer-set F1 scoring using the codex harness and Exa search.
-- name: deepsearchqa/configs/deepsearchqa_hermes
-  config_path: configs/deepsearchqa_hermes.yaml
-  description: Multi-step web research with answer-set F1 scoring using the hermes harness and Exa search.
-- name: deepsearchqa/configs/deepsearchqa_kilocode
-  config_path: configs/deepsearchqa_kilocode.yaml
-  description: Multi-step web research with answer-set F1 scoring using the kilocode harness and Exa search.
-- name: deepsearchqa/configs/deepsearchqa_nemo_fabric_deepagents
-  config_path: configs/deepsearchqa_nemo_fabric_deepagents.yaml
-  description: Multi-step web research with answer-set F1 scoring using the deepagents harness and Exa search.
-- name: deepsearchqa/configs/deepsearchqa_openclaw
-  config_path: configs/deepsearchqa_openclaw.yaml
-  description: Multi-step web research with answer-set F1 scoring using the openclaw harness and Exa search.
-- name: deepsearchqa/configs/deepsearchqa_opencode
-  config_path: configs/deepsearchqa_opencode.yaml
-  description: Multi-step web research with answer-set F1 scoring using the opencode harness and Exa search.
-- name: deepsearchqa/configs/deepsearchqa_pi
-  config_path: configs/deepsearchqa_pi.yaml
-  description: Multi-step web research with answer-set F1 scoring using the pi harness and Exa search.
-- name: deepsearchqa/configs/deepsearchqa_prime_agent
-  config_path: configs/deepsearchqa_prime_agent.yaml
-  description: Multi-step web research with answer-set F1 scoring using the prime harness and Exa search.
-- name: deepsearchqa/configs/deepsearchqa_simple_strands
-  config_path: configs/deepsearchqa_simple_strands.yaml
-  description: Multi-step web research with answer-set F1 scoring using the simple_strands harness and Exa search.
+  description: Multi-step web research with answer-set F1 scoring, run with the main config's claude_code harness and Exa search, but with 200 turns and 7200 s instead of 12 turns and 600 s, no cap of four web searches, another system prompt and Claude Code's Read tool turned off.
+  setups:
+  - name: deepsearchqa/configs/deepsearchqa_cline
+    config_path: configs/deepsearchqa_cline.yaml
+    description: Multi-step web research with answer-set F1 scoring using the cline harness and Exa search. It sets the protocol's 7200 s budget; cline has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_codex
+    config_path: configs/deepsearchqa_codex.yaml
+    description: Multi-step web research with answer-set F1 scoring using the codex harness and Exa search. It sets the protocol's 7200 s budget; codex has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_hermes
+    config_path: configs/deepsearchqa_hermes.yaml
+    description: Multi-step web research with answer-set F1 scoring using the hermes harness and Exa search. It sets the protocol's 200-turn budget; hermes has no run time setting.
+  - name: deepsearchqa/configs/deepsearchqa_kilocode
+    config_path: configs/deepsearchqa_kilocode.yaml
+    description: Multi-step web research with answer-set F1 scoring using the kilocode harness and Exa search. It sets the protocol's 7200 s budget; kilocode has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_nemo_fabric_deepagents
+    config_path: configs/deepsearchqa_nemo_fabric_deepagents.yaml
+    description: Multi-step web research with answer-set F1 scoring using the deepagents harness and Exa search. It sets the protocol's 7200 s budget and blocks the web_fetch_exa tool; deepagents has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_openclaw
+    config_path: configs/deepsearchqa_openclaw.yaml
+    description: Multi-step web research with answer-set F1 scoring using the openclaw harness and Exa search. It sets the protocol's 7200 s budget; openclaw has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_opencode
+    config_path: configs/deepsearchqa_opencode.yaml
+    description: Multi-step web research with answer-set F1 scoring using the opencode harness and Exa search. It sets the protocol's 7200 s budget; opencode has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_pi
+    config_path: configs/deepsearchqa_pi.yaml
+    description: Multi-step web research with answer-set F1 scoring using the pi harness and Exa search. It sets the protocol's 7200 s budget; pi has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_prime_agent
+    config_path: configs/deepsearchqa_prime_agent.yaml
+    description: Multi-step web research with answer-set F1 scoring using the prime harness and Exa search. It sets the protocol's 7200 s budget; prime has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_simple_strands
+    config_path: configs/deepsearchqa_simple_strands.yaml
+    description: Multi-step web research with answer-set F1 scoring using the simple_strands harness and Exa search. It sets the protocol's 200-turn and 7200 s budgets.
