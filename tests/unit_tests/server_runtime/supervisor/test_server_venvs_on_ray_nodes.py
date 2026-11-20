@@ -232,3 +232,16 @@ def test_a_node_sharing_the_venv_storage_skips_setup(tmp_path, install_fake_ray,
 
     assert ran == ["setup local@10.0.0.9", "setup read_only@10.0.0.9"]
     assert server_supervisor.os.environ["UV_INDEX_URL"] == "https://index"
+
+
+def test_a_failed_setup_command_names_the_server_and_node(tmp_path, install_fake_ray, monkeypatch):
+    install_fake_ray(_FakeRay([], {}))
+    monkeypatch.setattr(server_supervisor, "setup_env_command", lambda dir_path, config, label: "setup")
+    monkeypatch.setattr(
+        server_supervisor,
+        "run_command",
+        lambda command, dir_path, label, global_config_dict: types.SimpleNamespace(wait=lambda: 1, returncode=1),
+    )
+
+    with pytest.raises(RuntimeError, match=r"agent@10\.0\.0\.9"):
+        _setup_server_venvs_on_this_node([("agent", tmp_path, None)], OmegaConf.create({}), {})

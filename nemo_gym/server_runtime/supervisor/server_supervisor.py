@@ -1163,11 +1163,17 @@ Process `{process_name}` stderr:
 
             if len(successful_servers) != total_servers:
                 if deadline is not None and monotonic() >= deadline:
+                    setup_note = (
+                        f"Venv setup on other Ray nodes used {seconds_used:.1f}s of that limit.\n"
+                        if seconds_used >= 0.1
+                        else ""
+                    )
                     raise ServerSpinupTimeoutError(
                         f"Timed out after {timeout_seconds:g}s waiting for Gym servers to become ready: "
                         f"{', '.join(waiting)}\n"
                         "This wait covers dependency installation and any local model download or loading "
                         "that a server does before it opens its port.\n"
+                        f"{setup_note}"
                         f"Raise the limit with `++{SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}=<seconds>`, "
                         "or set it to 0 to wait without a limit."
                     )
