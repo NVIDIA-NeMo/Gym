@@ -397,3 +397,7 @@ def test_an_interrupted_bounded_command_takes_its_own_subprocesses_with_it(no_ss
         assert not late_output.exists()
     finally:
         process.kill()
+
+
+def test_output_with_bytes_that_are_not_utf8_is_decoded_with_replacements_and_not_an_error():
+    assert LocalConnection().run([r"printf 'a\xffb'"]) == "a\ufffdb"

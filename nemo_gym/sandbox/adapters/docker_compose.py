@@ -30,6 +30,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
+import anyio
 import yaml
 
 from nemo_gym.data.tasks.harbor.digest import is_ignored
@@ -1139,16 +1140,24 @@ class AsyncSandboxCompose:
         collection._started = collection._ready = True
         return collection
 
-    async def stop(self):
+    async def stop(self, *, timeout_s: float | None = None) -> None:
+        """Stop every sandbox of the group, shielded like :meth:`AsyncSandbox.stop`.
+
+        Each member's stop is bounded by its own ``STOP_TIMEOUT_S``, and members stop one after another, so the
+        group has no limit of its own unless ``timeout_s`` sets one. The stop runs as its own task, so neither a
+        cancelled caller nor ``timeout_s`` cuts it short: a caller that gives up leaves it running, and the next
+        ``stop`` waits for that same task instead of starting another. A stop that failed is started again.
+
+        Raises:
+            TimeoutError: The stop did not finish within ``timeout_s``.
+        """
         if self._closed:
             return
         if self._stop_task is None or self._stop_task.done():
             self._stop_task = asyncio.create_task(self._stop())
-        try:
+            self._stop_task.add_done_callback(_log_unawaited_stop_failure)
+        with anyio.CancelScope(shield=True), anyio.fail_after(timeout_s):
             await asyncio.shield(self._stop_task)
-        except asyncio.CancelledError:
-            await self._stop_task
-            raise
 
     async def _stop(self):
         for process in self._processes.values():
@@ -1188,3 +1197,9 @@ class AsyncSandboxCompose:
 
     async def __aexit__(self, *exc):
         await self.stop()
+
+
+def _log_unawaited_stop_failure(task: asyncio.Task) -> None:
+    """Retrieve a group stop's failure, which a caller that gave up on the stop never awaits; the next stop retries."""
+    if not task.cancelled() and (error := task.exception()) is not None:
+        LOGGER.warning("Compose group stop failed; the next stop retries it: %r", error)

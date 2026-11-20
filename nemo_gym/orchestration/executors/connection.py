@@ -257,6 +257,7 @@ def _run_stopping_group_on_timeout(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        errors="replace",
         start_new_session=True,
     ) as process:
         try:
@@ -283,9 +284,10 @@ def _run_stopping_group_on_timeout(
 
 
 def _checked(cmd: list[str], *, input: str | None = None, context: str = "", timeout_s: float | None = None) -> str:
+    # errors="replace": a log can hold bytes that are not UTF-8, and one of them must not fail the whole read.
     try:
         if timeout_s is None:
-            result = subprocess.run(cmd, input=input, text=True, capture_output=True)
+            result = subprocess.run(cmd, input=input, text=True, capture_output=True, errors="replace")
         else:
             result = _run_stopping_group_on_timeout(cmd, input=input, timeout_s=timeout_s)
     except subprocess.TimeoutExpired as exc:

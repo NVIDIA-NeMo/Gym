@@ -521,7 +521,7 @@ def plan_for_config(
             name=benchmark.name,
             config_paths=[gym_relative_path(path) for path in global_config_dict.get("config_paths") or []],
         ),
-        taskset=benchmark.dataset.taskset or benchmark.name,
+        taskset=benchmark.dataset.taskset,
         gym=PlanGym(version=__version__, commit=installed_gym_commit()),
         selected_task_ids=task_ids,
     )
