@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The Agentic-VBench entries admit three harnesses, and each harness's overlay differs only in the harness block."""
+"""The Agentic-VBench entries admit four harnesses, and each harness's overlay differs only in the harness block."""
 
 import tomllib
 from pathlib import Path
@@ -16,7 +16,12 @@ OVERLAYS = {
     "opencode_agent": ("harbor_sandbox.yaml", "harbor_train.yaml"),
     "pi_agent": ("harbor_sandbox_pi.yaml", "harbor_train_pi.yaml"),
     "openclaw_agent": ("harbor_sandbox_openclaw.yaml", "harbor_train_openclaw.yaml"),
+    "codex_agent": ("harbor_sandbox_codex.yaml", "harbor_train_codex.yaml"),
 }
+# Codex's `view_image` returns a frame inside the tool result; only this model-server switch sends it on.
+CODEX_MODEL_SERVER = {"responses_api_models": {"vllm_model": {"inline_tool_output_images": True}}}
+# Above every task's own agent budget, as OpenCode's shipped config; a harness default (600 or 900 s) would cut it.
+BENCHMARK_CEILING = 10800
 ADDED = [harness for harness in OVERLAYS if harness != "opencode_agent"]
 ENTRY_NAMES = ("agentic_vbench", "agentic_vbench_train")
 # What `harbor_train.yaml` sets on OpenCode and every other harness's training overlay sets on its own.
@@ -53,14 +58,33 @@ def test_an_added_overlay_keeps_every_setting_outside_the_harness_block(harness:
     opencode = _load(ENTRY_NAMES[index], OVERLAYS["opencode_agent"][index])
     added = _load(ENTRY_NAMES[index], OVERLAYS[harness][index])
     del opencode["opencode_agent"], added[harness]
+    if harness == "codex_agent":
+        assert added.pop("policy_model") == CODEX_MODEL_SERVER
     assert added == opencode
+
+
+def test_opencode_s_shipped_ceiling_is_the_one_the_added_benchmark_overlays_set() -> None:
+    shipped = yaml.safe_load((ROOT / "responses_api_agents/opencode_agent/configs/opencode_agent.yaml").read_text())
+    assert _block(shipped, "opencode_agent")["timeout"] == BENCHMARK_CEILING
 
 
 @pytest.mark.parametrize("harness", ADDED)
 def test_an_added_overlay_carries_the_settings_the_opencode_overlay_sets(harness: str) -> None:
-    assert _block(_load("agentic_vbench", OVERLAYS[harness][0]), harness) == {"image_input": True}
+    sees_frames = {} if harness == "codex_agent" else {"image_input": True}
+    assert _block(_load("agentic_vbench", OVERLAYS[harness][0]), harness) == {
+        **sees_frames,
+        "timeout": BENCHMARK_CEILING,
+    }
     opencode = _block(_load("agentic_vbench_train", OVERLAYS["opencode_agent"][1]), "opencode_agent")
     added = _block(_load("agentic_vbench_train", OVERLAYS[harness][1]), harness)
+    if harness == "codex_agent":
+        # Codex's own names: no `image_input` (the model-server switch instead) and no per-call output key.
+        assert added == {
+            "token_id_capture": opencode["token_id_capture"],
+            "timeout": opencode["timeout"],
+            "model_context_window": opencode["context_window"],
+        }
+        return
     for key in SHARED_TRAINING_KEYS:
         assert added[key] == opencode[key], key
     # Pi alone has a switch for compaction; no compaction call in a Pi training episode.

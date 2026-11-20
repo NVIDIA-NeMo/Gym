@@ -23,3 +23,6 @@ pi_agent:
   responses_api_agents:
     pi_agent:
       image_input: true
+      # A ceiling above every task's own agent budget (1800 s or more), as OpenCode's shipped config has; the
+      # harness's default of 900 s would end the tasks early.
+      timeout: 10800

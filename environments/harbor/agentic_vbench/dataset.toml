@@ -20,9 +20,10 @@ license = "Apache 2.0"
 # `opencode_agent` is the harness the benchmark's published numbers use (OpenCode inside the task container) and the
 # one the README's full-set numbers come from. `pi_agent` and `openclaw_agent` are the other harnesses with that
 # switch (`image_input`, see `harbor_sandbox_pi.yaml` and `harbor_sandbox_openclaw.yaml`); their scores are their own
-# baselines, not the published ones. A harness that does not send the model the images its tools read would run
+# baselines, not the published ones. `codex_agent` sends them through its `view_image` tool, which needs the model
+# server's `inline_tool_output_images` (`harbor_sandbox_codex.yaml`). A harness that does not send the model the images its tools read would run
 # blind to the clips and still get a score, so none is listed.
-allowed_agents = ["opencode_agent", "pi_agent", "openclaw_agent"]
+allowed_agents = ["opencode_agent", "pi_agent", "openclaw_agent", "codex_agent"]
 
 [gym.defaults]
 # The benchmark's published runs gave every verifier three times its declared 1800 s: the repurpose judges

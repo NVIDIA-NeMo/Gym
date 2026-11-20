@@ -37,6 +37,8 @@ def test_the_overlay_over_the_shipped_config_is_an_openclaw_configuration_with_i
     # The prompt has no image, so only this key declares image input to the model.
     assert config.image_input is True
     assert config.openclaw_version == "2026.6.11"
+    # The benchmark overlay lets each task's own budget apply; the training overlay caps an episode at 1800 s.
+    assert config.timeout == (10800 if overlay == OVERLAYS[0] else 1800)
 
 
 def test_the_training_overlay_turns_capture_on_within_the_policy_budgets() -> None:

@@ -37,6 +37,8 @@ def test_the_overlay_over_the_shipped_config_is_a_pi_configuration_with_image_in
     # The prompt has no image; without this Pi omits every frame its tools read.
     assert config.image_input is True
     assert config.pi_version == "0.80.2"
+    # The benchmark overlay lets each task's own budget apply; the training overlay caps an episode at 1800 s.
+    assert config.timeout == (10800 if overlay == OVERLAYS[0] else 1800)
 
 
 def test_the_training_overlay_turns_capture_on_and_compaction_off_within_the_policy_budgets() -> None:

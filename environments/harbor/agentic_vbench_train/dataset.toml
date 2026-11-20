@@ -18,10 +18,11 @@ domain = "agent"
 license = "Apache 2.0"
 # The harnesses a run may train: OpenCode inside the task container, as the benchmark's published runs
 # (`harbor_train.yaml`), and Pi and OpenClaw (`harbor_train_pi.yaml`, `harbor_train_openclaw.yaml`), the other
-# sandboxed session harnesses that send the model the frames their tools read. Each harness has its own rows and run
+# sandboxed session harnesses that send the model the frames their tools read, and Codex (`harbor_train_codex.yaml`),
+# whose `view_image` tool does with the model server's `inline_tool_output_images`. Each harness has its own rows and run
 # configuration (README, "Harnesses"). Another sandboxed session harness is possible with
 # `--allow-unsupported-pairing` but is not what the entry validates.
-allowed_agents = ["opencode_agent", "pi_agent", "openclaw_agent"]
+allowed_agents = ["opencode_agent", "pi_agent", "openclaw_agent", "codex_agent"]
 
 [gym.defaults]
 # The benchmark's published runs gave every verifier three times its declared budget: the repurpose judges
