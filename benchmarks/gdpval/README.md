@@ -540,7 +540,7 @@ Replace `opencode` with `openclaw` for OpenClaw.
 
 - The rows, the task tools and the deliverables directory work as for Pi, and these are not AA v2 scores either.
   Each harness installs its pinned runtime in the task sandbox at the start of each episode (OpenCode 1.17.11,
-  OpenClaw 2026.6.11 on Node.js 22).
+  OpenClaw 2026.11.5 on Node.js 24.22.3).
 - The model sees the task tools as `gdpval_resources_server_<tool>` in OpenCode and
   `gdpval_resources_server__<tool>` in OpenClaw. Their built-in web tools are off, and the task's `web_search` and
   `fetch_web_page` are provided instead; the sandbox still has egress, so shell commands can reach the web too.

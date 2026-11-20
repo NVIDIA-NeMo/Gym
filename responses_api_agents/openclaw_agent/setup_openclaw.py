@@ -57,7 +57,7 @@ Examples:
     Inspect the resolved versions without touching the filesystem::
 
         >>> resolve_openclaw_version(None), resolve_node_version()
-        ('2026.6.11', '24.21.0')
+        ('2026.11.5', '24.22.3')
 """
 
 import ctypes
@@ -82,17 +82,11 @@ LOG = logging.getLogger(__name__)
 
 _OPENCLAW_PKG = "openclaw"
 
-#: Version the agent installs when no override or config value is supplied. 2026.9.4
-#: is deliberately NOT the default yet: it stores session history in SQLite, which
-#: this agent's JSONL session reader cannot parse, so tool-using and interrupted
-#: rollouts lose their transcripts. Bump this after the session reader understands it.
-DEFAULT_OPENCLAW_VERSION = "2026.6.11"
+#: Version the agent installs when no override or config value is supplied.
+DEFAULT_OPENCLAW_VERSION = "2026.11.5"
 
-#: Node.js version downloaded when ``npm`` is absent: the newest release of the
-#: Node 24 LTS line, which is the line OpenClaw's own installer provisions on
-#: Linux (``NODE_LINUX_DEFAULT_MAJOR=24``). It satisfies the ``engines.node``
-#: range of every pinned release.
-DEFAULT_NODE_VERSION = "24.21.0"
+#: Pinned Node 24 LTS release for local provisioning and the sandbox installer.
+DEFAULT_NODE_VERSION = "24.22.3"
 
 OPENCLAW_VERSION_ENV = "OPENCLAW_VERSION"
 NODE_VERSION_ENV = "OPENCLAW_NODE_VERSION"
@@ -106,11 +100,12 @@ _USER_LOCAL_BIN = Path.home() / ".local" / "bin"
 OPENCLAW_ENGINES_NODE = {
     "2026.6.11": ">=22.19.0",
     "2026.9.4": ">=24.16.0 <25 || >=26.1.0",
+    DEFAULT_OPENCLAW_VERSION: ">=24.16.0 <25 || >=26.1.0",
 }
 
 #: Range assumed for a release missing from the table when the registry cannot
-#: be asked; deliberately the newest known, not the default pin's.
-_NEWEST_KNOWN_ENGINES_NODE = OPENCLAW_ENGINES_NODE["2026.9.4"]
+#: be asked.
+_NEWEST_KNOWN_ENGINES_NODE = OPENCLAW_ENGINES_NODE[DEFAULT_OPENCLAW_VERSION]
 
 #: The only accepted ``openclaw`` version form: an exact semver, optionally with a
 #: prerelease tag. npm ranges are rejected so "installed == requested" is a plain
@@ -150,7 +145,7 @@ def _parse_version(version: str) -> tuple[int, ...]:
     """Return the numeric ``(major[, minor[, patch]])`` prefix of *version*.
 
     Accepts partial versions (``24``, ``24.16``) and ignores prerelease/build
-    suffixes (``24.21.0-rc.1``); npm range logic only needs the numeric prefix.
+    suffixes (``24.22.3-rc.1``); npm range logic only needs the numeric prefix.
     """
     match = re.match(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", version.strip().lstrip("v"))
     if match is None:
@@ -174,7 +169,7 @@ def _range_comparator(op: str, operand: str, actual: tuple[int, int, int]) -> bo
 _RANGE_PRIMITIVE = re.compile(r"^(>=|<=|>|<|=|\^|~)?v?(\d+(?:\.\d+){0,2})")
 
 
-def _satisfies_range(node_version: str, node_range: str) -> bool:
+def node_satisfies_range(node_version: str, node_range: str) -> bool:
     """Return whether *node_version* satisfies the npm *node_range*.
 
     Supports the constructs ``openclaw`` actually publishes — ``||``,
@@ -502,7 +497,7 @@ def _ensure_npm(version: str, node_bin_dir: str | None) -> str:
     npm = _which("npm", node_bin_dir)
     node = _which("node", node_bin_dir)
     node_version = _node_reported_version(node) if node else None
-    node_ok = node_version is not None and _satisfies_range(node_version, engines)
+    node_ok = node_version is not None and node_satisfies_range(node_version, engines)
     if npm and node_ok:
         LOG.info("using npm %s with node %s", npm, node_version)
         return npm

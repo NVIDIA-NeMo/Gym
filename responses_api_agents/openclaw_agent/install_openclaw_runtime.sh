@@ -6,7 +6,7 @@ trap 'status=$?; echo "OpenClaw installer failed (exit $status) at line $LINENO:
 
 runtime=$1
 openclaw_version=$2
-node_version=22.19.0
+node_version=24.22.3
 if [ "$(uname -s)" != Linux ]; then
   echo 'OpenClaw sandbox execution requires a Linux sandbox.' >&2
   exit 1

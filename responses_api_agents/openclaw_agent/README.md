@@ -9,7 +9,7 @@ the rollout's prefix. Run-level `token_id_capture.enabled: true` and either the 
 or run-level `token_id_capture.all_agents: true` route those calls through capture. Capture also needs a capture
 store and a model backend that returns token IDs (see
 [Training on External Agent Harnesses](https://docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/external-agent-harnesses)).
-No training capture run has validated this agent.
+Token IDs and generation log probabilities are available in the Gym capture store when the backend returns them.
 
 ## Quick start
 
@@ -52,13 +52,13 @@ Session install/close timeouts default to 600/60 seconds.
 - `context_window`: context limit for a generated model entry. Set it to the model server's maximum
   context length (`max_model_len` for vLLM). OpenClaw uses it to lower a call's requested output when
   the input is long, to decide when to compact (summarize) the conversation, and to cap long tool
-  results, so changing it can change rollouts. When unset, OpenClaw 2026.6.11 assumes 200,000 tokens,
-  and on a server with a smaller limit, long episodes can send requests the server rejects. Gym's
+  results, so changing it can change rollouts. When unset, OpenClaw chooses a default. If the model server has a smaller limit, long
+  episodes can send requests the server rejects. Gym's
   `vllm_model` turns each rejection into an empty reply by default; OpenClaw does not see that as a
   context overflow, so it does not compact, and the run ends early.
 - `max_output_tokens`: most output tokens OpenClaw requests per call for a generated model entry; it
   requests less when its estimate of the input leaves less room in `context_window`. When unset,
-  OpenClaw 2026.6.11 uses 8,192.
+  OpenClaw chooses the model default.
 - `image_input`: declare image support in sandbox sessions without prompt images (default `false`);
   prompt images declare it automatically.
 - `workspace_root`: where per-request workspaces are created and deleted
@@ -79,14 +79,13 @@ Session install/close timeouts default to 600/60 seconds.
   reused when `openclaw --version` reports exactly the resolved version; anything else
   is reinstalled on first local use after a restart. After an install, the launcher
   selected on `PATH` must report the requested version, or that local request fails.
-  Note: releases ≥ 2026.9.0 store session history in SQLite instead of JSONL, which
-  the agent's transcript reader does not support yet — tool results and interrupted
-  sessions are not captured, so stick to 2026.6.11 until that lands.
+  Gym reads the pinned release's per-agent SQLite transcripts with OpenClaw's SDK after the worker stops.
+  Older releases that write JSONL sessions remain readable.
 - `node_bin_dir`: directory put before `PATH` when running `openclaw`. Setup uses the
   same order for its version probes and for `npm`, so a bundled runtime is checked
   as the rollout will use it.
 - `OPENCLAW_NODE_VERSION` (env only): Node.js version fetched when `npm` is absent
-  (default `24.21.0`, the newest release of the Node 24 LTS line OpenClaw supports).
+  (default `24.22.3`, the newest release of the Node 24 LTS line OpenClaw supports).
   The build is picked for the host platform — Linux, macOS and Windows on x64 and
   arm64. Other platforms raise, since nodejs.org publishes no build for them;
   install Node.js yourself and put `npm` on `PATH`.
@@ -175,8 +174,8 @@ deadline when a task needs more total time; increasing those alone does not rais
 
 The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64. The task image needs no Python:
 the supervisor and harness runner are Bash scripts. Session setup installs a missing Bash with apt-get or apk
-when running as root; otherwise preinstall Bash. Existing tools are preserved. Node 22.19.0 and OpenClaw are installed under
-`/tmp/nemo-gym-openclaw-node-22.19.0-<version>`. Node archives are checked against upstream SHA-256
+when running as root; otherwise preinstall Bash. Existing tools are preserved. Node 24.22.3 and OpenClaw are installed under
+`/tmp/nemo-gym-openclaw-node-24.22.3-<version>`. Node archives are checked against upstream SHA-256
 sums; the installed package version is verified before caching and when reusing a cached runtime.
 A version-scoped `flock` serializes runtime installation and cache validation across session setup
 attempts. Missing `flock`, `curl`, CA certificates, `tar`, `gzip`, `sha256sum`, and `awk` are installed with `apt-get` or `apk` only when
@@ -324,7 +323,7 @@ other than `inherit` (the default, the provider's network), and it cannot be com
 `sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `openclaw/` as the installer lays them out.
 Build it into the image with `bash install_openclaw_runtime.sh <dir> <openclaw_version>`; the image also needs `bash`,
 since the session prepare step would otherwise run `apk` or `apt-get`, which the policy blocks. Instead of installing,
-setup checks that the runtime's Node is 22.19.0 or newer, that the CLI runs, and that the package declares
+setup checks that the runtime's Node satisfies the installed package's engine range, that the CLI runs, and that the package declares
 `openclaw_version` (an exact match), and refuses the seed with a 422 when any of these fails.
 
 Under `model_only`, a required MCP grant is refused at seed with a 422, since the policy would block its host; under

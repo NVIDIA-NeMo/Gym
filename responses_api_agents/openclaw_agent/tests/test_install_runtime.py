@@ -63,7 +63,7 @@ def test_missing_curl_is_installed_before_downloading_node(sandbox: tuple[Path, 
         "update",
         "install -y --no-install-recommends curl ca-certificates tar gzip coreutils gawk",
     ]
-    assert "https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-" in (root / "download.log").read_text()
+    assert "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-" in (root / "download.log").read_text()
     assert not (root / "runtime/ready").exists()
 
 
@@ -215,7 +215,7 @@ def test_musl_uses_pinned_x64_archive_and_apk(sandbox: tuple[Path, dict[str, str
     result = run_installer(root, env)
     assert result.returncode == 19, result.stderr
     assert (
-        "https://unofficial-builds.nodejs.org/download/release/v22.19.0/node-v22.19.0-linux-x64-musl.tar.gz"
+        "https://unofficial-builds.nodejs.org/download/release/v24.22.3/node-v24.22.3-linux-x64-musl.tar.gz"
         in (root / "download.log").read_text()
     )
     if bootstrap:
@@ -247,7 +247,7 @@ def test_old_musl_cpp_repair_is_private_and_checksum_gated(
         "curl": """for last; do :; done
 echo "$*" >> "$TEST_ROOT/download.log"
 if [[ "$*" == *SHASUMS256* ]]; then
-  echo 'stub  node-v22.19.0-linux-x64-musl.tar.gz' > "$last"
+  echo 'stub  node-v24.22.3-linux-x64-musl.tar.gz' > "$last"
 else
   echo fixture > "$last"
 fi
@@ -266,7 +266,7 @@ done
     node.parent.mkdir(parents=True)
     node.write_text("""#!/bin/bash
 case "$1" in
-  --version) [ -f "$TEST_ROOT/patched" ] || exit 1; echo v22.19.0;;
+  --version) [ -f "$TEST_ROOT/patched" ] || exit 1; echo v24.22.3;;
   */npm-cli.js) echo install >> "$TEST_ROOT/npm.log";;
   *) echo '2026.6.11';;
 esac

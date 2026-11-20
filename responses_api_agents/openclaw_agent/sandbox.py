@@ -5,10 +5,12 @@
 import asyncio
 import json
 import logging
+import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from time import monotonic
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
@@ -192,15 +194,43 @@ class OpenClawSandboxSession(AgentSessionState):
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
+    async def _read_sqlite_transcript(self, session_id: str) -> str:
+        directory = self.session.session_dir
+        destination = f"transcripts-{uuid4().hex}"
+        script = Path(__file__).with_name("export_sessions.mjs")
+        await self.session.sandbox.upload(script, f"{directory}/{script.name}")
+        command = shlex.join(
+            [
+                f"{self.runtime}/node/bin/node",
+                f"{directory}/{script.name}",
+                f"{self.runtime}/openclaw/node_modules/openclaw/openclaw.mjs",
+                f"{directory}/home/.openclaw",
+                f"{directory}/{destination}",
+                session_id,
+            ]
+        )
+        result = await self.session.sandbox.exec(command, cwd=directory, timeout_s=30)
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"OpenClaw transcript export failed: {result.error_type or result.stderr}")
+        return await self.read_text(f"{destination}/main/sessions/{session_id}.jsonl")
+
     async def collect_artifacts(self) -> dict[str, str]:
         """Retain transcript and diagnostics before releasing the task sandbox."""
         artifacts = {}
         session_id = self.session.session_dir.rsplit("/", 1)[-1]
-        for name in ("stdout.log", "stderr.log", f"home/.openclaw/agents/main/sessions/{session_id}.jsonl"):
+        for name in ("stdout.log", "stderr.log"):
             try:
                 artifacts[name] = await self.read_text(name)
             except Exception:
                 LOG.warning("OpenClaw artifact unavailable: %s", name, exc_info=True)
+        transcript = f"home/.openclaw/agents/main/sessions/{session_id}.jsonl"
+        try:
+            artifacts[transcript] = await self.read_text(transcript)
+        except Exception:
+            try:
+                artifacts[transcript] = await self._read_sqlite_transcript(session_id)
+            except Exception:
+                LOG.warning("OpenClaw transcript unavailable for %s", session_id, exc_info=True)
         try:
             runtime = json.loads(await self.read_text("runtime.json"))
         except Exception:
