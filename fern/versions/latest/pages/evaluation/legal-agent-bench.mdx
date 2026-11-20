@@ -133,8 +133,9 @@ gym eval run --no-serve \
 ```
 
 The sampling file above targets `openai_model`; configure equivalent defaults
-for other model servers. Hermes rejects row-level `top_p`, and Codex rejects
-row-level `temperature` and `top_p`, so use shared model defaults for comparisons.
+for other model servers. Claude Code and Codex reject row-level `temperature`,
+`top_p`, `max_output_tokens`, and `reasoning`; Hermes accepts only `temperature`,
+which then overrides the preset. Use shared model defaults for comparisons.
 
 Preparation converts legacy `instance_id` rows into canonical Environment Server
 rows. Original IDs and caller parameters are retained. Shared corpora are stored
