@@ -18,8 +18,10 @@ supervisor. Shell commands run in the sandbox; task tools are the resources serv
 """
 
 import asyncio
+import tempfile
 import time
 from asyncio import Semaphore
+from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Mapping, Optional
 from uuid import uuid4
 
@@ -68,6 +70,7 @@ from nemo_gym.trajectory import (
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
+    read_tool_events,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
@@ -106,16 +109,51 @@ def _zero_usage() -> NeMoGymResponseUsage:
     )
 
 
-def _observations(output: Optional[dict[str, Any]], model_server: ModelServerRef) -> AgentObservationBundle:
+def _tool_observations(
+    raw: dict[str, Any], tool_events: Optional[str]
+) -> tuple[list[ToolCallObservation], list[ObservationGap]]:
+    """The runner's recorded tool calls, under the call IDs the conversation uses for them."""
+    call_ids = raw.get("tool_call_ids") or {}
+    failed = raw.get("tool_capture_failed_spans") or []
+    if tool_events is None:
+        # No events file: a runner whose report names no tool call ran none; otherwise the calls are unrecoverable.
+        if not call_ids and not failed:
+            return [], []
+        return [], [ObservationGap(code="tool_capture_unavailable", invocation_id=raw.get("invocation_id"))]
+    with tempfile.TemporaryDirectory(prefix="gym-stirrup-tools-") as directory:
+        path = Path(directory) / "tool_events.jsonl"
+        path.write_text(tool_events)
+        tools, gaps = read_tool_events(path)
+    tools = [
+        tool.model_copy(update={"tool_call_id": call_ids[tool.span_id]}) if tool.span_id in call_ids else tool
+        for tool in tools
+    ]
+    gaps.extend(
+        ObservationGap(code="tool_capture_unavailable", invocation_id=raw.get("invocation_id"), span_id=span)
+        for span in failed
+    )
+    return tools, gaps
+
+
+def _observations(
+    output: Optional[dict[str, Any]], model_server: ModelServerRef, tool_events: Optional[str] = None
+) -> AgentObservationBundle:
     """Validate the evidence the sandbox runner reported into an observation bundle.
 
     Each part is validated on its own, so a part that fails becomes an ``observation_capture_failed`` gap naming
-    it and the rest is kept.
+    it and the rest is kept. Tool calls come from the runner's recorded tool events, which survive a runner that
+    left no output.
     """
     raw = (output or {}).get("observations")
     if not isinstance(raw, dict):
         gap = ObservationGap(code="observation_capture_failed", detail="the runner reported no observations")
-        return AgentObservationBundle(source="stirrup", gaps=[gap])
+        records: list = []
+        gaps = [gap]
+        if tool_events is not None:
+            tools, tool_gaps = _tool_observations({}, tool_events)
+            records.extend(tools)
+            gaps.extend(tool_gaps)
+        return AgentObservationBundle(schema_version="2.0", source="stirrup", records=records, gaps=gaps)
     records, gaps = [], []
 
     def failed(part: str, error: Exception) -> None:
@@ -140,11 +178,13 @@ def _observations(output: Optional[dict[str, Any]], model_server: ModelServerRef
         except Exception as error:
             failed("conversation", error)
         records.append(invocation)
-    for index, tool in enumerate(raw.get("tool_calls") or []):
-        try:
-            records.append(ToolCallObservation.model_validate(tool))
-        except Exception as error:
-            failed(f"tool_calls[{index}]", error)
+    try:
+        tools, tool_gaps = _tool_observations(raw, tool_events)
+    except Exception as error:
+        failed("tool_calls", error)
+    else:
+        records.extend(tools)
+        gaps.extend(tool_gaps)
     for index, compaction in enumerate(raw.get("compactions") or []):
         try:
             event = ContextCompactionObservation.model_validate(
@@ -156,7 +196,7 @@ def _observations(output: Optional[dict[str, Any]], model_server: ModelServerRef
             records.append(event)
         except Exception as error:
             failed(f"compactions[{index}]", error)
-    return AgentObservationBundle(source="stirrup", records=records, gaps=gaps)
+    return AgentObservationBundle(schema_version="2.0", source="stirrup", records=records, gaps=gaps)
 
 
 _REMOVED_OPTIONS = [
@@ -379,7 +419,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         await state.close(self.config.session_close_timeout_seconds)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
-            agent_observations=_observations(state.session.artifacts, self.config.model_server),
+            agent_observations=_observations(state.session.artifacts, self.config.model_server, state.tool_events),
             resources_cookies=state.resources_cookies,
         )
 
@@ -421,6 +461,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "tool_access": state.tool_access.model_dump(mode="json") if state.tool_access else None,
             "workdir": state.session.workdir,
             "stop_request_path": state.session.stop_request_path,
+            # Joins each recorded tool call to the response that requested it.
+            "model_ref": self.config.model_server.model_dump(mode="json"),
             "max_turns": self.config.agent_max_turns,
             "min_compaction_summary_words": self.config.min_compaction_summary_words,
             "client": {
