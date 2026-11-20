@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Flat CAD rows use sessions through single_agent_turn_legacy; no legacy_agent relay or custom agent is involved.
-rollout_correlation: true
-
 use_absolute_ip: true
 absolute_ip_server_types: [responses_api_models]
 head_server:
