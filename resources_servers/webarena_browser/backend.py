@@ -11,8 +11,10 @@ from typing import Any
 from nemo_gym.web import (
     NAVIGATION_WAIT_UNTIL,
     RESET_WAIT_UNTIL,
+    TRANSPORT,
     BrowserSessionHandle,
     ComposedWebBackend,
+    RemoteWebBackend,
     VisualBrowserDriver,
     VisualBrowserEvaluationContext,
     WebArtifactStore,
@@ -92,7 +94,15 @@ def webarena_backend_factory(
     artifacts: WebArtifactStore,
     browser_lease: BrowserSessionHandle,
 ):
-    """Compose the local-site browser with its benchmark evaluator."""
+    """Run site setup and evaluation in the process owning the browser lease."""
+
+    if browser_lease.transport == TRANSPORT:
+        return RemoteWebBackend(
+            handle=browser_lease,
+            config=config,
+            session_id=session_id,
+            backend_factory="resources_servers.webarena_browser.backend:webarena_backend_factory",
+        )
 
     from resources_servers.webarena_browser.evaluators import WebArenaTaskEvaluator
 

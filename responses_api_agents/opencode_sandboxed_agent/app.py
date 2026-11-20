@@ -36,7 +36,6 @@ from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
 from uuid import uuid4
 
-from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
@@ -577,6 +576,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
     artifacts_dir: Optional[str] = None
     opencode_model_call_timeout: Optional[int] = None
+    opencode_provider_id: str = "nemo_gym"
+    opencode_model_id: str = "dummy_model"
+    sandbox_upload_roots: List[str] = Field(default_factory=list)
+    sandbox_row_option_keys: List[str] = Field(default_factory=list)
 
     # Environment variables exported in front of `opencode run` inside the sandbox.
     #
@@ -627,6 +630,8 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
+    sandbox_provider_options: Dict[str, Any] = Field(default_factory=dict)
+    sandbox_uploads: Dict[str, str] = Field(default_factory=dict)
 
 
 def _build_remote_opencode_install_command(
@@ -756,7 +761,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
-    async def _start_sandbox(self, sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AsyncSandbox:
+    async def _start_sandbox(
+        self,
+        sandbox_id: Optional[str] = None,
+        workdir: Optional[str] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
+    ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = create_provider(
             resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -773,6 +783,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         if self.config.debug:
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
+
+        row_options = provider_options or {}
+        if disallowed := sorted(set(row_options) - set(self.config.sandbox_row_option_keys)):
+            raise ValueError(f"sandbox_provider_options {disallowed} are not listed in sandbox_row_option_keys")
+        if "network_policy" in row_options and self.config.network_access != "inherit":
+            raise ValueError("sandbox_provider_options.network_policy cannot be set when network_access is restricted")
 
         resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
         # TODO @bxyu-nvidia: Refactor this after swapping to PTY as this should be set on the SWE Bench resources server side
@@ -794,7 +810,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             },
             resources=resources,
             entrypoint=self.config.sandbox_config.get("entrypoint"),
-            provider_options=deepcopy(self.config.sandbox_config.get("provider_options", {})),
+            provider_options=deepcopy(self.config.sandbox_config.get("provider_options", {})) | deepcopy(row_options),
         )
 
         if self.config.network_access != "inherit":
@@ -805,13 +821,25 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 urls.extend(
                     sandbox_server_url(server.name, require_reachable=True) for server in self.config.tool_servers
                 )
-            sandbox_spec.provider_options["network_policy"] = restricted_network_policy(
-                resolved_sandbox_provider.name, urls
-            )
+            policy = restricted_network_policy(resolved_sandbox_provider.name, urls)
+            configured = sandbox_spec.provider_options.get("network_policy") or {}
+            if configured:
+                if configured.get("defaultAction", "deny") != "deny":
+                    raise ValueError("network_access with a network_policy needs defaultAction: deny")
+                policy["egress"] = list(configured.get("egress") or []) + policy["egress"]
+            sandbox_spec.provider_options["network_policy"] = policy
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
         return sandbox
+
+    async def _upload_inputs(self, sandbox: AsyncSandbox, uploads: Dict[str, str]) -> None:
+        roots = [Path(root).resolve() for root in self.config.sandbox_upload_roots]
+        for remote, local in uploads.items():
+            source = Path(local).resolve()
+            if not source.is_file() or not any(source.is_relative_to(root) for root in roots):
+                raise ValueError(f"sandbox upload {local!r} is not a file under sandbox_upload_roots")
+            await sandbox.upload(source, remote)
 
     async def _stage_ripgrep(self, sandbox: AsyncSandbox, source_path: Path) -> str:
         """Retry an ambiguous upload timeout without reusing its remote path."""
@@ -963,6 +991,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         forwards attached images instead of replacing them with "this model does not support image input"
         (``unsupportedParts`` in OpenCode's provider/transform.ts reads ``capabilities.input.image``, which
         provider.ts derives from the model's ``modalities.input``)."""
+        for provider_id, provider in (self.config.opencode_config.get("provider") or {}).items():
+            if provider_id != self.config.opencode_provider_id:
+                raise ValueError(f"opencode_config.provider.{provider_id} is not opencode_provider_id")
+            for model_id in (provider or {}).get("models", {}) or {}:
+                if model_id != self.config.opencode_model_id:
+                    raise ValueError(f"opencode_config model {model_id} is not opencode_model_id")
         base_url = (
             self.base_url_for_run(
                 base_url=sandbox_server_url(
@@ -973,10 +1007,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             + "/v1"
         )
         config: Dict[str, Any] = {
-            "model": "nemo_gym/dummy_model",
+            "model": f"{self.config.opencode_provider_id}/{self.config.opencode_model_id}",
             "$schema": "https://opencode.ai/config.json",
             "provider": {
-                "nemo_gym": {
+                self.config.opencode_provider_id: {
                     # TODO @bxyu-nvidia: We should use @ai-sdk/openai here but there is some /v1/responses streaming error.
                     "npm": "@ai-sdk/openai-compatible",
                     "options": {
@@ -988,7 +1022,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         else False,  # milliseconds
                     },
                     "models": {
-                        "dummy_model": {
+                        self.config.opencode_model_id: {
                             "temperature": True,
                             "limit": {
                                 "context": self.config.opencode_max_context_window,
@@ -1004,7 +1038,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if image_input:
             # Only when the turn carries images: with it, OpenCode would also send any image the agent's
             # Read tool opens during the run, which a text-only model cannot take.
-            config["provider"]["nemo_gym"]["models"]["dummy_model"]["modalities"] = {
+            config["provider"][self.config.opencode_provider_id]["models"][self.config.opencode_model_id][
+                "modalities"
+            ] = {
                 "input": ["text", "image"],
                 "output": ["text"],
             }
@@ -1105,6 +1141,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if pool and not env.get("EXA_API_KEY"):
             digest = hashlib.sha256(query.encode("utf-8")).digest()
             env["EXA_API_KEY"] = pool[int.from_bytes(digest[:8], "big") % len(pool)]
+        env["NEMO_GYM_OPENCODE_PROVIDER_ID"] = self.config.opencode_provider_id
         return env
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
@@ -1907,6 +1944,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
             workdir=seed_session_result.get("workdir"),
+            provider_options=body.sandbox_provider_options,
         )
         self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
@@ -1917,6 +1955,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request.state._ng_observation_invocation_id = rollout_id
         observations = None
         try:
+            if seed_session_result.get("sandbox_handle") and body.sandbox_provider_options:
+                raise ValueError("sandbox_provider_options cannot apply to a seed-supplied sandbox")
+            await self._upload_inputs(sandbox, body.sandbox_uploads)
             response = await self.responses(request, body.responses_create_params)
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
@@ -1967,17 +2008,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             del request.state._ng_observation_invocation_id
             del request.state._ng_opencode_mcp
             # A server cancels its handler when the caller disconnects, and OpenCode keeps running
-            # in its pod regardless: only stopping the sandbox ends it. Shielded because the
-            # cancellation is re-delivered at every await until the handler exits, so an unshielded
-            # stop would itself be cancelled and leave the pod generating until its TTL.
-            with CancelScope(shield=True):
-                try:
-                    await sandbox.stop()
-                except Exception:
-                    print("Failed to stop sandbox", format_exc(), file=sys.stderr)
-                finally:
-                    self._sandbox_id_to_sandbox.pop(session_key, None)
-                    self._sandbox_id_to_run_result.pop(session_key, None)
+            # in its pod regardless: only stopping the sandbox ends it. AsyncSandbox.stop is shielded
+            # from that cancellation and bounded in time, so the pod does not generate until its TTL.
+            try:
+                await sandbox.stop()
+            except Exception:
+                print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+            finally:
+                self._sandbox_id_to_sandbox.pop(session_key, None)
+                self._sandbox_id_to_run_result.pop(session_key, None)
 
         response_dict |= run_result
         if trajectory is not None:
