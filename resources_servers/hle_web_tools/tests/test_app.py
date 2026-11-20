@@ -45,7 +45,7 @@ def make_server(tavily_api_key: str = "key-one, key-two", **overrides) -> HLEWeb
         host="127.0.0.1",
         port=8000,
         entrypoint="app.py",
-        name="hle_tools",
+        name="web_tools",
         tavily_api_key=tavily_api_key,
         **overrides,
     )
@@ -836,7 +836,7 @@ async def test_rejected_keys_do_not_spend_the_retry_budget(monkeypatch, key_pool
 def test_a_launch_with_several_workers_is_refused():
     """The refusal names what actually stops several uvicorn workers. Session state (seeded questions, bindings) is
     keyed by the session ID, which session routing pins to the owning worker, so that is not the reason."""
-    with pytest.raises(ValueError, match="hle_tools needs num_workers=1: ") as excinfo:
+    with pytest.raises(ValueError, match="web_tools needs num_workers=1: ") as excinfo:
         refuse_unsupported_num_workers(make_server(num_workers=2))
     reason = str(excinfo.value).split(": ", 1)[1]
     assert reason == (

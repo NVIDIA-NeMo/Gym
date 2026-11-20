@@ -120,7 +120,7 @@ hle_diamond_opencode_reference_agent:
       sandbox_provider: sandbox_docker
       network_access: "${oc.select:hle_diamond_docker_egress_acknowledgement.${oc.env:HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS,unset},'refused - the reference preset enforces egress; export HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted to run it on local Docker and label the result'}"
       # The reference image's note with the truth about the network; nothing the image lacks. It names no tool
-      # implementation, so it serves the Tavily tools (opencode_reference) and hle_tools (opencode_hle_tools,
+      # implementation, so it serves the Tavily tools (opencode_reference) and web_tools (opencode_hle_tools,
       # opencode_hle_tools_full) alike.
       system_prompt: |
         Direct internet access from this machine is NOT restricted (local Docker sandbox). The web search and page-reading tools offered to you are available if useful for the task.

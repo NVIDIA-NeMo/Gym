@@ -501,13 +501,13 @@ class TestConfigs:
 
         resolved = _resolve("opencode_hle_tools.yaml")
         assert list(resolved[REFERENCE_AGENT]["responses_api_agents"]) == ["opencode_agent"]
-        # Only the reference agent and the hle_tools server are started: no search agent, no Tavily resource.
+        # Only the reference agent and the web_tools server are started: no search agent, no Tavily resource.
         assert resolved["hle_diamond_opencode_agent"] is None and resolved["tavily"] is None
         env_server = resolved["hle_diamond_equivalence_llm_judge_environment_server"]["environment_servers"]
         assert list(env_server) == ["single_agent_turn_legacy"]
         assert env_server["single_agent_turn_legacy"]["agent_server"]["name"] == REFERENCE_AGENT
         agent = get_first_server_config_dict(resolved, REFERENCE_AGENT)
-        assert agent["tool_servers"] == [{"type": "resources_servers", "name": "hle_tools"}]
+        assert agent["tool_servers"] == [{"type": "resources_servers", "name": "web_tools"}]
         assert (agent["network_access"], agent["sandbox_provider"]) == ("model_and_tools", "sandbox")
         # The sandbox reaches the tool server by address, so the Resources servers leave loopback too.
         assert list(resolved["absolute_ip_server_types"]) == ["responses_api_models", "resources_servers"]
@@ -516,12 +516,12 @@ class TestConfigs:
         note = agent["system_prompt"]
         assert "disabled" in note and "no downloads and no package installation" in note and "Tavily" not in note
         assert "web_search" in note and "web_fetch" in note
-        assert "hle_tools_web_search" in note and "hle_tools_web_fetch" in note  # the names the model sees
+        assert "web_tools_web_search" in note and "web_tools_web_fetch" in note  # the names the model sees
         assert "files" not in agent["sandbox_config"]  # the note is the prompt
         # The effort travels on the model server's extra_body (TestReasoningEffort), not on an OpenCode option.
         assert "provider" not in agent["opencode_config"]
-        assert list(resolved["hle_tools"]["resources_servers"]) == ["hle_web_tools"]
-        tools = get_first_server_config_dict(resolved, "hle_tools")
+        assert list(resolved["web_tools"]["resources_servers"]) == ["hle_web_tools"]
+        tools = get_first_server_config_dict(resolved, "web_tools")
         assert tools["expose_tools_over_mcp"] is True
         assert "blocklist_file_path" not in tools  # the server's pinned upstream copy, not a per-preset list
 
@@ -537,7 +537,7 @@ class TestConfigs:
         """`absolute_ip_server_types` moves every model and Resources server to the routable address, which the
         egress policy then opens on every port. The judge resources server (preset) and the judge model
         (judge_openai.yaml) pin their own loopback host, and a server's own host wins over the type-scoped
-        address, so the sandbox reaches exactly two hosts' ports: the model server's and hle_tools'."""
+        address, so the sandbox reaches exactly two hosts' ports: the model server's and web_tools'."""
         import nemo_gym.config.global_config as global_config
         from nemo_gym.config import GlobalConfigDictParser
 
@@ -571,11 +571,11 @@ class TestConfigs:
 
         hosts = {
             name: get_first_server_config_dict(config, name)["host"]
-            for name in ("policy_model", "hle_tools", JUDGE_SERVER, "hle_diamond_judge_model", REFERENCE_AGENT)
+            for name in ("policy_model", "web_tools", JUDGE_SERVER, "hle_diamond_judge_model", REFERENCE_AGENT)
         }
         assert hosts == {
             "policy_model": "192.0.2.20",
-            "hle_tools": "192.0.2.20",
+            "web_tools": "192.0.2.20",
             JUDGE_SERVER: "127.0.0.1",
             "hle_diamond_judge_model": "127.0.0.1",
             REFERENCE_AGENT: "127.0.0.1",
@@ -676,7 +676,7 @@ class TestConfigs:
         agent_dict, base_dict = settings(agent), settings(get_first_server_config_dict(base, REFERENCE_AGENT))
         differing = {key for key in set(agent_dict) | set(base_dict) if agent_dict.get(key) != base_dict.get(key)}
         assert differing == {"datasets"}
-        for instance in (JUDGE_SERVER, "hle_tools", "hle_diamond_equivalence_llm_judge_environment_server"):
+        for instance in (JUDGE_SERVER, "web_tools", "hle_diamond_equivalence_llm_judge_environment_server"):
             assert settings(get_first_server_config_dict(resolved, instance)) == settings(
                 get_first_server_config_dict(base, instance)
             ), instance
@@ -1026,14 +1026,14 @@ class TestLocalDockerOverride:
         # opencode_hle_tools runs on the reference agent, so it composes only once acknowledged (TestReferencePreset);
         # the reference agent's note serves it and names no backend, and the tool grant and MCP timeout survive.
         monkeypatch.setenv(ACK_ENV, "egress-not-restricted")
-        hle_tools, preset = agents("opencode_hle_tools.yaml", REFERENCE_AGENT)
+        web_tools, preset = agents("opencode_hle_tools.yaml", REFERENCE_AGENT)
         reference, _ = agents("opencode_reference.yaml", REFERENCE_AGENT)
-        assert hle_tools["system_prompt"] == reference["system_prompt"] and "Tavily" not in hle_tools["system_prompt"]
-        assert "NOT restricted" in hle_tools["system_prompt"] and "SageMath" not in hle_tools["system_prompt"]
+        assert web_tools["system_prompt"] == reference["system_prompt"] and "Tavily" not in web_tools["system_prompt"]
+        assert "NOT restricted" in web_tools["system_prompt"] and "SageMath" not in web_tools["system_prompt"]
         assert (
-            hle_tools["tool_servers"] == preset["tool_servers"] == [{"type": "resources_servers", "name": "hle_tools"}]
+            web_tools["tool_servers"] == preset["tool_servers"] == [{"type": "resources_servers", "name": "web_tools"}]
         )
-        assert hle_tools["mcp_tool_timeout_seconds"] == preset["mcp_tool_timeout_seconds"]
+        assert web_tools["mcp_tool_timeout_seconds"] == preset["mcp_tool_timeout_seconds"]
 
         full, preset = agents("opencode_search_full.yaml", FULL_AGENT)
         note = full["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
@@ -1082,7 +1082,7 @@ class TestReferencePreset:
     """opencode_reference.yaml: opencode_search.yaml on the reference image under upstream's egress policy
     (docs/evaluation-with-tools.md), which sandbox_docker_local.yaml may lift only when acknowledged."""
 
-    # The presets on the reference agent: the Tavily tools, upstream's hle_tools, and hle_tools over the full set.
+    # The presets on the reference agent: the Tavily tools, upstream's web_tools, and web_tools over the full set.
     PRESETS = ["opencode_reference.yaml", "opencode_hle_tools.yaml", "opencode_hle_tools_full.yaml"]
 
     @staticmethod

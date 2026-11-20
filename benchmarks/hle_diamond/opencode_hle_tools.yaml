@@ -3,7 +3,7 @@
 # docs/evaluation-with-tools.md, network_access model_and_tools) with the Tavily tools replaced by
 # resources_servers/hle_web_tools, which exposes exactly web_search and web_fetch over MCP behind the upstream
 # docs/blocklist.json (all seven rule families, query and fetch refusals, content re-checks) with Tavily as the
-# search and extraction backend. The Environment Server seeds the hle_tools server for every episode and grants
+# search and extraction backend. The Environment Server seeds the web_tools server for every episode and grants
 # its MCP tools to the agent (the agent's tool_servers); the sandbox reaches only the model server and that
 # server (the judge servers are pinned to loopback below). This is the preset that follows upstream's protocol
 # (sections 1-3) on every point Gym controls; benchmarks/hle_diamond/README.md > Sandboxed agents (with tools)
@@ -17,9 +17,9 @@
 # not listed.
 config_paths:
 - benchmarks/hle_diamond/opencode_reference.yaml
-# The Tavily tool server of opencode_search.yaml is not started: hle_tools is the only tool server.
+# The Tavily tool server of opencode_search.yaml is not started: web_tools is the only tool server.
 tavily: null
-hle_tools:
+web_tools:
   resources_servers:
     hle_web_tools:
       entrypoint: app.py
@@ -33,12 +33,12 @@ hle_diamond_opencode_reference_agent:
     opencode_agent:
       tool_servers:
       - type: resources_servers
-        name: hle_tools
+        name: web_tools
       # Only what the reference protocol allows (no SageMath, Lean or /opt/science/README.md), and the two tools
       # by the names OpenCode shows the model (<grant>_<tool>). Any note is extra prompt text upstream's model
       # never saw; the README states it next to every number.
       system_prompt: |
-        Direct internet access is disabled on this machine: no downloads and no package installation. External information is available only through the web_search and web_fetch tools of the hle_tools server (hle_tools_web_search and hle_tools_web_fetch).
+        Direct internet access is disabled on this machine: no downloads and no package installation. External information is available only through the web_search and web_fetch tools of the web_tools server (web_tools_web_search and web_tools_web_fetch).
         Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.
 # The judge, on this preset only, as upstream's hle_eval/run_judge_results.py runs it on every point Gym controls:
 # - the judge's [question] is the bare dataset question. prompts/opencode.yaml folds the answer-format instruction
@@ -47,8 +47,8 @@ hle_diamond_opencode_reference_agent:
 # - the judge call is capped at 4096 output tokens (upstream: max_completion_tokens=4096). A verdict cut off by
 #   the cap scores 0 as no_verdict, as it would upstream;
 # - the judge server stays on loopback: absolute_ip_server_types moves every Resources server to the routable
-#   address so the sandbox can reach hle_tools, and a server's own host wins over that, so the sandbox reaches
-#   exactly the model server and hle_tools (judge_openai.yaml pins its judge model the same way).
+#   address so the sandbox can reach web_tools, and a server's own host wins over that, so the sandbox reaches
+#   exactly the model server and web_tools (judge_openai.yaml pins its judge model the same way).
 hle_diamond_equivalence_llm_judge_resources_server:
   resources_servers:
     equivalence_llm_judge:

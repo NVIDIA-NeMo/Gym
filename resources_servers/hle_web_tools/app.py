@@ -307,7 +307,7 @@ class Block:
             else "the URL is not a valid http(s) URL the policy can check",
             UNSEEDED_SESSION_FAMILY: "search is served only to a rollout session seeded with its question",
         }[self.family]
-        return f"Refused by the HLE web-tool policy: {reason}."
+        return f"Refused by the web-tool policy: {reason}."
 
 
 class Blocklist:

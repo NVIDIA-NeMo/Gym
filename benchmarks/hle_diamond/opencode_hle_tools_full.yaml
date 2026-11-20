@@ -1,6 +1,6 @@
 # OpenCode preset with upstream's two web tools over ALL 1000 HLE-Diamond questions, the 272 image questions
 # included: opencode_hle_tools.yaml (the reference agent hle_diamond_opencode_reference_agent, an opencode_agent
-# session on the HLE-Diamond reference image under network_access model_and_tools, hle_tools as the only tool
+# session on the HLE-Diamond reference image under network_access model_and_tools, web_tools as the only tool
 # server, the judge as upstream runs it) with ONLY that agent's dataset swapped for the full set written by
 # prepare_opencode_legacy.py. The published HLE-Diamond with-tools numbers (lastexam.ai/blog/hle-diamond) are over
 # all 1000 questions, so a 728-row number from opencode_hle_tools is not comparable with them; this preset has the
@@ -34,7 +34,7 @@
 # - the judge reads [question] from the last user message, joining a multimodal turn's text parts
 #   (resources_servers/equivalence_llm_judge/app.py, _extract_question_text), then applies the inherited
 #   question_extract_regex, which cuts the folded instruction off: the bare question, as on opencode_hle_tools.
-#   The hle_tools seed reads the row's `question` field (resources_servers/hle_web_tools/app.py, extract_question),
+#   The web_tools seed reads the row's `question` field (resources_servers/hle_web_tools/app.py, extract_question),
 #   which the full set carries like the text set.
 #
 # Unlike opencode_hle_tools.yaml and opencode_search.yaml, this file declares a dataset, so it is discovered by

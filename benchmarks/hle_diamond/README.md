@@ -913,7 +913,7 @@ equal to `hle`'s apart from those two keys:
   `/usr/local/bin/opencode` at the digest its Dockerfile checks (`sandbox_executable_path`,
   `sandbox_executable_sha256`) and Pi the image's `/opt/node` and `/opt/pi` (`sandbox_runtime_dir: /opt`,
   `pi_version: 0.85.1`).
-- Search: the agent's `tool_servers` lists the Tavily server (`opencode_hle_tools`: the `hle_tools`
+- Search: the agent's `tool_servers` lists the Tavily server (`opencode_hle_tools`: the `web_tools`
   instance of `hle_web_tools`); the Environment Server seeds a session on that server for every
   episode and grants its MCP tools to the agent. The judge serves no tools, so it grants none of its
   own.
@@ -1087,7 +1087,7 @@ the denominator of the published with-tools column (Coverage below).
 - Exactly two tools over MCP, `web_search(query)` (URL, title and snippet of at most 20 results per call before
   filtering) and `web_fetch(url)` (main content as Markdown, capped at 60,000 characters with a
   truncation indicator, no image, audio or video payloads; PDF rendering is Tavily's and unverified live). OpenCode
-  names them `hle_tools_web_search` and `hle_tools_web_fetch`; its own `webfetch` and `websearch` stay denied.
+  names them `web_tools_web_search` and `web_tools_web_fetch`; its own `webfetch` and `websearch` stay denied.
 - The upstream `docs/blocklist.json`, byte-exact (digest pinned in the server and checked at start),
   with **all seven rule families** enforced with the semantics the protocol describes, plus its query
   refusals (a blocked `site:` domain, a verbatim span of the question: 8 consecutive words, the
@@ -1107,8 +1107,8 @@ the denominator of the published with-tools column (Coverage below).
 **Agent session.** The preset extends `opencode_reference.yaml`, so its agent is the reference agent
 (`hle_diamond_opencode_reference_agent`, Reference preset): an `opencode_agent` session on the
 reference image (`OPENCODE_REFERENCE_SANDBOX_IMAGE`, default `gym-opencode-hle-reference:local`) under
-`network_access: model_and_tools`, with the Tavily resource removed (`tavily: null`) and `hle_tools`
-granted instead. The Environment Server seeds the `hle_tools` server for every episode with the row
+`network_access: model_and_tools`, with the Tavily resource removed (`tavily: null`) and `web_tools`
+granted instead. The Environment Server seeds the `web_tools` server for every episode with the row
 (`/seed_session` reads the question from `task_data`) and grants its MCP tools from the agent's
 `tool_servers`; the sandbox reaches the tool server by address (`absolute_ip_server_types` adds the
 Resources servers) while the judge resources server and, with `judge_openai.yaml`, the judge model pin
@@ -1123,7 +1123,7 @@ failed call counted as wrong; add `'++count_failure_classes_as_zero=[agent_run_e
 are routed to the sidecar) and `coverage/imputed` says how many rows it imputed:
 
 ```bash
-export TAVILY_API_KEY=...   # the hle_tools server's search and extraction backend
+export TAVILY_API_KEY=...   # the web_tools server's search and extraction backend
 export OPENCODE_REFERENCE_SANDBOX_IMAGE=gym-opencode-hle-reference:local   # the default
 gym eval run --benchmark hle_diamond/opencode_hle_tools --split benchmark --model-type litellm_model \
     '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]' \
@@ -1158,7 +1158,7 @@ Docker host). Report rows evaluated / 1000 next to the number as for every full 
 
 A reproduction-grade run needs the OpenSandbox provider, which enforces the egress policy, in egress
 mode `dns+nft` (preflight: confirm the deployment's mode, and inside a sandbox that
-`python -c 'import requests; requests.get("https://example.com")'` fails while the `hle_tools` MCP
+`python -c 'import requests; requests.get("https://example.com")'` fails while the `web_tools` MCP
 endpoint answers); keep `head_server_serve_credentials` unset. Like `opencode_reference`, this preset is
 refused by `sandbox_docker_local.yaml` unless `HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted`
 is exported, and such a run is comparison infrastructure only (Quickstart > Sandboxed presets on a local
@@ -1170,14 +1170,14 @@ all at upstream commit `22ed3074b1e7b134bcbc09028d0ba320839b0655`: <!-- pragma: 
 
 | Upstream requirement (`docs/evaluation-with-tools.md` at `22ed3074b1e7b134bcbc09028d0ba320839b0655` <!-- pragma: allowlist secret -->, and `hle_eval/` at the same commit) | Status | Where, and why |
 | --- | --- | --- |
-| §1 Disable internet access from the code sandbox, including downloads and package installation | matched (OpenSandbox) | `network_access: model_and_tools` becomes a deny-all OpenSandbox network policy that allows the model server's host and the `hle_tools` host; any other provider fails closed (`sandbox_docker_local.yaml` lifts it only behind `HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS`, label the run). The image has no `curl`, `git` or Node; `pip` is present and has no network. Gate: the OpenSandbox server must run egress mode `dns+nft` (in `dns` mode a hard-coded IP bypasses the policy); that is a deployment setting, not Gym config, and no OpenSandbox run of this preset exists yet. |
-| §1 External information is available only through `web_search` and `web_fetch` | matched | `hle_tools` is the only tool server; OpenCode's `webfetch`, `websearch` and `task` are denied. Residual: `/seed_session` is unauthenticated, so a sandbox can seed a fresh session and search without the span rule for the real question (NVIDIA-NeMo/Gym#5845); the blocklist families do not depend on the seed. |
-| §1 Network access for the evaluated model is separate from task internet access | matched | The sandbox reaches the model server's host and the `hle_tools` host, nothing else: the judge resources server and the judge model pin `host: 127.0.0.1`, which wins over `absolute_ip_server_types`. OpenSandbox's policy is per host, so every port of those two hosts is open. |
+| §1 Disable internet access from the code sandbox, including downloads and package installation | matched (OpenSandbox) | `network_access: model_and_tools` becomes a deny-all OpenSandbox network policy that allows the model server's host and the `web_tools` host; any other provider fails closed (`sandbox_docker_local.yaml` lifts it only behind `HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS`, label the run). The image has no `curl`, `git` or Node; `pip` is present and has no network. Gate: the OpenSandbox server must run egress mode `dns+nft` (in `dns` mode a hard-coded IP bypasses the policy); that is a deployment setting, not Gym config, and no OpenSandbox run of this preset exists yet. |
+| §1 External information is available only through `web_search` and `web_fetch` | matched | `web_tools` is the only tool server; OpenCode's `webfetch`, `websearch` and `task` are denied. Residual: `/seed_session` is unauthenticated, so a sandbox can seed a fresh session and search without the span rule for the real question (NVIDIA-NeMo/Gym#5845); the blocklist families do not depend on the seed. |
+| §1 Network access for the evaluated model is separate from task internet access | matched | The sandbox reaches the model server's host and the `web_tools` host, nothing else: the judge resources server and the judge model pin `host: 127.0.0.1`, which wins over `absolute_ip_server_types`. OpenSandbox's policy is per host, so every port of those two hosts is open. |
 | §2 Python 3.11.16 with a shell | matched | The reference image: `python:3.11.16-slim-bookworm` at a pinned digest, `python --version` asserted at build, bash from the base image. |
 | §2 Install the pinned requirements (`docs/requirements-tools.txt`, twelve packages) | matched | `hle_reference_image/requirements-tools.txt` is byte-identical (SHA-256 `c1c626be…7068`), installed from a hashed lock with `pip check`; the test pins every version. Transitive versions are Gym's lock (upstream resolves them at install time, so theirs are unknowable). |
 | §2 No specialist solvers, chess engines, OCR tools or task libraries | matched | Only `ripgrep` is added; a test scans the Dockerfile and lock for forbidden tokens, and the offline verification found none. The OpenCode binary and its plugin files are harness-side, as upstream's vendor CLIs are. |
-| §2 (implicit) The model is told nothing beyond what the harness says | cannot match exactly | A two-sentence environment note is appended to OpenCode's instructions: internet disabled, the two tools by the names OpenCode shows (`hle_tools_web_search`, `hle_tools_web_fetch`), Python 3.11 and the twelve packages. It names nothing the image lacks (tested); state it next to every number. |
-| §3 Expose only `web_search(query)` and `web_fetch(url)` | matched | The MCP token lists exactly the two; the server refuses to start with any other set. OpenCode shows them as `<grant>_<tool>` (`hle_tools_web_search`, `hle_tools_web_fetch`); upstream states no naming requirement for its wrapper. |
+| §2 (implicit) The model is told nothing beyond what the harness says | cannot match exactly | A two-sentence environment note is appended to OpenCode's instructions: internet disabled, the two tools by the names OpenCode shows (`web_tools_web_search`, `web_tools_web_fetch`), Python 3.11 and the twelve packages. It names nothing the image lacks (tested); state it next to every number. |
+| §3 Expose only `web_search(query)` and `web_fetch(url)` | matched | The MCP token lists exactly the two; the server refuses to start with any other set. OpenCode shows them as `<grant>_<tool>` (`web_tools_web_search`, `web_tools_web_fetch`); upstream states no naming requirement for its wrapper. |
 | §3 `web_search`: URLs, titles, snippets; at most 20 results per call before filtering | matched | Tavily `/search` with `max_results` 20 (bounded `le=20`), no answer, no page bodies, no images; survivors at most 20. |
 | §3 `web_fetch`: main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | matched | Tavily `/extract` in Markdown; cut at 60,000 with `[Content truncated at 60,000 characters; N characters omitted]`; a page of any length is served cut (no size refusal); `data:` URIs removed, `include_images: false`; `max_fetch_chars` cannot exceed 60,000. Unverified: PDF rendering is Tavily's and no live PDF fetch is recorded. |
 | §3 Load `docs/blocklist.json` | matched | Byte-exact copy (SHA-256 `3abaf35e…6575`), digest checked at start; all seven families present, unknown families rejected. |
@@ -1210,7 +1210,7 @@ Harness mapping for §4, from the agents Gym has today:
 
 | Upstream harness | Gym status |
 | --- | --- |
-| Claude Code 2.1.278 / 2.1.280 | `responses_api_agents/claude_code_agent` pins an exact version but rejects `network_access: model_and_tools` and remote MCP tool grants, so it cannot carry `hle_tools`: adapter change needed before a preset. |
+| Claude Code 2.1.278 / 2.1.280 | `responses_api_agents/claude_code_agent` pins an exact version but rejects `network_access: model_and_tools` and remote MCP tool grants, so it cannot carry `web_tools`: adapter change needed before a preset. |
 | Codex CLI 0.155.1 | `responses_api_agents/codex_agent` supports sandboxed sessions, MCP grants and `model_and_tools`; a preset needs the Codex runtime baked into the reference image (a restricted sandbox cannot download it) and a parsing smoke at 0.155.1, which is outside its tested version (0.144.4). |
 | Gemini CLI 0.60.0 | no Gym agent. |
 | Muse Code 1.3.0 | no Gym agent. |
@@ -1238,7 +1238,8 @@ unrestricted; comparison infrastructure only) ran the preset as it then was, `op
 behind the `legacy_agent` relay on the science image: exit 0, 5/5 rows scored (3 correct), 4/5 rows made
 tool calls, among them two `web_search` calls that returned 20 and 16 results with no Tavily error; all 14
 captured OpenCode requests carried `reasoning_effort: high` (OpenCode's own option on that harness) and
-offered exactly `hle_tools_web_search` and `hle_tools_web_fetch` as MCP tools next to OpenCode's native
+offered exactly `hle_tools_web_search` and `hle_tools_web_fetch` (the tool server was then named
+`hle_tools`; it is `web_tools` now) as MCP tools next to OpenCode's native
 file and shell tools. A manual `web_search` through the server's MCP endpoint, in a session seeded with a
 real question and quoting ten consecutive words of it, was refused with the span message and logged
 as `family=question_span rule='8 consecutive words of the question' where=query subject='8 words'`; a
@@ -1266,6 +1267,12 @@ with the agent asking the user a question instead of an `Answer:` line, as an in
 does when it cannot verify; upstream's protocol adds no nudge and neither does this preset. One run, one
 repeat, no confidence interval, open egress: a comparison, not a reproduction (Reference preset >
 OpenSandbox gate).
+The pilot ran before the tool server was renamed from `hle_tools` to `web_tools`: the model saw the tools
+as `hle_tools_web_search` and `hle_tools_web_fetch`, and a refusal began "Refused by the HLE web-tool
+policy" (the local-Docker note names no tool). The names and the refusal text no longer mention the
+benchmark; nothing else changed, and the pilot was not rerun under the new names. A one-row run after
+the rename (2026-11-20, same composition) offered `web_tools_web_search` and `web_tools_web_fetch` in
+every policy request, with no `hle` string in any of them.
 
 **Judge settings, paired regrade, 2026-11-18** (`gym eval reverify` over the pilot's 1,000 saved rollouts:
 same completions, same row ids, same judge `azure/openai/o3-mini`, no policy call). Two judge settings

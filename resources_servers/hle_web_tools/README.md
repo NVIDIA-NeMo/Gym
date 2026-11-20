@@ -190,7 +190,7 @@ the rule text.
 ## Configuration
 
 ```yaml
-hle_tools:
+web_tools:
   resources_servers:
     hle_web_tools:
       entrypoint: app.py
@@ -223,7 +223,7 @@ serves a module-level `app`, which this module does not define, and the page cac
 page-check pool are per process, so each worker would fetch, scan and cache its own copy of a page. The server
 says so through `multiple_workers_unsupported_reason`, so a launch with `num_workers > 1` is refused before
 uvicorn starts, dry runs included (`<instance name> needs num_workers=1: ...`, for the Diamond preset
-`hle_tools needs num_workers=1: the module defines no module-level app for uvicorn workers, ...`).
+`web_tools needs num_workers=1: the module defines no module-level app for uvicorn workers, ...`).
 
 `verify` is a stub: this is a tool server. A preset pairs it through the agent's `tool_servers` and
 grades the rollout with its own `resources_server` (for HLE-Diamond, the equivalence judge). Should
@@ -237,7 +237,7 @@ agent (`hle_diamond_opencode_reference_agent`) on the HLE-Diamond reference imag
 twelve pinned packages, a shell, OpenCode) under `network_access: model_and_tools`, with the Tavily
 resource removed and this server granted instead. Its Environment Server seeds this server for every
 episode with the task row and grants `web_search` and `web_fetch` to the agent over MCP from the agent's
-`tool_servers` (OpenCode shows them to the model as `hle_tools_web_search` and `hle_tools_web_fetch`);
+`tool_servers` (OpenCode shows them to the model as `web_tools_web_search` and `web_tools_web_fetch`);
 the sandbox reaches the server by address, while the preset pins the judge servers to loopback so the
 sandbox reaches exactly the model server and this one. `benchmarks/hle_diamond/opencode_hle_tools_full.yaml`
 is the same preset over all 1000 HLE-Diamond questions, the 272 image questions included (the dataset is
