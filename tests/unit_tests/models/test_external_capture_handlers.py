@@ -226,6 +226,20 @@ def _staged_coords(**overrides: Any) -> dict[str, Any]:
     return CommitCoords(**kwargs).model_dump(mode="json")
 
 
+def _held_coords() -> dict[str, Any]:
+    """Return the ids-and-lengths acknowledgement of a worker that keeps and joins its own tokens."""
+    return CommitCoords(
+        capture_key="rollout-1",
+        model_call_id="c1",
+        prev_len=0,
+        weight_version=7,
+        delta_len=3,
+        cum_len=3,
+        disposition="held",
+        staging_key="engine-uid",
+    ).model_dump(mode="json")
+
+
 @HANDLER_CLASSES
 @pytest.mark.parametrize("framework", [False, True])
 async def test_only_framework_capture_persists_selection_and_validation_evidence(handler_cls, framework, tmp_path):
@@ -284,10 +298,15 @@ class _FinalizeCase:
     coords_payload: Any
     expected_failure: str | None
     drop_response_id: bool = False
+    # The custody the model server is configured to accept (``external_staging_custody``).
+    custody: str = "staged"
 
 
 _FINALIZE_CASES = {
     "staged": _FinalizeCase(coords_payload=_staged_coords(), expected_failure=None),
+    "held": _FinalizeCase(coords_payload=_held_coords(), expected_failure=None, custody="held"),
+    # A held receipt is unverifiable, so a server configured for staged custody refuses it.
+    "held-not-configured": _FinalizeCase(coords_payload=_held_coords(), expected_failure=INVALID_COMMIT_COORDS_REASON),
     # ``drop_response_id`` is deliberately False: finalization returns at the
     # missing-coordinates branch before the envelope id is ever inspected.
     "missing-coordinates": _FinalizeCase(
@@ -372,6 +391,7 @@ async def test_handler_finalization_updates_lineage_and_cleans_transport(handler
     handler = handler_cls()
     store = InMemoryLineageStore()
     context = _root_context(store)
+    context.custody = case.custody
     payload = _transport_payload()
     if case.coords_payload is not None:
         payload["ng_commit_coords"] = case.coords_payload
@@ -385,10 +405,14 @@ async def test_handler_finalization_updates_lineage_and_cleans_transport(handler
         assert context.committed is True
         assert manifest["failures"] == []
         record = manifest["records"][0]
-        assert record["staging_key"] == "r0/c1"
         assert record["weight_version"] == 7
-        assert record["chain_hash"] == "2" * 64
-        assert record["cumulative_hash"] == "3" * 64
+        if case.custody == "held":
+            assert record["staging_key"] == "engine-uid" and record["custody"] == "held"
+            assert record["chain_hash"] is None and record["cumulative_hash"] is None
+        else:
+            assert record["staging_key"] == "r0/c1" and record["custody"] == "staged"
+            assert record["chain_hash"] == "2" * 64
+            assert record["cumulative_hash"] == "3" * 64
         assert record["response_id"] == "request-1"
         _assert_transport_fields_stripped(payload)
     else:
@@ -401,6 +425,7 @@ async def test_handler_finalization_updates_lineage_and_cleans_transport(handler
 async def test_handler_writes_the_call_identity_on_the_row_it_leaves(handler_cls, case: _FinalizeCase) -> None:
     store = InMemoryLineageStore()
     context = _root_context(store)
+    context.custody = case.custody
     context.agent_instance = "judge.1"
     context.model_ref = ModelRef(name="policy")
     payload = _transport_payload()

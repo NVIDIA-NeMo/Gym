@@ -136,6 +136,9 @@ class CaptureContext:
     # Only admitted writers participate in completion/failure accounting.
     intent_registered: bool = False
     parent_chain_hash: str = ""
+    # Which receipt a worker may return for an admitted call:
+    # `staged` (digest-bearing) or `held` (ids and lengths; the worker's store vouches).
+    custody: str = "staged"
     # The request items as received from the harness, stashed by
     # ``resolve_parent`` so the commit hook can publish the ledger row with
     # the exact representation the next request will echo.
@@ -329,6 +332,7 @@ async def resolve_parent(request_messages: list | None) -> None:
                 required_prefix_token_ids=[],
                 staging_chain=list(match.staging_chain),
                 parent_chain_hash=match.chain_hash or None,
+                parent_custody=match.custody,
             )
         except ValueError:
             logger.warning(
@@ -471,6 +475,7 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
         parent_call_id=predecessor.model_call_id if predecessor is not None else None,
         prev_len=predecessor.cum_len if predecessor is not None else 0,
         parent_chain_hash=predecessor.chain_hash if predecessor is not None else None,
+        parent_custody=predecessor.custody if predecessor is not None else None,
         staging_chain=chain,
         request_replay=request_replay,
         candidate_replay=predecessor.replay if predecessor is not None else None,

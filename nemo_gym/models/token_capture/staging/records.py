@@ -38,6 +38,7 @@ from nemo_gym.models.token_capture.records import (  # noqa: F401  (re-exported 
     LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
     UNCOMMITTED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
+    Custody,
     ModelRef,
     OmitsAbsentIdentity,
 )
@@ -51,7 +52,7 @@ from nemo_gym.models.token_capture.staging.digest import (
 )
 
 
-CaptureDisposition = Literal["staged", "capture_failed"]
+CaptureDisposition = Literal["staged", "capture_failed", "held"]
 CaptureMode = Literal["token_in", "text"]
 CompletionStatus = Literal["completed", "incomplete", "failed", "unknown"]
 RootReason = Literal[
@@ -253,6 +254,9 @@ class CaptureAdmission(_RolloutIdAlias, _WireModel):
     required_prefix_token_ids: list[StrictInt] = Field(default_factory=list)
     staging_chain: list[str] = Field(default_factory=list)
     parent_chain_hash: DigestHex | None = None
+    # `held` when the parent row is a held receipt (`Custody`): it has no chain hash to pass on,
+    # so the worker chains nothing and the admission is ids and lengths only.
+    parent_custody: Custody | None = None
     generation_cut: GenerationCutContinuation | None = None
     request_replay: ReplayContext | None = None
     candidate_replay: ReplaySummary | None = None
@@ -274,8 +278,10 @@ class CaptureAdmission(_RolloutIdAlias, _WireModel):
         if self.mode in ("token_in", "candidate"):
             if self.parent_call_id is None or self.prev_len == 0:
                 raise ValueError("token_in admission requires a parent_call_id and prev_len > 0")
-            if self.parent_chain_hash is None:
+            if self.parent_chain_hash is None and self.parent_custody != "held":
                 raise ValueError("token_in admission requires the parent's chain hash")
+            if self.parent_chain_hash is not None and self.parent_custody == "held":
+                raise ValueError("a held parent has no chain hash")
             # When staging_chain is supplied the worker fetches the prefix from TQ;
             # required_prefix_token_ids is allowed to be empty on the wire.
             if not self.staging_chain and len(self.required_prefix_token_ids) != self.prev_len:
@@ -286,6 +292,7 @@ class CaptureAdmission(_RolloutIdAlias, _WireModel):
             or self.required_prefix_token_ids
             or self.staging_chain
             or self.parent_chain_hash is not None
+            or self.parent_custody is not None
         ):
             raise ValueError("text admission must be a parentless root with no required prefix")
         return self
@@ -486,15 +493,24 @@ class CommitCoords(_RolloutIdAlias, _DigestWireModel):
             raise ValueError("child coordinates must have prev_len > 0")
         if self.cum_len != self.prev_len + self.delta_len:
             raise ValueError("cum_len must equal prev_len + delta_len")
-        staged_payload = (self.digest, self.extras_digest, self.staging_key, self.chain_hash, self.cumulative_hash)
+        digests = (self.digest, self.extras_digest, self.chain_hash, self.cumulative_hash)
         if self.disposition == "staged":
-            if any(value is None for value in staged_payload):
+            if self.staging_key is None or any(value is None for value in digests):
                 raise ValueError(
                     "staged coordinates require digest, extras_digest, staging_key, chain_hash, and cumulative_hash"
                 )
             if self.delta_len == 0:
                 raise ValueError("staged coordinates require a non-empty delta")
-        elif any(value is not None for value in staged_payload):
+        elif self.disposition == "held":
+            if self.staging_key is None:
+                raise ValueError("held coordinates require a staging_key")
+            if any(value is not None for value in digests):
+                raise ValueError(
+                    "held coordinates cannot carry digests: the worker's own store vouches for the tokens"
+                )
+            if self.delta_len == 0:
+                raise ValueError("held coordinates require a non-empty delta")
+        elif self.staging_key is not None or any(value is not None for value in digests):
             raise ValueError("capture_failed coordinates cannot carry staged payload metadata")
         elif self.delta_len != 0:
             raise ValueError("capture_failed coordinates cannot carry token deltas")
@@ -517,12 +533,15 @@ class CallRecord(_DigestWireModel, OmitsAbsentIdentity):
     delta_len: NonNegativeInt
     cum_len: NonNegativeInt
     weight_version: NonNegativeInt
-    digest: DigestHex
-    extras_digest: DigestHex
+    digest: DigestHex | None = None
+    extras_digest: DigestHex | None = None
     staging_key: Identifier
     mode: CaptureMode = "token_in"
-    chain_hash: DigestHex
-    cumulative_hash: DigestHex
+    chain_hash: DigestHex | None = None
+    cumulative_hash: DigestHex | None = None
+    # Whether the worker's receipt carried the four digests above (`staged`)
+    # or vouched for the tokens with its own store (`held`). A held row has none of the four.
+    custody: Custody = "staged"
     # The response envelope ID observed before the model server returns the response.
     # Terminal attribution matches the scored ``response.id`` to this field.
     response_id: Identifier
@@ -585,6 +604,11 @@ class CallRecord(_DigestWireModel, OmitsAbsentIdentity):
             raise ValueError("a parentless manifest row must use text mode")
         if self.parent_call_id is not None and self.mode != "token_in":
             raise ValueError("a child manifest row must use token_in mode")
+        digests = (self.digest, self.extras_digest, self.chain_hash, self.cumulative_hash)
+        if self.custody == "staged" and any(value is None for value in digests):
+            raise ValueError("a staged manifest row requires digest, extras_digest, chain_hash, and cumulative_hash")
+        if self.custody == "held" and any(value is not None for value in digests):
+            raise ValueError("a held manifest row carries no digests")
         return self
 
 

@@ -118,6 +118,7 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "staging_chain": list(staging_chain) if staging_chain else [],
         "chain_hash": record.chain_hash,
         "cumulative_hash": record.cumulative_hash,
+        "custody": record.custody,
         "response_id": record.response_id,
         "output_fingerprint": record.output_fingerprint or None,
         "continuation_fingerprint": record.continuation_fingerprint or None,
@@ -133,6 +134,12 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "source_capture_key": record.source_capture_key,
         **CallIdentity(agent_instance=record.agent_instance, model_ref=record.model_ref).columns(),
     }
+
+
+def _digest_column(row: dict, key: str) -> str | None:
+    """A digest column as the manifest row carries it: ``None`` when the row has none (held)."""
+    value = row.get(key)
+    return None if value is None else str(value)
 
 
 def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
@@ -192,9 +199,10 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
                     )
                 )
                 continue
-            if not row.get("chain_hash") or not row.get("cumulative_hash"):
-                # Same treatment for a custody row missing either chain digest:
-                # without them the row cannot anchor verification.
+            custody = str(row.get("custody") or "staged")
+            if custody == "staged" and (not row.get("chain_hash") or not row.get("cumulative_hash")):
+                # Same treatment for a staged custody row missing either chain digest:
+                # without them the row cannot anchor verification. A held row carries none.
                 failures.append(
                     ManifestFailure(
                         model_call_id=str(row["model_call_id"]),
@@ -211,12 +219,13 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
                     delta_len=int(row["delta_len"]),
                     cum_len=int(row["cum_len"]),
                     weight_version=int(row["weight_version"]),
-                    digest=str(row["staging_digest"]),
-                    extras_digest=str(row["extras_digest"]),
+                    digest=_digest_column(row, "staging_digest"),
+                    extras_digest=_digest_column(row, "extras_digest"),
                     staging_key=str(row["staging_key"]),
                     mode=str(row["mode"]),
-                    chain_hash=str(row["chain_hash"]),
-                    cumulative_hash=str(row["cumulative_hash"]),
+                    chain_hash=_digest_column(row, "chain_hash"),
+                    cumulative_hash=_digest_column(row, "cumulative_hash"),
+                    custody=custody,
                     response_id=str(row["response_id"]),
                     admitted_at=row.get("admitted_at"),
                     output_fingerprint=row.get("output_fingerprint") or None,
@@ -297,6 +306,7 @@ class LineageNode:
     staging_key: str = ""
     staging_chain: list[str] = field(default_factory=list)
     chain_hash: str = ""
+    custody: str = "staged"
 
 
 def stamp_continuation(entry: TokenEntry, request_items: list[dict]) -> TokenEntry:
@@ -396,6 +406,7 @@ class RolloutLineage:
                 staging_chain=tuple(node.staging_chain),
                 prev_len=node.cum_len,
                 chain_hash=node.chain_hash,
+                custody=node.custody,
             ),
         )
 
@@ -460,6 +471,7 @@ class RolloutLineage:
         parent_staging_chain: list[str] | None = None,
         cum_len: int | None = None,
         chain_hash: str = "",
+        custody: str = "staged",
     ) -> None:
         """Index a completed call by its continuation fingerprint.
 
@@ -482,6 +494,7 @@ class RolloutLineage:
             staging_key=staging_key,
             staging_chain=list(parent_staging_chain) if parent_staging_chain else [],
             chain_hash=chain_hash,
+            custody=custody,
         )
         previous = self.by_call_id.get(call_id)
         if previous is not None:
@@ -629,12 +642,13 @@ class InMemoryLineageStore:
                 record.model_call_id,
                 list(commit.request_items) + list(commit.response_items),
                 [],
-                record.cumulative_hash,
+                record.cumulative_hash or "",
                 context_len=len(commit.request_items),
                 staging_key=record.staging_key,
                 parent_staging_chain=list(commit.staging_chain),
                 cum_len=record.cum_len,
-                chain_hash=record.chain_hash,
+                chain_hash=record.chain_hash or "",
+                custody=record.custody,
             )
         rows.append(row)
 
@@ -1114,7 +1128,7 @@ class FileLineageStore(IncrementalLineageStore):
                 call_id=call_id,
                 cum_tokens=None,
                 cum_len=int(record.get("cum_len") or len(record.get("cumulative_token_ids") or ())),
-                digest=str(record["digest"]),
+                digest=str(record.get("digest") or ""),
                 context_len=int(record["context_len"]),
                 context_digest=str(record["context_digest"]),
             )
@@ -1136,6 +1150,7 @@ class FileLineageStore(IncrementalLineageStore):
                 staging_chain=tuple(record.get("staging_chain") or []),
                 prev_len=node.cum_len,
                 chain_hash=str(record.get("chain_hash") or ""),
+                custody=str(record.get("custody") or "staged"),
             ),
         )
 
@@ -1192,7 +1207,7 @@ class FileLineageStore(IncrementalLineageStore):
             "tool_call_turn_fingerprint": tool_call_turn_fingerprint(list(commit.response_items)),
             "context_len": len(request_items),
             "context_digest": conversation_digest(request_items),
-            "digest": commit.record.cumulative_hash,
+            "digest": commit.record.cumulative_hash or "",
             **_custody_columns(commit.record, commit.staging_chain),
         }
         with self._locked(commit.capture_key):

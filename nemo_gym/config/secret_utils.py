@@ -60,6 +60,7 @@ _CAPTURE_PUBLIC_FIELDS = frozenset(
         "mask_fraction_min_samples",
         "external_staging",
         "external_staging_backend",
+        "external_staging_custody",
     }
 )
 

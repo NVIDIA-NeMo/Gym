@@ -304,6 +304,60 @@ def test_coords_enforce_staged_and_failed_shapes() -> None:
         )
 
 
+def test_held_coords_rows_and_admissions_carry_ids_and_lengths_only() -> None:
+    held = CommitCoords(
+        capture_key="r",
+        model_call_id="c2",
+        parent_call_id="c1",
+        prev_len=5,
+        delta_len=3,
+        cum_len=8,
+        weight_version=1,
+        disposition="held",
+        staging_key="engine-uid",
+    )
+    assert (held.digest, held.chain_hash, held.cumulative_hash) == (None, None, None)
+    with pytest.raises(ValidationError, match="cannot carry digests"):
+        CommitCoords.model_validate({**held.model_dump(), "digest": "1" * 64})
+    with pytest.raises(ValidationError, match="require a staging_key"):
+        CommitCoords.model_validate({**held.model_dump(), "staging_key": None})
+    with pytest.raises(ValidationError, match="non-empty delta"):
+        CommitCoords.model_validate({**held.model_dump(), "delta_len": 0, "cum_len": 5})
+    row = CallRecord(
+        model_call_id="c2",
+        parent_call_id="c1",
+        prev_len=5,
+        delta_len=3,
+        cum_len=8,
+        weight_version=1,
+        staging_key="engine-uid",
+        response_id="chatcmpl-c2",
+        custody="held",
+    )
+    assert row.digest is None and row.chain_hash is None
+    with pytest.raises(ValidationError, match="held manifest row carries no digests"):
+        CallRecord.model_validate({**row.model_dump(), "chain_hash": "2" * 64})
+    with pytest.raises(ValidationError, match="staged manifest row requires"):
+        CallRecord.model_validate({**row.model_dump(), "custody": "staged"})
+    # A held parent has no chain hash to pass on; a staged parent must still pass one.
+    admission = CaptureAdmission(
+        capture_key="r",
+        model_call_id="c3",
+        parent_call_id="c2",
+        prev_len=8,
+        mode="token_in",
+        staging_chain=["engine-uid"],
+        parent_custody="held",
+    )
+    assert admission.parent_chain_hash is None
+    with pytest.raises(ValidationError, match="requires the parent's chain hash"):
+        CaptureAdmission.model_validate({**admission.model_dump(), "parent_custody": None})
+    with pytest.raises(ValidationError, match="held parent has no chain hash"):
+        CaptureAdmission.model_validate({**admission.model_dump(), "parent_chain_hash": "1" * 64})
+    with pytest.raises(ValidationError, match="parentless root"):
+        CaptureAdmission(capture_key="r", model_call_id="c1", mode="text", parent_custody="held")
+
+
 def _manifest_row() -> CallRecord:
     payload = _record_payload()
     return CallRecord(

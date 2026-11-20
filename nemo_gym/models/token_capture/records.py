@@ -87,6 +87,13 @@ LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
 # A committed ledger row lacks the chain or cumulative digest that verification anchors on.
 LEDGER_ROW_MISSING_CHAIN_HASH_REASON = "ledger_row_missing_chain_hash"
 
+# How a committed external-staging row vouches for its tokens.
+# A `staged` row carries the worker's digest, chain hash and cumulative hash,
+# so a consumer that fetches the staged delta can verify it.
+# A `held` row carries none: the worker keeps the tokens in its own store and joins them itself,
+# nothing on Gym's side ever fetches or verifies them, and its receipt is ids and lengths only.
+Custody = Literal["staged", "held"]
+
 # The error code the client receives, and a ``EngineRefusalRecord`` carries, when the engine refused a
 # request because the prompt does not fit the context window (OpenAI's name for that error). A
 # refusal that named only an output-token parameter carries no code.

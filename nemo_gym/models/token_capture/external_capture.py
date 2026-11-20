@@ -355,6 +355,11 @@ class _BaseExternalCaptureHandler(ABC):
                 identity=context.identity,
             )
             return
+        if coords.disposition == "held" and context.custody != "held":
+            raise ValueError(
+                f"worker returned a held receipt for {coords.model_call_id}, but "
+                "token_id_capture.external_staging_custody is 'staged'"
+            )
         worker_root = admission.mode == "candidate" and coords.parent_call_id is None and coords.prev_len == 0
         if not worker_root and (
             coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len
@@ -401,6 +406,7 @@ class _BaseExternalCaptureHandler(ABC):
             admitted_at=context.admitted_at,
             chain_hash=coords.chain_hash,
             cumulative_hash=coords.cumulative_hash,
+            custody="held" if coords.disposition == "held" else "staged",
             response_id=response_id,
             output_items=(
                 [

@@ -1091,6 +1091,16 @@ def test_external_staging_requires_framework_owned_rebuild_and_active_capture():
     assert config.token_id_capture.external_staging is True
 
 
+def test_held_custody_requires_external_staging():
+    with pytest.raises(ValueError, match="external_staging_custody=held requires external_staging=true"):
+        TokenCaptureConfig.model_validate(_block(external_staging_custody="held"))
+    config = TokenCaptureConfig.model_validate(
+        _block(external_staging=True, rebuild_response=False, external_staging_custody="held")
+    )
+    assert config.token_id_capture.external_staging_custody == "held"
+    assert TokenCaptureConfig().token_id_capture.external_staging_custody == "staged"
+
+
 @pytest.mark.parametrize("mode", ["fingerprint", "source_history"])
 def test_parent_resolution_modes(mode):
     config = TokenCaptureConfig.model_validate(

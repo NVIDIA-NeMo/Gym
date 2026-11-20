@@ -148,6 +148,8 @@ class LineageMatch:
     staging_chain: tuple[str, ...] = ()
     prev_len: int = 0
     chain_hash: str = ""
+    # "held" when the parent row carries no digests.
+    custody: str = "staged"
 
 
 @dataclass(frozen=True)

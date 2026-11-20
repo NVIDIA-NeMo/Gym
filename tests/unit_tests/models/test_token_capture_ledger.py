@@ -117,9 +117,26 @@ def _call_record(
     delta_len: int | None = None,
     admitted_at: float | None = 1_755_600_000.25,
     finish_reason: str | None = None,
+    custody: str = "staged",
 ) -> CallRecord:
     if delta_len is None:
         delta_len = len(TOKENS_1) - prev_len
+    if custody == "held":
+        return CallRecord(
+            model_call_id=model_call_id,
+            parent_call_id=parent_call_id,
+            staging_key=f"r1/{model_call_id}",
+            weight_version=17,
+            prev_len=prev_len,
+            delta_len=delta_len,
+            cum_len=prev_len + delta_len,
+            mode="text" if parent_call_id is None else "token_in",
+            response_id=f"chatcmpl-{model_call_id}",
+            admitted_at=admitted_at,
+            fingerprint_version=FINGERPRINT_VERSION,
+            finish_reason=finish_reason,
+            custody="held",
+        )
     return CallRecord(
         model_call_id=model_call_id,
         parent_call_id=parent_call_id,
@@ -365,6 +382,20 @@ async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
     finally:
         reset_token_sink(token)
     return context
+
+
+@pytest.mark.asyncio
+async def test_held_rows_round_trip_and_admit_children_without_a_chain_hash(store):
+    await store.record(_commit(_call_record("c1", custody="held"), [USER_1], [ASSISTANT_1]))
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    (record,) = manifest.records
+    assert manifest.failures == [] and record == _call_record("c1", custody="held")
+    assert (record.custody, record.digest, record.chain_hash, record.cumulative_hash) == ("held", None, None, None)
+    context = await _admit(store, [USER_1, ASSISTANT_1, USER_2])
+    admission = context.capture_admission
+    assert admission is not None and admission.mode == "token_in"
+    assert (admission.parent_call_id, admission.prev_len, admission.staging_chain) == ("c1", len(TOKENS_1), ["r1/c1"])
+    assert (admission.parent_chain_hash, admission.parent_custody) == (None, "held")
 
 
 @pytest.mark.asyncio

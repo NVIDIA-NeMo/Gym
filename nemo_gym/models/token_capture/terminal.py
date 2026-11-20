@@ -254,6 +254,8 @@ def _sequence_identity(entry: TokenEntry) -> tuple:
     training consumes.
     """
     if _is_custody_row(entry):
+        if getattr(entry, "custody", "staged") == "held":
+            return ("held", entry.model_call_id)
         return (entry.cumulative_hash, entry.chain_hash, entry.cum_len)
     digest = getattr(entry, "digest", None)
     cum_len = getattr(entry, "cum_len", None)
