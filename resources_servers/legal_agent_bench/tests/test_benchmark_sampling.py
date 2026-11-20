@@ -23,7 +23,7 @@ from responses_api_agents.legal_agent_bench_native.app import (
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
-BENCHMARK_DIR = Path(__file__).resolve().parents[1]
+BENCHMARK_DIR = Path(__file__).resolve().parents[3] / "benchmarks/legal_agent_bench"
 RESPONSE = {
     "id": "response",
     "object": "response",
@@ -52,7 +52,7 @@ def _resolve(harness: str) -> DictConfig:
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         {
             "default_host": "127.0.0.1",
-            "lab": {"policy_temperature": 0.37, "policy_top_p": 0.73},
+            "lab": {"policy_temperature": 0.37, "policy_top_p": 0.73, "policy_context_window": 128000},
         },
     )
     return GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)

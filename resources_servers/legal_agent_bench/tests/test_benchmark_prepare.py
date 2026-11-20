@@ -16,7 +16,7 @@ from resources_servers.legal_agent_bench.app import LegalAgentBenchEnvironmentCo
 from resources_servers.legal_agent_bench.prepare import INDEX_FILENAME
 
 
-BENCHMARK_DIR = Path(__file__).resolve().parents[1]
+BENCHMARK_DIR = Path(__file__).resolve().parents[3] / "benchmarks/legal_agent_bench"
 PRESETS = ["native", "hermes", "claude_code", "codex"]
 
 
@@ -24,7 +24,7 @@ def resolve(harness="native", **overrides):
     initial = OmegaConf.merge(
         OmegaConf.load(BENCHMARK_DIR / f"config_{harness}.yaml"),
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        {"default_host": "127.0.0.1"},
+        {"default_host": "127.0.0.1", "lab": {"policy_context_window": 128000}},
         overrides,
     )
     return initial, GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
@@ -156,6 +156,10 @@ def test_harness_switch_preserves_grading_and_dataset(count, reward_mode, tmp_pa
         else:
             assert agent.concurrency == 2
             assert (agent.sandbox_runner_timeout_seconds if harness == "hermes" else agent.timeout) == 300
+        assert agent.model_server.name == "policy_model"
+        assert agent.model_server.type == "responses_api_models"
+        if harness != "codex":
+            assert agent.max_turns == 60
         assert config.agent_server.name == benchmark.agent_name
 
 
@@ -180,7 +184,51 @@ def test_default_alias_selects_lab_native():
     initial = OmegaConf.merge(
         OmegaConf.load(BENCHMARK_DIR / "config.yaml"),
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        {"default_host": "127.0.0.1"},
+        {"default_host": "127.0.0.1", "lab": {"policy_context_window": 128000}},
     )
     default = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
     assert wiring(default) == wiring(native)
+
+
+@pytest.mark.parametrize("policy_name", ["gpt-5.6-sol", "openai/gpt-5.6-sol", "custom-policy"])
+def test_codex_uses_classic_tools_without_changing_the_policy_route(policy_name):
+    from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig
+
+    _, resolved = resolve("codex", policy_model_name=policy_name)
+    values = OmegaConf.to_container(
+        resolved.legal_agent_bench_benchmark_agent.responses_api_agents.codex_agent, resolve=True
+    )
+    config = CodexAgentConfig(name="lab", **values)
+    agent = CodexAgent.model_construct(config=config)
+    generated = agent._build_config("http://model.example/v1")
+    assert config.model is None
+    assert generated["model"] == "gym-policy-model"
+    assert generated["model_context_window"] == 128000
+    assert generated["features"]["code_mode"] is False
+    assert not config.inherit_sandbox_environment
+    assert config.model_server.name == "policy_model"
+
+
+@pytest.mark.parametrize("context_window", [None, 64000, 256000])
+def test_codex_context_window_is_optional_and_overrides_reach_cli(context_window):
+    from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig
+
+    initial = OmegaConf.merge(
+        OmegaConf.load(BENCHMARK_DIR / "config_codex.yaml"),
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {"default_host": "127.0.0.1"},
+        {} if context_window is None else {"lab": {"policy_context_window": context_window}},
+    )
+    resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
+    values = OmegaConf.to_container(
+        resolved.legal_agent_bench_benchmark_agent.responses_api_agents.codex_agent, resolve=True
+    )
+    agent = CodexAgent.model_construct(config=CodexAgentConfig(name="lab", **values))
+    generated = agent._build_config("http://model.example/v1")
+    assert generated["model"] == "gym-policy-model"
+    if context_window is None:
+        assert agent.config.model_context_window is None
+        assert "model_context_window" not in generated
+    else:
+        assert generated["model_context_window"] == context_window
+

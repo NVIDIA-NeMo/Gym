@@ -8,7 +8,8 @@ legal_agent_bench_benchmark_agent:
   _inherit_from: codex_agent
   responses_api_agents:
     codex_agent:
-      model: ${policy_model_name}
+      model: null  # The Gym model server selects the real model; keep classic Codex tools.
+      model_context_window: ${oc.select:lab.policy_context_window,null}
       timeout: ${lab.agent_timeout_seconds}
       concurrency: ${num_samples_in_parallel}
       codex_version: 0.144.4
