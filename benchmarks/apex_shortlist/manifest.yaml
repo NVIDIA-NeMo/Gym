@@ -67,21 +67,6 @@ setups:
     prepare_script: benchmarks/apex_shortlist/prepare.py
     prompt_config: benchmarks/prompts/generic/math.yaml
     num_repeats: 16
-- name: apex_shortlist/opencode_legacy_agent
-  config_path: opencode_legacy_agent.yaml
-  integration_profile: custom-gym-agent-loop
-  description: MathArena APEX Shortlist math problems with symbolic-only math-verify grading, solved by OpenCode through the sandboxed OpenCode agent server.
-  primary_metric: pass@1[avg-of-16]/symbolic_accuracy
-  requirements:
-    network: allowlist
-  agent_server: opencode_sandboxed_agent
-  datasets:
-  - name: apex_shortlist
-    type: benchmark
-    jsonl_fpath: benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl
-    prepare_script: benchmarks/apex_shortlist/prepare.py
-    prompt_config: benchmarks/prompts/generic/math.yaml
-    num_repeats: 16
 - name: apex_shortlist/pi
   config_path: pi.yaml
   integration_profile: custom-gym-agent-loop
@@ -90,21 +75,6 @@ setups:
   requirements:
     network: allowlist
   agent_server: pi_agent
-  datasets:
-  - name: apex_shortlist
-    type: benchmark
-    jsonl_fpath: benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl
-    prepare_script: benchmarks/apex_shortlist/prepare.py
-    prompt_config: benchmarks/prompts/generic/math.yaml
-    num_repeats: 16
-- name: apex_shortlist/pi_legacy_agent
-  config_path: pi_legacy_agent.yaml
-  integration_profile: custom-gym-agent-loop
-  description: MathArena APEX Shortlist math problems with symbolic-only math-verify grading, solved by pi through the sandboxed pi agent server.
-  primary_metric: pass@1[avg-of-16]/symbolic_accuracy
-  requirements:
-    network: allowlist
-  agent_server: pi_sandboxed_agent
   datasets:
   - name: apex_shortlist
     type: benchmark

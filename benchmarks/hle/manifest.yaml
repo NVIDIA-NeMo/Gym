@@ -68,21 +68,6 @@ setups:
     prompt_config: benchmarks/hle/prompts/opencode.yaml
     num_repeats: 1
   standard_prompt_config: benchmarks/hle/prompts/opencode.yaml
-- name: hle/opencode_legacy_agent
-  config_path: opencode_legacy_agent.yaml
-  integration_profile: custom-gym-agent-loop
-  description: Humanity's Last Exam short-answer questions graded by an LLM judge, answered by OpenCode through the sandboxed OpenCode agent server. OpenCode keeps its own system prompt, so the HLE authors' answer-format instructions, which the main config sends as the system message, follow the question in the user message word for word.
-  requirements:
-    network: allowlist
-  agent_server: opencode_sandboxed_agent
-  datasets:
-  - name: hle
-    type: benchmark
-    jsonl_fpath: benchmarks/hle/data/hle_benchmark.jsonl
-    prepare_script: benchmarks/hle/prepare.py
-    prompt_config: benchmarks/hle/prompts/opencode.yaml
-    num_repeats: 1
-  standard_prompt_config: benchmarks/hle/prompts/opencode.yaml
 - name: hle/pi
   config_path: pi.yaml
   integration_profile: custom-gym-agent-loop
@@ -90,21 +75,6 @@ setups:
   requirements:
     network: allowlist
   agent_server: pi_agent
-  datasets:
-  - name: hle
-    type: benchmark
-    jsonl_fpath: benchmarks/hle/data/hle_benchmark.jsonl
-    prepare_script: benchmarks/hle/prepare.py
-    prompt_config: benchmarks/hle/prompts/opencode.yaml
-    num_repeats: 1
-  standard_prompt_config: benchmarks/hle/prompts/opencode.yaml
-- name: hle/pi_legacy_agent
-  config_path: pi_legacy_agent.yaml
-  integration_profile: custom-gym-agent-loop
-  description: Humanity's Last Exam short-answer questions graded by an LLM judge, answered by pi through the sandboxed pi agent server. pi keeps its own system prompt, so the HLE authors' answer-format instructions, which the main config sends as the system message, follow the question in the user message word for word.
-  requirements:
-    network: allowlist
-  agent_server: pi_sandboxed_agent
   datasets:
   - name: hle
     type: benchmark
