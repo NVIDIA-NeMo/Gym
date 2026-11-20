@@ -110,8 +110,10 @@ export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bir
   string, DuckDB refuses implicit text-to-number conversion where Snowflake casts row by row (erroring only on text
   that isn't a number), and DuckDB-only functions and division by zero (`inf`) run where Snowflake errors. `snowflake_gold_check.py` grades sqlglot transpiles of the golds:
   92% (1,413 of 1,534) match after one mechanical fix, identifier case (a second, double-quoted names to strings, fires
-  on no dev gold); its failure classes show where the stand-in, not the model, decides the score. The server's `snowflake_engine: snowflake` points the same grader at
-  a real, already-loaded account (`snowflake_connection_name` in the connector's `connections.toml`).
+  on no dev gold); its failure classes show where the stand-in, not the model, decides the score. The server's
+  `snowflake_engine: snowflake` points the same grader at a real account (`snowflake_connection_name` in the
+  connector's `connections.toml`), loaded once with `snowflake_load_account.py` (setup steps in
+  `resources_servers/bird_sql/README.md`).
 - **Snowflake calibration on a real account** (dev, 2026-11-19, `snowflake_gold_check.py --snowflake-connection`).
   The same translated golds match on 1,439 of 1,534 there. Of the 1,532 whose gold runs on SQLite, the stand-in and
   Snowflake agree on pass or fail for 1,498 (97.8%). 30 pass only on Snowflake: string arithmetic 20 (Snowflake casts),

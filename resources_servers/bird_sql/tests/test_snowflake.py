@@ -383,6 +383,175 @@ class TestLoader:
             ensure_bird_snowflake(snowflake_env.dev_dir, tmp_path)
 
 
+class _FakeAdminConnection:
+    """An admin connection for the account loader: records statements, answers the loaded-db_ids query from ``loaded``,
+    SHOW SCHEMAS from ``schemas`` ({name: comment}) and each COUNT(*) from what ``write_pandas`` wrote (one row short
+    for ``short_table``)."""
+
+    def __init__(self, loaded=None, short_table=None, schemas=None):
+        self.statements, self.written, self.closed = [], {}, False
+        self.loaded, self.short_table, self.schemas, self._rows = loaded or {}, short_table, schemas or {}, []
+        self.description = []
+
+    def cursor(self):
+        return self
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+        if sql.startswith("SELECT db_id, layout"):
+            self._rows = list(self.loaded.items())
+        elif sql.startswith("SHOW SCHEMAS LIKE"):
+            self.description = [("created_on",), ("name",), ("comment",)]
+            self._rows = [(None, name, comment) for name, comment in self.schemas.items() if name == params[0]]
+        elif sql.startswith("SELECT COUNT(*)"):
+            table = sql.rsplit(".", 1)[1].strip('"')
+            self._rows = [(self.written.get(table, 0) - (table == self.short_table),)]
+        return self
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0]
+
+    def close(self):
+        self.closed = True
+
+
+@requires_fakesnow
+class TestAccountLoader:
+    @staticmethod
+    def _load(env, monkeypatch, conn, grant_to="BIRD_RO"):
+        import snowflake.connector
+        import snowflake.connector.pandas_tools
+
+        from resources_servers.bird_sql.setup_bird_snowflake import load_bird_snowflake_account
+
+        def write_pandas(c, df, table, database, schema, chunk_size):
+            assert (c, database, schema) == (conn, "BIRD", DB_ID)
+            c.written[table] = len(df)
+
+        monkeypatch.setattr(snowflake.connector, "connect", lambda **kw: conn)
+        monkeypatch.setattr(snowflake.connector.pandas_tools, "write_pandas", write_pandas)
+        load_bird_snowflake_account(env.dev_dir, "bird_admin", grant_to)
+
+    def test_loads_the_layout_records_it_last_and_grants_the_reader(self, snowflake_env, monkeypatch):
+        conn = _FakeAdminConnection()
+        self._load(snowflake_env, monkeypatch, conn)
+        s = conn.statements
+        create = s.index(f'CREATE SCHEMA BIRD."{DB_ID}" COMMENT = %s')
+        assert s[:create].count("GRANT USAGE ON DATABASE BIRD TO ROLE BIRD_RO") == 1
+        assert 'GRANT SELECT ON ALL TABLES IN SCHEMA BIRD."_bird_meta" TO ROLE BIRD_RO' in s[:create]
+        mixed = f'CREATE TABLE BIRD."{DB_ID}"."Mixed Case" '
+        assert mixed + '("Col Name" VARCHAR, "n" NUMBER(38,0), "r" FLOAT, "dirty" VARCHAR, "d" VARCHAR)' in s
+        assert conn.written == {"t": 3, "Mixed Case": 2, "big": 3000}
+        record = next(i for i, sql in enumerate(s) if sql.startswith('INSERT INTO BIRD."_bird_meta".loaded'))
+        assert all(not sql.startswith(("CREATE TABLE BIRD.", "SELECT COUNT")) for sql in s[record:])
+        # The db_id is readable as soon as it's recorded, before any later db_id loads.
+        assert s[record + 1 :] == [
+            f'GRANT USAGE ON SCHEMA BIRD."{DB_ID}" TO ROLE BIRD_RO',
+            f'GRANT SELECT ON ALL TABLES IN SCHEMA BIRD."{DB_ID}" TO ROLE BIRD_RO',
+        ]
+        assert conn.closed
+
+    def test_a_loaded_db_id_is_skipped_but_still_granted(self, snowflake_env, monkeypatch):
+        conn = _FakeAdminConnection(loaded={DB_ID: 1})
+        self._load(snowflake_env, monkeypatch, conn)
+        assert conn.written == {}
+        assert not any(
+            sql.startswith(("CREATE SCHEMA BIRD.", "CREATE OR REPLACE", "INSERT")) for sql in conn.statements
+        )
+        assert f'GRANT SELECT ON ALL TABLES IN SCHEMA BIRD."{DB_ID}" TO ROLE BIRD_RO' in conn.statements
+
+    def test_a_short_table_drops_the_schema_and_records_nothing(self, snowflake_env, monkeypatch):
+        conn = _FakeAdminConnection(short_table="Mixed Case")
+        with pytest.raises(RuntimeError, match="Mixed Case: 1 rows loaded into Snowflake, 2 in SQLite"):
+            self._load(snowflake_env, monkeypatch, conn)
+        assert conn.statements[-1] == f'DROP SCHEMA IF EXISTS BIRD."{DB_ID}"'
+        assert not any(sql.startswith("INSERT") for sql in conn.statements)
+
+    def test_a_failed_load_leaves_the_earlier_db_ids_readable(self, tmp_path, monkeypatch):
+        import snowflake.connector
+        import snowflake.connector.pandas_tools
+
+        from resources_servers.bird_sql.setup_bird_snowflake import load_bird_snowflake_account
+
+        for db_id in ("a_db", "b_db"):
+            (tmp_path / db_id).mkdir()
+            with sqlite3.connect(str(tmp_path / db_id / f"{db_id}.sqlite")) as sqlite_conn:
+                sqlite_conn.execute(f"CREATE TABLE {db_id}_t (x INTEGER)")
+                sqlite_conn.execute(f"INSERT INTO {db_id}_t VALUES (1)")
+        conn = _FakeAdminConnection(short_table="b_db_t")
+        monkeypatch.setattr(snowflake.connector, "connect", lambda **kw: conn)
+        monkeypatch.setattr(
+            snowflake.connector.pandas_tools,
+            "write_pandas",
+            lambda c, df, table, **kw: c.written.update({table: len(df)}),
+        )
+        with pytest.raises(RuntimeError, match="b_db_t: 0 rows loaded"):
+            load_bird_snowflake_account(tmp_path, "bird_admin", "BIRD_RO")
+        assert 'GRANT SELECT ON ALL TABLES IN SCHEMA BIRD."a_db" TO ROLE BIRD_RO' in conn.statements
+        assert not any('BIRD."b_db" TO ROLE' in sql for sql in conn.statements)
+
+    def test_replaces_only_a_schema_it_created(self, snowflake_env, monkeypatch):
+        # On a shared account a same-named schema may be someone else's: only the loader's own (a failed load's) goes.
+        from resources_servers.bird_sql.setup_bird_snowflake import _LOADER_COMMENT
+
+        theirs = _FakeAdminConnection(schemas={DB_ID: "someone else's"})
+        with pytest.raises(RuntimeError, match="was not created by this loader; drop it first"):
+            self._load(snowflake_env, monkeypatch, theirs)
+        assert not any(f'SCHEMA BIRD."{DB_ID}"' in sql and sql.startswith("CREATE") for sql in theirs.statements)
+        assert theirs.written == {}
+        ours = _FakeAdminConnection(schemas={DB_ID: _LOADER_COMMENT})
+        self._load(snowflake_env, monkeypatch, ours)
+        assert f'CREATE OR REPLACE SCHEMA BIRD."{DB_ID}" COMMENT = %s' in ours.statements
+        assert ours.written == {"t": 3, "Mixed Case": 2, "big": 3000}
+
+    @pytest.mark.parametrize(
+        ("conn", "grant_to", "error"),
+        [
+            (_FakeAdminConnection(loaded={DB_ID: 2}), "BIRD_RO", "another layout"),
+            (_FakeAdminConnection(), "BIRD_RO; DROP DATABASE BIRD", "plain role name"),
+        ],
+    )
+    def test_refuses_another_layout_and_an_odd_role(self, snowflake_env, monkeypatch, conn, grant_to, error):
+        with pytest.raises((RuntimeError, ValueError), match=error):
+            self._load(snowflake_env, monkeypatch, conn, grant_to)
+        assert conn.written == {}
+
+
+class _FakeGraderConnection(_FakeAdminConnection):
+    """The grader's connection at startup: ``loaded`` as recorded, and ``columns`` as its role can see them."""
+
+    def __init__(self, loaded, columns):
+        super().__init__(loaded=loaded)
+        self.columns = columns
+
+    def execute(self, sql, params=None):
+        super().execute(sql, params)
+        if sql.startswith("SELECT table_schema"):
+            self._rows = self.columns
+        return self
+
+
+@requires_fakesnow
+@pytest.mark.parametrize("visible", [True, False])
+def test_account_check_refuses_a_db_id_its_role_cannot_read(snowflake_env, monkeypatch, visible):
+    # Without the grant the catalog is empty for that db_id, and every model query on it would be refused and score 0.
+    import snowflake.connector
+
+    from resources_servers.bird_sql.setup_bird_snowflake import check_bird_snowflake_account
+
+    columns = [(DB_ID, "t", "x")] if visible else [("other_db", "t", "x")]
+    conn = _FakeGraderConnection(loaded={DB_ID: 1}, columns=columns)
+    monkeypatch.setattr(snowflake.connector, "connect", lambda **kw: conn)
+    if visible:
+        assert check_bird_snowflake_account(snowflake_env.dev_dir, "bird_ro", 30).tables == {DB_ID: {"t": {"x"}}}
+    else:
+        with pytest.raises(RuntimeError, match=f"can't see: \\['{DB_ID}'\\]"):
+            check_bird_snowflake_account(snowflake_env.dev_dir, "bird_ro", 30)
+
+
 @requires_fakesnow
 class TestExecuteAndCompareSnowflake:
     @staticmethod

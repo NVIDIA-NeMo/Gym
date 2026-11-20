@@ -121,6 +121,20 @@ config), with the data already loaded in the same layout. Each connection runs
 secondary roles are often `ALL`, which would let a session on a read-only role write through
 the user's other roles.
 
+To set up an account:
+
+1. As an account admin, create a database `BIRD`, a warehouse (X-Small, with auto-suspend) and
+   a read-only role for the grader, granted to the user the grader connects as. Grant that
+   role `USAGE` on the warehouse: with secondary roles off, it can't borrow another role's.
+2. Add two connections to the connector's `connections.toml`: an admin one, with the warehouse
+   and a role that owns `BIRD`, and the grader's, with the read-only role and the warehouse.
+3. Load the data and grant the grader's role read access:
+   `resources_servers/bird_sql/.venv/bin/python -m benchmarks.birdbench.snowflake_load_account
+   <admin connection> --grant-to <role>` (`--split train` for train). Dev takes about 7
+   minutes. Run it again after any reload: FUTURE grants need MANAGE GRANTS, which a
+   database owner such as SYSADMIN usually lacks, so the script grants on the tables itself.
+4. Serve with `snowflake_engine: snowflake` and `snowflake_connection_name: <grader connection>`.
+
 **Calibration on a real account** (BIRD dev, 2026-11-19, with
 `benchmarks/birdbench/snowflake_gold_check.py --snowflake-connection`). sqlglot's translations
 of the 1,534 dev golds match on 1,439 on Snowflake and on 1,413 on the stand-in. For the 1,532

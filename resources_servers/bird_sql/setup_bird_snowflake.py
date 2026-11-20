@@ -9,8 +9,9 @@ Two engines sit behind one interface (``tables``, ``connect``, ``fetch_all``, ``
   and runs it on DuckDB. ``ensure_bird_snowflake`` builds ``<db_dir>/BIRD.db`` on first start and reopens it read-only,
   so a model's DDL or DML fails instead of changing the data other rollouts read.
 - ``snowflake``: a real account, through ``snowflake-connector-python`` with a named connection from the connector's
-  own ``connections.toml``. ``check_bird_snowflake_account`` expects the data already loaded in the same layout.
-  Calibrated against the stand-in on a real account (see the README).
+  own ``connections.toml``. ``check_bird_snowflake_account`` expects the data already loaded in the same layout;
+  ``load_bird_snowflake_account`` loads it, once, through an admin connection. Calibrated against the stand-in on a
+  real account (see the README).
 
 Every ``db_id`` becomes a schema of that name in one database, ``BIRD``. Column types follow ``setup_bird_spark``
 exactly (same ``_typed_tables``) and are shown to the model as Snowflake types: ``NUMBER(38,0)``, ``FLOAT`` or
@@ -25,6 +26,7 @@ A ``db_id`` is loaded in one transaction and recorded, with its string-fallback 
 import contextlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional
@@ -42,6 +44,8 @@ _TYPES_BY_DTYPE = {"Int64": ("BIGINT", "NUMBER(38,0)"), "float64": ("DOUBLE", "F
 _TEXT_TYPES = ("VARCHAR", "VARCHAR")
 # Version of the schema layout, recorded per db_id in _bird_meta.loaded. Layout 1: BIRD's original names, quoted.
 _LAYOUT = 1
+# Comment on every schema load_bird_snowflake_account creates in an account: the only schemas it may replace.
+_LOADER_COMMENT = "BIRD db_id loaded by Gym bird_sql (load_bird_snowflake_account)"
 
 Catalog = Dict[str, Dict[str, FrozenSet[str]]]
 
@@ -256,7 +260,7 @@ def check_bird_snowflake_account(
 ) -> AccountSnowflake:
     """Raise unless every ``db_id`` under ``databases_dir`` is loaded, with this layout, in the account's ``BIRD``.
 
-    Returns the ``snowflake`` engine with the account's catalog. Loading an account is not done here.
+    Returns the ``snowflake`` engine with the account's catalog. ``load_bird_snowflake_account`` loads an account.
     """
     db_ids = _db_ids(databases_dir)
     engine = AccountSnowflake(connection_name=connection_name, timeout_s=timeout_s, tables={})
@@ -272,4 +276,100 @@ def check_bird_snowflake_account(
             f"SELECT table_schema, table_name, column_name FROM {SNOWFLAKE_DATABASE}.information_schema.columns"
         )
         tables = _catalog(cur.fetchall(), db_ids)
+    # The catalog lists only what the connection's role may read. A db_id with no visible table (a missing grant, a
+    # dropped schema) would refuse every model query on it as an unknown table and score it 0.
+    unreadable = sorted(db_id for db_id in db_ids if not tables[db_id])
+    if unreadable:
+        raise RuntimeError(
+            f"BIRD db_ids whose tables the Snowflake connection's role can't see: {unreadable}. Grant it SELECT on "
+            "them (load_bird_snowflake_account's grant_to does), or load them again"
+        )
     return AccountSnowflake(connection_name=connection_name, timeout_s=timeout_s, tables=tables)
+
+
+def _load_account_db(conn: Any, db_id: str, sqlite_path: Path) -> List[Dict[str, str]]:
+    """(Re)create schema ``db_id`` of the account's ``BIRD`` from ``sqlite_path`` and record it as loaded.
+
+    Only a schema this loader created (marked by ``_LOADER_COMMENT``, for example one left by a failed load) is
+    replaced; any other schema of that name raises, since on a shared account it may be someone else's. Snowflake
+    commits DDL on its own, so unlike ``load_sqlite_db`` this can't be one transaction: the ``loaded`` row is written
+    last, after every table's row count is checked, and the schema is dropped if anything fails.
+    """
+    from snowflake.connector.pandas_tools import write_pandas
+
+    cur = conn.cursor()
+    schema = f"{SNOWFLAKE_DATABASE}.{_quote(db_id)}"
+    all_fallbacks: List[Dict[str, str]] = []
+    cur.execute(f"SHOW SCHEMAS LIKE %s IN DATABASE {SNOWFLAKE_DATABASE}", (db_id,))
+    names = [d[0].lower() for d in cur.description]
+    comments = [row[names.index("comment")] for row in cur.fetchall() if row[names.index("name")] == db_id]
+    if comments and comments[0] != _LOADER_COMMENT:
+        raise RuntimeError(f"Schema {schema} already exists and was not created by this loader; drop it first")
+    cur.execute(f"CREATE {'OR REPLACE ' if comments else ''}SCHEMA {schema} COMMENT = %s", (_LOADER_COMMENT,))
+    try:
+        for table, df, fallbacks in _typed_tables(sqlite_path):
+            types = [_TYPES_BY_DTYPE.get(str(dtype), _TEXT_TYPES)[1] for dtype in df.dtypes]
+            column_defs = ", ".join(f"{_quote(c)} {t}" for c, t in zip(df.columns, types))
+            cur.execute(f"CREATE TABLE {schema}.{_quote(table)} ({column_defs})")
+            if len(df):
+                write_pandas(conn, df, table, database=SNOWFLAKE_DATABASE, schema=db_id, chunk_size=200_000)
+            (count,) = cur.execute(f"SELECT COUNT(*) FROM {schema}.{_quote(table)}").fetchone()
+            if count != len(df):
+                raise RuntimeError(f"{db_id}.{table}: {count} rows loaded into Snowflake, {len(df)} in SQLite")
+            all_fallbacks += fallbacks
+        cur.execute(
+            f"INSERT INTO {SNOWFLAKE_DATABASE}.{_quote(_META_SCHEMA)}.loaded (db_id, fallbacks, layout) "
+            "VALUES (%s, %s, %s)",
+            (db_id, json.dumps(all_fallbacks), _LAYOUT),
+        )
+    except BaseException:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema}")
+        raise
+    return all_fallbacks
+
+
+def load_bird_snowflake_account(databases_dir: Path, connection_name: Optional[str], grant_to: Optional[str]) -> None:
+    """Load every ``db_id`` under ``databases_dir`` that the account's ``BIRD`` doesn't have yet, in this layout.
+
+    ``connection_name`` is an admin connection in the connector's ``connections.toml``, with a warehouse and a role that
+    may create schemas in the existing database ``BIRD``. Unlike the grader's connections, it keeps the user's
+    secondary roles, on purpose: loading may need the privileges of any of them. ``grant_to`` names the grader's
+    read-only role: it gets USAGE on ``BIRD`` and on every ``db_id``'s schema and SELECT on their tables, each
+    ``db_id`` right after it loads (so a later failure leaves the loaded ones readable) and on every run, since a
+    reload replaces the tables and FUTURE grants need MANAGE GRANTS. Run it once before serving with
+    ``snowflake_engine: snowflake``.
+    """
+    import snowflake.connector
+
+    if grant_to is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", grant_to):
+        raise ValueError(f"grant_to must be a plain role name, got {grant_to!r}")
+    sqlite_paths = sorted(databases_dir.glob("*/[!.]*.sqlite"))
+    db_ids = [p.parent.name for p in sqlite_paths]
+    meta = f"{SNOWFLAKE_DATABASE}.{_quote(_META_SCHEMA)}"
+    kwargs = {"connection_name": connection_name} if connection_name else {}
+    with contextlib.closing(snowflake.connector.connect(**kwargs, database=SNOWFLAKE_DATABASE)) as conn:
+        cur = conn.cursor()
+
+        def grant(schema: str) -> None:
+            if grant_to is not None:
+                cur.execute(f"GRANT USAGE ON SCHEMA {SNOWFLAKE_DATABASE}.{_quote(schema)} TO ROLE {grant_to}")
+                cur.execute(
+                    f"GRANT SELECT ON ALL TABLES IN SCHEMA {SNOWFLAKE_DATABASE}.{_quote(schema)} TO ROLE {grant_to}"
+                )
+
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {meta}")
+        cur.execute(
+            f"CREATE TABLE IF NOT EXISTS {meta}.loaded (db_id VARCHAR PRIMARY KEY, fallbacks VARCHAR, layout INTEGER, "
+            "loaded_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP())"
+        )
+        loaded = dict(cur.execute(f"SELECT db_id, layout FROM {meta}.loaded").fetchall())
+        _check_layout(loaded, db_ids, "the Snowflake account")
+        if grant_to is not None:
+            cur.execute(f"GRANT USAGE ON DATABASE {SNOWFLAKE_DATABASE} TO ROLE {grant_to}")
+        grant(_META_SCHEMA)
+        for sqlite_path, db_id in zip(sqlite_paths, db_ids):
+            if db_id not in loaded:
+                logger.info("Loading %s into the Snowflake account ...", db_id)
+                for record in _load_account_db(conn, db_id, sqlite_path):
+                    logger.warning("BIRD Snowflake load: stored as string: %s", record)
+            grant(db_id)
