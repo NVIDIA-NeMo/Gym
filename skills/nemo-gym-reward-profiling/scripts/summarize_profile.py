@@ -109,13 +109,14 @@ def record_key(record):
     return (record["agent"] or "", (0, task, "") if isinstance(task, int) else (1, 0, str(task)))
 
 
-def new_record(task, agent, measured, expected, planned, row=None):
+def new_record(task, agent, planned, row=None):
     row = row or {}
     return {
         "task": task,
         "agent": agent,
-        "measured": measured,
-        "expected": expected,
+        "measured": row.get("num_rollouts", 0),
+        # Planned minus masked: `gym eval profile` drops masked rollouts before it counts.
+        "expected": row.get("expected_num_rollouts", row.get("num_rollouts", 0)),
         "planned": planned,
         "mean": row.get("mean/reward"),
         "std": row.get("std/reward"),
@@ -147,64 +148,75 @@ def summarize(
     labels = input_run_labels
     if labels is None:
         labels = run_labels(row["sample"] for row in profile_rows if isinstance(row.get("sample"), dict))
-    run_names = set(labels.values())
-    several_runs = len(run_names) > 1
-    runs_by_task = defaultdict(set)
-    for task, label in planned_by_task_label or {}:
-        runs_by_task[task].add(label)
+    several_runs = len(set(labels.values())) > 1
 
-    def run_of(row):
-        """The label of the row's run, or None when the row cannot tell."""
+    def named_run(row):
+        """The label of the run the row names, or None when it names none or the profile has a single run."""
+        if not several_runs:
+            return None
         if isinstance(row.get("sample"), dict):
             return labels.get(run_key(row["sample"]))
-        if "agent_ref" in row:
-            return agent_name(row)
-        # A row with no measured rollout that gym did not split by run belongs to its task's only planned run, if any.
-        task_runs = runs_by_task.get(row["_ng_task_index"], ())
-        return next(iter(task_runs)) if len(task_runs) == 1 else None
+        return agent_name(row)
 
-    runs = [run_of(row) if several_runs else None for row in profile_rows]
-    # Compare per run when every row's run is known, and per task otherwise; then the rows cannot tell masked
-    # rollouts from rollouts that were never saved.
-    by_run = several_runs and planned_by_task_label is not None and all(run in run_names for run in runs)
-    per_task_fallback = several_runs and planned_by_task_label is not None and not by_run
-
-    def group(task, label):
-        return (task, label if by_run else None)
+    def mismatch(task):
+        return ValueError(
+            f"The materialized inputs do not match this profile (task {task}). Use the "
+            "<stem>_materialized_inputs.jsonl written next to the same rollouts file."
+        )
 
     records = []
-    members = defaultdict(list)
-    for row, run in zip(profile_rows, runs):
-        # Planned minus masked: `gym eval profile` drops masked rollouts before it counts.
-        expected = row.get("expected_num_rollouts", row["num_rollouts"])
-        record = new_record(row["_ng_task_index"], run, row["num_rollouts"], expected, None, row)
-        records.append(record)
-        members[group(record["task"], record["agent"])].append(record)
+    planned = None
+    masked_in_rows = 0
+    # Tasks with a row whose run is unknown: the rows then cannot tell masked rollouts from rollouts never saved.
+    unresolved_tasks = set()
+    if planned_by_task_label is None:
+        records = [new_record(row["_ng_task_index"], named_run(row), None, row) for row in profile_rows]
+    else:
+        planned = Counter()
+        runs_by_task = defaultdict(list)
+        for (task, label), count in planned_by_task_label.items():
+            key = (task, label if several_runs else None)
+            if key not in planned:
+                runs_by_task[task].append(key[1])
+            planned[key] += count
+        # Every planned run of a task gets its own record, which takes the row that names it. A row with no measured
+        # rollout (written by main only) has no sample and names its run as gym labels the measured rows, or not at
+        # all, so it can miss the inputs' labels; it then takes its task's one run left without a row, and with
+        # several left its run stays unknown.
+        row_by_run = {}
+        unnamed_by_task = defaultdict(list)
+        for row in profile_rows:
+            key = (row["_ng_task_index"], named_run(row))
+            if key in planned and key not in row_by_run:
+                row_by_run[key] = row
+            else:
+                unnamed_by_task[key[0]].append(row)
+        for task, rows in unnamed_by_task.items():
+            left = [label for label in runs_by_task.get(task, ()) if (task, label) not in row_by_run]
+            # A row with measured rollouts names its run in its sample, so it never takes a run by elimination.
+            if len(rows) > len(left) or any(row["num_rollouts"] for row in rows):
+                raise mismatch(task)
+            if len(left) == 1:
+                row_by_run[(task, left[0])] = rows[0]
+            else:
+                unresolved_tasks.add(task)
+        for (task, label), count in planned.items():
+            # nemo-gym 0.7.0 writes no row for a run with no measured rollout. Main writes one with num_rollouts 0,
+            # except for a run whose every planned rollout was saved and masked.
+            row = row_by_run.get((task, label))
+            record = new_record(task, label, count, row)
+            if row is not None:
+                if record["expected"] > count:
+                    raise mismatch(task)
+                masked_in_rows += count - record["expected"]
+            elif task in unresolved_tasks:
+                # A row of unknown run on this task may be this run's, so whether it is in the file is unknown.
+                record["in_profile_file"] = None
+            records.append(record)
 
     masked_reported = None
     if agent_metrics is not None:
         masked_reported = sum(e.get("coverage/masked_rollouts", 0) for e in agent_metrics if isinstance(e, dict))
-    planned = None
-    masked_in_rows = 0
-    if planned_by_task_label is not None:
-        planned = Counter()
-        for (task, label), count in planned_by_task_label.items():
-            planned[group(task, label)] += count
-        for key, group_records in members.items():
-            expected = sum(r["expected"] for r in group_records)
-            if expected > planned[key]:
-                raise ValueError(
-                    f"The materialized inputs do not match this profile (task {key[0]}). Use the "
-                    "<stem>_materialized_inputs.jsonl written next to the same rollouts file."
-                )
-            masked_in_rows += planned[key] - expected
-            if len(group_records) == 1:
-                group_records[0]["planned"] = planned[key]
-        for (task, label), count in planned.items():
-            if (task, label) not in members:
-                # nemo-gym 0.7.0 writes no row for a task with no measured rollout. Main writes one with
-                # num_rollouts 0, except for a task whose every planned rollout was saved and masked.
-                records.append(new_record(task, label, 0, 0, count))
 
     groups = {"varies": [], "one_rollout": [], "no_measured_rollout": [], "no_reward": []}
     same_every_repeat = {}
@@ -224,12 +236,12 @@ def summarize(
 
     measured_total = sum(r["measured"] for r in records)
     planned_total = sum(planned.values()) if planned is not None else None
-    absent = [r for r in records if not r["in_profile_file"]]
+    absent = [r for r in records if r["in_profile_file"] is False]
     # A row's planned minus expected rollouts were masked, and masked rollouts of tasks with no row show only in the
     # agent metrics' total. That total counts only rows that name an agent, so the split between masked and never
-    # saved is known only when the inputs are found, every input row names an agent and the run labels line up.
+    # saved is known only when the inputs are found, every input row names an agent and every row's run is known.
     masked_total = None
-    if planned is not None and masked_reported is not None and every_input_names_agent and not per_task_fallback:
+    if planned is not None and masked_reported is not None and every_input_names_agent and not unresolved_tasks:
         # Masked rollouts were saved but not measured: at least those the rows leave out, at most all unmeasured ones.
         if not masked_in_rows <= masked_reported <= planned_total - measured_total:
             raise ValueError(
@@ -323,7 +335,7 @@ def print_report(summary):
         f"Tasks: {cov['tasks']}; {cov['complete_tasks']} complete, {len(cov['partial_tasks'])} partial, "
         f"{len(cov['tasks_without_measured_rollout'])} with no measured rollout{unknown}."
     )
-    absent = [r for r in summary["no_measured_rollout"] if not r["in_profile_file"]]
+    absent = [r for r in summary["no_measured_rollout"] if r["in_profile_file"] is False]
     if absent:
         masked = cov["masked_rollouts_of_tasks_not_in_profile_file"]
         if masked == 0:

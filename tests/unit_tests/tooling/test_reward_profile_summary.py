@@ -70,15 +70,15 @@ def _ids(entries):
     return sorted((entry["task"], entry["agent"]) for entry in entries)
 
 
-def _fan_out_rows(runs, tasks=2):
-    """Two repeats of each task under each run, given as (agent, Environment Server or None)."""
+def _fan_out_rows(runs, tasks=2, repeats=2):
+    """The repeats of each task under each run, given as (agent, Environment Server or None)."""
     rows = []
     for task in range(tasks):
         for position, (agent, server) in enumerate(runs):
-            for repeat in range(2):
+            for repeat in range(repeats):
                 row = {
                     "_ng_task_index": task,
-                    "_ng_rollout_index": 2 * position + repeat,
+                    "_ng_rollout_index": repeats * position + repeat,
                     "agent_ref": {"name": agent},
                 }
                 rows.append(row | ({"_ng_environment_server": server} if server else {}))
@@ -145,11 +145,12 @@ def test_inputs_from_another_run_are_rejected(tmp_path):
     ]
     profile = _gym_profile(tmp_path, rows, [row | {"reward": 1.0} for row in rows])
     inputs = tmp_path / "run_materialized_inputs.jsonl"
-    # A smaller run's inputs plan fewer rollouts than the profile measured.
-    _write_jsonl(inputs, rows[2:])
-    completed = _summarize(profile, check=False)
-    assert completed.returncode != 0
-    assert "do not match this profile (task 0)" in completed.stderr
+    # A smaller run's inputs plan fewer tasks or fewer repeats than the profile measured.
+    for planned_rows in (rows[2:], rows[::2]):
+        _write_jsonl(inputs, planned_rows)
+        completed = _summarize(profile, check=False)
+        assert completed.returncode != 0
+        assert "do not match this profile (task 0)" in completed.stderr
     # Agent metrics from another run can count more masked rollouts than the inputs leave unmeasured.
     _write_jsonl(inputs, rows)
     metrics = tmp_path / "run_agent_metrics.json"
@@ -175,6 +176,20 @@ def test_inputs_from_another_run_are_rejected(tmp_path):
     completed = _summarize(profile, check=False)
     assert completed.returncode != 0
     assert "not valid JSON" in completed.stderr
+    # Under several runs, inputs that name another run than a row's sample, or plan no run for main's count-only row
+    # (task 1 saved nothing), do not match either.
+    (tmp_path / "fan_out").mkdir()
+    rows = _fan_out_rows([("agent_a", None), ("agent_b", None)])
+    results = [row | {"reward": 1.0} for row in rows if row["_ng_task_index"] == 0]
+    profile = _gym_profile(tmp_path / "fan_out", rows, results)
+    renamed = [
+        row | {"agent_ref": {"name": "agent_c"}} if row["agent_ref"]["name"] == "agent_b" else row for row in rows
+    ]
+    for planned_rows, task in [(renamed, 0), (rows[:4], 1)]:
+        _write_jsonl(tmp_path / "fan_out" / "run_materialized_inputs.jsonl", planned_rows)
+        completed = _summarize(profile, check=False)
+        assert completed.returncode != 0
+        assert f"do not match this profile (task {task})" in completed.stderr
 
 
 def test_float_noise_is_not_spread(tmp_path):
@@ -271,6 +286,35 @@ def test_runs_renamed_by_masking_are_read_from_the_samples(tmp_path, shape):
         assert _ids(coverage["tasks_without_measured_rollout"]) == [(0, "server_b"), (1, "server_a"), (1, "server_b")]
     else:
         assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (None, None)
+
+
+def test_a_row_of_unknown_run_keeps_the_other_runs_coverage(tmp_path):
+    # As above, with two of task 0's results under server_a masked too. main's count-only row for task 1 under
+    # server_a names neither server, and must not hide that server_a measured only 2 of task 0's 4 repeats.
+    rows = _fan_out_rows([("agent", "server_a"), ("agent", "server_b"), ("agent_c", None)], repeats=4)
+    results = [
+        row
+        | {
+            "reward": 1.0,
+            "mask_sample": row.get("_ng_environment_server") == "server_b" or row["_ng_rollout_index"] < 2,
+        }
+        for row in rows
+        if (row["_ng_task_index"], row.get("_ng_environment_server")) != (1, "server_a")
+    ]
+    profile = _gym_profile(tmp_path, rows, results)
+
+    coverage = _summary(profile)["coverage"]
+
+    assert (coverage["planned_rollouts"], coverage["measured_rollouts"]) == (24, 10)
+    assert (coverage["tasks"], coverage["complete_tasks"]) == (6, 2)
+    assert _ids(coverage["partial_tasks"]) == [(0, "server_a")]
+    assert _ids(coverage["tasks_without_measured_rollout"]) == [(0, "server_b"), (1, "server_a"), (1, "server_b")]
+    assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (None, None)
+    # Only task 0 under server_b is known to have no row; the count-only row is task 1's under one of the servers.
+    assert _ids(coverage["tasks_not_in_profile_file"]) == [(0, "server_b")]
+    assert "  Not in the profile file (never saved, or every saved rollout masked): 0 (server_b)\n" in (
+        _summarize(profile).stdout
+    )
 
 
 def test_a_run_masked_everywhere_is_reported_apart(tmp_path):
