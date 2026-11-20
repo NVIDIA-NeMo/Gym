@@ -185,7 +185,8 @@ def test_inputs_from_another_run_are_rejected(tmp_path):
     renamed = [
         row | {"agent_ref": {"name": "agent_c"}} if row["agent_ref"]["name"] == "agent_b" else row for row in rows
     ]
-    for planned_rows, task in [(renamed, 0), (rows[:4], 1)]:
+    one_agent = [row for row in rows if row["agent_ref"]["name"] == "agent_a"]
+    for planned_rows, task in [(renamed, 0), (rows[:4], 1), (one_agent, 0)]:
         _write_jsonl(tmp_path / "fan_out" / "run_materialized_inputs.jsonl", planned_rows)
         completed = _summarize(profile, check=False)
         assert completed.returncode != 0
@@ -318,16 +319,30 @@ def test_a_row_of_unknown_run_keeps_the_other_runs_coverage(tmp_path):
     ]
     profile = _gym_profile(tmp_path, rows, results)
 
-    coverage = _summary(profile)["coverage"]
+    summary = _summary(profile)
+    coverage = summary["coverage"]
 
     assert (coverage["planned_rollouts"], coverage["measured_rollouts"]) == (16, 3)
-    assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (None, None)
+    # The agent metrics still count every masked rollout, so the totals are known.
+    assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (8, 5)
+    # Whether those runs have a row is unknown, not false or true.
+    assert {record["in_profile_file"] for record in summary["no_measured_rollout"]} == {None}
+    assert "Not in the profile file" not in _summarize(profile).stdout
     assert (coverage["tasks"], coverage["complete_tasks"]) == (8, 1)
     assert _ids(coverage["partial_tasks"]) == [(0, "agent_d")]
     assert _ids(coverage["tasks_without_measured_rollout"]) == [
         (task, server) for task in (0, 1) for server in ("agent", "server_a", "server_c")
     ]
     assert coverage["tasks_not_in_profile_file"] == []
+    # A count-only row without agent_ref can be either run's, even when another task's plain row names one of them.
+    (tmp_path / "plain").mkdir()
+    rows = _fan_out_rows([("agent_a", None), ("agent_b", None)], tasks=1)
+    rows += [
+        {"_ng_task_index": 1, "_ng_rollout_index": repeat, "agent_ref": {"name": "agent_b"}} for repeat in range(2)
+    ]
+    results = [row | {"reward": 1.0, "mask_sample": row["_ng_task_index"] == 0} for row in rows[2:]]
+    summary = _summary(_gym_profile(tmp_path / "plain", rows, results))
+    assert [record["in_profile_file"] for record in summary["no_measured_rollout"]] == [None, None]
 
 
 def test_a_run_masked_everywhere_is_reported_apart(tmp_path):

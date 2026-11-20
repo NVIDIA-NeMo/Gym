@@ -196,5 +196,5 @@ Mean reward 0.51 over the 41 measured rollouts only.
 
 - The script summarizes `gym eval profile` output; it does not recompute statistics from the rollouts.
 - Telling masked rollouts from rollouts never saved needs the materialized inputs and the masked total in `_agent_metrics.json`, which counts only rows that name an agent (rows of Environment Server tasksets do not). When either is missing or incomplete, the script reports that split as unknown.
-- When the same task ran under several agents or Environment Servers, the script labels the runs the way `gym eval profile` does. If the inputs and the profile disagree on the labels, it compares coverage per task instead.
+- When the same task ran under several agents or Environment Servers, the script reports each task and run separately and names each run as the materialized inputs do: by its agent, or by its Environment Server when several servers front one agent. If masking removed every rollout of a run, `gym eval profile` can name the other runs differently, so the profile file and `_agent_metrics.json` may use other names. When a row with no measured rollout could belong to more than one run, the script reports whether those runs are in the profile file as unknown.
 - A profile shows which tasks give a signal, not why a task fails. Read the rollouts for that.

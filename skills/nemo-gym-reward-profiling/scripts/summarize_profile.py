@@ -265,9 +265,10 @@ def summarize(
     absent = [r for r in records if r["in_profile_file"] is False]
     # A row's planned minus expected rollouts were masked, and masked rollouts of tasks with no row show only in the
     # agent metrics' total. That total counts only rows that name an agent, so the split between masked and never
-    # saved is known only when the inputs are found, every input row names an agent and every row's run is known.
+    # saved is known only when the inputs are found and every input row names an agent. A row whose run is unknown
+    # still counts in that total; only which of its task's runs it belongs to stays unknown.
     masked_total = None
-    if planned is not None and masked_reported is not None and every_input_names_agent and not unresolved_tasks:
+    if planned is not None and masked_reported is not None and every_input_names_agent:
         # Masked rollouts were saved but not measured: at least those the rows leave out, at most all unmeasured ones.
         if not masked_in_rows <= masked_reported <= planned_total - measured_total:
             raise ValueError(
@@ -304,7 +305,7 @@ def summarize(
             # Masked rollouts that belong to tasks with no row: 0 means those tasks were never saved, a value equal to
             # their planned rollouts means every one of them was saved and masked, and null means unknown.
             "masked_rollouts_of_tasks_not_in_profile_file": (masked_total - masked_in_rows)
-            if known and absent
+            if known and absent and not unresolved_tasks
             else None,
             "inputs_checked": planned is not None,
             "masked_rollouts_in_agent_metrics": masked_reported,

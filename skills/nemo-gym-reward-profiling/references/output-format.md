@@ -18,7 +18,7 @@ A failed `/run` request stops the run unless `+route_failures_to_sidecar=true` i
 ## Per-task rows: `<stem>_reward_profiling.jsonl`
 
 - `_ng_task_index`: the task.
-- `agent_ref`: present only when the same task ran under more than one run; the file then has one row per task and run. It names the agent, or the Environment Server when several servers front one agent.
+- `agent_ref`: present only when the same task ran under more than one run; the file then has one row per task and run. It names the agent, or the Environment Server when several servers front one agent. Masked rollouts are left out first, so a run whose every rollout was masked can remove `agent_ref` from the file or change how the other runs are named.
 - `sample`: one materialized input row for the task, without the two index keys.
 - `num_rollouts`: measured rollouts summarized in this row.
 - `expected_num_rollouts`: planned rollouts for the task, from the materialized inputs, minus masked ones.

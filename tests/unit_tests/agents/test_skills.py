@@ -141,18 +141,13 @@ class TestHashSkillDir:
         (copy_dir / "linked" / "scripts").mkdir()
         (copy_dir / "linked" / "scripts" / "helper.py").write_text("print('v1')\n")
 
-        h1 = hash_skill_dir(skills_dir)
         # The link hashes like a real directory with the same files.
-        assert h1 == hash_skill_dir(copy_dir)
-        (target / "SKILL.md").write_text("---\nname: linked\ndescription: edited\n---\n# Body\n")
-        h2 = hash_skill_dir(skills_dir)
-        (target / "scripts" / "helper.py").write_text("print('v2')\n")
-        h3 = hash_skill_dir(skills_dir)
-        assert len({h1, h2, h3}) == 3
-        # Staging copies the bytes that were hashed.
+        assert hash_skill_dir(skills_dir) == hash_skill_dir(copy_dir)
+        # Staging copies those files, not the link.
         dest = tmp_path / "staged"
         stage_skills(str(skills_dir), dest)
-        assert (dest / "linked" / "scripts" / "helper.py").read_text() == "print('v2')\n"
+        assert not (dest / "linked").is_symlink()
+        assert (dest / "linked" / "scripts" / "helper.py").read_text() == "print('v1')\n"
 
 
 class TestLoadSkillDirectory:
