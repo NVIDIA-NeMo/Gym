@@ -54,9 +54,22 @@ All presets are under `benchmarks/legal_agent_bench/`:
 
 All presets run through the Harbor Environment Server and
 use `legal_agent_bench_benchmark_agent` and the same task rows and verifier.
-Change the preset to compare harnesses while keeping tasks, model, judges,
-sampling, and budgets fixed. LAB Native uses LAB's `finish` tool; CLI harnesses
-keep their own tools and termination rules.
+Presets share tasks, the model server, judges, wall-clock budgets, and sampling
+defaults. Harness requests can override sampling defaults. Output caps, turn
+limits, and context handling remain harness-specific: LAB Native caps each call
+at 65,536 output tokens; Hermes and Codex have no per-call cap configured by these
+presets. Claude Code controls its own output cap. LAB Native, Hermes, and Claude
+Code allow 60 turns; Codex has no turn cap configured here.
+
+Hermes enables its `terminal` toolset, without the separate `file` toolset.
+Claude Code uses `bare: true`, disabling automatic discovery of features such as
+hooks and plugins. CLI harnesses keep their own termination rules; LAB Native
+uses LAB's `finish` tool.
+
+For Codex, optionally set `lab.policy_context_window` to your policy endpoint's
+context limit. If omitted, Codex uses its generic context settings. The preset
+uses a placeholder model name inside Codex to retain classic
+shell tools. The Gym model server still sends the real configured model name.
 
 `finish` checks only the agent's listed output files, without consulting the rubric.
 Missing files cause up to two rejections so the agent can correct them; a third
@@ -72,6 +85,19 @@ Apptainer and Enroot borrowers must run on the owner's host and UID; Enroot also
 requires matching data/runtime directories. Fargate needs exec-server mode and
 the owner's active SSH forward. OpenShell needs the same gateway and workspace.
 
+CLI presets expose only model servers through automatic IP discovery. Leave
+`default_host` unset: setting it explicitly applies that address to all servers.
+If automatic discovery fails or gives an unreachable address, disable it and set
+the policy model server's own `host`, for example in `model-provider.yaml`:
+
+```yaml
+use_absolute_ip: false
+policy_model:
+  responses_api_models:
+    openai_model:
+      host: 192.0.2.10  # Replace with the host address reachable from your sandbox.
+```
+
 OpenShell policies must allow writes to `/workspace`, `/tmp`, `/home/sandbox`, `/tests`, and `/logs`.
 The LAB image creates the Harbor directories with ownership assigned to the restricted sandbox user.
 Rubrics and judge credentials are still injected only into the separate verifier sandbox.
@@ -79,8 +105,9 @@ Rubrics and judge credentials are still injected only into the separate verifier
 Automatic image preparation uses Docker. To run without local Docker, supply
 an accessible, provider-compatible
 LAB tools image using `prepare_script_args.image`. Every sandbox must reach the
-advertised model-server address. OpenShell policies must also permit harness
-installation; scoped npm packages need encoded slashes allowed on registry requests.
+advertised model-server address. Codex installs Node and Codex in each sandbox, so
+OpenShell policies must allow nodejs.org and registry.npmjs.org, with encoded
+slashes allowed for scoped npm packages.
 
 ## Run selected tasks
 
@@ -97,6 +124,8 @@ prepare_script_args:
 lab:
   policy_temperature: 1.0
   policy_top_p: 0.95
+  # Optional for Codex; set to your endpoint's actual context limit.
+  # policy_context_window: 128000
   reward_mode: full_task
   judge_parallelism: 6
   agent_timeout_seconds: 10800
@@ -153,6 +182,21 @@ supported. Use local storage or enable cluster-wide locking on shared storage.
   document-tool versions, completion status, and usage. Judge errors are operational
   failures. Turn/context exhaustion remains scoreable, and measured verifier-budget
   timeouts retain Harbor's scoring policy. Cleanup failures remain operational failures.
+
+Harnesses do not yet classify every failure alike. A Claude Code failed response
+without outcome metadata can still be graded; classified transport failures from
+other harnesses are retried and persistent failures are excluded from scores.
+For reporting that counts persistent environment failures and missing runs as
+zero, add these collection settings:
+
+```yaml
+count_failure_classes_as_zero: [environment_server_failed]
+count_missing_rollouts_as_zero: true
+```
+
+These settings change aggregate metrics, not retry behavior or saved grades.
+They also count environment and judge failures as zero, so report failures
+separately and do not treat this as identical failure handling across harnesses.
 
 The production-review task
 `categorize-document-production-set-by-relevance-and-privilege` has a grading
