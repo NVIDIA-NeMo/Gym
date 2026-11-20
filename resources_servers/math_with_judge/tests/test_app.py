@@ -46,8 +46,8 @@ from resources_servers.math_with_judge.app import (
     _extract_last_boxed_answer,
     _extract_unboxed_answer_candidate,
     _prepare_format_tolerant_response,
-    _run_math_verify,
 )
+from resources_servers.math_with_judge.library import _run_math_verify, _wait_for_library_verifier_process
 
 
 def _geometric_series_terms(num_terms: int) -> str:
@@ -669,7 +669,7 @@ class TestApp:
 
         try:
             task = asyncio.create_task(
-                LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+                _wait_for_library_verifier_process(
                     process,
                     result_connection,
                     60.0,
@@ -698,7 +698,7 @@ class TestApp:
 
         operation = ResourcesOperation()
         try:
-            assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+            assert await _wait_for_library_verifier_process(
                 process,
                 result_connection,
                 0.01,
@@ -717,7 +717,7 @@ class TestApp:
         process.exitcode = 1
         result_connection = MagicMock()
 
-        assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+        assert await _wait_for_library_verifier_process(
             process,
             result_connection,
             1.0,
@@ -731,7 +731,7 @@ class TestApp:
         result_connection.poll.return_value = True
         result_connection.recv.side_effect = EOFError()
 
-        assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+        assert await _wait_for_library_verifier_process(
             process,
             result_connection,
             1.0,
