@@ -130,10 +130,23 @@ class TokenCaptureSnapshot:
 
     capture_key: str
     entries: tuple[TokenEntry, ...]
+    # The aggregate across agent instances: any agent instance lost a call, or the episode was marked.
     incomplete: bool
     snapshot_id: str
     version: int
     engine_refusals: tuple[EngineRefusalRecord, ...] = ()
+    # The agent instances with a lost call of their own; ``None`` is the unnamed agent.
+    incomplete_agent_instances: frozenset[str | None] = frozenset()
+    # A mark or failure with no known identity, or one that names no agent instance in an episode that names
+    # them: it masks every agent instance.
+    incomplete_episode: bool = False
+
+    def incomplete_for(self, agent_instance: str | None) -> bool:
+        """Whether this agent instance's sample is incomplete: by its own lost call, or episode-wide."""
+        if not self.incomplete_agent_instances and not self.incomplete_episode:
+            # A source that reports only the aggregate cannot place it, so it applies to everyone.
+            return self.incomplete
+        return self.incomplete_episode or agent_instance in self.incomplete_agent_instances
 
 
 @dataclass(frozen=True)
@@ -181,10 +194,19 @@ class LineageResolver(Protocol):
     Unstamped entries are invisible to resolution.
     """
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+    async def resolve(
+        self, rollout_id: str, request_items: list[dict], *, identity: CallIdentity
+    ) -> LineageResolution:
         """Return whether the request is a root, resolved, or unresolved.
 
         ``request_items`` are the unmodified harness items.
+        ``identity`` names the caller: only calls of the request's own lineage scope (its agent instance and model
+        server) can be its parent. An unnamed agent passes an identity that carries its model server.
+        A request whose only match was served by another model server for the same agent instance is a root
+        with reason ``model_server_changed``.
+        A request that carries model turns while its lineage scope has made no call is a root with reason
+        ``first_call``: the turns are input, such as another agent instance's transcript. An implementation
+        that cannot tell a lineage scope without calls from one whose calls it no longer holds returns ``UNRESOLVED``.
         The implementation must verify the recorded request context.
         A conflicting set of committed payloads for one call id must count as zero candidates.
         UNRESOLVED is always a safe answer; a wrong RESOLVED is caught later by digest verification.
@@ -258,10 +280,11 @@ class CaptureLedger(LineageResolver, Protocol):
         """
         ...
 
-    async def has_rows(self, rollout_id: str) -> bool:
-        """Return whether any ledger row (committed or failed) exists.
+    async def has_rows(self, rollout_id: str, *, identity: CallIdentity) -> bool:
+        """Return whether any ledger row (committed or failed) exists for ``identity``'s lineage scope.
 
-        A retired rollout raises ``RolloutRetiredError``, so admission can refuse to capture its late calls.
+        A retired rollout whose ledger has no row of that lineage scope raises ``RolloutRetiredError``, so admission
+        can refuse to capture its late calls.
         """
         ...
 

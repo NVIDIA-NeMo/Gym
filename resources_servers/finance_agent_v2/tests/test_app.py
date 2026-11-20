@@ -538,6 +538,38 @@ class TestToolDispatch:
         sent_prompt = server._run_retrieval.call_args.args[0]
         assert "shares outstanding 24.3 billion" in sent_prompt
 
+    @staticmethod
+    async def _sent_retrieval_body(server: FinanceAgentV2ResourcesServer) -> dict:
+        failed = MagicMock(ok=False, status=500)
+        failed.text = AsyncMock(return_value="stop")
+        server.server_client.post = AsyncMock(return_value=failed)
+        with pytest.raises(RuntimeError):
+            await server._run_retrieval("prompt")
+        return server.server_client.post.call_args.kwargs["json"].model_dump(exclude_unset=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "request_params, fallback, expected",
+        [
+            ({}, None, "absent"),
+            ({}, 8192, 8192),
+            ({"max_output_tokens": 4096}, None, 4096),
+            ({"max_output_tokens": 4096}, 8192, 4096),
+            ({"max_output_tokens": None}, None, None),
+            ({"max_output_tokens": None}, 8192, 8192),
+        ],
+    )
+    async def test_retrieval_output_budget(self, request_params, fallback, expected) -> None:
+        server = _make_server(
+            retrieval_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], **request_params),
+            retrieval_max_output_tokens=fallback,
+        )
+        body = await self._sent_retrieval_body(server)
+        if expected == "absent":
+            assert "max_output_tokens" not in body
+        else:
+            assert body["max_output_tokens"] == expected
+
     @pytest.mark.asyncio
     async def test_retrieve_missing_key_errors(self) -> None:
         server = _make_server()

@@ -246,7 +246,7 @@ class SandboxDomain:
             if self._sandbox is None or self.cleanup == "deleted":
                 return self.cleanup
             try:
-                await asyncio.wait_for(self._sandbox.stop(), timeout=self.policy.cleanup_timeout_s)
+                await self._sandbox.stop(timeout_s=self.policy.cleanup_timeout_s)
             except asyncio.CancelledError:
                 self.cleanup = "delete_failed"
                 raise

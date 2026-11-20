@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from omegaconf import DictConfig
 
 import resources_servers.genrm_compare.app as genrm
@@ -131,6 +132,84 @@ async def test_a_member_that_has_not_recorded_its_reward_gets_it_back_after_a_re
     # Answered from the restored cohort: no sibling had to verify again, and the judge did not run.
     restored._run_single_comparison.assert_not_awaited()
     await restored.aclose()
+
+
+async def test_explicit_defaults_preserve_digest_and_saved_coefficient_echo(config):
+    config = config.model_copy(
+        update={
+            "group_answer_length_penalty_coeff": 0.06,
+            "group_reasoning_length_penalty_coeff": 0.06,
+        }
+    )
+    server, participant = seeded(config)
+    explicit = member(1).model_copy(
+        update={
+            "group_answer_length_penalty_coeff": 0.06,
+            "group_reasoning_length_penalty_coeff": 0.06,
+        }
+    )
+    static, scored = await asyncio.gather(
+        verify_as(server, SESSIONS[0], member(0)), verify_as(server, SESSIONS[1], explicit)
+    )
+    answer_field = "group_answer_length_penalty_coeff"
+    reasoning_field = "group_reasoning_length_penalty_coeff"
+    assert answer_field not in static.model_dump()
+    assert scored.group_answer_length_penalty_coeff == scored.group_reasoning_length_penalty_coeff == 0.06
+    states = await server.export_session_states(SESSIONS, checkpoint_id="c")
+    assert states[SESSIONS[1]]["prompt_digest"] == genrm.get_prompt_key_from_input(
+        explicit.responses_create_params.input
+    )
+    records = await participant.export(None, checkpoint_id="c")
+    await server.aclose()
+
+    restored, _ = await restore(config, records)
+    replay = await verify_as(restored, SESSIONS[1], explicit)
+    assert replay.reward == scored.reward
+    assert replay.group_answer_length_penalty_coeff == replay.group_reasoning_length_penalty_coeff == 0.06
+    restored._run_single_comparison.assert_not_awaited()
+    await restored.aclose()
+
+    for state in states.values():
+        state["result"].pop(answer_field)
+        state["result"].pop(reasoning_field)
+    historical, _ = participant_server(config)
+    await historical.restore_session_states(states)
+    with pytest.raises(HTTPException, match="did not record applied length coefficients") as error:
+        await verify_as(historical, SESSIONS[1], explicit)
+    assert error.value.status_code == 409
+    static_replay = await verify_as(historical, SESSIONS[1], member(1))
+    assert static_replay.reward == scored.reward
+    assert answer_field not in static_replay.model_dump()
+    historical._run_single_comparison.assert_not_awaited()
+    await historical.aclose()
+
+
+async def test_unfinished_cohort_replays_with_its_length_coefficients(config):
+    field = "group_answer_length_penalty_coeff"
+    bodies = [member(index).model_copy(update={field: 0.12}) for index in range(2)]
+    server, participant = seeded(config)
+    waiter = asyncio.create_task(verify_as(server, SESSIONS[0], bodies[0]))
+    try:
+        await until(lambda: any(cohort.members for cohort in server._verify_cohorts.values()))
+        records = await participant.export(None, checkpoint_id="c")
+        assert [record.state for record in records] == [{}, {}]
+    finally:
+        await server.aclose()
+        await asyncio.gather(waiter, return_exceptions=True)
+
+    restored, _ = await restore(config, records)
+    try:
+        async with asyncio.timeout(2):
+            scores = await asyncio.gather(
+                *(verify_as(restored, session, body) for session, body in zip(SESSIONS, bodies))
+            )
+        assert all(score.group_answer_length_penalty_coeff == 0.12 for score in scores)
+        conflicting = bodies[1].model_copy(update={field: 0.0})
+        with pytest.raises(HTTPException, match="length coefficients") as error:
+            await verify_as(restored, SESSIONS[1], conflicting)
+        assert error.value.status_code == 409
+    finally:
+        await restored.aclose()
 
 
 @pytest.mark.parametrize("recorded_before_checkpoint", [[0], []], ids=["member_1_open", "both_open"])
