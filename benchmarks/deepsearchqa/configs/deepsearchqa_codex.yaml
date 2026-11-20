@@ -57,7 +57,7 @@ deepsearchqa_agent:
       model: ${policy_model_name}
       timeout: 7200
       codex_version: 0.144.4
-      system_prompt: You must search the web with the web_search tool before answering, and read pages with find_in_page or scroll_page. Research the request on the web and return a complete final answer.
+      system_prompt: You must search the web with the exa_search server's web_search tool before answering, and read pages with its find_in_page or scroll_page tools; your tool list may show them with an exa_search prefix. Research the request on the web and return a complete final answer.
       concurrency: 32
       sandbox_provider: sandbox
       sandbox_config:

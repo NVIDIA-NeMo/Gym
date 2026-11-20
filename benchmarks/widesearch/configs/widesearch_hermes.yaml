@@ -69,7 +69,7 @@ widesearch_hermes_benchmark:
       chat_template_kwargs_enabled: false
       # The Hermes run's 2-hour budget, as the other harnesses' timeout.
       sandbox_runner_timeout_seconds: 7200
-      system_prompt: You must search the web with the web_search tool before answering, and read pages with find_in_page or scroll_page. Research the request on the web and return exactly the requested Markdown table.
+      system_prompt: You must search the web with the exa_search server's web_search tool before answering, and read pages with its find_in_page or scroll_page tools; your tool list may show them with an exa_search prefix. Research the request on the web and return exactly the requested Markdown table.
       concurrency: 32
       sandbox_provider: sandbox
       sandbox_config:
