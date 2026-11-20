@@ -48,6 +48,7 @@ class LazyRenderConfig(BaseModel, extra="forbid"):
     reference_execution_timeout_s: int = Field(default=60, ge=1, le=600)
     reference_catalog: str | None = None
     max_reference_replacements: int = Field(default=8, ge=0, le=64)
+    allow_partial_operation_replacements: bool = False
     operation_hint_probability: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False)
 
 
@@ -113,6 +114,7 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
             "cache_root",
             "reference_catalog",
             "max_reference_replacements",
+            "allow_partial_operation_replacements",
         }
     )
     if record.get("source_kind") != "cad_corpus":
@@ -302,6 +304,14 @@ def materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                     replaced_reference_asset_ids=rejected,
                     reference_replacement_reasons=replacement_reasons,
                 )
+                required = set(original["record"].get("reference_operations", []))
+                retained = required & set(current["deepcad_lazy"]["record"].get("reference_operations", []))
+                if required - retained:
+                    resolved["verifier_metadata"]["reference_operation_fallback"] = {
+                        "required_operations": sorted(required),
+                        "retained_operations": sorted(retained),
+                        "missing_operations": sorted(required - retained),
+                    }
             return resolved
         except (ReferenceRejected, ReferenceRenderTimeout) as exc:
             if (
@@ -324,23 +334,31 @@ def materialize_one(example: dict[str, Any]) -> dict[str, Any]:
             if not catalog.is_relative_to(root):
                 raise ValueError("Reference replacement catalog must remain inside dataset_root")
             key = hashlib.sha256((original["record"]["task_id"] + ":" + str(attempt)).encode()).hexdigest()
-            # Replacement must preserve the selected source and operation coverage.
+            # The default retains the source and every required operation.
             source = original["record"].get("dataset")
+            source_parameters = (source,)
             required_operations = json.dumps(sorted(set(original["record"].get("reference_operations", []))))
+            source_predicate = "status='selected' AND json_extract(row_json, '$.deepcad_lazy.record.dataset') IS ? "
             eligible = (
-                "status='selected' AND json_extract(row_json, '$.deepcad_lazy.record.dataset') IS ? "
-                "AND NOT EXISTS (SELECT 1 FROM json_each(?) AS required WHERE NOT EXISTS "
+                source_predicate + "AND NOT EXISTS (SELECT 1 FROM json_each(?) AS required WHERE NOT EXISTS "
                 "(SELECT 1 FROM json_each(json_extract(row_json, '$.deepcad_lazy.record.reference_operations')) "
                 "AS actual WHERE actual.value=required.value)) "
             )
             with sqlite3.connect(f"file:{catalog}?mode=ro", uri=True) as db:
+                # New catalogs expose an indexed source column; retain JSON-only catalog support.
+                if config.allow_partial_operation_replacements and any(
+                    column[1] == "dataset" for column in db.execute("PRAGMA table_info(assets)")
+                ):
+                    source_predicate = "dataset IS ? AND " + source_predicate
+                    eligible = "dataset IS ? AND " + eligible
+                    source_parameters = (source, source)
                 row = db.execute(
                     "SELECT row_json FROM assets WHERE "
                     + eligible
                     + "AND id>=? AND id NOT IN ("
                     + ",".join("?" for _ in rejected)
                     + ") ORDER BY id LIMIT 1",
-                    (source, required_operations, key, *rejected),
+                    (*source_parameters, required_operations, key, *rejected),
                 ).fetchone()
                 if row is None:
                     row = db.execute(
@@ -349,8 +367,33 @@ def materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                         + "AND id NOT IN ("
                         + ",".join("?" for _ in rejected)
                         + ") ORDER BY id LIMIT 1",
-                        (source, required_operations, *rejected),
+                        (*source_parameters, required_operations, *rejected),
                     ).fetchone()
+                if row is None and config.allow_partial_operation_replacements:
+                    row = db.execute(
+                        "SELECT row_json FROM assets WHERE "
+                        + source_predicate
+                        + "AND id NOT IN ("
+                        + ",".join("?" for _ in rejected)
+                        + ") ORDER BY (SELECT COUNT(DISTINCT required.value) FROM json_each(?) AS required "
+                        "WHERE EXISTS (SELECT 1 FROM "
+                        "json_each(json_extract(row_json, '$.deepcad_lazy.record.reference_operations')) AS actual "
+                        "WHERE actual.value=required.value)) DESC, CASE WHEN id>=? THEN 0 ELSE 1 END, id LIMIT 1",
+                        (*source_parameters, *rejected, required_operations, key),
+                    ).fetchone()
+                    if row is not None:
+                        replacement_record = json.loads(row[0])["deepcad_lazy"]["record"]
+                        missing = sorted(
+                            set(original["record"].get("reference_operations", []))
+                            - set(replacement_record.get("reference_operations", []))
+                        )
+                        logger.warning(
+                            "Using partial-operation reference replacement requested_task=%s source=%s asset=%s missing=%s",
+                            original["record"]["task_id"],
+                            source,
+                            replacement_record["asset_id"],
+                            missing,
+                        )
             if row is None:
                 raise
             current = json.loads(row[0])
