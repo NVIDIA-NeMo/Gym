@@ -30,3 +30,6 @@ codex_agent:
       features:  # config.toml [features]; null leaves a feature at the CLI default
         multi_agent: false
         code_mode: false
+      tool_pid_namespace: false  # task-sandbox sessions only: tool commands in a nested pid namespace (README)
+      failure_artifacts_dir: null  # agent-host dir that keeps a failed activation's session logs (README)
+      tool_pid_namespace_bwrap_path: null  # null -> the bwrap sandbox provider's bwrap_path

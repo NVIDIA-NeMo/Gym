@@ -50,6 +50,7 @@ class TaskData(BaseModel):
     )
     grading_mode: Literal["lenient", "strict"] = Field(
         default="lenient",
-        description="'strict' requires a well-formed <solution> block; 'lenient' also accepts bare letters.",
+        description="'lenient' takes the first standalone letter in the last <solution> block; 'strict' requires "
+        "the block to hold exactly one letter.",
         json_schema_extra={"consumed_by": ["verify"]},
     )

@@ -9,10 +9,19 @@ import shlex
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agents import HARNESS_RUNNER_FILE, AgentSessionState, SandboxCommand, SandboxSession, shell_assignments
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    AgentSessionState,
+    CleanupReceipt,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, stage_media, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -24,6 +33,19 @@ LAUNCHER_FILE = "sandbox_launcher.mjs"
 # The longest the optional session-rollout copy may take, and the part of the capture budget kept free after it.
 _ARCHIVE_TIMEOUT_S = 120.0
 _ARCHIVE_RESERVE_S = 1.0
+# Session files kept for a failed activation: supervisor + harness diagnostics first.
+FAILURE_ARTIFACT_FILES = (
+    "output.log",
+    "stderr.log",
+    "cleanup.json",
+    "runtime.json",
+    "supervisor.pid",
+    "stop.request",
+    "events.jsonl",
+)
+FAILURE_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024
+# Suffix of the trimmed copy of a session file that preserve_failure_artifacts downloads.
+FAILURE_ARTIFACT_TAIL_SUFFIX = ".gym-tail"
 # Runner setup for raise_oom_score_adj: make the runner, and with it Codex and every tool, the memory-cgroup OOM
 # killer's preferred victims. Raise oom_score_adj to 1000, or to 0 when the sandbox starts it below zero (a
 # Guaranteed pod's -997), so the sandbox never becomes the node's first victim in a global OOM. Raising needs no
@@ -57,6 +79,37 @@ def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
     except ValidationError:
         LOG.warning("Codex runtime metadata is missing or malformed")
         return None
+
+
+def harness_kill_evidence(
+    *,
+    cleanup: CleanupReceipt | None,
+    cleanup_receipt_missing: bool,
+    launch_return_code: int | None,
+) -> str | None:
+    """Describe a harness process that was killed although nobody asked it to stop, else None.
+
+    Only call this when the controller neither cancelled the activation nor hit the deadline:
+    then the supervisor, the runner and Codex end only on their own, or because something in
+    the sandbox (in practice an agent tool command, rarely the OOM killer) killed them. The
+    receipt's return code is the runner's shell status: 128+N when it, or Codex under it,
+    ended by signal N (N up to 64). This says the harness was killed, not by whom: 137 is
+    also a memory-cgroup OOM kill and 134 Node's heap abort.
+
+    A missing receipt counts only when the launch shell itself ended by a signal or its
+    status is unknown; a launch that exited normally (0, 2, 127, ...) before the
+    supervisor ran is a launch failure, not a kill.
+    """
+    if cleanup_receipt_missing:
+        if launch_return_code is None or 128 < launch_return_code <= 128 + 64:
+            return f"the process supervisor exited ({launch_return_code}) without writing its cleanup receipt"
+        return None
+    if cleanup is None or cleanup["timed_out"]:
+        return None
+    return_code = cleanup["return_code"]
+    if return_code is not None and 128 < return_code <= 128 + 64:
+        return f"the Codex runner or Codex was killed by signal {return_code - 128}"
+    return None
 
 
 @dataclass
@@ -189,6 +242,55 @@ class CodexSandboxSession(AgentSessionState):
         except Exception:
             LOG.exception("Codex session rollouts not copied")
 
+    async def _read_tail(self, name: str, max_bytes: int) -> str:
+        """The last ``max_bytes`` of a session file, trimmed inside the sandbox before the download, so a huge log
+        never reaches the Agent Server whole."""
+        path = f"{self.session.session_dir}/{name}"
+        tail = f"{name}{FAILURE_ARTIFACT_TAIL_SUFFIX}"
+        result = await self.session.sandbox.exec(
+            f"tail -c {int(max_bytes)} {shlex.quote(path)} > {shlex.quote(f'{self.session.session_dir}/{tail}')}",
+            cwd="/",
+            timeout_s=30,
+        )
+        if result.return_code != 0 or result.error_type:
+            raise FileNotFoundError(f"{name}: {(result.stderr or '').strip()[:200] or result.error_type}")
+        return await self.read_text(tail)
+
+    async def preserve_failure_artifacts(self, root: str, detail: dict[str, JsonValue]) -> Path | None:
+        """Copy the session's diagnostics to ``root/<episode>-<id>/`` before the sandbox is released.
+
+        Best effort: a file that cannot be read is listed in failure.json, and an
+        error here never replaces the activation's own failure.
+        """
+        try:
+            key = "".join(c if c.isalnum() or c in "-_." else "_" for c in self.request.episode_id.capture_key)
+            target = Path(root) / f"{key}-{uuid4().hex[:8]}"
+            copied, unavailable = [], {}
+            for name in FAILURE_ARTIFACT_FILES:
+                try:
+                    text = await self._read_tail(name, FAILURE_ARTIFACT_MAX_BYTES)
+                except Exception as error:  # noqa: BLE001 - diagnostics only
+                    unavailable[name] = f"{type(error).__name__}: {error}"[:300]
+                    continue
+                data = text.encode()
+                if len(data) > FAILURE_ARTIFACT_MAX_BYTES:
+                    data = data[-FAILURE_ARTIFACT_MAX_BYTES:]
+                await asyncio.to_thread(_write_file, target / name, data)
+                copied.append(name)
+            summary = {
+                **detail,
+                "session_dir": self.session.session_dir,
+                "saved_at": time.time(),
+                "copied": copied,
+                "unavailable": unavailable,
+            }
+            await asyncio.to_thread(_write_file, target / "failure.json", json.dumps(summary, indent=1).encode())
+            LOG.warning("Codex failure artifacts preserved in %s", target)
+            return target
+        except Exception:  # noqa: BLE001 - diagnostics only
+            LOG.warning("Could not preserve Codex failure artifacts", exc_info=True)
+            return None
+
     async def collect_artifacts(self) -> str:
         """Keep partial events even when worker metadata is unavailable."""
         if self.session.expired_before_launch:
@@ -254,3 +356,8 @@ class CodexSandboxSession(AgentSessionState):
             LOG.warning("Could not check for Codex events after a rollout stop", exc_info=True)
             return False
         return probe.return_code == 0 and not probe.error_type and probe.stdout.strip() == "absent"
+
+
+def _write_file(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
