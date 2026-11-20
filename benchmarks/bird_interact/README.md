@@ -5,7 +5,7 @@ text-to-SQL: the request is ambiguous, part of the knowledge base is hidden, and
 before it writes PostgreSQL. This recipe runs its Lite and Full releases on the
 [`bird_interact` Environment Server](../../environment_servers/bird_interact/README.md), which describes the two
 modes, the user simulator, the rewards and the grading. Its c-Interact follows the BIRD-Interact ADK: its protocol,
-its simulator and its grading, as auto-ontology-eval runs it. The server's own five-task example runs without this
+its simulator and its grading, as [auto-ontology-eval](https://github.com/NVIDIA/auto-ontology-eval) runs it. The server's own five-task example runs without this
 recipe.
 
 | Config | Release | Mode | Tasks |
@@ -77,7 +77,8 @@ gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark
 
 - **Simulator.** The server runs the ADK's simulator. For scores comparable with auto-ontology-eval's, set
   `user_model_name` to the ADK's default simulator model, `anthropic/claude-haiku-4-5-20251001` (BIRD-Interact's own
-  harness uses `gemini-2.0-flash-001`).
+  harness uses `gemini-2.0-flash-001`). Run the policy at temperature 0 with at most 4096 output tokens, as the ADK
+  runs its agent; the server's README says where to set them.
 - **Harnesses.** c-Interact needs an agent that resumes its session across turns and takes tool grants, such as
   `simple_agent`; a-Interact an agent that takes tool grants. The server's README lists which harnesses run each mode,
   and how to point the a-Interact server at an MCP-only harness such as Codex.

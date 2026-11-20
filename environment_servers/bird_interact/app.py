@@ -321,8 +321,9 @@ class BirdInteractEpisode:
     task: BirdInteractTask
     files: _DatabaseFiles
     sandbox: _EpisodeSandbox
-    # c-Interact's clarification turns (the ADK's max_turn), or a-Interact's BIRD-COIN.
+    # c-Interact: the question budget (the ADK's max_turn, which its texts call clarification turns).
     question_budget: int | None
+    # a-Interact: the BIRD-COIN budget.
     coin_budget: float | None
     phase: int = 1
     # Submissions in the current phase.

@@ -15,7 +15,7 @@ grades them. Each episode holds one task:
 
 c-Interact follows the [BIRD-Interact ADK](https://github.com/bird-bench/BIRD-Interact/tree/451fe2c3518ee1cf908d8139e2913483bd519381/BIRD-Interact-ADK)
 (revision `451fe2c`): its protocol, its user simulator and its grading, for the query tasks of Lite and Full that
-auto-ontology-eval runs. [ADK parity](#adk-parity) lists what matches and the two deliberate differences.
+[auto-ontology-eval](https://github.com/NVIDIA/auto-ontology-eval) runs. [ADK parity](#adk-parity) lists what matches and what differs.
 
 ## Modes
 
@@ -85,6 +85,10 @@ output tokens, and read the model's output as the ADK does: the action and the r
 The simulator model is the `user_model` server, which `user_model_name` in `env.yaml` sets. The ADK's default, which
 auto-ontology-eval uses, is `anthropic/claude-haiku-4-5-20251001`; set it for scores comparable with theirs.
 BIRD-Interact's own harness, `bird_interact_agent`, uses `gemini-2.0-flash-001`.
+
+For scores comparable with the ADK's, also run the policy as the ADK runs its agent: at temperature 0, with at most
+4096 output tokens. The server writes the agent's requests, so set both on the policy's Model Server, for example
+`++policy_model.responses_api_models.vllm_model.sampling_overrides={temperature:0,max_output_tokens:4096}`.
 
 If the user model fails, the result masks the sample with `failure_kind: bird_interact:user_simulator_failed`, and
 c-Interact opens no further turn.
@@ -212,8 +216,8 @@ code is Gym's. Two checks back the grading: the tests, and a run of the ADK's ow
 `grading.py` on six Lite databases, where 863 of 863 submissions got the same verdict.
 
 The ADK's agent-side behavior that a Gym harness replaces is not reproduced: its agent stops at 60 model calls in an
-episode, where a Gym harness has its own limit (`simple_agent`'s `max_steps`, for each turn). Two differences are
-deliberate:
+episode, where a Gym harness has its own limit (`simple_agent`'s `max_steps`, for each turn). Read a comparison with the
+ADK's scores with these differences in mind:
 
 - **The simulator:** the ADK fills its prompts' placeholders one after another, so a question containing `[[GT_SQL]]`
   would get the solution SQL written into it. Gym fills them in one pass, so it cannot.
@@ -222,6 +226,19 @@ deliberate:
   `submit_sql` and another call runs both, and two `submit_sql` calls are both graded and both count as attempts. Gym
   runs a turn's calls up to its submission; a later call in the same response gets `SQL submitted. Awaiting result.`,
   so each turn grades one submission.
+- **A failed simulator or grader masks the sample.** When the ADK's simulator model fails, the agent gets `I'm not sure
+  I understand your question.` and the task is scored; when its grader fails, the agent gets `Error: ...` and the
+  submission counts as failed. Gym masks the sample instead (`user_simulator_failed`, `sandbox_failed`), so an
+  infrastructure failure does not count as the agent's.
+- **The agent's request.** The ADK's agent adds a line that names it (`You are an agent. Your internal name is
+  "bird_interact_agent".`) to the instruction; Gym does not. Gym's tools have parameter descriptions and
+  `strict: true`; the ADK's have neither.
+- **Tool results.** `google-adk` sends a text tool result as JSON (`{"result": "..."}`); Gym sends the text.
+- **After a submission.** In the ADK, `SQL submitted. Awaiting result.` stays in the history as the agent's message
+  before the next debug or follow-up message. In Gym the turn ends at the tool's result, and the next user message
+  follows it.
+- **An empty submission.** The ADK answers that the SQL is not correct, without running it; Gym runs it and answers
+  that it is not executable. Both score 0, and the debug message differs.
 
 ## Not supported yet
 
