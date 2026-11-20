@@ -10,6 +10,10 @@
 # install): build it with responses_api_agents/openhands_sdk_sandboxed_agent/build_bundle.sh and pass
 #   ++nl2repobench_opencode_sandboxed_agent.responses_api_agents.openhands_sdk_sandboxed_agent.bundle_path=<outdir>/openhands_bundle.tar.gz
 # The task prompt comes from the benchmark row (user_prompt: null below), so OpenHands and OpenCode get the same one.
+#
+# Status: experimental. This config resolves and the OpenHands agent has run on the internal NL2RepoBench-style task sets, but no
+# complete run of the upstream 104 tasks with this harness is recorded yet (see "Combinations and status" in README.md), so
+# treat that pairing as untested end to end until a smoke run is.
 config_paths:
   - responses_api_agents/openhands_sdk_sandboxed_agent/configs/openhands_sdk_sandboxed_agent.yaml
   - resources_servers/nl2repobench/configs/nl2repobench.yaml
