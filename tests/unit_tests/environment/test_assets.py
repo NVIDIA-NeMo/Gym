@@ -150,8 +150,9 @@ def test_a_manifest_that_changes_moves_or_is_added_during_the_process_is_seen(ro
     shutil.move(demo.parent, moved)
     assert _selected("demo") == (moved / "other.yaml").resolve()
 
-    # Added: a manifest written after the first selection.
-    added = _write_manifest(later, "environments", "added", _manifest("added"))
+    # Added: a manifest written after the first selection, in a folder named differently from its ID, so that only
+    # reading the tree again finds it.
+    added = _write_manifest(later, "environments", "new_folder", _manifest("added"))
     assert _selected("added") == _listed("added") == added.with_name("config.yaml").resolve()
 
 
