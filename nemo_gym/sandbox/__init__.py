@@ -15,7 +15,7 @@
 """Public sandbox API for NeMo Gym."""
 
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-from nemo_gym.sandbox.api import AsyncSandbox, AsyncSandboxSidecar, Sandbox, SandboxPty
+from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox, AsyncSandboxSidecar, Sandbox, SandboxPty
 from nemo_gym.sandbox.config import (
     resolve_provider_config,
     resolve_provider_metadata,
@@ -44,6 +44,7 @@ from nemo_gym.sandbox.providers import (
     SandboxStatus,
     SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
+    SupportsSandboxExecScopedProcesses,
     SupportsSandboxNetwork,
     SupportsSandboxParkedPolling,
     SupportsSandboxPauseResume,
@@ -66,6 +67,7 @@ from nemo_gym.sandbox.utils import rewrite_image
 __all__ = [
     "Sandbox",
     "AsyncSandbox",
+    "STOP_TIMEOUT_S",
     "AsyncSandboxCompose",
     "AsyncSandboxSidecar",
     "ConnectableProvider",
@@ -91,6 +93,7 @@ __all__ = [
     "SandboxStatus",
     "SupportsSandboxCheckpointPolling",
     "SupportsSandboxEndpoint",
+    "SupportsSandboxExecScopedProcesses",
     "SupportsSandboxNetwork",
     "SupportsSandboxParkedPolling",
     "SupportsSandboxPauseResume",

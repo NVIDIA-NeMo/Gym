@@ -22,6 +22,22 @@ from resources_servers.gdpval.comparison import send_judge_request
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
+class _TestClientTransport(httpx.BaseTransport):
+    """Send httpx requests through a Starlette TestClient.
+
+    Starlette builds TestClient on httpx2 when it is installed, and the OpenAI SDK accepts only an httpx client.
+    """
+
+    def __init__(self, test_client: TestClient) -> None:
+        self._test_client = test_client
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        response = self._test_client.request(
+            request.method, str(request.url), headers=request.headers.raw, content=request.read()
+        )
+        return httpx.Response(response.status_code, headers=response.headers.raw, content=response.content)
+
+
 @pytest.mark.parametrize(
     ("judge_name", "expected_model", "expected_parameters", "model_overrides"),
     [
@@ -111,12 +127,13 @@ async def test_benchmark_panel_routes_to_matching_upstream_model(
             ],
         }
     )
-    with TestClient(server.setup_webserver()) as transport:
+    with TestClient(server.setup_webserver()) as test_client:
         messages = [{"role": "user", "content": "check"}]
         if judge_mode == "pairwise":
+            http_client = httpx.Client(transport=_TestClientTransport(test_client))
             monkeypatch.setattr(
                 "resources_servers.aa_briefcase_lite.app.OpenAI",
-                lambda **kwargs: OpenAI(**{**kwargs, "http_client": transport}),
+                lambda **kwargs: OpenAI(**{**kwargs, "http_client": http_client}),
             )
             pairwise_judge = resource._pairwise_judges([judge])[0]
             assert pairwise_judge.model == expected_model

@@ -66,12 +66,13 @@ from nemo_gym.data.hf_utils import (
 )
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.data.task_data import (
+    SERVER_DIR_MARKERS,
     TaskDataSchemaError,
     TaskDataValidator,
     find_server_dir,
     load_task_data_schema,
 )
-from nemo_gym.data.task_materialization import materialize_task
+from nemo_gym.data.task_materialization import materialize_task, require_row_in_taskset
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 
 
@@ -562,6 +563,19 @@ def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
         if _declares_prepared_dataset(OmegaConf.to_container(config, resolve=False), dataset, context=context):
             return f"gym eval prepare --config {raw_config_path}"
     return "gym eval prepare --config <config path>"
+
+
+def _missing_server_dir_hint(impl_key: str, base_folder: str, instance_name: str) -> str:
+    """Why a schema home resolved to no server directory, and what to do about it.
+
+    A dangling ``resources_server`` reference never reaches this point (``_schema_home_for`` returns None for
+    it), so the directory that is missing is the implementation's own.
+    """
+    return (
+        f"no {base_folder}/{impl_key} directory holding one of {', '.join(SERVER_DIR_MARKERS)} under the "
+        f"component search roots. Check that `{impl_key}`, the implementation {instance_name} resolves to, has a "
+        "server directory, or add its root to the search roots (NEMO_GYM_EXTRA_ROOTS / --search-dir)."
+    )
 
 
 class TrainDataProcessor(BaseModel):
@@ -1206,6 +1220,12 @@ This could be due to a change in how metrics are calculated, leading to outdated
         impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
+            # Say so: a schema home that resolves to no server directory used to switch the gate off silently.
+            warnings.warn(
+                f"Skipping task_data validation for {d.jsonl_fpath}: "
+                + _missing_server_dir_hint(impl_key, base_folder, c.name),
+                stacklevel=2,
+            )
             return None
         try:
             adapter = load_task_data_schema(server_dir)
@@ -1250,6 +1270,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
         impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
+            warnings.warn(
+                f"Skipping the dataset metrics hook lookup for {c.name}: "
+                + _missing_server_dir_hint(impl_key, base_folder, c.name),
+                stacklevel=2,
+            )
             return None
         try:
             return load_dataset_metrics_hook(server_dir)
@@ -1337,11 +1362,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
                             validator.validate_row(row_index // d.num_repeats, row)
                         if d.taskset is not None and is_materialized_task_row(row):
                             # A prepared task row already names its taskset; it must be this dataset's.
-                            if row["task_id"].get("taskset") != d.taskset:
-                                raise ValueError(
-                                    f"{d.jsonl_fpath} row {row_index}: task_id.taskset "
-                                    f"{row['task_id'].get('taskset')!r} differs from the dataset taskset {d.taskset!r}"
-                                )
+                            try:
+                                require_row_in_taskset(row, d.taskset)
+                            except ValueError as error:
+                                raise ValueError(f"{d.jsonl_fpath} row {row_index}: {error}") from error
                         elif d.taskset is not None:
                             # Keep collector identity outside task_data so shards and retries
                             # retain their capture keys after materialization, and keep a row's

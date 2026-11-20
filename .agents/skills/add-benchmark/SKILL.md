@@ -123,6 +123,7 @@ Critical rules:
 - Must handle 4k-65k concurrent requests without crashing
 - Use `asyncio.Semaphore` for subprocess concurrency control
 - For Ray remote tasks: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` in async context.
+- Ray is optional. A server that uses Ray must declare `ray_enabled = True` on the class its entrypoint runs and request `nemo-gym[ray]` in its own `pyproject.toml`; otherwise Gym doesn't start Ray for it and Ray calls fail with "Ray has not been started yet". For isolated code execution, use the Sandbox API instead of Ray.
 - Decode subprocess output with `errors="replace"`
 - Strip `<think>`/`<thinking>` blocks before parsing model output (thinking models emit these)
 - Tests should `pytest.mark.skipif` when external tools aren't installed

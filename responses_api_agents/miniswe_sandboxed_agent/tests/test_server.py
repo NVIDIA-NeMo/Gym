@@ -924,11 +924,22 @@ async def test_late_verify_cannot_race_expiry_cleanup(fixture):
 
 @pytest.mark.parametrize("shutdown_timeout", [0, 0.02])
 @pytest.mark.parametrize("blocked_stage", ["preparation", "response"])
-async def test_shutdown_is_bounded_when_seed_response_never_arrives(fixture, shutdown_timeout, blocked_stage):
+async def test_shutdown_is_bounded_when_seed_response_never_arrives(
+    fixture, monkeypatch, shutdown_timeout, blocked_stage
+):
     f = fixture
     f.agent.config.shutdown_timeout_sec = shutdown_timeout
-    f.server.config.seeded_session_timeout_sec = 0.1
     entered, transport_cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    expire = asyncio.Event()
+    watch_deadline = f.server._watch_agent_deadline
+
+    async def expire_after_shutdown(server, session):
+        # Slow setup must not expire the session before the seed-response wait is reached.
+        await expire.wait()
+        session.agent_deadline = asyncio.get_running_loop().time()
+        await watch_deadline(session)
+
+    monkeypatch.setattr(type(f.server), "_watch_agent_deadline", expire_after_shutdown)
     post = f.agent.server_client.post.side_effect
     if blocked_stage == "preparation":
         task = f.server._loader.load.return_value
@@ -965,9 +976,12 @@ async def test_shutdown_is_bounded_when_seed_response_never_arrives(fixture, shu
     release.set()
     async with asyncio.timeout(1):
         await session.execution
+        assert session.phase == "ready" and session.finalization is None
+        expire.set()
         await session.expiry_task
         await session.finalization
     assert session.phase == "closed" and not session.owns_slot
+    assert session.termination.reason == "timeout" and "agent_expired_at" in session.deadlines
     assert all(e.closed for e in f.envs)
     f.grade.assert_not_awaited()
 

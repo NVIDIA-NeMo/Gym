@@ -17,9 +17,9 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 359.2,
-        "Min": 346.0,
-        "Max": 379.0,
+        "Average": 497.2,
+        "Min": 484.0,
+        "Max": 517.0,
         "Standard deviation": 14.45
     },
     "Number of turns": {
@@ -35,9 +35,5 @@
         "Min": 0.0,
         "Max": 0.0,
         "Standard deviation": 0.0
-    },
-    "task_source": {
-        "unique_count": 1,
-        "total_count": 5
     }
 }

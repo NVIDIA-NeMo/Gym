@@ -1,0 +1,43 @@
+# ui_generation_agentic with OpenCode (opencode_agent) in the lent task sandbox. The task set and routing are in
+# base.yaml.
+config_paths:
+  - environments/ui_generation_agentic/base.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+
+# OpenCode in the lent sandbox, with the runtime baked into the agent images (no download at seed: the sandbox has
+# no internet). Web, subagent and skill tools are denied.
+ui_generation_agentic_opencode_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      num_workers: 1
+      model: ${policy_model_name}
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      resources_server: null
+      concurrency: 4
+      context_window: 131072
+      # Per model call, from ui_generation_agentic_max_output_tokens (resources server config).
+      max_output_tokens: ${ui_generation_agentic_max_output_tokens}
+      timeout: 3600
+      sandbox_install_timeout_seconds: 600
+      sandbox_executable_path: /opt/ui-gen/runtime/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret (public runtime digest)
+      sandbox_ripgrep_path: /opt/ui-gen/runtime/rg
+      sandbox_ripgrep_sha256: ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2  # pragma: allowlist secret (public runtime digest)
+      sandbox_plugin_dependencies_path: /opt/ui-gen/runtime/opencode-1.17.11-plugin-dependencies.tar.gz
+      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret (public runtime digest)
+      opencode_config:
+        permission:
+          webfetch: deny
+          websearch: deny
+          task: deny
+          skill: deny
+
+ui_generation_agentic_environment_server:
+  environment_servers:
+    single_agent_turn:
+      agent_server:
+        type: responses_api_agents
+        name: ui_generation_agentic_opencode_agent
