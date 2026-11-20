@@ -188,9 +188,10 @@ def validate_endpoint(endpoint: str) -> None:
 class RetryableTransportError(ValueError):
     """A receipted infrastructure failure requires an explicit later retry."""
 
-    def __init__(self, message: str, *, http_status: int | None = None):
+    def __init__(self, message: str, *, http_status: int | None = None, terminal: bool = False):
         super().__init__(message)
         self.http_status = http_status
+        self.terminal = terminal
 
 
 async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> dict:

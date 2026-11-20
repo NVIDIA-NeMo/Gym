@@ -80,8 +80,8 @@ def test_judge_startup_requires_key_only_when_serving(monkeypatch):
         server.setup_webserver()
 
 
-@pytest.mark.parametrize("status", [401, 403])
-def test_http_verify_rejected_credentials_preserves_saved_answer(verifier, monkeypatch, status):
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 503, 400, 404, 413, 422])
+def test_http_verify_judge_failure_preserves_saved_answer(verifier, monkeypatch, status):
     from resources_servers.agentic_if_realworld.tests.test_transport import Response
 
     calls = []
@@ -113,8 +113,13 @@ def test_http_verify_rejected_credentials_preserves_saved_answer(verifier, monke
     saved = {path: path.read_bytes() for path in (verifier.receipt_dir / "model").iterdir()}
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         response = client.post("/verify", json=body)
-        assert response.status_code == status and len(calls) == 1
-        assert f"http_status={status}" in response.json()["detail"] and "attempt0.json" in response.json()["detail"]
+        terminal = status in (400, 404, 413, 422)
+        assert response.status_code == (500 if terminal else 200) and len(calls) == 1
+        if not terminal:
+            expected_kind = "provider_credentials_rejected" if status in (401, 403) else "judge_failed"
+            assert response.json()["failure_kind"] == expected_kind
+            assert f"http_status={status}" in response.json()["failure_reason"]
+            assert "attempt0.json" in response.json()["failure_reason"]
         assert not list(verifier.receipt_dir.glob("judges/*/result.json"))
         monkeypatch.setenv("SYNTHETIC", "corrected-key")
         response = client.post("/verify", json=body)

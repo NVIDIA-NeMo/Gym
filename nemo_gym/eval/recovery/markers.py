@@ -29,6 +29,7 @@ from nemo_gym.core.failure_kinds import (
     DRIVER_INSTALL_FAILED,
     ENVIRONMENT_PREPARE_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
+    JUDGE_FAILED,
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
     SERVER_SPINUP_TIMEOUT,
@@ -78,6 +79,11 @@ GUARDED_DRIVER_FAILURE_KINDS = (
     PROVIDER_QUOTA_EXHAUSTED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
 )
+
+
+# Journal drivers opt into continuation with a retryable kind and revalidate their saved answers.
+# Guarded terminal failures above never retry.
+RESUMABLE_DRIVER_FAILURE_KINDS = (JUDGE_FAILED,)
 
 
 def record_failure_kind(error: BaseException) -> None:

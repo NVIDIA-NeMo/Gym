@@ -219,3 +219,9 @@ def test_each_root_lazy_export_names_the_module_that_defines_it() -> None:
             if name not in vars(importlib.import_module(f"nemo_gym.{module}")):
                 stale.append(f"{name}: nemo_gym.{module}")
     assert not stale, f"These nemo_gym._LAZY_EXPORTS entries name a module that does not define the name: {stale}"
+
+
+def test_judge_provider_credential_kind_is_exported_from_core():
+    from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
+
+    assert importlib.import_module("nemo_gym.core").PROVIDER_CREDENTIALS_REJECTED == PROVIDER_CREDENTIALS_REJECTED

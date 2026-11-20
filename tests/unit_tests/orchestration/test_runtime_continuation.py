@@ -369,7 +369,7 @@ def test_a_failing_installed_runtime_names_its_first_error_and_stops(tmp_path):
         ("agentic", "99", "judge_failed", True, 0, False),
         ("agentic", "100", "other_error", True, 0, False),
         ("agentic", None, None, True, 0, False),
-        ("missing_driver:run", "100", "judge_failed", True, 0, False),
+        ("other.custom_driver:run", "100", "judge_failed", True, 0, True),
         ("null", "100", "judge_failed", True, 0, False),
         ("${oc.env:DRIVER}", "100", "judge_failed", True, 0, False),
         ("[unclosed", "100", "judge_failed", True, 0, False),
@@ -409,3 +409,51 @@ def test_custom_driver_run_stops_when_its_driver_found_nothing_eligible(tmp_path
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="76:0")
     assert "REACHED_WORK" not in result.stdout
     assert not (tmp_path / ".gym_infra_retries").exists()
+
+
+@pytest.mark.parametrize(
+    "driver,walltime,state,policy,expected,reason",
+    [
+        (
+            "benchmarks.agentic_if_realworld.rollout_driver:run_rollout_collection",
+            61,
+            "ok",
+            None,
+            "stop",
+            "accumulated walltime",
+        ),
+        ("other.custom_driver:run", 10, "ok", None, "retry", "resumes from its own journal"),
+        ("other.custom_driver:run", 10, "malformed", None, "stop", "accumulated walltime"),
+        (
+            "other.custom_driver:run",
+            10,
+            "ok",
+            '{"by_failure_kind": {"judge_failed": "fail"}}',
+            "stop",
+            "policy stops judge_failed",
+        ),
+    ],
+)
+def test_journal_driver_continuation_obeys_walltime_and_outcome_policy(
+    tmp_path, monkeypatch, capsys, driver, walltime, state, policy, expected, reason
+):
+    from types import SimpleNamespace
+
+    from nemo_gym.eval.recovery.continuation import continuation_admission
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_resolved_config.yaml").write_text(f"rollout_collection_driver: {driver}\n")
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("{}\n")
+    (tmp_path / ".gym_driver_failure.100").write_text("judge_failed\n")
+    collected = {
+        "materialized": [],
+        "results": [],
+        "failures": [],
+        "managed_store": False,
+        "walltime_used_s": walltime,
+        "walltime_state": state,
+    }
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps(collected)))
+    assert continuation_admission(str(tmp_path), 3, 60, "1:0", "100", "FAILED", policy) == expected
+    assert reason in capsys.readouterr().out
