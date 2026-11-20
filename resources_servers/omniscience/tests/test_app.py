@@ -26,14 +26,18 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.server_runtime import BaseRunRequest
+from nemo_gym.verification import JudgeError
 from resources_servers.omniscience.app import (
     OmniscienceConfig,
+    OmniscienceRunRequest,
     OmniscienceServer,
     OmniscienceVerifyRequest,
     _strip_thinking_traces,
     extract_text_from_response,
     parse_judge_grade,
 )
+from resources_servers.omniscience.task_data import TaskData
 
 
 class TestStripThinkingTraces:
@@ -75,8 +79,8 @@ class TestParseJudgeGrade:
     def test_labelled_letter_in_text(self) -> None:
         assert parse_judge_grade("The grade is A based on analysis") == "A"
 
-    def test_fallback_to_b(self) -> None:
-        assert parse_judge_grade("no clear grade here") == "B"
+    def test_no_grade_returns_none(self) -> None:
+        assert parse_judge_grade("no clear grade here") is None
 
     @pytest.mark.parametrize(
         "text, expected",
@@ -106,8 +110,8 @@ class TestParseJudgeGrade:
             "",
         ],
     )
-    def test_ambiguous_text_defaults_to_incorrect(self, text: str) -> None:
-        assert parse_judge_grade(text) == "B"
+    def test_ambiguous_text_has_no_grade(self, text: str) -> None:
+        assert parse_judge_grade(text) is None
 
     def test_whitespace_handling(self) -> None:
         assert parse_judge_grade("  D  ") == "D"
@@ -475,6 +479,63 @@ class TestOmniscienceServer:
         assert result.extracted_answer == ""
         assert result.verdict == "not_attempted"
 
+    async def test_verify_without_a_grade_raises_judge_error(self, config: OmniscienceConfig) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        server = OmniscienceServer(config=config, server_client=server_mock)
+        self._mock_judge_reply(server_mock, self._make_judge_response("The predicted answer matches the gold target."))
+
+        with pytest.raises(JudgeError):
+            await server.verify(self._make_request("1989"))
+
+    async def test_chat_completions_judge_strips_think_blocks(self, config: OmniscienceConfig) -> None:
+        config.use_chat_completions_for_judge = True
+        server_mock = MagicMock(spec=ServerClient)
+        server = OmniscienceServer(config=config, server_client=server_mock)
+        self._mock_judge_reply(
+            server_mock,
+            {
+                "id": "judge_chat",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "judge_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "<think>Same year as the gold target.</think>\nA"},
+                    }
+                ],
+            },
+        )
+
+        result = await server.verify(self._make_request("1989"))
+
+        assert result.verdict == "correct"
+        assert result.judge_output == "A"
+
+    def _mock_judge_reply(self, server_mock: MagicMock, payload: dict) -> None:
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(return_value=payload)
+        response_mock.read = AsyncMock(return_value=orjson.dumps(payload))
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+    def _make_request(self, policy_text: str) -> OmniscienceVerifyRequest:
+        return OmniscienceVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._make_model_response(policy_text),
+            question="In what year did the Berlin Wall fall?",
+            expected_answer="1989",
+        )
+
+
+def test_run_request_fields_agree_with_task_data() -> None:
+    for name in set(OmniscienceRunRequest.model_fields) - set(BaseRunRequest.model_fields):
+        wire_field = OmniscienceRunRequest.model_fields[name]
+        schema_field = TaskData.model_fields[name]
+        assert wire_field.annotation == schema_field.annotation, name
+        assert wire_field.is_required() == schema_field.is_required(), name
+        assert wire_field.default == schema_field.default, name
+
 
 class TestOmniscienceScoreFn:
     def test_correct(self) -> None:
@@ -558,49 +619,68 @@ class TestExtractTextNoStrip:
         ("Grade: B: INCORRECT", "B", True),
         ("Grade: C: PARTIAL_ANSWER", "C", True),
         ("Grade: B; Verdict: B", "B", True),
-        ("NOT CORRECT", "B", False),
-        ("It is not CORRECT", "B", False),
-        ("The predicted answer is NOT CORRECT.", "B", False),
-        ("PARTIALLY CORRECT", "B", False),
-        ("Grade: NOT CORRECT", "B", False),
-        ("Grade: PARTIALLY CORRECT", "B", False),
-        ("<think>Is it CORRECT? No.</think>B", "B", False),
-        ("<think>\nCORRECT\n</think>B", "B", False),
-        ("A\n\nExplanation: the answer is B-level", "B", False),
-        ("The gold answer is C and the predicted answer is C++, which is different.", "B", False),
-        ("<your_message>A</your_message>", "B", False),
-        ("b", "B", False),
-        ("Predicted answer: Berlin", "B", False),
-        ("The predicted answer is a city in France.", "B", False),
-        ("Answer: Berlin", "B", False),
-        ("Grade: Athens", "B", False),
-        ("Answer: C++", "B", False),
-        ("Grade: A+", "B", False),
-        ("Grade: A/B-level", "B", False),
-        ("Grade: A/B+", "B", False),
-        ("Grade: A/E", "B", False),
-        ("Grade:\nA reasonable attempt", "B", False),
-        ("Reasoning; Grade: A", "B", False),
-        ("C: CORRECT", "B", False),
-        ("Grade: A: INCORRECT", "B", False),
-        ("Grade: A/B", "B", False),
-        ("Grade: A & B", "B", False),
-        ("Grade: A | C", "B", False),
-        ("Grade: CORRECT or INCORRECT", "B", False),
-        ("The grade is A or B", "B", False),
-        ("Grade: A/B; Grade: A", "B", False),
-        ("Grade: A; Grade: B", "B", False),
-        ("Grade: A; Grade: B+", "B", False),
-        ("Grade: **A**/**B**", "B", False),
-        ("Grade: **A** and **B**", "B", False),
-        ("Grade: **A**, **B**", "B", False),
-        ("The answer A is not correct.", "B", False),
-        ("PARTIALLY_CORRECT", "B", False),
-        ("no clear grade", "B", False),
-        ("It is CORRECT in part but also INCORRECT in part", "B", False),
+        ("NOT CORRECT", None, False),
+        ("It is not CORRECT", None, False),
+        ("The predicted answer is NOT CORRECT.", None, False),
+        ("PARTIALLY CORRECT", None, False),
+        ("Grade: NOT CORRECT", None, False),
+        ("Grade: PARTIALLY CORRECT", None, False),
+        ("<think>Is it CORRECT? No.</think>B", None, False),
+        ("<think>\nCORRECT\n</think>B", None, False),
+        ("A\n\nExplanation: the answer is B-level", None, False),
+        ("The gold answer is C and the predicted answer is C++, which is different.", None, False),
+        ("<your_message>A</your_message>", None, False),
+        ("b", None, False),
+        ("Predicted answer: Berlin", None, False),
+        ("The predicted answer is a city in France.", None, False),
+        ("Answer: Berlin", None, False),
+        ("Grade: Athens", None, False),
+        ("Answer: C++", None, False),
+        ("Grade: A+", None, False),
+        ("Grade: A/B-level", None, False),
+        ("Grade: A/B+", None, False),
+        ("Grade: A/E", None, False),
+        ("Grade:\nA reasonable attempt", None, False),
+        ("Reasoning; Grade: A", None, False),
+        ("C: CORRECT", None, False),
+        ("Grade: A: INCORRECT", None, False),
+        ("Grade: A/B", None, False),
+        ("Grade: A & B", None, False),
+        ("Grade: A | C", None, False),
+        ("Grade: CORRECT or INCORRECT", None, False),
+        ("The grade is A or B", None, False),
+        ("Grade: A/B; Grade: A", None, False),
+        ("Grade: A; Grade: B", None, False),
+        ("Grade: A; Grade: B+", None, False),
+        ("Grade: **A**/**B**", None, False),
+        ("Grade: **A** and **B**", None, False),
+        ("Grade: **A**, **B**", None, False),
+        ("The answer A is not correct.", None, False),
+        ("PARTIALLY_CORRECT", None, False),
+        ("no clear grade", None, False),
+        ("It is CORRECT in part but also INCORRECT in part", None, False),
+        # A verdict followed by a short reason or closing punctuation still counts.
+        ("CORRECT because the predicted answer matches the gold target.", "A", True),
+        ("Grade: B (the predicted year differs)", "B", True),
+        ("Answer: D - the model declined to answer", "D", True),
+        ("Final grade: C since only part of the answer is given", "C", True),
+        ("Verdict: **A**.", "A", True),
+        # Prose that only starts like a verdict, from the #5783 review.
+        ("Answer: A different year (1990) was given, so this is incorrect.", None, False),
+        ("CORRECT answer would be 1989, but the model said 1990.", None, False),
+        ("CORRECT? No, the answers differ.", None, False),
+        ("Answer: C#", None, False),
+        ("<think>Let me consider the options:\nA", None, False),
+        ("<THINK>reasoning</THINK>\nA", None, False),
+        ("Grade A would require an exact match, so this is B.", None, False),
+        ("Grade A", None, False),
+        ("A: CORRECT\nB: INCORRECT\nC:", None, False),
+        ("B:", None, False),
+        ("B\n\nThe answer is CORRECT to one significant figure, but the gold target requires three.", None, False),
+        ("Grade: A，B", None, False),
     ],
 )
-def test_only_explicit_judge_verdict_marks_grading(text: str, expected: str, parsed: bool) -> None:
+def test_only_explicit_judge_verdict_marks_grading(text: str, expected: str | None, parsed: bool) -> None:
     from nemo_gym.trajectory import ModelCallRef
     from nemo_gym.verification import JudgeGrading
     from nemo_gym.verification.judge import _judge_grading
