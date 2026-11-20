@@ -96,155 +96,18 @@ uv pip install gdown
 # Google Drive rate-limits this download ("Too many users have viewed or downloaded this file recently"). That is
 # fatal by default, because a container built without the data fails later, at SciCode runtime. A build that does not
 # run SciCode (e.g. nl2repobench only) opts out with SKIP_SCICODE_DATA=1. A download that "succeeds" without leaving
-# test_data.h5 (the path benchmarks/scicode/config.yaml reads) is a failure too.
-SCICODE_TEST_DATA="benchmarks/scicode/data/test_data.h5"
+# benchmarks/scicode/data/test_data.h5 (the path benchmarks/scicode/config.yaml reads) is a failure too.
+# This text sits in an unquoted heredoc, so the outer shell expands any dollar-sign expression in it, comments
+# included; it uses only the opt-out.
 if ! gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR" \
-    -O benchmarks/scicode/data || [[ ! -s "$SCICODE_TEST_DATA" ]]; then
+    -O benchmarks/scicode/data || [[ ! -s benchmarks/scicode/data/test_data.h5 ]]; then
     if [[ "${SKIP_SCICODE_DATA:-0}" == "1" ]]; then
         echo ">>> WARNING: scicode data download failed; continuing because SKIP_SCICODE_DATA=1" >&2
     else
-        echo ">>> ERROR: scicode data download failed or left no $SCICODE_TEST_DATA. Retry later, or set SKIP_SCICODE_DATA=1 if this container will not run SciCode." >&2
+        echo ">>> ERROR: scicode data download failed or left no benchmarks/scicode/data/test_data.h5. Retry later, or set SKIP_SCICODE_DATA=1 if this container will not run SciCode." >&2
         exit 1
     fi
 fi
-
-if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
-    MOUNTS="$MOUNTS,$TAU_2_MOUNT_BASE_GYM_DIR:$TAU_2_MOUNT_BASE_GYM_DIR"
-fi
-
-VLLM_ROUTER_WHEEL=$(readlink -f "$VLLM_ROUTER_WHEEL")
-MOUNTS="$MOUNTS,$(dirname "$VLLM_ROUTER_WHEEL"):$(dirname "$VLLM_ROUTER_WHEEL")"
-
-# pyxis --container-save exports the image when the step tears down, whatever the
-# inner script exited with, and it overwrites whatever already sits at the target.
-# So stage the build and publish only on success; otherwise a failed build silently
-# replaces a good container with a broken one.
-staged_container="$OUTPUT_CONTAINER.partial"
-rm -f "$staged_container"
-save_status=0
-
-srun --nodes=1 --ntasks=1 \
-    --container-image=$INPUT_CONTAINER \
-    --container-mounts=$MOUNTS \
-    --no-container-mount-home \
-    --container-save="$staged_container" \
-    bash -s <<INNER_BUILD || save_status=$?
-set -xeuo pipefail
-
-# Hardlink, not clone to save space
-export UV_LINK_MODE=hardlink
-
-uv pip install --system --reinstall-package vllm-router "$VLLM_ROUTER_WHEEL"
-uv pip show --system vllm-router
-# Package metadata alone does not catch a wheel built against a newer system libc.
-python3 -c 'import vllm_router_rs'
-
-uv pip install --system fastokens==0.3.1
-
-apt-get update
-apt-get install -y --no-install-recommends \
-    git
-rm -rf /var/lib/apt/lists/*
-
-cd /opt
-# Python 3.13.14 is Gym main's Python version.
-uv venv --python 3.13.14 Gym_venv
-source Gym_venv/bin/activate
-
-# We use this flow to support use cases where env.yaml, etc config files are mounted
-# In these cases, git clone throws a non-empty directory error.
-mkdir -p Gym
-cd Gym
-git init
-git remote add origin $NEMO_GYM_GIT_URL
-git fetch origin $NEMO_GYM_GIT_REF
-git checkout $NEMO_GYM_GIT_REF
-
-uv sync --active --extra all
-
-########################################
-# START Benchmark specific preparation
-########################################
-
-# See benchmarks/scicode/README.md
-uv pip install gdown
-# Google Drive rate-limits this download ("Too many users have viewed or downloaded this file recently"). That is
-# fatal by default, because a container built without the data fails later, at SciCode runtime. A build that does not
-# run SciCode (e.g. nl2repobench only) opts out with SKIP_SCICODE_DATA=1.
-if ! gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR" \
-    -O benchmarks/scicode/data; then
-    if [[ "${SKIP_SCICODE_DATA:-0}" == "1" ]]; then
-        echo ">>> WARNING: scicode data download failed; continuing because SKIP_SCICODE_DATA=1" >&2
-    else
-        echo ">>> ERROR: scicode data download failed. Retry later, or set SKIP_SCICODE_DATA=1 if this container will not run SciCode." >&2
-        exit 1
-    fi
-fi
-
-if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
-    MOUNTS="$MOUNTS,$TAU_2_MOUNT_BASE_GYM_DIR:$TAU_2_MOUNT_BASE_GYM_DIR"
-fi
-
-VLLM_ROUTER_WHEEL=$(readlink -f "$VLLM_ROUTER_WHEEL")
-MOUNTS="$MOUNTS,$(dirname "$VLLM_ROUTER_WHEEL"):$(dirname "$VLLM_ROUTER_WHEEL")"
-
-# pyxis --container-save exports the image when the step tears down, whatever the
-# inner script exited with, and it overwrites whatever already sits at the target.
-# So stage the build and publish only on success; otherwise a failed build silently
-# replaces a good container with a broken one.
-staged_container="$OUTPUT_CONTAINER.partial"
-rm -f "$staged_container"
-save_status=0
-
-srun --nodes=1 --ntasks=1 \
-    --container-image=$INPUT_CONTAINER \
-    --container-mounts=$MOUNTS \
-    --no-container-mount-home \
-    --container-save="$staged_container" \
-    bash -s <<INNER_BUILD || save_status=$?
-set -xeuo pipefail
-
-# Hardlink, not clone to save space
-export UV_LINK_MODE=hardlink
-
-uv pip install --system --reinstall-package vllm-router "$VLLM_ROUTER_WHEEL"
-uv pip show --system vllm-router
-# Package metadata alone does not catch a wheel built against a newer system libc.
-python3 -c 'import vllm_router_rs'
-
-uv pip install --system fastokens==0.3.1
-
-apt-get update
-apt-get install -y --no-install-recommends \
-    git
-rm -rf /var/lib/apt/lists/*
-
-cd /opt
-# Python 3.13.14 is Gym main's Python version.
-uv venv --python 3.13.14 Gym_venv
-source Gym_venv/bin/activate
-
-# We use this flow to support use cases where env.yaml, etc config files are mounted
-# In these cases, git clone throws a non-empty directory error.
-mkdir -p Gym
-cd Gym
-git init
-git remote add origin $NEMO_GYM_GIT_URL
-git fetch origin $NEMO_GYM_GIT_REF
-git checkout $NEMO_GYM_GIT_REF
-
-uv sync --active --extra all
-
-########################################
-# START Benchmark specific preparation
-########################################
-
-# See benchmarks/scicode/README.md
-uv pip install gdown
-# SciCode data is irrelevant to the nl2repobench build and Google Drive rate-limits it ("Too many users
-# have viewed or downloaded this file recently"), which aborted a build; don't let it be fatal.
-gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR" \
-    -O benchmarks/scicode/data || echo ">>> WARNING: scicode data download failed; continuing (not needed for nl2repobench)"
 
 if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
     echo "Copying Tau2 and Tau3 data from mounted Gym dir: $TAU_2_MOUNT_BASE_GYM_DIR"
