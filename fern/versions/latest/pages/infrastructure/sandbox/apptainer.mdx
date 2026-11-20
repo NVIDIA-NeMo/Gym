@@ -130,7 +130,7 @@ The neutral `user` argument to `exec()` maps onto Apptainer behavior:
 | `"root"` or `0` | Add `--fakeroot` when `exec.fakeroot_for_root` is enabled. |
 | Other user or uid | Add `--fakeroot` and wrap the command with `su`. |
 
-A command given as a list of strings is passed to `apptainer exec` as the program and its arguments, without `sh -c`. Because `su` runs a shell, it takes `user` as `None`, `"root"` or `0` only and raises `SandboxExecArgvUnsupportedError` for another user.
+A command given as a list of strings is passed to `apptainer exec` as the program and its arguments, without `sh -c`. Because `su` runs a shell, it takes `user` as `None`, `"root"` or `0` only and raises `SandboxExecArgvUnsupportedError` for another user. When Apptainer cannot start the program of such a list, the result is a command failure like a shell's: return code `127` if the program is not found, `126` if it cannot be executed, and no `error_type`.
 
 Running as root or another user depends on host fakeroot support. Numeric UIDs may not resolve inside the container; prefer named users when switching users.
 

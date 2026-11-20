@@ -247,6 +247,9 @@ are unaffected.
 `exec` never raises for command failure; it returns a `SandboxExecResult`:
 
 - **Normal** — the command's real `return_code`, `error_type=None`.
+- **Program of an argument list that cannot be started** — Apptainer's own `FATAL:` line for a program it cannot
+  find or execute (exit code 255) is a command failure like a shell's: `return_code=127` (not found) or `126`
+  (not executable), `error_type=None`. For shell text the program is `sh`, so that stays a runtime failure.
 - **Timeout** — `return_code=125`, `error_type="timeout"`.
 - **Apptainer runtime failure** (instance gone, etc., detected via Apptainer's own
   stderr lines: a line starting with `FATAL:`, a missing-instance message, or an
