@@ -19,7 +19,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from environment_servers.bird_interact.task_data import BirdInteractTask
+from environment_servers.bird_interact.task_input import BirdInteractTask
 from nemo_gym.data import materialize_task
 
 
