@@ -1,7 +1,7 @@
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/reasoning_gym/data/example.jsonl",
+    "jsonl_fpath": "environments/reasoning_gym/data/example.jsonl",
     "num_repeats": 1,
     "gitlab_identifier": null,
     "license": null,
