@@ -211,7 +211,8 @@ def test_servers_starting_together_build_eternafold_once(tmp_path: Path, monkeyp
         thread.start()
     for thread in threads:
         thread.join()
-    assert errors == [] and len(builds) == 1
+    # One build for both servers: Defaults.ipp first, then the parallel build.
+    assert errors == [] and len(builds) == 2 and builds[0][-1] == "Defaults.ipp"
 
 
 class TestReviewFixes:
