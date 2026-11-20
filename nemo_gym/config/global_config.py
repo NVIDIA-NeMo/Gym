@@ -382,6 +382,18 @@ def environment_server_attributed_agent(server: DictConfig) -> Optional[str]:
     return agents[0] if len(agents) == 1 else None
 
 
+def wrapped_openclaw_kwargs(agent: str, config: DictConfig) -> DictConfig | None:
+    """Return the settings a wrapper will pass to the OpenClaw agent in the sandbox."""
+    if (agent in {"harness_agent", "harness_exa_search"} and config.get("agent") == "openclaw") or (
+        agent in {"anyswe_agent", "anyterminal_agent"}
+        and config.get("agent_server_module") == "responses_api_agents.openclaw_agent.app"
+    ):
+        kwargs = config.get("agent_kwargs")
+        if isinstance(kwargs, DictConfig):
+            return kwargs
+    return None
+
+
 @dataclass(frozen=True)
 class _AgentInstance:
     """A top-level agent instance, with its single agent type already unwrapped."""
@@ -893,6 +905,26 @@ Duplicate config paths:
                 continue
             instances.append(_AgentInstance(name=str(name), agent_type=agent_type, server_config=server_config))
         return instances
+
+    def _apply_openclaw_pin_overrides(self, merged: DictConfig, layers: list[DictConfig]) -> None:
+        """Honor a later openclaw_version override on a preset that now declares harness_version."""
+        for instance in self._agent_instances(merged):
+            path = f"{instance.name}.{AGENT_SERVER_TYPE_KEY_NAME}.{instance.agent_type}"
+            pins = instance.server_config
+            if instance.agent_type != "openclaw_agent":
+                pins = wrapped_openclaw_kwargs(instance.agent_type, pins)
+                path += ".agent_kwargs"
+            if not isinstance(pins, DictConfig) or not {"openclaw_version", "harness_version"} <= pins.keys():
+                continue
+            for layer in reversed(layers):
+                override = OmegaConf.select(layer, path)
+                if isinstance(override, DictConfig):
+                    if "harness_version" in override:
+                        break
+                    if "openclaw_version" in override:
+                        with open_dict(pins):
+                            del pins["harness_version"]
+                        break
 
     @staticmethod
     def _resources_server_reference(server_config: DictConfig) -> Optional[DictConfig]:
@@ -1806,6 +1838,10 @@ Pass each config with --config (it builds the list for you), e.g.:
         # Rebuilt rather than reused: the command line dict was trimmed after the early merge above.
         global_config_dict = OmegaConf.merge(
             *extra_configs, OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
+        )
+
+        self._apply_openclaw_pin_overrides(
+            global_config_dict, [*extra_configs, initial_global_config_dict, cli_global_config_dict]
         )
 
         # Update the config paths after postprocessing

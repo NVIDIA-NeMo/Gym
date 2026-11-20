@@ -28,7 +28,7 @@ gdpval_openclaw_agent:
         type: responses_api_models
         name: policy_model
       model: ${policy_model_name}
-      openclaw_version: 2026.11.5
+      harness_version: "2026.11.5"
       # Concurrent OpenClaw runs, as Stirrup's concurrency. Keep it at least the environment server's
       # max_concurrent_episodes: an episode beyond it waits with its sandbox started and its deadline running.
       concurrency: 32

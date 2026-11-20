@@ -11,7 +11,7 @@ anyterminal_openclaw:
       agent_config_class: OpenClawAgentConfig
       agent_kwargs:
         model: model
-        openclaw_version: "2026.11.5"
+        harness_version: "2026.11.5"
         timeout: 3600
         setup_timeout: 1200
         thinking: "off"

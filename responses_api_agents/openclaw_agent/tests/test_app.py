@@ -108,6 +108,12 @@ class TestSanity:
         assert cfg.thinking == "off"
         assert cfg.command_parts == ["openclaw"]
 
+    def test_config_accepts_both_version_spellings(self) -> None:
+        args = {"host": "localhost", "port": 8080, "entrypoint": "app.py", "name": "openclaw"}
+        for key in ("openclaw_version", "harness_version"):
+            config = OpenClawAgentConfig(**args, **{key: "2026.6.11"})
+            assert config.openclaw_version == "2026.6.11"
+
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4

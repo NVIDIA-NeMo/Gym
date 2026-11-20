@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+from unittest.mock import Mock
+
 import pytest
 from omegaconf import OmegaConf
 
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.server_runtime.supervisor import harness_version as versions
 
 
@@ -69,3 +73,71 @@ def test_no_override_keeps_existing_defaults(monkeypatch):
 def test_unsupported_selector_fails_before_launch():
     with pytest.raises(ValueError, match="does not support"):
         versions.resolve_harness_version("simple_agent", OmegaConf.create({"harness_version": "latest"}))
+
+
+@pytest.mark.parametrize(
+    "preset",
+    [
+        "benchmarks/gdpval/openclaw.yaml",
+        "environments/openclaw_math/config.yaml",
+        "environments/openclaw_reasoning_gym/config.yaml",
+        "responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml",
+        "benchmarks/deepsearchqa/configs/deepsearchqa_openclaw.yaml",
+        "benchmarks/widesearch/configs/widesearch_openclaw.yaml",
+        "benchmarks/swe_atlas_qa/openclaw.yaml",
+        "responses_api_agents/anyswe_agent/configs/anyswe_openclaw.yaml",
+        "responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml",
+    ],
+)
+def test_openclaw_preset_pin_reaches_the_installer(preset, monkeypatch):
+    root = Path(__file__).resolve().parents[4]
+    config = OmegaConf.load(root / preset)
+    (instance,) = GlobalConfigDictParser()._agent_instances(config)
+    server = instance.server_config
+    pins = server if instance.agent_type == "openclaw_agent" else server.agent_kwargs
+    assert pins.harness_version == "2026.11.5"
+    assert "openclaw_version" not in pins
+
+    lookup = Mock(return_value="2026.12.1")
+    monkeypatch.setattr(versions, "_lookup", lookup)
+    versions.resolve_harness_version(instance.agent_type, server)
+    assert pins.openclaw_version == "2026.11.5"
+    lookup.assert_not_called()
+    pins.harness_version = "latest"
+    versions.resolve_harness_version(instance.agent_type, server)
+    versions.resolve_harness_version(instance.agent_type, server)
+    assert pins.openclaw_version == "2026.12.1"
+    lookup.assert_called_once_with("https://registry.npmjs.org/openclaw/latest", "version")
+    if instance.agent_type != "openclaw_agent":
+        assert "harness_version" not in pins  # kwargs sent to older in-sandbox Gym releases
+
+
+@pytest.mark.parametrize(
+    ("preset", "pin_path"),
+    [
+        (
+            "responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml",
+            "openclaw_agent.responses_api_agents.openclaw_agent",
+        ),
+        (
+            "responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml",
+            "anyterminal_openclaw.responses_api_agents.anyterminal_agent.agent_kwargs",
+        ),
+    ],
+)
+def test_legacy_override_on_a_migrated_preset(preset, pin_path):
+    overrides = OmegaConf.create({"config_paths": [preset]})
+    OmegaConf.update(overrides, f"{pin_path}.openclaw_version", "2026.6.11")
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, overrides
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    pins = OmegaConf.select(config, pin_path)
+    assert pins.openclaw_version == "2026.6.11"
+    assert "harness_version" not in pins

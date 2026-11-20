@@ -10,7 +10,7 @@ openclaw_agent:
       resources_server: null
       model_server: {type: responses_api_models, name: policy_model}
       model: ${policy_model_name}
-      openclaw_version: 2026.11.5
+      harness_version: "2026.11.5"
       timeout: 900
       model_timeout_seconds: 600
       sandbox_install_timeout_seconds: 600

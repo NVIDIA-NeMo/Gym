@@ -9,6 +9,8 @@ import re
 import requests
 from omegaconf import DictConfig, open_dict
 
+from nemo_gym.config.global_config import wrapped_openclaw_kwargs
+
 
 LOG = logging.getLogger(__name__)
 # OpenCode publishes two release lines. The release marked latest by its upstream
@@ -41,6 +43,14 @@ def _lookup(url: str, key: str) -> str:
 
 def resolve_harness_version(agent: str, config: DictConfig) -> str | None:
     """Set the installer's concrete version. Return the source to pass to the Hermes worker, if selected."""
+    # Wrappers may run an older Gym inside the task container. Give it the concrete
+    # installer field it understands, even when the outer config requests latest.
+    kwargs = wrapped_openclaw_kwargs(agent, config)
+    if kwargs is not None:
+        resolve_harness_version("openclaw_agent", kwargs)
+        with open_dict(kwargs):
+            kwargs.pop("harness_version", None)
+
     field = _RELEASES[agent][0] if agent in _RELEASES else None
     if agent == "hermes_agent":
         field = "hermes_version"

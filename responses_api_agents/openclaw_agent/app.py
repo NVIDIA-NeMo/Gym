@@ -34,7 +34,7 @@ from uuid import uuid4
 
 import psutil
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import AliasChoices, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -578,7 +578,7 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
         description="Declare image input in sandbox sessions even without prompt images, for images read by tools.",
     )
     # required: every config must pin an explicit version so runs are reproducible and cannot silently drift
-    openclaw_version: str
+    openclaw_version: str = Field(validation_alias=AliasChoices("harness_version", "openclaw_version"))
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     network_access: SandboxNetworkAccess = Field(
