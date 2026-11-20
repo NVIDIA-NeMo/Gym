@@ -356,6 +356,37 @@ async def test_committed_reference_is_independent_of_server_working_directory(se
 
 
 @pytest.mark.asyncio
+async def test_reference_root_resolves_relative_reference_paths(setup, tmp_path, monkeypatch):
+    server, body, _, judge = setup
+    root = tmp_path / "refs"
+    (root / "data" / "set").mkdir(parents=True)
+    (tmp_path / "reference.png").rename(root / "data" / "set" / "reference.png")
+    server.config.reference_root = str(root)
+    body.verifier_metadata.image_path = "data/set/reference.png"
+    monkeypatch.chdir(tmp_path)
+    judge.return_value = judge_result(body.verifier_metadata.rubric)
+    result = await server.verify(body)
+    assert not result.mask_sample and result.failure_kind is None
+
+
+@pytest.mark.asyncio
+async def test_relative_reference_path_without_reference_root_is_masked(setup, tmp_path):
+    server, body, renderer, judge = setup
+    # Unset reference_root: a relative path resolves against the Gym checkout, which has no such file.
+    body.verifier_metadata.image_path = "data/set/reference.png"
+    result = await server.verify(body)
+    assert result.mask_sample and result.failure_kind == "verifier_error"
+    renderer.assert_not_awaited()
+    judge.assert_not_awaited()
+
+
+def test_reference_root_must_be_absolute(setup):
+    server, _, _, _ = setup
+    with pytest.raises(ValueError, match="reference_root must be an absolute directory"):
+        app.Vision2CodeConfig(**{**server.config.model_dump(), "reference_root": "relative/dir"})
+
+
+@pytest.mark.asyncio
 async def test_concurrency_and_unique_artifacts(setup):
     server, body, renderer, judge = setup
     server._render_slots = asyncio.Semaphore(2)
