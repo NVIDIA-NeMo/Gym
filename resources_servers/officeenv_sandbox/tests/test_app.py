@@ -49,6 +49,7 @@ from officeenv.service import Reply
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.sandbox.api import STOP_TIMEOUT_S
 from nemo_gym.server_runtime import (
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     ResourcesCloseSessionRequest,
@@ -282,7 +283,13 @@ class FakeSandbox:
             raise RuntimeError("the provider cannot describe the sandbox")
         return {"container": "c-1"}
 
-    async def stop(self) -> None:
+    async def stop(self, *, timeout_s: float | None = STOP_TIMEOUT_S) -> None:
+        """As AsyncSandbox.stop: shielded from cancellation and bounded by ``timeout_s``; the provider's part is
+        ``_stop``, which tests slow down, refuse or hang."""
+        with anyio.CancelScope(shield=True), anyio.fail_after(timeout_s):
+            await self._stop()
+
+    async def _stop(self) -> None:
         if FakeSandbox.fail_on == "stop":
             raise RuntimeError("the provider could not stop the sandbox")
         if FakeSandbox.on_stop is not None:
@@ -475,7 +482,7 @@ def test_a_failed_seed_whose_stop_fails_is_stopped_by_its_sessions_next_seed(san
     world or token is left, and the retried seed stops the sandbox the failed one left before it lends a new one
     (Gym's LentSandboxes), which shutdown then stops."""
     sandboxes.fail_on = "serialize"
-    stop = FakeSandbox.stop
+    stop = FakeSandbox._stop
     refused: list[FakeSandbox] = []
 
     async def stop_refusing_once(sandbox: FakeSandbox) -> None:
@@ -484,7 +491,7 @@ def test_a_failed_seed_whose_stop_fails_is_stopped_by_its_sessions_next_seed(san
             raise RuntimeError("the provider could not stop the sandbox")
         await stop(sandbox)
 
-    monkeypatch.setattr(FakeSandbox, "stop", stop_refusing_once)
+    monkeypatch.setattr(FakeSandbox, "_stop", stop_refusing_once)
     server = make_server()
     with caplog.at_level("ERROR"):
         with mcp_client(server) as client:
@@ -779,7 +786,7 @@ def test_shutdown_stops_the_sandbox_a_seed_failing_meanwhile_could_not_stop(sand
     """A seed still starting its sandbox when shutdown begins fails, and so does its own stop of that sandbox:
     shutdown, which waited for the start, stops it on a second try and leaves nothing for a reaper."""
     server = make_server()
-    start, stop = FakeSandbox.start, FakeSandbox.stop
+    start, stop = FakeSandbox.start, FakeSandbox._stop
     refused: list[FakeSandbox] = []
 
     async def stop_refusing_once(sandbox: FakeSandbox) -> None:
@@ -798,7 +805,7 @@ def test_shutdown_stops_the_sandbox_a_seed_failing_meanwhile_could_not_stop(sand
             raise RuntimeError("the provider lost the sandbox")
 
         monkeypatch.setattr(FakeSandbox, "start", slow_failing_start)
-        monkeypatch.setattr(FakeSandbox, "stop", stop_refusing_once)
+        monkeypatch.setattr(FakeSandbox, "_stop", stop_refusing_once)
         seed = asyncio.create_task(server._seed_sandboxed_episode(SimpleNamespace(session={}), seed_request()))
         await starting.wait()
         stopping = asyncio.create_task(server.shutdown())
@@ -818,7 +825,7 @@ def test_shutdown_stops_every_lent_sandbox_at_once_within_its_grace(sandboxes, m
     a collection's worth of sandboxes (64 in a training smoke) would outlast it and stay on the cell until their TTL."""
     monkeypatch.setattr(sandbox_app, "get_global_config_dict", lambda: GRACE_OF_3_S)  # a stop budget of 1 s
     server = make_server()
-    stop = FakeSandbox.stop
+    stop = FakeSandbox._stop
 
     async def slow_stop(sandbox: FakeSandbox) -> None:
         await asyncio.sleep(0.25)
@@ -829,7 +836,7 @@ def test_shutdown_stops_every_lent_sandbox_at_once_within_its_grace(sandboxes, m
             await server._seed_sandboxed_episode(
                 SimpleNamespace(session={}), seed_request(session_id=f"rs-{n}", rollout_id=f"r{n}")
             )
-        monkeypatch.setattr(FakeSandbox, "stop", slow_stop)
+        monkeypatch.setattr(FakeSandbox, "_stop", slow_stop)
         started = time.monotonic()
         await server.shutdown()
         return time.monotonic() - started
@@ -842,7 +849,7 @@ def test_shutdown_stops_every_lent_sandbox_at_once_within_its_grace(sandboxes, m
 def test_shutdown_ends_at_its_deadline_and_logs_the_sandboxes_left(sandboxes, monkeypatch, caplog) -> None:
     monkeypatch.setattr(sandbox_app, "get_global_config_dict", lambda: GRACE_OF_3_S)  # a stop budget of 1 s
     server = make_server()
-    stop = FakeSandbox.stop
+    stop = FakeSandbox._stop
 
     async def stop_or_hang(sandbox: FakeSandbox) -> None:
         if sandbox is FakeSandbox.started[0]:
@@ -854,7 +861,7 @@ def test_shutdown_ends_at_its_deadline_and_logs_the_sandboxes_left(sandboxes, mo
             await server._seed_sandboxed_episode(
                 SimpleNamespace(session={}), seed_request(session_id=f"rs-{n}", rollout_id=f"r{n}")
             )
-        monkeypatch.setattr(FakeSandbox, "stop", stop_or_hang)
+        monkeypatch.setattr(FakeSandbox, "_stop", stop_or_hang)
         await asyncio.wait_for(server.shutdown(), timeout=3.0)  # unbounded, it would wait for the hung stop
 
     with caplog.at_level("ERROR"):
@@ -868,7 +875,7 @@ def test_shutdown_names_the_creates_still_in_flight_at_its_deadline_apart(sandbo
     reaper's count can be checked against the line."""
     monkeypatch.setattr(sandbox_app, "get_global_config_dict", lambda: GRACE_OF_3_S)  # a stop budget of 1 s
     server = make_server()
-    start, stop = FakeSandbox.start, FakeSandbox.stop
+    start, stop = FakeSandbox.start, FakeSandbox._stop
 
     async def scenario() -> None:
         in_flight = asyncio.Event()
@@ -885,7 +892,7 @@ def test_shutdown_names_the_creates_still_in_flight_at_its_deadline_apart(sandbo
             await stop(sandbox)
 
         monkeypatch.setattr(FakeSandbox, "start", start_or_hang)
-        monkeypatch.setattr(FakeSandbox, "stop", stop_or_hang)
+        monkeypatch.setattr(FakeSandbox, "_stop", stop_or_hang)
         await server._seed_sandboxed_episode(
             SimpleNamespace(session={}), seed_request(session_id="rs-0", rollout_id="r0")
         )
@@ -929,7 +936,7 @@ def test_a_seed_cancelled_as_its_sandbox_starts_stops_that_sandbox(
     cancelled, and no line naming them."""
     monkeypatch.setattr(sandbox_app, "get_global_config_dict", lambda: GRACE_OF_3_S)  # a shutdown budget of 1 s
     server = make_server()
-    start, stop = FakeSandbox.start, FakeSandbox.stop
+    start, stop = FakeSandbox.start, FakeSandbox._stop
 
     async def scenario() -> None:
         creating, created = asyncio.Event(), asyncio.Event()
@@ -944,7 +951,7 @@ def test_a_seed_cancelled_as_its_sandbox_starts_stops_that_sandbox(
             await stop(sandbox)
 
         monkeypatch.setattr(FakeSandbox, "start", slow_start)
-        monkeypatch.setattr(FakeSandbox, "stop", provider_stop)
+        monkeypatch.setattr(FakeSandbox, "_stop", provider_stop)
         seed = as_a_request(lambda: server._seed_sandboxed_episode(SimpleNamespace(session={}), seed_request()))
         await creating.wait()
         seed.cancel()
@@ -978,14 +985,14 @@ def test_a_close_cancelled_as_it_stops_the_sandbox_still_stops_it(sandboxes, mon
     async def scenario() -> None:
         await server._seed_sandboxed_episode(SimpleNamespace(session={}), seed_request())
         stopping, stopped = asyncio.Event(), asyncio.Event()
-        stop = FakeSandbox.stop
+        stop = FakeSandbox._stop
 
         async def slow_stop(sandbox: FakeSandbox) -> None:
             stopping.set()
             await stopped.wait()  # the provider's stop, in flight
             await stop(sandbox)
 
-        monkeypatch.setattr(FakeSandbox, "stop", slow_stop)
+        monkeypatch.setattr(FakeSandbox, "_stop", slow_stop)
         caller = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
         body = ResourcesCloseSessionRequest(**close_body())
         close = as_a_request(lambda: server.close_resources_session(caller, body))
@@ -3030,7 +3037,7 @@ def test_a_failed_seeds_sandbox_whose_stop_failed_is_stopped_at_its_sessions_clo
     """A sandbox may run on, billed, after its seed failed and its stop failed too: the session's close tries the stop
     again (Gym's LentSandboxes keeps it for that), rather than shutdown, which may come days later."""
     sandboxes.fail_on = "serialize"
-    stop = FakeSandbox.stop
+    stop = FakeSandbox._stop
     refused: list[FakeSandbox] = []
 
     async def stop_refusing_once(sandbox: FakeSandbox) -> None:
@@ -3039,7 +3046,7 @@ def test_a_failed_seeds_sandbox_whose_stop_failed_is_stopped_at_its_sessions_clo
             raise RuntimeError("the provider could not stop the sandbox")
         await stop(sandbox)
 
-    monkeypatch.setattr(FakeSandbox, "stop", stop_refusing_once)
+    monkeypatch.setattr(FakeSandbox, "_stop", stop_refusing_once)
     server = make_server()
     with mcp_client(server) as client:
         with pytest.raises(RuntimeError, match="the provider cannot describe the sandbox"):
