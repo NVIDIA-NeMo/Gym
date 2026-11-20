@@ -31,6 +31,13 @@ class ToolTimingScope:
     def __post_init__(self) -> None:
         if not self.runtime_version or not self.mode or not self.tool_paths or not all(self.tool_paths):
             raise ValueError("Timing scope requires a pinned runtime, mode and tested tool paths")
+        for name in ("lifecycle_sources", "executor_sources"):
+            sources = getattr(self, name)
+            # A bare string would match its substrings as sources.
+            if not isinstance(sources, (list, tuple)) or not all(
+                isinstance(source, str) and source.strip() for source in sources
+            ):
+                raise ValueError(f"{name} must be a list or tuple of nonempty strings")
 
 
 def check_tool_timing(tools: list[dict], scope: ToolTimingScope, results: Results, *, available: bool) -> None:

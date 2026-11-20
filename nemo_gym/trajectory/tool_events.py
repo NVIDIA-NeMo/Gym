@@ -113,9 +113,18 @@ def replay_tool_events(
         # A corrupt measurement must not hide the call's identity or known outcome.
         for name in ("started_at", "completed_at", "duration_ms"):
             value = values.get(name)
-            if value is not None and (
-                type(value) not in (int, float) or not math.isfinite(value) or (name == "duration_ms" and value < 0)
-            ):
+            if value is None:
+                continue
+            try:
+                invalid = (
+                    type(value) not in (int, float)
+                    or not math.isfinite(value)
+                    or (name == "duration_ms" and value < 0)
+                )
+            except OverflowError:
+                # An integer too large for a float is no measurement either.
+                invalid = True
+            if invalid:
                 values[name] = None
                 invalid_timing = True
         for name in ("clock_domain", "duration_source"):
@@ -177,12 +186,15 @@ def replay_tool_events(
             gaps.append(_gap(exemplar, "tool_start_unavailable"))
         if finish is None:
             gaps.append(_gap(exemplar, "tool_completion_unavailable"))
-        domain = start.clock_domain if start else finish.clock_domain if finish else None
+        # A start record without a usable timestamp is no endpoint: the finish's own endpoint and domain stand.
+        has_start_endpoint = start is not None and start.started_at is not None
+        domain = start.clock_domain if has_start_endpoint else finish.clock_domain if finish else None
         end = finish.completed_at if finish else None
         duration = finish.duration_ms if finish else None
         if start and finish and (start.clock_domain is None or start.clock_domain != finish.clock_domain):
             # Only independently measured elapsed time survives incomparable wall clocks.
-            end = None
+            if has_start_endpoint:
+                end = None
             if finish.duration_source == "wall_clock":
                 duration = None
             gaps.append(

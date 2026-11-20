@@ -265,3 +265,45 @@ async def test_replay_collector_and_direct_enrichment_agree_across_instances_and
     await enrich_run_result(row, direct, capture_dirs=[], observability_enabled=True, trajectory_schema_version="2.0")
     assert direct["ng_trajectory"]["tool_calls"] == before
     assert direct["reward"] == raw["reward"] and direct["response"] == raw["response"]
+
+
+@pytest.mark.parametrize("field", ["started_at", "completed_at", "duration_ms"])
+def test_an_unrepresentable_measurement_is_invalid_timing_not_a_failed_replay(field):
+    damaged = event(
+        "start" if field == "started_at" else "finish",
+        **{field: 10**400, "status": "failed"} if field != "started_at" else {field: 10**400},
+    )
+    records = [event("start"), event("finish"), damaged]
+    other = [
+        event("start", span="span-2", producer="producer-2"),
+        event("finish", span="span-2", producer="producer-2"),
+    ]
+    if field == "started_at":
+        records = [damaged, event("finish")]
+    tools, gaps = replay_tool_events([*records, *other])
+
+    assert {tool.span_id for tool in tools} >= {"span-2"}
+    assert "tool_timing_invalid" in codes(gaps)
+
+
+def test_a_start_without_a_timestamp_keeps_the_finish_endpoint_and_its_domain():
+    tools, gaps = replay_tool_events(
+        [event("start", started_at=None, clock_domain=None), event("finish", clock_domain="sandbox/one/epoch-2")]
+    )
+
+    (timing,) = tools[0].timings
+    assert timing.started_at is None and timing.completed_at == 102.0
+    assert timing.clock_domain == "sandbox/one/epoch-2"
+    assert timing.duration_ms == 1900.0 and tools[0].status == "completed"
+
+
+def test_a_start_without_a_timestamp_still_drops_a_wall_clock_duration_across_domains():
+    tools, gaps = replay_tool_events(
+        [
+            event("start", started_at=None, clock_domain="sandbox/one/epoch-1"),
+            event("finish", clock_domain="sandbox/one/epoch-2", duration_source="wall_clock"),
+        ]
+    )
+
+    (timing,) = tools[0].timings
+    assert timing.completed_at == 102.0 and timing.duration_ms is None
