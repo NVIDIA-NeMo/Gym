@@ -163,9 +163,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         self._check_mcp_server_names()
 
     def _check_mcp_server_names(self) -> None:
-        """Refuse a pairing that grants two MCP endpoints listed under one name: MCP clients name each tool by the
-        endpoint that serves it (``mcp__<name>__<tool>``), so the two endpoints' tools would collide. Each endpoint
-        lists itself under its ``mcp_server_name``, else its server's name."""
+        """Refuse a pairing that grants two MCP endpoints listed under one name: every harness names a tool after
+        the endpoint that serves it (Pi ``mcp__<name>__<tool>``, OpenCode ``<name>_<tool>``), so the two endpoints'
+        tools would collide. Each endpoint lists itself under its ``mcp_server_name``, else its server's name.
+        Names that collide only in one harness's naming are that harness's agent's to refuse."""
         granted = [self.config.resources_server.name] if "mcp" in self.config.resources_tool_transports else []
         granted += self.tool_server_names
         listed: dict[str, str] = {}
