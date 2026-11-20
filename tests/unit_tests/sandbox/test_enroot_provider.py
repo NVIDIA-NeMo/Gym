@@ -1384,3 +1384,36 @@ async def test_only_a_measured_handle_wraps_its_execs_and_a_lent_one_reports_no_
     await provider.serialize_handle(creator)
     await provider.exec(creator, "git diff")
     assert rec.calls[-1]["argv"][:2] == [FAKE_BINARY, "exec"] and await provider.usage(creator) == ()
+
+
+async def test_a_lent_sandbox_has_no_exec_cpu_summary_even_after_measuring_setup_commands(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if argv[0] == "/bin/sh":
+            Path(argv[4]).write_text("0m0.00s 0m0.00s\n0m1.00s 0m0.00s\n")
+        return 0, "", ""
+
+    monkeypatch.setenv("NEMO_GYM_SANDBOX_USAGE_SAMPLE_INTERVAL_SECONDS", "0.01")
+    provider, _rec, _sr = _make_provider(monkeypatch, responder, tmp_path)
+    monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
+    monkeypatch.setattr(provider, "_pid_has_container_marker", lambda pid, name: True)
+    handle = _make_handle(tmp_path, measure_exec_cpu=True)
+
+    async def create(spec: SandboxSpec) -> SandboxHandle:
+        return handle
+
+    monkeypatch.setattr(provider, "create", create)
+    owner = await AsyncSandbox(provider, SandboxSpec(image="test")).start()
+    # Setup commands before the sandbox is lent, as a task seed or an environment normalisation runs them.
+    await owner.exec("chmod +x setup.sh")
+    for _ in range(100):
+        if ("exec_rusage", "process_tree") in owner._usage_tracker.samples:
+            break
+        await anyio.sleep(0.01)
+    assert ("exec_rusage", "process_tree") in owner._usage_tracker.samples
+    await owner.serialize()
+    await owner.stop()
+
+    assert all(summary.source != "exec_rusage" for summary in owner.resource_usage)
+    assert all(summary.unavailable_reason != "final_read_failed" for summary in owner.resource_usage)

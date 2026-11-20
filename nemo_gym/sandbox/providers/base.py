@@ -735,6 +735,8 @@ SandboxUsageScope = Literal["container", "process_tree", "shared_step"]
 # ``counter``: the kernel's cumulative value or high-water mark. ``sampled_lower_bound``: the largest value of the
 # measured quantity Gym observed across its samples, so that quantity's true peak may be higher.
 SandboxUsageKind = Literal["counter", "sampled_lower_bound"]
+# The source of the CPU of the commands run to completion through one handle's ``exec``.
+EXEC_USAGE_SOURCE = "exec_rusage"
 
 
 @dataclass(frozen=True)
