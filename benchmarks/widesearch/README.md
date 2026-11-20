@@ -71,7 +71,7 @@ gym eval run \
   --limit 1
 ```
 
-Set `exa_api_key` in the selected config before running it. The available
+The available
 copies are Claude Code, Codex, OpenCode, Pi, Hermes, OpenClaw, Kilocode, Cline,
 Prime Agent, Simple Strands, and NeMo Fabric DeepAgents.
 
