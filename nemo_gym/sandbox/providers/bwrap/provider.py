@@ -441,6 +441,11 @@ class BwrapProvider:
         self._network_host_binds = (
             resolve_binds(self._config.network_host_ro_binds) if self._config.network == "host" else []
         )
+        # Trusted image aliases (for example /bin -> /usr/bin) are resolved once, not at exec.
+        # Keep their configured destinations and still no-follow-open the captured sources.
+        self._system_bind_sources = {path: os.path.realpath(path) for path in self._system_binds}
+        self._network_host_bind_sources = {path: os.path.realpath(path) for path in self._network_host_binds}
+        self._borrowed_network_binds: list[tuple[str, str]] | None = None
         self._check_target(self._config.workdir, label="workdir")
         self._check_target(self._config.home_path, label="home_path")
         self._check_own_dirs(self._config.workdir)
@@ -563,12 +568,18 @@ class BwrapProvider:
         if config.allow_nested_userns and os.geteuid() == 0:
             # Only root needs it; a non-root sandbox's nested bwrap refuses to start with capabilities.
             argv += ["--cap-add", "CAP_SETFCAP"]
-        network_binds = self._network_host_binds
+        network_binds = [(source, path) for path, source in self._network_host_bind_sources.items()]
         if inst.network == "host" and config.network != "host":
-            # A sandbox created as host-network by a differently configured provider.
-            network_binds = resolve_binds(config.network_host_ro_binds)
-        for path in [*self._system_binds, *(network_binds if inst.network == "host" else [])]:
-            argv += ["--ro-bind", path, path]
+            # Resolve this provider's host-network configuration only when a borrower needs it,
+            # then retain the captured sources for every subsequent exec of that configuration.
+            if self._borrowed_network_binds is None:
+                self._borrowed_network_binds = [
+                    (os.path.realpath(path), path) for path in resolve_binds(config.network_host_ro_binds)
+                ]
+            network_binds = self._borrowed_network_binds
+        system_binds = [(source, path) for path, source in self._system_bind_sources.items()]
+        for source, target in [*system_binds, *(network_binds if inst.network == "host" else [])]:
+            argv += ["--ro-bind", source, target]
         argv += ["--proc", "/proc", "--dev", "/dev"]
         argv += ["--bind", str(inst.tmp), "/tmp"]
         argv += ["--bind", str(inst.home), config.home_path]

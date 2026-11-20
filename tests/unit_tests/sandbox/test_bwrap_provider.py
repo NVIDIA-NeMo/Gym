@@ -277,6 +277,47 @@ async def test_mounts_from_config_and_provider_options(system) -> None:
             await start(provider, provider_options=options)
 
 
+@pytest.mark.parametrize("network_alias", [False, True], ids=["system", "host-network"])
+@pytest.mark.parametrize("borrowed", [False, True], ids=["owner", "borrower"])
+async def test_trusted_alias_sources_are_captured_without_changing_destinations(
+    system, network_alias, borrowed
+) -> None:
+    alias = system["resolv.conf"] if network_alias else system["bin"]
+    target = alias.with_name("image-source")
+    alias.rename(target)
+    alias.symlink_to(target.name, target_is_directory=target.is_dir())
+    creator = make_provider(system, network="host", probe_on_create=True)
+    sandbox = await start(creator)
+    provider = creator
+    if borrowed:
+        provider = make_provider(system, network="none", probe_on_create=True)
+        sandbox = await AsyncSandbox.connect(await sandbox.serialize(), provider=provider)
+        assert (await sandbox.exec("true")).return_code == 0
+    try:
+        argv = provider.bwrap_argv(sandbox._handle.raw, "true")
+        assert (str(target), str(alias)) in bind_pairs(argv, "--ro-bind")
+        expected = target.stat()
+        with provider._bind_sources(argv) as (pinned, descriptors):
+            pairs = bind_pairs(pinned, "--ro-bind-fd")
+            fd = int(next(source for source, destination in pairs if destination == str(alias)))
+            assert (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == (expected.st_dev, expected.st_ino)
+            assert fd in descriptors
+        with pytest.raises(OSError):
+            os.fstat(fd)
+        replacement = alias.with_name("replacement-source")
+        if target.is_dir():
+            replacement.mkdir()
+        else:
+            replacement.write_text("replacement")
+        alias.unlink()
+        alias.symlink_to(replacement.name, target_is_directory=replacement.is_dir())
+        argv = provider.bwrap_argv(sandbox._handle.raw, "true")
+        assert (str(target), str(alias)) in bind_pairs(argv, "--ro-bind")
+        assert (await sandbox.exec("true")).return_code == 0
+    finally:
+        await sandbox.stop()
+
+
 @pytest.mark.parametrize("configured", [False, True], ids=["sandbox", "provider"])
 @pytest.mark.parametrize("ro", [False, True], ids=["rw", "ro"])
 async def test_replaced_mount_source_is_refused_before_another_exec(system, tmp_path, configured, ro) -> None:
