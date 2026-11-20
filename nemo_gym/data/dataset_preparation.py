@@ -70,7 +70,7 @@ from nemo_gym.data.task_data import (
     find_server_dir,
     load_task_data_schema,
 )
-from nemo_gym.data.task_materialization import materialize_task
+from nemo_gym.data.task_materialization import materialize_task, require_row_in_taskset
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 
 
@@ -1342,11 +1342,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
                             validator.validate_row(row_index // d.num_repeats, row)
                         if d.taskset is not None and is_materialized_task_row(row):
                             # A prepared task row already names its taskset; it must be this dataset's.
-                            if row["task_id"].get("taskset") != d.taskset:
-                                raise ValueError(
-                                    f"{d.jsonl_fpath} row {row_index}: task_id.taskset "
-                                    f"{row['task_id'].get('taskset')!r} differs from the dataset taskset {d.taskset!r}"
-                                )
+                            try:
+                                require_row_in_taskset(row, d.taskset)
+                            except ValueError as error:
+                                raise ValueError(f"{d.jsonl_fpath} row {row_index}: {error}") from error
                         elif d.taskset is not None:
                             # Keep collector identity outside task_data so shards and retries
                             # retain their capture keys after materialization, and keep a row's
