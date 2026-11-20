@@ -2379,12 +2379,22 @@ class TestCheckpointAcrossModelCalls:
 @pytest.mark.parametrize("stage", ["verify", "return"])
 async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_trajectory(stage: str) -> None:
     trajectory = TrajectoryRecord(task_id="0", rollout_id="0-0").model_dump(mode="json")
+    closes: list[dict] = []
 
     async def post(*, url_path, **kwargs):
         if url_path == "/seed_session":
-            return _mock_response({})
+            return _mock_response(
+                {},
+                headers={
+                    "x-ng-checkpoint-verify": "replay",
+                    "x-ng-checkpoint-resources-session-id": "resources-session",
+                },
+            )
         if url_path.endswith("/v1/responses"):
             return _mock_response(_FINAL_RESPONSE | {"_ng_trajectory": trajectory})
+        if url_path == "/close_session":
+            closes.append(kwargs["json"])
+            return _mock_response({})
         return _mock_response(kwargs["json"] | {"reward": 1.0})
 
     def run_request(attempt: int) -> SimpleAgentRunRequest:
@@ -2411,6 +2421,7 @@ async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_traje
     participant.legacy_episodes.boundary = recording
     await server.run(MagicMock(cookies={}), run_request(0))
     [episode] = [state for state in boundaries if state["next"] == stage]
+    assert episode["resources_session_id"] == "resources-session"
 
     restored, restored_client = _make_agent(True)
     restored_participant = AgentSessionParticipant(restored)
@@ -2427,6 +2438,8 @@ async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_traje
     result = await restored.run(MagicMock(cookies={}), run_request(1))
 
     assert result.model_dump()["ng_trajectory"]["rollout_id"] == "0-0-a1"
+    assert [close["resources_session_id"] for close in closes] == ["resources-session", "resources-session"]
+    assert [close["episode_id"]["attempt"] for close in closes] == [0, 1]
 
 
 def _legacy_run_request(attempt: int) -> SimpleAgentRunRequest:
@@ -3198,8 +3211,9 @@ async def test_a_restored_session_s_direct_http_tool_calls_reach_the_restored_re
 
 
 @pytest.mark.parametrize("resources_verify_step_type, closes", [("replay", True), ("wait", False)])
+@pytest.mark.parametrize("resources_session_id", [None, "resources-session"])
 async def test_a_legacy_run_closes_its_resources_session_after_a_verification_a_checkpoint_does_not_wait_for(
-    resources_verify_step_type: str, closes: bool
+    resources_verify_step_type: str, closes: bool, resources_session_id: str | None
 ) -> None:
     server, server_client = _make_agent(False)
     server._checkpoint_participant = AgentSessionParticipant(server)
@@ -3210,6 +3224,8 @@ async def test_a_legacy_run_closes_its_resources_session_after_a_verification_a_
         if url_path == "/seed_session":
             response = _mock_response({})
             response.headers = {"x-ng-checkpoint-verify": resources_verify_step_type}
+            if resources_session_id is not None:
+                response.headers["x-ng-checkpoint-resources-session-id"] = resources_session_id
             response.cookies = {"session": MagicMock(value="resources-cookie")}
             return response
         if url_path.endswith("/v1/responses"):
@@ -3234,6 +3250,7 @@ async def test_a_legacy_run_closes_its_resources_session_after_a_verification_a_
         [close] = closes_seen
         assert close["cookies"] == {"session": "resources-cookie"}
         assert close["json"]["episode_id"] == {"rollout_id": "0-0", "attempt": 0}
+        assert close["json"]["resources_session_id"] == (resources_session_id or "run:0-0")
         assert [path for path, _ in calls][-1] == "/close_session"
     else:
         assert closes_seen == []
