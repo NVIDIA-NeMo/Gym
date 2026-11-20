@@ -19,7 +19,7 @@ accounting of a chain's allocations, including requeued ones.
 import os
 from pathlib import Path
 
-from nemo_gym.core.failure_kinds import JUDGE_FAILED
+from nemo_gym.core.outcome_policy import OutcomeAction, choose_action
 from nemo_gym.eval.recovery.decision import (
     ALLOCATION_ENDED_STATES,
     IdentityState,
@@ -41,6 +41,7 @@ from nemo_gym.eval.recovery.markers import (
     PROVISIONAL_MARKER_PREFIX,
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
+    RESUMABLE_DRIVER_FAILURE_KINDS,
 )
 from nemo_gym.eval.recovery.planner import (
     decide_from_collected,
@@ -90,12 +91,16 @@ def continuation_admission(
         if not collected.managed_store:
             driver = _rollout_collection_driver(job)
             marker = job / f"{DRIVER_FAILURE_NAME}.{previous_job_id}"
+            kind = marker.read_text().strip() if previous_job_id.isdecimal() and marker.is_file() else None
+            journal_marker = marker.with_name(marker.name + ".journal")
             if not (
                 previous_state == "FAILED"
-                and driver == "benchmarks.agentic_if_realworld.rollout_driver:run_rollout_collection"
+                and driver is not None
                 and previous_job_id.isdecimal()
                 and marker.is_file()
-                and marker.read_text().strip() == JUDGE_FAILED
+                and kind in RESUMABLE_DRIVER_FAILURE_KINDS
+                and journal_marker.is_file()
+                and journal_marker.read_text().strip() == kind
                 and (job / "artifacts" / "rollouts_materialized_inputs.jsonl").is_file()
             ):
                 print(
@@ -104,6 +109,21 @@ def continuation_admission(
                 return "stop"
             if collected.walltime_state != "ok":
                 print(f"{CONTINUATION_REASON_PREFIX}the chain's accumulated walltime is {collected.walltime_state}")
+                return "stop"
+            if max_walltime_s is not None and collected.walltime_used_s >= max_walltime_s:
+                print(f"{CONTINUATION_REASON_PREFIX}the chain's accumulated walltime reached its cap")
+                return "stop"
+            policy, _ = effective_outcome_policy(None, json.loads(outcome_policy) if outcome_policy else None)
+            if policy.by_status_code:
+                print(
+                    f"{CONTINUATION_REASON_PREFIX}journal failure has no HTTP status for status-specific recovery policy"
+                )
+                return "stop"
+            if choose_action(failure_kind=kind, http_status=None, config=policy) not in (
+                OutcomeAction.VERIFY,
+                OutcomeAction.RETRY,
+            ):
+                print(f"{CONTINUATION_REASON_PREFIX}the recovery outcome policy stops {kind}")
                 return "stop"
             # This allocation deferred a journaled answer and the driver revalidates it on resume.
             print(f"{CONTINUATION_REASON_PREFIX}rollout_collection_driver {driver} resumes from its own journal")

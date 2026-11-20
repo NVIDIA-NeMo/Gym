@@ -197,7 +197,9 @@ async def test_configured_session_driver(tmp_path, monkeypatch, unused_tcp_port_
                     and request.url.path.endswith("/verify")
                     and sum(path.endswith("/verify") for _, path, _ in events) == 1
                 ):
-                    return JSONResponse({"error": "synthetic judge outage before dispatch"}, status_code=503)
+                    return JSONResponse(
+                        {"failure_kind": "judge_failed", "failure_reason": "synthetic judge outage before dispatch"}
+                    )
             return await call_next(request)
 
     try:
@@ -226,8 +228,8 @@ async def test_configured_session_driver(tmp_path, monkeypatch, unused_tcp_port_
                 assert all(p.read_bytes() == value for p, value in saved.items())
             else:
                 if delivery == "judge_outage":
-                    # A 503 from /verify defers the task to a resume instead of failing the whole run.
-                    with pytest.raises(RetryableTransportError, match="503 for .*synthetic judge outage"):
+                    # A typed judge failure defers the task without failing the whole run.
+                    with pytest.raises(RetryableTransportError, match="synthetic judge outage"):
                         await rollout_driver.run_rollout_collection(config, settings)
                     assert len(policy_calls) == 1 and not judge_calls
                     config.resume_from_cache = True
