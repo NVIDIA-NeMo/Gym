@@ -330,6 +330,116 @@ class TestRequestValidation:
             StemJudgeConfig(**{**config.model_dump(), "question_extract_regex": "(unclosed"})
 
 
+class TestAnswerFormatRegex:
+    pattern = r"<answer>(?P<answer>[^<>]*)</answer>"
+
+    @mark.parametrize("pattern", ["[", "(.*)", ""])
+    def test_invalid_contract_rejected_by_schema_and_request(self, pattern: str) -> None:
+        with raises(ValidationError, match="answer_format_regex"):
+            TaskData(expected_answer="2", answer_format_regex=pattern)
+        with raises(ValidationError, match="answer_format_regex"):
+            _request(_split("2"), answer_format_regex=pattern)
+
+    @mark.parametrize(
+        "text",
+        [
+            "2",
+            "<answer></answer>",
+            "<answer> </answer>",
+            "prefix <answer>2</answer>",
+            "<answer>2</answer> suffix",
+            " <answer>2</answer>",
+            "<answer>1</answer><answer>2</answer>",
+        ],
+    )
+    async def test_invalid_format_skips_judge(self, config: StemJudgeConfig, text: str) -> None:
+        server = _server(config, "Judgement: 'yes'")
+        request = _request(_split(text), answer_format_regex=self.pattern)
+        result = await server.verify(request)
+        assert (result.reward, result.grading_status, result.answer_format_valid) == (
+            0,
+            "answer_format_invalid",
+            False,
+        )
+        assert result.judge_evaluations == []
+        assert result.response == request.response
+        server.server_client.post.assert_not_awaited()
+
+    async def test_unmatched_optional_capture_skips_judge(self, config: StemJudgeConfig) -> None:
+        server = _server(config)
+        result = await server.verify(_request(_split("none"), answer_format_regex=r"none|(?P<answer>2)"))
+        assert result.answer_format_valid is False
+        server.server_client.post.assert_not_awaited()
+
+    @mark.parametrize("answer_format", [None, "boxed", "free"])
+    @mark.parametrize("verdict, reward", [("yes", 1), ("no", 0)])
+    async def test_only_capture_is_judged_and_response_is_preserved(
+        self, config: StemJudgeConfig, answer_format: str | None, verdict: str, reward: int
+    ) -> None:
+        server = _server(config, f"Judgement: '{verdict}'")
+        request = _request(
+            _response(_msg("earlier answer"), _reasoning("hidden reasoning"), _msg(r"<answer>\frac{4}{2}</answer>")),
+            answer_format=answer_format,
+            answer_format_regex=self.pattern,
+        )
+        result = await server.verify(request)
+        assert (result.reward, result.answer_format_valid, result.grading_status) == (reward, True, "judged")
+        assert _judge_prompt(server).endswith("**Student Solution**:\n" + r"\frac{4}{2}")
+        assert all(s not in _judge_prompt(server) for s in ("<answer>", "hidden reasoning", "earlier answer"))
+        assert result.response == request.response
+        assert result.answer_format_regex == self.pattern
+        # The saved result remains a valid reverification request, even with stale verifier fields.
+        saved = result.model_dump() | {"answer_format_valid": False}
+        again = _server(config, f"Judgement: '{verdict}'")
+        assert (await again.verify(StemJudgeVerifyRequest(**saved))).answer_format_valid is True
+
+    async def test_rubric_uses_capture(self, config: StemJudgeConfig) -> None:
+        server = _server(config, '{"r1": true, "r2": false, "r3": false}')
+        result = await server.verify(
+            _request(
+                _split("<answer>proof here</answer>"), expected=None, rubric=RUBRIC, answer_format_regex=self.pattern
+            )
+        )
+        assert (result.reward, result.rubric_score, result.answer_format_valid) == (0.6, 0.6, True)
+        assert "proof here" in _judge_prompt(server) and "<answer>" not in _judge_prompt(server)
+
+    async def test_split_text_blocks_do_not_change_contract(self, config: StemJudgeConfig) -> None:
+        server = _server(config, "Judgement: 'yes'")
+        message = _msg("<ans")
+        message.content.extend(_msg("wer>2</answer>").content)
+        result = await server.verify(_request(_response(message), answer_format_regex=self.pattern))
+        assert result.reward == 1 and result.answer_format_valid is True
+        assert _judge_prompt(server).endswith("**Student Solution**:\n2")
+
+    @mark.parametrize("answer, reward", [("22", 1), ("222", 0)])
+    async def test_length_limit_applies_to_capture(self, config: StemJudgeConfig, answer: str, reward: int) -> None:
+        server = _server(config.model_copy(update={"max_answer_chars": 2, "max_box_chars": 1}), "Judgement: 'yes'")
+        result = await server.verify(_request(_split(f"<answer>{answer}</answer>"), answer_format_regex=self.pattern))
+        assert result.reward == reward and result.answer_format_valid is True
+        if reward == 0:
+            assert result.grading_status == "answer_too_long"
+            server.server_client.post.assert_not_awaited()
+
+    @mark.parametrize(
+        "response, status",
+        [(_split("<answer>2</answer>", truncated=True), "truncated"), (_response(_reasoning()), "empty_final_answer")],
+    )
+    async def test_existing_gates_run_first(
+        self, config: StemJudgeConfig, response: NeMoGymResponse, status: str
+    ) -> None:
+        server = _server(config)
+        result = await server.verify(_request(response, answer_format_regex=self.pattern))
+        assert result.reward == 0 and result.grading_status == status
+        assert "answer_format_valid" not in result.model_dump()
+        server.server_client.post.assert_not_awaited()
+
+    async def test_no_contract_omits_new_fields(self, config: StemJudgeConfig) -> None:
+        server = _server(config, "Judgement: 'yes'")
+        result = await server.verify(_request(_split(r"\boxed{2}")))
+        assert "answer_format_regex" not in result.model_dump()
+        assert "answer_format_valid" not in result.model_dump()
+
+
 class TestVerify:
     async def test_boxed_row_judges_the_final_answer(self, config: StemJudgeConfig) -> None:
         server = _server(config, "Reasoning...\nJudgement: 'yes'")

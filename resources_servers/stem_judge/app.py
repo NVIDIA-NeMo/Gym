@@ -205,6 +205,7 @@ class StemJudgeVerifyResponse(BaseVerifyResponse):
 
     expected_answer: str
     answer_format: str
+    answer_format_valid: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     # "judged", "judge_unparsed", or why the judge was not called.
     grading_status: str
     # Rubric rows only: earned / total positive points, before rubric_reward.
@@ -212,7 +213,15 @@ class StemJudgeVerifyResponse(BaseVerifyResponse):
     judge_evaluations: list[JudgeEvaluation]
 
 
-RESPONSE_FIELDS = ("reward", "expected_answer", "answer_format", "grading_status", "rubric_score", "judge_evaluations")
+RESPONSE_FIELDS = (
+    "reward",
+    "expected_answer",
+    "answer_format",
+    "answer_format_valid",
+    "grading_status",
+    "rubric_score",
+    "judge_evaluations",
+)
 FAILURE_FIELDS = (
     "mask_sample",
     "failure_kind",
@@ -222,15 +231,15 @@ FAILURE_FIELDS = (
 )
 
 
-def _assistant_text(response: NeMoGymResponse) -> str:
-    """Text of the last assistant message; content blocks are joined with newlines."""
+def _assistant_text(response: NeMoGymResponse, *, separator: str = "\n") -> str:
+    """Text of the last assistant message; existing callers join blocks with newlines."""
     for item in reversed(response.output):
         if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
             content = getattr(item, "content", None)
             if isinstance(content, str):
                 return content
             if isinstance(content, list):
-                return "\n".join(t for t in (getattr(c, "text", None) for c in content) if isinstance(t, str))
+                return separator.join(t for t in (getattr(c, "text", None) for c in content) if isinstance(t, str))
             return ""
     return ""
 
@@ -465,16 +474,29 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         cfg = self.config
         expected = reference_of(body)
         answer_format = body.answer_format or cfg.default_answer_format
+        answer_format_valid = None
 
         async def zero(status: str, judged: Optional[str] = None) -> StemJudgeVerifyResponse:
-            return await self._finish(body, expected, answer_format, status, 0.0, judged, [])
+            result = await self._finish(body, expected, answer_format, status, 0.0, judged, [])
+            result.answer_format_valid = answer_format_valid
+            return result
 
         final, status = final_answer(body.response)
         if final is None:
             return await zero(status)
 
         solution = final
-        if answer_format == "boxed":
+        if body.answer_format_regex is not None:
+            # Match the unstripped final text: whitespace is part of the task's contract.
+            match = re.fullmatch(body.answer_format_regex, _assistant_text(body.response, separator=""))
+            answer = match.group("answer") if match else None
+            answer_format_valid = bool(answer and answer.strip())
+            if not answer_format_valid:
+                return await zero("answer_format_invalid")
+            solution = answer
+            if cfg.max_answer_chars is not None and len(solution) > cfg.max_answer_chars:
+                return await zero("answer_too_long", solution)
+        elif answer_format == "boxed":
             box = last_boxed(final)
             if box is None:
                 return await zero("no_boxed")
@@ -482,13 +504,17 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
                 return await zero("box_too_long")
             if cfg.boxed_judge_input == "box":
                 solution = box
-        judges_whole_answer = answer_format == "free" or cfg.boxed_judge_input == "final_answer"
+        judges_whole_answer = body.answer_format_regex is None and (
+            answer_format == "free" or cfg.boxed_judge_input == "final_answer"
+        )
         if judges_whole_answer and cfg.max_answer_chars is not None and len(final) > cfg.max_answer_chars:
             return await zero("answer_too_long")
 
         question = _extract_question_text(body.responses_create_params, self._question_regex())
         grade = self._grade_rubric if body.rubric else self._grade_answer
-        return await observe_llm_judge_grading(lambda: grade(body, expected, answer_format, question, solution))
+        result = await observe_llm_judge_grading(lambda: grade(body, expected, answer_format, question, solution))
+        result.answer_format_valid = answer_format_valid
+        return result
 
     async def _grade_answer(
         self, body: StemJudgeVerifyRequest, expected: str, answer_format: str, question: str, solution: str

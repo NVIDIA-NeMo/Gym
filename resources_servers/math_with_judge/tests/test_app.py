@@ -48,6 +48,7 @@ from resources_servers.math_with_judge.app import (
     _prepare_format_tolerant_response,
     _run_math_verify,
 )
+from resources_servers.math_with_judge.task_data import TaskData
 
 
 def _geometric_series_terms(num_terms: int) -> str:
@@ -245,6 +246,8 @@ class TestApp:
 
     @mark.parametrize("pattern", ["[", "(.*)"])
     def test_invalid_format_contract_rejected(self, pattern):
+        with raises(ValueError):
+            TaskData(question="2+2", expected_answer="4", answer_format_regex=pattern)
         with raises(ValueError):
             LibraryJudgeMathVerifyRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
