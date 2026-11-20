@@ -96,7 +96,9 @@ flowchart TB
      length Linux refuses in one environment variable, is written to a file that only the user can read, and
      `NEMO_GYM_CONFIG_DICT_FILE` names it. A venv reused with `skip_venv_if_present` can hold a Gym that reads only
      the variable: the config then stays in the variable for every server, and the run stops before any server
-     starts when the operating system does not accept it there.
+     starts when the operating system does not accept it there. The file is removed when the servers shut down,
+     also when SIGTERM stops `gym env start`. The command then exits with status 143, or with 15 when a server
+     uses Ray and the signal arrives while the servers start, where Ray's own handler is in place.
    - The specific server identity is passed via `NEMO_GYM_CONFIG_PATH`.
    - Server URLs are registered in the global config, allowing other servers to discover and call them.
 
