@@ -92,6 +92,9 @@ Session install/close timeouts default to 600/60 seconds.
   After an install, the launcher selected on `PATH` must report the requested version, or that local request fails.
   Gym reads the pinned release's per-agent SQLite transcripts with OpenClaw's SDK after the worker stops
   (`export_sessions.mjs`). If that export fails, the response keeps the CLI's final text without the tool calls.
+  The export runs the SDK of the OpenClaw that `command` runs: a one-word `command` (the launcher, under `node` from
+  `PATH`) or an interpreter followed by the entrypoint's path (`/opt/node/bin/node .../openclaw/openclaw.mjs`).
+  A package runner such as `npx openclaw` chooses the package itself, so its responses keep only the final text.
   Older releases that write JSONL sessions remain readable.
 - `node_bin_dir`: directory put before `PATH` when running `openclaw`. Setup uses the
   same order for its version probes and for `npm`, so a bundled runtime is checked

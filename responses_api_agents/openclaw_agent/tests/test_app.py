@@ -1038,7 +1038,9 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
     assert agent.config.timeout == 1800
 
 
-def _sqlite_era_transcript(session_id: str, reasoning: tuple[int | None, int | None] = (None, None)) -> str:
+def _sqlite_era_transcript(
+    session_id: str, reasoning: tuple[int | None, int | None] = (None, None), answer: str = "42"
+) -> str:
     def usage(count: int | None) -> dict:
         return {"input": 3, "output": 2, **({} if count is None else {"reasoningTokens": count})}
 
@@ -1069,7 +1071,7 @@ def _sqlite_era_transcript(session_id: str, reasoning: tuple[int | None, int | N
                 "role": "assistant",
                 "responseId": "resp-2",
                 "usage": usage(reasoning[1]),
-                "content": [{"type": "text", "text": "42"}],
+                "content": [{"type": "text", "text": answer}],
             },
         },
     ]
@@ -1097,24 +1099,34 @@ class _SQLiteHostRun:
         self.agent_cmd: list[str] | None = None
         self.export_call: tuple[list[str], dict] | None = None
 
-    def stub(self, *, agent_result, export_result=(0, "", ""), exported_id=None, reasoning=(None, None)):
+    def stub(
+        self, *, agent_result, export_result=(0, "", ""), exported_id=None, reasoning=(None, None), also_exported=()
+    ):
+        """Fake the CLI and the exporter. A failing export first writes a tool-call prefix of the transcript; each
+        session in ``also_exported`` is written later, with a newer mtime, and answers with its own id."""
+
         async def run_exec(cmd, *, cwd, env, timeout):
             if "onboard" in cmd:
                 return 0, "", ""
             if cmd[1].endswith("export_sessions.mjs"):
                 self.export_call = (cmd, {"cwd": cwd, "env": env, "timeout": timeout})
+                failed = isinstance(export_result, BaseException) or export_result[0] != 0
+                session_id = exported_id or self.agent_cmd[self.agent_cmd.index("--session-id") + 1]
+                sessions = Path(cmd[4]) / "main" / "sessions"
+                sessions.mkdir(parents=True)
+                transcript = _sqlite_era_transcript(session_id, reasoning)
+                root = sessions / f"{session_id}.jsonl"
+                root.write_text("\n".join(transcript.splitlines()[:3]) if failed else transcript)
+                index = {"agent:main:main": {"sessionId": session_id, "sessionFile": root.name}}
+                for offset, other_id in enumerate(also_exported, 1):
+                    other = sessions / f"{other_id}.jsonl"
+                    other.write_text(_sqlite_era_transcript(other_id, answer=other_id))
+                    mtime = root.stat().st_mtime + 10 * offset
+                    os.utime(other, (mtime, mtime))
+                    index[f"agent:main:{other_id}"] = {"sessionId": other_id, "sessionFile": other.name}
+                (sessions / "sessions.json").write_text(json.dumps(index))
                 if isinstance(export_result, BaseException):
                     raise export_result
-                if export_result[0] == 0:
-                    session_id = exported_id or self.agent_cmd[self.agent_cmd.index("--session-id") + 1]
-                    sessions = Path(cmd[4]) / "main" / "sessions"
-                    sessions.mkdir(parents=True)
-                    (sessions / f"{session_id}.jsonl").write_text(_sqlite_era_transcript(session_id, reasoning))
-                    (sessions / "sessions.json").write_text(
-                        json.dumps(
-                            {"agent:main:main": {"sessionId": session_id, "sessionFile": f"{session_id}.jsonl"}}
-                        )
-                    )
                 return export_result
             self.agent_cmd = cmd
             if isinstance(agent_result, BaseException):
@@ -1178,7 +1190,8 @@ def test_timed_out_run_reads_partial_sqlite_history_by_forced_session_id(tmp_pat
     ids=["exit_1", "timeout"],
 )
 def test_failed_sqlite_export_keeps_the_envelope_answer(tmp_path: Path, export_result, caplog) -> None:
-    """An export failure after a finished run loses the tool calls, never the answer: it must not be scored empty."""
+    """An export failure after a finished run loses the tool calls, never the answer, even when the failed export
+    left a transcript prefix behind: the response must keep the envelope's final answer."""
     run = _SQLiteHostRun(tmp_path)
     stdout = _envelope([{"text": "fallback"}], usage={"input": 3, "output": 2})
     with (
@@ -1220,6 +1233,54 @@ def test_export_uses_the_configured_command_as_its_launcher(tmp_path: Path) -> N
 
     assert run.export_call[0][2] == str(run.bin_dir / "openclaw-pinned")
     assert [item.type for item in output] == ["function_call", "function_call_output", "message"]
+
+
+def test_export_runs_an_interpreter_command_with_its_entrypoint(tmp_path: Path) -> None:
+    """`<node> <openclaw.mjs>` resolves the SDK from the entrypoint under that node, not from the interpreter."""
+    run = _SQLiteHostRun(tmp_path)
+    interpreter = tmp_path / "runtime/node/bin/node"
+    entrypoint = tmp_path / "runtime/openclaw/node_modules/openclaw/openclaw.mjs"
+    for path in (interpreter, entrypoint):
+        path.parent.mkdir(parents=True)
+        path.write_text("#!/bin/sh\nexit 0\n")
+    interpreter.chmod(0o755)
+    run.agent.config.command = f"{interpreter} {entrypoint}"
+    stdout = _envelope([{"text": "fallback"}], usage={"input": 3, "output": 2})
+    with run.stub(agent_result=(0, stdout, "")):
+        output, _, _ = run.run()
+
+    argv = run.export_call[0]
+    assert (argv[0], argv[2]) == (str(interpreter), str(entrypoint))
+    assert [item.type for item in output] == ["function_call", "function_call_output", "message"]
+
+
+def test_package_runner_command_skips_the_export_and_keeps_the_envelope_answer(tmp_path: Path, caplog) -> None:
+    """`npx openclaw` picks the package by npm's rules, so no entrypoint is known and the export is skipped."""
+    run = _SQLiteHostRun(tmp_path)
+    (run.bin_dir / "npx").write_text("#!/bin/sh\nexit 0\n")
+    (run.bin_dir / "npx").chmod(0o755)
+    run.agent.config.command = "npx openclaw"
+    stdout = _envelope([{"text": "fallback"}], usage={"input": 3, "output": 2})
+    with caplog.at_level(logging.WARNING), run.stub(agent_result=(0, stdout, "")):
+        output, _, _ = run.run()
+
+    assert run.export_call is None
+    assert [item.content[0].text for item in output] == ["fallback"]
+    assert "OpenClaw transcript export skipped" in caplog.text
+
+
+@pytest.mark.parametrize("extra_args", [["--session-id", "root"], ["--session-id=root"]], ids=["separate", "inline"])
+def test_stopped_run_reads_the_session_id_given_in_extra_args(tmp_path: Path, extra_args) -> None:
+    """A stopped run has no envelope: the id from extra_args, not the newest exported file, names its history."""
+    run = _SQLiteHostRun(tmp_path, extra_args=extra_args)
+    collector = MagicMock()
+    with run.stub(agent_result=TimeoutError("openclaw timed out"), exported_id="root", also_exported=("child",)):
+        output, _, _ = run.run(observation_collector=collector)
+
+    assert run.agent_cmd[-len(extra_args) :] == extra_args
+    assert run.agent_cmd.count("--session-id") == extra_args.count("--session-id")
+    assert output[-1].content[0].text == "42"
+    assert collector.call_args.args[0] == "root"
 
 
 def test_missing_node_skips_the_export_and_keeps_the_envelope_answer(tmp_path: Path, caplog) -> None:

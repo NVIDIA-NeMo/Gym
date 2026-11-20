@@ -502,7 +502,10 @@ if [ "$#" -gt 0 ]; then
 fi
 """
     check_paths = f"(set -- {shlex.join([workdir, str(Path(directory).parent), runtime])}{_SANDBOX_PATH_CHECK})"
-    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw/media')}"
+    # Create the directories that activation uploads into as the sandbox user: an upload creates missing parents
+    # as root on Docker, and OpenClaw must still create its SQLite store and sessions beside the uploaded files.
+    state = directory + "/home/.openclaw"
+    return bootstrap + f"{check_paths} && mkdir -p {shlex.join([state + '/media', state + '/agents/main/agent'])}"
 
 
 # One ``openclaw mcp probe`` per MCP grant: CLI startup, connection and tool listing.
@@ -617,6 +620,33 @@ def _runtime_matches(report: str, version: str) -> bool:
 
 # `openclaw agent` options that choose the session; when extra_args sets one, the adapter adds no --session-id.
 _SESSION_SELECTOR_ARGS = frozenset({"--session-id", "--session-key", "--to", "-t"})
+# A session id that can name an exported transcript file without reaching outside the export directory.
+_SESSION_ID_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]*")
+
+
+def _explicit_session_id(args: list[str]) -> Optional[str]:
+    """The session id that ``extra_args`` pass with ``--session-id``, when they pass exactly one usable id."""
+    ids = [value for flag, value in zip(args, args[1:]) if flag == "--session-id"]
+    ids += [arg.split("=", 1)[1] for arg in args if arg.startswith("--session-id=")]
+    return ids[0] if len(ids) == 1 and _SESSION_ID_PATTERN.fullmatch(ids[0]) else None
+
+
+def _export_launch(command_parts: list[str], *, cwd: Path, path: Optional[str]) -> Optional[tuple[str, str]]:
+    """The interpreter and OpenClaw entrypoint that run the transcript exporter like the configured command.
+
+    The exporter resolves the OpenClaw SDK from the entrypoint. A one-word command is the launcher itself and runs
+    under ``node`` from ``PATH``. A longer command must give the entrypoint as a path after its interpreter, as in
+    ``/opt/node/bin/node /opt/openclaw/node_modules/openclaw/openclaw.mjs``. A package runner such as ``npx openclaw``
+    selects the package by its own rules, so it has no entrypoint here and the export is skipped.
+    """
+    if len(command_parts) == 1:
+        interpreter, entrypoint = shutil.which("node", path=path), shutil.which(command_parts[0], path=path)
+    else:
+        interpreter = shutil.which(command_parts[0], path=path)
+        scripts = [cwd / part for part in command_parts[1:] if "/" in part and (cwd / part).is_file()]
+        entrypoint = str(scripts[-1]) if scripts else None
+    return (interpreter, entrypoint) if interpreter and entrypoint else None
+
 
 # OpenClaw moved agents.defaults.memorySearch to memory.search in 2026.8.1: its doctor migration
 # "memorySearch->memory.search" first ships in that tag, and 2026.11.5 rejects the old key.
@@ -1586,23 +1616,30 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         """Export the CLI's SQLite session history as JSONL under *destination* with the installed OpenClaw SDK.
 
         The run has already finished, so a failed export only loses the transcript: the caller then answers from
-        the CLI envelope and never turns the failure into an empty, scored response.
+        the CLI envelope and never turns the failure into an empty, scored response. A failed export may leave a
+        partial file, so its destination is removed rather than read.
         """
-        launcher = shutil.which(self.config.command_parts[0], path=env.get("PATH"))
-        node = shutil.which("node", path=env.get("PATH"))
-        if launcher is None or node is None:
-            LOG.warning("OpenClaw transcript export skipped: node or %s is not on PATH", self.config.command_parts[0])
+        launch = _export_launch(self.config.command_parts, cwd=cwd, path=env.get("PATH"))
+        if launch is None:
+            LOG.warning(
+                "OpenClaw transcript export skipped: no interpreter and OpenClaw entrypoint found for command %r",
+                self.config.command,
+            )
             return
+        interpreter, entrypoint = launch
         script = str(Path(__file__).with_name("export_sessions.mjs"))
         try:
             code, _, diagnostic = await self._run_exec(
-                [node, script, launcher, str(state_dir), str(destination)], cwd=str(cwd), env=env, timeout=timeout
+                [interpreter, script, entrypoint, str(state_dir), str(destination)],
+                cwd=str(cwd),
+                env=env,
+                timeout=timeout,
             )
         except (TimeoutError, OSError) as error:
-            LOG.warning("OpenClaw transcript export failed: %s", error)
-            return
-        if code:
+            code, diagnostic = None, error
+        if code != 0:
             LOG.warning("OpenClaw transcript export failed: %s", diagnostic)
+            shutil.rmtree(destination, ignore_errors=True)
 
     async def _run_exec(
         self, args: list[str], *, cwd: Optional[str], env: dict[str, str], timeout: float
@@ -1752,7 +1789,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             config_path.write_text(json.dumps(self._build_openclaw_config(base_cfg, rollout_id), indent=2) + "\n")
 
             # A known session id lets the SQLite export find a stopped run's history without an envelope.
-            local_session_id = uuid4().hex
+            local_session_id = _explicit_session_id(self.config.extra_args) or uuid4().hex
             selects_session = any(arg.split("=", 1)[0] in _SESSION_SELECTOR_ARGS for arg in self.config.extra_args)
             cmd = [
                 *self.config.command_parts,
@@ -1820,7 +1857,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 sessions = agents_root / self.config.openclaw_agent_id / "sessions"
                 meta = (envelope or {}).get("meta") or {}
                 reported_id = (meta.get("agentMeta") or {}).get("sessionId")
-                if isinstance(reported_id, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*", reported_id):
+                if isinstance(reported_id, str) and _SESSION_ID_PATTERN.fullmatch(reported_id):
                     local_session_id = reported_id
                 session_path = sessions / f"{local_session_id}.jsonl"
                 if selects_session and not session_path.is_file():
