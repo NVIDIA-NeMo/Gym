@@ -855,7 +855,7 @@ async def test_continuation_activations_resume_one_conversation_in_the_session_r
 @pytest.mark.asyncio
 async def test_seed_gives_a_continuation_session_a_claude_session_id(monkeypatch):
     instance = agent(sandbox_executable_path="/bin/claude", sandbox_executable_sha256="a" * 64)
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock())
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), sandbox_id="sandbox-1")
     monkeypatch.setattr(app, "create_provider", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
     monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
