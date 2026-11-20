@@ -6,10 +6,14 @@
 > agents or configs on it. Use the harness's own agent with sandbox sessions under an environment server instead
 > (`claude_code_agent`, `codex_agent`, `hermes_agent`, `pi_agent`, `opencode_agent` and so on); the `job_bench` and
 > `workspace_bench` configs do this through `single_agent_turn_legacy`. The `swe_atlas_qa` and `rna_design` configs
-> still run on this agent until they move, and `harness_exa_search` still builds on its agent registry. `cline`,
-> `prime`, `simple_strands` and `deepagents` have no agent that serves sandbox sessions yet, so their `swe_atlas_qa`
-> configs have nothing to move to, and this agent stays until they do. Existing configs keep working; the agent logs a
-> deprecation warning when it starts.
+> still run on this agent until they move, and `harness_exa_search` still builds on its agent registry:
+>
+> - Every `swe_atlas_qa` harness has a session agent that works in a sandbox the resources server lends (`deepagents`
+>   and `mini_swe` through `langchain_deepagents_agent` and `mini_swe_agent`, without the Fabric adapters), but the
+>   `swe_atlas_qa` resources server does not lend its task sandbox yet.
+> - `rna_design` forwards its MCP tools to Claude Code, and `claude_code_agent` does not accept required remote tools.
+>
+> Existing configs keep working; the agent logs a deprecation warning when it starts.
 
 Runs any gym agent harness in a sandbox with any resources server.
 
