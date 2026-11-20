@@ -184,6 +184,8 @@ Sessions use MCP tool grants and reject other required grants. Each granted MCP 
 
 The Hermes runner and the model's terminal tool execute as the same user in the same sandbox. The host reads the final result, including token IDs, from `/tmp/nemo-gym-hermes-sessions/<session-id>/output.json`; commands issued by the model can also write that file. Sandbox mode is suitable for evaluation, but it must not be used to produce RL training data until results are returned through a channel the model cannot modify.
 
+The runner records each tool call with the shared tool call recorder, in sandbox sessions and in the host worker alike. A call Hermes runs concurrently is timed in `_invoke_tool` (the `executor` boundary); a call it runs sequentially, including most `delegate_task` calls, is timed at its tool start and completion callbacks (the `lifecycle` boundary). The start and finish go to `tool_events.jsonl` in the run's directory as they happen, so a runner that stops before writing its output keeps the calls it started.
+
 ## Local compatibility
 
 Calls without an agent session run Hermes on the agent-server host. They do not operate on

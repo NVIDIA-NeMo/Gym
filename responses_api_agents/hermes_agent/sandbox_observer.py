@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextvars import ContextVar
 from copy import deepcopy
-from time import monotonic, time
+from time import time
 from typing import Any
 
 
@@ -38,6 +38,9 @@ _USAGE_DETAIL_FIELDS = (
     ("prompt_tokens_details", "cached_tokens", "cache_read_tokens"),
     ("completion_tokens_details", "reasoning_tokens", "reasoning_tokens"),
 )
+
+# The shared tool call recorder's events, beside the runner's output in the session directory.
+TOOL_EVENTS_FILE = "tool_events.jsonl"
 
 _SUMMARY_CAPTURE: ContextVar[Any] = ContextVar("gym_hermes_summary_capture", default=None)
 
@@ -77,17 +80,32 @@ class _ObservedChildren(list):
 
 
 class SandboxHermesObserver:
-    """Capture raw event dictionaries for host-side validation."""
+    """Capture raw event dictionaries for host-side validation.
 
-    def __init__(self) -> None:
+    Tool calls are not part of these dictionaries: each one is recorded through the shared tool call recorder that
+    ``tool_recorder(invocation_id, boundary)`` returns, with one timing per call. Hermes' concurrent path starts a
+    call on a worker thread and runs it through ``_invoke_tool``, which records it at the ``executor`` boundary. Its
+    sequential path starts a call on the conversation's thread and runs it outside ``_invoke_tool``; that call is
+    recorded at the tool start and completion callbacks, at the ``lifecycle`` boundary. A call that starts on a worker
+    thread but never reaches ``_invoke_tool`` is recorded at its completion callback.
+    """
+
+    def __init__(self, *, tool_recorder: Callable[[str, str], Any]) -> None:
         self._lock = threading.RLock()
         self._executing_tool: ContextVar[tuple[str, str] | None] = ContextVar("executing_tool", default=None)
         # Hermes runs `delegate_task` on its sequential path, outside `_invoke_tool`, so each parent's running
         # delegation is the call that spawns its children.
         self._running_delegations: dict[str, str] = {}
         self._child_index = 0
-        self._started_ticks: dict[tuple[str, str], float] = {}
-        self._tools: dict[tuple[str, str], dict[str, Any]] = {}
+        self._tool_recorder = tool_recorder
+        self._recorders: dict[tuple[str, str], Any] = {}
+        # Calls recorded from their start callback, calls left to `_invoke_tool`, and calls it already recorded.
+        self._tool_handles: dict[tuple[str, str], tuple[Any, Any]] = {}
+        self._dispatched: dict[tuple[str, str], str | None] = {}
+        self._executed: set[tuple[str, str]] = set()
+        # The thread each invocation's conversation runs on. Hermes starts a concurrent call on a worker thread,
+        # immediately before `_invoke_tool`; a sequential call starts on the conversation's own thread.
+        self._conversation_threads: dict[str, int] = {}
         self._invocations: dict[str, dict[str, Any]] = {
             "root": {
                 "invocation_id": "root",
@@ -109,6 +127,8 @@ class SandboxHermesObserver:
             import agent.context_compressor as compressor
 
             _install_summary_capture(compressor)
+        # The runner drives the root conversation on the thread that instruments it.
+        self._conversation_threads["root"] = threading.get_ident()
         self._instrument(agent, "root", wrap_conversation=False)
         return self
 
@@ -129,14 +149,14 @@ class SandboxHermesObserver:
     ) -> dict[str, Any]:
         self._record_conversation("root", result, error)
         with self._lock:
-            for tool in self._tools.values():
-                if tool["status"] == "unknown":
-                    tool["status"] = "incomplete"
             return {
                 "invocations": list(self._invocations.values()),
-                "tools": list(self._tools.values()),
                 "compactions": list(self._compactions),
                 "gaps": list(self._gaps),
+                # Calls whose start or finish could not be written; their recorded events may be incomplete.
+                "tool_capture_failed_spans": sorted(
+                    span for recorder in self._recorders.values() for span in recorder.failed_spans
+                ),
             }
 
     def _instrument(self, agent: Any, invocation_id: str, *, wrap_conversation: bool) -> None:
@@ -161,6 +181,8 @@ class SandboxHermesObserver:
                 return
 
             def run(*args: Any, **kwargs: Any) -> Any:
+                with self._lock:
+                    self._conversation_threads[invocation_id] = threading.get_ident()
                 try:
                     child_result = original(*args, **kwargs)
                 except BaseException as error:
@@ -320,24 +342,44 @@ class SandboxHermesObserver:
             return
 
         def invoke(*args: Any, **kwargs: Any) -> Any:
-            # v0.23.2 supplies a call ID even when middleware rewrites the argument dictionary.
+            # v0.23.2 supplies the name first and a call ID even when middleware rewrites the argument dictionary.
+            name = args[0] if args else None
             call_id = args[3] if len(args) > 3 else kwargs.get("tool_call_id")
             key = (invocation_id, str(call_id or ""))
             with self._lock:
-                tool = self._tools.get(key)
-                if tool is not None:
-                    tool.update(started_at=time(), timing_source="executor")
-            started = monotonic()
+                handle = None
+                if key in self._dispatched:
+                    recorder = self._recorder(invocation_id, "executor")
+                    handle = recorder.start(
+                        native_call_id=key[1], tool_call_id=key[1], tool_name=self._dispatched.pop(key)
+                    )
             token = self._executing_tool.set(key)
             try:
-                return original(*args, **kwargs)
+                result = original(*args, **kwargs)
+            except BaseException:
+                if handle is not None:
+                    self._finish_executed(key, recorder, handle, "failed")
+                raise
             finally:
                 self._executing_tool.reset(token)
-                if tool is not None:
-                    with self._lock:
-                        tool.update(completed_at=time(), duration_ms=(monotonic() - started) * 1000)
+            if handle is not None:
+                self._finish_executed(
+                    key, recorder, handle, "failed" if self._failed_result(name, result) else "completed"
+                )
+            return result
 
         agent._invoke_tool = invoke
+
+    def _finish_executed(self, key: tuple[str, str], recorder: Any, handle: Any, status: str) -> None:
+        with self._lock:
+            recorder.finish(handle, status=status)
+            self._executed.add(key)
+
+    def _recorder(self, invocation_id: str, boundary: str) -> Any:
+        recorder = self._recorders.get((invocation_id, boundary))
+        if recorder is None:
+            recorder = self._recorders[(invocation_id, boundary)] = self._tool_recorder(invocation_id, boundary)
+        return recorder
 
     def _child_added(self, child: Any, parent_id: str) -> None:
         with self._lock:
@@ -357,39 +399,42 @@ class SandboxHermesObserver:
 
     def _tool_started(self, invocation_id: str, call_id: Any, name: Any, args: Any) -> None:
         key = (invocation_id, str(call_id or ""))
+        tool_name = str(name or "") or None
         with self._lock:
             if name == "delegate_task" and key[1]:
                 self._running_delegations[invocation_id] = key[1]
-            if key in self._tools:
+            if key in self._tool_handles or key in self._dispatched or key in self._executed:
                 self._gap("duplicate_tool_call", invocation_id, key[1])
-            self._tools[key] = {
-                "invocation_id": invocation_id,
-                "tool_call_id": key[1],
-                "tool_name": str(name or "") or None,
-                "started_at": time(),
-                "completed_at": None,
-                "duration_ms": None,
-                "timing_source": "harness",
-                "status": "unknown",
-                "error_type": None,
-            }
-            self._started_ticks[key] = monotonic()
+            conversation_thread = self._conversation_threads.get(invocation_id, threading.get_ident())
+            if threading.get_ident() != conversation_thread:
+                # A concurrent call: `_invoke_tool` runs next on this thread and records it at the executor.
+                self._dispatched[key] = tool_name
+                return
+            recorder = self._recorder(invocation_id, "lifecycle")
+            self._tool_handles[key] = (
+                recorder,
+                recorder.start(native_call_id=key[1], tool_call_id=key[1], tool_name=tool_name),
+            )
 
     def _tool_completed(self, invocation_id: str, call_id: Any, name: Any, args: Any, result: Any) -> None:
         key = (invocation_id, str(call_id or ""))
         with self._lock:
-            if key not in self._tools:
-                self._tool_started(invocation_id, call_id, name, args)
             if self._running_delegations.get(invocation_id) == key[1]:
                 del self._running_delegations[invocation_id]
-            tool = self._tools[key]
-            failed = self._failed_result(name, result)
-            started = self._started_ticks.pop(key, None)
-            if tool["completed_at"] is None:
-                tool["completed_at"] = time()
-                tool["duration_ms"] = max(0.0, (monotonic() - started) * 1000) if started is not None else None
-            tool["status"] = "failed" if failed else "completed"
-            tool["error_type"] = "tool_result" if failed else None
+            if key in self._executed:
+                self._executed.discard(key)
+                return
+            if key not in self._tool_handles:
+                # No start was recorded, or a concurrent call never reached `_invoke_tool`: its start and finish
+                # are both observed here, at completion.
+                self._dispatched.pop(key, None)
+                recorder = self._recorder(invocation_id, "lifecycle")
+                self._tool_handles[key] = (
+                    recorder,
+                    recorder.start(native_call_id=key[1], tool_call_id=key[1], tool_name=str(name or "") or None),
+                )
+            recorder, handle = self._tool_handles.pop(key)
+            recorder.finish(handle, status="failed" if self._failed_result(name, result) else "completed")
 
     def restore_messages(self, result: dict[str, Any], *, invocation_id: str = "root") -> dict[str, Any]:
         """Export the executed conversation, retaining history removed from model context."""

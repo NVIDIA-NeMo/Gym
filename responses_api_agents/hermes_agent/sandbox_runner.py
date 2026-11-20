@@ -46,7 +46,13 @@ def _connect_mcp_servers(required: list[str]) -> None:
         raise RuntimeError("Required MCP servers did not connect: " + ", ".join(missing))
 
 
-def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None = None) -> dict[str, Any]:
+def _run(
+    payload: dict[str, Any],
+    session_dir: Path,
+    *,
+    output_path: Path | None = None,
+    clock_location: str = "sandbox",
+) -> dict[str, Any]:
     # Hermes reads .env/config and caches state paths at import time. Configure its session home before any
     # harness imports, including sibling modules that may import Hermes transitively; preserve the task's HOME.
     hermes_home = session_dir / "hermes-home"
@@ -80,10 +86,15 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
 
     try:
         from .model_kwargs import configure_model_calls
-        from .sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
+        from .sandbox_observer import SESSION_TOKEN_COUNTERS, TOOL_EVENTS_FILE, SandboxHermesObserver
     except ImportError:
         from model_kwargs import configure_model_calls
-        from sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
+        from sandbox_observer import SESSION_TOKEN_COUNTERS, TOOL_EVENTS_FILE, SandboxHermesObserver
+    if __package__:
+        from nemo_gym.utils.tool_recording import ClockContext, ToolCallRecorder
+    else:
+        # The worker has no Gym install; the recorder modules are staged beside it or in its exchange directory.
+        from tool_recording import ClockContext, ToolCallRecorder
     from run_agent import AIAgent
     from tools.delegate_tool_config import gateway_delegation_inline_scope
 
@@ -112,7 +123,20 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
             save_trajectories=False,
         )
     configure_model_calls(agent, preserve_reasoning_history=payload["chat_template_kwargs_enabled"])
-    observer = SandboxHermesObserver().instrument(agent, capture_summaries=True)
+    clock = ClockContext(location=clock_location, owner=os.uname().nodename.replace("/", "_") or "hermes")
+
+    def tool_recorder(invocation_id: str, boundary: str) -> ToolCallRecorder:
+        return ToolCallRecorder(
+            path=session_dir / TOOL_EVENTS_FILE,
+            producer_id=f"hermes:{uuid4().hex}",
+            invocation_id=invocation_id,
+            agent_instance=None,
+            clock=clock,
+            boundary=boundary,
+            timing_source="hermes.invoke_tool" if boundary == "executor" else "hermes.tool_callback",
+        )
+
+    observer = SandboxHermesObserver(tool_recorder=tool_recorder).instrument(agent, capture_summaries=True)
     result = None
     error = None
     stop_reason = None
@@ -206,11 +230,13 @@ def main() -> int:
         print("usage: sandbox_runner.py INPUT_JSON OUTPUT_JSON", file=sys.stderr)
         return 2
     if sys.argv[1] == "--host":
+        # The host stages the tool call recorder modules in the exchange directory.
+        sys.path.insert(0, sys.argv[2])
         # Isolate the result channel from third-party stdout and close it on tool exec.
         with os.fdopen(os.dup(sys.stdout.fileno()), "w") as result_pipe:
             os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
             try:
-                result = _run(json.load(sys.stdin), Path(sys.argv[2]))
+                result = _run(json.load(sys.stdin), Path(sys.argv[2]), clock_location="host")
             except Exception as error:
                 result_pipe.write(
                     json.dumps(

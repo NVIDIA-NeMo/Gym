@@ -43,6 +43,7 @@ from responses_api_agents.hermes_agent.app import (
     HermesAgentRunRequest,
 )
 from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession, parse_runtime_info
+from responses_api_agents.hermes_agent.sandbox_observer import TOOL_EVENTS_FILE
 
 
 @pytest.fixture
@@ -95,10 +96,15 @@ def state():
 
 
 def mock_json_download(sandbox, **kwargs):
-    """Supply files through the real text utility's sandbox download boundary."""
+    """Supply files through the real text utility's sandbox download boundary.
+
+    No tool ran in these sessions, so the recorder's events file is absent and takes no supplied file.
+    """
     download = AsyncMock(**kwargs)
 
     async def write_download(path, destination):
+        if path.endswith(f"/{TOOL_EVENTS_FILE}"):
+            raise FileNotFoundError(path)
         Path(destination).write_text(json.dumps(await download(sandbox, path)), encoding="utf-8")
 
     sandbox.download = AsyncMock(side_effect=write_download)
@@ -1144,7 +1150,7 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
     )
     original = body.model_dump()
     result = {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}
-    host_worker = AsyncMock(return_value=({"result": result}, False))
+    host_worker = AsyncMock(return_value=({"result": result}, False, None))
     monkeypatch.setattr(HermesAgent, "_run_host_worker", host_worker)
     await agent.responses(SimpleNamespace(session={}), body)
     host = host_worker.await_args.args[0]
@@ -1967,7 +1973,7 @@ async def test_images_reach_host_and_sandbox_without_dropping_history(agent, sta
             await agent.responses(request(state), body.model_copy(update={"instructions": "different"}))
         assert error.value.status_code == 409
     else:
-        host_worker = AsyncMock(return_value=({"result": result}, False))
+        host_worker = AsyncMock(return_value=({"result": result}, False, None))
         monkeypatch.setattr(HermesAgent, "_run_host_worker", host_worker)
         await agent.responses(SimpleNamespace(session={}), body)
         host = host_worker.await_args.args[0]
@@ -2044,3 +2050,19 @@ def test_portable_runtime_refuses_an_image_whose_glibc_cannot_load_it(monkeypatc
     else:
         with pytest.raises(RuntimeError, match=r"Hermes requires glibc 2\.28 or newer"):
             runtime._require_supported_glibc()
+
+
+async def test_close_without_runner_output_keeps_the_recorded_tool_calls(
+    agent, state, tool_recorder, tool_events_path
+):
+    """A runner that died before writing its output still leaves the starts it recorded."""
+    tool_recorder("root").start(native_call_id="c1", tool_call_id="c1", tool_name="terminal")
+    state.tool_events = tool_events_path.read_text()
+    state.close = AsyncMock()
+
+    observations = (await agent._close_agent_session_state(state)).agent_observations
+
+    (tool,) = observations.records
+    assert (tool.tool_call_id, tool.status) == ("c1", "incomplete")
+    assert tool.timings[0].started_at is not None and tool.timings[0].completed_at is None
+    assert {"observation_capture_failed", "tool_completion_unavailable"} <= {gap.code for gap in observations.gaps}

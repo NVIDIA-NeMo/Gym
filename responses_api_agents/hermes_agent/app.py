@@ -89,8 +89,9 @@ from nemo_gym.trajectory import (
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
+    read_tool_events,
 )
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, tool_recording_files
 from responses_api_agents.hermes_agent.observability import normalize_hermes_messages
 from responses_api_agents.hermes_agent.runtime import builtin_toolsets, host_python
 from responses_api_agents.hermes_agent.sandbox import (
@@ -99,6 +100,7 @@ from responses_api_agents.hermes_agent.sandbox import (
     HermesSandboxSession,
     parse_runtime_info,
 )
+from responses_api_agents.hermes_agent.sandbox_observer import TOOL_EVENTS_FILE
 
 
 # Legacy /run grades these request rejections and masks other provider failures.
@@ -271,6 +273,35 @@ def _trajectory_to_output_items(messages, n_input):
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+
+
+def _recorded_tools(
+    raw_observations: Mapping[str, Any] | None, tool_events: str | None
+) -> tuple[list[ToolCallObservation], list[ObservationGap]]:
+    """The sandbox runner's recorded tool calls, with gaps for calls whose capture failed or was lost."""
+    raw = raw_observations or {}
+    gaps = [
+        ObservationGap(code="tool_capture_unavailable", span_id=span)
+        for span in raw.get("tool_capture_failed_spans") or []
+    ]
+    if tool_events is None:
+        # No events file: a conversation that requested no tool ran none; otherwise its calls are unrecoverable.
+        requested = any(
+            isinstance(message, dict) and message.get("role") == "assistant" and message.get("tool_calls")
+            for invocation in raw.get("invocations") or []
+            for message in invocation.get("messages") or []
+        )
+        return [], [*gaps, ObservationGap(code="tool_capture_unavailable")] if requested else gaps
+    with tempfile.TemporaryDirectory(prefix="gym-hermes-tools-") as directory:
+        path = os.path.join(directory, TOOL_EVENTS_FILE)
+        with open(path, "w") as events:
+            events.write(tool_events)
+        tools, event_gaps = read_tool_events(path)
+    # The observer classifies a failure only from the tool's result.
+    tools = [
+        tool.model_copy(update={"error_type": "tool_result"}) if tool.status == "failed" else tool for tool in tools
+    ]
+    return tools, [*event_gaps, *gaps]
 
 
 def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
@@ -489,6 +520,16 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 result if isinstance(result, dict) else {"failed": True},
                 output.get("observations"),
                 runtime_info=state.runtime_info,
+                tool_events=state.tool_events,
+            )
+        elif state.observations is None and state.tool_events is not None:
+            # The runner left no output, but the tool calls it started were recorded as they ran.
+            tools, gaps = _recorded_tools(None, state.tool_events)
+            state.observations = AgentObservationBundle(
+                schema_version="2.0",
+                source="hermes",
+                records=tools,
+                gaps=[ObservationGap(code="observation_capture_failed"), *gaps],
             )
         observations = state.observations or AgentObservationBundle(
             source="hermes", gaps=[ObservationGap(code="observation_capture_failed")]
@@ -671,6 +712,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         raw_observations: Any,
         *,
         runtime_info: HarnessProcessInfo | None,
+        tool_events: str | None,
     ) -> AgentObservationBundle:
         context_limited = self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT
         gaps = [] if runtime_info is not None else [ObservationGap(code="runtime_info_unavailable")]
@@ -700,9 +742,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
                             ),
                         )
                     )
-                records.extend(
-                    ToolCallObservation.model_validate(tool) for tool in raw_observations.get("tools") or []
-                )
+                tools, tool_gaps = _recorded_tools(raw_observations, tool_events)
+                records.extend(tools)
+                gaps.extend(tool_gaps)
                 records.extend(
                     ContextCompactionObservation.model_validate(
                         {
@@ -716,6 +758,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     for compaction in raw_observations.get("compactions") or []
                 )
                 return AgentObservationBundle(
+                    schema_version="2.0",
                     source="hermes",
                     records=records,
                     gaps=[*gaps, *(ObservationGap.model_validate(gap) for gap in raw_observations.get("gaps") or [])],
@@ -723,6 +766,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             except Exception as error:
                 LOG.exception("failed to validate sandbox Hermes observations")
                 return AgentObservationBundle(
+                    schema_version="2.0",
                     source="hermes",
                     gaps=[
                         *gaps,
@@ -747,6 +791,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 conversation=normalize_hermes_messages(messages),
             )
         ]
+        if tool_events is not None:
+            # The runner reported no observations, but its tool calls were recorded as they ran.
+            tools, tool_gaps = _recorded_tools(None, tool_events)
+            return AgentObservationBundle(
+                schema_version="2.0", source="hermes", records=[*records, *tools], gaps=[*gaps, *tool_gaps]
+            )
         for message in messages:
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
@@ -886,7 +936,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
         return AgentEpisode(
             response=response,
-            observations=self._sandbox_observations(result, output.get("observations"), runtime_info=runtime),
+            observations=self._sandbox_observations(
+                result, output.get("observations"), runtime_info=runtime, tool_events=state.tool_events
+            ),
         )
 
     def _validate_request(
@@ -1076,7 +1128,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         payload = self._worker_payload(body, agent_session_id=uuid4().hex, rollout_id=rollout_id, mcp_accesses=[])
         payload["terminal_backend"] = self.config.terminal_backend
         payload["api_key"] = self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym")  # pragma: allowlist secret
-        worker, interrupted = await self._run_host_worker(payload)
+        worker, interrupted, tool_events = await self._run_host_worker(payload)
         result = worker["result"]
         if observation_collector is not None:
             try:
@@ -1084,6 +1136,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     result,
                     worker.get("observations"),
                     runtime_info=parse_runtime_info(worker.get("runtime")),
+                    tool_events=tool_events,
                 )
             except Exception:
                 LOG.exception("Unable to project Hermes worker observations")
@@ -1103,11 +1156,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
             retain_provider_failure=True,
         )
 
-    async def _run_host_worker(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    async def _run_host_worker(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool, str | None]:
         python = await asyncio.to_thread(host_python)
         runner = Path(__file__).with_name("sandbox_runner.py")
         self._ensure_sigterm_handler()
         with tempfile.TemporaryDirectory(prefix="gym-hermes-") as directory:
+            # The worker imports the tool call recorder from its exchange directory and records tool calls there.
+            for path, text in tool_recording_files(directory).items():
+                Path(path).write_text(text)
             # The model's terminal tools must not be able to overwrite the training result file.
             # Use an inherited private pipe for the host response. Sandbox sessions use their file-exchange API.
             process = await asyncio.create_subprocess_exec(
@@ -1139,7 +1195,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             worker = json.loads(output)
             if process.returncode:
                 raise RuntimeError(f"Hermes worker failed ({worker.get('error_type')}): {worker.get('error')}")
-        return worker, interrupted
+            events = Path(directory, TOOL_EVENTS_FILE)
+            tool_events = events.read_text() if events.exists() else None
+        return worker, interrupted, tool_events
 
     async def responses(
         self,

@@ -202,10 +202,12 @@ class TestSanity:
         assert state.session.session_dir.startswith("/tmp/nemo-gym-hermes-sessions/")
         assert len(state.session.session_dir.rsplit("/", 1)[-1]) == 32
         assert sandbox.exec.await_count == 2
-        assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
+        assert {Path(call.args[1]).name for call in sandbox.upload.await_args_list} == {
             "sandbox_runner.py",
             "sandbox_observer.py",
             "model_kwargs.py",
+            "tool_recording.py",
+            "jsonl_capture.py",
         }
 
     async def test_seed_installs_hermes_when_it_does_not_import(self, monkeypatch) -> None:
@@ -249,10 +251,12 @@ class TestSanity:
         assert "mcp_tool_discovery" in _HERMES_RUNTIME.import_check
         # Seeding prepares paths from the root; it never runs in, or writes to, the task's working directory.
         assert [call.kwargs["cwd"] for call in sandbox.exec.await_args_list] == ["/"]
-        assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
+        assert {Path(call.args[1]).name for call in sandbox.upload.await_args_list} == {
             "sandbox_runner.py",
             "sandbox_observer.py",
             "model_kwargs.py",
+            "tool_recording.py",
+            "jsonl_capture.py",
         }
 
     @pytest.mark.parametrize(
@@ -1027,7 +1031,7 @@ class TestResultClassification:
         result = {"failed": True, "error": "HTTP 500", "messages": []}
         if totals is not None:
             result.update(prompt_tokens=totals[0], completion_tokens=totals[1])
-        monkeypatch.setattr(HermesAgent, "_run_host_worker", AsyncMock(return_value=({"result": result}, False)))
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", AsyncMock(return_value=({"result": result}, False, None)))
         response = await hermes._create_response(NeMoGymResponseCreateParamsNonStreaming(input="hi"))
         assert response.status == "failed"
         assert response.error.message == "HTTP 500"
@@ -1199,7 +1203,7 @@ class TestRolloutCorrelation:
 
         async def worker(_, payload):
             seen["base_url"] = payload["model_base_url"]
-            return ({"result": {"messages": [{"role": "assistant", "content": "ok"}]}}, False)
+            return ({"result": {"messages": [{"role": "assistant", "content": "ok"}]}}, False, None)
 
         monkeypatch.setattr(HermesAgent, "_run_host_worker", worker)
         client = TestClient(agent.setup_webserver())
@@ -1237,7 +1241,7 @@ class TestMaxTokens:
 
         async def worker(_, payload):
             seen["max_tokens"] = payload["max_tokens"]
-            return ({"result": {"messages": [{"role": "assistant", "content": "ok"}]}}, False)
+            return ({"result": {"messages": [{"role": "assistant", "content": "ok"}]}}, False, None)
 
         monkeypatch.setattr(HermesAgent, "_run_host_worker", worker)
         return agent, seen
@@ -1280,7 +1284,7 @@ class TestObservability:
                 {"role": "assistant", "content": "ok"},
             ],
         }
-        monkeypatch.setattr(HermesAgent, "_run_host_worker", AsyncMock(return_value=({"result": result}, False)))
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", AsyncMock(return_value=({"result": result}, False, None)))
         body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
         baseline = asyncio.run(agent.responses(request=None, body=body))
 
@@ -1438,6 +1442,19 @@ def test_host_worker_failure_raises_with_its_reason(monkeypatch, tmp_path, scrip
     with pytest.raises(RuntimeError, match=message):
         asyncio.run(hermes._run_host_worker({"history": []}))
     assert hermes.active_agents == set()
+
+
+def test_host_worker_stages_the_recorder_and_returns_its_tool_events(monkeypatch, tmp_path) -> None:
+    # The worker gets `-E -s RUNNER --host DIR`; it imports the recorder from DIR and records tool calls there.
+    script = (
+        'cat >/dev/null\ntest -f "$5/tool_recording.py" && test -f "$5/jsonl_capture.py" || exit 4\n'
+        'echo \'{"event": 1}\' > "$5/tool_events.jsonl"\necho \'{"result": {}}\'\n'
+    )
+    hermes = _host_worker_agent(monkeypatch, tmp_path, script)
+
+    worker, interrupted, tool_events = asyncio.run(hermes._run_host_worker({"history": []}))
+
+    assert (worker, interrupted, tool_events) == ({"result": {}}, False, '{"event": 1}\n')
 
 
 def test_host_worker_cancel_kills_its_process_group(monkeypatch, tmp_path) -> None:

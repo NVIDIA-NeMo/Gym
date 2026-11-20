@@ -19,6 +19,7 @@ from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPlatform, 
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
+from nemo_gym.utils import tool_recording_files
 from responses_api_agents.hermes_agent.runtime import (
     HERMES_MIN_GLIBC_MINOR,
     HERMES_PYTHON_VERSION,
@@ -26,6 +27,7 @@ from responses_api_agents.hermes_agent.runtime import (
     source_checkout,
     stage_source,
 )
+from responses_api_agents.hermes_agent.sandbox_observer import TOOL_EVENTS_FILE
 
 
 LOG = logging.getLogger(__name__)
@@ -137,6 +139,8 @@ class HermesSandboxSession(AgentSessionState):
 
     session: SandboxSession[dict[str, JsonValue]]
     observations: AgentObservationBundle | None = None
+    # The recorder's tool events, read before the runner's output so a runner that left none still keeps them.
+    tool_events: str | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
@@ -157,6 +161,8 @@ class HermesSandboxSession(AgentSessionState):
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
         await self.session.sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
+        for path, text in tool_recording_files(_SANDBOX_RUNTIME_DIR).items():
+            await upload_text(self.session.sandbox, path=path, text=text)
 
     async def upload_json(self, name: str, payload: dict[str, JsonValue]) -> None:
         """Write a Hermes input under the session directory using file transfer."""
@@ -217,6 +223,13 @@ class HermesSandboxSession(AgentSessionState):
 
     async def collect_artifacts(self) -> dict[str, JsonValue]:
         """Copy Hermes output before close removes files, including interrupted output."""
+        try:
+            self.tool_events = await read_text(
+                self.session.sandbox, path=f"{self.session.session_dir}/{TOOL_EVENTS_FILE}"
+            )
+        except Exception:
+            # No tool started, or the events are lost; the runner's report says which.
+            self.tool_events = None
         try:
             output = await self.read_json("output.json")
         except Exception as error:

@@ -32,7 +32,9 @@ parent = AIAgent(base_url=sys.argv[2], api_key='gym', model='policy_model', prov
     api_mode='chat_completions', quiet_mode=True, enabled_toolsets=[], skip_memory=True,
     skip_context_files=True, skip_background_review=True, max_iterations=1)
 configure_model_calls(parent, preserve_reasoning_history=False)
-observer = SandboxHermesObserver().instrument(parent)
+def no_tool_calls(*_):
+    raise AssertionError('this probe makes no tool call')
+observer = SandboxHermesObserver(tool_recorder=no_tool_calls).instrument(parent)
 agent = parent
 if sys.argv[3] == 'True':
     agent = _build_child_agent(task_index=0, task_count=1, goal='Inspect the work', context=None,

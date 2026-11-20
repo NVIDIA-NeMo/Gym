@@ -30,7 +30,8 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_runtime import TOKEN_HEADER, maybe_auto_expose
-from nemo_gym.trajectory import AgentInvocation
+from nemo_gym.trajectory import AgentInvocation, project_bundle_v1, read_tool_events
+from nemo_gym.utils import tool_recording_files
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,
     ExampleMCPWeatherResourcesServerConfig,
@@ -46,8 +47,16 @@ def _run(payload: dict, session: Path) -> dict:
     input_file = session / "input.json"
     output_file = session / "output.json"
     input_file.write_text(json.dumps(payload))
+    # Stage the runner as the sandbox does: its sibling modules and the tool call recorder side by side.
+    runtime = session / "runtime"
+    runtime.mkdir(exist_ok=True)
+    source = Path(sandbox_runner.__file__).parent
+    for name in ("sandbox_runner.py", "sandbox_observer.py", "model_kwargs.py"):
+        (runtime / name).write_text((source / name).read_text())
+    for path, text in tool_recording_files(runtime).items():
+        Path(path).write_text(text)
     process = subprocess.run(
-        [str(host_python()), "-E", "-s", sandbox_runner.__file__, str(input_file), str(output_file)],
+        [str(host_python()), "-E", "-s", str(runtime / "sandbox_runner.py"), str(input_file), str(output_file)],
         capture_output=True,
         text=True,
         errors="replace",
@@ -88,7 +97,7 @@ def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported()
 
     invocations = [
         record
-        for record in agent._sandbox_observations({}, raw, runtime_info=None).records
+        for record in agent._sandbox_observations({}, raw, runtime_info=None, tool_events=None).records
         if isinstance(record, AgentInvocation)
     ]
 
@@ -101,6 +110,80 @@ def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported()
     assert invocations[1].spawned_by_tool_call_id == "call-delegate"
     assert invocations[1].status == "incomplete"
     assert invocations[1].stop_reason == "max_iterations"
+
+
+def _hermes_agent() -> HermesAgent:
+    return HermesAgent(
+        config=HermesAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            name="hermes",
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "model"},
+            resources_server={"type": "resources_servers", "name": "resources"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+def _recorded_events(tool_recorder, tool_events_path) -> str:
+    """One completed call in the root invocation and one in a child, plus a call still running."""
+    root, child = tool_recorder("root"), tool_recorder("root.child-1")
+    root.finish(root.start(native_call_id="c1", tool_call_id="c1", tool_name="terminal"), status="completed")
+    child.finish(child.start(native_call_id="c2", tool_call_id="c2", tool_name="terminal"), status="failed")
+    root.start(native_call_id="c3", tool_call_id="c3", tool_name="terminal")
+    return tool_events_path.read_text()
+
+
+def test_sandbox_tools_come_from_recorded_events_with_one_harness_timing_each(tool_recorder, tool_events_path):
+    raw = {
+        "invocations": [
+            {"invocation_id": "root", "status": "completed"},
+            {"invocation_id": "root.child-1", "parent_invocation_id": "root", "status": "completed"},
+        ]
+    }
+
+    bundle = _hermes_agent()._sandbox_observations(
+        {}, raw, runtime_info=None, tool_events=_recorded_events(tool_recorder, tool_events_path)
+    )
+
+    tools = {record.tool_call_id: record for record in bundle.records if record.kind == "tool_call"}
+    assert {key: (tool.invocation_id, tool.status, tool.error_type) for key, tool in tools.items()} == {
+        "c1": ("root", "completed", None),
+        "c2": ("root.child-1", "failed", "tool_result"),
+        "c3": ("root", "incomplete", None),
+    }
+    assert all(len(tool.timings) == 1 and tool.timings[0].boundary == "lifecycle" for tool in tools.values())
+    # The v1 view keeps today's label and the recorded times.
+    projected = {
+        record["tool_call_id"]: record
+        for record in project_bundle_v1(bundle.model_dump(mode="json"))["records"]
+        if record["kind"] == "tool_call"
+    }
+    for call_id, tool in tools.items():
+        assert projected[call_id]["timing_source"] == "harness"
+        for field in ("started_at", "completed_at", "duration_ms"):
+            assert projected[call_id][field] == getattr(tool.timings[0], field)
+    assert projected["c3"]["completed_at"] is None
+
+
+@pytest.mark.parametrize("requested", [False, True])
+def test_lost_tool_events_are_a_gap_only_when_the_conversation_requested_tools(requested):
+    message = {"role": "assistant", "content": "done"}
+    if requested:
+        message["tool_calls"] = [{"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]
+    raw = {
+        "invocations": [{"invocation_id": "root", "status": "completed", "messages": [message]}],
+        "tool_capture_failed_spans": ["span-1"],
+    }
+
+    bundle = _hermes_agent()._sandbox_observations({}, raw, runtime_info=None, tool_events=None)
+
+    assert not [record for record in bundle.records if record.kind == "tool_call"]
+    tool_gaps = [(gap.code, gap.span_id) for gap in bundle.gaps if gap.code == "tool_capture_unavailable"]
+    assert tool_gaps == [("tool_capture_unavailable", "span-1")] + (
+        [("tool_capture_unavailable", None)] if requested else []
+    )
 
 
 def _completion(message: dict) -> dict:
@@ -284,13 +367,18 @@ raise SystemExit(status)
     with _ModelServer([_completion({"content": "done"})]) as server:
         payload = _payload(server.base_url)
         input_path.write_text(json.dumps(payload))
+        # As in the sandbox, the recorder modules are staged beside the runner rather than imported from Gym.
+        staged = tmp_path / "staged"
+        staged.mkdir()
+        for path, text in tool_recording_files(staged).items():
+            Path(path).write_text(text)
         result = subprocess.run(
             [
                 str(host_python()),
                 "-I",
                 "-c",
                 driver,
-                json.dumps([str(Path(sandbox_runner.__file__).parent)]),
+                json.dumps([str(Path(sandbox_runner.__file__).parent), str(staged)]),
                 str(input_path),
                 str(output_path),
                 str(report_path),
@@ -668,10 +756,18 @@ def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(
     expire_path = tmp_path / "expire.request"
     input_path.write_text(json.dumps({**_payload("http://unused/v1"), "stop_request_path": str(stop_request_path)}))
     # Run the real worker/observer under the real supervisor, with a deterministic slow harness.
+    # The sandbox has no Gym install: the runner imports the recorder modules staged beside it.
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    for path, text in tool_recording_files(staged).items():
+        Path(path).write_text(text)
     driver = """
 import os, pathlib, sys, time, types
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[5])
 class Agent:
+    tool_start_callback = None
+    tool_complete_callback = None
     def __init__(self, **kwargs):
         self._session_messages = []
         self.stopping = False
@@ -685,6 +781,7 @@ class Agent:
             {'role': 'user', 'content': 'fix bug'},
             {'role': 'assistant', 'content': 'Partial work', 'prompt_token_ids': [1], 'generation_token_ids': [2]},
         ]
+        self.tool_start_callback('call-1', 'terminal', {'command': 'make'})
         pathlib.Path('model.patch').write_bytes(b'partial patch\\n')
         while not self.stopping or sys.argv[4] == 'False':
             time.sleep(0.01)
@@ -719,6 +816,7 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             str(input_path),
             str(output_path),
             str(cooperative),
+            str(staged),
         ],
         cwd=tmp_path,
         stdout=subprocess.PIPE,
@@ -765,6 +863,10 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
     assert response.output[0].content[0].text == "Partial work"
     assert response.output[0].generation_token_ids == [2]
     assert output["observations"]["invocations"][0]["status"] == "incomplete"
+    # The tool still running at the stop keeps the start written before it ran.
+    (tool,), _ = read_tool_events(tmp_path / "tool_events.jsonl")
+    assert (tool.tool_call_id, tool.status) == ("call-1", "incomplete")
+    assert tool.timings[0].started_at is not None and tool.timings[0].completed_at is None
     with pytest.raises(ProcessLookupError):
         os.kill(output["runtime"]["pid"], 0)
 
