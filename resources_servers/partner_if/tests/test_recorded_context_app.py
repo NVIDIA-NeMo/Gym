@@ -175,6 +175,23 @@ async def test_step_retries_and_terminal_retries_do_not_repeat_tools_or_judge(mo
 
 
 @pytest.mark.asyncio
+async def test_step_masks_deeply_nested_call_arguments_and_caches_the_result(monkeypatch):
+    resource, calls = server(monkeypatch)
+    await reset(resource)
+    call = tool("Bash", {}, "deep-json")
+    call["arguments"] = "[" * 10_000 + "]" * 10_000
+    body = response(call)
+
+    result = await step(resource, body)
+
+    assert result.mask_sample and result.truncated
+    assert result.info[RESULT_KEY]["evaluation_completed"] is False
+    assert result.info[RESULT_KEY]["recorded_context"]["termination"] in {"invalid_call", "invalid_capture"}
+    assert await step(resource, body) == result
+    assert not calls
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("output_option", ["--output ", "--output="])
 async def test_step_can_read_a_probe_output_in_the_same_response(monkeypatch, output_option):
     resource, calls = server(monkeypatch)

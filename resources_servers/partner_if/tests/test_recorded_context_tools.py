@@ -101,7 +101,16 @@ def test_write_and_edit_preserve_actual_answer_bytes(world: Fixtures, schemas: d
     assert world.files[path] == world.drafts[path] == "new answer"
 
 
-@pytest.mark.parametrize("bad_call", [None, {}, {"function": None}, {"function": {"name": "Read", "arguments": "{"}}])
+@pytest.mark.parametrize(
+    "bad_call",
+    [
+        None,
+        {},
+        {"function": None},
+        {"function": {"name": "Read", "arguments": "{"}},
+        pytest.param({"function": {"name": "Bash", "arguments": "[" * 10_000 + "]" * 10_000}}, id="deep-json"),
+    ],
+)
 def test_malformed_tool_calls_return_errors_without_raising(world: Fixtures, schemas: dict, bad_call: dict):
     before = dict(world.files)
     assert world.dispatch(bad_call, schemas)[1] == "invalid_call"
@@ -154,6 +163,17 @@ def test_uncovered_shell_command_does_not_keep_earlier_output_redirects(world: F
     result, kind = world.dispatch(call("Bash", {"command": f"echo replacement > {path}; cat {path}"}), schemas)
     assert kind == "answer_draft"
     assert result == world.files[path] == world.drafts[path] == "replacement\n"
+
+
+@pytest.mark.parametrize("readonly", [False, True])
+@pytest.mark.parametrize(
+    "command", ["echo ';' cat /repo/a.py", "echo '>' /workspace/logs/new.txt", r"echo \| cat /repo/a.py"]
+)
+def test_escaped_and_quoted_operators_do_not_execute(world: Fixtures, schemas: dict, readonly, command):
+    before = dict(world.files), world.files._bytes
+    result, kind = world.dispatch(call("Bash", {"command": command}), schemas, readonly=readonly)
+    assert kind == "fixture_gap" and "value = 1" not in result
+    assert (dict(world.files), world.files._bytes) == before
 
 
 @pytest.mark.parametrize(

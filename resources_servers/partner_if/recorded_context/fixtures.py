@@ -25,6 +25,11 @@ from resources_servers.partner_if.recorded_context.runtime_contract import Runti
 from resources_servers.partner_if.recorded_context.workflow_tools import temporal_show
 
 
+_SHELL_PUNCTUATION = ";&|<>"
+_SHELL_OPERATOR = re.compile(rf"[{_SHELL_PUNCTUATION}]+")
+_SHELL_LEXEME = re.compile(rf"""'[^']*'|"(?:\\.|[^"\\])*"|\\.|#[^\n]*|(?P<operator>{_SHELL_OPERATOR.pattern})""", re.S)
+
+
 def canonical_path(path: str, aliases: dict[str, str] | None = None) -> str:
     for source, target in (aliases or {}).items():
         path = path.replace(source, target)
@@ -32,10 +37,15 @@ def canonical_path(path: str, aliases: dict[str, str] | None = None) -> str:
 
 
 def shell_tokens(command: str) -> list[str]:
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
     lexer.whitespace_split = True
     lexer.commenters = "#"
-    return list(lexer)
+    tokens = list(lexer)
+    # shlex removes quotes and escapes. Reject arguments that then look like operators.
+    operators = [match["operator"] for match in _SHELL_LEXEME.finditer(command) if match["operator"] is not None]
+    if [token for token in tokens if _SHELL_OPERATOR.fullmatch(token)] != operators:
+        raise CoverageGap("Quoted or escaped shell punctuation is outside recorded coverage")
+    return tokens
 
 
 def probe_options(tokens: list[str]) -> dict[str, str]:
@@ -188,7 +198,7 @@ class Fixtures:
             return bounded_output(result), kind
         except (CoverageGap, subprocess.SubprocessError) as error:
             return f"Fixture unavailable: {str(error)[:512]}; no command executed.", "fixture_gap"
-        except (KeyError, TypeError, ValueError, IndexError):
+        except (KeyError, TypeError, ValueError, IndexError, RecursionError):
             return "Invalid tool call or unsupported tool arguments.", "invalid_call"
 
     def _dispatch(self, call: dict, schemas: dict, *, readonly: bool) -> tuple[str, str]:

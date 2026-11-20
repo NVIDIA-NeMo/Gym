@@ -86,6 +86,24 @@ def test_search_accepts_empty_pipeline_input(content, expected_status):
         tool.run(shell_tokens("cat /repo/input.txt | rg --files"))
 
 
+@pytest.mark.parametrize(
+    "content,selection,selected,match_output,match_status",
+    [
+        ("", "1,2p", "", "", 1),
+        ("line\n", "2,3p", "", "", 1),
+        ("\n", "1,1p", "\n", "\n", 0),
+        ("line\nother\n", "1,1p", "line\n", "", 1),
+    ],
+)
+def test_sed_selection_preserves_actual_lines(content, selection, selected, match_output, match_status):
+    tool = ReadonlyTools({"/repo/input.txt": content}, {})
+    command = f"sed -n '{selection}' /repo/input.txt"
+
+    assert tool.command(shell_tokens(command), None) == (selected, "", 0)
+    result, kind = tool.run(shell_tokens(f"{command} | rg '^$'"))
+    assert (result, kind, tool.last_status) == (match_output, "readonly_tool_result", match_status)
+
+
 def test_search_requires_complete_content_but_inventory_listing_does_not():
     inventory = {"root": "/repo", "paths": ["a.py", "b.py", "ignored.md"]}
     tool = ReadonlyTools({"/repo/a.py": "no match"}, {}, source_inventory=inventory, workspace_listing=True)

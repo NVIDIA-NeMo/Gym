@@ -185,7 +185,8 @@ class ReadonlyTools:
             match = re.fullmatch(r"(\d+),(\d+)p", args[1])
             if match and args[2] in self.files:
                 start, end = map(int, match.groups())
-                return "\n".join(self.files[args[2]].splitlines()[start - 1 : end]) + "\n", "", 0
+                selected = self.files[args[2]].splitlines()[start - 1 : end]
+                return "\n".join(selected) + ("\n" if selected else ""), "", 0
         if name == "rg":
             return self.search(args, stdin)
         if name == "ls" and self.workspace_listing:
