@@ -71,15 +71,21 @@ class PoolSession(AgentSessionState):
         self.failure_artifact_path = path
         LOG.warning("Pool failure artifacts saved to %s", path)
 
-    async def install(self, *, version: str, accept_eula: bool, timeout: float) -> None:
+    async def install(
+        self, *, version: str, accept_eula: bool, timeout: float, published_checksums: bool = False
+    ) -> None:
         """Retain installation when a seed caller disconnects; close joins it before releasing the sandbox."""
         if self.installation_task is None:
             self.installation_task = asyncio.create_task(
-                self._install(version=version, accept_eula=accept_eula, timeout=timeout)
+                self._install(
+                    version=version, accept_eula=accept_eula, timeout=timeout, published_checksums=published_checksums
+                )
             )
         await asyncio.shield(self.installation_task)
 
-    async def _install(self, *, version: str, accept_eula: bool, timeout: float) -> None:
+    async def _install(
+        self, *, version: str, accept_eula: bool, timeout: float, published_checksums: bool = False
+    ) -> None:
         directory = self.session.session_dir
         sandbox = self.session.sandbox
         prepared = await sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
@@ -90,7 +96,7 @@ class PoolSession(AgentSessionState):
         await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
         result = await sandbox.exec(
             f"sh {quote(directory + '/install_pool.sh')} {quote(directory)} {quote(version)} "
-            f"{str(accept_eula).lower()}",
+            f"{str(accept_eula).lower()}" + (" true" if published_checksums else ""),
             cwd="/",
             timeout_s=timeout,
         )

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -26,7 +27,7 @@ RELEASE_SHA256: dict[str, dict[str, str]] = {
 }
 
 
-def install(root: Path, *, version: str, accept_eula: bool) -> None:
+def install(root: Path, *, version: str, accept_eula: bool, published_checksums: bool = False) -> None:
     """Verify the complete archive before extracting or executing its single Pool binary."""
     if not accept_eula:
         raise ValueError("Accept https://poolside.ai/eula with accept_pool_eula=true before installing Pool")
@@ -35,9 +36,29 @@ def install(root: Path, *, version: str, accept_eula: bool) -> None:
     arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(machine)
     target = f"{os_name}-{arch}"
     checksum = RELEASE_SHA256.get(version, {}).get(target)
+    binary_name = f"pool-{target}"
+    if checksum is None and published_checksums and os_name in ("linux", "darwin") and arch:
+        if not re.fullmatch(r"v\d+\.\d+\.\d+", version):
+            raise ValueError(f"Invalid Pool release {version!r}")
+        manifest = subprocess.check_output(
+            [
+                "curl",
+                "--retry",
+                "3",
+                "--max-time",
+                "60",
+                "-fsSL",
+                f"https://downloads.poolside.ai/pool/{version}/checksums.txt",
+            ],
+            text=True,
+        )
+        for line in manifest.splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})\s+\*?(.+)", line)
+            if match and match[2] == f"{binary_name}.tar.gz":
+                checksum = match[1]
+                break
     if checksum is None:
         raise ValueError(f"No pinned Pool archive for version={version}, OS={os_name}, architecture={machine}")
-    binary_name = f"pool-{target}"
     url = f"https://downloads.poolside.ai/pool/{version}/{binary_name}.tar.gz"
     root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pool-download-", dir=root) as temporary:
@@ -70,4 +91,9 @@ def install(root: Path, *, version: str, accept_eula: bool) -> None:
 
 
 if __name__ == "__main__":
-    install(Path(sys.argv[1]), version=sys.argv[2], accept_eula=sys.argv[3] == "true")
+    install(
+        Path(sys.argv[1]),
+        version=sys.argv[2],
+        accept_eula=sys.argv[3] == "true",
+        published_checksums=sys.argv[4:] == ["true"],
+    )

@@ -118,6 +118,10 @@ def run(params):
     import yaml
 
     runtime_manifest = validate_runtime(Path(sys.prefix))
+    if params.get("harness_version") and params["harness_version"] != runtime_manifest["hermes_commit"]:
+        raise ValueError(
+            f"Prepared Hermes checkout differs from requested {params['harness_version']}; rebuild the runtime"
+        )
     source = Path(sys.prefix) / "hermes-src"
 
     home = Path(params["run_dir"]) / "home"

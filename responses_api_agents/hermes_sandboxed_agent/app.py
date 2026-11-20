@@ -235,6 +235,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     "chat_template_kwargs",
                 )
             } | {
+                "harness_version": self.config.harness_version,
                 "run_dir": remote,
                 "workdir": cwd_result.stdout.strip(),
                 "base_url": self.resolve_model_base_url(self.config.model_server.name, rollout_id),

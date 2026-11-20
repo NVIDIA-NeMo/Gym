@@ -226,6 +226,7 @@ class PoolAgent(SimpleResponsesAPIAgent):
                 await state.install(
                     version=self.config.pool_version,
                     accept_eula=self.config.accept_pool_eula,
+                    published_checksums=bool(self.config.harness_version),
                     timeout=self.config.setup_timeout,
                 )
                 if self._shutting_down:

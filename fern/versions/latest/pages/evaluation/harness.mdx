@@ -34,7 +34,7 @@ A spread this size, with the model and dataset held identical, means the harness
 
 ## Select a harness release
 
-Set `harness_version` on an OpenClaw, OpenCode, Hermes, or Pi agent in the config you pass to `gym env start`. For example, add this override to an existing OpenCode config:
+Set `harness_version` on an upstream agent in the config you pass to `gym env start`. For example, add this override to an existing OpenCode config:
 
 ```yaml
 opencode_agent:
@@ -46,6 +46,15 @@ opencode_agent:
 Use `"latest"` to resolve the publisher's latest release at startup. Workers in that launch share the resolved version. Copy the version from the startup log to repeat the run. Omitting the setting uses the agent's configured default.
 
 OpenClaw and Pi use npm's `latest` tag. OpenCode and Hermes use the release marked latest on GitHub. Hermes also accepts a full commit SHA and an optional `hermes_repo` (for example, `https://github.com/your-team/hermes-agent`). Its worker installs dependencies from the selected checkout's own lock. Selecting a release leaves Gym's checked-in lockfiles untouched. A selected release must support the adapter's CLI or Python interfaces and the task sandbox's platform.
+
+| Installer | Other supported harnesses | What `latest` selects |
+| --- | --- | --- |
+| npm | Claude Code, Cline, Codex, Copilot, Droid, Kilo, Kimi Code, Qwen Code | The package's latest distribution tag |
+| Release binary | Goose, Prime Agent, Pool | The publisher's current release |
+| Python package | CrewAI, DeepAgents, Harbor, LangGraph, mini-SWE, NeMo Fabric, OpenHands, Stirrup, Terminus 2, Verifiers | The current PyPI version. OpenHands installs the same version of its SDK and tools. |
+| Git checkout | NOOA, Simple Strands, tau2 | The current commit of the repository's default branch. For these harnesses, `harness_repo` can name a fork, and a full SHA selects an exact commit. |
+
+Python package overrides use a version-specific component environment. If the selected package conflicts with Gym's requirements, its environment setup reports the conflict. Harbor's package version controls the Harbor engine. Harbor's agent configuration still controls a harness launched inside Harbor. Gym-native agents ship with the installed Gym revision. A legacy adapter that uses a prebuilt Pi or Hermes runtime requires a matching runtime in the task image.
 
 ## The composed instance is renamed
 

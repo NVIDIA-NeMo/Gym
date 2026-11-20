@@ -26,7 +26,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
+from nemo_gym.utils.install_lock import adopt_recorded_install, ensure_selected_npm_cli, install_lock, record_install
 from responses_api_agents.opencode_agent.runtime import (
     OPENCODE_RELEASE_SHA256,
     OPENCODE_VERSION,
@@ -194,6 +194,8 @@ def _require_version(version: str) -> None:
 
 def ensure_opencode(version: str = OPENCODE_VERSION) -> None:
     """Install OpenCode if absent and require the configured release."""
+    if ensure_selected_npm_cli(_OPENCODE_PKG, "opencode", version, install_node=_install_node_locally):
+        return
     if shutil.which("opencode"):
         _require_version(version)
         return

@@ -36,6 +36,10 @@ kernel_packages=(
 # A private agent directory keeps the version check from writing Prime Agent state under the task's HOME. Prime Agent
 # 0.7.0 prints its version on stderr.
 installed() {
+    if [ "$node_archive" = native ]; then
+        "$1/release/prime-agent" --version
+        return
+    fi
     PRIME_AGENT_CODING_AGENT_DIR="$1/.version-check" PI_SKIP_VERSION_CHECK=1 \
         "$1/bin/node" "$1/$cli" --version 2>&1 | tail -n 1 | sed 's/^v//'
 }
@@ -59,7 +63,9 @@ flock -x 9
 ready && exit 0
 staging=$(mktemp -d "$runtime.install.XXXXXX")
 trap 'rm -rf "$staging"' EXIT
-echo "$node_sha256  $node_archive" | sha256sum -c -
+if [ "$node_archive" != native ]; then
+    echo "$node_sha256  $node_archive" | sha256sum -c -
+fi
 echo "$package_sha256  $package" | sha256sum -c -
 echo "$python_sha256  $python_archive" | sha256sum -c -
 # PACKAGE_SHA256 and each DEPENDENCY_SHA256 are checksums of the copies the agent server rewrote after checking the
@@ -68,19 +74,26 @@ while [ "$#" -gt 0 ]; do
     echo "$2  $1" | sha256sum -c -
     shift 2
 done
-tar -xzf "$node_archive" -C "$staging" --strip-components=1
-# npm's cache and logs stay in the staging directory, out of the task's HOME. The package's optional postinstall only
-# pre-downloads tools that Prime Agent otherwise fetches on first use.
-HOME="$staging/.npm-home" npm_config_cache="$staging/.npm-cache" PATH="$staging/bin:$PATH" \
-    "$staging/bin/node" "$staging/lib/node_modules/npm/bin/npm-cli.js" install --global --prefix "$staging" \
-    --ignore-scripts --no-audit --no-fund "$package"
-rm -rf "$staging/.npm-home" "$staging/.npm-cache"
+if [ "$node_archive" = native ]; then
+    mkdir "$staging/release"
+    tar -xzf "$package" -C "$staging/release" --no-same-owner
+    kernel_package="$staging/release/prime-agent-runtime"
+else
+    tar -xzf "$node_archive" -C "$staging" --strip-components=1
+    # npm's cache and logs stay in the staging directory, out of the task's HOME. The package's optional postinstall only
+    # pre-downloads tools that Prime Agent otherwise fetches on first use.
+    HOME="$staging/.npm-home" npm_config_cache="$staging/.npm-cache" PATH="$staging/bin:$PATH" \
+        "$staging/bin/node" "$staging/lib/node_modules/npm/bin/npm-cli.js" install --global --prefix "$staging" \
+        --ignore-scripts --no-audit --no-fund "$package"
+    rm -rf "$staging/.npm-home" "$staging/.npm-cache"
+    kernel_package="$staging/lib/node_modules/prime-agent/dist/prime-agent-runtime"
+fi
 test "$(installed "$staging")" = "$version"
 mkdir "$staging/kernel" "$staging/uv"
 tar -xzf "$python_archive" -C "$staging/kernel" --strip-components=1
 tar -xzf "$uv_archive" -C "$staging/uv" --strip-components=1
 UV_CACHE_DIR="$staging/.uv-cache" "$staging/uv/uv" pip install --python "$staging/kernel/bin/python3" \
-    --break-system-packages "${kernel_packages[@]}" "$staging/lib/node_modules/prime-agent/dist/prime-agent-runtime"
+    --break-system-packages "${kernel_packages[@]}" "$kernel_package"
 rm -rf "$staging/uv" "$staging/.uv-cache"
 kernel_ready "$staging"
 touch "$staging/ready"

@@ -305,7 +305,7 @@ async def test_owned_seed_merges_metadata_and_sets_ttl():
         session = await agent(
             sandbox_provider="sandbox", sandbox_config={"image": "test", "metadata": {"x": "custom"}}
         )._seed_agent_session_state(seed(borrowed=False))
-    install.assert_awaited_once_with(version="v1.0.16", accept_eula=True, timeout=900)
+    install.assert_awaited_once_with(version="v1.0.16", accept_eula=True, published_checksums=False, timeout=900)
     spec = sandbox.start.call_args.args[0]
     assert spec.metadata == {"x": "custom", "y": "default", "agent_session_id": "session-1"}
     assert spec.ttl_s > 1800

@@ -23,7 +23,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
+from nemo_gym.utils.install_lock import adopt_recorded_install, ensure_selected_npm_cli, install_lock, record_install
 
 
 LOG = logging.getLogger(__name__)
@@ -83,6 +83,8 @@ def _install_node_locally() -> Path:
 
 def ensure_pi(version: str | None = None) -> None:
     """Ensure ``pi`` is on PATH, installing it via npm if necessary."""
+    if ensure_selected_npm_cli(_PI_PKG, "pi", version, install_node=_install_node_locally):
+        return
     local_bin = Path.home() / ".local" / "bin"
     if not shutil.which("pi"):
         if (local_bin / "pi").is_file():

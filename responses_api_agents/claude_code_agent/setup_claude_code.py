@@ -22,7 +22,7 @@ import tarfile
 import urllib.request
 from pathlib import Path
 
-from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
+from nemo_gym.utils.install_lock import adopt_recorded_install, ensure_selected_npm_cli, install_lock, record_install
 
 
 LOG = logging.getLogger(__name__)
@@ -69,6 +69,8 @@ def _install_node_locally() -> Path:
 
 def ensure_claude_code(version: str | None = None) -> None:
     """Ensure ``claude`` is on PATH, installing it if necessary."""
+    if ensure_selected_npm_cli(_CLAUDE_PKG, "claude", version, install_node=_install_node_locally):
+        return
     if shutil.which("claude"):
         return
 

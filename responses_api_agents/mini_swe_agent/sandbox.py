@@ -10,6 +10,7 @@ mini-SWE runs in the task sandbox with a private Python runtime that this server
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from shlex import quote
@@ -32,7 +33,7 @@ from nemo_gym.trajectory import AgentObservationBundle
 
 LOG = logging.getLogger(__name__)
 
-MINI_SWE_VERSION = "2.4.6"
+MINI_SWE_VERSION = os.environ.get("NEMO_GYM_MINI_SWE_VERSION", "2.4.6")
 SESSION_ROOT = "/tmp/nemo-gym-mini-swe-sessions"
 # Where the Harbor environment server leaves the task's own MCP servers and skills directory at seed.
 TASK_CONTEXT_FILE = "/tmp/.nemo-gym/task.json"
@@ -58,7 +59,10 @@ def _requirement_lines(path: Path) -> tuple[str, ...]:
 
 MINI_SWE_RUNTIME = SandboxPythonRuntime(
     harness="mini-swe",
-    requirements=_requirement_lines(_RUNTIME_FILES / "requirements.in"),
+    requirements=tuple(
+        f"mini-swe-agent=={MINI_SWE_VERSION}" if line.startswith("mini-swe-agent==") else line
+        for line in _requirement_lines(_RUNTIME_FILES / "requirements.in")
+    ),
     import_check=(
         # LiteLLM would otherwise fetch its model cost map from GitHub at import; the check makes no network call.
         # mini-SWE makes its config directory at import; keep it in the check's HOME, not in the task's XDG_CONFIG_HOME.
@@ -69,7 +73,7 @@ MINI_SWE_RUNTIME = SandboxPythonRuntime(
         "from mcp.client.streamable_http import streamable_http_client"
     ),
     overrides=_requirement_lines(_RUNTIME_FILES / "overrides.txt"),
-    constraints=_requirement_lines(_RUNTIME_FILES / "requirements.txt"),
+    constraints=_requirement_lines(_RUNTIME_FILES / "requirements.txt") if MINI_SWE_VERSION == "2.4.6" else (),
 )
 
 

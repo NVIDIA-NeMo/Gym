@@ -18,6 +18,7 @@ from nemo_gym.agents import (
     SandboxSession,
     shell_assignments,
 )
+from nemo_gym.agents.utils.release_assets import release_checksums
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -64,10 +65,17 @@ class KimiSession(AgentSessionState):
     session: SandboxSession[KimiArtifacts]
     provider_name: str
     sandbox_id: str | None
-    runtime: str = f"{RUNTIME_ROOT}-{KIMI_VERSION}"
+    runtime: str = ""
+
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     observations: AgentObservationBundle | None = None
+
+    version: str = KIMI_VERSION
+
+    def __post_init__(self) -> None:
+        if not self.runtime:
+            self.runtime = f"{RUNTIME_ROOT}-{self.version}"
 
     @property
     def home(self) -> str:
@@ -100,25 +108,31 @@ class KimiSession(AgentSessionState):
             (arch.stdout or "").strip(), (arch.stdout or "").strip()
         )
         if arch_name not in KIMI_BINARY_SHA256:
-            raise AgentSeedRejectedError(f"No Kimi Code {KIMI_VERSION} release for sandbox architecture {arch_name!r}")
+            raise AgentSeedRejectedError(f"No Kimi Code {self.version} release for sandbox architecture {arch_name!r}")
         name = kimi_binary_name(arch_name)
-        local = await cached_download(
-            f"{KIMI_RELEASE_URL}/{name}", sha256=KIMI_BINARY_SHA256[arch_name], timeout=timeout
-        )
+        if self.version == KIMI_VERSION:
+            digest = KIMI_BINARY_SHA256[arch_name]
+        else:
+            digests = await release_checksums("moonshot-ai/kimi-code", self.version)
+            if name not in digests:
+                raise AgentSeedRejectedError(f"No published checksum for {name} at {self.version}")
+            digest = digests[name]
+        release_url = f"https://code.kimi.com/kimi-code/binaries/{self.version}"
+        local = await cached_download(f"{release_url}/{name}", sha256=digest, timeout=timeout)
         binary = f"{directory}/{name}"
         await sandbox.upload(local, binary)
         result = await sandbox.exec(
-            f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(KIMI_VERSION)} "
-            f"{quote(KIMI_TARGETS[arch_name])} {quote(KIMI_BINARY_SHA256[arch_name])} {quote(binary)}",
+            f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(self.version)} "
+            f"{quote(KIMI_TARGETS[arch_name])} {quote(digest)} {quote(binary)}",
             cwd="/",
             timeout_s=timeout,
         )
         if result.return_code == NO_GLIBC_EXIT and not result.error_type:
-            raise AgentSeedRejectedError(f"Kimi Code {KIMI_VERSION} needs a glibc sandbox image")
+            raise AgentSeedRejectedError(f"Kimi Code {self.version} needs a glibc sandbox image")
         if result.return_code != 0 or result.error_type:
             details = "\n".join(part for part in (result.stderr, result.stdout) if part)
             raise RuntimeError(
-                f"Kimi Code {KIMI_VERSION} installation failed (exit {result.return_code}, "
+                f"Kimi Code {self.version} installation failed (exit {result.return_code}, "
                 f"error_type={result.error_type}): {details[-4096:]}"
             )
 

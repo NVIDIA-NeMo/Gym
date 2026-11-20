@@ -522,7 +522,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.model_server is None:
             raise AgentSeedRejectedError("Prime Agent sessions require a sandbox-reachable Gym model_server")
-        if self.config.prime_agent_version not in (None, PRIME_AGENT_VERSION):
+        if self.config.prime_agent_version not in (None, PRIME_AGENT_VERSION) and not self.config.harness_version:
             raise AgentSeedRejectedError(f"Prime Agent sessions pin prime_agent_version {PRIME_AGENT_VERSION}")
         if self.config.command != "prime-agent" or self.config.extra_args or self.config.env:
             raise AgentSeedRejectedError("Prime Agent sessions do not support command, extra_args, or env overrides")
@@ -563,6 +563,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         state = PrimeSession(
+            version=self.config.prime_agent_version or PRIME_AGENT_VERSION,
             request=body,
             provider_name=provider.name,
             sandbox_id=sandbox.sandbox_id,
@@ -656,7 +657,11 @@ class PrimeAgent(SimpleResponsesAPIAgent):
     ) -> SandboxCommand:
         user_message, system_prompt = self._session_conversation(body)
         command = self._build_command(user_message, system_prompt, Path(state.session.session_dir) / "daemon.sock")
-        command[: len(self.config.command_parts)] = [f"{state.runtime}/bin/node", f"{state.runtime}/{CLI}"]
+        command[: len(self.config.command_parts)] = (
+            [f"{state.runtime}/release/prime-agent"]
+            if state.native_release
+            else [f"{state.runtime}/bin/node", f"{state.runtime}/{CLI}"]
+        )
         access = state.request.sandbox_access
         env = {
             key: value
@@ -778,7 +783,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             metadata={
                 "harness_execution": "sandbox",
-                "prime_agent_version": PRIME_AGENT_VERSION,
+                "prime_agent_version": state.version,
                 "prime_agent_exit_code": str(return_code),
             },
         )

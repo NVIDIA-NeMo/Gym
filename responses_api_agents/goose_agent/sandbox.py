@@ -20,6 +20,7 @@ from nemo_gym.agents import (
     SandboxSession,
     shell_assignments,
 )
+from nemo_gym.agents.utils.release_assets import release_checksums
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -71,12 +72,19 @@ class GooseSession(AgentSessionState):
     session: SandboxSession[GooseArtifacts]
     provider_name: str
     sandbox_id: str | None
-    runtime: str = f"{RUNTIME_ROOT}-{GOOSE_VERSION}"
+    runtime: str = ""
+
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     observations: AgentObservationBundle | None = None
     # Certifi's bundle in the session directory, set only when the task image has no trust store.
     ca_bundle: str | None = None
+
+    version: str = GOOSE_VERSION
+
+    def __post_init__(self) -> None:
+        if not self.runtime:
+            self.runtime = f"{RUNTIME_ROOT}-{self.version}"
 
     @property
     def root(self) -> str:
@@ -122,23 +130,29 @@ class GooseSession(AgentSessionState):
             (arch.stdout or "").strip(), (arch.stdout or "").strip()
         )
         if arch_name not in GOOSE_ARCHIVE_SHA256:
-            raise AgentSeedRejectedError(f"No Goose {GOOSE_VERSION} release for sandbox architecture {arch_name!r}")
+            raise AgentSeedRejectedError(f"No Goose {self.version} release for sandbox architecture {arch_name!r}")
         name = goose_archive_name(arch_name)
-        local = await cached_download(
-            f"{GOOSE_RELEASE_URL}/{name}", sha256=GOOSE_ARCHIVE_SHA256[arch_name], timeout=timeout
-        )
+        if self.version == GOOSE_VERSION:
+            digest = GOOSE_ARCHIVE_SHA256[arch_name]
+        else:
+            digests = await release_checksums("aaif-goose/goose", self.version)
+            if name not in digests:
+                raise AgentSeedRejectedError(f"No published checksum for {name} at {self.version}")
+            digest = digests[name]
+        release_url = f"https://github.com/aaif-goose/goose/releases/download/v{self.version}"
+        local = await cached_download(f"{release_url}/{name}", sha256=digest, timeout=timeout)
         archive = f"{directory}/{name}"
         await sandbox.upload(local, archive)
         result = await sandbox.exec(
-            f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(GOOSE_VERSION)} "
-            f"{quote(arch_name)} {quote(GOOSE_ARCHIVE_SHA256[arch_name])} {quote(archive)}",
+            f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(self.version)} "
+            f"{quote(arch_name)} {quote(digest)} {quote(archive)}",
             cwd="/",
             timeout_s=timeout,
         )
         if result.return_code != 0 or result.error_type:
             details = "\n".join(part for part in (result.stderr, result.stdout) if part)
             raise RuntimeError(
-                f"Goose {GOOSE_VERSION} installation failed (exit {result.return_code}, "
+                f"Goose {self.version} installation failed (exit {result.return_code}, "
                 f"error_type={result.error_type}): {details[-4096:]}"
             )
 

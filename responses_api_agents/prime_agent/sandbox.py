@@ -21,6 +21,7 @@ from nemo_gym.agents import (
     SandboxSession,
     shell_assignments,
 )
+from nemo_gym.agents.utils.release_assets import release_checksums
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -113,10 +114,18 @@ class PrimeSession(AgentSessionState):
     session: SandboxSession[PrimeArtifacts]
     provider_name: str
     sandbox_id: str | None
-    runtime: str = f"{RUNTIME_ROOT}-{PRIME_AGENT_VERSION}-node-{NODE_VERSION}"
+    runtime: str = ""
+
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     observations: AgentObservationBundle | None = None
+
+    version: str = PRIME_AGENT_VERSION
+    native_release: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.runtime:
+            self.runtime = f"{RUNTIME_ROOT}-{self.version}-node-{NODE_VERSION}"
 
     @property
     def agent_dir(self) -> str:
@@ -156,41 +165,62 @@ class PrimeSession(AgentSessionState):
         )
         if arch_name not in NODE_SHA256:
             raise RuntimeError(f"No Node.js {NODE_VERSION} build for sandbox architecture {arch_name!r}")
-        name = f"node-v{NODE_VERSION}-linux-{NODE_ARCH[arch_name]}.tar.gz"
-        node = await cached_download(
-            f"https://nodejs.org/dist/v{NODE_VERSION}/{name}", sha256=NODE_SHA256[arch_name], timeout=timeout
-        )
-        # The installer requires glibc, so the kernel uses the glibc Python build.
-        uv, python = await bootstrap_assets(arch_name, "gnu")
-        await sandbox.upload(node, f"{directory}/{name}")
-        # Each release archive's sandbox path, which the rewritten manifests name as a `file:` dependency.
-        uploads = {release: f"{directory}/{release}.tgz" for release in PRIME_RELEASE_PACKAGES}
-        replacements = {
-            f"{PRIME_DEPENDENCY_URL}/{release}-{PRIME_AGENT_VERSION}.tgz": f"file:{path}"
-            for release, path in uploads.items()
-        }
-        checksums = {}
-        with tempfile.TemporaryDirectory(prefix="gym-prime-release-") as temporary:
-            for release, pinned in PRIME_RELEASE_PACKAGES.items():
-                source = await cached_download(
-                    f"{PRIME_RELEASE_URL}/{release}-{PRIME_AGENT_VERSION}.tgz", sha256=pinned, timeout=timeout
-                )
-                localized = Path(temporary) / f"{release}.tgz"
-                checksums[release] = await asyncio.to_thread(
-                    _localize_release_package, source, localized, replacements
-                )
-                await sandbox.upload(localized, uploads[release])
-        dependency_checks = " ".join(
-            f"{quote(uploads[release])} {quote(checksum)}"
-            for release, checksum in checksums.items()
-            if release != "prime-agent"
-        )
+        release_url = f"https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v{self.version}"
+        digests = {}
+        if self.version != PRIME_AGENT_VERSION:
+            digests = await release_checksums("PrimeIntellect-ai/prime-agent", self.version)
+        native = f"prime-agent-{self.version}-linux-{NODE_ARCH[arch_name]}.tar.gz"
+        self.native_release = native in digests
+        if self.native_release:
+            uv, python = await bootstrap_assets(arch_name, "gnu")
+            digest = digests[native]
+            asset = await cached_download(f"{release_url}/{native}", sha256=digest, timeout=timeout)
+            await sandbox.upload(asset, f"{directory}/{native}")
+            package_args = ["native", "-", f"{directory}/{native}", digest]
+            dependency_checks = ""
+        else:
+            name = f"node-v{NODE_VERSION}-linux-{NODE_ARCH[arch_name]}.tar.gz"
+            node = await cached_download(
+                f"https://nodejs.org/dist/v{NODE_VERSION}/{name}", sha256=NODE_SHA256[arch_name], timeout=timeout
+            )
+            uv, python = await bootstrap_assets(arch_name, "gnu")
+            await sandbox.upload(node, f"{directory}/{name}")
+            # Each release archive's sandbox path, which the rewritten manifests name as a `file:` dependency.
+            dependency_url = PRIME_DEPENDENCY_URL.rsplit("/", 1)[0] + f"/v{self.version}"
+            packages = PRIME_RELEASE_PACKAGES
+            if self.version != PRIME_AGENT_VERSION:
+                packages = {name: digests[f"{name}-{self.version}.tgz"] for name in PRIME_RELEASE_PACKAGES}
+            uploads = {release: f"{directory}/{release}.tgz" for release in packages}
+            replacements = {
+                f"{dependency_url}/{release}-{self.version}.tgz": f"file:{path}" for release, path in uploads.items()
+            }
+            checksums = {}
+            with tempfile.TemporaryDirectory(prefix="gym-prime-release-") as temporary:
+                for release, pinned in packages.items():
+                    source = await cached_download(
+                        f"{release_url}/{release}-{self.version}.tgz", sha256=pinned, timeout=timeout
+                    )
+                    localized = Path(temporary) / f"{release}.tgz"
+                    checksums[release] = await asyncio.to_thread(
+                        _localize_release_package, source, localized, replacements
+                    )
+                    await sandbox.upload(localized, uploads[release])
+            dependency_checks = " ".join(
+                f"{quote(uploads[release])} {quote(checksum)}"
+                for release, checksum in checksums.items()
+                if release != "prime-agent"
+            )
+            package_args = [
+                f"{directory}/{name}",
+                NODE_SHA256[arch_name],
+                uploads["prime-agent"],
+                checksums["prime-agent"],
+            ]
         await sandbox.upload(python, f"{directory}/python.tar.gz")
         await sandbox.upload(uv, f"{directory}/uv.tar.gz")
         result = await sandbox.exec(
-            f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(PRIME_AGENT_VERSION)} "
-            f"{quote(f'{directory}/{name}')} {quote(NODE_SHA256[arch_name])} "
-            f"{quote(uploads['prime-agent'])} {quote(checksums['prime-agent'])} "
+            f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(self.version)} "
+            f"{' '.join(quote(arg) for arg in package_args)} "
             f"{quote(f'{directory}/python.tar.gz')} {quote(PYTHON_SHA256[arch_name, 'gnu'])} "
             f"{quote(f'{directory}/uv.tar.gz')} {dependency_checks}",
             cwd="/",
@@ -199,7 +229,7 @@ class PrimeSession(AgentSessionState):
         if result.return_code != 0 or result.error_type:
             details = "\n".join(part for part in (result.stderr, result.stdout) if part)
             raise RuntimeError(
-                f"Prime Agent {PRIME_AGENT_VERSION} installation failed (exit {result.return_code}, "
+                f"Prime Agent {self.version} installation failed (exit {result.return_code}, "
                 f"error_type={result.error_type}): {details[-4096:]}"
             )
 

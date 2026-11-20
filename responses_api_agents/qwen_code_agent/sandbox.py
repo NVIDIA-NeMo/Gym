@@ -57,10 +57,17 @@ class QwenSession(AgentSessionState):
     session: SandboxSession[QwenArtifacts]
     provider_name: str
     sandbox_id: str | None
-    runtime: str = f"{RUNTIME_ROOT}-{QWEN_VERSION}-node-{NODE_VERSION}"
+    runtime: str = ""
+
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     observations: AgentObservationBundle | None = None
+
+    version: str = QWEN_VERSION
+
+    def __post_init__(self) -> None:
+        if not self.runtime:
+            self.runtime = f"{RUNTIME_ROOT}-{self.version}-node-{NODE_VERSION}"
 
     @property
     def qwen_home(self) -> str:
@@ -124,7 +131,7 @@ class QwenSession(AgentSessionState):
             node = f"{directory}/{name}"
             await sandbox.upload(local, node)
         result = await sandbox.exec(
-            f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(QWEN_VERSION)} "
+            f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(self.version)} "
             f"{quote(NODE_SHA256[arch_name])} {quote(node)} {quote(archive)}",
             cwd="/",
             timeout_s=timeout,
@@ -132,7 +139,7 @@ class QwenSession(AgentSessionState):
         if result.return_code != 0 or result.error_type:
             details = "\n".join(part for part in (result.stderr, result.stdout) if part)
             raise RuntimeError(
-                f"Qwen Code {QWEN_VERSION} installation failed (exit {result.return_code}, "
+                f"Qwen Code {self.version} installation failed (exit {result.return_code}, "
                 f"error_type={result.error_type}): {details[-4096:]}"
             )
 
