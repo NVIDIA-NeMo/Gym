@@ -44,9 +44,10 @@ records why in ``grading_status``:
 4. ``answer_too_long``: the judge would see the whole final answer and it is
    over ``max_answer_chars``.
 
-Then one judge call. Answer rows end with ``Judgement: 'yes'|'no'`` (reward 1
-or 0). Rubric rows end with a JSON object marking every criterion; the server
-sums the points itself. A judge reply that cannot be parsed scores 0
+An opt-in Math-Verify match on a box-only answer row earns 1 immediately.
+Otherwise the server makes one judge call. By default, answer rows end with
+``Judgement: 'yes'|'no'`` (reward 1 or 0). Rubric rows end with a JSON object
+marking every criterion and the server sums the points. A judge reply that cannot be parsed scores 0
 (``judge_unparsed``). A failed judge call is retried by ``call_judge`` when another
 attempt can succeed (408, 429, 5xx, timeout, lost connection) and otherwise fails at
 once; either way it is reported as a judge failure, which masks the row instead of
@@ -474,11 +475,26 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         self._rubric_template.format(question="", expected_answer="", rubric="", generated_answer="")
 
         self._math_library = None
-        if self.config.math_verify is not None:
-            from resources_servers.math_with_judge.library import MathLibraryVerifier
+        if (math_config := self.config.math_verify) is not None:
+            from resources_servers.math_with_judge.app import (
+                LibraryJudgeMathResourcesServer,
+                LibraryJudgeMathResourcesServerConfig,
+            )
 
-            self._math_library = MathLibraryVerifier(
-                server_name=self.config.name, **self.config.math_verify.model_dump()
+            # Use the existing bounded library operation locally. STEM owns every model call.
+            self._math_library = LibraryJudgeMathResourcesServer(
+                config=LibraryJudgeMathResourcesServerConfig(
+                    host=self.config.host,
+                    port=self.config.port,
+                    name=self.config.name,
+                    entrypoint=self.config.entrypoint,
+                    judge_model_server=self.config.judge_model_server,
+                    judge_responses_create_params=self.config.judge_responses_create_params,
+                    should_use_judge=False,
+                    library_verifier_timeout_seconds=math_config.timeout_seconds,
+                    library_verifier_max_concurrency=math_config.max_concurrency,
+                ),
+                server_client=self.server_client,
             )
 
         # The host and pid suffix keeps server worker processes from sharing one file. Writes run
@@ -525,7 +541,9 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             return await zero("answer_too_long")
 
         if self._math_library and body.math_equivalence and not body.rubric and not judges_whole_answer:
-            score, _ = await self._math_library.verify(expected, "\\boxed{" + solution + "}")
+            score, _ = await self._math_library._verify_answer_with_library_async(
+                expected, "\\boxed{" + solution + "}"
+            )
             if score > 0.5:
                 return await self._finish(body, expected, answer_format, "math_verified", 1.0, solution, [])
 

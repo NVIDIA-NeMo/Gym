@@ -191,18 +191,35 @@ class TestAnswerOptions:
             None if status == "judge_unparsed" else f"Judgement: {verdict}"
         )
 
-    async def test_math_match_skips_model_and_nonmatch_uses_the_same_box(self, config):
+    @mark.parametrize("verdict,status", [("no", "judged"), ("unresolved", "judge_unresolved")])
+    async def test_math_match_skips_model_and_nonmatch_uses_the_same_box(self, config, verdict, status):
         config.box_parser = "last_command"
         config.boxed_judge_input = "box"
+        config.verdict_mode = "yes_no_unresolved"
         config.math_verify = MathVerifyConfig()
-        server = _server(config, "Judgement: 'no'")
+        server = _server(config, f"Judgement: '{verdict}'")
         response = _split(r"\boxed{5} then \boxed {\frac{4}{2}}")
         result = await server.verify(_request(response, math_equivalence=True))
         assert (result.reward, result.grading_status, result.judge_evaluations) == (1, "math_verified", [])
         server.server_client.post.assert_not_awaited()
         result = await server.verify(_request(response, expected="5", math_equivalence=True))
-        assert (result.reward, result.grading_status) == (0, "judged")
+        server.server_client.post.assert_awaited_once()
+        assert (result.reward, result.grading_status, result.verdict) == (0, status, verdict)
+        assert result.mask_sample is (verdict == "unresolved")
         assert _judge_prompt(server).endswith("**Student Solution**:\n" + r"\frac{4}{2}")
+
+    async def test_math_timeout_defers_to_stem_verdict(self, config, monkeypatch):
+        def slow_match(*args):
+            time.sleep(1)
+            return 1.0, "2"
+
+        monkeypatch.setattr("resources_servers.math_with_judge.app._run_math_verify", slow_match)
+        config.boxed_judge_input = "box"
+        config.math_verify = MathVerifyConfig(timeout_seconds=0.02)
+        server = _server(config, "Judgement: 'yes'")
+        result = await server.verify(_request(_split(r"\boxed{2}"), math_equivalence=True))
+        server.server_client.post.assert_awaited_once()
+        assert (result.reward, result.grading_status) == (1, "judged")
 
     @mark.parametrize(
         "row,view,reply",

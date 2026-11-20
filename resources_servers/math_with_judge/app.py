@@ -12,11 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import contextlib
+import logging
+import multiprocessing as mp
 import re
 import unicodedata
+from io import StringIO
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from fastapi import FastAPI
+from math_verify import grader
+from math_verify.errors import TimeoutException
+from math_verify.metric import math_metric
+from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 from pydantic import BaseModel, Field, PositiveFloat, PositiveInt
 
 from nemo_gym.config import ModelServerRef
@@ -34,9 +43,9 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.telemetry import MeteredSemaphore, resources_operation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import call_judge, normalize_math_judge_verdict
-from resources_servers.math_with_judge.library import MathLibraryVerifier
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -316,6 +325,61 @@ def _prepare_format_tolerant_response(response: str) -> str:
     return _repair_final_unclosed_box(_normalize_unicode_digits(response))
 
 
+def _run_math_verify(
+    library_verifier: Any, expected_answer: str, generated_answer: str
+) -> tuple[float, Optional[str]]:
+    # This functionality is migrated from Nemo RL.
+    # https://github.com/NVIDIA-NeMo/RL/blob/e1f56c42ae175d3863ccaf4e21b7de7e9c46c2e1/nemo_rl/environments/math_environment.py
+    try:
+        stripped = LibraryJudgeMathResourcesServer._strip_math_delimiters(expected_answer)
+        ground_truth_parsable = "\\boxed{" + stripped + "}"
+        with LibraryJudgeMathResourcesServer._mute_output():
+            ret_score, extracted_answer = library_verifier([ground_truth_parsable], [generated_answer])
+
+        reward = float(ret_score)
+
+        if extracted_answer is not None:
+            # Make sure the extracted answer has two elements.
+            assert len(extracted_answer) == 2
+
+            extracted_gold, extracted_prediction = extracted_answer
+
+            # Get the extracted answer.
+            for pred in extracted_prediction:
+                if any(grader.verify(gold, pred) for gold in extracted_gold):
+                    extracted_answer = pred
+                    break
+            else:
+                # If no match is found, that means all the answers are
+                # incorrect.  The first prediction is used as the extracted
+                # answer.
+                extracted_answer = extracted_prediction[0] if extracted_prediction else None
+
+        return reward, extracted_answer
+
+    # It's possible to emit a TimeoutException and that wouldn't be caught since
+    # it actually subclasses from BaseException and math-verify itself does not
+    # catch it.
+    except (Exception, TimeoutException):
+        return 0.0, None
+
+
+def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, result_connection: Any) -> None:
+    # Keep math_verify construction inside the child process. A wedged SymPy call
+    # can then be killed by terminating this process without poisoning the server.
+    library_verifier = math_metric(
+        gold_extraction_target=(LatexExtractionConfig(),),
+        pred_extraction_target=(
+            ExprExtractionConfig(),
+            LatexExtractionConfig(),
+        ),
+    )
+    try:
+        result_connection.send(_run_math_verify(library_verifier, expected_answer, generated_answer))
+    finally:
+        result_connection.close()
+
+
 class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
     # Each answer is checked on its own: there is no session state to export,
     # and a checkpoint can re-run a verification after a crash instead of waiting for it.
@@ -351,10 +415,15 @@ Example output: "My final verdict is different [[A!=B]]"."""
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
 
-        self._math_library = MathLibraryVerifier(
+        logging.getLogger("math_verify").setLevel(logging.CRITICAL)
+
+        # The async path no longer blocks the event loop while SymPy runs, so
+        # cap child-process fanout explicitly.
+        self._library_verifier_semaphore = MeteredSemaphore(
+            self.config.library_verifier_max_concurrency,
+            component="resources_server",
+            limit_name="library_verifier",
             server_name=self.config.name,
-            timeout_seconds=self.config.library_verifier_timeout_seconds,
-            max_concurrency=self.config.library_verifier_max_concurrency,
         )
 
     def setup_webserver(self) -> FastAPI:
@@ -424,10 +493,97 @@ Example output: "My final verdict is different [[A!=B]]"."""
         )
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
+    @classmethod
+    @contextlib.contextmanager
+    def _mute_output(cls):
+        devnull_out, devnull_err = StringIO(), StringIO()
+        with (
+            contextlib.redirect_stdout(devnull_out),
+            contextlib.redirect_stderr(devnull_err),
+        ):
+            yield
+
+    @staticmethod
+    def _strip_math_delimiters(s: str) -> str:
+        """Strip outer math delimiters from expected answers.
+
+        Many expected_answer values are wrapped in \\(...\\) or $...$,
+        which causes the math_verify parser to fail when we wrap them
+        in \\boxed{}.  Removing these outer delimiters fixes parsing.
+        """
+        s = s.strip()
+        if s.startswith("\\(") and s.endswith("\\)"):
+            s = s[2:-2].strip()
+        if s.startswith("$") and s.endswith("$") and len(s) > 1:
+            s = s[1:-1].strip()
+        return s
+
     async def _verify_answer_with_library_async(
         self, expected_answer: str, generated_answer: str
     ) -> tuple[float, Optional[str]]:
-        return await self._math_library.verify(expected_answer, generated_answer)
+        async with resources_operation(
+            self._library_verifier_semaphore, operation="verify", executor="subprocess"
+        ) as operation:
+            # The production rollout workers run on Linux. Pin fork so the
+            # verifier child is cheap to start and can be killed independently
+            # if SymPy wedges.
+            ctx = mp.get_context("fork")
+            result_connection, child_connection = ctx.Pipe(duplex=False)
+            process = ctx.Process(
+                target=_run_math_verify_in_subprocess,
+                args=(expected_answer, generated_answer, child_connection),
+            )
+            process.start()
+            child_connection.close()
+            return await self._wait_for_library_verifier_process(
+                process,
+                result_connection,
+                self.config.library_verifier_timeout_seconds,
+                operation=operation,
+            )
+
+    @staticmethod
+    async def _wait_for_library_verifier_process(
+        process: Any, result_connection: Any, timeout_seconds: float, *, operation: Optional[Any] = None
+    ) -> tuple[float, Optional[str]]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        try:
+            while process.is_alive():
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    process.terminate()
+                    terminate_deadline = loop.time() + 1.0
+                    while process.is_alive() and loop.time() < terminate_deadline:
+                        await asyncio.sleep(0.05)
+                    if process.is_alive():
+                        process.kill()
+                    while process.is_alive():
+                        await asyncio.sleep(0.05)
+                    process.join(timeout=0)
+                    if operation is not None:
+                        operation.outcome = "timeout"
+                    return 0.0, None
+                await asyncio.sleep(min(0.05, remaining))
+
+            process.join(timeout=0)
+            if process.exitcode != 0 or not result_connection.poll():
+                if operation is not None:
+                    operation.outcome = "crashed"
+                return 0.0, None
+            try:
+                return result_connection.recv()
+            except EOFError:
+                return 0.0, None
+        finally:
+            with contextlib.suppress(OSError, AssertionError):
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=1.0)
+                    if process.is_alive():
+                        process.kill()
+                        process.join(timeout=1.0)
+            result_connection.close()
 
     async def _verify_answer_with_judge(
         self, question: str, expected_answer: str, generated_answer: str

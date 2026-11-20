@@ -38,7 +38,8 @@ the reason in `grading_status`.
 | `box_too_long` | The box is longer than `max_box_chars` (off by default). |
 | `answer_too_long` | The judge would see the whole final answer, and it is longer than `max_answer_chars`. |
 
-After the gates, the server makes one judge call:
+After the gates, a match from the optional Math-Verify check earns 1 immediately.
+All other rows go to the configured judge:
 
 - **Answer rows:** the stem_v11 prompt. The judge's last `Judgement: 'yes'|'no'`
   gives reward 1 or 0.
@@ -175,6 +176,17 @@ markers. Mark a row `math_equivalence: true` only when equivalence alone establi
 answer. Leave proofs, explanations and rows with additional obligations on the judge
 or rubric path. For NeMoRL SingleController with source scheduling, enable
 `grpo.exclude_failed_judge_groups` to keep a masked group out of the trainer and reward cache.
+
+To route a math question through STEM, load the question-bank preset and give the
+dataset row the STEM agent reference, as in this JSONL row.
+
+```json
+{"agent_ref":{"type":"responses_api_agents","name":"stem_judge_simple_agent"},"answer_format":"boxed","math_equivalence":true,"expected_answer":"1/2","responses_create_params":{"input":[{"role":"user","content":"What is 2 divided by 4? Put only the final answer in \\boxed{}."}]}}
+```
+
+For this row, `\boxed{0.5}` earns 1 through Math-Verify. If the library cannot
+establish equivalence, the configured STEM judge sees the question, reference and
+selected box. The STEM process runs the library check locally.
 
 The solver instruction is a separate generation option. For a dataset of **boxed**
 questions with a raw `question` field, render it once before generating rollouts:
