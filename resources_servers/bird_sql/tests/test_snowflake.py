@@ -263,6 +263,13 @@ _TABLES = {
         ('SELECT AVG(CASE WHEN "x" = 1 THEN TRUE ELSE FALSE END) FROM "t"', "boolean_aggregate:AVG"),
         ('SELECT SUM(CASE WHEN "x" = 1 THEN 1 ELSE 0 END), SUM(COALESCE("x", 0)) FROM "t"', None),
         ('SELECT AVG(DISTINCT) FROM "t"', "unparsable"),
+        # Snowflake has no aggregate FILTER clause and none of DuckDB's own functions; its FILTER(array, lambda),
+        # DIV0 and LISTAGG are fine, and so is a CTE that happens to share a DuckDB function's name.
+        ('SELECT COUNT(*) FILTER (WHERE "x" > 1) * 100.0 / COUNT(*) FROM "t"', "aggregate_filter"),
+        ('SELECT DIVIDE(SUM("x"), COUNT(*)) FROM "t"', "duckdb_function:DIVIDE"),
+        ('SELECT string_agg("x", \',\') FROM "t"', "duckdb_function:STRING_AGG"),
+        ("SELECT FILTER([1, 2, 3], a -> a > 1), DIV0(1, 0), LISTAGG('a', ',')", None),
+        ('WITH divide AS (SELECT "x" FROM "t") SELECT "x" FROM divide', None),
         # SELECT DISTINCT can't ORDER BY a column it doesn't select; a selected column, alias or position can, and so
         # can an expression that is selected or built from selected columns.
         ('SELECT DISTINCT "n" FROM "Mixed Case" ORDER BY "ID"', "distinct_order_by:ID"),

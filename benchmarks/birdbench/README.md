@@ -104,23 +104,27 @@ export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bir
   off. Tables and columns keep BIRD's names, created quoted, so a model must double-quote mixed- and lower-case names
   exactly, as it would on Snowflake. Before the query runs, a static check refuses what Snowflake would refuse but
   DuckDB would run: more than one statement or a non-query, identifiers that don't resolve under Snowflake's rules
-  (unquoted means upper case), a few SQLite-only spellings, `SUM`/`AVG` of a boolean, and a `SELECT DISTINCT` ordered
-  by something it doesn't select. Known stand-in differences: `DATEADD`/`DATE_TRUNC` on a date return a timestamp,
-  `TO_CHAR` can drop its format, `DATEDIFF`/`DATEADD` on the `VARCHAR` date columns fail where Snowflake casts the
-  string, DuckDB refuses implicit text-to-number conversion where Snowflake casts row by row (erroring only on text
-  that isn't a number), and DuckDB-only functions and division by zero (`inf`) run where Snowflake errors. `snowflake_gold_check.py` grades sqlglot transpiles of the golds:
-  92% (1,413 of 1,534) match after one mechanical fix, identifier case (a second, double-quoted names to strings, fires
-  on no dev gold); its failure classes show where the stand-in, not the model, decides the score. The server's
-  `snowflake_engine: snowflake` points the same grader at a real account (`snowflake_connection_name` in the
-  connector's `connections.toml`), loaded once with `snowflake_load_account.py` (setup steps in
-  `resources_servers/bird_sql/README.md`).
+  (unquoted means upper case), a few SQLite-only spellings, `SUM`/`AVG` of a boolean, a `SELECT DISTINCT` ordered by
+  something it doesn't select, an aggregate `FILTER (WHERE ...)` clause, and six DuckDB-only functions (`DIVIDE`,
+  `STRING_AGG`, ...). Known stand-in differences: `DATEADD`/`DATE_TRUNC` on a date return a timestamp, `TO_CHAR` can
+  drop its format, `DATEDIFF`/`DATEADD` on the `VARCHAR` date columns fail where Snowflake casts the string, DuckDB
+  refuses implicit text-to-number conversion where Snowflake casts row by row (erroring only on text that isn't a
+  number), and other DuckDB-only functions and division by zero (`inf`) run where Snowflake errors.
+  `snowflake_gold_check.py` grades sqlglot transpiles of the golds: 92% (1,413 of 1,534) match after one mechanical fix,
+  identifier case (a second, double-quoted names to strings, fires on no dev gold); its failure classes show where the
+  stand-in, not the model, decides the score. The server's `snowflake_engine: snowflake` points the same grader at a
+  real account (`snowflake_connection_name` in the connector's `connections.toml`), loaded once with
+  `snowflake_load_account.py` (setup steps in `resources_servers/bird_sql/README.md`).
 - **Snowflake calibration on a real account** (dev, 2026-11-19, `snowflake_gold_check.py --snowflake-connection`).
   The same translated golds match on 1,439 of 1,534 there. Of the 1,532 whose gold runs on SQLite, the stand-in and
   Snowflake agree on pass or fail for 1,498 (97.8%). 30 pass only on Snowflake: string arithmetic 20 (Snowflake casts),
   ties under `LIMIT` 4, text compared with a number 3, and 3 others. 4 pass only on the stand-in: ties under `LIMIT` 2,
   float precision 1, and a text value cast to a number 1. Before the static check refused boolean `SUM`/`AVG` and
   `DISTINCT` ordered by an unselected column, 17 more did. Snowflake refused every query the static check refuses,
-  including each SQLite-only spelling, and the check refuses none of the 1,477 distinct queries Snowflake ran.
+  including each SQLite-only spelling, and the check refuses none of the 2,681 distinct queries Snowflake ran (gold
+  translations, probes and a model's answers). On a model's own SQL (Nemotron 3.5 Lightning, thinking on, all of dev,
+  2026-11-20), the two agree on pass or fail for 1,523 of 1,532 (99.4%): 8 pass only on the stand-in (5 fixed-point
+  division, 2 `LIMIT` ties, 1 strict date format) and 1 only on Snowflake (text arithmetic).
 - **Caveat.** Because the gold is the answer under SQLite semantics, a correct Spark query can differ from it when the
   gold relies on SQLite behavior (bare `GROUP BY` columns, integer division, case-insensitive `LIKE`, loose
   text/number comparison). `spark_gold_check.py` estimates about 8% of dev (121 of 1534) are affected.
@@ -142,11 +146,17 @@ failure there as a filter with known holes, not as a label:
     `TO_DATE(...)` or `::DATE` works on both.
   - `DATEADD`/`DATE_TRUNC` on a date return a timestamp (the value gains `00:00:00`), and `TO_CHAR` drops its format
     when sqlglot can't infer the argument's type (a subquery's column, a timestamp).
-- **Wrong Snowflake SQL that can pass** (each checked on a real account): functions DuckDB has and Snowflake doesn't
-  (for example `regexp_matches`, `strptime`, `epoch_ms`, `list_value`, `string_agg`), because only a short SQLite-only
-  list is refused; a `SELECT DISTINCT` ordered by an aggregate, and `SUM`/`AVG` of a boolean-valued function other
-  than `IFF`, `CASE` or `COALESCE` (the static check leaves both alone rather than risk refusing SQL Snowflake
-  accepts); `TO_CHAR(varchar_col, 'YYYY')`; and division by zero, which returns `inf` instead of failing.
+  - A table alias with a column list named like a refused function (`FROM t AS divide (a, b)`): the static check
+    refuses it, Snowflake accepts it.
+- **Wrong Snowflake SQL that can pass** (each checked on a real account): functions DuckDB has and Snowflake doesn't,
+  beyond the six the static check refuses, and those six when quoted (`"DIVIDE"(a, b)`) or called in a query with a
+  CTE of the same name; a `SELECT DISTINCT` ordered by an aggregate, and `SUM`/`AVG` of a
+  boolean-valued function other than `IFF`, `CASE` or `COALESCE` (the static check leaves both alone rather than risk
+  refusing SQL Snowflake accepts); `TO_CHAR(varchar_col, 'YYYY')`; and division by zero, which returns `inf` instead of
+  failing.
+- **Precision.** Snowflake divides `NUMBER`s in fixed point, so a ratio such as `COUNT(...) * 1.0 / COUNT(*) * 100` can
+  differ from SQLite's float in the sixth decimal, where the grader compares. Such an answer passes on the stand-in and
+  fails on Snowflake: 5 of Nemotron 3.5 Lightning's answers on dev. Casting to `FLOAT` first avoids it.
 - **Leave out the questions the stand-in can't confirm.** Translated golds fail on 121 of 1,534 dev questions;
   `snowflake_gold_check.py` writes their ids by class to `failures_by_class.json` (the `id` in the prepared file). That
   count only covers the gold's own translation, so model SQL can still hit the gaps above. For train, run

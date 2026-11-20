@@ -336,6 +336,10 @@ async def execute_postgres_async(
 # Functions SQLite has and Snowflake does not (Snowflake spells them LISTAGG, IFF, POSITION, ...) that DuckDB, under the
 # local Snowflake stand-in, still runs or rewrites. A Snowflake account refuses each of them (checked 2026-11-19).
 _SQLITE_ONLY_FUNCTIONS = frozenset({"GROUP_CONCAT", "IIF", "INSTR", "JULIANDAY", "STRFTIME", "TOTAL"})
+# Functions DuckDB has and Snowflake does not, seen in model SQL or probes. A Snowflake account refuses each of them
+# as an unknown function (checked 2026-11-19; DIVIDE 2026-11-20); DuckDB, under the stand-in, runs them. Names are
+# matched as written, like ``_SQLITE_ONLY_FUNCTIONS``.
+_DUCKDB_ONLY_FUNCTIONS = frozenset({"DIVIDE", "EPOCH_MS", "LIST_VALUE", "REGEXP_MATCHES", "STRING_AGG", "STRPTIME"})
 # Output columns of ``LATERAL FLATTEN(...)``.
 _FLATTEN_COLUMNS = frozenset({"SEQ", "KEY", "PATH", "INDEX", "VALUE", "THIS"})
 
@@ -370,6 +374,7 @@ def snowflake_rejection(
     - identifiers resolve as on Snowflake, where an unquoted name means its upper-case spelling and a quoted one is
       exact (DuckDB matches names in any case);
     - no SQLite-only function (``_SQLITE_ONLY_FUNCTIONS``), ``LIMIT offset, count``, or two-argument ``MAX``/``MIN``;
+    - no DuckDB-only function (``_DUCKDB_ONLY_FUNCTIONS``), and no aggregate ``FILTER (WHERE ...)`` clause;
     - no ``SUM``/``AVG`` of a boolean expression, and no ``SELECT DISTINCT`` ordered by a column it doesn't select.
 
     The identifier check knows the catalog, the query's own aliases and CTEs, and ``FLATTEN``'s columns; a column is
@@ -395,11 +400,17 @@ def snowflake_rejection(
         if tok.token_type != TokenType.IDENTIFIER and nxt.token_type == TokenType.L_PAREN:
             if tok.text.upper() in _SQLITE_ONLY_FUNCTIONS and tok.text.upper() not in cte_names:
                 return f"sqlite_function:{tok.text.upper()}"
+            if tok.text.upper() in _DUCKDB_ONLY_FUNCTIONS and tok.text.upper() not in cte_names:
+                return f"duckdb_function:{tok.text.upper()}"
         if tok.token_type == TokenType.LIMIT and i + 2 < len(tokens) and tokens[i + 2].token_type == TokenType.COMMA:
             return "limit_offset_comma"
     tree = normalize_identifiers(statements[0], dialect="snowflake")
     if any(f.expressions for f in tree.find_all(exp.Max, exp.Min)):
         return "scalar_max_min"
+    if any(tree.find_all(exp.Filter)):
+        # COUNT(*) FILTER (WHERE ...): DuckDB filters the aggregate, Snowflake has no such clause. Snowflake's own
+        # FILTER(array, lambda) function is another node (ArrayFilter) and stays allowed.
+        return "aggregate_filter"
     for agg in tree.find_all(exp.Sum, exp.Avg):
         # SUM("x" = 'y'): DuckDB counts the true rows, Snowflake refuses a BOOLEAN argument.
         arg = agg.this

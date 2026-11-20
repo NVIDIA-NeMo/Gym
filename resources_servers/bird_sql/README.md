@@ -86,9 +86,14 @@ refuses, as Snowflake would, anything but a single query, identifiers that do no
 under Snowflake's rules (an unquoted name means its upper-case spelling), and a few
 SQLite-only spellings (`IIF`, `INSTR`, `GROUP_CONCAT`, `STRFTIME`, `JULIANDAY`, `TOTAL`,
 `LIMIT offset, count`), `SUM`/`AVG` of a boolean expression (including an `IFF`, `CASE` or
-`COALESCE` of booleans), and a `SELECT DISTINCT` ordered by something it doesn't select. This
-check is static and approximate; on a real account, Snowflake refused every query it refuses
-(see the calibration below). Known differences from Snowflake that the check does not cover,
+`COALESCE` of booleans), a `SELECT DISTINCT` ordered by something it doesn't select, an
+aggregate `FILTER (WHERE ...)` clause, and six functions DuckDB has and Snowflake doesn't
+(`DIVIDE`, `EPOCH_MS`, `LIST_VALUE`, `REGEXP_MATCHES`, `STRING_AGG`, `STRPTIME`). This check
+is static and approximate; on a real account, Snowflake refused every query it refuses (see
+the calibration below). It matches function names as written: a quoted name (`"DIVIDE"(a, b)`)
+or a call in a query with a CTE of the same name (`WITH divide AS (...) SELECT DIVIDE(a, b)`)
+gets past it, and a table alias with a column list that has one of these names
+(`FROM t AS divide (a, b)`) is refused although Snowflake accepts it. Known differences from Snowflake that the check does not cover,
 each checked on an account:
 
 - `DATEADD` and `DATE_TRUNC` on a date return a timestamp, so the result gains `00:00:00`;
@@ -100,9 +105,8 @@ each checked on an account:
 - DuckDB refuses implicit text-to-number conversion (`'2026' - '1990'`, `varchar_col > 0`)
   where Snowflake casts row by row and errors only on text that isn't a number (3 of 11 dev
   golds that compare text with a number match on Snowflake).
-- Wrong Snowflake SQL that runs: functions DuckDB has and Snowflake doesn't (for example
-  `regexp_matches`, `strptime`, `epoch_ms`, `list_value`, `string_agg`), `TO_CHAR` of a
-  `VARCHAR` with a format, division by zero (it returns `inf` instead of an error), `SUM`/`AVG`
+- Wrong Snowflake SQL that runs: other functions DuckDB has and Snowflake doesn't, `TO_CHAR` of
+  a `VARCHAR` with a format, division by zero (it returns `inf` instead of an error), `SUM`/`AVG`
   of another boolean-valued function, and a `SELECT DISTINCT` ordered by an aggregate. The
   static check leaves the last two alone rather than risk refusing SQL Snowflake accepts.
 
@@ -141,8 +145,16 @@ of the 1,534 dev golds match on 1,439 on Snowflake and on 1,413 on the stand-in.
 whose gold runs on SQLite, the two agree on pass or fail for 1,498 (97.8%). 30 pass only on
 Snowflake, mostly arithmetic on text that Snowflake casts (20). 4 pass only on the stand-in:
 ties under `LIMIT` (2), float precision (1) and a text value cast to a number (1). Snowflake
-refused every query the static check refuses, and the check refuses none of the 1,477
-distinct queries Snowflake ran in the calibration.
+refused every query the static check refuses, and the check refuses none of the 2,681
+distinct queries Snowflake ran in the calibration (gold translations, probes and a model's
+answers).
+
+On a model's own SQL (Nemotron 3.5 Lightning with thinking on, all of dev, 2026-11-20), the
+stand-in and Snowflake agree on pass or fail for 1,523 of 1,532 questions (99.4%). 8 pass only
+on the stand-in: 5 ratios where Snowflake's fixed-point division changes the sixth decimal,
+which is where the grader compares (a precision limit, not something the check can see), 2
+ties under `LIMIT` and 1 date format Snowflake parses strictly. 1 passes only on Snowflake
+(arithmetic on text that holds a number).
 
 ## Example usage
 

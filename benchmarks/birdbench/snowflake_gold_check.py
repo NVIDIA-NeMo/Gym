@@ -83,8 +83,8 @@ FAILURE_CLASSES = {
     "like_case": "LIKE is case-sensitive on Snowflake, not on SQLite; Snowflake differs too",
     "division": "/ returns decimals where SQLite truncates; Snowflake differs too",
     "other_mismatch": "another result difference; read the samples",
-    "refused": "refused by the server's static check (a SQLite-only function, SUM/AVG of a boolean, DISTINCT ordered "
-    "by an unselected column, unparsable); Snowflake refuses too",
+    "refused": "refused by the server's static check (for example a SQLite-only function, SUM/AVG of a boolean, "
+    "DISTINCT ordered by an unselected column, unparsable); Snowflake refuses too",
     "stand_in_timeout": "stand_in: timed out",
     "transpile_error": "sqlglot can't translate the gold",
     "gold_fails_on_sqlite": "the gold itself fails or times out on SQLite",
