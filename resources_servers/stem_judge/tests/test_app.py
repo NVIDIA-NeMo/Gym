@@ -425,6 +425,10 @@ class TestAnswerOptions:
             ({"units": False, "precision": 12}, "1/2", "0.5", True),
             ({}, "1", "9=1", True),
             ({"bidirectional": True}, "1", "9=1", False),
+            ({"bidirectional": True}, "1", "x=2=1", False),
+            ({"bidirectional": True}, "x=1", "x=2=1", False),
+            ({"bidirectional": True}, "1", "x=y=1", False),
+            ({"bidirectional": True}, "1", "x=2-1=1", True),
             ({"bidirectional": True}, "1", "x=1", True),
             ({"bidirectional": True}, "1", "1", True),
             ({"bidirectional": True}, "1", "2", False),
@@ -448,6 +452,16 @@ class TestAnswerOptions:
     def test_math_precision_requires_nonnegative_decimal_places(self, precision):
         with raises(ValidationError, match="precision"):
             MathVerifyConfig(precision=precision)
+
+    async def test_partial_judge_text_is_logged_without_grading_it(self, config, tmp_path):
+        config.verdict_mode = "yes_no_unresolved"
+        config.generation_log_dir = str(tmp_path)
+        partial = _msg("Judgement: yes").model_copy(update={"status": "incomplete"})
+        reply = _response(partial).model_copy(update={"status": "incomplete"})
+        result = await _server(config, reply).verify(_request(_split(r"\boxed{2}")))
+        assert result.mask_sample and result.grading_status == "judge_unparsed"
+        saved_log = json.loads(next(tmp_path.glob("*.jsonl")).read_text())
+        assert saved_log["judge_generations"] == ["Judgement: yes"]
 
     async def test_math_worker_unavailable_defers_to_judge(self, config, monkeypatch):
         config.boxed_judge_input = "box"

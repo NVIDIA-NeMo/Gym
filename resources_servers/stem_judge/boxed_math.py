@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from math_verify import parse, verify
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from sympy import Set
+from sympy import And, Set
 
 from nemo_gym.telemetry import MeteredSemaphore, resources_operation
 from resources_servers.math_with_judge.app import LibraryJudgeMathResourcesServer, _run_math_verify
@@ -20,8 +20,14 @@ if TYPE_CHECKING:
     from resources_servers.stem_judge.app import MathVerifyConfig
 
 
+def _reduce_chain(expr):
+    if isinstance(expr, And):
+        return And(*(link.doit() for link in expr.args))
+    return expr
+
+
 def _reverse_match(box: str, reference: str, latex: LatexExtractionConfig, precision: int) -> bool:
-    """Compare the parsed answers in reverse. For sets, also require equal membership."""
+    """Compare in reverse, retaining set membership and all constraints of a chained relation."""
 
     def parse_box(text, targets):
         text = LibraryJudgeMathResourcesServer._strip_math_delimiters(text)
@@ -36,6 +42,12 @@ def _reverse_match(box: str, reference: str, latex: LatexExtractionConfig, preci
         return False
     if isinstance(left, Set) or isinstance(right, Set):
         return isinstance(left, Set) and isinstance(right, Set) and left.symmetric_difference(right).is_empty is True
+    if isinstance(left, And) or isinstance(right, And):
+        # Math-Verify unwraps a chain to its endpoints. Evaluate each link before comparing the whole statement.
+        left, right = _reduce_chain(left), _reduce_chain(right)
+        if isinstance(left, And) or isinstance(right, And):
+            return left == right
+        return verify(left, right, float_rounding=precision)
     return True
 
 

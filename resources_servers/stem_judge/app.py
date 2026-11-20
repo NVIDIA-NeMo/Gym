@@ -683,7 +683,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         evaluations: list[JudgeEvaluation],
     ) -> str:
         """One JSONL record for the generation log."""
-        judge_texts = [assistant_text(e.response, judge_reply=True) or "" for e in evaluations]
+        judge_texts = [assistant_text(e.response, judge_reply=True, allow_partial=True) or "" for e in evaluations]
         record = {
             "ts": time.time(),
             "step": _extract_step(body),
