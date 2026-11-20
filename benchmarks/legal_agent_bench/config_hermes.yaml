@@ -12,6 +12,7 @@ legal_agent_bench_benchmark_agent:
       temperature: ${lab.policy_temperature}
       enabled_toolsets:
       - terminal
+      - file
       concurrency: ${num_samples_in_parallel}
       sandbox_install_timeout_seconds: 900
       sandbox_runner_timeout_seconds: ${lab.agent_timeout_seconds}

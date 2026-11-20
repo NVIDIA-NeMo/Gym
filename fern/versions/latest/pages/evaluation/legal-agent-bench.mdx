@@ -61,7 +61,7 @@ at 65,536 output tokens; Hermes and Codex have no per-call cap configured by the
 presets. Claude Code controls its own output cap. LAB Native, Hermes, and Claude
 Code allow 60 turns; Codex has no turn cap configured here.
 
-Hermes enables its `terminal` toolset, without the separate `file` toolset.
+Hermes enables its `terminal` and `file` toolsets for shell commands and file operations.
 Claude Code uses `bare: true`, disabling automatic discovery of features such as
 hooks and plugins. CLI harnesses keep their own termination rules; LAB Native
 uses LAB's `finish` tool.

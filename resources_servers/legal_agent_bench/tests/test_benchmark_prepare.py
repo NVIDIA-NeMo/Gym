@@ -156,6 +156,8 @@ def test_harness_switch_preserves_grading_and_dataset(count, reward_mode, tmp_pa
         else:
             assert agent.concurrency == 2
             assert (agent.sandbox_runner_timeout_seconds if harness == "hermes" else agent.timeout) == 300
+        if harness == "hermes":
+            assert agent.enabled_toolsets == ["terminal", "file"]
         assert agent.model_server.name == "policy_model"
         assert agent.model_server.type == "responses_api_models"
         if harness != "codex":
