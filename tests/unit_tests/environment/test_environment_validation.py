@@ -1455,25 +1455,44 @@ def test_a_setup_keeps_the_benchmarks_prompt_template(tmp_path: Path) -> None:
         validate_environment(main_path, name="demo/other")
 
 
-def test_a_setup_may_adapt_the_benchmarks_prompt_for_its_harness(tmp_path: Path) -> None:
-    # The harness owns the system prompt, so the setup's template carries the benchmark's prompt in the user message.
-    in_user_message = "benchmarks/demo/prompts/in_user_message.yaml"
+def _setup_with_its_own_template(
+    tmp_path: Path, template: str, template_text: str, *, agent_server: str | None = None, **fields: object
+) -> Path:
+    """The demo benchmark with a setup that names its own prompt template, run by ``agent_server`` when it is set."""
     edit = (
         "prepare_script: benchmarks/demo/prepare.py",
-        f"prepare_script: benchmarks/demo/prepare.py\n        prompt_config: {in_user_message}",
+        f"prepare_script: benchmarks/demo/prepare.py\n        prompt_config: {template}",
     )
     dataset = {
         "name": "example",
         "type": "benchmark",
         "jsonl_fpath": "benchmarks/demo/data/example.jsonl",
         "prepare_script": "benchmarks/demo/prepare.py",
-        "prompt_config": in_user_message,
+        "prompt_config": template,
     }
+    if agent_server is not None:
+        fields["agent_server"] = agent_server
+    main_path = _listing(tmp_path, config_edit=edit, standard_prompt_config=template, datasets=[dataset], **fields)
+    if agent_server is not None:
+        variant = main_path.with_name("variant.yaml")
+        variant.write_text(
+            variant.read_text(encoding="utf-8").replace("    simple_agent:\n", f"    {agent_server}:\n"),
+            encoding="utf-8",
+        )
+    (tmp_path / template).write_text(template_text, encoding="utf-8")
+    return main_path
+
+
+def test_a_setup_may_adapt_the_benchmarks_prompt_for_its_harness(tmp_path: Path) -> None:
+    # The harness owns the system prompt, so the setup's template carries the benchmark's prompt in the user message.
     description = "The demo benchmark with its prompt in the user message, because the harness owns the system prompt."
-    main_path = _listing(
-        tmp_path, config_edit=edit, standard_prompt_config=in_user_message, datasets=[dataset], description=description
+    main_path = _setup_with_its_own_template(
+        tmp_path,
+        "benchmarks/demo/prompts/in_user_message.yaml",
+        "user: '{question}'\n",
+        agent_server="custom_agent",
+        description=description,
     )
-    (tmp_path / in_user_message).write_text("user: '{question}'\n", encoding="utf-8")
     assert validate_environment(main_path, name="demo/variant").name == "demo/variant"
 
     # Review checks the adaptation, so the setup has to say what it is.
@@ -1482,6 +1501,26 @@ def test_a_setup_may_adapt_the_benchmarks_prompt_for_its_harness(tmp_path: Path)
     main_path.write_text(dump_manifest(raw), encoding="utf-8")
     with pytest.raises(EnvironmentValidationError, match="names its own prompt template; its description must say"):
         validate_environment(main_path, name="demo/variant")
+
+
+def test_a_setup_with_its_parents_agent_server_keeps_the_benchmarks_prompt_template(tmp_path: Path) -> None:
+    # A system-prompt variant run by the same agent, such as arxivmath_0626/config_with_system, prompts under other
+    # rules. Listed as a setup with its own template and a description, it is rejected: the same harness needs no
+    # other form of the prompt, so the template comparison runs as usual.
+    main_path = _setup_with_its_own_template(
+        tmp_path,
+        "benchmarks/demo/prompts/with_system.yaml",
+        "system: Answer briefly.\nuser: '{question}'\n",
+        description="The demo benchmark with a system prompt.",
+    )
+    with pytest.raises(EnvironmentValidationError, match="demo/variant uses another prompt template than demo"):
+        validate_environment(main_path, name="demo/variant")
+
+    # The same entry, moved unchanged to protocols, validates.
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    raw["protocols"] = raw.pop("setups")
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+    assert validate_environment(main_path, name="demo/variant").name == "demo/variant"
 
 
 def _protocol_with_a_setup(tmp_path: Path, *, nested_edit: tuple[str, str] | None = None) -> Path:

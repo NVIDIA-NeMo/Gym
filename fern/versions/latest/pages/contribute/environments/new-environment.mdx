@@ -438,21 +438,29 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | `standard_prompt_config` | string or null | Required for template benchmarks; absent for prepared prompts; optional for agent-owned prompting |
 | `adopted_from` | object or null | Optional; requires source URL, upstream ref, and reconciliation date |
 | `lifecycle` | string | Optional; `active` (default) or `deprecated` |
-| `setups` | list of objects | Optional; configs that run these tasks and scoring with another harness or runtime; see [Setups and Protocols](#setups-and-protocols) |
-| `protocols` | list of objects | Optional, benchmarks only; configs that score these tasks under another prompt, tools, or scoring. Each may list `setups` of its own |
+| `setups` | list of objects | Optional; configs that run these tasks, prompt, scoring, and task limits with another harness or runtime; see [Setups and Protocols](#setups-and-protocols) |
+| `protocols` | list of objects | Optional, benchmarks only; task variants: configs that run these tasks under another prompt, scoring, or task limits. Each may list `setups` of its own |
 
 Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `train`, `validation`, `example`, or `benchmark`; benchmark datasets also require `prepare_script`. `num_repeats` defaults to `1`. `canonical_split` records the source split being measured, while dataset `type: benchmark` selects its role in Gym.
 
-A named config that runs a benchmark's tasks with another harness, prompt, tools, or scoring is listed in that benchmark's manifest; see [Setups and Protocols](#setups-and-protocols). A named config with tasks of its own gets its own manifest: put it in the workload's catalog directory and set `config_path` relative to it. For example, `benchmarks/my_benchmark/hard/manifest.yaml` can declare `name: my_benchmark/hard` and `config_path: ../hard.yaml`. Shared prompts and suite fragments are not standalone workloads.
+A named config that runs a benchmark's tasks with another harness, prompt, scoring, task limits, or tools is listed in that benchmark's manifest; see [Setups and Protocols](#setups-and-protocols). A named config with tasks of its own gets its own manifest: put it in the workload's catalog directory and set `config_path` relative to it. For example, `benchmarks/my_benchmark/hard/manifest.yaml` can declare `name: my_benchmark/hard` and `config_path: ../hard.yaml`. Shared prompts and suite fragments are not standalone workloads.
 
 ### Setups and Protocols
 
 A named config is often a variant of a benchmark or environment rather than a workload of its own. Such a config gets no manifest of its own: the main manifest lists it under `setups` or `protocols`. To choose, ask whether the config's score is still the benchmark's score.
 
-- **Setup:** the config runs the same tasks, prompt wording, and scoring with another harness or runtime, so its score is the benchmark's score with that harness. For example, `hle/opencode` runs HLE with OpenCode.
-- **Protocol** (benchmarks only): the config changes what the model is asked or how it is scored, through another prompt, tools, or scoring, so its score is not comparable with the main config's. It may also run another harness. For example, `gdpval/opencode` runs GDPval's tasks under a prompt that names no harness's tools.
+- **Setup:** the config runs the same tasks, prompt wording, scoring, and task limits with another harness or runtime, so its score is the benchmark's score with that harness. For example, `hle/opencode` runs HLE with OpenCode. A setup is a run preset that ships with the benchmark: a config you select by name.
+  - Task limits are the turn and time budgets and the tool caps, such as a search limit, that the benchmark sets. When a harness has no setting for one of them, the setup's `description` says so.
+  - A runtime is what drives or hosts the run with the same harness. For example, `skillsbench/harbor_opensandbox` runs SkillsBench on another sandbox provider, and `agentic_if_realworld/native` runs a standard rollout instead of the adaptive evaluation driver.
+- **Protocol** (benchmarks only): a task variant. The config runs the tasks under another prompt, scoring, or task limits, so its score is not comparable with the main config's. It may also run another harness. For example, `gdpval/opencode` runs GDPval's tasks under a prompt that names no harness's tools.
+  - A config that changes the tools runs the tasks in another environment. Until a manifest can name environments separately, list it as a protocol and say so in its `description`.
+  - Serving the same tools another way, for example over MCP, is not a change of tools.
 
-Validation checks that a setup runs the same task datasets or `harbor_target`, with the same resources server and grading mode. When both use `prompt_source: template`, it also checks that they use the same prompt templates. A harness may add its own instructions. When a harness needs the benchmark's prompt in another form, the setup names its own template in `standard_prompt_config` and says in its `description` how it adapted the prompt. For example, `hle/opencode` puts the HLE authors' system prompt into the user message, because OpenCode owns the system prompt. Review checks that the benchmark's wording is unchanged. A protocol's tasks are checked in review, because a protocol may prepare its own copy of the data.
+A `*_legacy_agent` config is not listed as a setup or protocol. It is being migrated off: the agent runs the whole episode behind the `legacy_agent` relay instead of the Environment Server, often through an older adapter of the same harness, such as `opencode_sandboxed_agent`. It runs by name as a plain catalog config until it is removed.
+
+Validation checks that a setup runs the same task datasets or `harbor_target`, with the same resources server and grading mode. When both use `prompt_source: template`, it also checks that they use the same prompt templates. A harness may add its own instructions. When a harness needs the benchmark's prompt in another form, a setup whose `agent_server` differs from its parent's names its own template in `standard_prompt_config` and says in its `description` how it adapted the prompt. For example, `hle/opencode` puts the HLE authors' system prompt into the user message, because OpenCode owns the system prompt. Review checks that the benchmark's wording is unchanged. A setup with its parent's `agent_server` runs the same harness, so another template makes it a protocol. Agent servers that choose the harness through a setting, such as `harness_agent`, keep the same `agent_server` for every harness and cannot use this exception.
+
+Validation does not compare task limits, because each harness names them with its own keys, so review checks them. A setup may run more repeats than its parent, which changes the variance of its score and not what it measures. A protocol's tasks are checked in review, because a protocol may prepare its own copy of the data.
 
 Each entry names its config and sets only the facts that differ from the main manifest. A field it leaves out, `version` included, is the main manifest's:
 
@@ -475,7 +483,7 @@ protocols:
 
 - `name` is required. It is the name the catalog gives the config: its path under `benchmarks/` or `environments/` without `.yaml`, which is also what `gym eval run --benchmark` takes.
 - `config_path` is required and relative to the main manifest.
-- An entry may set `description`, `maintainers`, `requirements`, `primary_metric`, `integration_profile`, and `dataset_owner`. A protocol must set `description`, saying how its prompt, tools, or scoring differ, and may also set `standard_prompt_config`. A setup sets `standard_prompt_config` only for a prompt adapted to its harness, and then must set `description`.
+- An entry may set `description`, `maintainers`, `requirements`, `primary_metric`, `integration_profile`, and `dataset_owner`. A protocol must set `description`, saying how its prompt, scoring, task limits, or tools differ, and may also set `standard_prompt_config`. A setup sets `standard_prompt_config` only for a prompt adapted to its harness, which needs another `agent_server` than its parent's, and then must set `description`.
 - `requirements` combines field by field: an entry that sets only `network: public` keeps the inherited `gpu`. A list such as `datasets` or `maintainers` replaces the inherited one whole.
 - The composition fields `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, `grading_mode`, and `harbor_target` mirror the entry's own config. `gym env validate --sync` writes the ones that differ from the main manifest's and removes those that match it again. `null` clears a value the main manifest sets, as for a harness that reaches the model itself.
 

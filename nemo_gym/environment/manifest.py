@@ -299,26 +299,41 @@ class _ListedConfig(_ManifestModel):
         description=(
             "The config's own prompt template. A protocol sets it when it prompts under other rules. A setup sets it "
             "only when its harness needs the benchmark's prompt in another form, such as in the user message because "
-            "the harness owns the system prompt; its description then says how the prompt was adapted."
+            "the harness owns the system prompt. Such a setup runs another agent server than its parent, and its "
+            "description says how the prompt was adapted."
         ),
     )
 
 
 class ManifestSetup(_ListedConfig):
-    """A config that runs the main manifest's tasks and scoring with another harness or runtime."""
+    """A config that runs the same tasks, prompt wording, scoring and task limits with another harness or runtime.
+
+    Task limits are the turn and time budgets and the tool caps, such as a search limit, that the benchmark sets. When
+    a harness has no setting for one of them, the setup's description says so. A runtime is what drives or hosts the
+    run with the same harness, such as another sandbox provider, or a standard rollout instead of an adaptive
+    evaluation driver. A ``*_legacy_agent`` config is not listed as a setup. It is being migrated off: the agent runs
+    the whole episode behind the ``legacy_agent`` relay instead of the Environment Server, often through an older
+    adapter of the same harness. It runs by name as a plain catalog config until it is removed.
+    """
 
 
 class ManifestProtocol(_ListedConfig):
-    """A config that scores a benchmark's tasks under another prompt, tools or scoring.
+    """A task variant: a config that runs a benchmark's tasks under another prompt, scoring or task limits.
+
+    Its score is not comparable with the main config's. A config that changes the tools runs the tasks in another
+    environment; until a manifest can name environments separately, it is listed as a protocol whose description says
+    so. Serving the same tools another way, for example over MCP, is not a change of tools.
 
     It may list its own setups: configs that run the protocol with another harness or runtime. They take the
     protocol's facts, not only the main manifest's. A setup lists nothing, so the nesting stops there.
     """
 
-    description: NonEmptyString = Field(description="How the protocol's prompt, tools or scoring differ.")
+    description: NonEmptyString = Field(description="How the protocol's prompt, scoring, task limits or tools differ.")
     setups: list[ManifestSetup] = Field(
         default_factory=list,
-        description="Configs that run this protocol's tasks, prompt and scoring with another harness or runtime.",
+        description=(
+            "Configs that run this protocol's tasks, prompt, scoring and task limits with another harness or runtime."
+        ),
     )
 
 
@@ -515,11 +530,11 @@ class EnvironmentManifest(_ManifestModel):
 
     setups: list[ManifestSetup] = Field(
         default_factory=list,
-        description="Configs that run these tasks and this scoring with another harness or runtime.",
+        description="Configs that run these tasks, prompt, scoring and task limits with another harness or runtime.",
     )
     protocols: list[ManifestProtocol] = Field(
         default_factory=list,
-        description="Benchmark configs that score these tasks under another prompt, tools or scoring.",
+        description="Task variants: benchmark configs that run these tasks under another prompt, scoring or limits.",
     )
 
     @field_validator("authors", "maintainers", "intended_use", "capabilities", "domains", "overlaps_with")

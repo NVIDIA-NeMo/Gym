@@ -123,11 +123,20 @@ Apply the checks for the areas the diff touches.
   applies, which is a claim to check, not a default. New or modified metadata must not leave scaffold
   `TODO` values. For an existing manifest, review the affected declarations
   without requiring unrelated metadata backfilling. A config that runs a
-  benchmark with another harness, or under another prompt, tools or scoring,
-  is listed in the main manifest's `setups` or `protocols`, sets only what
-  differs, and has no manifest of its own. A setup that names its own
-  `standard_prompt_config` must keep the benchmark's prompt wording, adapted
-  only in form for its harness, and its `description` must say how.
+  benchmark with another harness or runtime is listed in the main manifest's
+  `setups`, and one under another prompt, scoring, task limits or tools in its
+  `protocols`; each entry sets only what differs and has no manifest of its
+  own. A `*_legacy_agent` config is the exception: it is being migrated off,
+  and the agent runs the whole episode behind the `legacy_agent` relay, often
+  through an older adapter of the same harness. It is not listed, and runs by
+  name until it is removed. A setup keeps the benchmark's task limits: turn
+  and time budgets, and tool caps such as a search limit. Validation does not
+  compare them, so check them, and check that the `description` says so when
+  the harness has no setting for one. A config that changes them is a protocol,
+  but one that only runs more repeats is still a setup. A setup that names its
+  own `standard_prompt_config` must run another `agent_server` than its
+  parent, keep the benchmark's prompt wording, adapted only in form for its
+  harness, and its `description` must say how.
 - **Agent harnesses (`responses_api_agents/`).** Check multi-turn and
   tool-calling trajectory handling in the Responses API format. Check schema
   presence and drift coverage against the dataset's owner, which is not

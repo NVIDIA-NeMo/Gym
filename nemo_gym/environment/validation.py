@@ -1079,14 +1079,23 @@ def _prompt_templates(manifest: EnvironmentManifest) -> tuple[str | None, set[tu
 def _validate_setup(main: EnvironmentManifest, setup: EnvironmentManifest, entry: ManifestSetup) -> None:
     """Check that a setup runs the tasks and scoring of ``main``: the main manifest, or the protocol that lists it.
 
-    ``setup`` is the setup's complete manifest and ``entry`` what its listing sets. A setup runs the tasks with another
-    harness or runtime, so both declare the same task datasets or Harbor target, resources server and grading mode.
-    When both build prompts from templates, they also declare the same templates: a harness may add its own
-    instructions, but the benchmark's prompt is part of its rules. A harness may need that prompt in another form,
-    such as in the user message because it owns the system prompt. The entry then names its own template in
-    ``standard_prompt_config`` and says in its ``description`` how it adapted the prompt; review checks that the
-    benchmark's wording is unchanged. A protocol is not checked here: it scores a benchmark's tasks under other rules,
-    and it may run its own prepared copy of the data, so whether its tasks match is left to review.
+    ``setup`` is the setup's complete manifest and ``entry`` what its listing sets. A setup runs the same tasks, prompt
+    wording, scoring and task limits with another harness or runtime, so both declare the same task datasets or Harbor
+    target, resources server and grading mode. When both build prompts from templates, they also declare the same
+    templates: a harness may add its own instructions, but the benchmark's prompt is part of the task.
+
+    A harness may need that prompt in another form, such as in the user message because it owns the system prompt. A
+    setup whose agent server differs from its parent's then names its own template in ``standard_prompt_config`` and
+    says in its ``description`` how it adapted the prompt; review checks that the benchmark's wording is unchanged. A
+    setup with its parent's agent server runs the same harness, so its own template changes the prompt, and the
+    template comparison runs as usual. Agent servers that choose the harness through a setting, such as
+    ``harness_agent`` and ``harness_exa_search``, keep the same name for every harness, so their setups cannot use
+    this exception; none needs it today.
+
+    Task limits are not compared, because each harness names its turn and time budgets and tool caps with its own
+    keys; review checks them. Neither are repeats, which change the variance of a score and not what it measures. A
+    protocol is not checked here: it is a task variant, and it may run its own prepared copy of the data, so whether
+    its tasks match is left to review.
     """
     if _task_files(setup) != _task_files(main):
         raise EnvironmentValidationError(
@@ -1103,7 +1112,7 @@ def _validate_setup(main: EnvironmentManifest, setup: EnvironmentManifest, entry
             f"Setup {setup.name} scores with another resources server or grading mode than {main.name}; list a "
             "benchmark config scored under other rules under protocols."
         )
-    if entry.standard_prompt_config is not None:
+    if entry.standard_prompt_config is not None and setup.agent_server != main.agent_server:
         if entry.description is None:
             raise EnvironmentValidationError(
                 f"Setup {setup.name} names its own prompt template; its description must say how it adapts the "
@@ -1114,8 +1123,9 @@ def _validate_setup(main: EnvironmentManifest, setup: EnvironmentManifest, entry
     ):
         raise EnvironmentValidationError(
             f"Setup {setup.name} uses another prompt template than {main.name}; list a benchmark config prompted "
-            "under other rules under protocols. A setup whose harness needs the same prompt in another form names "
-            "its template in standard_prompt_config and says how it adapted the prompt in its description."
+            "under other rules under protocols. A setup whose harness needs the same prompt in another form runs "
+            f"another agent server than {main.name}, names its template in standard_prompt_config and says how it "
+            "adapted the prompt in its description."
         )
 
 
