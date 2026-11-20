@@ -434,7 +434,7 @@ async def test_owned_stop_precedes_waiting_for_cancelled_activation(agent, state
             await stopped.wait()
             raise
 
-    state.session.sandbox.stop.side_effect = stopped.set
+    state.session.sandbox.stop.side_effect = lambda **_: stopped.set()
     download_json = mock_json_download(state.session.sandbox, side_effect=FileNotFoundError("missing cleanup receipt"))
     state.task = asyncio.create_task(activation())
     await started.wait()

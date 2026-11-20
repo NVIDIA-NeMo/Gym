@@ -11,6 +11,9 @@ headers do not replace terms applicable to third-party material.
   revision `5e0a5533f597b0c56dae7d9705771498202ab19b`.
   The evaluator subtree is Apache-2.0; its VLMEvalKit license is reproduced below.
   Source: https://github.com/zhuzil/VTC-Bench/blob/5e0a5533f597b0c56dae7d9705771498202ab19b/eval/eval/VLMEvalKit/vlmeval/dataset/image_vqa.py
+- Agent-X uses an original reference-answer judge; its evaluator code and judge prompt are not incorporated.
+  The pinned manifest records dataset provenance, separately from dataset access and redistribution terms.
+
 ## Scoring deviations
 
 The `mcq-final-answer-llm-v4` scorer requires an uppercase, word-bounded option

@@ -6,7 +6,9 @@ import io
 import json
 import shutil
 import sqlite3
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -20,6 +22,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from resources_servers.spider2_lite import eval_utils
 from resources_servers.spider2_lite.app import (
     FailureCode,
     Spider2LiteResourcesServer,
@@ -40,8 +43,91 @@ from resources_servers.spider2_lite.eval_utils import (
 from resources_servers.text_to_sql.app import extract_sql_from_response
 
 
+# Ends on its own after a few seconds, so a missing timeout fails a test instead of hanging it.
+_SLOW_QUERY = (
+    "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 30000000) SELECT count(*) FROM r"
+)
+
+
 # ---------------------------------------------------------------------------
-# TestEvalUtils
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_response(text: str) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="r",
+        created_at=0.0,
+        model="m",
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id="msg",
+                content=[NeMoGymResponseOutputText(annotations=[], text=text, type="output_text")],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+        ],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+
+
+def _make_verify_request(
+    text: str, db_id: str = "TestDB", gold_sql: str = "SELECT 1", **kwargs
+) -> Spider2LiteVerifyRequest:
+    return Spider2LiteVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=_make_response(text),
+        db_id=db_id,
+        question="test question",
+        gold_sql=gold_sql,
+        **kwargs,
+    )
+
+
+@pytest.fixture
+def sql_executor():
+    executor = ThreadPoolExecutor(max_workers=4)
+    yield executor
+    executor.shutdown(wait=True)
+
+
+@pytest.fixture
+def tiny_db(tmp_path) -> Path:
+    """Create a tiny SQLite DB with one table."""
+    db = tmp_path / "TestDB.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE items (id INTEGER, name TEXT, val REAL)")
+    conn.executemany("INSERT INTO items VALUES (?,?,?)", [(1, "alpha", 1.0), (2, "beta", 2.0)])
+    conn.commit()
+    conn.close()
+    return db
+
+
+@pytest.fixture
+def server(tmp_path, tiny_db):
+    sqlite_dir = tmp_path / ".spider2_lite" / "sqlite"
+    sqlite_dir.mkdir(parents=True)
+    # Move the tiny db into the sqlite_dir
+    import shutil
+
+    shutil.copy(tiny_db, sqlite_dir / "TestDB.sqlite")
+
+    with patch("resources_servers.spider2_lite.app.ensure_spider2_lite", return_value=sqlite_dir):
+        cfg = Spider2LiteResourcesServerConfig(
+            host="127.0.0.1",
+            port=20099,
+            entrypoint="",
+            spider2_lite_dir=str(tmp_path / ".spider2_lite"),
+        )
+        srv = Spider2LiteResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
+    return srv
+
+
+# ---------------------------------------------------------------------------# TestEvalUtils
 # ---------------------------------------------------------------------------
 
 
@@ -83,10 +169,50 @@ class TestEvalUtils:
     def test_execute_sqlite_bad_sql(self, tiny_db):
         assert execute_sqlite(tiny_db, "NOT VALID SQL") == None
 
-    def test_execute_sqlite_async_ok(self, tiny_db):
+    def test_execute_sqlite_async_ok(self, tiny_db, sql_executor):
         sem = asyncio.Semaphore(1)
-        rows = asyncio.run(execute_sqlite_async(tiny_db, "SELECT id FROM items ORDER BY id", sem))
+        rows = asyncio.run(execute_sqlite_async(tiny_db, "SELECT id FROM items ORDER BY id", sem, sql_executor))
         assert rows == [(1,), (2,)]
+
+    def test_execute_sqlite_timeout_raises(self, tiny_db):
+        with pytest.raises(TimeoutError):
+            execute_sqlite(tiny_db, _SLOW_QUERY, timeout_s=0.2)
+
+    def test_execute_sqlite_timeout_leaves_the_next_query_unaffected(self, tiny_db):
+        with pytest.raises(TimeoutError):
+            execute_sqlite(tiny_db, _SLOW_QUERY, timeout_s=0.2)
+        assert execute_sqlite(tiny_db, "SELECT id FROM items ORDER BY id", timeout_s=5.0) == [(1,), (2,)]
+
+    async def test_execute_sqlite_async_timeout_stops_the_query(self, tiny_db, sql_executor, monkeypatch):
+        monkeypatch.setattr(eval_utils, "_OUTER_TIMEOUT_BUFFER_S", 0.5)
+        finished = threading.Event()
+        real_execute = eval_utils.execute_sqlite
+
+        def tracked_execute(*args, **kwargs):
+            try:
+                return real_execute(*args, **kwargs)
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(eval_utils, "execute_sqlite", tracked_execute)
+        sem = asyncio.Semaphore(1)
+        assert await execute_sqlite_async(tiny_db, _SLOW_QUERY, sem, sql_executor, timeout_s=0.2) is None
+        assert finished.is_set()
+        assert not sem.locked()
+
+    async def test_queries_queued_behind_slow_ones_still_run(self, tiny_db, monkeypatch):
+        # Admitted queries always find a worker in the dedicated pool, so quick queries behind slow ones succeed.
+        monkeypatch.setattr(eval_utils, "_OUTER_TIMEOUT_BUFFER_S", 5.0)
+        sem = asyncio.Semaphore(2)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            slow = [execute_sqlite_async(tiny_db, _SLOW_QUERY, sem, executor, timeout_s=0.3) for _ in range(2)]
+            quick = [
+                execute_sqlite_async(tiny_db, "SELECT id FROM items ORDER BY id", sem, executor, timeout_s=5.0)
+                for _ in range(6)
+            ]
+            results = await asyncio.gather(*slow, *quick)
+        assert results[:2] == [None, None]
+        assert results[2:] == [[(1,), (2,)]] * 6
 
     def test_compare_result_sets_exact(self):
         gold = [(1, "a"), (2, "b")]
@@ -156,31 +282,37 @@ class TestEvalUtils:
     def test_compare_multi_empty_gold(self):
         assert not compare_multi_result_sets([], [(1,)])
 
-    def test_execute_and_compare_match(self, tiny_db):
+    def test_execute_and_compare_match(self, tiny_db, sql_executor):
         sem = asyncio.Semaphore(4)
         match, gold, pred, err = asyncio.run(
-            execute_and_compare(tiny_db, "SELECT id FROM items ORDER BY id", "SELECT id FROM items ORDER BY id", sem)
+            execute_and_compare(
+                tiny_db, "SELECT id FROM items ORDER BY id", "SELECT id FROM items ORDER BY id", sem, sql_executor
+            )
         )
         assert match is True
         assert err is None
 
-    def test_execute_and_compare_mismatch(self, tiny_db):
+    def test_execute_and_compare_mismatch(self, tiny_db, sql_executor):
         sem = asyncio.Semaphore(4)
         match, gold, pred, err = asyncio.run(
-            execute_and_compare(tiny_db, "SELECT id FROM items", "SELECT name FROM items", sem)
+            execute_and_compare(tiny_db, "SELECT id FROM items", "SELECT name FROM items", sem, sql_executor)
         )
         assert match is False
         assert err is None
 
-    def test_execute_and_compare_gold_error(self, tiny_db):
+    def test_execute_and_compare_gold_error(self, tiny_db, sql_executor):
         sem = asyncio.Semaphore(4)
-        match, gold, pred, err = asyncio.run(execute_and_compare(tiny_db, "INVALID SQL", "SELECT 1", sem))
+        match, gold, pred, err = asyncio.run(
+            execute_and_compare(tiny_db, "INVALID SQL", "SELECT 1", sem, sql_executor)
+        )
         assert match is False
         assert err is not None and "gold_sql_error" in err
 
-    def test_execute_and_compare_pred_error(self, tiny_db):
+    def test_execute_and_compare_pred_error(self, tiny_db, sql_executor):
         sem = asyncio.Semaphore(4)
-        match, gold, pred, err = asyncio.run(execute_and_compare(tiny_db, "SELECT id FROM items", "INVALID SQL", sem))
+        match, gold, pred, err = asyncio.run(
+            execute_and_compare(tiny_db, "SELECT id FROM items", "INVALID SQL", sem, sql_executor)
+        )
         assert match is False
         assert err is not None and "pred_sql_error" in err
 
@@ -208,6 +340,9 @@ class TestExtractSqlReuse:
 
 
 class TestSpider2LiteServerUnit:
+    def test_sql_pool_is_as_large_as_the_semaphore(self, server):
+        assert server._sql_executor._max_workers == server.config.sqlite_max_concurrency
+
     async def test_verify_gold_sql_match(self, server):
         req = _make_verify_request(
             "```sql\nSELECT id, name, val FROM items ORDER BY id;\n```",

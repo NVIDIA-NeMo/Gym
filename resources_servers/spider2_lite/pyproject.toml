@@ -6,7 +6,7 @@ name = "gym-resources-servers-spider2-lite"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
-    "nemo-gym[dev,ray]",
+    "nemo-gym[dev]",
     "google-cloud-bigquery>=3.0.0",
 ]
 

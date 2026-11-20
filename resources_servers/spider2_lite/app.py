@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -125,7 +126,6 @@ class Spider2LiteVerifyResponse(BaseVerifyResponse):
 
 
 class Spider2LiteResourcesServer(SimpleResourcesServer):
-    ray_enabled = True
     config: Spider2LiteResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
@@ -133,6 +133,10 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
         self._sqlite_dir: Optional[Path] = None
         self._sqlite_lock = threading.Lock()
         self._semaphore = asyncio.Semaphore(self.config.sqlite_max_concurrency)
+        # Dedicated pool, as large as the semaphore, so an admitted query never waits behind other server work.
+        self._sql_executor = ThreadPoolExecutor(
+            max_workers=self.config.sqlite_max_concurrency, thread_name_prefix="spider2_lite_sql"
+        )
         self._bigquery_client: Any = None
         self._bigquery_init_error: Optional[str] = None
         self._bigquery_lock = threading.Lock()
@@ -281,6 +285,7 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
                 gold_sql=body.gold_sql,
                 pred_sql=extracted_sql,
                 semaphore=self._semaphore,
+                executor=self._sql_executor,
                 condition_cols=body.condition_cols or [],
                 ignore_order=body.ignore_order,
                 timeout_s=self.config.sqlite_execution_timeout_s,
@@ -296,6 +301,7 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
                 db_path,
                 extracted_sql,
                 self._semaphore,
+                self._sql_executor,
                 timeout_s=self.config.sqlite_execution_timeout_s,
             )
             if pred_rows is None:

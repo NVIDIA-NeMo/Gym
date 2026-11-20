@@ -6,6 +6,7 @@
 from collections import Counter
 
 from nemo_gym.models.chat_completions_converter import message_content_to_text
+from nemo_gym.trajectory.model_call_record import build_model_call_record
 from nemo_gym.trajectory.trajectory_record import ContextCompactionObservation
 
 from .checker import _mapping, _objects, _resolve
@@ -38,14 +39,17 @@ def inspect_compaction(
     helper_ids = fixture.get("response_ids")
     summary = fixture.get("summary")
     attempts = _objects((witness or {}).get("attempts"))
-    expected_ids = [_mapping(a.get("response")).get("id") for a in attempts]
+    successful = [a for a in attempts if isinstance(a.get("status_code"), int) and 200 <= a["status_code"] < 300]
+    failed = [a for a in attempts if isinstance(a.get("status_code"), int) and a["status_code"] >= 400]
+    expected_ids = [_mapping(a.get("response")).get("id") for a in successful]
     available = (
         record is not None
         and isinstance(helper_ids, list)
         and all(isinstance(value, str) and value for value in helper_ids)
         and isinstance(summary, str)
         and bool(summary)
-        and bool(attempts)
+        and bool(successful)
+        and len(successful) + len(failed) == len(attempts)
         and all(isinstance(value, str) and value for value in expected_ids)
     )
     helper_ids = helper_ids if available else []
@@ -105,7 +109,7 @@ def inspect_compaction(
     )
 
     def summary_reused() -> bool:
-        if events[0].get("summary") != summary or helper_ids[0] not in expected_ids:
+        if summary not in (events[0].get("summary") or "") or helper_ids[0] not in expected_ids:
             return False
         following = expected_ids[expected_ids.index(helper_ids[0]) + 1 :]
         if not following:
@@ -153,15 +157,20 @@ def inspect_compaction(
     )
 
     def usage_retained() -> bool:
-        usages = [_mapping(_mapping(a.get("response")).get("usage")) for a in attempts]
-        counts = [
-            (u.get("prompt_tokens", u.get("input_tokens")), u.get("completion_tokens", u.get("output_tokens")))
-            for u in usages
-        ]
-        if any(type(value) is not int or value < 0 for pair in counts for value in pair):
-            return False
-        prompt = sum(pair[0] for pair in counts)
-        completion = sum(pair[1] for pair in counts)
+        calls = [build_model_call_record(attempt, call_index=index) for index, attempt in enumerate(attempts)]
+        counts = []
+        for call in calls:
+            pair = (call.tokens_in, call.tokens_out)
+            if any(value is None for value in pair):
+                if call.status_code is None or call.status_code < 400:
+                    return False
+                # Aggregate the measured subtotal, never assign usage to the error.
+                gaps = _objects(_mapping((record or {}).get("ng_agent_observations")).get("gaps"))
+                if not any(gap.get("code") == "model_call_usage_unavailable" for gap in gaps):
+                    return False
+            counts.append(pair)
+        prompt = sum(pair[0] for pair in counts if pair[0] is not None)
+        completion = sum(pair[1] for pair in counts if pair[1] is not None)
         usage = _mapping(_mapping((record or {}).get("response")).get("usage"))
         return (usage.get("input_tokens"), usage.get("output_tokens"), usage.get("total_tokens")) == (
             prompt,
@@ -173,6 +182,6 @@ def inspect_compaction(
         "usage_retained",
         usage_retained,
         "$.response.usage",
-        "aggregate usage must include every witnessed policy and compaction call exactly once",
+        "aggregate usage must include reported policy and compaction usage exactly once; unknown error usage needs a gap",
     )
     return results.dump()

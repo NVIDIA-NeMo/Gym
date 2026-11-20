@@ -114,11 +114,13 @@ def regenerate(*, root: Path, commit: str, output: Path, harnesses: list[str], t
     runtimes = {}
     for harness in harnesses:
         identities = []
-        for scenario in SCENARIOS:
-            runtime = json.loads((probes / harness / scenario.name / "runtime.json").read_text())
+        for scenario in summary["harnesses"][harness]["scenarios"]:
+            if scenario.get("unsupported_reason"):
+                continue  # A declared failure did not start a runtime.
+            runtime = json.loads((probes / harness / scenario["scenario"] / "runtime.json").read_text())
             # Runtime locations are machine-local; versions and source hashes are portable.
             identities.append({key: value for key, value in runtime.items() if key not in ("source", "executable")})
-        if not identities[0] or any(identity != identities[0] for identity in identities):
+        if not identities or not identities[0] or any(identity != identities[0] for identity in identities):
             raise ValueError(f"{harness} runtime changed during probing")
         runtimes[harness] = identities[0]
     report = {
