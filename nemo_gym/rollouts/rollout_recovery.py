@@ -1266,6 +1266,9 @@ def _is_semantic(key: str) -> bool:
     # Task data (task_parameters and the like) is part of the experiment whatever its keys are called.
     if any(segment in _SEMANTIC_KEYS or segment.startswith("task") for segment in segments):
         return True
+    # OpenAI-compatible providers also spell their transport endpoint baseURL.
+    if segments[-1] == "baseURL":
+        return False
     if _SEMANTIC_ASSET_PATH.search(segments[-1]):
         return True
     if any(part in segment for segment in segments[:-1] for part in _SEMANTIC_PARTS):
