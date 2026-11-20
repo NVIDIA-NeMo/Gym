@@ -44,4 +44,4 @@ bird_interact_c_interact:
       agent_server:
         name: auto_ontology_agent
       # A turn is one Auto Ontology episode, with the user's answers: as long as the agent lets an episode run.
-      turn_timeout_seconds: 1800
+      activation_timeout_seconds: 1800
