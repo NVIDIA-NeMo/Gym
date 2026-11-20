@@ -141,15 +141,21 @@ by the resources server.
 
 ## Run other harnesses
 
-`benchmarks/deepswe/{hermes,nooa,openclaw,pi,codex}.yaml` run the same tasks, resources server and verifier with
-another harness in place of OpenCode. Each binds its own resources server, agent and `single_agent_turn_legacy`
-Environment Server instances (`deepswe_<harness>_*`), lists only its harness in `allowed_agents`, and lets the
-agent sandbox reach the policy model server's host (`sandbox_model_server`) and nothing else. Each harness keeps the
-three-hour agent budget and the 18,000-second episode bound of the OpenCode benchmark.
+`benchmarks/deepswe/{hermes,nooa,openclaw,pi,codex}.yaml` are presets of the DeepSWE benchmark: the same tasks,
+resources server and verifier, with another harness in place of OpenCode. A preset is not a benchmark of its own and
+has no manifest; the resources server's `allowed_agents` (`configs/deepswe.yaml`) lists every preset's harness. Each
+preset binds its own resources server, agent and `single_agent_turn_legacy` Environment Server instances
+(`deepswe_<harness>_*`), narrows that resources server's `allowed_agents` to its harness, and lets the agent sandbox
+reach the policy model server's host (`sandbox_model_server`) and nothing else. Each harness keeps the three-hour agent
+budget and the 18,000-second episode bound of the OpenCode benchmark.
 
-The agent sandbox cannot download a harness runtime, so each benchmark gets one in without network:
+Select a harness with its preset (`--benchmark deepswe/<harness>`), not with `--agent-type` on the OpenCode benchmark.
+These harnesses are session agents, which run only where a config binds them, and the preset also sets the harness's
+runtime, budget and concurrency for DeepSWE.
 
-| Benchmark | Runtime in the agent sandbox | What to provide |
+The agent sandbox cannot download a harness runtime, so each config gets one in without network:
+
+| Config (`--benchmark`) | Runtime in the agent sandbox | What to provide |
 | --- | --- | --- |
 | `deepswe/opencode` | The OpenCode binary (`sandbox_executable_path`) | A mounted copy, or `agent_runtime_paths.opencode` (above) |
 | `deepswe/hermes` | Built by the Hermes agent server for the sandbox's platform and uploaded at seed | Nothing; the agent server needs network to build it once |

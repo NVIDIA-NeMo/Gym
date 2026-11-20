@@ -2057,6 +2057,17 @@ def test_each_harness_recipe_binds_its_own_deepswe_instances(
         assert agent[runtime_setting] == f"{app_module.AGENT_RUNTIME_DIR}/{harness}"
 
 
+def test_every_harness_preset_is_allowed_and_shares_the_one_deepswe_manifest() -> None:
+    # A config that only changes the harness is a preset of the DeepSWE taskset, not a benchmark of its own: it has no
+    # manifest, and the resources server's allowed_agents lists its harness.
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "deepswe.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    allowed = config["deepswe_resources_server"]["resources_servers"]["deepswe"]["allowed_agents"]
+
+    assert sorted(allowed) == sorted(f"{path.stem}_agent" for path in _DEEPSWE_BENCHMARKS.glob("*.yaml"))
+    assert [path.parent.name for path in _DEEPSWE_BENCHMARKS.glob("*/manifest.yaml")] == ["opencode"]
+
+
 @pytest.mark.parametrize(
     "harness,agent_type,concurrency",
     [

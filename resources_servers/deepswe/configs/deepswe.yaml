@@ -1,7 +1,9 @@
 deepswe_resources_server:
   resources_servers:
     deepswe:
-      allowed_agents: [opencode_agent]
+      # Every harness the DeepSWE configs in benchmarks/deepswe/ run. The harness presets share the one DeepSWE
+      # manifest (deepswe/opencode), and each narrows its own instance to its harness.
+      allowed_agents: [opencode_agent, hermes_agent, nooa_agent, openclaw_agent, pi_agent, codex_agent]
       entrypoint: app.py
       domain: coding
       verified: false
