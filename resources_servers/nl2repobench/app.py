@@ -547,10 +547,10 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # reward 0, graded=false, evaluation_completed=false; grade later from the saved workspace (for nl2repo-tasks: its
     # own grade.py). Mirrors the ProgramBench resources server's trace-only mode. Added 2026-11-03.
     trace_only: bool = False
-    # Grading is attempted this many times in all, each on a fresh verifier sandbox, when the infrastructure fails (the
-    # sandbox cannot start, or the provider reports an error rather than a test result) before the row is masked as
+    # Grading is retried this many times, each on a fresh verifier sandbox, when the infrastructure fails (the sandbox
+    # cannot start, or the provider reports an error rather than a test result) before the row is masked as
     # inconclusive: that says nothing about the agent's code, so it must not score as a 0.
-    verifier_attempts: int = Field(default=3, ge=1)
+    inconclusive_verification_retries: int = Field(default=2, ge=0)
     verifier_sandbox_retry_delay_s: float = Field(default=5.0, ge=0)
 
 
@@ -1344,7 +1344,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         if workspace_error is None and self.config.trace_only:
             result = VerifierResult(evaluation_completed=False, reward=0.0, test_case_count=task.test_case_count)
         elif workspace_error is None:
-            attempts = self.config.verifier_attempts
+            attempts = 1 + self.config.inconclusive_verification_retries
             for attempt in range(1, attempts + 1):
                 sandbox = None
                 try:

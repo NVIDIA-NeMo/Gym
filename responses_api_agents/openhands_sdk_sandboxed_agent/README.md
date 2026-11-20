@@ -1,0 +1,68 @@
+# OpenHands SDK Sandboxed Agent
+
+> [!NOTE]
+> **Experimental.** This agent serves one benchmark today, [NL2RepoBench](../../benchmarks/nl2repobench/README.md),
+> and runs each episode through its own `/run` path, like `opencode_sandboxed_agent`. It has no completed run on the
+> upstream 104-task NL2RepoBench set yet; see "Combinations and status" in the benchmark README.
+
+The OpenHands SDK harness for sandboxes that a resources server seeds. The resources server creates the sandbox
+(`/seed_session` returns a `sandbox_handle`); this agent reconnects to it by handle, installs the OpenHands SDK
+inside it, runs `runner.py` against the policy model server, hands the response to the resources server's `/verify`,
+and stops the sandbox. Nothing here modifies the OpenCode agent: it is a separate agent type.
+
+## Usage
+
+The agent is configured through the benchmark that uses it. For NL2RepoBench:
+
+```bash
+gym env start \
+  --config benchmarks/nl2repobench/openhands.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+  --config responses_api_models/<model>/configs/<model>.yaml
+```
+
+The shared agent config is `configs/openhands_sdk_sandboxed_agent.yaml`. It needs a `resources_server` that seeds a
+sandbox and answers `/verify`, and a `model_server`.
+
+## Installing the SDK in the sandbox
+
+- **Default:** `pip install` of `install_packages` (`openhands-sdk==1.50.0`, `openhands-tools==1.50.0` and a pinned
+  `litellm`) into a venv at `venv_dir`, optionally from a pre-staged wheelhouse (`install_find_links`).
+- **Offline bundle (`bundle_path`):** for sandboxes with no internet, or that block `python -m venv` (the
+  `no_internet_preinstalled` and `block_target_v2` NL2RepoBench modes). Build it once with
+  `bash build_bundle.sh <outdir>` (needs `uv` and internet on an x86_64 Linux machine). It produces
+  `openhands_bundle.tar.gz` with a standalone Python, the SDK and a static tmux, which is uploaded into each rollout's
+  sandbox. `bundle_python_relpath` must match the Python version the bundle pins.
+
+## Failure handling
+
+- **Setup failures are not graded.** An install that exits non-zero, reports a provider `error_type`, or does not print
+  its `OPENHANDS_INSTALLED` marker, and a failed upload, raises a typed `openhands.setup` failure. The row is never
+  sent to `/verify`: a harness that never started has not attempted the task, and an untouched workspace would score
+  as a 0.
+- **A run that started is graded on what it left.** A runner that times out or errors after starting still goes to
+  `/verify`, which sees the partial workspace.
+- **Teardown always runs.** The sandbox is stopped in a shielded `finally`, so a verify error or a cancelled request
+  does not leave it to its TTL.
+
+## Configuration
+
+| Option | Default | Meaning |
+|---|---|---|
+| `sandbox_timeout` | `21600` | Seconds one agent run may take. |
+| `install_timeout_s` | `900` | Seconds the SDK install may take. |
+| `max_iterations` | `500` | OpenHands iteration cap. |
+| `model_call_timeout_s` | `14400` | Bound on a single model call. |
+| `background_exec` | `true` | Run the SDK as a detached background process and poll, instead of one long exec; the runner also writes partial results periodically. |
+| `bundle_path` | `null` | Offline bundle (above). |
+| `user_prompt` | NL2RepoBench's task prompt | Set to `null` to use the benchmark row's own prompt. |
+
+## Tests
+
+```bash
+gym env test +entrypoint=responses_api_agents/openhands_sdk_sandboxed_agent
+```
+
+## Licensing information
+
+Code: Apache 2.0.

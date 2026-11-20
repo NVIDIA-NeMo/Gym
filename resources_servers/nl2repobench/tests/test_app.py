@@ -662,13 +662,13 @@ async def test_verifier_sandbox_that_never_starts_masks_the_row(task_assets: Pat
     assert response.mask_sample is True
     assert response.failure_kind == "verifier_error"
     assert "provider busy" in response.failure_reason
-    assert create_sandbox.await_count == 1 + server.config.verifier_attempts
+    assert create_sandbox.await_count == 1 + (1 + server.config.inconclusive_verification_retries)
 
 
 async def test_provider_error_while_running_tests_masks_the_row(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
     server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
     sandboxes = []
-    for _ in range(server.config.verifier_attempts):
+    for _ in range((1 + server.config.inconclusive_verification_retries)):
         sandbox = AsyncMock()
         sandbox.exec.return_value = MagicMock(return_code=125, stdout="", stderr="", error_type="sandbox")
         sandboxes.append(sandbox)

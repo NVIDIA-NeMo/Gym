@@ -55,9 +55,9 @@ snapshot instead of `git diff`:
    `workspace_tar_max_bytes` as a hard cap before proceeding.
 3. The agent sandbox is stopped, and a **fresh** verifier sandbox is created, from the task's pinned per-task image
    unless `verify_image_override` or `verify_image_registry_template` says otherwise (trusted network, no egress
-   restriction; the image ships the test dependencies but no reference solution). Grading is attempted
-   `verifier_attempts` times (default 3), each on a fresh sandbox, when the infrastructure fails, before the row is
-   masked.
+   restriction; the image ships the test dependencies but no reference solution). Grading is retried
+   `inconclusive_verification_retries` times (default 2), each on a fresh sandbox, when the infrastructure fails,
+   before the row is masked.
 4. The tarball is uploaded and restored into `/workspace`. With `grading_protocol: gym_strict` (the server's default; the shipped benchmark configs set `upstream`) it is
    extracted as is; with `upstream` the agent's packaging files and its files at the held-out test paths are deleted
    first, as NL2RepoBench's own post-processor does.
