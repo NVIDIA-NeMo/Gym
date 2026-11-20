@@ -55,7 +55,7 @@ Terminal-Bench 2.1 does not list `openhands_agent` in `allowed_agents` yet; star
 | `system_prompt` | Text appended to OpenHands' own system prompt, before the request's `instructions` and system message. |
 | `llm_settings` | OpenHands SDK `LLM` settings, limited to the names in `SUPPORTED_LLM_SETTINGS` in `app.py`. |
 | `finish_tool_names` | Tools from the episode's MCP grants whose successful call ends the run, such as a benchmark's `finish`. When set, OpenHands' own `finish` is not offered, and the runner requires at least one configured name to be available from a grant. A reply without a tool call, `timeout` or `max_iterations` can still end the run without submitting. |
-| `mcp_tool_timeout_seconds` | Per call to a tool from an MCP grant (default 900). |
+| `mcp_tool_timeout_seconds` | Deadline for each request to an MCP grant's server, tool calls and tool discovery included (default and maximum 300). OpenHands stops every MCP tool call after 300 seconds, so a call that runs longer returns a tool error to the model. |
 | `sandbox_provider`, `sandbox_config` | Only for an agent-owned sandbox, when Resources supplies no `sandbox_access`. `ttl_s` defaults to `sandbox_install_timeout_seconds + timeout + 600`. `metadata` is the provider block's `default_metadata`, then `sandbox_config.metadata`, then the adapter's `gym-agent`, `gym-session` and `gym-rollout` labels. |
 | `network_access` | `inherit` (default), `model_only` or `model_and_tools`: egress of an agent-owned sandbox. `inherit` keeps the provider's network; `model_only` allows only the Model Server's host, and `model_and_tools` also the hosts of the episode's MCP grants. OpenSandbox only; a session that borrows a sandbox rejects any value other than `inherit`, as does one whose `sandbox_config.provider_options` sets its own `network_policy`. The Agent Server builds the runtime and uploads it, so a restricted sandbox needs no network for setup. |
 | `sandbox_install_timeout_seconds` | Budget for runtime installation at seed. |
@@ -125,7 +125,7 @@ observation bundle, with an `agent_activation_interrupted` gap when no activatio
   `OH_PERSISTENCE_DIR`; nothing is written under the task's home. Tool shells keep the task's `HOME` and
   `XDG_*` directories. They also see `OH_PERSISTENCE_DIR`, `OPENHANDS_SUPPRESS_BANNER`, OpenHands' own
   `AI_AGENT=openhands`, `HISTFILE` and `INPUTRC`. `INPUTRC` points at a session file that includes the
-  readline file bash would have read (`~/.inputrc` or `/etc/inputrc`) and turns bracketed paste off: at 1.59.0
+  readline file bash would have read (`~/.inputrc` or `/etc/inputrc`) and turns bracketed paste off: at 1.62.0
   the subprocess terminal otherwise leaves bash 5.1+'s `ESC[?2004h` codes in the tool output.
 
 ## Responses and outcomes

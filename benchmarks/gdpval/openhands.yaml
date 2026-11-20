@@ -43,8 +43,9 @@ gdpval_openhands_agent:
         # Per model call, in seconds; the model server retries transient failures.
         timeout: 600
       finish_tool_names: [finish, abandon_task_finish]
-      # Well above a slow web call: each step of a search or fetch can take up to 180 s.
-      mcp_tool_timeout_seconds: 900
+      # OpenHands stops each MCP tool call after 300 s, its own fixed limit, so a web call that runs longer (each step
+      # of a search or fetch can take up to 180 s) returns a tool error to the model.
+      mcp_tool_timeout_seconds: 300
       # The first seed builds the runtime on the agent server's host with uv and uploads it to the sandbox.
       sandbox_install_timeout_seconds: 1200
       session_close_timeout_seconds: 90

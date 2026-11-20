@@ -145,8 +145,14 @@ class OpenHandsAgentConfig(BaseResponsesAPIAgentConfig):
             "a tool call or a run limit can still end the run without submitting."
         ),
     )
+    # OpenHands stops every MCP tool call after its own fixed 300 seconds (MCP_TOOL_TIMEOUT_SECONDS), whatever the
+    # server's timeout is, so a longer deadline could not take effect.
     mcp_tool_timeout_seconds: float = Field(
-        default=900, gt=0, allow_inf_nan=False, description="Per call to a tool from an MCP grant."
+        default=300,
+        gt=0,
+        le=300,
+        allow_inf_nan=False,
+        description="Deadline for each request to an MCP grant's server, tool calls and tool discovery included.",
     )
     # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
     sandbox_provider: Optional[str] = None

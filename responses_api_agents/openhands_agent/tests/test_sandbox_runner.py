@@ -334,9 +334,9 @@ GRANTS = {
         "url": "http://resources:8080/mcp",
         "headers": {"x-nemo-gym-mcp-session": "token"},
         "required": True,
-        "timeout": 300,
+        "timeout": 300000,
     },
-    "search": {"url": "http://search:8080/mcp", "headers": {}, "required": False, "timeout": 300},
+    "search": {"url": "http://search:8080/mcp", "headers": {}, "required": False, "timeout": 300000},
 }
 
 
@@ -349,7 +349,7 @@ def test_mcp_grants_reach_openhands_and_required_ones_are_probed_first(tmp_path,
         "url": "http://resources:8080/mcp",
         "transport": "http",
         "headers": {"x-nemo-gym-mcp-session": "token"},
-        "timeout": 300,
+        "timeout": 300000,
     }
     assert set(agent["mcp_config"]) == {"gdpval_resources_server", "search"}
     # Without finish tools, OpenHands keeps its own finish.
