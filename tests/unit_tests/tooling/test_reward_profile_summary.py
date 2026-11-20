@@ -332,6 +332,25 @@ def test_a_run_masked_everywhere_is_reported_apart(tmp_path):
     assert "  Not in the profile file (every saved rollout was masked): 0 (agent_b)\n" in _summarize(profile).stdout
 
 
+@pytest.mark.parametrize(
+    "runs", [[("agent_a", None), ("agent_b", None)], [("agent", "server_a"), ("agent", "server_b")]]
+)
+def test_without_inputs_a_run_that_saved_nothing_keeps_its_label(tmp_path, runs):
+    # The second run saved nothing, so main writes its count-only row under the label gym gave it.
+    rows = _fan_out_rows(runs, tasks=1)
+    results = [row | {"reward": 1.0} for row in rows[:2]]
+    profile = _gym_profile(tmp_path, rows, results)
+    (tmp_path / "run_materialized_inputs.jsonl").unlink()
+    measured, unmeasured = (server or agent for agent, server in runs)
+
+    summary = _summary(profile)
+
+    assert _ids(summary["same_reward_every_repeat"]["1.0"]) == [(0, measured)]
+    assert _ids(summary["no_measured_rollout"]) == [(0, unmeasured)]
+    assert summary["mean_reward_over_measured_rollouts"] == {measured: 1.0}
+    assert summary["coverage"]["planned_rollouts"] is None
+
+
 @pytest.mark.parametrize("shape", ["main", "0.7.0"])
 def test_runs_on_separate_tasks_keep_their_own_means(tmp_path, shape):
     # Each task ran under one agent, so gym writes plain rows that do not name the run. Task 2 saved nothing.

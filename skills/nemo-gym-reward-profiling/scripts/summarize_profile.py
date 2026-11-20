@@ -151,7 +151,10 @@ def summarize(
     several_runs = len(set(labels.values())) > 1
 
     def named_run(row):
-        """The label of the run the row names, or None when it names none or the profile has a single run."""
+        """The label of the run the row names, or None when it names none or there is only one run to name."""
+        if planned_by_task_label is None and "agent_ref" in row:
+            # Without the inputs, a row gym split by run keeps gym's label, even when only one run was measured.
+            return agent_name(row)
         if not several_runs:
             return None
         if isinstance(row.get("sample"), dict):
