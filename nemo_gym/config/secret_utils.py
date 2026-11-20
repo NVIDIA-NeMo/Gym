@@ -368,6 +368,49 @@ def mask_credentials(value: Any, under_credential_key: bool = False, in_headers:
     return copy(value)
 
 
+# A setting holding a credential, matched on its name lower-cased with `-`, `.`, spaces and case changes as `_`:
+# `exa_api_key`, `X-Api-Key`, `service_key`, `Authorization`, `auth`, `X-Session`, `X_TOKEN`, `my_service_pw`, but not
+# `max_tokens`, `author`, `reference_key` or `record_terminal_session`. A `..._key` counts only after a word that names
+# an account or a service, since other `..._key` settings (`metric_key`, `reference_key`) select what is measured.
+_CREDENTIAL_NAME = re.compile(
+    r"api_?key|secret|passw(or)?d|credential|private_?key|access_?key|cookie"
+    r"|(^|_)(token|pw|pwd|pass|bearer|o?auth)$|(^|_)o?auth(orization|entication)?(_|$)"
+    r"|(^|_)(service|client|signing|license|master|account|subscription|encryption|session|app)_key$"
+    r"|^(x_)?session(_id)?$"
+)
+
+
+def is_credential_name(name: object) -> bool:
+    """Whether a setting's name says it holds a credential; narrower than `looks_like_secret_key`, so it can decide
+    what a persisted identity redacts without hiding settings such as `max_tokens`."""
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(name))
+    return bool(_CREDENTIAL_NAME.search(re.sub(r"[\s.\-]", "_", normalized).lower()))
+
+
+_URL_HEAD = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//")
+_URL_PARTS = re.compile(r"^(?P<authority>[^/?#]*)(?P<path>[^?#]*)")
+
+
+def url_without_credentials(value: str) -> str:
+    """`value` without the user info, query and fragment of the URL it is, so it can be recorded as a name.
+
+    A URL is one with a scheme, a protocol-relative `//host/...`, or a schemeless `user:password@host/...` (also
+    `TOKEN@host.example/...`). The user info runs to the authority's last `@`, since passwords are often pasted without
+    percent-encoding. Anything else, such as `org/benchmark@v3` or a model name, is returned as is.
+    """
+    head = _URL_HEAD.match(value)
+    rest = value[head.end() :] if head else value
+    parts = _URL_PARTS.match(rest)
+    userinfo, separator, host = parts["authority"].rpartition("@")
+    if not head:
+        if not separator:
+            return value
+        hostname, _, port = host.partition(":")
+        if not ("." in hostname or hostname == "localhost" or port or ":" in userinfo):
+            return value
+    return (head[0] if head else "") + host + parts["path"]
+
+
 def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
     """Mask `+key=value` / `++key=value` tokens whose key looks secret-shaped."""
     override_re = re.compile(r"^(\+{1,2})([^=]+)=(.*)$")
