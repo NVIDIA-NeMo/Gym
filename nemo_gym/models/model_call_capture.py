@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import time
+import zlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, NotRequired, Optional, TypedDict
@@ -38,10 +39,10 @@ from uuid import uuid4
 import orjson
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.core.correlation import CorrelationPathError, client_session_id, resolve
-from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.episode_context import CALLER_SERVER_HEADER, VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
@@ -119,6 +120,16 @@ class ModelCallCaptureConfig(BaseModel):
     observability_enabled: bool = False
     trajectory_schema_version: Literal["1.0", "2.0"] = "1.0"
     model_call_capture_dir: Optional[Path] = None
+    # Which model servers write evaluation capture records. None (the default) records every model server; a list
+    # records only the named servers, e.g. the judge and simulator servers and not the policy. Unlisted servers still
+    # strip the rollout prefix and keep token capture.
+    model_call_capture_servers: Optional[list[str]] = None
+    # Record the calls of one rollout group in every N. The group is the capture key without its
+    # `_g<index>` sibling and `-a<attempt>` suffixes, so a prompt's siblings and retries are kept or dropped together.
+    model_call_capture_sample_every: int = Field(default=1, ge=1)
+    # Stop recording new calls while the capture directory's filesystem has less free space than
+    # this (checked at most every 30 s per process). 0 disables the check.
+    model_call_capture_min_free_gib: float = Field(default=0.0, ge=0)
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
@@ -129,6 +140,61 @@ class ModelCallCaptureConfig(BaseModel):
         if not self.model_call_capture_dir.is_absolute():
             raise ValueError("model_call_capture_dir must be an absolute path")
         return self
+
+    def records_server(self, model_server_name: Optional[str]) -> bool:
+        """Whether this model server writes evaluation capture records."""
+        return self.model_call_capture_servers is None or model_server_name in self.model_call_capture_servers
+
+
+# The sibling and attempt suffixes of a NeMo RL capture key (`<group>_g<i>[-a<n>]`).
+_CAPTURE_GROUP_SUFFIX = re.compile(r"_g\d+(?:-a\d+)?\Z")
+
+
+class _CaptureGate:
+    """Per-rollout-group sampling and a free-space floor for the evaluation capture store."""
+
+    _SPACE_CHECK_INTERVAL_S = 30.0
+
+    def __init__(self, root: Path, *, sample_every: int, min_free_gib: float) -> None:
+        self._root = root
+        self._sample_every = sample_every
+        self._min_free_bytes = int(min_free_gib * 2**30)
+        self._space_checked_at: Optional[float] = None
+        self._space_ok = True
+
+    @staticmethod
+    def group_of(rollout_id: str) -> str:
+        return _CAPTURE_GROUP_SUFFIX.sub("", rollout_id)
+
+    def samples(self, rollout_id: str) -> bool:
+        if self._sample_every <= 1:
+            return True
+        return zlib.crc32(self.group_of(rollout_id).encode()) % self._sample_every == 0
+
+    def has_space(self) -> bool:
+        if not self._min_free_bytes:
+            return True
+        now = time.monotonic()
+        if self._space_checked_at is None or now - self._space_checked_at >= self._SPACE_CHECK_INTERVAL_S:
+            self._space_checked_at = now
+            try:
+                stat = os.statvfs(self._root)
+                space_ok = stat.f_bavail * stat.f_frsize >= self._min_free_bytes
+            except OSError:
+                space_ok = False
+            if space_ok != self._space_ok:
+                logger.warning(
+                    "Model-call capture at %s %s: free space is %s the %.1f GiB floor.",
+                    self._root,
+                    "resumed" if space_ok else "paused",
+                    "back above" if space_ok else "below",
+                    self._min_free_bytes / 2**30,
+                )
+            self._space_ok = space_ok
+        return self._space_ok
+
+    def admits(self, rollout_id: str) -> bool:
+        return self.samples(rollout_id) and self.has_space()
 
 
 _PENDING_SUFFIX = ".capture.pending"
@@ -658,6 +724,7 @@ def _record(
     response_raw: Optional[str] = None,
     execution: Optional[ModelExecutionOutcome] = None,
     failure: BaseException | None = None,
+    caller_server: Optional[str] = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
     request_body = None
@@ -688,6 +755,8 @@ def _record(
         }
         if verifier_invocation_id is not None:
             exchange["verifier_invocation_id"] = verifier_invocation_id
+        if caller_server is not None:
+            exchange["caller_server"] = caller_server
         if client_session_id is not None:
             exchange["client_session_id"] = client_session_id
         if agent_instance is not None:
@@ -787,9 +856,12 @@ class _CaptureMiddleware:
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
+        capture_gate: "_CaptureGate | None" = None,
     ) -> None:
         self._app = app
         self._store = store
+        # Sampling and free-space floor, applied per call before it is recorded.
+        self._capture_gate = capture_gate
         self._model_server_name = model_server_name
         # Every capture record names the serving model server from this server's own configuration.
         self._model_ref = ModelRef(name=model_server_name) if model_server_name else None
@@ -917,7 +989,17 @@ class _CaptureMiddleware:
             if not known_non_generating and not response_started:
                 await _mark_unobserved_incomplete("completed without starting a response")
             return
-        if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
+        # A sampled-out rollout group, or a full disk, records nothing, exactly as with no store.
+        store = self._store
+        if (
+            store is not None
+            and self._capture_gate is not None
+            and rollout_from_path is not None
+            and dialect is not None
+            and not self._capture_gate.admits(rollout_from_path)
+        ):
+            store = None
+        if (store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
             # Publish the id to this handler's current_rollout_id() even on the plain
             # forward path -- this is the common case for a model server with capture
             # disabled, and the id is already known here from the prefix above.
@@ -930,6 +1012,7 @@ class _CaptureMiddleware:
         verifier_invocation_id = _unique_request_header(
             scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
         )
+        caller_server = _unique_request_header(scope.get("headers") or [], CALLER_SERVER_HEADER.encode("ascii"))
         session_id = client_session_id(scope)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
@@ -963,7 +1046,7 @@ class _CaptureMiddleware:
 
         # Training-only capture has no evaluation record.
         # Persist capture failure before forwarding a terminal event or finishing a JSON response.
-        if self._store is None:
+        if store is None:
             streaming = False
             sse_event_buffer = bytearray()
 
@@ -1046,7 +1129,7 @@ class _CaptureMiddleware:
         # Claimed before the call is forwarded, for its whole lifetime. A claim taken only at
         # write time does not exist while the call is in flight, so a reader can look, see nothing
         # outstanding, and snapshot the rollout before the row lands.
-        self._store.mark_pending(rollout_id, model_call_id)
+        store.mark_pending(rollout_id, model_call_id)
         try:
             with rollout_context(rollout_id):
                 await self._app(scope, _receive, _send)
@@ -1061,7 +1144,7 @@ class _CaptureMiddleware:
             try:
                 await asyncio.to_thread(
                     _record,
-                    self._store,
+                    store,
                     dialect,
                     self._model_server_name,
                     bytes(request_body),
@@ -1081,11 +1164,12 @@ class _CaptureMiddleware:
                     response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
                     execution=request_state.get("nemo_gym_model_execution"),
                     failure=exc,
+                    caller_server=caller_server,
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
             finally:
-                self._store.clear_pending(rollout_id, model_call_id)
+                store.clear_pending(rollout_id, model_call_id)
                 await _fail_uncommitted_external_call(capture_context)
                 await _flush_deferred_response()
             raise
@@ -1103,7 +1187,7 @@ class _CaptureMiddleware:
         stream_terminal = state["stream_terminal"]
         ttft_ms = state["ttft_ms"]
         request_bytes = bytes(request_body)
-        store, model_server_name = self._store, self._model_server_name
+        model_server_name = self._model_server_name
 
         def _parse_and_record() -> None:
             # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a
@@ -1159,6 +1243,7 @@ class _CaptureMiddleware:
                     ttft_ms=ttft_ms,
                     response_raw=response_raw,
                     execution=request_state.get("nemo_gym_model_execution"),
+                    caller_server=caller_server,
                 )
             finally:
                 store.clear_pending(rollout_id, model_call_id)
@@ -1265,9 +1350,21 @@ def install_model_call_capture(
                 await _close_capture_endpoints()
 
         app.router.lifespan_context = _capture_lifespan
+    # Only the configured servers record, through the sampling and free-space gate.
+    store = make_capture_store(config) if config.records_server(model_server_name) else None
+    capture_gate = (
+        _CaptureGate(
+            store.root,
+            sample_every=config.model_call_capture_sample_every,
+            min_free_gib=config.model_call_capture_min_free_gib,
+        )
+        if store is not None
+        else None
+    )
     app.add_middleware(
         _CaptureMiddleware,
-        store=make_capture_store(config),
+        store=store,
+        capture_gate=capture_gate,
         assistant_message_header=assistant_message_header,
         model_server_name=model_server_name,
         token_store=token_store,
