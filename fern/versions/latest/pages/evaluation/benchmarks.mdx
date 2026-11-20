@@ -207,6 +207,21 @@ JUDGE_BASE_URL=http://JUDGE_HOST:8001/v1 JUDGE_MODEL=Qwen/Qwen2.5-72B-Instruct \
 
 The headline metric is `mAM`. Scores are comparable only between runs with the same judge, and not with published V-STaR results, which sample one frame per second. See the benchmark's [README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/vstar_spatiotemporal/README.md) for the task contract, the frame options and the limitations.
 
+**Molmo2-VideoTrackEval** (`benchmarks/molmo2_videotrack`) is another. It is text-referred video point tracking: the model gets a description and a clip's frames 1 second apart, and reports a point on every matching object in every frame where it is visible. A point is correct when it lies inside its object's segmentation mask, and the score is the F1 of the points, averaged over frames and then over the 3,147 expressions. The dataset ships annotations only. The videos come from APTv2, DanceTrack, SportsMOT, PersonPath22 and SA-V, each under its own terms, and Gym does not redistribute them: download them and extract the frames with `benchmarks/molmo2_videotrack/extract_frames.py`, as the [benchmark README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/molmo2_videotrack/README.md) describes.
+
+Point `MOLMO2_VIDEOTRACK_ROOT` at the directory holding `data/` and `videos/`, then prepare and run:
+
+```bash
+export MOLMO2_VIDEOTRACK_ROOT=/path/to/Molmo2-VideoTrackEval
+gym eval prepare --benchmark molmo2_videotrack
+
+gym eval run --benchmark molmo2_videotrack \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 --model MODEL_NAME \
+  --split benchmark --output results/molmo2_videotrack/rollouts.jsonl
+```
+
+By default the prepared rows reference each frame by a `file://` URL, so the JSONL is tied to that path and needs a model server that reads local files, such as vLLM started with `--allowed-local-media-path`. Set `MOLMO2_VIDEOTRACK_FRAME_URL_ROOT` when the model server sees the frames at a different path, or `MOLMO2_VIDEOTRACK_EMBED_FRAMES=1` to embed the frames as data URLs for an endpoint that cannot read local files (about 7 GB of JSONL). Prompts carry up to 30 images, some of them 3840x2160. Object ids in the answer are not scored, and the scores have not been checked against the upstream evaluation code, so compare with published Molmo2 numbers with care.
+
 ## Interpreting Results
 
 A score is only meaningful relative to a fixed comparison: same dataset split, same model, same harness, same sampling config. It is also only as reliable as the verifier behind it — before trusting a score, confirm the reward function actually measures the behavior you care about.
