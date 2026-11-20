@@ -1160,6 +1160,15 @@ class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
 
 
 class NeMoGymResponseUsage(ResponseUsage):
+    """Token usage of a response; for an agent, the sum over its policy-model responses that finished.
+
+    A detail such as ``input_tokens_details.cached_tokens`` (cache reads) is the count the model or
+    harness reported. When it reported none, or reported a zero that only stands for "absent", set
+    None: consumers read 0 as a measured "no cache hits". Use 0 only for a known zero, such as a
+    response that made no model call, and say why in a comment. Use ``accumulate_response_usage``
+    or ``sum_from_list`` to add usages; they keep an unknown detail unknown.
+    """
+
     input_tokens_details: NeMoGymResponseInputTokensDetails
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
@@ -1170,6 +1179,7 @@ class NeMoGymResponseUsage(ResponseUsage):
             total = accumulate_response_usage(total, usage)
         if total is not None:
             return total
+        # The sum over no responses is a known zero, details included.
         return cls(
             input_tokens=0,
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0, cache_write_tokens=0),
@@ -1396,20 +1406,29 @@ NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
 ]
 
 
+# Outer tool-call keys that agents replay from a model response but that carry no meaning in a request:
+# - "name" duplicates the nested function.name or custom.name.
+# - "index" is a position in a streamed response, which some providers also return on non-streaming tool calls.
+_REDUNDANT_OUTER_TOOL_CALL_KEYS = ("name", "index")
+
+
 def _strip_outer_tool_call_names(value: Any) -> Any:
-    """Copy tool calls carrying a redundant outer name and remove only that field."""
+    """Copy tool calls carrying a redundant outer key and remove only those keys.
+
+    Every other unknown key stays a validation error, so provider state an agent needs to replay is never dropped.
+    """
     if not isinstance(value, list):
         return value
 
     normalized = None
     for index, tool_call in enumerate(value):
-        if not isinstance(tool_call, dict) or "name" not in tool_call:
+        if not isinstance(tool_call, dict) or tool_call.keys().isdisjoint(_REDUNDANT_OUTER_TOOL_CALL_KEYS):
             continue
         if normalized is None:
             normalized = list(value)
-        normalized_tool_call = dict(tool_call)
-        del normalized_tool_call["name"]
-        normalized[index] = normalized_tool_call
+        normalized[index] = {
+            key: field for key, field in tool_call.items() if key not in _REDUNDANT_OUTER_TOOL_CALL_KEYS
+        }
 
     return value if normalized is None else normalized
 
@@ -1426,6 +1445,9 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
     # Some harnesses replay reasoning on assistant history in Chat Completions.
     reasoning_content: str | None
+    reasoning: str | None
+    # Provider-signed thinking (LiteLLM's Anthropic `thinking_blocks`), replayed verbatim.
+    thinking_blocks: List[Dict[str, Any]]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(

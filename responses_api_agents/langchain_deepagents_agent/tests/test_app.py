@@ -13,19 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import re
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
+from fastapi import HTTPException, Response
+from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError
 
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.sandbox import (
+    DirectSandboxConnection,
+    SandboxAccess,
+)
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent, DeepAgentsAgentConfig
 from responses_api_agents.langchain_deepagents_agent.reasoning_search_agent import (
     ReasoningSearchDeepAgent,
     ReasoningSearchDeepAgentConfig,
@@ -36,24 +46,51 @@ from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge 
 )
 
 
-def _config(**kwargs) -> ReasoningSearchDeepAgentConfig:
+def _config(**kwargs) -> DeepAgentsAgentConfig:
+    kwargs.setdefault("tool_profile", "tavily_search")
     kwargs.setdefault("resources_server", ResourcesServerRef(type="resources_servers", name="reasoning_gym"))
     kwargs.setdefault("model_server", ModelServerRef(type="responses_api_models", name="policy_model"))
     kwargs.setdefault("tavily_api_key", "test-tavily-key")
     kwargs.setdefault("max_input_tokens", 202800)
-    return ReasoningSearchDeepAgentConfig(host="0.0.0.0", port=8080, entrypoint="", name="", **kwargs)
+    return DeepAgentsAgentConfig(host="0.0.0.0", port=8080, entrypoint="", name="", **kwargs)
 
 
-def _make_agent(**kwargs) -> ReasoningSearchDeepAgent:
-    return ReasoningSearchDeepAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+def _make_agent(**kwargs) -> DeepAgentsAgent:
+    return DeepAgentsAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
-# --- build_agent abstractness / concreteness --------------------------------------------------------
+# --- shared entrypoint and tool profiles -------------------------------------------------------------
 
 
-def test_base_class_build_agent_is_abstract():
-    with pytest.raises(NotImplementedError):
-        DeepAgentsAgent.build_agent(MagicMock(), MagicMock())
+def test_builtin_profile_does_not_build_a_search_graph(monkeypatch):
+    build = MagicMock(side_effect=AssertionError("search graph must not be built for a sandbox session"))
+    monkeypatch.setattr(DeepAgentsAgent, "build_agent", build)
+    agent = _make_agent(tool_profile="builtin", tavily_api_key=None, resources_server=None)
+    assert agent.agent is None
+    build.assert_not_called()
+
+
+def test_legacy_search_class_uses_the_shared_implementation():
+    config = ReasoningSearchDeepAgentConfig.model_validate(
+        _config().model_dump(exclude_none=True, exclude={"tool_profile"})
+    )
+    agent = ReasoningSearchDeepAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    assert agent.config.tool_profile == "tavily_search"
+    assert agent.agent is not None
+    assert ReasoningSearchDeepAgent.responses is DeepAgentsAgent.responses
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"tavily_api_key": None}, "tavily_api_key is required"),
+        ({"tool_profile": "builtin"}, "tavily_api_key requires tool_profile=tavily_search"),
+        ({"sandbox_provider": "runtime"}, "sandbox_provider requires tool_profile=builtin"),
+    ],
+)
+def test_tool_profile_rejects_incompatible_configuration(overrides, message):
+    with pytest.raises(ValidationError, match=message):
+        _config(**overrides)
 
 
 def test_concrete_agent_builds_successfully():
@@ -113,8 +150,7 @@ async def test_responses_propagates_inbound_cookies_to_outgoing_response():
     request.path_params = {}
     response = Response()
 
-    body = MagicMock()
-    body.input = "hello"
+    body = NeMoGymResponseCreateParamsNonStreaming(input="hello")
 
     await agent.responses(request, response, body)
     assert response.raw_headers  # a Set-Cookie header was added
@@ -141,7 +177,7 @@ async def test_responses_seeds_model_cookies_empty_not_from_resources_server_coo
     request.path_params = {}
     request.url.path = "/v1/responses"
 
-    await agent.responses(request, Response(), MagicMock(input="hello"))
+    await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
     run_config = agent.agent.ainvoke.call_args.kwargs["config"]
     assert run_config["configurable"]["model_cookies"] == {"cookies": None}
@@ -162,7 +198,7 @@ async def test_responses_forwards_capture_mode_path_into_model_url_path():
     request.path_params = {"rollout_id": "abc123"}
     request.url.path = "/ng-rollout/abc123/training-token-capture/v1/responses"
 
-    await agent.responses(request, Response(), MagicMock(input="hello"))
+    await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
     run_config = agent.agent.ainvoke.call_args.kwargs["config"]
     assert "training-token-capture" in run_config["configurable"]["model_url_path"]
@@ -304,7 +340,7 @@ async def test_responses_result_is_what_verify_receives_for_a_tool_using_rollout
     used to discard the whole tool-call/tool-result trace.
 
     Deliberately does not assert on resources-server session state/metrics: this agent's tools (e.g.
-    TavilySearch in reasoning_search_agent.py; `ls` here, deepagents' built-in filesystem tool, so this
+    TavilySearch in app.py; `ls` here, deepagents' built-in filesystem tool, so this
     test needs no network) execute inside the agent harness and never touch a resources server's own
     session — there is nothing on that side for a test at this level to observe. See README.md's "Tool
     ownership" section."""
@@ -322,8 +358,7 @@ async def test_responses_result_is_what_verify_receives_for_a_tool_using_rollout
     request = MagicMock()
     request.cookies = {}
     request.path_params = {}
-    body = MagicMock()
-    body.input = "list files"
+    body = NeMoGymResponseCreateParamsNonStreaming(input="list files")
 
     result = await agent.responses(request, Response(), body)
 
@@ -407,7 +442,7 @@ async def test_responses_propagates_rollout_id_as_langgraph_thread_id():
     request.path_params = {"rollout_id": "abc123"}
     request.url.path = "/ng-rollout/abc123/v1/responses"
 
-    await agent.responses(request, Response(), MagicMock(input="hello"))
+    await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
     run_config = agent.agent.ainvoke.call_args.kwargs["config"]
     assert run_config["configurable"]["thread_id"] == "abc123"
@@ -429,7 +464,7 @@ async def test_responses_thread_id_falls_back_to_unscoped_without_a_rollout_id()
     request.path_params = {}
     request.url.path = "/v1/responses"
 
-    await agent.responses(request, Response(), MagicMock(input="hello"))
+    await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
     run_config = agent.agent.ainvoke.call_args.kwargs["config"]
     assert run_config["configurable"]["thread_id"] == "unscoped"
@@ -500,3 +535,477 @@ async def test_stable_thread_id_keeps_offloaded_history_in_one_appended_log():
     assert "user turn 0" not in scattered_latest, (
         "without a stable thread_id the file the model is finally pointed at has lost the original context"
     )
+
+
+# --- agent sessions (single_agent_turn / single_agent_turn_legacy) ------------------------------------
+
+
+def _session_agent(global_config: dict | None = None) -> ReasoningSearchDeepAgent:
+    agent = _make_agent()
+    agent.server_client.global_config_dict = global_config or {}
+    agent.agent = MagicMock()
+
+    async def ainvoke(state: dict, config: RunnableConfig) -> dict:
+        # Like the real graph, return the input history followed by the new messages.
+        return {"messages": [*state["messages"], AIMessage(content="<answer>42</answer>")]}
+
+    agent.agent.ainvoke = AsyncMock(side_effect=ainvoke)
+    return agent
+
+
+def _seed_body(**kwargs) -> AgentSeedSessionRequest:
+    return AgentSeedSessionRequest(
+        agent_session_id="agent-session",
+        episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+        task_id=TaskId(taskset="reasoning_gym", task_id="0"),
+        **kwargs,
+    )
+
+
+def test_config_rejects_execute_tools_false():
+    with pytest.raises(ValidationError, match="execute_tools=false is not supported"):
+        _config(execute_tools=False)
+
+
+@pytest.mark.parametrize(
+    ("unsupported", "reason"),
+    [
+        (
+            {"tool_accesses": [DirectHTTPToolAccess(name="resources", required=True, base_url="http://r:8000")]},
+            "DeepAgents agent does not support required tool access: resources",
+        ),
+        (
+            {
+                "tool_accesses": [
+                    MCPToolAccess(
+                        name="resources",
+                        required=True,
+                        connection=MCPStreamableHTTPConnection(url="http://r:8000/mcp"),
+                    )
+                ]
+            },
+            "DeepAgents agent does not support required tool access: resources",
+        ),
+        (
+            {
+                "sandbox_access": SandboxAccess(
+                    connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
+                    workdir="/work",
+                )
+            },
+            "DeepAgents agent runs in process and cannot use a task sandbox; use tool_profile=builtin",
+        ),
+    ],
+)
+def test_unsupported_seed_is_refused_with_a_final_422(unsupported: dict, reason: str):
+    agent = _session_agent()
+    assert check_agent_seed_rejected(agent.setup_webserver(), _seed_body(**unsupported)) == reason
+
+
+def test_session_skips_an_optional_grant_and_runs_the_graph_without_mirroring_cookies():
+    agent = _session_agent()
+    client = TestClient(agent.setup_webserver())
+    seed = client.post(
+        "/v1/agent_sessions",
+        json=_seed_body(
+            tool_accesses=[
+                DirectHTTPToolAccess(
+                    name="resources", required=False, base_url="http://r:8000", cookies={"resources_cookie": "grant"}
+                )
+            ]
+        ).model_dump(mode="json"),
+    )
+    assert seed.status_code == 200
+
+    result = client.post(
+        "/ng-rollout/rollout/v1/responses",
+        json={"input": [{"role": "user", "content": "6 * 7?"}]},
+        cookies={"resources_cookie": "from-seed"},
+    )
+
+    assert result.status_code == 200
+    assert result.json()["output"][0]["content"][0]["text"] == "<answer>42</answer>"
+    assert agent.agent.ainvoke.await_count == 1
+    # The Environment Server owns the Resources cookies on the session path; the agent sends none back.
+    assert "resources_cookie" not in result.cookies
+
+    close = client.post(
+        "/v1/agent_sessions/close",
+        json=AgentCloseSessionRequest(
+            agent_session_id="agent-session", episode_id=EpisodeId(rollout_id="rollout", attempt=0)
+        ).model_dump(mode="json"),
+    )
+    # The skipped grant's cookies never become the jar, which would replace the seed cookies /verify uses.
+    assert close.status_code == 200
+    assert close.json()["resources_cookies"] is None
+
+
+def test_session_close_reports_observation_gaps_and_no_resources_cookie_jar():
+    agent = _session_agent()
+    client = TestClient(agent.setup_webserver())
+    episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+    assert client.post("/v1/agent_sessions", json=_seed_body().model_dump(mode="json")).status_code == 200
+    assert client.post("/ng-rollout/rollout/v1/responses", json={"input": "6 * 7?"}).status_code == 200
+
+    close = client.post(
+        "/v1/agent_sessions/close",
+        json=AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=episode_id).model_dump(mode="json"),
+    )
+
+    assert close.status_code == 200
+    body = close.json()
+    # No jar: the seed's Resources cookie, which the Environment Server sends to /verify, stays unchanged.
+    assert body["resources_cookies"] is None
+    observations = body["agent_observations"]
+    assert observations["source"] == "langchain_deepagents_agent"
+    assert observations["records"] == []
+    assert [gap["code"] for gap in observations["gaps"]] == [
+        "agent_transcript_unavailable",
+        "model_call_ownership_unavailable",
+    ]
+
+
+def test_activation_without_a_seeded_session_is_refused():
+    agent = _session_agent()
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=_seed_body().model_dump(mode="json")).status_code == 200
+    episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+    close_body = AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=episode_id)
+    assert client.post("/v1/agent_sessions/close", json=close_body.model_dump(mode="json")).status_code == 200
+
+    # The client still carries the closed session's cookie.
+    result = client.post("/ng-rollout/rollout/v1/responses", json={"input": "6 * 7?"})
+
+    assert result.status_code == 409
+    agent.agent.ainvoke.assert_not_awaited()
+
+
+def test_checkpointing_restarts_deepagents_rollouts_instead_of_exporting_them():
+    """The graph's state lives inside one ainvoke(), which a checkpoint cannot export, so the agent takes part
+    as restart-only rather than claiming SimpleAgent's resumable sessions."""
+    agent = _session_agent({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+
+    agent.setup_webserver()
+
+    assert agent.checkpoint_participant is None
+    assert agent._restart_only is not None
+
+
+# --- activation and close ------------------------------------------------------------------------------
+
+
+def _request(rollout_id: str = "rollout") -> SimpleNamespace:
+    return SimpleNamespace(session={}, cookies={}, path_params={"rollout_id": rollout_id})
+
+
+def _close_body() -> AgentCloseSessionRequest:
+    return AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=EpisodeId(rollout_id="rollout"))
+
+
+def _tool_names(post: AsyncMock, call: int) -> set[str]:
+    return {tool["name"] for tool in post.call_args_list[call].kwargs["json"]["tools"]}
+
+
+@pytest.mark.asyncio
+async def test_in_process_session_keeps_files_in_graph_state_without_an_execute_tool(tmp_path):
+    agent = _make_agent()
+    path = str(tmp_path / "in_process.txt")
+    post = AsyncMock(
+        side_effect=[
+            _model_response(
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "write_file", "args": {"file_path": path, "content": "kept"}, "id": "w"}],
+                )
+            ),
+            _model_response(
+                AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"file_path": path}, "id": "r"}])
+            ),
+            _model_response("done"),
+        ]
+    )
+    agent.server_client.post = post
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body())
+
+    result = await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+
+    outputs = {item.call_id: item.output for item in result.output if item.type == "function_call_output"}
+    assert "kept" in outputs["r"]
+    # deepagents' StateBackend keeps the file in graph state, never on the Agent Server's disk.
+    assert not (tmp_path / "in_process.txt").exists()
+    assert "execute" not in _tool_names(post, 0)
+    close = await agent.close_agent_session(request, _close_body())
+    assert close.agent_observations.records == []
+
+
+def _hanging_graph(started: asyncio.Event, order: list[str]) -> MagicMock:
+    async def ainvoke(state: dict, config: RunnableConfig) -> dict:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            order.append("cancelled")
+            raise
+
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock(side_effect=ainvoke)
+    return graph
+
+
+async def _seed_with_graph(agent: ReasoningSearchDeepAgent, graph: MagicMock):
+    agent.agent = graph
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body())
+    return request
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seeded", [False, True])
+async def test_response_output_budget_is_refused_before_graph_binding_or_model_calls(seeded):
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(return_value=_model_response("done"))
+    request = _request()
+    state = None
+    if seeded:
+        await agent.seed_agent_session(request, _seed_body())
+        state = agent._require_agent_session("agent-session")
+    body = NeMoGymResponseCreateParamsNonStreaming(input="go", max_output_tokens=32)
+
+    with pytest.raises(HTTPException, match="response-wide max_output_tokens") as refused:
+        await agent.responses(request, Response(), body)
+    assert refused.value.status_code == 422
+    agent.server_client.post.assert_not_awaited()
+    if state is not None:
+        assert state.activation is None and state.activation_request is None
+
+    result = await agent.responses(request, Response(), body.model_copy(update={"max_output_tokens": None}))
+    assert result.output[-1].content[0].text == "done"
+    agent.server_client.post.assert_awaited_once()
+    if seeded:
+        await agent.close_agent_session(request, _close_body())
+
+
+@pytest.mark.asyncio
+async def test_legacy_run_rejects_output_budget_before_seeding_resources():
+    from responses_api_agents.simple_agent.app import SimpleAgentRunRequest
+
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(side_effect=AssertionError("invalid budget must not seed resources"))
+    body = SimpleAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="go", max_output_tokens=32)
+    )
+    with pytest.raises(HTTPException, match="response-wide max_output_tokens") as refused:
+        await agent.run(_request(), body)
+    assert refused.value.status_code == 422
+    agent.server_client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_the_running_graph():
+    agent = _make_agent()
+    started, order = asyncio.Event(), []
+    request = await _seed_with_graph(agent, _hanging_graph(started, order))
+    activation = asyncio.create_task(
+        agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="x"))
+    )
+    await asyncio.wait_for(started.wait(), 5)
+
+    close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 5)
+
+    assert order == ["cancelled"]
+    assert close.agent_observations.records == []
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(activation, 5)
+
+
+@pytest.mark.asyncio
+async def test_activation_retries_join_one_graph_run_and_conflicting_requests_are_refused():
+    agent = _make_agent()
+    release, runs = asyncio.Event(), []
+
+    async def ainvoke(state: dict, config: RunnableConfig) -> dict:
+        runs.append(state["messages"][0].content)
+        await release.wait()
+        return {"messages": [*state["messages"], AIMessage(content="ran once")]}
+
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock(side_effect=ainvoke)
+    request = await _seed_with_graph(agent, graph)
+    body = NeMoGymResponseCreateParamsNonStreaming(input="do it")
+    first = asyncio.create_task(agent.responses(request, Response(), body))
+    await asyncio.sleep(0)
+    # A client resending the same POST after a lost reply joins the run in flight.
+    second = asyncio.create_task(agent.responses(request, Response(), body.model_copy(deep=True)))
+    with pytest.raises(HTTPException) as different:
+        await asyncio.wait_for(
+            agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="other")), 5
+        )
+    with pytest.raises(HTTPException) as other_rollout:
+        other_route = SimpleNamespace(session=request.session, cookies={}, path_params={"rollout_id": "other"})
+        await asyncio.wait_for(agent.responses(other_route, Response(), body), 5)
+    release.set()
+
+    replies = await asyncio.wait_for(asyncio.gather(first, second), 5)
+
+    assert [reply.output[0].content[0].text for reply in replies] == ["ran once", "ran once"]
+    assert runs == ["do it"]
+    assert (different.value.status_code, other_rollout.value.status_code) == (409, 409)
+
+
+@pytest.mark.parametrize("missing_index", [0, 1, 2])
+async def test_missing_usage_stays_unknown_across_in_process_model_calls(missing_index):
+    from langchain_core.runnables import RunnableLambda
+
+    agent = _make_agent()
+    replies = [_model_response("done", input_tokens=10, output_tokens=5) for _ in range(3)]
+    missing_body = orjson.loads(await replies[missing_index].read())
+    missing_body["usage"] = None
+    replies[missing_index].read = AsyncMock(return_value=orjson.dumps(missing_body))
+    agent.server_client.post = AsyncMock(side_effect=replies)
+    model = GymResponsesChatModel(agent=agent)
+    holder = {"usage": None}
+
+    async def invoke_model(_input):
+        for index in range(3):
+            await model.ainvoke([HumanMessage(content="hello")])
+            if index >= missing_index:
+                assert holder["usage"] is None
+            else:
+                assert holder["usage"].input_tokens == 10 * (index + 1)
+                assert holder["usage"].output_tokens == 5 * (index + 1)
+
+    await RunnableLambda(invoke_model).ainvoke({}, config=_run_config(holder))
+    assert agent.server_client.post.await_count == 3
+
+
+async def test_retirement_cancels_a_shielded_in_process_graph():
+    agent = _make_agent()
+    started, order = asyncio.Event(), []
+    request = await _seed_with_graph(agent, _hanging_graph(started, order))
+    activation = asyncio.create_task(
+        agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+    )
+    await asyncio.wait_for(started.wait(), 10)
+    await agent.retire_agent_session("agent-session")
+    with pytest.raises(asyncio.CancelledError):
+        await activation
+    assert order == ["cancelled"]
+
+
+def test_entrypoint_class_declares_that_its_default_profile_calls_the_model_from_the_sandbox():
+    # Harbor reads this literal from the class the entrypoint runs, not through inheritance.
+    assert DeepAgentsAgent.__dict__["calls_model_from_sandbox"] is True
+    assert "calls_model_from_sandbox" not in ReasoningSearchDeepAgent.__dict__
+
+
+def _model_refusal(status: int, body: dict) -> MagicMock:
+    """A Model Server reply that `raise_for_status()` raises as a ClientResponseError with this status and body."""
+    from aiohttp import ClientResponseError, RequestInfo
+    from multidict import CIMultiDict, CIMultiDictProxy
+    from yarl import URL
+
+    url = URL("http://policy-model/v1/responses")
+    error = ClientResponseError(
+        RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url), (), status=status, message="refused"
+    )
+    response = MagicMock()
+    response.ok = False
+    response.content.read = AsyncMock(return_value=orjson.dumps(body))
+    response.raise_for_status = MagicMock(side_effect=error)
+    return response
+
+
+@pytest.mark.asyncio
+async def test_in_process_session_applies_instructions_and_sampling_to_every_model_call():
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(return_value=_model_response("done"))
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body())
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="go", instructions="Answer briefly.", temperature=0.3, top_p=0.7
+    )
+
+    await agent.responses(request, Response(), body)
+
+    sent = agent.server_client.post.call_args.kwargs["json"]
+    assert (sent["temperature"], sent["top_p"]) == (0.3, 0.7)
+    assert {"type": "message", "role": "system", "content": "Answer briefly."} in sent["input"]
+    await agent.close_agent_session(request, _close_body())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "status", "outcome"),
+    [
+        ("context_length_exceeded", "incomplete", None),
+        ("invalid_request_error", "failed", {"failure_kind": "model_request_error", "status_code": 400}),
+    ],
+)
+async def test_in_process_session_types_a_final_model_refusal(error_code, status, outcome):
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(
+        return_value=_model_refusal(400, {"error": {"code": error_code, "message": "too long"}})
+    )
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body())
+
+    result = await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+
+    assert (result.status, result.output, result.usage) == (status, [], None)
+    metadata = result.metadata or {}
+    reported = metadata.get("ng_agent_outcome")
+    assert (orjson.loads(reported) if reported else None) == outcome
+    if outcome is None:
+        assert metadata["stop_reason"] == "context_limit" and result.error is None
+    else:
+        assert "Model Server HTTP 400" in result.error.message
+    await agent.close_agent_session(request, _close_body())
+
+
+@pytest.mark.asyncio
+async def test_in_process_model_errors_still_raise_when_retryable_or_outside_a_session():
+    from aiohttp import ClientResponseError
+
+    refusal = {"error": {"code": "invalid_request_error", "message": "bad"}}
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(side_effect=[_model_refusal(503, refusal), _model_refusal(400, refusal)])
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body())
+    # The Environment Server reruns an episode whose activation fails with a retryable status.
+    with pytest.raises(ClientResponseError) as retryable:
+        await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+    assert retryable.value.status == 503
+    await agent.close_agent_session(request, _close_body())
+
+    # Legacy /run dispatches without a session and keeps raising every model error.
+    legacy = MagicMock()
+    legacy.cookies = {}
+    legacy.path_params = {"rollout_id": "legacy"}
+    legacy.url.path = "/ng-rollout/legacy/v1/responses"
+    legacy.headers = {}
+    legacy.session = {}
+    with pytest.raises(ClientResponseError) as raised:
+        await agent.responses(legacy, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+    assert raised.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_in_process_session_does_not_type_a_tool_http_error_as_a_model_refusal():
+    from aiohttp import ClientResponseError, RequestInfo
+    from multidict import CIMultiDict, CIMultiDictProxy
+    from yarl import URL
+
+    url = URL("http://search-api/search")
+    tool_error = ClientResponseError(
+        RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url), (), status=400, message="bad query"
+    )
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock(side_effect=tool_error)
+    agent = _make_agent()
+    request = await _seed_with_graph(agent, graph)
+
+    with pytest.raises(ClientResponseError) as raised:
+        await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+    assert raised.value is tool_error
+    await agent.close_agent_session(request, _close_body())

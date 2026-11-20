@@ -15,7 +15,6 @@
 import base64
 
 import pytest
-from omegaconf import OmegaConf
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.core.model_call_sampling import (
@@ -24,7 +23,6 @@ from nemo_gym.core.model_call_sampling import (
     current_model_sampling_segment,
     decode_model_sampling,
     encode_model_sampling,
-    model_call_sampling_config,
     model_sampling_context,
     model_sampling_from_run_body,
     with_model_sampling_segment,
@@ -158,36 +156,3 @@ def test_the_context_scopes_a_segment_to_its_block() -> None:
             assert current_model_sampling_segment() == "values"
         assert current_model_sampling_segment() == MODEL_SAMPLING_NULL
     assert current_model_sampling_segment() is None
-
-
-def test_the_global_block_marks_a_run_whose_rows_carry_values() -> None:
-    config = model_call_sampling_config(
-        OmegaConf.create(
-            {
-                "policy_model": {"responses_api_models": {"vllm_model": {}}},
-                "model_call_sampling": {"required_model_servers": ["policy_model"]},
-            }
-        )
-    )
-
-    assert config is not None and config.required_model_servers == ["policy_model"]
-    assert model_call_sampling_config(OmegaConf.create({"model_call_sampling": {}})).required_model_servers == []
-    assert model_call_sampling_config(OmegaConf.create({})) is None
-    assert model_call_sampling_config(None) is None
-    with pytest.raises(ValidationError):
-        model_call_sampling_config({"model_call_sampling": {"required_model_server": ["policy_model"]}})
-
-
-@pytest.mark.parametrize("name", ["polcy_model", "policy_agent"])
-def test_a_required_server_that_is_not_a_model_server_fails(name: str) -> None:
-    """A misspelled or wrong name would otherwise leave the trained agent's Model Server unenforced."""
-    with pytest.raises(ValueError, match=rf"not Model Servers in this run: \['{name}'\]"):
-        model_call_sampling_config(
-            OmegaConf.create(
-                {
-                    "policy_model": {"responses_api_models": {"vllm_model": {}}},
-                    "policy_agent": {"responses_api_agents": {"simple_agent": {}}},
-                    "model_call_sampling": {"required_model_servers": [name]},
-                }
-            )
-        )

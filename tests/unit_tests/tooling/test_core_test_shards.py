@@ -330,6 +330,7 @@ def test_workflow_requires_all_shards_sandbox_and_coverage_and_preserves_routing
         "sandbox-tests",
         "core-coverage",
         "changed-server-tests",
+        "longmt-scoring",
     }
     assert jobs["test-result"]["name"] == "Test"
     assert jobs["test-result"]["if"] == "always()"
@@ -338,16 +339,24 @@ def test_workflow_requires_all_shards_sandbox_and_coverage_and_preserves_routing
 
 
 @pytest.mark.parametrize(
-    "failed", ["DETECT_RESULT", "CORE_RESULT", "SANDBOX_RESULT", "COVERAGE_RESULT", "SERVERS_RESULT", None]
+    "failed",
+    ["DETECT_RESULT", "CORE_RESULT", "SANDBOX_RESULT", "COVERAGE_RESULT", "SERVERS_RESULT", "LONGMT_RESULT", None],
 )
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
 def test_existing_test_gate_fails_closed(failed, result):
     command = yaml.safe_load(WORKFLOW.read_text())["jobs"]["test-result"]["steps"][0]["run"]
     env = {
         name: "success"
-        for name in ("DETECT_RESULT", "CORE_RESULT", "SANDBOX_RESULT", "COVERAGE_RESULT", "SERVERS_RESULT")
+        for name in (
+            "DETECT_RESULT",
+            "CORE_RESULT",
+            "SANDBOX_RESULT",
+            "COVERAGE_RESULT",
+            "SERVERS_RESULT",
+            "LONGMT_RESULT",
+        )
     }
-    env.update(RUN_FULL="true", RUN_SERVERS="true")
+    env.update(RUN_FULL="true", RUN_SERVERS="true", RUN_LONGMT="true")
     if failed:
         env[failed] = result
     completed = subprocess.run(["bash", "-c", command], env=env)
@@ -357,7 +366,14 @@ def test_existing_test_gate_fails_closed(failed, result):
 def test_docs_only_gate_needs_successful_detection_but_no_tests():
     command = yaml.safe_load(WORKFLOW.read_text())["jobs"]["test-result"]["steps"][0]["run"]
     completed = subprocess.run(
-        ["bash", "-c", command], env={"DETECT_RESULT": "success", "RUN_FULL": "false", "RUN_SERVERS": "false"}
+        ["bash", "-c", command],
+        env={
+            "DETECT_RESULT": "success",
+            "RUN_FULL": "false",
+            "RUN_SERVERS": "false",
+            "RUN_LONGMT": "false",
+            "LONGMT_RESULT": "skipped",
+        },
     )
     assert completed.returncode == 0
 

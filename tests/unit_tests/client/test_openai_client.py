@@ -14,6 +14,7 @@
 # limitations under the License.
 """Tests of the OpenAI-compatible client in `nemo_gym.client.openai_client`."""
 
+import json
 import re
 from copy import deepcopy
 from types import SimpleNamespace
@@ -853,6 +854,19 @@ class TestProviderBackoff:
 class TestExhaustedAttemptCause:
     """The final HTTP error of exhausted retries is caused by the last attempt's observed failure."""
 
+    @pytest.mark.parametrize("error_type", [ClientOSError, TimeoutError])
+    async def test_error_body_read_without_failure_evidence_preserves_the_transport_error(self, error_type) -> None:
+        error = error_type("response body was interrupted")
+        read = AsyncMock(side_effect=error)
+        response = SimpleNamespace(headers={}, content=SimpleNamespace(read=read))
+
+        with pytest.raises(error_type) as raised:
+            await openai_client_module._read_error_body(response, None)
+
+        assert raised.value is error
+        assert raised.value.__cause__ is None
+        read.assert_awaited_once_with()
+
     @staticmethod
     def _http_error() -> ClientResponseError:
         return ClientResponseError(SimpleNamespace(real_url="http://model"), (), status=503, message="unavailable")
@@ -973,3 +987,56 @@ async def test_a_forwarded_permanent_failure_is_the_cause_of_only_the_call_it_en
     finally:
         await session.close()
         await runner.cleanup()
+
+
+def test_log_api_cost_appends_cost_headers_and_usage(tmp_path, monkeypatch) -> None:
+    from nemo_gym.client.openai_client import API_COST_LOG_ENV_VAR_NAME, log_api_cost
+
+    path = tmp_path / "cost.jsonl"
+    log_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})  # unset: nothing written
+    assert not path.exists()
+    monkeypatch.setenv(API_COST_LOG_ENV_VAR_NAME, str(path))
+    headers = {
+        "X-LiteLLM-Response-Cost": "0.0123",
+        "x-litellm-response-cost-input": "0.01",
+        "Authorization": "Bearer k",
+    }
+    usage = {"input_tokens": 10, "input_tokens_details": {"cached_tokens": 8}, "output_tokens": 3}
+    log_api_cost(
+        "/responses",
+        {"model": "m", "prompt_cache_key": "conv-1", "input": "secret prompt"},
+        headers,
+        {"usage": usage, "output": ["secret answer"]},
+    )
+    log_api_cost("/chat/completions", {"model": "m"}, None, None)
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert lines[0]["cost"] == {"x-litellm-response-cost": "0.0123", "x-litellm-response-cost-input": "0.01"}
+    assert lines[0]["usage"] == usage and lines[0]["prompt_cache_key"] == "conv-1"
+    assert "secret" not in path.read_text() and "Bearer" not in path.read_text()
+    assert lines[1]["usage"] is None and lines[1]["cost"] == {}
+
+
+def test_log_api_cost_never_raises(tmp_path, monkeypatch) -> None:
+    from nemo_gym.client.openai_client import API_COST_LOG_ENV_VAR_NAME, log_api_cost
+
+    monkeypatch.setenv(API_COST_LOG_ENV_VAR_NAME, str(tmp_path / "missing-dir" / "cost.jsonl"))
+    log_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})
+
+
+async def test_alog_api_cost_writes_in_a_worker_thread_only_when_enabled(tmp_path, monkeypatch) -> None:
+    import threading
+
+    from nemo_gym.client import openai_client
+    from nemo_gym.client.openai_client import API_COST_LOG_ENV_VAR_NAME, alog_api_cost
+
+    threads = []
+    real = openai_client.log_api_cost
+    monkeypatch.setattr(
+        openai_client, "log_api_cost", lambda *args: threads.append(threading.current_thread()) or real(*args)
+    )
+    await alog_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})
+    assert threads == []  # off: no thread hop at all
+    monkeypatch.setenv(API_COST_LOG_ENV_VAR_NAME, str(tmp_path / "cost.jsonl"))
+    await alog_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})
+    assert len(threads) == 1 and threads[0] is not threading.main_thread()
+    assert json.loads((tmp_path / "cost.jsonl").read_text())["model"] == "m"

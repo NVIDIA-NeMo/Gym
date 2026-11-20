@@ -1,0 +1,64 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Real su cannot switch to an unmapped uid in our single-uid user namespace, so
+# stay root and let the LD_PRELOAD shim report the faked uid instead.
+#
+# su accepts options both before and after the user name
+# (`su postgres -s /bin/bash -c cmd`), so parse the whole line rather than
+# assuming the first argument is the user.
+export SAAS_FAKE_ID=1
+
+cmd=""
+user=""
+user_seen=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -c|--command)
+      cmd="${2:-}"
+      shift
+      [ "$#" -gt 0 ] && shift
+      ;;
+    -s|--shell|-g|--group|-G|--supp-group)
+      shift
+      [ "$#" -gt 0 ] && shift
+      ;;
+    -|-l|--login|-m|-p|--preserve-environment|-f|--fast)
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      if [ "$user_seen" = 0 ]; then
+        user="$1"
+        user_seen=1
+        shift
+      else
+        break
+      fi
+      ;;
+  esac
+done
+
+# Report the uid the image actually assigned to that account: postgres tools
+# resolve the effective uid back to a name and abort when it is not in
+# /etc/passwd.
+uid="$(awk -F: -v u="$user" '$1 == u { print $3 }' /etc/passwd 2>/dev/null)"
+# Export rather than only writing the per-pid file: a -c body runs in a forked
+# shell, and the child pid has no file of its own so the shim would report root.
+export SAAS_FORCE_UID="${uid:-999}"
+echo "$SAAS_FORCE_UID" > "/tmp/.saas-euid-$$"
+
+if [ -n "$cmd" ]; then
+  # Replace this process so the uid file stays valid for the same pid. -c bodies
+  # can be full shell scripts (`export FOO=1; exec ...`), so hand them to a shell
+  # rather than exec'ing the first word.
+  exec /bin/sh -c "$cmd"
+fi
+[ "$#" -gt 0 ] || exec /bin/sh
+exec "$@"

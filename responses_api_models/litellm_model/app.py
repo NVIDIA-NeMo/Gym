@@ -348,8 +348,7 @@ class LiteLLMModelServer(SimpleModelServer):
         return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict["model"] = self.config.openai_model
+        body_dict = self._upstream_body(body)
 
         async def create_and_validate() -> NeMoGymResponse:
             try:

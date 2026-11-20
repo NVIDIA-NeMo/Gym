@@ -17,7 +17,8 @@ the system temp folder until it shuts down. This page lists what each file is fo
 
 `<taskset>` is the name of the target's folder: the dataset folder (for an entry or `harbor:` reference, the folder
 it was pulled into), or the task folder for a single task. `results/harbor/` is relative to the directory you run
-`gym` from.
+`gym` from; `+harbor_output_root=DIR` on `gym eval run` puts the taskset's folder under `DIR` instead (a parameterized
+dataset then also renders under `DIR`, not where `gym dataset validate` renders it).
 
 ## Pulled datasets
 
@@ -77,6 +78,7 @@ other's entries.
 | --- | --- |
 | `tasks_<agent>.jsonl` | The rows of a run with one harness. Each row carries `_ng_digest`, `_ng_dataset_digest` and `task_source`. |
 | `run_config_<agent>.yaml` | The generated run config: the task mapping, the dataset digests and the generated server instances. |
+| `benchmark_settings_<agent>.yaml` | For a benchmark config that names a Harbor target, its settings other than its agent instance; the run loads it after the server's and the provider's configs. |
 | `skipped.json` | Task ID to reason, for every selected task that did not load or build, or whose Compose file was refused. |
 | `images.json` | Every distinct image a run of the prepared tasks starts, for pre-pulling. |
 | `rendered/` | Rendered task folders of a parameterized dataset. |
@@ -89,7 +91,7 @@ other's entries.
 `<agent>` is the instance name in the harness's config. The `rollouts` stem follows `--output`:
 `--output results/harbor/x/full.jsonl` writes `full_run_summary.json`, `full_failures.jsonl` and so on. The health
 check's reports keep their names there, and the rows, run config, `skipped.json`, `images.json` and `verifier/` stay
-in `results/harbor/<taskset>/`.
+in `results/harbor/<taskset>/`, or under `+harbor_output_root`.
 
 ## The run summary
 

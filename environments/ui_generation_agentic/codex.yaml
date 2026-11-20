@@ -1,0 +1,42 @@
+# ui_generation_agentic with Codex (codex_agent) in the lent task sandbox. The task set and routing are in base.yaml.
+#
+# The sandbox has no internet, so the Codex runtime (Node 22.19.0 plus @openai/codex 0.144.4) must be baked into the
+# agent images: build them with WITH_CODEX=1 (resources_servers/ui_generation_agentic/docker/build_images.sh). Codex
+# calls the policy Gym model server's Responses endpoint with a placeholder key. It has no per-call output cap of its
+# own and refuses a request max_output_tokens, so set the cap on the model server instead, for a chat backend with
+# `extra_body: {max_tokens: ...}` on the vllm_model server.
+config_paths:
+  - environments/ui_generation_agentic/base.yaml
+  - responses_api_agents/codex_agent/configs/codex_agent.yaml
+
+ui_generation_agentic_codex_agent:
+  _inherit_from: codex_agent
+  responses_api_agents:
+    codex_agent:
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      resources_server: null
+      concurrency: 4
+      codex_version: 0.144.4
+      # Baked into the images (WITH_CODEX=1); setup checks it reports `codex-cli 0.144.4` instead of installing.
+      sandbox_runtime_dir: /opt/ui-gen/runtime/codex
+      timeout: 3600
+      # Grade the file as it stands when Codex exits nonzero or ends without turn.completed, as the other harnesses'
+      # failed runs are graded, instead of turning the run into an execution error that leaves the score.
+      verify_after_agent_error: true
+      # The sandbox environment is the agent image's own; Codex needs its TMPDIR (/var/tmp), since it refuses to create
+      # its helper binaries under the temp dir and its sessions live under /tmp.
+      inherit_sandbox_environment: true
+      # Context accounting for a custom model; compaction stays at most 90% of the window.
+      model_context_window: 131072
+      model_auto_compact_token_limit: 117000
+
+ui_generation_agentic_environment_server:
+  environment_servers:
+    single_agent_turn:
+      agent_server:
+        type: responses_api_agents
+        name: ui_generation_agentic_codex_agent
