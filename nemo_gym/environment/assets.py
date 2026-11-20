@@ -50,7 +50,9 @@ class _DeclaredNames:
 # Each tree's names, read once per process: finding them means walking the whole tree and reading every manifest, so
 # a command that selects several names, or a test that selects every name, would otherwise pay that for each name.
 # A selection checks that the table still answers for its name (see _answers) and reads the tree again when it does
-# not, so a manifest that changes, moves or is added during the process is seen.
+# not, so a manifest that changes, moves or is added during the process is seen. One case is not: a name that no
+# manifest declares, selected by its config's path, keeps that answer for the rest of the process, even if a manifest
+# added later declares that name. Checking for that would mean reading the whole tree again for every such name.
 _DECLARED_NAMES: dict[Path, _DeclaredNames] = {}
 
 
