@@ -613,7 +613,7 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                 errors += int(row.get("wer_errors") or 0)
                 references += int(row["wer_ref_words"])
             elif row.get("text"):
-                counts = _wer_counts(row["text"], row.get("pred_text") or "empty")
+                counts = _wer_counts(row["text"], row.get("pred_text") or "")
                 errors += counts["wer_errors"]
                 references += counts["wer_ref_words"]
         return None if references == 0 else 100.0 * errors / references

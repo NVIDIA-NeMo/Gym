@@ -172,6 +172,18 @@ async def test_aggregate_metrics_endpoint_scores_in_a_worker_thread(monkeypatch)
     assert aggregated.key_metrics["wer"] == pytest.approx(100.0 * 1 / 4)
 
 
+@pytest.mark.parametrize("reference,hypothesis", [("empty", ""), ("the room is empty", "Uh.")])
+async def test_aggregate_metrics_preserves_empty_normalized_hypothesis(reference: str, hypothesis: str) -> None:
+    row = await _verify("ASR-PC", reference, hypothesis)
+    assert row["pred_text"] == ""
+    assert row["wer"] == 1.0
+    row.update(_ng_task_index=0, _ng_rollout_index=0)
+
+    aggregated = await _server().aggregate_metrics(AggregateMetricsRequest(verify_responses=[row]))
+
+    assert aggregated.key_metrics["wer"] == 100.0
+
+
 async def test_aggregate_metrics() -> None:
     server = _server()
     pc = [
