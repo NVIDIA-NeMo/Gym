@@ -200,7 +200,7 @@ jobs:
           echo "One or more server-suite shards failed (result: ${{ needs.server-suite.result }})."
           exit 1
 
-  # Merges every shard's dependency cache into one layer on top of the gym image built from the
+  # Merges every shard's dependency cache into bounded layers on top of the gym image built from the
   # same commit, as gym:main-offline: an image that runs the server suite without network access.
   offline-image:
     name: Publish offline server image
@@ -251,13 +251,23 @@ jobs:
             echo "current=false" | tee -a "$GITHUB_OUTPUT"
           fi
 
+      - name: Checkout repository
+        if: steps.shards.outputs.current == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
       # Shards download shared wheels (torch, CUDA libraries) into separate uv archives. Each
       # shard's links replace the previous shard's, and pruning drops the archives left unlinked.
+      # A cluster that pulls through a remote registry refuses any layer above its request ceiling
+      # (9.9 GB on the GCP routes), so the merged cache is appended as several bounded layers.
       - name: Merge this commit's shard caches
         if: steps.shards.outputs.current == 'true'
         shell: bash
         env:
           REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
+          CACHE_LAYER_BYTES: "4000000000"
+          REMOTE_LAYER_LIMIT_BYTES: "9900000000"
         run: |
           curl -LsSf "$UV_INSTALL_URL" | env UV_UNMANAGED_INSTALL="$RUNNER_TEMP/uv" sh
           crane="$RUNNER_TEMP/crane"
@@ -269,8 +279,26 @@ jobs:
             "$crane" blob "$REPOSITORY@$digest" | tar -xzf - -C "$merged"
             "$RUNNER_TEMP/uv/uv" cache prune --cache-dir "$merged/opt/nemo-gym/cache/uv"
           done
-          tar -C "$merged" --numeric-owner --owner=65532 --group=65532 \
-            -czf "$RUNNER_TEMP/cache.tar.gz" opt/nemo-gym/cache
+          layers="$RUNNER_TEMP/layers"
+          python3 scripts/ci/pack_cache_layers.py "$merged" opt/nemo-gym/cache "$layers" \
+            --max-bytes "$CACHE_LAYER_BYTES"
+          pids=()
+          for members in "$layers"/layer-*.list; do
+            tar -C "$merged" --numeric-owner --owner=65532 --group=65532 --no-recursion --null \
+              -T "$members" -czf "${members%.list}.tar.gz" &
+            pids+=("$!")
+          done
+          for pid in "${pids[@]}"; do
+            wait "$pid"
+          done
+          for layer in "$layers"/layer-*.tar.gz; do
+            size="$(stat -c %s "$layer")"
+            echo "$(basename "$layer"): $size bytes"
+            if ((size > REMOTE_LAYER_LIMIT_BYTES)); then
+              echo "::error::$(basename "$layer") is $size bytes, above the $REMOTE_LAYER_LIMIT_BYTES-byte remote registry limit."
+              exit 1
+            fi
+          done
 
       # cicd-main's schedule builds gym:<commit> on the same cron, once its unit tests pass. Layering
       # onto that image keeps its source and locks in step with the caches; another commit's image
@@ -293,7 +321,11 @@ jobs:
             fi
             sleep 60
           done
-          "$RUNNER_TEMP/crane" append --base "$base" --new_layer "$RUNNER_TEMP/cache.tar.gz" \
+          new_layers=()
+          for layer in "$RUNNER_TEMP"/layers/layer-*.tar.gz; do
+            new_layers+=(--new_layer "$layer")
+          done
+          "$RUNNER_TEMP/crane" append --base "$base" "${new_layers[@]}" \
             --new_tag "$REPOSITORY:main-offline" --set-base-image-annotations
 
   test-wheel-install:
