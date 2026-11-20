@@ -208,6 +208,7 @@ async def score(
                         f"reason={receipt.get('reason')}, receipt={receipt_path.name}); "
                         "fix the service or credentials and explicitly resume the saved answer",
                         http_status=status,
+                        terminal=receipt.get("terminal", False),
                     )
                 continue
             delivered_reviews += 1

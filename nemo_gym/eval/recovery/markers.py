@@ -29,6 +29,7 @@ from nemo_gym.core.failure_kinds import (
     DRIVER_INSTALL_FAILED,
     ENVIRONMENT_PREPARE_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
+    JUDGE_FAILED,
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
     SERVER_SPINUP_TIMEOUT,
@@ -80,6 +81,11 @@ GUARDED_DRIVER_FAILURE_KINDS = (
 )
 
 
+# Journal drivers explicitly opt in on their deferred error; a shared failure kind alone is not admission.
+# Guarded terminal failures above never retry.
+RESUMABLE_DRIVER_FAILURE_KINDS = (JUDGE_FAILED,)
+
+
 def record_failure_kind(error: BaseException) -> None:
     """Leave the registered kind ``error`` carries in the failure file the driver step names, for the next guard.
 
@@ -90,7 +96,11 @@ def record_failure_kind(error: BaseException) -> None:
     if not isinstance(kind, str) or not path:
         return
     try:
+        journal_marker = Path(path + ".journal")
+        journal_marker.unlink(missing_ok=True)
         Path(path).write_text(kind + "\n")
+        if kind in RESUMABLE_DRIVER_FAILURE_KINDS and getattr(error, "resumable_journal", False) is True:
+            journal_marker.write_text(kind + "\n")
     except OSError as write_error:
         # The next segment then reads the saved state as it would without the kind.
         logger.warning("Cannot record failure kind %s in %s: %s", kind, path, write_error)
