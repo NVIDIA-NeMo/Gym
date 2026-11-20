@@ -30,6 +30,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
+import anyio
+
 from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
@@ -55,6 +57,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxSnapshot,
     create_provider,
 )
+from nemo_gym.sandbox.providers.base import SupportsSandboxExecScopedProcesses
 from nemo_gym.sandbox.resource_telemetry import (
     ResourceProvider,
     ResourceSampler,
@@ -147,6 +150,19 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
         return_code=int(exit_text) if parsed else SANDBOX_PTY_RUNTIME_RETURN_CODE,
         error_type=None if parsed else "pty",
     )
+
+
+STOP_TIMEOUT_S = 120.0
+"""How long :meth:`AsyncSandbox.stop` and :meth:`AsyncSandbox.disconnect` may take by default."""
+
+
+async def _close_private_session(session: SandboxPtySession) -> None:
+    """Close a terminal session a one-shot exec opened, even when its request is being cancelled.
+
+    Otherwise a cancelled request would leave the session, and the process it runs, in the sandbox.
+    """
+    with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
+        await session.close()
 
 
 class SandboxPty:
@@ -346,7 +362,7 @@ class SandboxPty:
         except (TimeoutError, asyncio.TimeoutError):
             return _pty_timeout_result(command, timeout_s, reusable=True)
         finally:
-            await session.close()
+            await _close_private_session(session)
         return SandboxExecResult(
             stdout=stdout.decode(errors="replace"),
             stderr=None if pty else stderr.decode(errors="replace"),
@@ -393,7 +409,7 @@ class SandboxPty:
             return _pty_timeout_result(command, timeout_s, reusable=False)
         finally:
             if private:
-                await session.close()
+                await _close_private_session(session)
             else:
                 try:
                     await session.reattach()  # no-op unless a timeout left it detached
@@ -856,6 +872,16 @@ class AsyncSandbox:
             raise ValueError(f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {declared!r}")
         return AsyncSandboxSidecar(self._provider, self._require_handle(), name)
 
+    async def exec_processes_terminated(self) -> bool:
+        """True only when the provider proves that no process of any exec of this sandbox can still run.
+
+        Providers without exec-scoped processes (``SupportsSandboxExecScopedProcesses``)
+        cannot prove it and always return False.
+        """
+        if not isinstance(self._provider, SupportsSandboxExecScopedProcesses):
+            return False
+        return await self._provider.exec_processes_terminated(self._require_handle())
+
     async def status(self) -> SandboxStatus:
         if self._handle is None:
             return SandboxStatus.UNKNOWN
@@ -922,7 +948,24 @@ class AsyncSandbox:
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support snapshots")
         return await provider.snapshot(handle, name=name)
 
-    async def stop(self) -> None:
+    async def stop(self, *, timeout_s: float | None = STOP_TIMEOUT_S) -> None:
+        """Stop the sandbox and release its client; a no-op once stopped, so a caller may repeat it.
+
+        The stop is shielded from anyio cancellation, which is how a client that disconnects cancels its request, so
+        a request cut short still stops the sandbox instead of leaving it to its ``ttl_s``. ``timeout_s`` bounds it, so
+        a hung provider cannot hold the caller; ``None`` means no limit. The shield does not hold against a native
+        ``task.cancel()``, such as ``asyncio.timeout``, ``asyncio.wait_for`` or a checkpoint retire, and an enclosing
+        anyio deadline is held off like any other cancellation: only ``timeout_s`` bounds the stop.
+
+        Raises:
+            TimeoutError: The stop did not finish within ``timeout_s``. Like any failed stop, it leaves the sandbox
+                to be stopped again: an owner keeps it and retries at its next close or its shutdown.
+            Exception: Whatever the provider raised.
+        """
+        with anyio.CancelScope(shield=True), anyio.fail_after(timeout_s):
+            await self._stop()
+
+    async def _stop(self) -> None:
         if self._closed:
             return
         # A failed remote stop is retryable. Do not close its client or mark the
@@ -963,12 +1006,18 @@ class AsyncSandbox:
                 raise
         self._closed = True
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, *, timeout_s: float | None = STOP_TIMEOUT_S) -> None:
         """Release this client without stopping a borrowed sandbox.
 
         Use this only for a sandbox rebuilt with :meth:`connect`.
         The component that created the sandbox remains responsible for stopping it.
+        Shielded from anyio cancellation and bounded by ``timeout_s`` like :meth:`stop`, so a cancelled request
+        still releases the client.
         """
+        with anyio.CancelScope(shield=True), anyio.fail_after(timeout_s):
+            await self._disconnect()
+
+    async def _disconnect(self) -> None:
         if self._closed:
             return
         if not self._connected:

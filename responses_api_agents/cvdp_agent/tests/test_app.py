@@ -29,10 +29,13 @@ from pytest import MonkeyPatch
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     NeMoGymEasyInputMessage,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    NgFailureEvent,
 )
 from responses_api_agents.cvdp_agent import app as cvdp_app
 from responses_api_agents.cvdp_agent.app import (
@@ -41,6 +44,7 @@ from responses_api_agents.cvdp_agent.app import (
     CVDPAgentRunRequest,
     agent_key,
     deps_build_env,
+    harvest,
 )
 
 
@@ -56,6 +60,31 @@ def _drop_nulls(value):
     if isinstance(value, list):
         return [_drop_nulls(v) for v in value]
     return value
+
+
+class TestHarvest:
+    def test_collects_project_text_changes_without_restricting_extensions(self, tmp_path) -> None:
+        files = {
+            "docs/spec.md": "updated specification",
+            "rtl/coefficients.mem": "00\n01\n",
+            "verif/check.py": "assert True\n",
+            "rtl/unchanged.sv": "module old; endmodule",
+            "rtl/.cache/generated.txt": "cache",
+            "rtl/__pycache__/generated.pyc": "cache",
+        }
+        for rel, content in files.items():
+            path = tmp_path / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        assert harvest(
+            tmp_path,
+            ["docs/**/*", "rtl/**/*", "verif/**/*"],
+            seeded={"rtl/unchanged.sv": files["rtl/unchanged.sv"]},
+        ) == {key: files[key] for key in ["docs/spec.md", "rtl/coefficients.mem", "verif/check.py"]}
+
+    def test_does_not_collect_root_level_rtl_outside_project_roots(self, tmp_path) -> None:
+        (tmp_path / "top.sv").write_text("module top; endmodule")
+        assert harvest(tmp_path, CVDPAgentConfig.model_fields["harvest_globs"].default) == {}
 
 
 class TestApp:
@@ -277,8 +306,8 @@ class TestAgenticSandboxSpec:
         box.start = AsyncMock()
         box.exec = AsyncMock(
             side_effect=[
-                SimpleNamespace(return_code=0, stdout="", stderr=""),
-                SimpleNamespace(return_code=7, stdout="", stderr="harness failed"),
+                SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+                SimpleNamespace(return_code=7, stdout="", stderr="harness failed", error_type=None),
             ]
         )
 
@@ -294,15 +323,15 @@ class TestAgenticSandboxSpec:
         assert "harness failed" in result.container_stderr
         agent.server_client.post.assert_not_called()
 
-    async def test_missing_harness_response_returns_zero_reward(self) -> None:
+    async def test_missing_harness_response_is_an_agent_route_failure(self) -> None:
         agent = self._agent(deps_provision="baked")
         agent._image = "ghcr.io/hdl/sim/osvb"
         box = MagicMock()
         box.start = AsyncMock()
         box.exec = AsyncMock(
             side_effect=[
-                SimpleNamespace(return_code=0, stdout="", stderr=""),
-                SimpleNamespace(return_code=0, stdout="", stderr=""),
+                SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+                SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
             ]
         )
         box.download = AsyncMock(side_effect=FileNotFoundError("response.json"))
@@ -311,12 +340,297 @@ class TestAgenticSandboxSpec:
             "responses_api_agents.cvdp_agent.app.AsyncSandbox",
             return_value=self._sandbox_context(box),
         ):
-            result = await agent.run(MagicMock(cookies={}), self._run_request())
+            with pytest.raises(NgFailureEvent, match="response.json") as caught:
+                await agent.run(MagicMock(cookies={}), self._run_request())
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+        agent.server_client.post.assert_not_called()
 
-        assert result.reward == 0.0
-        assert result.task_id == "task-1"
-        assert result.container_exit_code is None
-        assert "response.json" in result.container_stderr
+    @pytest.mark.parametrize(
+        "result",
+        [
+            SimpleNamespace(return_code=None, stdout="", stderr="vanished", error_type="provider_error"),
+            SimpleNamespace(return_code=-9, stdout="", stderr="", error_type=None),
+        ],
+        ids=["provider_error", "signal"],
+    )
+    async def test_sandbox_level_harness_exit_is_an_agent_route_failure(self, result) -> None:
+        agent = self._agent(deps_provision="baked")
+        agent._image = "ghcr.io/hdl/sim/osvb"
+        box = MagicMock()
+        box.start = AsyncMock()
+        box.exec = AsyncMock(
+            side_effect=[SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None), result]
+        )
+        with patch(
+            "responses_api_agents.cvdp_agent.app.AsyncSandbox",
+            return_value=self._sandbox_context(box),
+        ):
+            with pytest.raises(NgFailureEvent) as caught:
+                await agent.run(MagicMock(cookies={}), self._run_request())
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+        agent.server_client.post.assert_not_called()
+
+    async def test_harvest_download_error_is_an_agent_route_failure(self, tmp_path) -> None:
+        agent = self._agent()
+        box = MagicMock()
+        box.exec = AsyncMock(
+            return_value=SimpleNamespace(stdout="rtl/a.sv\n", stderr="", return_code=0, error_type=None)
+        )
+        box.download = AsyncMock(side_effect=OSError("transfer broke"))
+        with pytest.raises(NgFailureEvent, match="transfer broke") as caught:
+            await agent._remote_harvest(box, "/code", ["rtl/*.sv"], {}, tmp_path)
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+
+    @pytest.mark.parametrize(
+        "listing",
+        [
+            SimpleNamespace(stdout="", stderr="vanished", return_code=None, error_type="provider_error"),
+            SimpleNamespace(stdout="", stderr="", return_code=0, error_type="timeout"),
+            SimpleNamespace(stdout="", stderr="sh: 1: cd: can't cd", return_code=2, error_type=None),
+            SimpleNamespace(stdout="", stderr="", return_code=-9, error_type=None),
+        ],
+        ids=["provider_error", "timeout", "shell_error", "signal"],
+    )
+    async def test_harvest_listing_failure_is_an_agent_route_failure(self, tmp_path, listing) -> None:
+        agent = self._agent()
+        box = MagicMock()
+        box.exec = AsyncMock(return_value=listing)
+        box.download = AsyncMock()
+        with pytest.raises(NgFailureEvent, match="harvest listing failed") as caught:
+            await agent._remote_harvest(box, "/code", ["rtl/*.sv"], {}, tmp_path)
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+        box.download.assert_not_called()
+
+    async def test_absent_harvest_directory_is_a_genuine_miss(self, tmp_path) -> None:
+        # find exits 1 with no output when the optional directory does not exist.
+        agent = self._agent()
+        box = MagicMock()
+        box.exec = AsyncMock(return_value=SimpleNamespace(stdout="", stderr="", return_code=1, error_type=None))
+        box.download = AsyncMock()
+        assert await agent._remote_harvest(box, "/code", ["rtl/*.sv"], {}, tmp_path) == {}
+        box.download.assert_not_called()
+
+    @staticmethod
+    def _target_run_request() -> CVDPAgentRunRequest:
+        return CVDPAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": [{"role": "user", "content": "build rtl"}], "model": "m"},
+                "verifier_metadata": {"task_id": "task-1", "target_files": ["rtl/top.sv"]},
+            }
+        )
+
+    @staticmethod
+    def _target_box(probe, download_target=None):
+        """A sandbox whose harness ran cleanly; probe is the result of the target file existence check."""
+        response_json = NeMoGymResponse(
+            id="r",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        ).model_dump_json()
+
+        async def download(src, dest):
+            if str(src).endswith("response.json"):
+                dest.write_text(response_json)
+            elif download_target is not None:
+                download_target(dest)
+
+        ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+        box = MagicMock()
+        box.start = AsyncMock()
+        # runtime check, harness run, harvest listing (nothing found), then the target file probe
+        box.exec = AsyncMock(side_effect=[ok, ok, ok, probe])
+        box.download = AsyncMock(side_effect=download)
+        return box
+
+    def _target_agent(self) -> CVDPAgent:
+        agent = self._agent(deps_provision="baked")
+        agent._image = "ghcr.io/hdl/sim/osvb"
+        agent.server_client.post = AsyncMock()
+        return agent
+
+    async def _run_to_verification(self, agent, box, body=None):
+        with (
+            patch("responses_api_agents.cvdp_agent.app.AsyncSandbox", return_value=self._sandbox_context(box)),
+            patch("responses_api_agents.cvdp_agent.app.raise_for_status", AsyncMock()),
+            patch("responses_api_agents.cvdp_agent.app.get_response_json", AsyncMock(return_value={"reward": 0.0})),
+        ):
+            return await agent.run(MagicMock(cookies={}), body if body is not None else self._target_run_request())
+
+    async def test_absent_target_file_reaches_verification_without_it(self) -> None:
+        box = self._target_box(SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None))
+        agent = self._target_agent()
+        assert await self._run_to_verification(agent, box) == {"reward": 0.0}
+        sent = agent.server_client.post.call_args.kwargs["json"]
+        assert "rtl_files" not in sent  # the model wrote nothing: scored as a miss, not masked
+
+    async def test_heavy_agent_sends_replayable_project_changes(self, tmp_path) -> None:
+        import base64
+        import hashlib
+
+        from resources_servers.cvdp.repository_workspace import apply_changes, collect_changes, snapshot
+
+        project = tmp_path / "project"
+        (project / "src").mkdir(parents=True)
+        (project / "src/core.v").write_text("starting RTL")
+        (project / "deleted.v").write_text("old RTL")
+        archive = tmp_path / "baseline.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            stream.add(project / "src", arcname="src")
+            stream.add(project / "deleted.v", arcname="deleted.v")
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        archive = archive.rename(tmp_path / f"{digest}.tar.gz")
+        before = snapshot(project)
+        (project / "src/core.v").write_text("fixed RTL")
+        (project / "deleted.v").unlink()
+        delta = tmp_path / "delta.tar.gz"
+        changes = collect_changes(project, before, delta)
+        box = self._target_box(None)
+        original_download = box.download.side_effect
+
+        async def download(source, destination):
+            if source.endswith("changes.tar.gz"):
+                destination.write_bytes(delta.read_bytes())
+            elif source.endswith("changes.tar.json"):
+                destination.write_text(json.dumps(changes))
+            else:
+                await original_download(source, destination)
+
+        async def start_with_setup(spec, setup):
+            await setup(box)
+
+        box.start_with_setup = AsyncMock(side_effect=start_with_setup)
+        box.upload = AsyncMock()
+        box.download.side_effect = download
+        box.exec.side_effect = None
+        box.exec.return_value = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+        agent = self._target_agent()
+        agent.config.prepared_repository_dir = str(tmp_path)
+        body = self._target_run_request()
+        body.verifier_metadata["repository_workspace_sha256"] = digest
+        await self._run_to_verification(agent, box, body)
+        sent = agent.server_client.post.call_args.kwargs["json"]
+        assert sent["verifier_metadata"]["repository_workspace_sha256"] == digest
+        assert sent["repository_changes"]["deleted"] == ["deleted.v"]
+        assert base64.b64decode(sent["repository_changes"]["archive"]) == delta.read_bytes()
+        replay = tmp_path / "replay"
+        with tarfile.open(archive) as stream:
+            stream.extractall(replay, filter="data")
+        apply_changes(replay, sent["repository_changes"])
+        assert snapshot(replay) == snapshot(project)
+        box.start_with_setup.assert_awaited_once()
+        box.upload.assert_awaited_once_with(archive, "/code/.nv/repository.tar.gz")
+
+    async def test_present_target_file_is_sent_to_verification(self) -> None:
+        box = self._target_box(
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+            download_target=lambda dest: dest.write_text("module top; endmodule"),
+        )
+        agent = self._target_agent()
+        await self._run_to_verification(agent, box)
+        sent = agent.server_client.post.call_args.kwargs["json"]
+        assert sent["rtl_files"] == {"rtl/top.sv": "module top; endmodule"}
+
+    async def test_project_roots_and_deleted_context_reach_verifier(self) -> None:
+        body = self._target_run_request()
+        body.verifier_metadata["context_files"] = {
+            "docs/spec.md": "original spec",
+            "hardware/old.sv": "module old; endmodule",
+            "README.md": "project readme",
+            "rtl/deleted.sv": "module deleted; endmodule",
+        }
+        final_files = {
+            "docs/spec.md": "updated spec",
+            "hardware/old.sv": "module old; endmodule",
+            "hardware/new.mem": "abcd",
+            "README.md": "project readme",
+        }
+        box = self._target_box(SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None))
+        original_download = box.download.side_effect
+
+        async def download(src, dest):
+            rel = str(src).removeprefix("/code/")
+            if rel in final_files:
+                dest.write_text(final_files[rel])
+            else:
+                await original_download(src, dest)
+
+        box.download.side_effect = download
+        ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+        box.exec.side_effect = [
+            ok,
+            ok,
+            SimpleNamespace(return_code=0, stdout="\n".join(final_files), stderr="", error_type=None),
+            SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None),
+        ]
+        agent = self._target_agent()
+        await self._run_to_verification(agent, box, body)
+        sent = agent.server_client.post.call_args.kwargs["json"]
+        assert sent["rtl_files"] == {"docs/spec.md": "updated spec", "hardware/new.mem": "abcd"}
+        assert sent["verifier_metadata"]["context_files"] == {
+            key: value for key, value in body.verifier_metadata["context_files"].items() if key != "rtl/deleted.sv"
+        }
+
+    async def test_unchanged_seeded_target_is_still_verified(self) -> None:
+        starting = "module top; // starting RTL left unchanged\nendmodule"
+        body = self._target_run_request()
+        body.verifier_metadata["context_files"] = {"rtl/top.sv": starting}
+        box = self._target_box(
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+            download_target=lambda dest: dest.write_text(starting),
+        )
+        agent = self._target_agent()
+        with patch.object(agent, "_build_spec", wraps=agent._build_spec) as build_spec:
+            await self._run_to_verification(agent, box, body)
+        assert build_spec.call_args.args[2]["/code/rtl/top.sv"] == starting
+        assert agent.server_client.post.call_args.kwargs["json"]["rtl_files"] == {"rtl/top.sv": starting}
+
+    @pytest.mark.parametrize(
+        "probe",
+        [
+            SimpleNamespace(return_code=None, stdout="", stderr="vanished", error_type="provider_error"),
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type="timeout"),
+            SimpleNamespace(return_code=126, stdout="", stderr="cannot execute", error_type=None),
+        ],
+        ids=["provider_error", "timeout", "unexpected_exit"],
+    )
+    async def test_target_probe_fault_is_an_agent_route_failure(self, probe) -> None:
+        agent = self._target_agent()
+        with pytest.raises(NgFailureEvent, match="could not check target file") as caught:
+            await self._run_to_verification(agent, self._target_box(probe))
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+        agent.server_client.post.assert_not_called()
+
+    async def test_target_download_fault_is_an_agent_route_failure(self) -> None:
+        def broken(_dest):
+            raise OSError("transfer broke")
+
+        box = self._target_box(
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None), download_target=broken
+        )
+        agent = self._target_agent()
+        with pytest.raises(NgFailureEvent, match="target file download of rtl/top.sv failed") as caught:
+            await self._run_to_verification(agent, box)
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+        agent.server_client.post.assert_not_called()
+
+    async def test_invalid_utf8_target_is_a_scored_failure_with_original_response(self) -> None:
+        box = self._target_box(
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+            download_target=lambda dest: dest.write_bytes(bytes([255])),
+        )
+        agent = self._target_agent()
+
+        result = await self._run_to_verification(agent, box)
+
+        assert result.reward == 0.0 and result.mask_sample is False
+        assert result.response.id == "r" and result.response.model == "m"
+        assert result.response.output == []
+        assert "rtl/top.sv is not UTF-8" in result.container_stderr
         agent.server_client.post.assert_not_called()
 
     def test_deps_archive_contains_runtime_root(self, tmp_path) -> None:

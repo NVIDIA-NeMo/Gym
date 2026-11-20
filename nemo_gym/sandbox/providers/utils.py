@@ -18,14 +18,23 @@ These were previously duplicated verbatim across the enroot, apptainer, and
 opensandbox providers. They live here so there is a single implementation.
 """
 
+import asyncio
+import contextlib
 import errno
 import os
 import posixpath
 import shutil
+import signal
 import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+import anyio
+
+
+# How long a cancelled CLI command's process may take to be reaped after it is killed.
+REAP_TIMEOUT_S = 5.0
 
 
 def coerce_config(value: Any, config_cls: type[Any]) -> Any:
@@ -133,3 +142,18 @@ def remove_writable_tree(path: Path) -> None:
         shutil.rmtree(path.name, dir_fd=parent_fd)
     finally:
         os.close(parent_fd)
+
+
+async def kill_cancelled_command(proc: asyncio.subprocess.Process) -> None:
+    """Kill the process group of a CLI command whose wait was cancelled, then reap it.
+
+    A provider runner calls this when the await on its command is cancelled, for example by the time limit of
+    :meth:`AsyncSandbox.stop`, and then re-raises the cancellation. Without it, only the runner's own command
+    timeout kills the process, so a cancelled call leaves the command running. The reap is shielded from the
+    cancellation that is still in force and bounded by ``REAP_TIMEOUT_S``.
+    """
+    if proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    with anyio.CancelScope(shield=True), anyio.move_on_after(REAP_TIMEOUT_S), contextlib.suppress(Exception):
+        await proc.wait()

@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import anyio
 import pytest
 
 from nemo_gym.sandbox.api import AsyncSandbox
@@ -36,6 +37,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.enroot import provider as enroot_provider
+from tests.unit_tests.sandbox.cli_testing import is_running, requires_sh, stand_in_cli
 
 
 pytestmark = pytest.mark.sandbox
@@ -1202,3 +1204,14 @@ async def test_start_detached_does_not_await_exit(fake_binary: str, tmp_path: Pa
         await proc.wait()
         out_f.close()
         err_f.close()
+
+
+@requires_sh
+async def test_a_cancelled_enroot_command_is_killed(fake_binary: str, tmp_path: Path) -> None:
+    cli = stand_in_cli(tmp_path)
+    provider = enroot_provider.EnrootProvider()
+    with anyio.move_on_after(0.5):
+        await provider._run([str(cli.path)], timeout_s=None)
+    assert not is_running(cli.last_pid())
+    cli.hang.unlink()
+    assert (await provider._run([str(cli.path)], timeout_s=10))[0] == 0
