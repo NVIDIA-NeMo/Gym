@@ -35,8 +35,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    rollout_context,
 )
-from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.server_runtime import ReverifyMode, verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding

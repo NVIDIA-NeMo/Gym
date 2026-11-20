@@ -726,10 +726,16 @@ class RolloutRecords:
             if saved == row:
                 # This is a replay of the settlement itself. A projected equality can hide changes
                 # in its audit evidence, so compare the two physical records before accepting it.
-                if record is not None and previous.record.skip_keys and REJUDGE_RECORD_BINDING_KEY in row:
+                if record is not None and previous.record.skip_keys and REJUDGED_FAILURE_ID_KEY in row:
                     if previous.record.large_record_digest() != record.large_record_digest():
-                        raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
-                return key, saved if REJUDGE_RECORD_BINDING_KEY in row else row
+                        # Older writers could append the same settlement in a different JSON key order.
+                        # For those unbound replays compare full values if the byte comparison was inconclusive.
+                        if REJUDGE_RECORD_BINDING_KEY in row or (
+                            replace(previous.record, skip_keys=frozenset()).read()
+                            != replace(record, skip_keys=frozenset()).read()
+                        ):
+                            raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
+                return key, saved if REJUDGED_FAILURE_ID_KEY in row else row
             if is_rejudgment_of(saved, row, record=previous.record) or is_rejudgment_failure_of(saved, row):
                 return key, row
             if is_rejudgment_of(row, saved, record=record):

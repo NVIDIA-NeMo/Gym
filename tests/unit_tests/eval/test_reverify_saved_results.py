@@ -571,6 +571,32 @@ async def test_rejudgment_persists_a_parsed_abstention_without_measuring_it(
         RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS)
 
 
+async def test_projected_replay_checks_the_audit_even_when_the_predecessor_was_small(tmp_path, verifier, monkeypatch):
+    output = _run(tmp_path, [ungraded(0)])
+    monkeypatch.setattr("nemo_gym.rollouts.rollout_records.PROJECTED_ROW_BYTES", output.stat().st_size + 1)
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+    (saved,) = _selected(output)[0].values()
+    audit_key = "_ng_rejudged_failure_observations"
+    assert "_ng_rejudge_predecessor_record_binding" not in saved
+
+    reordered = dict(reversed(saved.items()))
+    with RolloutStore.open_for_rejudgment(output) as store:
+        store.record_outcome(reordered)
+    assert output.read_bytes().splitlines()[-2:] == [orjson.dumps(saved)] * 2
+    # An older journal may already contain the equivalent settlement in a different order.
+    with output.open("ab") as journal:
+        journal.write(orjson.dumps(reordered) + b"\n")
+    (projected,) = RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS).selected("success")
+    assert audit_key not in projected and projected["_ng_rejudge_operation_id"] == saved["_ng_rejudge_operation_id"]
+
+    altered = saved | {audit_key: saved[audit_key] | {"other_evidence": "changed"}}
+    with output.open("ab") as journal:
+        journal.write(orjson.dumps(altered) + b"\n")
+    for projection in (frozenset(), STORE_SKIP_KEYS):
+        with pytest.raises(ConfigError, match="Conflicting outcomes"):
+            RolloutStore.read(output, import_legacy=False, skip_keys=projection)
+
+
 @pytest.mark.parametrize(
     "outcome",
     [
