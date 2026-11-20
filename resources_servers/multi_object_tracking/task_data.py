@@ -6,7 +6,7 @@
 whole row: the same fields plus the row's top-level `task_id`.
 """
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from resources_servers.got10k.task_data import Got10kTarget
 
@@ -35,6 +35,14 @@ class MultiObjectTrackingVerifierMetadata(BaseModel):
     objects: list[MultiObjectTrackingObject] = Field(
         min_length=1, json_schema_extra={"legacy_location": "verifier_metadata"}
     )
+
+    @field_validator("objects")
+    @classmethod
+    def _require_unique_ids(cls, objects: list[MultiObjectTrackingObject]) -> list[MultiObjectTrackingObject]:
+        ids = [obj.id for obj in objects]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"object ids must be unique within a row, got {ids}")
+        return objects
 
 
 class TaskData(MultiObjectTrackingVerifierMetadata):

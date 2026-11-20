@@ -22,10 +22,13 @@ frames where the target is not visible are not scored.
     a single-object answer in the GOT-10k format ({"boxes":[{"frame":..,"bbox":..}]})
     scores the same here as in `got10k`.
   * An entry with "visible": false is the model saying the object is hidden: it is
-    not used as a box. Visibility claims earn nothing and cost nothing by
-    themselves, as in GOT-10k; a hidden claim on a visible frame scores 0 for it.
-  * The first usable entry for an (object, frame) pair wins.
-  * <answer> blocks are tried last one first, then the whole text; the first that yields a box is used.
+    not used as a box, but it counts as an answer for that (object, frame) pair.
+    Visibility claims earn no reward and cost none by themselves, as in GOT-10k; a
+    hidden claim on a visible frame scores 0 for it.
+  * Only entries for a requested (object, frame) pair are kept. The first box for
+    a pair wins, and a box replaces a hidden claim for the same pair.
+  * <answer> blocks are tried last one first, then the whole text; the first that
+    answers a requested pair is used.
   * A truncated answer is salvaged entry by entry.
 
 The per-task reward is the mean, over the objects that are visible in at least one
@@ -139,14 +142,19 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
-def _read_entry(entry: Any) -> tuple[int | None, int, list[float]] | None:
-    """(object id or None, frame, grid box) of one answer entry, or None when it holds no usable box."""
-    if not isinstance(entry, dict) or entry.get("visible") is False:
+def _read_entry(entry: Any) -> tuple[int | None, int, list[float] | None] | None:
+    """(object id or None, frame, grid box) of one answer entry, or None when the entry is unusable.
+
+    The box is None for an entry with "visible": false, which answers the pair without giving a box.
+    """
+    if not isinstance(entry, dict):
         return None
     frame = _as_int(entry.get("frame"))
     if frame is None:
         return None
     object_id = next((i for key in OBJECT_ID_KEYS if (i := _as_int(entry.get(key))) is not None), None)
+    if entry.get("visible") is False:
+        return object_id, frame, None
     for key in BOX_KEYS:
         value = entry.get(key)
         if isinstance(value, (list, tuple, dict, str)) and (box := _coerce_box(value)) is not None:
@@ -166,14 +174,17 @@ def _entries_of(value: Any) -> list[Any]:
     return []
 
 
-def parse_tracks(text: str, object_ids: list[int]) -> tuple[dict[int, dict[int, list[float]]], str]:
-    """Boxes keyed by object id, then frame. An entry without an id belongs to the only object, if there is one.
+def parse_tracks(text: str, requested: dict[int, set[int]]) -> tuple[dict[int, dict[int, list[float] | None]], str]:
+    """Answers keyed by object id, then frame, for the requested frames of each object only.
+
+    `requested` maps each object id to its requested frames. An entry without an id belongs to the only object, if
+    there is one. The value for a pair is its box, or None when the answer only says the object is hidden there.
 
     Each <answer>...</answer> payload is tried, last one first (a later block corrects an earlier draft), then the
-    whole text, stopping at the first that yields a box. A payload is read as one JSON value, then as the JSON
-    objects embedded in it, then entry by entry for an answer that was cut off.
+    whole text, stopping at the first that answers a requested pair. A payload is read as one JSON value, then as
+    the JSON objects embedded in it, then entry by entry for an answer that was cut off.
     """
-    tracks: dict[int, dict[int, list[float]]] = {}
+    tracks: dict[int, dict[int, list[float] | None]] = {}
     text = text.strip()
     if not text:
         return tracks, "empty"
@@ -185,10 +196,15 @@ def parse_tracks(text: str, object_ids: list[int]) -> tuple[dict[int, dict[int, 
                 continue
             object_id, frame, box = read
             if object_id is None:
-                if len(object_ids) != 1:
+                if len(requested) != 1:
                     continue
-                object_id = object_ids[0]
-            tracks.setdefault(object_id, {}).setdefault(frame, box)
+                object_id = next(iter(requested))
+            if frame not in requested.get(object_id, ()):
+                continue
+            answers = tracks.setdefault(object_id, {})
+            # The first box for a pair wins; a box replaces a hidden claim.
+            if answers.get(frame) is None:
+                answers[frame] = box
 
     for payload in [*reversed(ANSWER_PATTERN.findall(text)), text]:
         add(_entries_of(_load_json_or_literal(payload)))
@@ -211,18 +227,22 @@ def parse_tracks(text: str, object_ids: list[int]) -> tuple[dict[int, dict[int, 
 
 
 def score_objects(text: str, metadata: MultiObjectTrackingVerifierMetadata) -> dict[str, Any]:
-    tracks, parse_status = parse_tracks(text, [obj.id for obj in metadata.objects])
+    requested = {obj.id: {target.frame for target in obj.targets} for obj in metadata.objects}
+    tracks, parse_status = parse_tracks(text, requested)
     totals: dict[str, Any] = dict.fromkeys(SUMMED_FIELDS, 0)
     object_scores: list[MultiObjectTrackingObjectScore] = []
     for obj in metadata.objects:
         single = Got10kVerifierMetadata(
             image_width=metadata.image_width, image_height=metadata.image_height, targets=obj.targets
         )
-        boxes = tracks.get(obj.id, {})
+        answers = tracks.get(obj.id, {})
+        boxes = {frame: box for frame, box in answers.items() if box is not None}
         answer = (
             json.dumps({"boxes": [{"frame": frame, "bbox": box} for frame, box in boxes.items()]}) if boxes else ""
         )
         result = score_sequence(answer, single)
+        # A hidden claim answers its pair without a box, so it counts as parsed but is never scored as a box.
+        result["parsed_frames"] += len(answers) - len(boxes)
         for field in SUMMED_FIELDS:
             totals[field] += result[field]
         object_scores.append(

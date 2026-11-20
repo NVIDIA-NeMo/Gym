@@ -55,6 +55,8 @@ A1 = [100, 100, 300, 300]
 A2 = [400, 500, 700, 900]
 B1 = [600, 200, 800, 500]
 DISJOINT = [900, 900, 950, 950]
+# Every object's requested frames, as `parse_tracks` takes them.
+REQUESTED = {1: {1, 2}, 2: {1, 2}}
 
 
 def _answer(*entries: dict, key: str = "tracks") -> str:
@@ -170,7 +172,9 @@ def test_answer_shapes_that_recover_every_visible_box(text: str) -> None:
 
     assert result["reward"] == 1.0
     assert result["parse_status"] == "structured"
-    assert (result["parsed_frames"], result["visible_frames"]) == (3, 3)
+    assert result["visible_frames"] == 3
+    # The three boxes on visible frames, plus the hidden claim for object 2 in frame 2 when the answer makes it.
+    assert result["parsed_frames"] == (4 if text.count('"visible": false') else 3)
 
 
 @pytest.mark.parametrize(
@@ -193,7 +197,7 @@ def test_answers_without_usable_entries_score_zero(text: str, status: str) -> No
 def test_an_entry_without_an_id_is_dropped_when_there_are_several_objects() -> None:
     text = _answer({"frame": 1, "bbox": A1}, {"frame": 2, "bbox": A2}, _entry(2, 1, B1))
 
-    tracks, _ = parse_tracks(text, [1, 2])
+    tracks, _ = parse_tracks(text, REQUESTED)
 
     assert tracks == {2: {1: [float(value) for value in B1]}}
 
@@ -205,16 +209,31 @@ def test_an_entry_without_an_id_belongs_to_the_only_object() -> None:
 
 
 def test_box_holds_the_id_or_the_coordinates() -> None:
-    as_id, _ = parse_tracks(_answer({"box": 2, "frame": 1, "bbox": B1}), [1, 2])
-    as_coordinates, _ = parse_tracks(_answer({"id": 2, "frame": 1, "box": B1}), [1, 2])
+    as_id, _ = parse_tracks(_answer({"box": 2, "frame": 1, "bbox": B1}), REQUESTED)
+    as_coordinates, _ = parse_tracks(_answer({"id": 2, "frame": 1, "box": B1}), REQUESTED)
 
     assert as_id == as_coordinates == {2: {1: [float(value) for value in B1]}}
 
 
 def test_the_first_entry_for_an_object_and_frame_wins() -> None:
-    tracks, _ = parse_tracks(_answer(_entry(1, 1, A1), _entry(1, 1, DISJOINT)), [1, 2])
+    tracks, _ = parse_tracks(_answer(_entry(1, 1, A1), _entry(1, 1, DISJOINT)), REQUESTED)
 
     assert tracks == {1: {1: [float(value) for value in A1]}}
+
+
+def test_entries_for_other_objects_or_frames_are_not_kept() -> None:
+    text = _answer(_entry(7, 1, A1), _entry(1, 0, A1), _entry(1, 9, A1, visible=False), _entry(2, 1, B1))
+
+    tracks, _ = parse_tracks(text, REQUESTED)
+
+    assert tracks == {2: {1: [float(value) for value in B1]}}
+
+
+def test_a_box_replaces_a_hidden_claim_for_the_same_pair_but_not_the_reverse() -> None:
+    hidden_first, _ = parse_tracks(_answer(_entry(1, 1, A1, visible=False), _entry(1, 1, A1)), REQUESTED)
+    box_first, _ = parse_tracks(_answer(_entry(1, 1, A1), _entry(1, 1, DISJOINT, visible=False)), REQUESTED)
+
+    assert hidden_first == box_first == {1: {1: [float(value) for value in A1]}}
 
 
 def test_a_hidden_claim_is_not_a_box() -> None:
@@ -225,6 +244,20 @@ def test_a_hidden_claim_is_not_a_box() -> None:
 
     assert [score.reward for score in result["object_scores"]] == [0.5, 1.0]
     assert result["reward"] == 0.75
+    # The claim still counts as an answer for its pair.
+    assert [score.parsed_frames for score in result["object_scores"]] == [2, 1]
+    assert result["parsed_frames"] == 3
+
+
+def test_an_answer_that_marks_every_pair_hidden_is_an_answer_without_boxes() -> None:
+    hidden = _answer(*(_entry(box, frame, [0, 0, 0, 0], visible=False) for box in (1, 2) for frame in (1, 2)))
+
+    result = score_objects(hidden, _metadata())
+
+    assert (result["reward"], result["parse_status"]) == (0.0, "structured")
+    assert (result["parsed_frames"], result["target_frames"]) == (4, 4)
+    # As a last block it is the answer, like a last block of boxes: the earlier block is not scored.
+    assert score_objects(f"{EXACT}\n{hidden}", _metadata())["reward"] == 0.0
 
 
 def test_a_box_on_a_hidden_frame_is_neither_rewarded_nor_penalized() -> None:
@@ -252,6 +285,18 @@ def test_a_digit_string_too_long_to_convert_drops_that_entry_only(key: str) -> N
     assert score_objects(text, _metadata())["reward"] == 1.0
 
 
+@pytest.mark.parametrize("key", ["frame", "box"])
+def test_a_python_literal_integer_too_long_to_print_drops_that_entry_only(key: str) -> None:
+    # Read as a Python literal, 4000 hex digits are an integer that cannot be converted to a decimal string.
+    oversized = f'{{"box": 1, "frame": 1, "bbox": [900, 900, 950, 950], "{key}": 0x{"f" * 4000}}}'
+    rest = ", ".join(json.dumps(entry) for entry in (_entry(1, 1, A1), _entry(1, 2, A2), _entry(2, 1, B1)))
+
+    result = score_objects(f'<answer>{{"tracks": [{oversized}, {rest}]}}</answer>', _metadata())
+
+    assert (result["reward"], result["parsed_frames"]) == (1.0, 3)
+    assert score_objects(f'<answer>{{"tracks": [{oversized}]}}</answer>', _metadata())["reward"] == 0.0
+
+
 def test_the_last_answer_block_wins_over_an_earlier_draft() -> None:
     draft = _answer(_entry(1, 1, DISJOINT), _entry(1, 2, DISJOINT), _entry(2, 1, DISJOINT))
 
@@ -260,7 +305,15 @@ def test_the_last_answer_block_wins_over_an_earlier_draft() -> None:
 
 
 @pytest.mark.parametrize(
-    "last_block", ["<answer></answer>", "<answer>see above</answer>", '<answer>{"tracks":[]}</answer>']
+    "last_block",
+    [
+        "<answer></answer>",
+        "<answer>see above</answer>",
+        '<answer>{"tracks":[]}</answer>',
+        # Only an object or a frame the row does not request.
+        '<answer>{"tracks":[{"box":7,"frame":1,"bbox":[100,100,300,300]}]}</answer>',
+        '<answer>{"tracks":[{"box":1,"frame":9,"bbox":[100,100,300,300]}]}</answer>',
+    ],
 )
 def test_an_unusable_last_answer_block_falls_back_to_an_earlier_one(last_block: str) -> None:
     assert score_objects(f"{EXACT}\n{last_block}", _metadata())["reward"] == 1.0
@@ -319,6 +372,7 @@ def test_a_task_where_no_object_is_ever_visible_has_zero_reward_and_no_weight() 
         # A corrected answer after a draft, and an unusable last block after a usable one.
         '<answer>{"boxes":[{"frame":1,"bbox":[0,0,10,10]}]}</answer> <answer>{"boxes":[{"frame":1,"bbox":[100,100,300,300]}]}</answer>',
         '<answer>{"boxes":[{"frame":1,"bbox":[100,100,300,300]}]}</answer> <answer>n/a</answer>',
+        '<answer>{"boxes":[{"frame":1,"bbox":[100,100,300,300]}]}</answer> <answer>{"boxes":[{"frame":0,"bbox":[0,0,9,9]}]}</answer>',
         "",
     ],
 )
@@ -346,7 +400,8 @@ def test_metrics_pool_frames_over_objects_and_tasks(server: MultiObjectTrackingR
         "visible_gt_AO": 0.6,
         "visible_gt_SR@0.5": 0.6,
         "visible_gt_SR@0.75": 0.6,
-        "parse_pass_ratio": 0.5,
+        # Four of the six requested pairs: three boxes and the hidden claim of the perfect answer.
+        "parse_pass_ratio": 4 / 6,
     }
     assert server.compute_repeat_metrics(tasks) == metrics
     assert server.get_key_metrics({**metrics, "mean/reward": 0.5}) == {
@@ -401,8 +456,46 @@ def test_committed_example_rows_are_the_synthetic_ones_and_their_ground_truth_sc
     assert len({row["task_id"] for row in committed}) == len(committed)
     for row in committed:
         metadata = TaskData.model_validate(row["verifier_metadata"])
-        assert score_objects(ground_truth_answer(row), metadata)["reward"] == pytest.approx(1.0, abs=0.05)
+        truth = score_objects(ground_truth_answer(row), metadata)
+        assert truth["reward"] == pytest.approx(1.0, abs=0.05)
+        # Every requested pair is answered, the hidden ones with a "visible": false entry.
+        assert truth["parsed_frames"] == truth["target_frames"]
         assert score_objects("", metadata)["reward"] == 0.0
+
+
+def test_ground_truth_answers_on_the_example_rows_have_a_full_parse_pass_ratio(
+    server: MultiObjectTrackingResourcesServer,
+) -> None:
+    rows = example_rows()
+    assert any(
+        target["visible"] == 0
+        for row in rows
+        for obj in row["verifier_metadata"]["objects"]
+        for target in obj["targets"]
+    )
+
+    tasks = [
+        [score_objects(ground_truth_answer(row), TaskData.model_validate(row["verifier_metadata"]))] for row in rows
+    ]
+
+    assert server.compute_metrics(tasks)["parse_pass_ratio"] == 1.0
+
+
+def test_committed_example_rollouts_score_again_to_their_stored_values(
+    server: MultiObjectTrackingResourcesServer,
+) -> None:
+    path = Path(__file__).parents[1] / "data" / "example_rollouts.jsonl"
+    rollouts = [json.loads(line) for line in path.read_text().splitlines()]
+
+    assert [rollout["task_id"] for rollout in rollouts] == [row["task_id"] for row in example_rows()]
+    for rollout in rollouts:
+        request = {key: rollout[key] for key in ("responses_create_params", "response", "verifier_metadata")}
+        result = asyncio.run(server.verify(MultiObjectTrackingVerifyRequest.model_validate(request)))
+        for key in ("reward", "parse_status", "parsed_frames", "target_frames", "visible_iou_sum"):
+            assert getattr(result, key) == rollout[key], (rollout["task_id"], key)
+        assert [score.model_dump() for score in result.object_scores] == rollout["object_scores"]
+    # Every requested pair was answered, the hidden ones with a "visible": false entry.
+    assert server.compute_metrics([[rollout] for rollout in rollouts])["parse_pass_ratio"] == 1.0
 
 
 def test_task_data_is_the_request_metadata_plus_the_row_task_id() -> None:
@@ -432,6 +525,7 @@ def test_task_data_defaults_and_required_fields() -> None:
         {**METADATA, "objects": [{"id": 1, "targets": []}]},
         {**METADATA, "objects": [{"targets": [{"frame": 1, "bbox": [1.0, 2.0, 3.0, 4.0]}]}]},
         {**METADATA, "objects": [{"id": 1, "targets": [{"frame": 1, "bbox": [1.0, 2.0, 3.0]}]}]},
+        {**METADATA, "objects": [METADATA["objects"][0], {**METADATA["objects"][1], "id": 1}]},
     ):
         with pytest.raises(ValidationError):
             TaskData.model_validate(broken)
