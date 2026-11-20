@@ -215,7 +215,7 @@ class TestParseOpenclawOutput:
     def test_empty(self) -> None:
         items, usage = parse_openclaw_output("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None, "reasoning_tokens": None}
 
     def test_text_message_and_usage(self) -> None:
         raw = _envelope(

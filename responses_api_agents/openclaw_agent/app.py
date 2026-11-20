@@ -187,7 +187,7 @@ def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int | None]
     """
     envelope = _decode_last_json_dict_suffix(stdout)
     if not envelope:
-        return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
+        return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None, "reasoning_tokens": None}
     output_items = _openclaw_output_items(envelope)
 
     meta = envelope.get("meta") if isinstance(envelope.get("meta"), dict) else {}
