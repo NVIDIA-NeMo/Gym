@@ -93,7 +93,7 @@ def _agent(
         resume_checkpoint_dir=resume_checkpoint_dir,
     )
     client = MagicMock(spec=ServerClient)
-    client.global_config_dict = {"policy_model_name": "moonshotai/Kimi-K3"}
+    client.global_config_dict = {"policy_model_name": "example-org/example-model"}
     agent = ApexAgent(config=config, server_client=client)
     agent._model_base_url = lambda _body: "http://model/v1"
     return agent
@@ -505,7 +505,7 @@ def test_sandbox_config_never_contains_verifier_secrets() -> None:
     serialized = json.dumps(runner)
 
     assert runner["instruction"] == "Do the work"
-    assert runner["policy_model"] == "moonshotai/Kimi-K3"
+    assert runner["policy_model"] == "example-org/example-model"
     assert runner["max_turns"] == 200
     assert runner["max_output_tokens"] == 32_768
     assert runner["supports_vision"] is True

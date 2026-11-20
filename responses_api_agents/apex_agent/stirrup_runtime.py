@@ -235,7 +235,7 @@ def format_tool_argument_validation_error(exc: Any, arguments: str) -> str:
     return f"Tool arguments are not valid: {errors}. Submitted arguments (first 500 chars): {preview!r}"
 
 
-# vLLM's glm47 tool-call parser string-encodes arguments for MCP tools whose
+# Some vLLM tool-call parsers string-encode arguments for MCP tools whose
 # JSON schema wraps params in a bare-$ref property with no inline "type"
 # ({"request": "{\"code\": ...}"} or flat {"code": ...}). The typing bug is
 # serving-side, so the model cannot self-correct no matter how the error is
@@ -369,7 +369,7 @@ def install_json_schema_to_pydantic_array_items_patch() -> None:
             stirrup_mcp.create_model = patched_create_model
 
 
-# GLM-family vLLM tool-call parsers reconstruct each argument's type from the
+# Some vLLM tool-call parsers reconstruct each argument's type from the
 # wire schema's properties[key].type; a property site that is a bare
 # {"$ref": "#/$defs/..."} carries no inline "type", so the parser
 # string-encodes the whole object server-side before the agent ever sees it.
@@ -467,7 +467,7 @@ def install_openai_tool_call_normalization() -> None:
 # finish_reason "length" (or "max_tokens"). That conflates two different events:
 # the prompt overflowing the context window, which vLLM rejects with HTTP 400
 # before generating anything, and one turn exhausting max_output_tokens
-# mid-reasoning. GLM-5.2 hits the second case on long deliberations. The raise
+# mid-reasoning. Models that deliberate at length hit the second case. The raise
 # then unwinds the last completed turn and, when that would cross a progress
 # boundary, ends the rollout with zero credit. On the full 452 x 3 benchmark,
 # 45 rollouts died this way, every one with valid partial content and a usable

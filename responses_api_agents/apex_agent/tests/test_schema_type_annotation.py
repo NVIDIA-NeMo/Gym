@@ -16,7 +16,7 @@ from responses_api_agents.apex_agent import stirrup_runtime
 
 
 # The exact schema shape Archipelago MCP tools present: the property site is a
-# bare $ref with no inline "type", which GLM-family vLLM parsers mistype.
+# bare $ref with no inline "type", which some vLLM tool-call parsers mistype.
 ARCHIPELAGO_SCHEMA = {
     "type": "object",
     "properties": {"request": {"$ref": "#/$defs/DynamicModel"}},
