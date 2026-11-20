@@ -61,11 +61,12 @@ async def start_task_sandbox(
     sandbox_config: GDPValSandboxConfig,
     *,
     task_id: str,
-    reference_dir: Path,
-    reference_files: list[str],
     workdir: Optional[str] = None,
 ) -> AsyncSandbox:
-    """Start a sandbox and stage the task's reference files under the working directory."""
+    """Start the task's sandbox; :func:`stage_reference_files` then puts the task's files in it.
+
+    The two are apart so the caller owns the sandbox before anything else can fail, and stops it on its own path.
+    """
     if not sandbox_config.image:
         raise ValueError(
             "Set sandbox_config.image (or GDPVAL_SANDBOX_IMAGE) to an OCI image built from "
@@ -81,13 +82,15 @@ async def start_task_sandbox(
     )
     sandbox = AsyncSandbox(resolve_provider_config(sandbox_provider, global_config_dict))
     await sandbox.start(spec)
-    try:
-        for rel_path in reference_files:
-            await sandbox.upload(reference_dir / rel_path, sandbox_path(rel_path, workdir))
-    except BaseException:
-        await sandbox.stop()
-        raise
     return sandbox
+
+
+async def stage_reference_files(
+    sandbox: AsyncSandbox, reference_dir: Path, reference_files: list[str], workdir: str | None = None
+) -> None:
+    """Upload the task's reference files from ``reference_dir`` to the sandbox's working directory."""
+    for rel_path in reference_files:
+        await sandbox.upload(reference_dir / rel_path, sandbox_path(rel_path, workdir))
 
 
 async def missing_files(sandbox: AsyncSandbox, paths: list[str], workdir: Optional[str] = None) -> list[str]:
