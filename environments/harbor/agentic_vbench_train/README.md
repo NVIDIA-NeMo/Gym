@@ -47,14 +47,15 @@ the agent's time ceiling, and the context and output budgets OpenCode is told (`
 compaction on. The model server must return token ids: `vllm_model_for_training.yaml`, or the training
 framework's.
 
-A NeMo RL run lists the rows and the server blocks a run of the entry generates, then this overlay:
+The generated run config inherits the agent and Harbor server entrypoints from their shipped configs.
+Include both configs in the NeMo RL recipe and load the training overlay last.
 
 ```sh
 # Once: materialize the rows and the run config (one episode runs; `--limit 0` is not a prepare).
 gym eval run agentic_vbench_train --agent opencode_agent --sandbox docker \
   --config environments/harbor/agentic_vbench_train/harbor_train.yaml --limit 1 \
   --model-type vllm_model --model <model> --model-url <url> --model-api-key <key>
-# results/harbor/agentic_vbench_train/tasks.jsonl and run_config_opencode_agent.yaml are written.
+# Writes tasks_opencode_agent.jsonl and run_config_opencode_agent.yaml under results/harbor/agentic_vbench_train/.
 ```
 
 ```yaml
@@ -63,6 +64,8 @@ env:
   nemo_gym:
     config_paths:
       - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+      - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+      - environment_servers/harbor/configs/harbor.yaml
       - results/harbor/agentic_vbench_train/run_config_opencode_agent.yaml
       - environments/harbor/agentic_vbench_train/harbor_train.yaml
       # optional: environments/harbor/agentic_vbench_train/compaction_plugins.yaml

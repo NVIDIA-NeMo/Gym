@@ -13,6 +13,7 @@ gym dataset validate agentic_vbench --sandbox docker \
   --config environments/harbor/agentic_vbench/harbor_sandbox.yaml   # plays each task's solution/ through its verifier
 gym eval run agentic_vbench --agent opencode_agent --sandbox docker \
   --config environments/harbor/agentic_vbench/harbor_sandbox.yaml \
+  --output results/harbor/agentic_vbench/opencode_agent/rollouts.jsonl \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
@@ -84,12 +85,16 @@ inside the tool result. All three raise the harness's time ceiling so that each 
 ```sh
 gym eval run agentic_vbench --agent pi_agent --sandbox docker \
   --config environments/harbor/agentic_vbench/harbor_sandbox_pi.yaml \
+  --output results/harbor/agentic_vbench/pi_agent/rollouts.jsonl \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
 The three install their runtime into the sandbox at session start (or read one the image carries; see the harness
-READMEs). A run's rows and outputs are per harness (`tasks_pi_agent.jsonl`, `run_config_pi_agent.yaml`). The
-published numbers and the full-set run below are OpenCode's; no full-set run of another harness has been recorded
+READMEs). The generated rows and run config include the harness name (`tasks_pi_agent.jsonl`,
+`run_config_pi_agent.yaml`). All harnesses default to the same `results/harbor/agentic_vbench/rollouts.jsonl`.
+Give each harness its own `--output` path as above when comparing runs.
+
+The published numbers and the full-set run below are OpenCode's; no full-set run of another harness has been recorded
 here yet, and a harness is an experimental variable, so compare a harness's scores with its own.
 
 The task Dockerfiles build their images (they download the task's clips from Hugging Face at build
