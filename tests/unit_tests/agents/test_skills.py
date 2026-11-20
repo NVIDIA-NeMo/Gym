@@ -128,6 +128,32 @@ class TestHashSkillDir:
         assert len(h) == 12
         int(h, 16)  # parses as hex
 
+    def test_follows_a_linked_skill(self, tmp_path):
+        # A skills directory can link to a skill kept elsewhere, as .agents/skills does for skills/.
+        target = _write_skill(tmp_path / "elsewhere", "linked")
+        (target / "scripts").mkdir()
+        (target / "scripts" / "helper.py").write_text("print('v1')\n")
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "linked").symlink_to(target, target_is_directory=True)
+        copy_dir = tmp_path / "copy"
+        _write_skill(copy_dir, "linked")
+        (copy_dir / "linked" / "scripts").mkdir()
+        (copy_dir / "linked" / "scripts" / "helper.py").write_text("print('v1')\n")
+
+        h1 = hash_skill_dir(skills_dir)
+        # The link hashes like a real directory with the same files.
+        assert h1 == hash_skill_dir(copy_dir)
+        (target / "SKILL.md").write_text("---\nname: linked\ndescription: edited\n---\n# Body\n")
+        h2 = hash_skill_dir(skills_dir)
+        (target / "scripts" / "helper.py").write_text("print('v2')\n")
+        h3 = hash_skill_dir(skills_dir)
+        assert len({h1, h2, h3}) == 3
+        # Staging copies the bytes that were hashed.
+        dest = tmp_path / "staged"
+        stage_skills(str(skills_dir), dest)
+        assert (dest / "linked" / "scripts" / "helper.py").read_text() == "print('v2')\n"
+
 
 class TestLoadSkillDirectory:
     def test_loads_multiple_skills_sorted(self, tmp_path):
