@@ -14,9 +14,10 @@ from pathlib import Path
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core.failure_kinds import JUDGE_FAILED, PROVIDER_CREDENTIALS_REJECTED
+from nemo_gym.core import JUDGE_FAILED
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
 from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
-from nemo_gym.verification.judge import judge_provider_stopped
+from nemo_gym.verification import judge_provider_stopped
 from resources_servers.agentic_if_realworld.benchmark.core import (
     Dataset,
     digest,

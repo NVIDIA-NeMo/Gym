@@ -176,8 +176,8 @@ def test_verify_failure_admission(tmp_path, monkeypatch, status):
     monkeypatch.setenv("GYM_DRIVER_FAILURE_FILE", str(marker))
     run = exit_cleanly_on_config_error(collect)
     if status in (401, 403):
+        from nemo_gym.core import NgFailureEvent
         from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
-        from nemo_gym.core.typed_exceptions import NgFailureEvent
 
         with pytest.raises(NgFailureEvent, match="Judge credentials rejected") as caught:
             run(tmp_path, monkeypatch, seen, parallel=1, client=SimpleNamespace(post=post))
