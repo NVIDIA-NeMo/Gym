@@ -619,9 +619,9 @@ async def test_a_start_that_hangs_ends_at_the_start_time_limit_and_lends_nothing
     with caplog.at_level(logging.ERROR, logger=sandbox_lending.__name__), pytest.raises(TimeoutError):
         await lender.lend("session", TASK)
 
-    assert len(stopped) == 1 and lender.get("session") is None
-    # The create was cut before the provider returned the sandbox's id, so the stop cannot reach what it created: the
-    # log names the session and the task, and what a reaper finds the sandbox by.
+    # The create was cut before the provider returned the sandbox's id, so the provider has nothing to close and the
+    # stop cannot reach what it created: the log names the session and the task, and what a reaper finds it by.
+    assert stopped == [] and lender.get("session") is None
     (cut,) = _lending_records(caplog)
     message = cut.getMessage()
     assert cut.levelno == logging.ERROR
