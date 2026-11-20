@@ -95,7 +95,12 @@ class ResourcesServer(SimpleResourcesServer):
             if error.terminal:
                 # Deterministic requests need correction, not another automatic allocation.
                 raise
-            raise judge_call_failed(str(error), operation="/verify", http_status=error.http_status) from error
+            status = error.http_status
+            raise judge_call_failed(
+                str(error),
+                operation="/verify",
+                http_status=status if status is not None and 100 <= status <= 599 else None,
+            ) from error
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Keep the frozen full-cohort denominator for native, reverify and reaggregate runs."""

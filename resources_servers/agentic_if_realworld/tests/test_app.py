@@ -80,16 +80,23 @@ def test_judge_startup_requires_key_only_when_serving(monkeypatch):
         server.setup_webserver()
 
 
-@pytest.mark.parametrize("status", [401, 403, 429, 500, 503, 400, 404, 413, 422])
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 503, 400, 404, 413, 422, None])
 def test_http_verify_judge_failure_preserves_saved_answer(verifier, monkeypatch, status):
+    from aiohttp import ConnectionTimeoutError
+
+    from resources_servers.agentic_if_realworld.benchmark import transport
     from resources_servers.agentic_if_realworld.tests.test_transport import Response
 
     calls = []
+    failed_calls = 3 if status in (429, 500, 503) else 1
+    monkeypatch.setattr(transport.asyncio, "sleep", AsyncMock())
 
     async def request(*args, **kwargs):
         calls.append(1)
-        if len(calls) == 1:
-            return Response(status, {"error": "bad credentials"})
+        if len(calls) <= failed_calls:
+            if status is None:
+                raise ConnectionTimeoutError("Judge connection timed out")
+            return Response(status, {"error": "judge unavailable"})
         payload = json.loads(kwargs["json"]["messages"][0]["content"].split("UNTRUSTED_EVALUATION_PAYLOAD:\n", 1)[1])
         return Response(
             200, {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(review(payload))}}]}
@@ -114,17 +121,23 @@ def test_http_verify_judge_failure_preserves_saved_answer(verifier, monkeypatch,
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         response = client.post("/verify", json=body)
         terminal = status in (400, 404, 413, 422)
-        assert response.status_code == (500 if terminal else 200) and len(calls) == 1
+        assert response.status_code == (500 if terminal else 200) and len(calls) == failed_calls
         if not terminal:
             expected_kind = "provider_credentials_rejected" if status in (401, 403) else "judge_failed"
             assert response.json()["failure_kind"] == expected_kind
             assert f"http_status={status}" in response.json()["failure_reason"]
             assert "attempt0.json" in response.json()["failure_reason"]
         assert not list(verifier.receipt_dir.glob("judges/*/result.json"))
+        [attempt] = verifier.receipt_dir.glob("judges/*/attempt0.json")
+        saved_failure = attempt.read_bytes()
+        if status is None:
+            assert "http_status" not in read(attempt)
+            assert read(attempt)["dispatch_status"] == "not_dispatched"
         monkeypatch.setenv("SYNTHETIC", "corrected-key")
         response = client.post("/verify", json=body)
         assert response.status_code == 200 and response.json()["item_verdict"] == "pass"
-        assert len(calls) == 2 and all(path.read_bytes() == value for path, value in saved.items())
+        assert len(calls) == failed_calls + 1 and all(path.read_bytes() == value for path, value in saved.items())
+        assert attempt.read_bytes() == saved_failure
 
 
 @pytest.mark.parametrize(
