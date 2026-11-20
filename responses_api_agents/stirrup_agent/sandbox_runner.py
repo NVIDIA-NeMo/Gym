@@ -29,6 +29,7 @@ import httpx  # noqa: E402
 from openai import APIStatusError  # noqa: E402
 from openai.types.responses import FunctionToolParam  # noqa: E402
 from pydantic import BaseModel, ConfigDict, create_model  # noqa: E402
+from stirrup.core.exceptions import ContextOverflowError  # noqa: E402
 from stirrup.core.models import (  # noqa: E402
     ImageContentBlock,
     Tool,
@@ -251,8 +252,10 @@ class Observer:
         self.response_ids: list[str] = []
         self.usages: list[dict[str, Any]] = []
         self.shell: LocalShell | None = None
-        # Keyed by the identity of the message Stirrup puts in the history for the call.
+        # Keyed by the identity of the message Stirrup puts in the history for the call. ``_observed`` keeps each
+        # message alive, so that the identity of one in a turn Stirrup later drops is never given to another.
         self._tools: dict[int, dict[str, Any]] = {}
+        self._observed: list[Any] = []
         self._clock_offset = time.time() - time.perf_counter()
 
     def watch_model_calls(self, client: DynamicMaxTokensChatCompletionsClient) -> None:
@@ -331,6 +334,7 @@ class Observer:
                 "timing_source": "harness",
                 "status": status,
             }
+            self._observed.append(message)
             return message
 
         agent_class.run_tool = observed_run_tool
@@ -374,7 +378,7 @@ class Observer:
 
 
 async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dict[str, Any]:
-    from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
+    from responses_api_agents.stirrup_agent.nemo_agent import CompactionSummaryError, NeMoAgent
     from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
     from responses_api_agents.stirrup_agent.stirrup_utils import (
         convert_stirrup_history_to_output_items,
@@ -418,6 +422,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         stop_reason = None
         model_error = None
         model_error_status = None
+        invalid_output = None
         async with agent.session(cache_on_interrupt=False) as session:
             try:
                 finish_params, history, _ = await session.run(messages)
@@ -433,7 +438,24 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
                 finish_params, history = None, _completed_turns(session, messages)
                 stop_reason, model_error = "model_error", str(error)
                 model_error_status = error.status_code
-        if model_error is not None:
+            except ContextOverflowError as error:
+                # With ``context_overflow_recovery`` on, Stirrup had no further completed turn to drop. The episode
+                # ends on the Model Server's own rejection, reported as the clause above reports it. A rejected
+                # compaction summary request comes after the snapshot, so the turn before it is not in the history.
+                rejection = _provider_rejection(error)
+                if rejection is None:
+                    raise
+                finish_params, history = None, _completed_turns(session, messages)
+                stop_reason, model_error = "model_error", str(rejection)
+                model_error_status = rejection.status_code
+            except CompactionSummaryError as error:
+                # The policy model's own summaries were unusable; the episode is graded on the turns so far.
+                finish_params, history = None, [*_completed_turns(session, messages)[:-1], error.messages]
+                stop_reason, invalid_output = "compaction_failed", str(error)
+        if finish_params is None and stop_reason is None:
+            # Stirrup returned on its own without a finish call: the turn budget ran out. Graded like a timeout.
+            stop_reason = "max_turns"
+        if model_error is not None or invalid_output is not None:
             status = InvocationStatus.FAILED
         else:
             status = InvocationStatus.COMPLETED if finish_params is not None else InvocationStatus.INCOMPLETE
@@ -446,6 +468,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             "stop_reason": stop_reason,
             "model_error": model_error,
             "model_error_status": model_error_status,
+            "invalid_output": invalid_output,
             **observer.report(status, history, output_items),
         }
 
@@ -459,6 +482,13 @@ def _completed_turns(session: Any, messages: list[Any]) -> list[list[Any]]:
 def _rejected_by_model(error: APIStatusError) -> bool:
     """Whether the Model Server refused the request itself (such as a context overflow), which no retry can fix."""
     return error.status_code in _REJECTION_STATUSES
+
+
+def _provider_rejection(error: BaseException | None) -> APIStatusError | None:
+    """The Model Server rejection a context overflow was raised for, found on its exception chain, or None."""
+    while error is not None and not isinstance(error, APIStatusError):
+        error = error.__cause__ or error.__context__
+    return error
 
 
 def _stop_reason(payload: dict[str, Any]) -> str:

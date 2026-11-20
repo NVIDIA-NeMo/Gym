@@ -13,7 +13,7 @@ export E2B_API_KEY=<your-api-key>
 ```
 
 For a package install, use `pip install "nemo-gym[sandbox]"`. The provider requires
-`e2b>=2.46.0,<3.0.0`. Gateway service-port routing requires the
+`e2b>=2.46.0,<2.51.0`. Gateway service-port routing requires the
 `ConnectionConfig.sandbox_headers` API available from E2B 2.46.
 
 The shipped config is `nemo_gym/sandbox/providers/e2b/configs/e2b.yaml`. It reads
@@ -107,7 +107,7 @@ command timeout. `exec.default_timeout_s` is only the fallback when the provider
 | `metadata` | Passed to E2B as string metadata, merged over the [job attribution](#job-attribution) keys. |
 | `resources` | Fixed by the E2B template, not applied per sandbox. Requests warn, or raise when `create.strict_resources` is true. |
 | `entrypoint` | Unsupported and rejected before creating a billable sandbox; define it in the E2B template. |
-| `provider_options` | Supports only `template`; unknown or invalid values are rejected before allocation. |
+| `provider_options` | Supports `template` and `resource_requests` (a mapping or `"limits"`). Scheduling `resource_requests` (for example from OpenSandbox-oriented agent configs) are treated like `resources`: they warn, or raise when `create.strict_resources` is true. Other keys and invalid values are rejected before allocation. |
 
 The bundled template builder can set CPU count and memory. Disk and GPU requirements need a
 suitable E2B template prepared through E2B tooling.

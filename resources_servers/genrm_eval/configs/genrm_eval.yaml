@@ -1,6 +1,11 @@
 responses_create_params:
   temperature: 1.0
   top_p: 0.95
+  max_output_tokens: 32768
+
+# Mark runs unhealthy for excessive failures, including sidecar failures; keep partial scores.
+health_check_max_not_final_failure_fraction: 0.01
+health_check_max_final_failure_fraction: 0.01
 
 genrm_eval:
   resources_servers:

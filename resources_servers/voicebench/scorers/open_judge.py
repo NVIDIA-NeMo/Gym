@@ -6,12 +6,12 @@ import asyncio
 import hashlib
 import math
 import re
-from pathlib import Path
 from time import perf_counter
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
@@ -27,6 +27,8 @@ class JudgeSettings(BaseModel):
     judge_max_tokens: int = Field(default=1024, gt=0)
     judge_n: int = Field(default=3, gt=0)
     judge_max_concurrency: int = Field(default=40, gt=0)
+    # SD-QA only: also report VoiceBench's PEDANT ("panda") correctness, scored locally without the judge.
+    sdqa_pedant: bool = False
 
 
 class JudgePrompt(BaseModel):
@@ -92,23 +94,44 @@ def scoring_failure(error: Exception) -> ScoringResult:
     )
 
 
+class JudgeLimiter:
+    """In-flight call bound and counters; scorers that share one limiter share the concurrency budget."""
+
+    def __init__(self, limit: int) -> None:
+        self.slots = asyncio.Semaphore(limit)
+        self.inflight = 0
+        self.peak_inflight = 0
+        self.total_calls = 0
+
+
 class OpenJudgeScorer:
     """One bounded judge client; caller chooses an independent versioned prompt file."""
 
-    def __init__(self, settings: JudgeSettings, server_client: ServerClient) -> None:
+    def __init__(
+        self, settings: JudgeSettings, server_client: ServerClient, limiter: JudgeLimiter | None = None
+    ) -> None:
         if settings.judge_model_server is None or settings.judge_prompt_file is None:
             raise ValueError("judge scoring requires judge_model_server and judge_prompt_file")
         self.settings = settings
         self.server_client = server_client
-        prompt_bytes = Path(settings.judge_prompt_file).read_bytes()
+        prompt_bytes = _resolve_under_cwd_or_install(settings.judge_prompt_file).read_bytes()
         self.prompt = JudgePrompt.model_validate(yaml.safe_load(prompt_bytes))
         if not {"{prompt}", "{response}"}.issubset(set(re.findall(r"\{\w+\}", self.prompt.user))):
             raise ValueError("judge user prompt must contain {prompt} and {response}")
         self.prompt_sha256 = hashlib.sha256(prompt_bytes).hexdigest()
-        self._slots = asyncio.Semaphore(settings.judge_max_concurrency)
-        self.inflight = 0
-        self.peak_inflight = 0
-        self.total_calls = 0
+        self.limiter = limiter or JudgeLimiter(settings.judge_max_concurrency)
+
+    @property
+    def inflight(self) -> int:
+        return self.limiter.inflight
+
+    @property
+    def peak_inflight(self) -> int:
+        return self.limiter.peak_inflight
+
+    @property
+    def total_calls(self) -> int:
+        return self.limiter.total_calls
 
     async def collect(
         self, answer: str, metadata: dict[str, JsonValue]
@@ -137,12 +160,13 @@ class OpenJudgeScorer:
             }
         )
         queued_at = perf_counter()
-        async with self._slots:
+        limiter = self.limiter
+        async with limiter.slots:
             started_at = perf_counter()
-            self.inflight += 1
-            self.total_calls += 1
-            self.peak_inflight = max(self.peak_inflight, self.inflight)
-            inflight_at_start = self.inflight
+            limiter.inflight += 1
+            limiter.total_calls += 1
+            limiter.peak_inflight = max(limiter.peak_inflight, limiter.inflight)
+            inflight_at_start = limiter.inflight
             try:
                 judged = await call_judge(
                     self.server_client,
@@ -152,12 +176,12 @@ class OpenJudgeScorer:
                     response_model=NeMoGymChatCompletion,
                 )
             finally:
-                self.inflight -= 1
+                limiter.inflight -= 1
             return judged, {
                 "judge_queue_seconds": started_at - queued_at,
                 "judge_call_seconds": perf_counter() - started_at,
                 "judge_inflight_at_start": inflight_at_start,
-                "judge_peak_inflight": self.peak_inflight,
+                "judge_peak_inflight": limiter.peak_inflight,
                 "judge_configured_concurrency": self.settings.judge_max_concurrency,
             }
 

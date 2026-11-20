@@ -1329,7 +1329,7 @@ class TestMultiStepTasks:
         assert [task.config.step_verifier_timeout_sec(t.config) for t in task.turns] == [1200.0, 1200.0]
         assert (
             "step(s) '01_plan', '02_implement' name no [steps.verifier].timeout_sec and are graded within Harbor's "
-            "step default of 1200s (600s times the dataset's timeout_multiplier), not the task's "
+            "step default of 1200s (600s times the dataset's timeout multipliers), not the task's "
             "[verifier].timeout_sec = 240s"
         ) in caplog.text
 
@@ -1343,6 +1343,38 @@ class TestMultiStepTasks:
         assert task.config.verifier.timeout_sec == 1200.0
         assert [task.config.step_verifier_timeout_sec(t.config) for t in task.turns] == [1200.0, 1200.0]
         assert "Harbor's step default" not in caplog.text
+
+    def test_a_verifier_timeout_multiplier_scales_the_verifier_budgets_alone(self, tmp_path, caplog):
+        """`[gym.defaults] verifier_timeout_multiplier` widens what the verifier gets, on top of `timeout_multiplier`,
+        and leaves every agent budget to `timeout_multiplier`: a benchmark whose published runs gave the verifiers
+        a longer allowance than the agents can say so without editing its tasks."""
+        root = write_multi_step_task(tmp_path / "t")
+        (tmp_path / "dataset.toml").write_text("[gym.defaults]\nverifier_timeout_multiplier = 3.0\n")
+        task = load_task(root)
+        assert task.config.verifier.timeout_sec == 360.0  # HELLO_TOML's 120 s, scaled by the verifier factor
+        assert task.config.agent.timeout_sec == 120.0  # the agent budget is untouched
+        plan, implement = task.turns
+        assert task.config.step_agent_timeout_sec(plan.config) == 2400.0  # the step's own agent budget, untouched
+        assert [task.config.step_verifier_timeout_sec(t.config) for t in task.turns] == [1800.0, 1800.0]
+
+        (tmp_path / "dataset.toml").write_text(
+            "[gym.defaults]\ntimeout_multiplier = 2.0\nverifier_timeout_multiplier = 3.0\n"
+        )
+        toml = (root / "task.toml").read_text()
+        (root / "task.toml").write_text(
+            toml.replace('name = "02_implement"\n', 'name = "02_implement"\n[steps.verifier]\ntimeout_sec = 50.0\n')
+        )
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
+            task = load_task(root)
+        assert (task.config.agent.timeout_sec, task.config.verifier.timeout_sec) == (240.0, 720.0)
+        plan, implement = task.turns
+        assert task.config.step_agent_timeout_sec(plan.config) == 4800.0
+        # A named step verifier budget scales by both factors; an unnamed one inherits the step default scaled by both.
+        assert implement.config.verifier.timeout_sec == 300.0
+        assert task.config.step_verifier_timeout_sec(plan.config) == 3600.0
+        assert task.config._verifier_timeout_multiplier == 6.0
+        assert "600s times the dataset's timeout multipliers" in caplog.text
+        assert task.digest != load_task(write_multi_step_task(tmp_path / "u")).digest  # the factor is in the digest
 
     def test_a_shared_step_with_its_own_verifier_environment_is_refused_as_harbor_refuses_it(self, tmp_path):
         """Harbor's `_validate_mode_env_consistency` is on `VerifierConfig`, and a step's verifier is one, so a step
@@ -2412,6 +2444,13 @@ class TestCli:
             "miniswe_sandboxed_agent",
             "opencode_sandboxed_agent",
             "pi_sandboxed_agent",
+            "browsecomp_agent",
+            "pool_agent",
+            "claude_code_agent",
+            "kilocode_agent",
+            "stirrup_agent",
+            "nooa_agent",
+            "terminus_2_agent",
         ],
     )
     def test_shipped_sandboxed_harnesses_declare_model_calls_from_sandbox(self, impl_name):
@@ -2419,9 +2458,9 @@ class TestCli:
         list of names, so a run with it advertises a reachable model server without ++use_absolute_ip=true."""
         assert runs_in_sandbox(impl_name, {"entrypoint": "app.py"}) is True
 
-    @pytest.mark.parametrize("impl_name", ["terminus_2_sandboxed_agent", "terminus_2_agent", "harbor_oracle_agent"])
+    @pytest.mark.parametrize("impl_name", ["terminus_2_sandboxed_agent", "harbor_oracle_agent"])
     def test_host_side_harnesses_declare_nothing(self, impl_name):
-        # Terminus 2 drives a tmux session in the sandbox but calls the model from the agent server.
+        # The sandboxed Terminus 2 drives a tmux session in the sandbox but calls the model from the agent server.
         assert runs_in_sandbox(impl_name, {"entrypoint": "app.py"}) is False
 
     def test_runs_in_sandbox_from_declaration_or_config_key(self, tmp_path, monkeypatch):
@@ -3264,7 +3303,7 @@ class TestDatasetConfig:
         assert (a.agent.timeout_sec, a.verifier.timeout_sec) == (60.0, 80.0)
         assert (task.config.step_agent_timeout_sec(a), task.config.step_verifier_timeout_sec(a)) == (60.0, 80.0)
         assert b.agent.timeout_sec is None and task.config.step_agent_timeout_sec(b) == 240.0
-        assert b.verifier.timeout_sec is None and task.config._timeout_multiplier == 2.0
+        assert b.verifier.timeout_sec is None and task.config._verifier_timeout_multiplier == 2.0
         row = materialize_task(task, "ds").model_dump(mode="json")
         turns = row["task_input"]["turns"]
         assert [turn["responses_create_params"]["metadata"]["agent_timeout_sec"] for turn in turns] == [
@@ -4786,3 +4825,97 @@ def test_a_task_shipping_harbors_seed_trajectory_loads_for_the_oracle_and_the_fi
     assert is_covered("trajectory.json") and content_hash(root) != before
     # The package store's hash (what a fetch verifies) covers the file as the folder digest does.
     assert archive_hash(root) == content_hash(root)
+
+
+class TestHarborOutputRoot:
+    """`+harbor_output_root=DIR` moves a task TARGET's prepared rows and run config out of the working directory."""
+
+    def _target_args(self, tmp_path):
+        import argparse
+
+        def fail(message):
+            raise SystemExit(message)
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        return argparse.Namespace(
+            target=str(folder), agent="hermes_agent", sandbox="opensandbox", _parser=argparse.Namespace(error=fail)
+        )
+
+    def _prepare(self, args, overrides, sandbox="opensandbox"):
+        agent = resolve_agent("hermes_agent")
+        prepared = cli_eval._prepare_for_agent(args, overrides, agent, sandbox)
+        config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
+        return prepared, config_path, tokens
+
+    def test_prepared_rows_do_not_depend_on_the_working_directory_when_the_output_root_is_set(
+        self, tmp_path, monkeypatch
+    ):
+        """A submitted run prepares in a fresh checkout on every allocation. The run config names the rows file, and a
+        continuation compares that config with the saved run's, so with the output root set (to a folder in the job
+        directory) two preparations from different working directories must write the same config."""
+        args = self._target_args(tmp_path)
+        root = tmp_path / "job" / "artifacts" / "harbor"
+        overrides = [f"+harbor_output_root={root}"]
+        configs = []
+        for name in ("checkout_a", "checkout_b"):
+            checkout = tmp_path / name
+            checkout.mkdir()
+            monkeypatch.chdir(checkout)
+            prepared, config_path, tokens = self._prepare(args, overrides)
+            assert config_path.parent == root / "ds" and prepared.rows_path.is_relative_to(root)
+            assert not any("harbor_output_root" in token for token in tokens)
+            configs.append(config_path.read_text())
+            assert not (checkout / "results").exists()
+        assert configs[0] == configs[1]
+        assert str(root / "ds") in configs[0]
+
+    @pytest.mark.parametrize("quoted", ["'{root}'", "{root}"])
+    def test_a_hydra_quoted_output_root_is_the_path_it_spells(self, tmp_path, monkeypatch, quoted):
+        """`+harbor_output_root='/tmp/prepared rows'` is the folder `/tmp/prepared rows`, not a name with quotes in
+        it that lands beneath the working directory."""
+        from nemo_gym.data.tasks.harbor.prepare import output_root_from_overrides
+
+        root = tmp_path / "prepared rows"
+        overrides = ["+harbor_output_root=" + quoted.format(root=root)]
+        assert output_root_from_overrides(overrides) == root
+        monkeypatch.chdir(tmp_path)
+        prepared, config_path, _ = self._prepare(self._target_args(tmp_path), overrides, sandbox=None)
+        assert config_path.parent == root / "ds" and prepared.rows_path.is_relative_to(root)
+        assert not any(path.name.startswith("'") for path in tmp_path.iterdir())
+
+    def test_an_empty_output_root_is_the_default_and_a_non_path_is_refused(self, tmp_path, monkeypatch):
+        from nemo_gym.data.tasks.harbor.prepare import DEFAULT_OUTPUT_ROOT, output_root_from_overrides
+
+        assert output_root_from_overrides([]) == DEFAULT_OUTPUT_ROOT
+        assert output_root_from_overrides(["+harbor_output_root=''"]) == DEFAULT_OUTPUT_ROOT
+        with pytest.raises(ValueError, match="path string"):
+            output_root_from_overrides(["+harbor_output_root=3"])
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit, match="path string"):
+            self._prepare(self._target_args(tmp_path), ["+harbor_output_root=3"])
+
+    @pytest.mark.parametrize("overrides", [[], ["+harbor_output_root={root}"]])
+    def test_the_oracle_run_prepares_under_the_output_root(self, tmp_path, monkeypatch, overrides):
+        """`gym eval run TARGET --agent harbor_oracle_agent` goes through the validation path; with the output root set
+        it prepares and renders there too, keeping its own validation/ folder, so a submitted oracle run does not
+        write into the checkout."""
+        root = tmp_path / "job" / "artifacts" / "harbor"
+        overrides = [token.format(root=root) for token in overrides]
+        seen = {}
+
+        class Stop(Exception):
+            pass
+
+        def capture(target, **kwargs):
+            seen.update(kwargs)
+            raise Stop
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cli_eval, "prepare_target", capture)
+        args = self._target_args(tmp_path)
+        with pytest.raises(Stop):
+            cli_eval.validate_target(args, overrides, agent=resolve_agent("harbor_oracle_agent"))
+        expected = root if overrides else Path("results/harbor")
+        assert seen["output_root"] == expected / "validation"
+        assert seen["render_root"] == expected

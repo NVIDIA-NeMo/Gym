@@ -5,12 +5,13 @@
 import ast
 import json
 import sys
+import warnings
 from pathlib import Path
 from typing import get_args
 
 import pytest
 from omegaconf import OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.config.config_types import (
     EnvironmentServerInstanceConfig,
@@ -27,6 +28,8 @@ from nemo_gym.data.task_data import (
     normalize_task_fields,
     validate_jsonl_rows,
 )
+from nemo_gym.data.tasks.harbor.materialize import HarborTaskInput
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -42,6 +45,16 @@ class TestNormalizeTaskFields:
         fields, conflicts = normalize_task_fields(row)
         assert fields == {"question": "q"}
         assert conflicts == []
+
+    def test_agent_context_is_not_task_data(self):
+        """Schema projection excludes single_agent_turn's context field without promising environment support."""
+        fields, _ = normalize_task_fields(
+            {
+                "verifier_metadata": {"label": "safe"},
+                "agent_context": {"agent": {"artifacts": {"media": {"path": "figs/1"}}}},
+            }
+        )
+        assert fields == {"label": "safe"}
 
     def test_splices_verifier_metadata_contents(self):
         fields, conflicts = normalize_task_fields(
@@ -161,6 +174,22 @@ class TestTaskDataValidator:
         assert "expected_answer" in v.report.errors[0]
         assert "0/" not in v.report.summary().splitlines()[0]
 
+    def test_agent_context_inside_task_data_is_not_a_task_field(self):
+        """SingleAgentTurnTaskInput lifts context out of task_data, so schema validation skips it there."""
+        row = {
+            "responses_create_params": {"input": "q"},
+            "task_data": {
+                "question": "q",
+                "expected_answer": "a",
+                "agent_context": {"agent": {"values": {"tag": "figqa2"}}},
+            },
+        }
+        v = self._validator()
+        v.validate_row(0, row)
+
+        assert v.report.clean, v.report.summary()
+        assert SingleAgentTurnTaskInput.model_validate(row).task_data == {"question": "q", "expected_answer": "a"}
+
     def test_verifier_metadata_rows_validate_against_flat_schema(self):
         v = self._validator()
         v.validate_row(0, {"verifier_metadata": {"question": "q", "expected_answer": "a"}})
@@ -175,6 +204,16 @@ class TestTaskDataValidator:
         assert not v.report.clean
         assert v.report.unknown_keys == {"difficulty": 1}
         assert "difficulty" in v.report.summary()
+
+    @pytest.mark.parametrize("skip_token_capture", [True, False])
+    def test_the_skip_token_capture_key_is_framework_owned(self, skip_token_capture):
+        v = self._validator()
+        row = {"question": "q", "expected_answer": "a", "_ng_skip_token_capture": skip_token_capture}
+        v.validate_row(0, row)
+        assert v.report.clean and v.report.unknown_keys == {}
+        # Only that key is reserved: a typo beside it still makes the report dirty.
+        v.validate_row(1, row | {"typo": 1})
+        assert v.report.unknown_keys == {"typo": 1}
 
     def test_conflicting_duplicate_marks_report_dirty(self):
         v = self._validator()
@@ -452,10 +491,17 @@ class TestSelfContainedAgentSchemaFallback:
         assert validator.report.server_name == "tau2"
 
     def test_agent_without_rs_reference_and_no_schema_is_skipped(self, tmp_path, monkeypatch):
-        (tmp_path / "responses_api_agents" / "tau2").mkdir(parents=True)
+        # A real server directory (it ships requirements.txt) that has not adopted a schema. An empty directory no
+        # longer stands in for one, and a tmp dir named `tau2` would now resolve to the built-in tau2, which ships
+        # a schema (NVBug 6900465), so the directory gets its own name.
+        agent_dir = tmp_path / "responses_api_agents" / "tau2_without_schema"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "requirements.txt").write_text("")
         monkeypatch.chdir(tmp_path)
-        agent = self._agent("tau2", None)
-        assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
+        agent = self._agent("tau2_without_schema", None)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # a found server without task_data.py is skipped silently
+            assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
 
     def test_agent_with_dangling_rs_reference_is_skipped(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "responses_api_agents" / "tau2"
@@ -742,7 +788,10 @@ class TestHarborLayoutThroughTheProcessor:
         processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [self._row({})])
         with pytest.raises(ValueError, match=r"(?s)against the `harbor` schema.*_ng_digest"):
             processor._collate_samples_single_type(
-                "validation", in_scope, task_data_validation=config.effective_task_data_validation
+                "validation",
+                in_scope,
+                task_data_validation=config.effective_task_data_validation,
+                output_dir=tmp_path / "prepared",
             )
 
     def test_materialized_row_passes(self, tmp_path, monkeypatch):
@@ -750,11 +799,37 @@ class TestHarborLayoutThroughTheProcessor:
             tmp_path, monkeypatch, [self._row({"_ng_digest": "a" * 64})]
         )
         paths = processor._collate_samples_single_type(
-            "validation", in_scope, task_data_validation=config.effective_task_data_validation
+            "validation",
+            in_scope,
+            task_data_validation=config.effective_task_data_validation,
+            output_dir=tmp_path / "prepared",
         )
         assert len(paths) == 1 and json.loads(paths[0].read_text())["task_input"]["task_data"] == {
             "_ng_digest": "a" * 64
         }
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_schema_filtering_preserves_context_for_environment_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nested: bool
+    ) -> None:
+        """Collation must preserve unsupported context so Harbor can refuse it at its request boundary."""
+        row = self._row({"_ng_digest": "a" * 64})
+        context = {"values": {"tag": "figqa2"}}
+        container = row["task_input"]["task_data"] if nested else row["task_input"]
+        container["agent_context"] = context
+        processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [row])
+
+        paths = processor._collate_samples_single_type(
+            "validation",
+            in_scope,
+            task_data_validation=config.effective_task_data_validation,
+            output_dir=tmp_path / "prepared",
+        )
+
+        [prepared] = [json.loads(line) for line in paths[0].read_text().splitlines()]
+        assert prepared["task_input"] == row["task_input"]
+        with pytest.raises(ValidationError, match="agent_context"):
+            HarborTaskInput.model_validate(prepared["task_input"])
 
 
 class TestLegacyWrapperLayoutThroughTheProcessor:
@@ -833,12 +908,171 @@ class TestLegacyWrapperLayoutThroughTheProcessor:
         processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [row])
         with pytest.raises(ValueError, match=r"(?s)against the `tau2` schema.*seed"):
             processor._collate_samples_single_type(
-                "validation", in_scope, task_data_validation=config.effective_task_data_validation
+                "validation",
+                in_scope,
+                task_data_validation=config.effective_task_data_validation,
+                output_dir=tmp_path / "prepared",
             )
 
     def test_valid_row_passes(self, tmp_path, monkeypatch):
         processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [self._row()])
         paths = processor._collate_samples_single_type(
-            "validation", in_scope, task_data_validation=config.effective_task_data_validation
+            "validation",
+            in_scope,
+            task_data_validation=config.effective_task_data_validation,
+            output_dir=tmp_path / "prepared",
         )
         assert len(paths) == 1 and len(paths[0].read_text().splitlines()) == 1
+
+
+class TestFindServerDirRejectsOutputOnlyDirs:
+    """A directory holding only data under the server's name must not resolve as the server (NVBug 6900465).
+
+    cwd is searched before the install root. Until #5997 ``gym dataset collate`` created
+    ``<cwd>/<base_folder>/<server>/data/`` for its own output before it looked the schema up; such a directory
+    still exists wherever an earlier collate ran, or where a dataset is kept there.
+    """
+
+    def test_output_only_dir_under_cwd_does_not_shadow_the_server_dir(self, tmp_path, monkeypatch):
+        (tmp_path / "resources_servers" / "mcqa" / "data").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        server_dir = find_server_dir("mcqa")
+        assert server_dir is not None
+        assert server_dir.resolve() == (REPO_ROOT / "resources_servers" / "mcqa").resolve()
+        assert load_task_data_schema(server_dir) is not None
+
+    def test_output_only_dir_does_not_shadow_an_agent_dir_either(self, tmp_path, monkeypatch):
+        (tmp_path / "responses_api_agents" / "tau2" / "data").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        server_dir = find_server_dir("tau2", base_folder="responses_api_agents")
+        assert server_dir is not None
+        assert server_dir.resolve() == (REPO_ROOT / "responses_api_agents" / "tau2").resolve()
+
+    def test_schema_only_server_dir_under_cwd_still_resolves(self, tmp_path, monkeypatch):
+        # A plugin server that ships a schema but neither requirements.txt nor pyproject.toml.
+        plugin_dir = tmp_path / "resources_servers" / "plugin_rs"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "task_data.py").write_text(
+            "from pydantic import BaseModel\nclass TaskData(BaseModel):\n    pass\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert find_server_dir("plugin_rs") == plugin_dir
+
+    def test_missing_server_is_none(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert find_server_dir("no_such_server_xyz") is None
+
+    # The markers are spelled out rather than taken from SERVER_DIR_MARKERS so that dropping one from the tuple
+    # fails here: requirements.txt and pyproject.toml are the CLI's server-dir rule, task_data.py and
+    # dataset_metrics.py are the modules the data tooling looks up.
+    @pytest.mark.parametrize("marker", ["requirements.txt", "pyproject.toml", "task_data.py", "dataset_metrics.py"])
+    def test_a_directory_holding_only_that_marker_is_a_server_dir(self, tmp_path, monkeypatch, marker):
+        server_dir = tmp_path / "resources_servers" / "marker_only_rs"
+        server_dir.mkdir(parents=True)
+        (server_dir / marker).write_text("")
+        monkeypatch.chdir(tmp_path)
+        assert find_server_dir("marker_only_rs") == server_dir
+
+    @pytest.mark.parametrize("marker", ["requirements.txt", "pyproject.toml", "task_data.py", "dataset_metrics.py"])
+    def test_a_marker_that_is_a_directory_does_not_count(self, tmp_path, monkeypatch, marker):
+        (tmp_path / "resources_servers" / "marker_dir_rs" / marker).mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        assert find_server_dir("marker_dir_rs") is None
+
+    def test_unresolvable_schema_home_warns_and_skips(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.chdir(tmp_path)
+        rs = ResourcesServerInstanceConfig(
+            name="plugin_rs",
+            server_type_config_dict=OmegaConf.create({}),
+            resources_servers={"no_such_server_xyz": {"entrypoint": "app.py", "domain": "agent"}},
+        )
+        dataset = SimpleNamespace(jsonl_fpath="data/example.jsonl")
+        with pytest.warns(UserWarning, match=r"no resources_servers/no_such_server_xyz directory"):
+            assert TrainDataProcessor._task_data_validator_for(rs, dataset, [rs]) is None
+
+
+class TestExternalCwdThroughTheProcessor:
+    """Collating a built-in dataset from a cwd outside the checkout must still validate it (NVBug 6900465).
+
+    The dataset's ``jsonl_fpath`` is repo-relative and its rows live under ``<cwd>/resources_servers/<server>/data/``,
+    a data-only directory of the server's name (what collate itself left behind before #5997); it must not be
+    mistaken for the server.
+    """
+
+    def _processor_and_configs(self, tmp_path, monkeypatch, rows):
+        from omegaconf import DictConfig
+
+        from nemo_gym.config.global_config import GlobalConfigDictParser
+        from nemo_gym.data.dataset_preparation import TrainDataProcessorConfig
+
+        rel_path = Path("resources_servers") / "example_session_state_mgmt" / "data" / "rows.jsonl"
+        rows_path = tmp_path / rel_path
+        rows_path.parent.mkdir(parents=True)
+        rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        monkeypatch.chdir(tmp_path)
+        global_config_dict = GlobalConfigDictParser().parse_no_environment(
+            DictConfig(
+                {
+                    "ssm_resources": {
+                        "resources_servers": {
+                            "example_session_state_mgmt": {
+                                "entrypoint": "app.py",
+                                "domain": "agent",
+                                "datasets": [
+                                    {
+                                        "name": "example",
+                                        "type": "example",
+                                        "license": "TBD",
+                                        "jsonl_fpath": str(rel_path),
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                }
+            )
+        )
+        processor = TrainDataProcessor()
+        config = TrainDataProcessorConfig(output_dirpath=str(tmp_path / "out"), mode="example_validation")
+        in_scope = processor.load_and_validate_server_instance_configs(config, global_config_dict)
+        assert [c.name for c in in_scope] == ["ssm_resources"]
+        return processor, config, in_scope
+
+    @staticmethod
+    def _row(**fields):
+        return {"responses_create_params": {"input": [{"role": "user", "content": "count"}]}, **fields}
+
+    def test_schema_violation_is_rejected_from_an_external_cwd(self, tmp_path, monkeypatch):
+        processor, config, in_scope = self._processor_and_configs(
+            tmp_path,
+            monkeypatch,
+            [self._row(initial_count=3)],  # expected_count missing
+        )
+        assert config.effective_task_data_validation == "error"
+        with pytest.raises(ValueError, match=r"(?s)against the `example_session_state_mgmt` schema.*expected_count"):
+            processor._collate_samples_single_type(
+                "example",
+                in_scope,
+                task_data_validation=config.effective_task_data_validation,
+                output_dir=tmp_path / "prepared",
+            )
+
+    def test_valid_rows_pass_from_an_external_cwd(self, tmp_path, monkeypatch):
+        processor, config, in_scope = self._processor_and_configs(
+            tmp_path, monkeypatch, [self._row(initial_count=3, expected_count=6)]
+        )
+        paths = processor._collate_samples_single_type(
+            "example",
+            in_scope,
+            task_data_validation=config.effective_task_data_validation,
+            output_dir=tmp_path / "prepared",
+        )
+        assert len(paths) == 1 and len(paths[0].read_text().splitlines()) == 1
+
+
+def test_rl_stream_index_is_not_part_of_task_schema() -> None:
+    fields, conflicts = normalize_task_fields({"_rowidx": 7, "_ng_task_index": 3, "task_data": {"answer": "expected"}})
+    assert fields == {"answer": "expected"}
+    assert not conflicts

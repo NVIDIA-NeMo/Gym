@@ -11,11 +11,13 @@ from typing import Any
 import pytest
 
 from nemo_gym.models.token_capture.external_capture import (
+    DynamoWorkerCaptureHandler,
     MegatronWorkerCaptureHandler,
     VLLMWorkerCaptureHandler,
     make_external_capture_handler,
 )
 from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.models.token_capture.records import IDENTITY_FIELDS, ModelRef
 from nemo_gym.models.token_capture.replay import replay_context
 from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.staging.records import (
@@ -30,8 +32,8 @@ from nemo_gym.models.token_capture.staging.records import (
 
 HANDLER_CLASSES = pytest.mark.parametrize(
     "handler_cls",
-    [VLLMWorkerCaptureHandler, MegatronWorkerCaptureHandler],
-    ids=["vllm", "megatron"],
+    [VLLMWorkerCaptureHandler, MegatronWorkerCaptureHandler, DynamoWorkerCaptureHandler],
+    ids=["vllm", "megatron", "dynamo"],
 )
 
 
@@ -395,6 +397,33 @@ async def test_handler_finalization_updates_lineage_and_cleans_transport(handler
 
 @pytest.mark.asyncio
 @HANDLER_CLASSES
+@pytest.mark.parametrize("case", list(_FINALIZE_CASES.values()), ids=list(_FINALIZE_CASES))
+async def test_handler_writes_the_call_identity_on_the_row_it_leaves(handler_cls, case: _FinalizeCase) -> None:
+    store = InMemoryLineageStore()
+    context = _root_context(store)
+    context.agent_instance = "judge.1"
+    context.model_ref = ModelRef(name="policy")
+    payload = _transport_payload()
+    if case.coords_payload is not None:
+        payload["ng_commit_coords"] = case.coords_payload
+    if case.drop_response_id:
+        payload.pop("id")
+
+    await _prepare_and_finalize(handler_cls(), context, payload)
+
+    # No intent row exists here, so the manifest cannot fill the identity in: the row itself must carry it.
+    manifest = await store.manifest("rollout-1")
+    [row] = manifest["records"] + manifest["failures"]
+    assert (row.get("reason") is None) == (case.expected_failure is None)
+    assert {name: row.get(name) for name in IDENTITY_FIELDS} == {
+        "agent_instance": "judge.1",
+        "agent_kind": "judge",
+        "model_ref": {"type": "responses_api_models", "name": "policy"},
+    }
+
+
+@pytest.mark.asyncio
+@HANDLER_CLASSES
 @pytest.mark.parametrize("previous_worker_response", [False, True])
 async def test_handler_leaves_synthetic_completion_uncommitted(handler_cls, previous_worker_response) -> None:
     handler = handler_cls()
@@ -438,7 +467,7 @@ class _FaultyLedger(InMemoryLineageStore):
             raise RuntimeError("ledger write failed")
         await super().record(commit)
 
-    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
+    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str, *, identity=None) -> None:
         self.record_failure_calls.append((rollout_id, model_call_id, reason))
         if self._record_failure_fails:
             raise RuntimeError("ledger poison write failed")
@@ -492,8 +521,8 @@ async def test_handler_logs_and_continues_when_poisoning_also_fails(handler_cls,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "handler",
-    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler()],
-    ids=["vllm", "megatron"],
+    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler(), DynamoWorkerCaptureHandler()],
+    ids=["vllm", "megatron", "dynamo"],
 )
 async def test_handlers_strip_unadmitted_capture_responses(handler) -> None:
     store = InMemoryLineageStore()
@@ -515,8 +544,8 @@ async def test_handlers_strip_unadmitted_capture_responses(handler) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "handler",
-    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler()],
-    ids=["vllm", "megatron"],
+    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler(), DynamoWorkerCaptureHandler()],
+    ids=["vllm", "megatron", "dynamo"],
 )
 async def test_handlers_leave_uncorrelated_traffic_untouched(handler) -> None:
     payload = _transport_payload()
@@ -528,7 +557,11 @@ async def test_handlers_leave_uncorrelated_traffic_untouched(handler) -> None:
 
 @pytest.mark.parametrize(
     ("backend", "handler_type"),
-    [("vllm_worker", VLLMWorkerCaptureHandler), ("megatron_worker", MegatronWorkerCaptureHandler)],
+    [
+        ("vllm_worker", VLLMWorkerCaptureHandler),
+        ("megatron_worker", MegatronWorkerCaptureHandler),
+        ("dynamo_worker", DynamoWorkerCaptureHandler),
+    ],
 )
 def test_factory_selects_the_typed_backend_strategy(backend, handler_type) -> None:
     assert isinstance(make_external_capture_handler(backend), handler_type)

@@ -38,9 +38,10 @@ from typing import Callable
 
 
 UPSTREAM_REPO = "https://github.com/SWE-rebench/SWE-rebench-V2.git"
-# Pinned so a parser change upstream cannot silently move scores between runs. Bump
-# deliberately, and re-baseline when you do.
-UPSTREAM_COMMIT = "main"
+# Pinned so a parser change upstream cannot silently move scores between runs.
+# Bump it deliberately, and re-baseline when you do.
+# c71902a8 (2026-03-12) is the tree the swe_agents harness graded with.
+UPSTREAM_COMMIT = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"  # pragma: allowlist secret
 
 # Upstream has moved this file between releases; accept both layouts rather than pinning one.
 _PARSER_RELATIVE_PATHS = (Path("lib") / "agent" / "log_parsers.py", Path("agent") / "log_parsers.py")
@@ -51,8 +52,11 @@ _MODULE: ModuleType | None = None
 def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
     """Clone once across concurrent workers, using a mkdir lock.
 
-    ``gym env start`` may bring several server workers up at once, and an unsynchronised clone
-    into a shared path yields a half-written tree that imports with a confusing error.
+    ``gym env start`` may bring several server workers up at once.
+    An unsynchronised clone into a shared path would yield a half-written tree that imports with a confusing error.
+    The tree is built in a private staging directory and published with one rename.
+    A parser file under ``destination`` therefore always belongs to a complete checkout of ``UPSTREAM_COMMIT``.
+    A worker killed while it holds the lock leaves the lock behind, and later callers time out naming it.
     """
     if _parser_path(destination) is not None:
         return
@@ -67,23 +71,50 @@ def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
             if _parser_path(destination) is not None:
                 return
             if waited > timeout_s:
-                raise TimeoutError(f"timed out waiting for the SWE-rebench clone lock at {lock_path}")
+                raise TimeoutError(
+                    f"timed out after {timeout_s:.0f}s waiting for the SWE-rebench clone lock at {lock_path}. "
+                    "A worker killed while fetching leaves this lock behind; "
+                    "if no other worker is fetching, remove it and retry."
+                )
             time.sleep(2.0)
             waited += 2.0
     try:
         if _parser_path(destination) is not None:
             return
         shutil.rmtree(destination, ignore_errors=True)
-        subprocess.run(
-            ["git", "clone", "--depth", "1", UPSTREAM_REPO, str(destination)],
-            check=True,
-            capture_output=True,
-        )
-        if UPSTREAM_COMMIT != "main":
-            subprocess.run(["git", "fetch", "--depth", "1", "origin", UPSTREAM_COMMIT], cwd=destination, check=True)
-            subprocess.run(["git", "checkout", UPSTREAM_COMMIT], cwd=destination, check=True)
+        # Only the lock holder creates staging trees, so any found here belong to a holder that was killed.
+        # Such a holder also leaves the lock behind, so this runs once that lock has been removed.
+        for orphan in destination.parent.glob(f".{destination.name}.tmp-*"):
+            shutil.rmtree(orphan, ignore_errors=True)
+        staging = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+        try:
+            _git("init", "-q", str(staging))
+            _git("fetch", "--depth", "1", UPSTREAM_REPO, UPSTREAM_COMMIT, cwd=staging)
+            _git("checkout", "-q", "FETCH_HEAD", cwd=staging)
+            os.rename(staging, destination)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
     finally:
         shutil.rmtree(lock_path, ignore_errors=True)
+
+
+def _git(*args: str, cwd: Path | None = None) -> None:
+    """Run one git command, and raise with its stderr if it fails.
+
+    ``verify()`` reports ``str(exc)`` as the failure reason.
+    ``CalledProcessError`` leaves stderr out of that string.
+    Without stderr, a masked row would not say whether the fetch hit an unknown commit, a DNS failure, or a proxy error.
+    """
+    try:
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
+        raise RuntimeError(f"git {args[0]} of {UPSTREAM_REPO} at {UPSTREAM_COMMIT} failed: {stderr}") from exc
+
+
+def _repo_dir_name() -> str:
+    """Key the clone by commit, so a cache filled under another pin (or main) is never reused."""
+    return "SWE-rebench-V2" if UPSTREAM_COMMIT == "main" else f"SWE-rebench-V2-{UPSTREAM_COMMIT[:12]}"
 
 
 def _parser_path(repo_dir: Path) -> Path | None:
@@ -100,7 +131,7 @@ def load_parsers(cache_dir: Path) -> ModuleType:
     if _MODULE is not None:
         return _MODULE
 
-    repo_dir = Path(cache_dir) / "SWE-rebench-V2"
+    repo_dir = Path(cache_dir) / _repo_dir_name()
     _clone_locked(repo_dir)
     parser_path = _parser_path(repo_dir)
     if parser_path is None:

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from harbor.models.job.config import JobConfig
+from harbor.models.task.config import TaskConfig
 from harbor.models.trial.result import TrialResult
 from ray.exceptions import RayTaskError
 
@@ -13,6 +14,7 @@ from benchmarks.skillsbench.observations import agent_observations, verifier_exi
 from benchmarks.skillsbench.verifier import verifier_infrastructure_failure
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.harbor_agent_general.app import (
     HarborAgent,
     HarborAgentConfig,
@@ -69,6 +71,12 @@ class SkillsBenchHarborAgent(HarborAgent):
         extra_body = json.loads(metadata.get("extra_body", "{}"))
         if "seed" in extra_body:
             kwargs["responses_create_params"]["seed"] = extra_body["seed"]
+        # Harbor hands the trial's agent deadline only to its oracle agent; resolve it the same way here.
+        agent = job_config.agents[0]
+        task = TaskConfig.model_validate_toml((job_config.datasets[0].path / body.task_name / "task.toml").read_text())
+        budget = min(agent.override_timeout_sec or task.agent.timeout_sec, agent.max_timeout_sec or float("inf"))
+        multiplier = job_config.agent_timeout_multiplier
+        kwargs["agent_timeout_sec"] = budget * (job_config.timeout_multiplier if multiplier is None else multiplier)
 
     def success_response(self, body: HarborRunRequest, trial_dir: Path) -> HarborVerifyResponse:
         reason = verifier_infrastructure_failure(trial_dir)
@@ -123,3 +131,6 @@ class SkillsBenchHarborAgent(HarborAgent):
 
 if __name__ == "__main__":
     SkillsBenchHarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SkillsBenchHarborAgent.run_webserver()  # noqa: F401
