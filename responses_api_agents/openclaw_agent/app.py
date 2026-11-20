@@ -578,7 +578,7 @@ _RUNTIME_VERSION_REPORT = (
 )
 
 
-# OpenClaw 2026.11.5 runs exec-tool commands through its native process helper (@openclaw/proc-safe), whose glibc
+# OpenClaw 2026.11.5 runs exec-tool commands through its compiled process helper (@openclaw/proc-safe), whose glibc
 # build needs glibc 2.33 or newer. Exits 4 when the helper does not load; releases without the helper pass.
 # install_openclaw_runtime.sh runs the same check.
 _EXEC_HELPER_CHECK = (
@@ -827,12 +827,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             prepared_directory = True
             if self.config.sandbox_runtime_dir:
                 # Probe the CLI with a private home, then verify the package version, its Node engine range and that
-                # the exec tool's native helper loads.
+                # the exec tool's compiled process helper loads.
                 node = shlex.quote(runtime + "/node/bin/node")
                 package = shlex.quote(runtime + "/openclaw/node_modules/openclaw/package.json")
                 version_home = f"{directory}/openclaw-version-home"
                 unavailable = shlex.quote(
-                    f"OpenClaw {self.config.openclaw_version} {_EXEC_TOOL_UNAVAILABLE}: its native process helper "
+                    f"OpenClaw {self.config.openclaw_version} {_EXEC_TOOL_UNAVAILABLE}: its compiled process helper "
                     "does not load (it needs glibc 2.33 or newer, or musl)."
                 )
                 checked = await sandbox.exec(
@@ -873,7 +873,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 )
                 unavailable = _EXEC_TOOL_UNAVAILABLE in (installed.stderr or "")
                 if installed.return_code == 3 and not installed.error_type and unavailable:
-                    # The image cannot load OpenClaw's native process helper; every attempt fails the same way.
+                    # The image cannot load OpenClaw's compiled process helper; every attempt fails the same way.
                     raise AgentSeedRejectedError(
                         f"OpenClaw {self.config.openclaw_version} cannot run in this task image: "
                         f"{(installed.stderr or '').strip()[-2000:]}"

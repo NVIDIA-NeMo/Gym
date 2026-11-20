@@ -65,13 +65,13 @@ verify_version() {
     'const p=require(process.argv[1]); if(p.version!==process.argv[2])throw Error("OpenClaw version mismatch")' \
     "$runtime/openclaw/node_modules/openclaw/package.json" "$openclaw_version"
 }
-# OpenClaw 2026.11.5 runs exec-tool commands through its native process helper (@openclaw/proc-safe), whose glibc
+# OpenClaw 2026.11.5 runs exec-tool commands through its compiled process helper (@openclaw/proc-safe), whose glibc
 # build needs glibc 2.33 or newer. Releases without the helper pass. Exit 3 marks an image that cannot run the tool.
 verify_exec_helper() {
   if ! "$runtime/node/bin/node" -e \
     'const r=require("module").createRequire(process.argv[1]); let p; try { p=r.resolve("@openclaw/proc-safe/reaper") } catch { process.exit(0) } import(require("url").pathToFileURL(p).href).then((m)=>process.exit(m.isSupported()?0:4))' \
     "$runtime/openclaw/node_modules/openclaw/package.json"; then
-    echo "OpenClaw ${openclaw_version} cannot run its exec tool in this image: its native process helper does not load (it needs glibc 2.33 or newer, or musl)." >&2
+    echo "OpenClaw ${openclaw_version} cannot run its exec tool in this image: its compiled process helper does not load (it needs glibc 2.33 or newer, or musl)." >&2
     exit 3
   fi
 }

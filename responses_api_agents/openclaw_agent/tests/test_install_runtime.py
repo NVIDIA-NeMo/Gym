@@ -178,14 +178,14 @@ esac
     assert (root / "npm-installs").read_text().splitlines() == ["install"]
     assert len((root / "downloads").read_text().splitlines()) == 2
     assert len((root / "version-checks").read_text().splitlines()) == 2
-    # Both the installer and the process that reuses its runtime check the exec tool's native helper.
+    # Both the installer and the process that reuses its runtime check the exec tool's compiled process helper.
     assert len((root / "helper-checks").read_text().splitlines()) == 2
     assert (root / "runtime/ready").read_text().strip() == "2026.6.11"
 
 
 @pytest.mark.parametrize("cached", [False, True], ids=["fresh_install", "cached_runtime"])
 def test_runtime_whose_exec_helper_does_not_load_is_refused(sandbox, cached):
-    """OpenClaw 2026.11.5's exec tool needs a native helper that needs glibc 2.33; an older image must fail setup."""
+    """OpenClaw 2026.11.5's exec tool needs a compiled helper that needs glibc 2.33; an older image fails setup."""
     root, env = sandbox
     bindir = root / "bin"
     replacements = {

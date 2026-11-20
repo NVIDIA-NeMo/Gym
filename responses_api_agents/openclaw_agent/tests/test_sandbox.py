@@ -945,7 +945,7 @@ async def test_image_that_cannot_load_the_exec_helper_is_refused_at_seed(setup):
     """The installer's exit 3 is deterministic for the image, so seed refuses it instead of failing retryably."""
     agent, sandbox = setup
     message = (
-        "OpenClaw 2026.6.11 cannot run its exec tool in this image: its native process helper does not load "
+        "OpenClaw 2026.6.11 cannot run its exec tool in this image: its compiled process helper does not load "
         "(it needs glibc 2.33 or newer, or musl)."
     )
     sandbox.exec.side_effect = [
@@ -2078,7 +2078,7 @@ def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, r
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
     check = _runtime_check(commands)
     assert "pkg.engines.node" in check
-    # The exec tool's native helper must load too; a release without it passes.
+    # The exec tool's compiled process helper must load too; a release without it passes.
     assert "@openclaw/proc-safe/reaper" in check
     assert "HOME=/tmp/nemo-gym-openclaw-sessions/" in check
     assert "/opt/openclaw-runtime/openclaw/node_modules/openclaw/openclaw.mjs --version >/dev/null" in check
