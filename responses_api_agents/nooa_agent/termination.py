@@ -53,18 +53,9 @@ def _generation_error_frame(error: BaseException) -> FrameType | None:
 
 
 def _is_codeact_iteration_exhaustion(error: BaseException) -> bool:
-    # The pinned NOOA uses the same error type for iteration and retry exhaustion.
-    frame = _generation_error_frame(error)
-    if frame is None or frame.f_code is not CodeActStrategy._run_generation.__code__:
-        return False
-    session = frame.f_locals.get("session")
-    return (
-        isinstance(session, CodeActSession)
-        and session.max_iterations is not None
-        and session.iteration >= session.max_iterations
-        and session.error_count < session.max_retries
-        and str(error) == str(session.build_failure_error())
-    )
+    # Only the pinned CodeAct loop's own exhaustion stop is a gradable outcome.
+    frame = _raising_frame(error) if type(error) is IterationLimitExceeded else None
+    return frame is not None and frame.f_code is CodeActStrategy._run_generation.__code__
 
 
 def _is_codeact_loop_stop(error: BaseException) -> bool:
@@ -109,10 +100,6 @@ def policy_termination(
             return NOOATerminationReason.INVALID_POLICY_OUTPUT, str(error)
         if _is_codeact_text_only_stop(error):
             return NOOATerminationReason.INVALID_POLICY_OUTPUT, str(error)
-        if isinstance(error, IterationLimitExceeded):
-            # NOOA names this stop (raised by CodeActSession.build_failure_error, outside the generation frame);
-            # the frame inspection below serves older pins.
-            return NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, str(error)
         if _is_codeact_iteration_exhaustion(error):
             return NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, str(error)
         if _is_codeact_loop_stop(error):
