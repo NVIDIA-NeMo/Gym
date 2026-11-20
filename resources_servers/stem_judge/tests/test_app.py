@@ -15,8 +15,11 @@
 """Tests for the stem_judge server: length guards, the boxed/free answer contract,
 verdict and rubric parsing, and the shipped config."""
 
+import asyncio
 import hashlib
 import json
+import multiprocessing as mp
+import signal
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -32,6 +35,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
@@ -288,6 +292,7 @@ class TestAnswerOptions:
         saved = json.loads(result.model_dump_json())
         assert saved["verdict"] == verdict and saved["grading_status"] == status
         assert saved["evaluation_completed"] is (status != "judge_unparsed")
+        assert saved["failure_kind"] == ("judge_unparseable" if status == "judge_unparsed" else None)
         assert saved["mask_sample"] is (not known)
         assert saved["correctness"] is (False if known else None)
         assert saved["reward"] == 0.0
@@ -419,14 +424,16 @@ class TestAnswerOptions:
     @mark.parametrize(
         "options,reference,box,library_match",
         [
-            ({}, "3t", "3", True),
-            ({"units": False}, "3t", "3", False),
+            ({"units": True, "bidirectional": False}, "3t", "3", True),
+            ({}, "3t", "3", False),
+            ({}, "2", r"2 \text{ (or 3)}", False),
+            ({}, r"12\,\text{J}", r"12\,\text{kJ}", False),
             ({"units": False}, "3t", "t+t+t", True),
             ({}, "0.0000001", "0.0000002", True),
             ({"precision": 12}, "0.0000001", "0.0000002", False),
             ({"units": False, "precision": 12}, "1/2", "0.5", True),
-            ({}, "1", "9=1", True),
-            ({"bidirectional": True}, "1", "9=1", False),
+            ({"bidirectional": False}, "1", "9=1", True),
+            ({}, "1", "9=1", False),
             ({"bidirectional": True}, "1", "x=2=1", False),
             ({"bidirectional": True}, "x=1", "x=2=1", False),
             ({"bidirectional": True}, "1", "x=y=1", False),
@@ -434,7 +441,7 @@ class TestAnswerOptions:
             ({"bidirectional": True}, "1", "x=1", True),
             ({"bidirectional": True}, "1", "1", True),
             ({"bidirectional": True}, "1", "2", False),
-            ({"bidirectional": True}, "(1,2)", r"\{1,2\}", False),
+            ({}, "(1,2)", r"\{1,2\}", False),
             ({"bidirectional": True}, r"\{1,2\}", "(1,2)", False),
             ({"bidirectional": True}, "(1,2)", "(1,1+1)", True),
             ({"bidirectional": True}, r"\{1,2\}", r"\{2,1\}", True),
@@ -486,6 +493,35 @@ class TestAnswerOptions:
         result = await server.verify(_request(_split(r"\boxed{2}")))
         server.server_client.post.assert_awaited_once()
         assert (result.reward, result.grading_status) == (1, "judged")
+
+    async def test_cancelling_symbolic_workers_keeps_the_loop_responsive(self, config, monkeypatch, tmp_path):
+        def unresponsive_worker(reference, *_):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            (tmp_path / reference).touch()
+            time.sleep(15)
+
+        monkeypatch.setattr("resources_servers.stem_judge.boxed_math._score_box", unresponsive_worker)
+        config.math_verify = MathVerifyConfig(max_concurrency=3)
+        library = _server(config)._math_library
+        children_before = set(mp.active_children())
+        tasks = [asyncio.create_task(library.matches(str(i), "2")) for i in range(3)]
+        try:
+            async with asyncio.timeout(5):
+                while len(list(tmp_path.iterdir())) < len(tasks):
+                    await asyncio.sleep(0.01)
+            for task in tasks:
+                task.cancel()
+            loop = asyncio.get_running_loop()
+            start = loop.time()
+            await asyncio.sleep(0.05)  # An unrelated request must still be able to run during cleanup.
+            assert loop.time() - start < 0.75
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
+            assert set(mp.active_children()) <= children_before
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     @mark.parametrize(
         "row,view,reply",
@@ -746,6 +782,25 @@ class TestRequestValidation:
 
 
 class TestVerify:
+    async def test_policy_text_with_refusal_is_graded_but_mixed_judge_verdict_is_unparseable(self, config):
+        refusal = NeMoGymResponseOutputRefusal(type="refusal", refusal="Declined another part.")
+        policy = _msg("First line.")
+        policy.content.extend([refusal, *_msg(r"\boxed{2}").content])
+        server = _server(config, "Judgement: yes")
+        result = await server.verify(_request(_response(policy)))
+        assert result.reward == 1 and result.grading_status == "judged"
+        assert _judge_prompt(server).endswith("First line.\n" + r"\boxed{2}")
+
+        judge = _msg("Judgement: yes")
+        judge.content.append(refusal)
+        config.verdict_mode = "yes_no_unresolved"
+        result = await _server(config, _response(judge)).verify(_request(_response(policy)))
+        assert result.grading_status == "judge_unparsed" and result.mask_sample
+        assert final_answer(_response(policy.model_copy(update={"content": [refusal]}))) == (
+            None,
+            "empty_final_answer",
+        )
+
     async def test_boxed_row_judges_the_final_answer(self, config: StemJudgeConfig) -> None:
         server = _server(config, "Reasoning...\nJudgement: 'yes'")
         res = await server.verify(_request(_split("First 1+1 = 2, so \\boxed{\\frac{4}{2}}.")))

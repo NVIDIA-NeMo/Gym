@@ -147,15 +147,14 @@ def assistant_text(response: NeMoGymResponse, *, judge_reply: bool = False, allo
         return final.content
     parts = []
     for block in final.content:
-        if isinstance(block, dict):
-            if block.get("type") != "input_text" or not isinstance(block.get("text"), str):
-                return None
+        if isinstance(block, dict) and block.get("type") == "input_text" and isinstance(block.get("text"), str):
             parts.append(block["text"])
-        elif block.type == "output_text":
+        elif getattr(block, "type", None) == "output_text":
             parts.append(block.text)
-        else:
+        elif judge_reply:
             return None
-    return "".join(parts) or None
+    # The policy can include refusals alongside its answer. Judge JSON can span adjacent text blocks.
+    return ("" if judge_reply else "\n").join(parts) or None
 
 
 def parse_json_judgment(text: str | None, *, verdict_mode: VerdictMode) -> JsonJudgment | None:

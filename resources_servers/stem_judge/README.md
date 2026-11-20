@@ -177,20 +177,22 @@ Set each option independently. The prompt options reuse the sections of the ship
 `stem_v11.txt` template. Custom templates used with those options must retain its section
 markers. Enable Math-Verify only for sources where symbolic equivalence establishes
 the answer. Route other sources to a STEM instance with `math_verify: null`.
-Free answers, whole-answer comparisons and rubric rows always use the judge. For NeMoRL SingleController with source scheduling, enable
-`grpo.exclude_failed_judge_groups` to keep a masked group out of the trainer and reward cache.
+Free answers, whole-answer comparisons and rubric rows always use the judge. Gym
+marks the individual sample. On NeMo RL branches that provide SingleController's
+`grpo.exclude_failed_judge_groups`, enable it with NeMo Gym, `grpo.use_dynamic_sampling=true`
+and `env.should_mask_flagged_samples=true` to exclude and refill the entire group.
 
 If recovery rejudges a saved answer, a parsed `unresolved` verdict completes the
 regrade once. The saved answer stays masked with unknown correctness. A malformed
 judge reply leaves the original answer eligible for another grading attempt.
 
-With `math_verify: {}`, Math-Verify uses Gym's defaults of `units: true` and
-`precision: 6`. Here `units` controls whether LaTeX normalization strips recognized
-unit suffixes on both sides. Set it to `false` to preserve a variable such as the
-`t` in `3t`. `precision` is the number of decimal places used for float comparisons.
+With `math_verify: {}`, STEM preserves unit suffixes (`units: false`) and checks
+both comparison directions (`bidirectional: true`). A box containing `12 kJ`
+for a `12 J` reference goes to the judge. To reproduce the standalone library
+settings, set `units: true`, `bidirectional: false`, and `precision: 6`. Unit
+stripping can also remove variables such as the `t` in `3t` and trailing LaTeX
+text. `precision` defaults to six decimal places for float comparisons.
 At 6 places, `0.0000001` and `0.0000002` compare equal. At 12 they go to the judge.
-Math-Verify normally compares the reference to the candidate once. Set
-`bidirectional: true` to require a match with their roles reversed as well.
 For reference `1`, the library accepts `9=1` in only one direction, so STEM
 sends that box to the judge. It accepts `x=1` in both directions. Only a
 forward match between different strings incurs a second comparison. Both

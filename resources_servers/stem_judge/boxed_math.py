@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run STEM's configured Math-Verify metric in a bounded worker process."""
 
+import asyncio
 import multiprocessing as mp
 from dataclasses import replace
 from multiprocessing.connection import Connection
@@ -63,7 +64,7 @@ def _score_box(reference: str, box: str, config: "MathVerifyConfig", sender: Con
         score, _ = _run_math_verify(metric, reference, r"\boxed{" + box + "}")
         if config.bidirectional and score > 0.5 and box != reference:
             score = float(_reverse_match(box, reference, latex, config.precision))
-        sender.send((score, None))  # The shared worker protocol also has an optional extracted answer.
+        sender.send(score > 0.5)
 
 
 class BoxedMathVerifier:
@@ -84,7 +85,25 @@ class BoxedMathVerifier:
                 process = ctx.Process(target=_score_box, args=(reference, box, self.config, sender))
                 process.start()
                 sender.close()
-                score, _ = await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
-                    process, receiver, self.config.timeout_seconds, operation=operation
-                )
-            return score > 0.5
+                loop = asyncio.get_running_loop()
+                exited = asyncio.Event()
+                loop.add_reader(process.sentinel, exited.set)
+                try:
+                    await asyncio.wait_for(exited.wait(), self.config.timeout_seconds)
+                    if process.exitcode is None:
+                        await asyncio.to_thread(process.join)
+                    if process.exitcode == 0:
+                        return receiver.recv()
+                    operation.outcome = "crashed"
+                except TimeoutError:
+                    operation.outcome = "timeout"
+                except EOFError:
+                    operation.outcome = "crashed"
+                finally:
+                    loop.remove_reader(process.sentinel)
+                    if process.is_alive():
+                        # A fork inherits the server's SIGTERM handler. Reap a cancelled or timed-out check off-loop.
+                        process.kill()
+                        await asyncio.to_thread(process.join)
+                    process.close()
+                return False
