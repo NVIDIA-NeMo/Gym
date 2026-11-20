@@ -2036,6 +2036,8 @@ async def test_exec_refuses_an_argument_list_it_cannot_send_without_a_shell(
     monkeypatch: pytest.MonkeyPatch, sdk_sends_argv: bool, user: Any, message: str
 ) -> None:
     provider, handle, commands = _argv_provider(monkeypatch, sdk_sends_argv=sdk_sends_argv)
+    # The capability answer follows the SDK, so AsyncSandbox.exec hands no list to a provider that would refuse all.
+    assert provider.exec_takes_argv() is sdk_sends_argv
 
     with pytest.raises(SandboxExecArgvUnsupportedError, match=message):
         await provider.exec(handle, ["id"], user=user)
@@ -2050,10 +2052,15 @@ async def test_exec_refuses_an_argument_list_it_cannot_send_without_a_shell(
     "installed, sends_argv", [("0.1.15", False), ("1.1.0", True), ("1.2.0", True), ("1.1.2.dev20261020", True)]
 )
 def test_sdk_sends_argv_from_the_first_sdk_that_takes_an_argument_list(
-    monkeypatch: pytest.MonkeyPatch, installed: str, sends_argv: bool
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, installed: str, sends_argv: bool
 ) -> None:
     monkeypatch.setattr("importlib.metadata.version", lambda name: installed)
-    assert opensandbox_provider._sdk_sends_argv.__wrapped__() is sends_argv
+    with caplog.at_level(logging.WARNING, logger=opensandbox_provider.__name__):
+        assert opensandbox_provider._sdk_sends_argv.__wrapped__() is sends_argv
+    # An older SDK is named with the requirement, which the refusal through AsyncSandbox.exec does not carry.
+    requirement_logged = f"opensandbox {installed} cannot send an exec argument list" in caplog.text
+    assert requirement_logged is not sends_argv
+    assert (opensandbox_provider.ARGV_SDK_REQUIREMENT in caplog.text) is not sends_argv
 
 
 def test_sdk_sends_no_argv_without_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:

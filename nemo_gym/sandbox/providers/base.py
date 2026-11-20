@@ -392,7 +392,7 @@ class SandboxProvider(Protocol):
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str | Sequence[str],
+        command: str,
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -401,9 +401,8 @@ class SandboxProvider(Protocol):
     ) -> SandboxExecResult:
         """Run a command inside a sandbox.
 
-        ``command`` is shell text. A provider that implements ``SupportsSandboxExecArgv`` also takes a list of
-        strings, which it runs as the process's argv without a shell; ``AsyncSandbox.exec`` passes a list to no
-        other provider.
+        ``command`` is shell text. Only a provider that implements ``SupportsSandboxExecArgv`` also takes a list of
+        strings, declared there; ``AsyncSandbox.exec`` passes a list to no other provider.
         """
         ...
 
@@ -470,6 +469,17 @@ class SupportsSandboxExecArgv(Protocol):
     """
 
     def exec_takes_argv(self) -> bool: ...
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        command: str | Sequence[str],
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult: ...
 
 
 @runtime_checkable

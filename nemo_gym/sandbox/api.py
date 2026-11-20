@@ -28,7 +28,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import anyio
 
@@ -852,14 +852,14 @@ class AsyncSandbox:
                 timeout_s=timeout_s,
                 **overrides,
             )
-        return await self._provider.exec(
-            self._require_handle(),
-            command,
-            cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
-            env=env,
-            timeout_s=timeout_s,
-            user=user if user is not None else self.default_user,
-        )
+        handle = self._require_handle()
+        cwd = cwd if cwd is not None else self.default_workdir
+        user = user if user is not None else self.default_user
+        if isinstance(command, str):
+            return await self._provider.exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+        # exec() lets an argument list through only for a provider whose exec takes one.
+        argv_provider = cast(SupportsSandboxExecArgv, self._provider)
+        return await argv_provider.exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
     @property
     def default_user(self) -> str | int | None:

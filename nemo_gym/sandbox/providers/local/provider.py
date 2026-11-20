@@ -105,7 +105,9 @@ class LocalProvider:
     ) -> SandboxExecResult:
         """Run shell text under the configured shell, an argument list without one.
 
-        Kill the process group on timeout or cancellation. A program that cannot be started raises its ``OSError``.
+        Kill the process group on timeout or cancellation. An argument list whose program cannot be started is a
+        command failure with a shell's exit status: 127 when the program is not found, 126 when it cannot be
+        executed. A working directory or shell that cannot be used raises its ``OSError``.
         """
         if user is not None:
             raise ValueError("The local sandbox provider cannot run commands as another user")
@@ -118,14 +120,25 @@ class LocalProvider:
         timeout = timeout_s if timeout_s is not None else self._default_timeout_s
         process_argv = [self._shell, "-c", command] if isinstance(command, str) else list(command)
         async with self._semaphore:
-            process = await asyncio.create_subprocess_exec(
-                *process_argv,
-                cwd=str(exec_cwd),
-                env={**os.environ, **inst["env"], **(env or {})},
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *process_argv,
+                    cwd=str(exec_cwd),
+                    env={**os.environ, **inst["env"], **(env or {})},
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                # Only an argument list's own program that cannot be started is a command failure. The error names
+                # the file it is about, so a missing working directory still raises, as does shell text whose shell
+                # is missing and a process that could not be created at all.
+                if isinstance(command, str) or error.filename != process_argv[0]:
+                    raise
+                not_found = isinstance(error, (FileNotFoundError, NotADirectoryError))
+                return SandboxExecResult(
+                    stdout=None, stderr=str(error), return_code=127 if not_found else 126, error_type=None
+                )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
             except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError) as exc:
