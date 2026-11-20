@@ -11,6 +11,27 @@ modality: text
 licensing: Apache-2.0 AND MIT
 authors:
 - gnalbandyan
+maintainers:
+- gnalbandyan
+intended_use:
+- evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/factual_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- chemistry
+- biology
+- physics
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -28,4 +49,8 @@ datasets:
   num_repeats: 1
 canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/hicai-zju/SciKnowEval
+  ref: 92ef969ad0a8bd6e195e0ac18af2c46e307e0cc2  # pragma: allowlist secret
+  reconciled: '2026-10-12'
 lifecycle: active

@@ -10,6 +10,22 @@ modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- coding
+- coding/code_generation
+- coding/code_editing
+- knowledge
+- knowledge/procedural_knowledge
+domains:
+- computer_science
+primary_metric: pass@1[avg-of-1]/passing_plus_tests
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -26,6 +42,6 @@ datasets:
   prompt_config: benchmarks/prompts/generic/codegen.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 standard_prompt_config: benchmarks/prompts/generic/codegen.yaml
 lifecycle: active

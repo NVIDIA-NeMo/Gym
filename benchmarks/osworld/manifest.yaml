@@ -11,6 +11,29 @@ modality: text, image
 licensing: Apache-2.0
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- JeffPengCoder
+intended_use:
+- evaluation
+- training
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/gui_tasks
+- tool_and_computer_use/env_feedback_interpretation
+- tool_and_computer_use/multi_step_tool_use
+- multimodal_input_understanding
+- multimodal_input_understanding/scene_understanding
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+- data_analysis
+- data_analysis/tabular_data_analysis
+domains:
+- computer_science
+- general
+primary_metric: unknown
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

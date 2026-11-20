@@ -3,13 +3,27 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: translation
 description: Machine-translation verifier computing corpus-level spBLEU and ChrF per
   language pair plus optional xCOMET-XXL neural QE via a Ray GPU actor.
 modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- multilingual_and_multicultural
+- multilingual_and_multicultural/translation
+- multilingual_and_multicultural/language_consistency
+domains:
+- language_linguistics
+primary_metric: unknown
+requirements:
+  gpu: true
+  network: no-network
 reward:
   range:
   - 0.0
@@ -26,6 +40,6 @@ datasets:
   prompt_config: benchmarks/flores200/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: devtest
 standard_prompt_config: benchmarks/flores200/prompts/default.yaml
 lifecycle: active

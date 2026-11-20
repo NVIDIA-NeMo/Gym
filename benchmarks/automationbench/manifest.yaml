@@ -3,13 +3,43 @@ version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: agent
 description: AutomationBench enterprise workflows scored by guardrail-gated objective
   completion, run with simple_agent sessions against the automationbench resources server.
 modality: text
 licensing: MIT
 authors:
 - Christian Munley
+maintainers:
+- cmunley1
+- d-molinari
+intended_use:
+- evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/tool_calling
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/env_feedback_interpretation
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- data_analysis
+- data_analysis/tabular_data_analysis
+- writing_and_editing
+- writing_and_editing/summarization
+- writing_and_editing/informational_writing
+- reasoning
+- reasoning/quantitative_reasoning
+domains:
+- business_management
+- general
+- marketing_advertising
+- accounting_audit
+primary_metric: pass@1[avg-of-1]/aa_headline
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -28,7 +58,11 @@ datasets:
   prepare_script: benchmarks/automationbench/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
 lifecycle: active
 resources_server: automationbench
+adopted_from:
+  source: https://github.com/zapier/AutomationBench
+  ref: 4a8e1061254004d9dac807054eed33fad7d1ff14  # pragma: allowlist secret
+  reconciled: '2026-11-04'

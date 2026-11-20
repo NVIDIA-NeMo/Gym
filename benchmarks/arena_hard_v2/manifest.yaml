@@ -3,13 +3,35 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: rlhf
 description: Arena Hard v2 pairwise LLM-judge server — ports arena-hard-auto's category-specific
   judging with side-swapped prompts
 modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- writing_and_editing
+- writing_and_editing/creative_writing
+- writing_and_editing/general_qa
+- writing_and_editing/informational_writing
+- reasoning
+- reasoning/deductive_reasoning
+- coding
+- coding/code_generation
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- general
+- computer_science
+primary_metric: arena_elo/score
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -26,6 +48,6 @@ datasets:
   prompt_config: benchmarks/prompts/generic/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 standard_prompt_config: benchmarks/prompts/generic/default.yaml
 lifecycle: active

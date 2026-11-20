@@ -10,6 +10,16 @@ modality: text, image
 licensing: CC-BY-NC-SA-4.0
 authors:
 - Pulkit Khandelwal
+maintainers:
+- pulkitkumar95
+intended_use:
+- evaluation
+capabilities: unknown
+domains: unknown
+primary_metric: visible_gt_AO
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0

@@ -11,6 +11,30 @@ modality: text
 licensing: Apache-2.0
 authors:
 - krishnpci
+maintainers:
+- krishnpci
+intended_use:
+- training
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/tool_calling
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/env_feedback_interpretation
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- human_ai_interaction
+- human_ai_interaction/clarification_and_assumption_management
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- safety
+- safety/agentic_action_safety
+- knowledge
+- knowledge/expert_knowledge
+domains:
+- finance
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0

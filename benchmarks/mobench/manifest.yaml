@@ -9,6 +9,27 @@ modality: text
 licensing: unknown
 authors:
 - stephencge
+maintainers:
+- stephencge
+intended_use:
+- evaluation
+capabilities:
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- coding
+- coding/code_generation
+- knowledge
+- knowledge/procedural_knowledge
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+domains:
+- mathematics
+- computer_science
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -25,6 +46,10 @@ datasets:
   prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
   num_repeats: 32
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 standard_prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
+adopted_from:
+  source: https://github.com/Goedel-LM/Goedel-Prover-V2
+  ref: 2e9036e118464aa96a8bebaf9f5b9d091aa3585c  # pragma: allowlist secret
+  reconciled: '2026-04-23'
 lifecycle: active

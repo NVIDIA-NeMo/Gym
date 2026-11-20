@@ -4,12 +4,30 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: knowledge
-description: Multi-step web research with answer-set F1 scoring using the claude_code
-  harness and Exa search.
+description: Multi-step web research with answer-set F1 scoring, run by any Gym harness
+  with Exa search.
 modality: text
 licensing: unknown
 authors:
 - Christian Munley
+maintainers:
+- cmunley1
+intended_use:
+- evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/multi_source_synthesis
+- tool_and_computer_use
+- tool_and_computer_use/web_search
+- tool_and_computer_use/multi_step_tool_use
+- planning_and_autonomy
+domains:
+- general
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0
@@ -25,6 +43,41 @@ datasets:
   prepare_script: benchmarks/deepsearchqa/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
 lifecycle: active
+protocols:
+- name: deepsearchqa/configs/deepsearchqa_claude_code
+  config_path: configs/deepsearchqa_claude_code.yaml
+  description: Multi-step web research with answer-set F1 scoring, run with the main config's claude_code harness and Exa search, but with 200 turns and 7200 s instead of 12 turns and 600 s, no cap of four web searches, another system prompt and Claude Code's Read tool turned off.
+  setups:
+  - name: deepsearchqa/configs/deepsearchqa_cline
+    config_path: configs/deepsearchqa_cline.yaml
+    description: Multi-step web research with answer-set F1 scoring using the cline harness and Exa search. It sets the protocol's 7200 s budget; cline has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_codex
+    config_path: configs/deepsearchqa_codex.yaml
+    description: Multi-step web research with answer-set F1 scoring using the codex harness and Exa search. It sets the protocol's 7200 s budget; codex has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_hermes
+    config_path: configs/deepsearchqa_hermes.yaml
+    description: Multi-step web research with answer-set F1 scoring using the hermes harness and Exa search. It sets the protocol's 200-turn budget; hermes has no run time setting.
+  - name: deepsearchqa/configs/deepsearchqa_kilocode
+    config_path: configs/deepsearchqa_kilocode.yaml
+    description: Multi-step web research with answer-set F1 scoring using the kilocode harness and Exa search. It sets the protocol's 7200 s budget; kilocode has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_openclaw
+    config_path: configs/deepsearchqa_openclaw.yaml
+    description: Multi-step web research with answer-set F1 scoring using the openclaw harness and Exa search. It sets the protocol's 7200 s budget; openclaw has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_opencode
+    config_path: configs/deepsearchqa_opencode.yaml
+    description: Multi-step web research with answer-set F1 scoring using the opencode harness and Exa search. It sets the protocol's 7200 s budget; opencode has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_prime_agent
+    config_path: configs/deepsearchqa_prime_agent.yaml
+    description: Multi-step web research with answer-set F1 scoring using the prime harness and Exa search. It sets the protocol's 7200 s budget; prime has no turn limit setting.
+  - name: deepsearchqa/configs/deepsearchqa_simple_strands
+    config_path: configs/deepsearchqa_simple_strands.yaml
+    description: Multi-step web research with answer-set F1 scoring using the simple_strands harness and Exa search. It sets the protocol's 200-turn and 7200 s budgets.
+- name: deepsearchqa/configs/deepsearchqa_nemo_fabric_deepagents
+  config_path: configs/deepsearchqa_nemo_fabric_deepagents.yaml
+  description: Multi-step web research with answer-set F1 scoring, run with the deepagents harness and other web tools than the main config. It reaches Exa through the MCP server with the page-fetch tool (`web_fetch_exa`) blocked, so the model reads only the text that search returns. Compared with the main config it also has a 7200 s budget instead of 12 turns and 600 s (deepagents has no turn limit setting), no cap of four web searches, and another system prompt.
+- name: deepsearchqa/configs/deepsearchqa_pi
+  config_path: configs/deepsearchqa_pi.yaml
+  description: Multi-step web research with answer-set F1 scoring, run with the pi harness and other web tools than the main config. It has one custom `exa_search` tool that returns up to 4,000 characters of page text per result, and no page-fetch tool. Compared with the main config it also has a 7200 s budget instead of 12 turns and 600 s (pi has no turn limit setting), no cap of four web searches, and another system prompt.

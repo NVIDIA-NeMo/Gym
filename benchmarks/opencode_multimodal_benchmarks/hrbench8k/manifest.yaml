@@ -11,6 +11,16 @@ modality: image
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- katerynaCh
+intended_use:
+- evaluation
+capabilities: unknown
+domains: unknown
+primary_metric: accuracy
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -29,3 +39,7 @@ datasets:
 model_server: policy_model
 canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/DreamMr/HR-Bench
+  ref: 83b9013d6293b85dc507e87199ca52517536939c  # pragma: allowlist secret
+  reconciled: '2026-11-13'

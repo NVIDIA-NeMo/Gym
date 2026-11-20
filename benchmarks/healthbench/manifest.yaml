@@ -11,6 +11,16 @@ modality: text
 licensing: MIT
 authors:
 - cparisien
+maintainers:
+- jin-nvidia
+intended_use:
+- evaluation
+capabilities: unknown
+domains: unknown
+primary_metric: overall_score
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0
@@ -25,7 +35,7 @@ prompt_source: prepared
 state: none
 adopted_from:
   source: https://huggingface.co/datasets/openai/healthbench
-  ref: 40ee1968852fc57f625934251ac22be47077a8fb
+  ref: 40ee1968852fc57f625934251ac22be47077a8fb  # pragma: allowlist secret
   reconciled: '2026-10-14'
 datasets:
 - name: healthbench

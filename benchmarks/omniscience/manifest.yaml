@@ -9,6 +9,31 @@ modality: text
 licensing: Apache-2.0
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/knowledge_uncertainty
+- knowledge/factual_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+domains:
+- law
+- computer_science
+- medicine
+- finance
+- history
+- engineering
+- humanities
+primary_metric: unknown
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -25,6 +50,10 @@ datasets:
   prompt_config: benchmarks/omniscience/prompts/generation.yaml
   num_repeats: 8
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 standard_prompt_config: benchmarks/omniscience/prompts/generation.yaml
+adopted_from:
+  source: https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public-v1.1
+  ref: 1f9cbcec472000b28f9782205f1ef9498b45bd21  # pragma: allowlist secret
+  reconciled: '2026-11-13'
 lifecycle: active

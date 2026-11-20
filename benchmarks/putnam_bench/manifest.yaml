@@ -9,6 +9,26 @@ modality: text
 licensing: unknown
 authors:
 - stephencge
+maintainers:
+- stephencge
+intended_use:
+- evaluation
+capabilities:
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/procedural_knowledge
+- coding
+- coding/code_generation
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+domains:
+- mathematics
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -25,6 +45,10 @@ datasets:
   prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
   num_repeats: 32
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 standard_prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
+adopted_from:
+  source: https://github.com/trishullab/PutnamBench
+  ref: 64cedd86ef523f3d5f5dc7a21c10e3f69564c7d4  # pragma: allowlist secret
+  reconciled: '2026-04-23'
 lifecycle: active

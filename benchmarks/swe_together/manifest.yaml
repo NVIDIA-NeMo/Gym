@@ -12,18 +12,28 @@ modality: text
 licensing: Apache-2.0
 authors:
   - Frederic Lafrance
+maintainers:
+- lafrancef
+intended_use:
+- evaluation
+capabilities: unknown
+domains: unknown
+primary_metric: unknown
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range: [0.0, 1.0]
   higher_is_better: true
 determinism: stochastic
-environment_server: swe_together
+resources_server: null
 agent_server: swe_together_candidate
 dataset_owner: swe_together_candidate
 model_server: policy_model
 session_model: episode
 state: per_session
 sandbox: sandbox
-canonical_split: full109
+canonical_split: full
 prompt_source: agent
 datasets:
   - name: swe_together
@@ -31,3 +41,7 @@ datasets:
     jsonl_fpath: benchmarks/swe_together/data/full109.jsonl
     prepare_script: benchmarks/swe_together/prepare.py
     num_repeats: 2
+adopted_from:
+  source: https://github.com/Togetherbench/SWE-Together
+  ref: 891d19eb4b3a64a47c3d49bbd066a311e0133254  # pragma: allowlist secret
+  reconciled: '2026-10-23'

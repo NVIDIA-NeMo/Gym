@@ -9,6 +9,28 @@ modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- reasoning/causal_reasoning
+- planning_and_autonomy
+domains:
+- chemistry
+- physics
+- astronomy_space
+- biology
+primary_metric: pass@1[avg-of-8]/accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -26,6 +48,6 @@ datasets:
   num_repeats: 8
 model_server: policy_model
 grading_mode: lenient_answer_colon_md
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/prompts/eval/aai/mcq-4choices.yaml
 lifecycle: active

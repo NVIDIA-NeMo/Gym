@@ -11,6 +11,23 @@ modality: text
 licensing: Apache-2.0 AND MIT
 authors:
 - gnalbandyan
+maintainers:
+- gnalbandyan
+intended_use:
+- evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+domains:
+- chemistry
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -28,4 +45,8 @@ datasets:
   num_repeats: 1
 canonical_split: train
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/jablonkagroup/ChemBench
+  ref: 6e1d25748952393f44e35b8e85bbe567246a6430  # pragma: allowlist secret
+  reconciled: '2026-10-12'
 lifecycle: active

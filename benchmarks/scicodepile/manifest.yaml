@@ -10,6 +10,26 @@ modality: text
 licensing: Apache-2.0
 authors:
 - Rima Shahbazyan
+maintainers:
+- rimashahbazyan
+intended_use:
+- evaluation
+capabilities:
+- coding
+- coding/code_generation
+- coding/scientific_coding
+- knowledge
+- knowledge/expert_knowledge
+- instruction_and_format_following
+- instruction_and_format_following/prompt_and_format_robustness
+domains:
+- computer_science
+- physics
+- mathematics
+primary_metric: pass@1[avg-of-1]/accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -29,4 +49,8 @@ datasets:
 model_server: policy_model
 canonical_split: train
 standard_prompt_config: benchmarks/scicodepile/prompts/default.yaml
+adopted_from:
+  source: https://huggingface.co/datasets/SciCodePile/SciCode-Runnable-Benchmark-Reviewed
+  ref: 9afb3a95c7fa8e470119cf6f74b44ec735c5a95b  # pragma: allowlist secret
+  reconciled: '2026-09-22'
 lifecycle: active

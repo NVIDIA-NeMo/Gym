@@ -3,12 +3,35 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
-domain: other
+domain: knowledge
 description: Research-level physics problems scored by the Artificial Analysis API
 modality: text
 licensing: unknown
 authors:
 - fsiino-nvidia
+maintainers:
+- fsiino-nvidia
+- AdamRajfer
+intended_use:
+- evaluation
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- coding
+- coding/code_generation
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/structured_output
+domains:
+- physics
+- mathematics
+primary_metric: mean/accuracy
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
@@ -25,6 +48,10 @@ datasets:
   prompt_config: benchmarks/critpt/prompts/turn1.yaml
   num_repeats: 5
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/critpt/prompts/turn1.yaml
+adopted_from:
+  source: https://huggingface.co/datasets/CritPt-Benchmark/CritPt
+  ref: 37ecba7e9d00eda858d7be1adba19a38ba50e7a6  # pragma: allowlist secret
+  reconciled: '2026-11-10'
 lifecycle: active

@@ -10,6 +10,19 @@ licensing: Apache-2.0
 authors:
 - fsiino-nvidia
 - bxyu-nvidia
+maintainers:
+- adil-a
+- ananthsub
+intended_use:
+- training
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/tool_calling
+domains:
+- general
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0

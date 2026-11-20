@@ -10,6 +10,21 @@ modality: text
 licensing: Apache-2.0
 authors:
 - George Armstrong
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
+capabilities:
+- coding
+- coding/code_generation
+- knowledge
+- knowledge/procedural_knowledge
+domains:
+- computer_science
+primary_metric: pass@1[avg-of-1]/accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -27,6 +42,6 @@ datasets:
   prompt_config: benchmarks/prompts/eval/bigcodebench/codegen.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: v0.1.4
 standard_prompt_config: benchmarks/prompts/eval/bigcodebench/codegen.yaml
 lifecycle: active
