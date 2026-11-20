@@ -1516,9 +1516,11 @@ class TestOpenCodeSandboxedAgent:
             ]
         )
         snapshot_path = tmp_path / "snapshot.db"
+        exports: list[Path] = []
 
         async def download(remote_path: str, local_path: Path) -> None:
             if remote_path == "/tmp/opencode_export.json":
+                exports.append(local_path)
                 local_path.write_text(json.dumps(opencode_export_test_data))
             else:
                 assert remote_path.endswith("/opencode/nemo-gym-observations.db") or remote_path.startswith(
@@ -1557,8 +1559,8 @@ class TestOpenCodeSandboxedAgent:
             if url_path == "/seed_session":
                 return Response({"sandbox_handle": "seed-sandbox"})
             assert url_path == "/verify"
-            export_path = tmp_path / "results/session-1/export.json"
-            assert export_path.is_file()
+            # Without artifacts_dir the export lives in a temporary folder, never next to app.py.
+            assert not (tmp_path / "results").exists()
             assert json["response"]["output"]
             return Response(
                 json
@@ -1606,7 +1608,11 @@ class TestOpenCodeSandboxedAgent:
             item.model_dump(exclude={"id"})
             for item in server._opencode_export_to_output_items(opencode_export_test_data)[1:]
         ]
-        assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+        # The temporary folder is removed once the export and snapshot are parsed.
+        [export] = exports
+        assert not export.parent.exists()
+        assert result.opencode_results_fpath == ""
+        assert not (tmp_path / "results").exists()
         if snapshot_failure in {"execute_io_timeout", "download_io_timeout"}:
             report = failure_log.report
             assert report.failure_id is None

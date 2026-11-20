@@ -31,13 +31,15 @@ from itsdangerous import TimestampSigner
 from pytest import MonkeyPatch
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.config.global_config import RESULTS_DIR_KEY_NAME
+from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId, runtime_files
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
+from resources_servers.swebench_pro import app as swebench_pro_app
 from resources_servers.swebench_pro.app import (
     SWEBenchProInstanceRequest,
     SWEBenchProResourcesServer,
@@ -177,6 +179,35 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
     assert verify.await_args.kwargs["inputs"].prefetch_go_modules is True
     create.assert_awaited_once()
     sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_verification_logs_are_written_only_under_the_configured_folder(
+    monkeypatch: MonkeyPatch, tmp_path: Path, configured: bool
+) -> None:
+    # The results folder is set either way, so only keep_verification_logs differs.
+    monkeypatch.setattr(runtime_files, "maybe_get_global_config_dict", lambda: {RESULTS_DIR_KEY_NAME: str(tmp_path)})
+    server = make_server(golden=True, keep_verification_logs=configured)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    verify = AsyncMock(
+        return_value=VerificationResult(completed=True, resolved=True, patch_applied=True, test_results={"tests": []})
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    log_dir = verify.await_args.kwargs["log_dir"]
+    if configured:
+        kept = Path(response.json()["log_dir"])
+        assert kept.is_dir() and kept.is_relative_to(tmp_path / server.config.name / "verification")
+        assert "-attempt1-" in kept.name
+    else:
+        assert response.json()["log_dir"] == ""
+        assert not any(tmp_path.iterdir())
+    # The verifier wrote to a temporary folder outside the server's source folder, removed after the attempt.
+    assert not log_dir.is_relative_to(Path(swebench_pro_app.__file__).parent)
+    assert not log_dir.exists()
 
 
 @pytest.mark.parametrize(
@@ -1269,6 +1300,30 @@ def test_verify_bounds_an_attempt_that_never_returns(monkeypatch: MonkeyPatch) -
     assert response.json()["evaluation_completed"] is False
     assert response.json()["reward"] == 0.0
     assert "Verification failed" in response.json()["error"]
+
+
+def test_an_attempt_that_times_out_still_keeps_its_logs(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    """The logs of a timed-out attempt are the ones most worth keeping."""
+    monkeypatch.setattr(runtime_files, "maybe_get_global_config_dict", lambda: {RESULTS_DIR_KEY_NAME: str(tmp_path)})
+    server = make_server(
+        golden=True,
+        keep_verification_logs=True,
+        verification_attempt_timeout=0.05,
+        inconclusive_verification_retries=0,
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+
+    async def _hang(*, log_dir: Path, **kwargs: object) -> None:
+        (log_dir / "test_output.log").write_text("partial log")
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", _hang)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.json()["evaluation_completed"] is False
+    [kept] = (tmp_path / server.config.name / "verification").rglob("test_output.log")
+    assert kept.read_text() == "partial log"
 
 
 def test_verify_stops_retrying_once_the_rollout_budget_is_spent(monkeypatch: MonkeyPatch) -> None:

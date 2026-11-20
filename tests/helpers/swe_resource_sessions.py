@@ -14,10 +14,12 @@ from pytest import MonkeyPatch
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.global_config import (
+    RESULTS_DIR_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     taskset_environment_server_name,
 )
+from nemo_gym.core import runtime_files
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRequest
 from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
@@ -100,6 +102,8 @@ def check_swe_resource_episode(
     monkeypatch.setattr(app, "run_verification", grade)
     if hasattr(app, "resolve_parser"):
         monkeypatch.setattr(app, "resolve_parser", lambda *args: MagicMock())
+    # The results folder is set in every scenario, so only keep_verification_logs decides whether logs are kept.
+    monkeypatch.setattr(runtime_files, "maybe_get_global_config_dict", lambda: {RESULTS_DIR_KEY_NAME: str(tmp_path)})
     server = server_type(
         config=config_type(
             host="0.0.0.0",
@@ -109,7 +113,7 @@ def check_swe_resource_episode(
             sandbox_provider="docker",
             sandbox_config={},
             apply_anti_cheating=False,
-            verification_log_dir=None if scenario == "logs_disabled" else tmp_path,
+            keep_verification_logs=scenario != "logs_disabled",
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -166,12 +170,14 @@ def check_swe_resource_episode(
         else:
             if scenario == "logs_disabled":
                 assert body["verification_log_dir"] is None
-                assert grade.call_args.kwargs["log_dir"] is None
                 assert not list(tmp_path.iterdir())
             else:
                 logs = Path(body["verification_log_dir"])
-                assert logs.parent == tmp_path / f"instance-{quote(row['instance_id'], safe='')}"
-                assert grade.call_args.kwargs["log_dir"].parent == logs
+                assert logs.is_dir() and logs.relative_to(tmp_path).parts[:2] == (module_name, "verification")
+                assert f"-{quote(row['instance_id'], safe='')}-attempt{grade.await_count}-" in logs.name
+            # The verifier wrote to a temporary folder outside the server's source folder, removed after the attempt.
+            assert not grade.call_args.kwargs["log_dir"].is_relative_to(Path(app.__file__).parent)
+            assert not grade.call_args.kwargs["log_dir"].exists()
             assert body["evaluation_completed"] is completed
             assert body["reward"] == float(resolved)
             assert bool(body.get("mask_sample")) is (not completed)
@@ -244,7 +250,6 @@ def check_swe_session_config(module_name: str) -> None:
     assert resources["allowed_agents"] == ["opencode_agent"]
     assert resources["datasets"][0]["taskset"] == module_name
     assert (root / resources["datasets"][0]["jsonl_fpath"]).is_file()
-    assert resources["verification_log_dir"] is None
     assert agent["resources_server"] is None
     assert environment["resources_tool_transports"] == []
     assert environment["default_episode_timeout_seconds"] <= resources["sandbox_config"]["ttl_s"]

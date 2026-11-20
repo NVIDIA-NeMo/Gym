@@ -14,13 +14,16 @@
 # limitations under the License.
 """Episode sessions and the agent-run seed, through the server's HTTP routes with a fake sandbox."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.config.global_config import RESULTS_DIR_KEY_NAME
+from nemo_gym.core import EpisodeId, TaskId, runtime_files
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources_session_contract
 from resources_servers.r2e_gym import app as r2e_gym_app
@@ -153,3 +156,26 @@ def test_a_failed_test_scrub_refuses_the_seed_and_stops_the_sandbox(monkeypatch:
         assert client.post("/seed_session", json=_ROW).status_code == 500
     assert [sandbox.stop.await_count for sandbox in sandboxes] == [1, 1]
     assert server._session_id_to_sandbox == {}
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_verification_logs_are_written_only_under_the_configured_folder(
+    monkeypatch: MonkeyPatch, tmp_path: Path, configured: bool
+) -> None:
+    server, _ = _server(monkeypatch)
+    # The results folder is set either way, so only keep_verification_logs differs.
+    monkeypatch.setattr(runtime_files, "maybe_get_global_config_dict", lambda: {RESULTS_DIR_KEY_NAME: str(tmp_path)})
+    server.config.keep_verification_logs = configured
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/verify", json=_VERIFY).status_code == 200
+    log_dir = r2e_gym_app.run_verification.await_args.kwargs["log_dir"]
+    if configured:
+        # The attempt's temporary folder was copied once under the server's results.
+        [kept] = (tmp_path / "r2e_gym" / "verification").glob("*/*")
+        assert "-attempt1-" in kept.name
+    else:
+        assert not any(tmp_path.iterdir())
+    # The verifier wrote to a temporary folder outside the server's source folder, removed after the attempt.
+    assert not log_dir.is_relative_to(Path(r2e_gym_app.__file__).parent)
+    assert not log_dir.exists()

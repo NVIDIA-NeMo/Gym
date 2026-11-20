@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import sys
 from csv import DictWriter
 from glob import glob
 from pathlib import Path
@@ -21,6 +22,8 @@ from shutil import copytree
 from swebench.harness.constants import MAP_REPO_TO_EXT
 
 
+# The verification logs a golden-patch run kept with keep_verification_logs on: `<results_dir>/<server name>/verification`.
+log_root = Path(sys.argv[1])
 benchmark_fpath = Path("benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl")
 failed_sample_dirpath = Path("results/failed_swe_multilingual_golden_patch")
 failed_sample_dirpath.mkdir(parents=True, exist_ok=True)
@@ -36,11 +39,12 @@ writer.writeheader()
 
 
 def copy_sample(path: Path, instance_id: str):
-    relative_report_path = path.relative_to("resources_servers/swebench/logs/run_evaluation")
-    session_id = relative_report_path.parts[0]
+    relative_report_path = path.relative_to(log_root)
+    # A report is at <kept folder>/<run id>/<model>/<instance id>/report.json; copy that one verification's folder.
+    verify_dir = path.parents[3]
     copytree(
-        src=Path("resources_servers/swebench/logs/run_evaluation") / session_id,
-        dst=failed_sample_dirpath / session_id,
+        src=verify_dir,
+        dst=failed_sample_dirpath / verify_dir.relative_to(log_root),
         dirs_exist_ok=True,
     )
     row = instance_id_to_row[instance_id]
@@ -50,7 +54,7 @@ def copy_sample(path: Path, instance_id: str):
 
 seen_instance_ids = []
 failed_instance_ids = []
-for path in glob("resources_servers/swebench/logs/run_evaluation/**/report.json", recursive=True):
+for path in glob(str(log_root / "**" / "report.json"), recursive=True):
     path = Path(path)
     report = json.loads(path.read_text())
     instance_id: str = list(report.keys())[0]
@@ -81,7 +85,7 @@ for instance_id in instance_id_to_row:
     if instance_id in seen_instance_ids:
         continue
 
-    dirpaths = glob(f"resources_servers/swebench/logs/run_evaluation/**/{instance_id}", recursive=True)
+    dirpaths = glob(str(log_root / "**" / instance_id), recursive=True)
     dirpaths: list[Path] = list(map(Path, dirpaths))
     dirpaths.sort(key=lambda p: p.stat().st_birthtime, reverse=True)
 

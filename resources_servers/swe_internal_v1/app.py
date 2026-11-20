@@ -31,8 +31,6 @@ from pathlib import Path
 from time import time
 from traceback import format_exc
 from typing import Any
-from urllib.parse import quote
-from uuid import uuid4
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
@@ -83,6 +81,7 @@ from resources_servers.swebench.swe_agents_container_setup import (
     apply_swe_agents_container_setup,
     swe_agents_container_files,
 )
+from resources_servers.swebench.verification_logs import run_keeping_logs
 
 
 class SweInternalV1ResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkConfig):
@@ -92,11 +91,11 @@ class SweInternalV1ResourcesServerConfig(BaseResourcesServerConfig, AgentNetwork
     include_model_patch_in_response: bool = True
     # The vendor's recorded evaluation_time is < 1 min for 95% of rows and < 10 min for all.
     evaluation_timeout: int | None = 1800
-    # None disables disk logs. Set an output directory to retain per-task, per-attempt logs.
-    verification_log_dir: Path | None = None
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
+    # Keep each verification attempt's logs under <results_dir>/<server name>/verification/.
+    keep_verification_logs: bool = False
     apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -428,11 +427,6 @@ class SweInternalV1ResourcesServer(SandboxSessionResourcesServer):
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = (
-            self.config.verification_log_dir / f"instance-{quote(body.instance_id, safe='')}" / uuid4().hex
-            if self.config.verification_log_dir is not None
-            else None
-        )
 
         files = verification_files(inputs)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
@@ -446,6 +440,7 @@ class SweInternalV1ResourcesServer(SandboxSessionResourcesServer):
             test_output="",
             error="unattempted",
         )
+        kept_logs: Path | None = None
         for attempt in range(1, attempts + 1):
             sandbox: AsyncSandbox | None = None
             started = time()
@@ -453,11 +448,17 @@ class SweInternalV1ResourcesServer(SandboxSessionResourcesServer):
                 sandbox = await self._create_sandbox(body, files=files, verifier_session_id=session_id)
                 start_time_taken = time() - started
                 verification_started = time()
-                result = await run_verification(
-                    sandbox=sandbox,
-                    inputs=inputs,
-                    timeout_s=self.config.evaluation_timeout,
-                    log_dir=log_dir / f"attempt-{attempt}" if log_dir is not None else None,
+                result, kept_logs = await run_keeping_logs(
+                    lambda logs: run_verification(
+                        sandbox=sandbox,
+                        inputs=inputs,
+                        timeout_s=self.config.evaluation_timeout,
+                        log_dir=logs,
+                    ),
+                    keep=self.config.keep_verification_logs,
+                    server_name=self.config.name,
+                    instance_id=body.instance_id,
+                    attempt=attempt,
                 )
                 verification_time_taken = time() - verification_started
             except Exception as exc:
@@ -490,7 +491,7 @@ class SweInternalV1ResourcesServer(SandboxSessionResourcesServer):
                 # evaluation_completed distinguishes them so a broken row is not read as a hard task.
                 "reward": 1.0 if result.resolved else 0.0,
                 "evaluation_completed": result.completed,
-                "verification_log_dir": str(log_dir) if log_dir is not None else None,
+                "verification_log_dir": str(kept_logs) if kept_logs is not None else None,
                 **(
                     {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": result.error}
                     if not result.completed
