@@ -70,6 +70,21 @@ def _ids(entries):
     return sorted((entry["task"], entry["agent"]) for entry in entries)
 
 
+def _fan_out_rows(runs, tasks=2):
+    """Two repeats of each task under each run, given as (agent, Environment Server or None)."""
+    rows = []
+    for task in range(tasks):
+        for position, (agent, server) in enumerate(runs):
+            for repeat in range(2):
+                row = {
+                    "_ng_task_index": task,
+                    "_ng_rollout_index": 2 * position + repeat,
+                    "agent_ref": {"name": agent},
+                }
+                rows.append(row | ({"_ng_environment_server": server} if server else {}))
+    return rows
+
+
 def test_report_on_the_eval_math_run():
     # The eval cases quote these numbers; the run was profiled with nemo-gym 0.7.0, so tasks 12 and 14 have no row.
     report = _summarize(SKILL / "evals" / "files" / "math_run" / "math_rollouts_reward_profiling.jsonl").stdout
@@ -135,6 +150,15 @@ def test_inputs_from_another_run_are_rejected(tmp_path):
     completed = _summarize(profile, check=False)
     assert completed.returncode != 0
     assert "do not match this profile (task 0)" in completed.stderr
+    # Agent metrics from another run can count more masked rollouts than the inputs leave unmeasured.
+    _write_jsonl(inputs, rows)
+    metrics = tmp_path / "run_agent_metrics.json"
+    saved_metrics = metrics.read_text()
+    metrics.write_text(json.dumps([json.loads(saved_metrics)[0] | {"coverage/masked_rollouts": 1}]))
+    completed = _summarize(profile, check=False)
+    assert completed.returncode != 0
+    assert "materialized inputs or the agent metrics do not match this profile" in completed.stderr
+    metrics.write_text(saved_metrics)
     # The same tasks with twice the repeats, as a stale inputs file from an earlier run would have.
     extra = [row | {"_ng_rollout_index": row["_ng_rollout_index"] + 2} for row in rows]
     _write_jsonl(inputs, rows + extra)
@@ -197,16 +221,7 @@ def test_long_task_lists_are_cut_in_the_text_report(tmp_path):
 )
 def test_fan_out_gap_for_one_run_counts_in_either_version(tmp_path, runs, labels):
     # gym names a run by its agent, unless several Environment Servers front that agent.
-    rows = []
-    for task in range(2):
-        for position, (agent, server) in enumerate(runs):
-            for repeat in range(2):
-                row = {
-                    "_ng_task_index": task,
-                    "_ng_rollout_index": 2 * position + repeat,
-                    "agent_ref": {"name": agent},
-                }
-                rows.append(row | ({"_ng_environment_server": server} if server else {}))
+    rows = _fan_out_rows(runs)
     # The second run saved nothing for task 1, which the first run did save.
     second_run = runs[1][1] or runs[1][0]
     gap = (1, labels[1])
@@ -232,33 +247,68 @@ def test_fan_out_gap_for_one_run_counts_in_either_version(tmp_path, runs, labels
         assert sorted(summary["mean_reward_over_measured_rollouts"]) == labels, shape
 
 
-def test_run_labels_that_change_with_masking_leave_the_split_unknown(tmp_path):
-    # gym labels runs from the measured rows only. With server_b masked everywhere, the agent behind both servers
-    # is labelled by its name in the profile but by its servers in the inputs, so masked and never-saved rollouts
-    # cannot be told apart from these files.
-    runs = [("agent", "server_a"), ("agent", "server_b"), ("agent_c", None)]
-    rows = []
-    for task in range(2):
-        for position, (agent, server) in enumerate(runs):
-            for repeat in range(2):
-                row = {
-                    "_ng_task_index": task,
-                    "_ng_rollout_index": 2 * position + repeat,
-                    "agent_ref": {"name": agent},
-                }
-                rows.append(row | ({"_ng_environment_server": server} if server else {}))
+@pytest.mark.parametrize("shape", ["0.7.0", "main"])
+def test_runs_renamed_by_masking_are_read_from_the_samples(tmp_path, shape):
+    # gym names runs from the measured rows only. With server_b masked everywhere, the agent behind both servers is
+    # named by its own name in the profile but by its servers in the inputs. A row with a measured rollout still shows
+    # its server in `sample`, but main's count-only row for task 1 under server_a does not, so with that row the split
+    # between masked and never-saved rollouts stays unknown.
+    rows = _fan_out_rows([("agent", "server_a"), ("agent", "server_b"), ("agent_c", None)])
     results = [
         row | {"reward": 1.0, "mask_sample": row.get("_ng_environment_server") == "server_b"}
         for row in rows
-        if (row["_ng_task_index"], row["agent_ref"]["name"]) != (0, "agent_c")
+        if (row["_ng_task_index"], row.get("_ng_environment_server")) != (1, "server_a")
     ]
     profile = _gym_profile(tmp_path, rows, results)
-    _drop_count_only_rows(profile)
+    if shape == "0.7.0":
+        _drop_count_only_rows(profile)
 
     coverage = _summary(profile)["coverage"]
 
     assert (coverage["planned_rollouts"], coverage["measured_rollouts"]) == (12, 6)
-    assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (None, None)
+    if shape == "0.7.0":
+        assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (4, 2)
+        assert _ids(coverage["tasks_without_measured_rollout"]) == [(0, "server_b"), (1, "server_a"), (1, "server_b")]
+    else:
+        assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (None, None)
+
+
+def test_a_run_masked_everywhere_is_reported_apart(tmp_path):
+    # With every agent_b result masked, gym sees a single run and writes a plain row for task 0.
+    rows = _fan_out_rows([("agent_a", None), ("agent_b", None)], tasks=1)
+    results = [row | {"reward": 1.0, "mask_sample": row["agent_ref"]["name"] == "agent_b"} for row in rows]
+    profile = _gym_profile(tmp_path, rows, results)
+
+    coverage = _summary(profile)["coverage"]
+
+    assert (coverage["planned_rollouts"], coverage["measured_rollouts"]) == (4, 2)
+    assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (2, 0)
+    assert (coverage["complete_tasks"], coverage["partial_tasks"]) == (1, [])
+    assert _ids(coverage["tasks_without_measured_rollout"]) == [(0, "agent_b")]
+    assert "  Not in the profile file (every saved rollout was masked): 0 (agent_b)\n" in _summarize(profile).stdout
+
+
+@pytest.mark.parametrize("shape", ["main", "0.7.0"])
+def test_runs_on_separate_tasks_keep_their_own_means(tmp_path, shape):
+    # Each task ran under one agent, so gym writes plain rows that do not name the run. Task 2 saved nothing.
+    rows = [
+        {"_ng_task_index": task, "_ng_rollout_index": repeat, "agent_ref": {"name": agent}}
+        for task, agent in enumerate(["agent_a", "agent_b", "agent_b"])
+        for repeat in range(2)
+    ]
+    results = [row | {"reward": float(row["agent_ref"]["name"] == "agent_a")} for row in rows[:4]]
+    profile = _gym_profile(tmp_path, rows, results)
+    if shape == "0.7.0":
+        _drop_count_only_rows(profile)
+
+    summary = _summary(profile)
+
+    assert summary["mean_reward_over_measured_rollouts"] == {"agent_a": 1.0, "agent_b": 0.0}
+    assert _ids(summary["coverage"]["tasks_without_measured_rollout"]) == [(2, "agent_b")]
+    assert summary["coverage"]["never_saved_rollouts"] == 2
+    # Without the inputs, the rows' samples still tell the runs apart.
+    (tmp_path / "run_materialized_inputs.jsonl").unlink()
+    assert _summary(profile)["mean_reward_over_measured_rollouts"] == {"agent_a": 1.0, "agent_b": 0.0}
 
 
 def test_without_inputs_the_planned_total_is_unknown(tmp_path):
