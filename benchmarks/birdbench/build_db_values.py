@@ -464,11 +464,12 @@ class DbHandle:
         """``dialect="spark"`` (needs ``db_id``) renders the schema for Spark SQL: schema-qualified, backtick-quoted
         table headings and column names, and the Spark column types the ``bird_sql`` server will actually load.
         ``dialect="postgres"`` does the same with double quotes, the PostgreSQL column types and the column names as
-        loaded (lower case; see ``setup_bird_postgres.postgres_column_name``).
+        loaded (lower case; see ``setup_bird_postgres.postgres_column_name``). ``dialect="snowflake"`` does the same with
+        double quotes, the Snowflake column types and BIRD's names unchanged.
         ``corpus_limit_per_column`` bounds the BM25 corpus scan per column (see ``_collect_column_values``).
         """
-        if dialect not in ("sqlite", "spark", "postgres"):
-            raise ValueError(f"Unsupported dialect {dialect!r}; expected 'sqlite', 'spark' or 'postgres'")
+        if dialect not in ("sqlite", "spark", "postgres", "snowflake"):
+            raise ValueError(f"Unsupported dialect {dialect!r}; expected 'sqlite', 'spark', 'postgres' or 'snowflake'")
         if dialect != "sqlite" and not db_id:
             raise ValueError(f"dialect={dialect!r} requires db_id (the schema name)")
         self.cur = cur
@@ -492,6 +493,12 @@ class DbHandle:
             # foreign_key_list gives no column (None) for a key on the parent's primary key; it stays as the other
             # dialects render it.
             self._column_name = lambda column: column if column is None else postgres_column_name(column)
+        elif dialect == "snowflake":
+            # Imported here: only the Snowflake dialect needs pandas.
+            from resources_servers.bird_sql.setup_bird_snowflake import snowflake_column_types
+
+            sqlite_path = Path(cur.execute("PRAGMA database_list").fetchall()[0][2])
+            self.column_types_by_table = snowflake_column_types(sqlite_path)
         dscp_fields = parse_dscp_fields(dscp)
         self.descriptions_by_table = {
             t: _column_descriptions(description_dir, t, dscp_fields) for t in self.table_names

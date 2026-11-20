@@ -70,6 +70,92 @@ startup stops with an error on one loaded with mixed-case column names until it 
 and loaded again. `psycopg` and `psycopg_pool` are dependencies of this server (`pyproject.toml`); the default SQLite
 dialect never imports them.
 
+## Snowflake dialect (experimental, local stand-in)
+
+Set `dialect: snowflake` for a model that writes Snowflake SQL. By default there is no
+Snowflake account behind it: the query runs on [fakesnow](https://github.com/tekumara/fakesnow),
+which transpiles Snowflake SQL with `sqlglot` and runs it on DuckDB, over a read-only copy of
+the databases (`<snowflake_db_dir>/BIRD.db`, one schema per `db_id`, built on first start in
+about 16 s for dev). As for Spark and PostgreSQL, the BIRD gold query still runs, untouched,
+on the original SQLite database, and only the two result sets are compared. Tables and
+columns keep BIRD's original names, created quoted, so they are case-sensitive as they would
+be on Snowflake.
+
+DuckDB is more lenient than Snowflake in places, so before running the query the grader
+refuses, as Snowflake would, anything but a single query, identifiers that do not resolve
+under Snowflake's rules (an unquoted name means its upper-case spelling), and a few
+SQLite-only spellings (`IIF`, `INSTR`, `GROUP_CONCAT`, `STRFTIME`, `JULIANDAY`, `TOTAL`,
+`LIMIT offset, count`), `SUM`/`AVG` of a boolean expression (including an `IFF`, `CASE` or
+`COALESCE` of booleans), a `SELECT DISTINCT` ordered by something it doesn't select, an
+aggregate `FILTER (WHERE ...)` clause, and six functions DuckDB has and Snowflake doesn't
+(`DIVIDE`, `EPOCH_MS`, `LIST_VALUE`, `REGEXP_MATCHES`, `STRING_AGG`, `STRPTIME`). This check
+is static and approximate; on a real account, Snowflake refused every query it refuses (see
+the calibration below). It matches function names as written: a quoted name (`"DIVIDE"(a, b)`)
+or a call in a query with a CTE of the same name (`WITH divide AS (...) SELECT DIVIDE(a, b)`)
+gets past it, and a table alias with a column list that has one of these names
+(`FROM t AS divide (a, b)`) is refused although Snowflake accepts it. Known differences from Snowflake that the check does not cover,
+each checked on an account:
+
+- `DATEADD` and `DATE_TRUNC` on a date return a timestamp, so the result gains `00:00:00`;
+  `TO_CHAR` ignores its format when `sqlglot` cannot infer the argument's type (a
+  subquery's column, a timestamp).
+- `DATEDIFF` and `DATEADD` on BIRD's `VARCHAR` date columns fail; Snowflake casts the string.
+  `YEAR`, `MONTH`, `EXTRACT` and `DATE_PART` on a `VARCHAR` fail on Snowflake too, and an
+  explicit `TO_DATE(...)` or `::DATE` works on both.
+- DuckDB refuses implicit text-to-number conversion (`'2026' - '1990'`, `varchar_col > 0`)
+  where Snowflake casts row by row and errors only on text that isn't a number (3 of 11 dev
+  golds that compare text with a number match on Snowflake).
+- Wrong Snowflake SQL that runs: other functions DuckDB has and Snowflake doesn't, `TO_CHAR` of
+  a `VARCHAR` with a format, division by zero (it returns `inf` instead of an error), `SUM`/`AVG`
+  of another boolean-valued function, and a `SELECT DISTINCT` ordered by an aggregate. The
+  static check leaves the last two alone rather than risk refusing SQL Snowflake accepts.
+
+A query that fails on the stand-in scores as the model's error; a failure of the stand-in
+itself (a closed connection, an I/O error) is masked as a verifier error (`unknown_error`).
+Queries run single-threaded so float sums are repeatable, and a timed-out query is
+interrupted. DuckDB's file and network access is off and locked, so model SQL can't read
+files through table functions such as `read_csv` or `sqlite_scan`. `fakesnow` and `snowflake-connector-python` are dependencies of this server
+(`pyproject.toml`), pinned to `fakesnow==0.12.1` because the grader reads two of its private
+attributes; the default SQLite dialect never imports them.
+
+`snowflake_engine: snowflake` runs the same grader against a real account instead, through
+`snowflake_connection_name` in the connector's `connections.toml` (no credentials in this
+config), with the data already loaded in the same layout. Each connection runs
+`USE SECONDARY ROLES NONE`, so only the connection's own role applies: a user's default
+secondary roles are often `ALL`, which would let a session on a read-only role write through
+the user's other roles.
+
+To set up an account:
+
+1. As an account admin, create a database `BIRD`, a warehouse (X-Small, with auto-suspend) and
+   a read-only role for the grader, granted to the user the grader connects as. Grant that
+   role `USAGE` on the warehouse: with secondary roles off, it can't borrow another role's.
+2. Add two connections to the connector's `connections.toml`: an admin one, with the warehouse
+   and a role that owns `BIRD`, and the grader's, with the read-only role and the warehouse.
+3. Load the data and grant the grader's role read access:
+   `resources_servers/bird_sql/.venv/bin/python -m benchmarks.birdbench.snowflake_load_account
+   <admin connection> --grant-to <role>` (`--split train` for train). Dev takes about 7
+   minutes. Run it again after any reload: FUTURE grants need MANAGE GRANTS, which a
+   database owner such as SYSADMIN usually lacks, so the script grants on the tables itself.
+4. Serve with `snowflake_engine: snowflake` and `snowflake_connection_name: <grader connection>`.
+
+**Calibration on a real account** (BIRD dev, 2026-11-19, with
+`benchmarks/birdbench/snowflake_gold_check.py --snowflake-connection`). sqlglot's translations
+of the 1,534 dev golds match on 1,439 on Snowflake and on 1,413 on the stand-in. For the 1,532
+whose gold runs on SQLite, the two agree on pass or fail for 1,498 (97.8%). 30 pass only on
+Snowflake, mostly arithmetic on text that Snowflake casts (20). 4 pass only on the stand-in:
+ties under `LIMIT` (2), float precision (1) and a text value cast to a number (1). Snowflake
+refused every query the static check refuses, and the check refuses none of the 2,681
+distinct queries Snowflake ran in the calibration (gold translations, probes and a model's
+answers).
+
+On a model's own SQL (Nemotron 3.5 Lightning with thinking on, all of dev, 2026-11-20), the
+stand-in and Snowflake agree on pass or fail for 1,523 of 1,532 questions (99.4%). 8 pass only
+on the stand-in: 5 ratios where Snowflake's fixed-point division changes the sixth decimal,
+which is where the grader compares (a precision limit, not something the check can see), 2
+ties under `LIMIT` and 1 date format Snowflake parses strictly. 1 passes only on Snowflake
+(arithmetic on text that holds a number).
+
 ## Example usage
 
 ### Running servers
