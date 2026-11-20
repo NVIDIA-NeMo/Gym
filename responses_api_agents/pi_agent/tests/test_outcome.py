@@ -12,7 +12,7 @@ from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
+from nemo_gym.core import MODEL_REQUEST_ERROR
 from responses_api_agents.pi_agent.app import PiAgent
 from responses_api_agents.pi_agent.tests.test_sandbox import _pinned_pi_package
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
