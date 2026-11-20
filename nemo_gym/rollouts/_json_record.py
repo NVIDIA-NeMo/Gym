@@ -26,6 +26,13 @@ def json_record_digest(path: Path, offset: int) -> bytes:
     Strings are read by chunk and arrays by element. An unnamed temporary database orders object members on disk,
     so a large string, a long list of model calls, or a wide object need not fit in memory.
     """
+    try:
+        return _digest(path, offset)
+    except sqlite3.Error as error:
+        raise ConfigError(f"Cannot compare the saved JSON at byte {offset} of {path}: {error}") from error
+
+
+def _digest(path: Path, offset: int) -> bytes:
     with path.open("rb") as stream, closing(sqlite3.connect("")) as members:
         stream.seek(offset)
         members.execute(
