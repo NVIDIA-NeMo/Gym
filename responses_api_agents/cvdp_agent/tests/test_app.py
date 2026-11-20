@@ -734,6 +734,35 @@ class TestAgenticSandboxSpec:
         assert env["NODE_ARCH"] == "linux-x64"
         assert Path(env["TMPDIR"]).is_dir()
 
+    def test_deps_recipe_follows_the_agent_pin(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        """Hermes reads its source pin from its pyproject.toml, so a pin bump must rebuild the cached prefix."""
+        hermes_dir = Path(cvdp_app.__file__).resolve().parents[1] / "hermes_agent"
+        assert hermes_dir / "pyproject.toml" in cvdp_app.agent_pin_files("hermes_agent")
+        pin = tmp_path / "pyproject.toml"
+        pin.write_text("source = 'a'")
+        monkeypatch.setattr(cvdp_app, "agent_pin_files", lambda key: (pin,))
+        agent = self._agent()
+        before = agent._deps_recipe("hermes_agent")[1]
+
+        pin.write_text("source = 'b'")
+        bumped = agent._deps_recipe("hermes_agent")[1]
+        assert bumped != before
+
+        # The deps script also builds from HERMES_SPEC when it is set.
+        monkeypatch.setenv("HERMES_SPEC", "git+https://example.invalid/hermes@experiment")
+        assert agent._deps_recipe("hermes_agent")[1] != bumped
+
+    async def test_hermes_deps_refuse_a_cross_architecture_sandbox_build(self, monkeypatch: MonkeyPatch) -> None:
+        """Hermes builds its runtime on the host with uv and the Gym checkout, which a task sandbox lacks."""
+        monkeypatch.setattr("responses_api_agents.cvdp_agent.app.os.uname", lambda: SimpleNamespace(machine="aarch64"))
+        agent = self._agent(
+            sandbox_provider={"opensandbox": {}}, agent_server_module="responses_api_agents.hermes_agent.app"
+        )
+        assert agent._deps_needs_sandbox_build() is True
+
+        with pytest.raises(RuntimeError, match=r"run CVDP on a host of the sandbox's architecture \(amd64\)"):
+            await agent._provision_deps_in_sandbox("image")
+
     def test_opensandbox_deps_default_to_amd64_even_on_arm_host(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("responses_api_agents.cvdp_agent.app.os.uname", lambda: SimpleNamespace(machine="aarch64"))
         agent = self._agent(sandbox_provider={"opensandbox": {}})
@@ -1249,7 +1278,10 @@ def test_sandbox_entrypoint_resolver_accepts_untrained_role(tmp_path: Path) -> N
         "NV_AGENT_CFG_CLASS": "ProbeConfig",
     }
 
-    completed = subprocess.run([sys.executable, str(entrypoint)], env=env, capture_output=True, text=True, timeout=120)
+    # The entrypoint creates the CVDP task directories in its working directory.
+    completed = subprocess.run(
+        [sys.executable, str(entrypoint)], env=env, capture_output=True, text=True, timeout=120, cwd=tmp_path
+    )
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads((traj_dir / "response.json").read_text()) == ["http://model/ng-rollout/rollout-1/v1"] * 2

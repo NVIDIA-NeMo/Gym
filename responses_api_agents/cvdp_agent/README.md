@@ -175,6 +175,8 @@ Kept as a plain, lintable module rather than a string template.
   - `claude_code_agent_deps.sh` — adds portable Node + the `@anthropic-ai/claude-code` CLI.
   - `hermes_agent_deps.sh` — builds the separate Hermes Python 3.14 runtime under `$DEPS_DIR/hermes-runtime`
   from the source pinned in `responses_api_agents/hermes_agent/pyproject.toml` (`HERMES_SPEC` overrides it).
+  The build runs on the Agent Server host, so the task sandbox must share its architecture, and task images
+  need glibc 2.28 or newer.
   - `opencode_agent_deps.sh`: adds portable Node and the pinned `opencode-ai` CLI.
 - `**configs/cvdp_agent_generic_claude.yaml**`, `**configs/cvdp_agent_generic_hermes.yaml**`,
 `**configs/cvdp_agent_generic_opencode.yaml**`
