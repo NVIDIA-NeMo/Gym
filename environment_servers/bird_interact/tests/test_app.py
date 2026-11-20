@@ -459,6 +459,12 @@ class TestGrading:
         with pytest.raises(RuntimeError, match="Setup SQL failed: no such column: nope"):
             main(["setup", str(request_path)])
 
+    @pytest.mark.parametrize("sql", ["SELECT 'a\x00b'", "SELECT '\ud800'"], ids=["nul", "lone-surrogate"])
+    def test_sql_the_driver_cannot_send_is_the_query_s_error(self, sql: str, tmp_path: Path) -> None:
+        # Not a crash of grading.py, which the server would retry as a sandbox failure and mask.
+        (result,) = _bookshop(tmp_path).run([sql], timeout_seconds=5)
+        assert result.error
+
     def test_a_failing_submission_is_not_applied(self, tmp_path: Path) -> None:
         database = _bookshop(tmp_path)
         grade(
