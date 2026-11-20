@@ -85,6 +85,8 @@ class QueryResult:
     rows: list[tuple] | None
     error: str | None = None
     timed_out: bool = False
+    # The statement returned more than ``MAX_RESULT_ROWS`` rows, and ``rows`` holds the first of them.
+    truncated: bool = False
 
     @property
     def ok(self) -> bool:
@@ -156,13 +158,14 @@ def _returns_rows(sql: str) -> bool:
     return sql.strip().lower().startswith(("select", "with"))
 
 
-def _fetch_rows(cursor: Any, script: str) -> list[tuple] | None:
+def _fetch_rows(cursor: Any, script: str) -> QueryResult:
     """The rows of a script's last statement, as the ADK keeps them: at most ``MAX_RESULT_ROWS`` when the script starts
     with ``SELECT`` or ``WITH``, all of them otherwise, and none when the statement returns no rows. Only that many are
     read, so a huge result does not fill the sandbox's memory with SQLite (psycopg2 holds a whole result anyway)."""
     if _returns_rows(script):
-        return cursor.fetchmany(MAX_RESULT_ROWS + 1)[:MAX_RESULT_ROWS]
-    return cursor.fetchall() if cursor.description is not None else None
+        rows = cursor.fetchmany(MAX_RESULT_ROWS + 1)
+        return QueryResult(rows=rows[:MAX_RESULT_ROWS], truncated=len(rows) > MAX_RESULT_ROWS)
+    return QueryResult(rows=cursor.fetchall() if cursor.description is not None else None)
 
 
 def _round_nested(value: object) -> object:
@@ -267,7 +270,7 @@ def _run_sqlite(database: Path, scripts: Sequence[str], *, timeout_seconds: floa
                 for statement in statements:
                     cursor = connection.execute(statement)
                 # Only the last statement's rows are kept, so only they are read.
-                results.append(QueryResult(rows=_fetch_rows(cursor, script) if cursor is not None else None))
+                results.append(_fetch_rows(cursor, script) if cursor is not None else QueryResult(rows=None))
             except (sqlite3.Error, ValueError, OverflowError) as error:
                 # A value the driver cannot hold, or SQL it cannot send (a NUL, a lone surrogate), is the query's error.
                 timed_out = isinstance(error, sqlite3.OperationalError) and time.monotonic() > deadline[0]
@@ -310,7 +313,7 @@ class PostgresDatabase:
                     timer.start()
                     try:
                         cursor.execute(script)
-                        results.append(QueryResult(rows=_fetch_rows(cursor, script)))
+                        results.append(_fetch_rows(cursor, script))
                     except psycopg2.errors.QueryCanceled:
                         message = f"Query timed out after {timeout_seconds} seconds"
                         results.append(QueryResult(rows=None, error=message, timed_out=True))
@@ -437,7 +440,7 @@ class TestCaseHelpers:
             finally:
                 timer.cancel()
             connection.commit()
-            return _fetch_rows(cursor, query)
+            return _fetch_rows(cursor, query).rows
         except Exception:
             connection.rollback()
             raise
@@ -661,6 +664,7 @@ def main(argv: list[str]) -> None:
         result = {
             "error": query.error,
             "row_count": len(rows),
+            "truncated": query.truncated,
             "preview": [repr(tuple(_preview_value(value) for value in row)) for row in rows[:MAX_PREVIEW_ROWS]],
         }
     elif command == "grade":
