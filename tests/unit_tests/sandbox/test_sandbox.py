@@ -599,7 +599,7 @@ class ArgvSandboxProvider(ServicePreservingSandboxProvider):
 
 @pytest.mark.parametrize("telemetry", [False, True])
 async def test_exec_hands_an_argument_list_to_a_provider_that_takes_one(monkeypatch, telemetry):
-    monkeypatch.setattr("nemo_gym.sandbox.api.is_span_group_enabled", lambda _: telemetry)
+    monkeypatch.setattr("nemo_gym.sandbox.api.is_span_group_or_metrics_active", lambda _: telemetry)
     provider = ArgvSandboxProvider()
     assert isinstance(provider, SupportsSandboxExecArgv)
     async with AsyncSandbox(provider) as sandbox:
@@ -679,7 +679,7 @@ def test_providers_that_run_an_argument_list_declare_it(name: str) -> None:
     assert hasattr(get_provider_class(name), "exec_takes_argv")
 
 
-@pytest.mark.parametrize("name", ["daytona", "e2b", "ecs_fargate", "enroot", "openshell"])
+@pytest.mark.parametrize("name", ["bwrap", "daytona", "e2b", "ecs_fargate", "enroot", "openshell"])
 async def test_providers_without_argv_refuse_an_argument_list_before_running_anything(name: str) -> None:
     """Called directly, past ``AsyncSandbox``, such a provider raises first: a stand-in ``self`` with only a name
     and a handle with nothing in it would fail on any other step."""

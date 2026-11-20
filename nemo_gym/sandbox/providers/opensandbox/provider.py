@@ -300,12 +300,23 @@ ARGV_SDK_REQUIREMENT = "opensandbox>=1.1.0"
 
 @functools.cache
 def _sdk_sends_argv() -> bool:
-    """Whether the installed SDK meets ``ARGV_SDK_REQUIREMENT``; Gym's own lower bound predates it."""
+    """Whether the installed SDK meets ``ARGV_SDK_REQUIREMENT``; Gym's own lower bound predates it.
+
+    Logs the requirement once when it does not: ``AsyncSandbox.exec`` then refuses an argument list without
+    naming the SDK.
+    """
     try:
         installed = importlib.metadata.version("opensandbox")
     except importlib.metadata.PackageNotFoundError:
         return False
-    return Requirement(ARGV_SDK_REQUIREMENT).specifier.contains(installed, prereleases=True)
+    sends_argv = Requirement(ARGV_SDK_REQUIREMENT).specifier.contains(installed, prereleases=True)
+    if not sends_argv:
+        LOGGER.warning(
+            "The installed opensandbox %s cannot send an exec argument list; running one without a shell needs %s",
+            installed,
+            ARGV_SDK_REQUIREMENT,
+        )
+    return sends_argv
 
 
 def _require_opensandbox_lifecycle_sdk() -> tuple[Any, Any]:
@@ -1254,12 +1265,12 @@ class OpenSandboxProvider:
         return self._operations.background_exec
 
     def exec_takes_argv(self) -> bool:
-        """execd runs an argument list as the process's argv (``SupportsSandboxExecArgv``).
+        """Whether execd gets an argument list as the process's argv (``SupportsSandboxExecArgv``).
 
-        ``exec`` refuses one before submitting it when the installed SDK predates ``ARGV_SDK_REQUIREMENT``, or for a
-        ``user`` name, which only ``su`` and so a shell can switch to.
+        False when the installed SDK predates ``ARGV_SDK_REQUIREMENT``, the first that sends one. ``exec`` refuses
+        a list then, and for a ``user`` name, which only ``su`` and so a shell can switch to.
         """
-        return True
+        return _sdk_sends_argv()
 
     def pull_policy_options(self, policy: str) -> dict[str, Any]:
         """Compose's ``pull_policy`` as the per-sandbox image pull policy extension (``_resolve_extensions`` lets a

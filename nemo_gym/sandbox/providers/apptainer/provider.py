@@ -65,6 +65,16 @@ APPTAINER_FATAL_RETURN_CODE = 255
 # count together with apptainer's exit code.
 APPTAINER_FATAL_LINE = re.compile(r"^FATAL\s*:\s", re.MULTILINE)
 APPTAINER_ERROR_LINE = re.compile(r"^ERROR\s*:\s", re.MULTILINE)
+# The FATAL line of ``apptainer exec`` when it cannot start the program it was given: the program is not found
+# (a shell's exit status 127), or it is found and cannot be executed (126).
+APPTAINER_PROGRAM_NOT_FOUND_LINE = re.compile(
+    r'^FATAL\s*:\s+(?:".*": executable file not found in \$PATH|stat .+: (?:no such file or directory|not a directory))$',
+    re.MULTILINE,
+)
+APPTAINER_PROGRAM_NOT_EXECUTABLE_LINE = re.compile(
+    r"^FATAL\s*:\s+(?:permission denied|is a directory|stat .+: permission denied|exec .+ failed: .+)$",
+    re.MULTILINE,
+)
 APPTAINER_RUNTIME_ERROR_MARKERS = ("no instance found", "instance not found")
 APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
 APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -225,6 +235,20 @@ def _is_runtime_failure(stderr: str, return_code: int | None = None) -> bool:
     if any(marker in low for marker in APPTAINER_RUNTIME_ERROR_MARKERS):
         return True
     return return_code == APPTAINER_FATAL_RETURN_CODE and APPTAINER_ERROR_LINE.search(stderr) is not None
+
+
+def _unstartable_program_return_code(stderr: str, return_code: int) -> int | None:
+    """A shell's exit status for a program ``apptainer exec`` could not start: 127 not found, 126 not executable.
+
+    None when apptainer failed for another reason, such as a missing instance or working directory.
+    """
+    if return_code != APPTAINER_FATAL_RETURN_CODE:
+        return None
+    if APPTAINER_PROGRAM_NOT_FOUND_LINE.search(stderr):
+        return 127
+    if APPTAINER_PROGRAM_NOT_EXECUTABLE_LINE.search(stderr):
+        return 126
+    return None
 
 
 def _is_missing_instance(stderr: str) -> bool:
@@ -661,6 +685,9 @@ class ApptainerProvider:
     ) -> SandboxExecResult:
         """Run a command inside the instance: shell text under ``sh -c``, an argument list without a shell.
 
+        An argument list whose program apptainer cannot start is a command failure with a shell's exit status:
+        127 when the program is not found, 126 when it cannot be executed.
+
         Maps the neutral ``user`` parameter onto apptainer:
         - None            -> run as the default (launching) user.
         - "root" / 0      -> add --fakeroot (root inside the container).
@@ -719,6 +746,11 @@ class ApptainerProvider:
             )
 
         if code != 0 and _is_runtime_failure(err, code):
+            # An argument list names the caller's program, so apptainer failing to start it is a command failure.
+            # For shell text the program is ``sh``: an image without one stays a sandbox failure.
+            program_code = None if isinstance(command, str) else _unstartable_program_return_code(err, code)
+            if program_code is not None:
+                return SandboxExecResult(stdout=out, stderr=err, return_code=program_code, error_type=None)
             return SandboxExecResult(
                 stdout=out,
                 stderr=err,

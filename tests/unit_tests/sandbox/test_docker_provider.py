@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import shutil
-import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -711,24 +709,19 @@ async def test_exec_uses_handle_shell(fake_binary: str, monkeypatch: pytest.Monk
 
 
 async def test_exec_hands_an_argument_list_to_docker_without_the_shell(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A docker binary that prints the arguments it receives shows the list arriving as the program's argv."""
-    docker = tmp_path / "docker"
-    docker.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
-    docker.chmod(0o755)
-    monkeypatch.setattr(docker_provider, "_require_docker", lambda: str(docker))
-    provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
+    """The list is the tail of the ``docker exec`` command line: the program's argv, with no ``<shell> -c``."""
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
     assert provider.exec_takes_argv()
     handle = _make_handle(shell="bash", env={"BASE": "1"})
 
-    argv_result = await provider.exec(
-        handle, ("printf", "%s", "a;b $HOME"), cwd="/work", env={"KEY": "v"}, user="alice", stdin=b""
-    )
-    shell_result = await provider.exec(handle, "printf %s $HOME", user="root")
+    await provider.exec(handle, ("printf", "%s", "a;b $HOME"), cwd="/work", env={"KEY": "v"}, user="alice", stdin=b"")
+    await provider.exec(handle, "printf %s $HOME", user="root")
 
     # User, environment, working directory and stdin are handled as for shell text.
-    assert json.loads(argv_result.stdout) == [
+    assert rec.calls[0]["argv"] == [
+        fake_binary,
         "exec",
         "-i",
         "-w",
@@ -744,7 +737,7 @@ async def test_exec_hands_an_argument_list_to_docker_without_the_shell(
         "%s",
         "a;b $HOME",
     ]
-    assert json.loads(shell_result.stdout)[-4:] == ["nemo-gym-x", "bash", "-c", "printf %s $HOME"]
+    assert rec.calls[1]["argv"][-4:] == ["nemo-gym-x", "bash", "-c", "printf %s $HOME"]
 
 
 @pytest.mark.parametrize(
