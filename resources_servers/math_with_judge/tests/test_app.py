@@ -198,6 +198,62 @@ class TestApp:
         assert _extract_last_boxed_answer(r"\boxed{ exact text }") == " exact text "
         assert _extract_last_boxed_answer(r"\boxed{unclosed") is None
 
+    @mark.parametrize(
+        ("text", "expected", "format_valid", "reward"),
+        [
+            ("<answer>4</answer>", "4", True, 1.0),
+            ("<answer>5</answer>", "4", True, 0.0),
+            ("4", "4", False, 0.0),
+            ("Explanation. <answer>4</answer>", "4", False, 0.0),
+            ("<answer>4</answer> extra", "4", False, 0.0),
+            ("<answer> </answer>", "4", False, 0.0),
+            (r"<answer>\frac{1}{2}</answer>", "0.5", True, 1.0),
+        ],
+    )
+    async def test_per_task_format_contract(self, config, text, expected, format_valid, reward):
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        response = NeMoGymResponse(**self._create_response("format-test", self._create_response_output_message(text)))
+        request = LibraryJudgeMathVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=response,
+            question="Compute",
+            expected_answer=expected,
+            answer_format_regex=r"\s*<answer>(?P<answer>[^<>\r\n]+)</answer>\s*",
+        )
+        result = await server.verify(request)
+        assert result.reward == reward and result.answer_format_valid is format_valid
+        assert result.response == response
+        server.server_client.post.assert_not_called()
+
+    async def test_format_failure_cannot_be_overridden_by_judge(self, config):
+        server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        response = NeMoGymResponse(**self._create_response("wrong-format", self._create_response_output_message("4")))
+        request = LibraryJudgeMathVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=response,
+            question="2+2",
+            expected_answer="4",
+            answer_format_regex=r"<answer>(?P<answer>[^<>]+)</answer>",
+        )
+        with patch.object(LibraryJudgeMathResourcesServer, "_verify_answer", new_callable=AsyncMock) as verify:
+            result = await server.verify(request)
+            assert result.reward == 0 and result.answer_format_valid is False
+            verify.assert_not_awaited()
+
+    @mark.parametrize("pattern", ["[", "(.*)"])
+    def test_invalid_format_contract_rejected(self, pattern):
+        with raises(ValueError):
+            LibraryJudgeMathVerifyRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                response=self._create_response("test", self._create_response_output_message("4")),
+                question="2+2",
+                expected_answer="4",
+                answer_format_regex=pattern,
+            )
+
     async def test_reverify_mode(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
         assert await resources_server.get_reverify_mode() == ReverifyMode.STATELESS

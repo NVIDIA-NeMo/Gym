@@ -26,7 +26,7 @@ from math_verify import grader
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from pydantic import BaseModel, Field, PositiveFloat, PositiveInt
+from pydantic import BaseModel, Field, PositiveFloat, PositiveInt, field_validator
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -61,6 +61,20 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
 class LibraryJudgeMathRunRequest(BaseRunRequest):
     question: str
     expected_answer: str
+    answer_format_regex: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
+
+    @field_validator("answer_format_regex")
+    @classmethod
+    def validate_answer_format_regex(cls, value: Optional[str]) -> Optional[str]:
+        """A task contract matches the entire final text and names its answer capture."""
+        if value is not None:
+            try:
+                pattern = re.compile(value)
+            except re.error as exc:
+                raise ValueError("Invalid answer_format_regex") from exc
+            if "answer" not in pattern.groupindex:
+                raise ValueError("answer_format_regex requires a named 'answer' capture")
+        return value
 
 
 class LibraryJudgeMathVerifyRequest(LibraryJudgeMathRunRequest, BaseVerifyRequest):
@@ -84,6 +98,7 @@ class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
     extracted_answer: Optional[str]
     library_reward: float
     judge_evaluations: Optional[list[JudgeEvaluation]]
+    answer_format_valid: Optional[bool] = Field(default=None, exclude_if=lambda value: value is None)
 
 
 def _extract_last_boxed_answer(response: str) -> Optional[str]:
@@ -447,8 +462,27 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 assistant_responses.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
+        answer_format_valid = None
+        verification_response = combined_response
+        if body.answer_format_regex is not None:
+            match = re.fullmatch(body.answer_format_regex, combined_response)
+            answer = match.group("answer") if match else None
+            answer_format_valid = bool(answer and answer.strip())
+            if not answer_format_valid:
+                # Correctness judges must never override a failed task format contract.
+                return LibraryJudgeMathVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    extracted_answer=None,
+                    library_reward=0.0,
+                    judge_evaluations=None,
+                    answer_format_valid=False,
+                )
+            # Only the contract's capture is graded; other numbers in the response
+            # cannot accidentally earn credit. Keep the original response in the record.
+            verification_response = "\\boxed{" + answer.strip() + "}"
         reward, extracted_answer, library_reward, judge_evaluations = await self._verify_answer(
-            body.question, body.expected_answer, combined_response
+            body.question, body.expected_answer, verification_response
         )
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
@@ -456,6 +490,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             extracted_answer=extracted_answer,
             library_reward=library_reward,
             judge_evaluations=judge_evaluations,
+            answer_format_valid=answer_format_valid,
         )
 
     async def _verify_answer(

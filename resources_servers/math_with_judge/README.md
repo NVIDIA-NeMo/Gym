@@ -8,6 +8,20 @@ on Hugging Face.
 
 # Example usage
 
+## Per-task output format
+
+A task may supply `answer_format_regex` with a named `answer` capture, for example
+`"\\s*<answer>(?P<answer>[^<>\\r\\n]+)</answer>\\s*"`. The regex must match the entire
+final response text (reasoning items are excluded). Missing or empty captures
+score zero without calling the mathematical verifier or judge. A passing match
+is graded using only the captured answer; the original response is retained.
+The result includes `answer_format_valid`. Without a contract, existing answer
+extraction and result fields are unchanged. Regexes are authored task settings;
+use bounded, simple patterns appropriate to the template.
+
+This separates formatting compliance from mathematical equivalence. The judge's
+format-tolerant equivalence prompt cannot override a failed format contract.
+
 ## Running servers
 The following are example commands for running this resources server, along with the simple agent and an OpenAI model:
 ```bash
