@@ -544,8 +544,7 @@ class SandboxSession[Artifacts]:
                         "Could not remove %s session files; stopping owned sandbox", self.harness, exc_info=True
                     )
                 finally:
-                    async with asyncio.timeout(timeout):
-                        await self.sandbox.stop()
+                    await self.sandbox.stop(timeout_s=timeout)
                     self.sandbox_stopped = True
             await self._release_exec(timeout=timeout)
         else:
@@ -559,4 +558,4 @@ class SandboxSession[Artifacts]:
                         timeout=timeout,
                         harness=self.harness,
                     )
-                await self.sandbox.disconnect()
+                await self.sandbox.disconnect(timeout_s=timeout)

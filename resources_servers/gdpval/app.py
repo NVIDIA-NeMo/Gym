@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
+import anyio
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -104,6 +105,7 @@ from resources_servers.gdpval.task_sandbox import (
     GDPValSandboxConfig,
     collect_deliverables,
     missing_files,
+    stage_reference_files,
     start_task_sandbox,
 )
 from resources_servers.gdpval.tavily_search import TavilySearch, fetch_web_page, web_client
@@ -549,9 +551,13 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     expected_final_stage_index: Optional[int] = None
     expected_stage_row_count: Optional[int] = None
     accepted_stage_row_count: Optional[int] = None
-    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index")
-    ng_rollout_index: Optional[int] = Field(default=None, alias="_ng_rollout_index")
-    ng_attempt_index: Optional[int] = Field(default=None, alias="_ng_attempt_index")
+    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index", exclude_if=lambda value: value is None)
+    ng_rollout_index: Optional[int] = Field(
+        default=None, alias="_ng_rollout_index", exclude_if=lambda value: value is None
+    )
+    ng_attempt_index: Optional[int] = Field(
+        default=None, alias="_ng_attempt_index", exclude_if=lambda value: value is None
+    )
 
 
 # The reference model has no deliverable for this task, so no battle can be
@@ -602,6 +608,9 @@ _AGENT_TIMEOUT = {
 
 # The ``judge_response.manual_imputation`` values of a row scored as a loss without a judgment.
 _IMPUTED_LOSS_KINDS = frozenset({"eval_missing_as_loss", "model_failure_as_loss"})
+
+# The rubric judge's submission text for collected files that hold no extractable text.
+_NO_READABLE_SUBMISSION_TEXT = "[The submitted files contain no readable text.]"
 
 # Stop reasons the agent reports when the model itself ended the run without a deliverable.
 _MODEL_STOP_FAILURE_KINDS = {
@@ -719,6 +728,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if self.config.num_workers not in (None, 1):
             raise ValueError("GDPVal sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _TaskSession] = {}
+        # Sessions whose seed failed and whose sandbox did not stop; the session's close or the shutdown stops them.
+        self._failed_seeds: dict[str, _TaskSession] = {}
         # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.
         self._claimed_directories: Dict[Tuple[str, str], str] = {}
         self._locks = ResourcesSessionLocks()
@@ -831,6 +842,15 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     )
                 request.session[SESSION_ID_KEY] = session_id
                 return await self._seed_response(session_id, session)
+            # A seed never replaces a failed seed's sandbox that still runs, so no sandbox is left without an owner,
+            # and only the failed seed's own episode and task may stop it.
+            failed_seed = self._failed_seeds.get(session_id)
+            if failed_seed is not None and (failed_seed.episode_id, failed_seed.task_id) != (
+                body.episode_id,
+                body.task_id,
+            ):
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            await self._release_failed_seed(session_id)
             try:
                 task = TaskData.model_validate(body.task_data)
             except ValidationError as error:
@@ -841,9 +861,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
             directory = (task.task_id, repeat)
             owner = self._claimed_directories.get(directory)
             if owner is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Session {owner} already holds task {task.task_id} repeat {repeat}; "
+                raise ResourcesSessionConflictError(
+                    f"Session {owner} already holds task {task.task_id} repeat {repeat}; "
                     "a second live session would overwrite its deliverables",
                 )
             self._claimed_directories[directory] = session_id
@@ -854,8 +873,6 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     self.config.sandbox_provider,
                     self.config.sandbox_config,
                     task_id=task.task_id,
-                    reference_dir=reference_dir,
-                    reference_files=reference_files,
                     workdir=self._sandbox_workdir,
                 )
             except BaseException:
@@ -863,11 +880,17 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 shutil.rmtree(reference_dir, ignore_errors=True)
                 raise
             session = _TaskSession(body.episode_id, body.task_id, repeat, sandbox, reference_dir)
+            # The session holds the sandbox from here, so a failed upload or reply stops it on the same path.
             try:
+                await stage_reference_files(sandbox, reference_dir, reference_files, self._sandbox_workdir)
                 response = await self._seed_response(session_id, session)
             except BaseException:
                 self._claimed_directories.pop(directory, None)
-                await self._release(session)
+                try:
+                    await self._release(session)
+                except Exception:
+                    self._failed_seeds[session_id] = session
+                    LOGGER.exception("Failed to stop the sandbox of a failed GDPVal seed for session %s", session_id)
                 raise
             self._sessions[session_id] = session
             request.session[SESSION_ID_KEY] = session_id
@@ -902,6 +925,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         async with self._locks.locked(session_id):
             fenced_episode = self._fences.get(session_id)
+            failed_seed = self._failed_seeds.get(session_id)
+            if failed_seed is not None and failed_seed.episode_id != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            await self._release_failed_seed(session_id)
             if fenced_episode is None:
                 session = self._sessions.get(session_id)
                 if session is not None:
@@ -923,7 +950,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if session.sandbox is not None:
             await session.sandbox.stop()
             session.sandbox = None
-        await asyncio.to_thread(shutil.rmtree, session.reference_dir, ignore_errors=True)
+        # Shielded like the stop, so a close that a disconnect cancels still removes the reference files and then,
+        # with no await left, its record and fence; otherwise a re-seed would find a record without a sandbox.
+        with anyio.CancelScope(shield=True):
+            await asyncio.to_thread(shutil.rmtree, session.reference_dir, ignore_errors=True)
 
     async def shutdown(self) -> None:
         for session_id, session in list(self._sessions.items()):
@@ -932,7 +962,20 @@ class GDPValResourcesServer(SimpleResourcesServer):
             except Exception:
                 LOGGER.exception("Failed to stop the sandbox of GDPVal session %s", session_id)
         self._sessions.clear()
+        for session_id in list(self._failed_seeds):
+            try:
+                await self._release_failed_seed(session_id)
+            except Exception:
+                LOGGER.exception("Failed to stop the sandbox of failed GDPVal seed %s", session_id)
+        self._failed_seeds.clear()
         self._claimed_directories.clear()
+
+    async def _release_failed_seed(self, session_id: str) -> None:
+        """Stop the sandbox a failed seed of ``session_id`` left running; it stays tracked until its stop succeeds."""
+        session = self._failed_seeds.get(session_id)
+        if session is not None:
+            await self._release(session)
+            del self._failed_seeds[session_id]
 
     def _cached_deliverables_dir(self, body: GDPValVerifyRequest) -> str:
         directory = persisted_layout.repeat_dir(
@@ -952,7 +995,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
     async def finish(self, request: Request, body: FinishRequest) -> str:
         session = self._get_session(request)
         if session.sandbox is None:
-            raise HTTPException(status_code=409, detail="The task sandbox is no longer available")
+            raise ResourcesSessionConflictError("The task sandbox is no longer available")
         missing = await missing_files(session.sandbox, body.paths, self._sandbox_workdir)
         if missing:
             raise HTTPException(
@@ -1177,6 +1220,27 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 **_gdpval_failure("missing_rubric", terminal=True),
             )
 
+        directory = Path(body.deliverables_dir) if body.deliverables_dir else None
+        if directory is not None and not directory.is_dir():
+            # The persisted files are gone (a cleaned persist dir, a reverify on another host). Grading the
+            # agent's final message instead would score its claims about files nobody can see.
+            return GDPValVerifyResponse(
+                **(body.model_dump() | lost_session_verification(f"deliverables_dir {directory} is not a directory")),
+                verify_mode="rubric",
+            )
+        # Collection publishes the finish marker atomically with the submitted files, so a directory with the
+        # marker holds the whole submission: its files are graded, never the agent's claims about them. A
+        # directory without the marker (a hand-made text deliverable) still falls back to the response text below.
+        collected = directory is not None and (directory / persisted_layout.FINISH_PARAMS_FILE).is_file()
+        if collected and not any(is_deliverable(path) for path in directory.iterdir()):
+            return GDPValVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                verify_mode="rubric",
+                judge_response={"manual_imputation": "no_deliverable_as_zero"},
+                **(_model_stop_failure(body) or {}),
+            )
+
         judges = self._resolve_judges()
         # Route tasks with audio/video deliverables per modality: video goes to
         # video-capable judge(s) (error/warn when none); audio a judge can't read
@@ -1207,6 +1271,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
             read = await asyncio.to_thread(read_deliverable_files, body.deliverables_dir)
             if read:
                 deliverable_text = read
+            elif collected:
+                # Submitted files with no extractable text (a blank workbook, a scanned PDF): the judge sees the
+                # files' renders, if any, and this note, not the agent's description of the files.
+                deliverable_text = _NO_READABLE_SUBMISSION_TEXT
             blocks = await asyncio.to_thread(
                 convert_deliverables_to_content_blocks,
                 body.deliverables_dir,

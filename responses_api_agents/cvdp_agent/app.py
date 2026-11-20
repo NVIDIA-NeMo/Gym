@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -44,6 +45,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -51,6 +53,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
@@ -74,15 +77,18 @@ from nemo_gym.trajectory import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.utils.install_lock import async_install_lock, install_lock
+from resources_servers.cvdp.repository_workspace import resolve_archive
 
 
-_DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
+_DEFAULT_HARVEST_GLOBS = ["docs/**/*", "rtl/**/*", "verif/**/*"]
+_GENERATED_WORKSPACE_DIRS = {"rundir", "__pycache__", ".cache", ".pytest_cache"}
 
 _RUNNER_SOURCE_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
 # Carries the model-call evidence of one /v1/responses self-call back to /run, which removes it before /verify.
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 # False on a /v1/responses reply whose usage is a partial sum over its calls; /run removes it before /verify.
 _INTERNAL_USAGE_COMPLETE_KEY = "_ng_usage_complete"
+
 DEPS_ROOT = Path(__file__).parent / "deps"
 # With num_workers > 1, every worker builds the runtime on its first rollout, into the same paths under DEPS_ROOT.
 # The build steps take this lock file in the directory they write to,
@@ -103,6 +109,16 @@ def agent_key(agent_server_module: str) -> str:
     """responses_api_agents.hermes_agent.app maps to hermes_agent, the deps-script key."""
     parts = agent_server_module.split(".")
     return parts[-2] if len(parts) >= 2 else agent_server_module
+
+
+def _agent_route_failed(reason: str, operation: str) -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="agent",
+        failure_kind=AGENT_ROUTE_FAILED,
+        failure_reason=reason,
+        operation=operation,
+        stage="agent",
+    )
 
 
 def load_runner_source() -> str:
@@ -170,6 +186,12 @@ def harvest(workdir: Path, globs: list[str], *, seeded: dict[str, str] | None = 
             if not fpath.is_file():
                 continue
             rel = fpath.relative_to(workdir).as_posix()
+            if _is_harness_path(rel) or any(
+                part in _GENERATED_WORKSPACE_DIRS for part in fpath.relative_to(workdir).parts
+            ):
+                continue
+            if fpath.is_symlink() or not fpath.resolve().is_relative_to(workdir.resolve()):
+                continue
             if rel in produced:
                 continue
             try:
@@ -235,6 +257,7 @@ class CVDPAgentConfig(BaseResponsesAPIAgentConfig):
     container_workdir: str = "/code"
     harvest_globs: list[str] = _DEFAULT_HARVEST_GLOBS
     deps_provision: Literal["archive", "baked"] = "archive"
+    prepared_repository_dir: str = ""
 
 
 class CVDPAgentRunRequest(BaseRunRequest):
@@ -938,20 +961,35 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         mirror: Path,
     ) -> dict:
         """Download files matching the harvest globs."""
-        dirs = sorted({g.split("/")[0] for g in globs if "/" in g}) or ["."]
+        if not globs:
+            return {}
+        roots = {g.split("/")[0] for g in globs}
+        dirs = sorted({"." if any(char in root for char in "*?[") else root for root in roots})
         listing = await box.exec(
             f"cd {shlex.quote(workdir)} && find {' '.join(shlex.quote(d) for d in dirs)} -type f 2>/dev/null"
         )
-        rels = [line.strip().lstrip("./") for line in (listing.stdout or "").splitlines() if line.strip()]
+        # find exits 1 when an optional harvest directory is absent (a genuine miss); anything else is a sandbox fault.
+        if listing.error_type or listing.return_code not in (0, 1):
+            raise _agent_route_failed(
+                f"harvest listing failed: error_type={listing.error_type} return_code={listing.return_code}: "
+                f"{(listing.stderr or '')[-500:]}",
+                "agent.harvest",
+            )
+        rels = [line.strip().removeprefix("./") for line in (listing.stdout or "").splitlines() if line.strip()]
         for rel in rels:
-            if not _safe_rel(rel):
+            if (
+                not _safe_rel(rel)
+                or _is_harness_path(rel)
+                or any(part in _GENERATED_WORKSPACE_DIRS for part in Path(rel).parts)
+            ):
                 continue
             dest = mirror / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 await box.download(f"{workdir.rstrip('/')}/{rel}", dest)
-            except Exception:
-                pass
+            except Exception as error:
+                # The file was just listed, so a failed download is a transport fault, not an absent file.
+                raise _agent_route_failed(f"harvest download of {rel} failed: {error}", "agent.harvest") from error
         return harvest(mirror, globs, seeded=seeded)
 
     async def _run_agentic(self, request: Request, body: CVDPAgentRunRequest) -> CVDPAgentVerifyResponse:
@@ -959,6 +997,23 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         context_files = meta.get("context_files") or {}
         target_files = meta.get("target_files") or []
         wd = self.config.container_workdir
+        repository_digest = meta.get("repository_workspace_sha256")
+        repository_archive = None
+        if repository_digest:
+            try:
+                repository_archive = await asyncio.to_thread(
+                    resolve_archive, self.config.prepared_repository_dir, repository_digest
+                )
+            except (OSError, ValueError) as error:
+                raise _agent_route_failed(f"Heavy repository preparation failed: {error}", "agent.setup") from error
+        # Track the visible project roots, as CVDP's agentic runner does. New roots
+        # absent from the initial workspace are not inferred from reference targets.
+        harvest_globs = list(self.config.harvest_globs)
+        for rel in context_files:
+            if _safe_rel(rel) and not _is_harness_path(rel) and not rel.startswith("."):
+                pattern = rel.split("/", 1)[0] + "/**/*" if "/" in rel else rel
+                if pattern not in harvest_globs:
+                    harvest_globs.append(pattern)
 
         inp = body.responses_create_params.input
         instruction = (
@@ -983,9 +1038,31 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             image = self._image
             seeded = self._seed_files(wd, context_files, meta.get("harness_files"))
             spec = self._build_spec(body, instruction, seeded, image)
+            if repository_archive:
+                spec.files[f"{self._traj_dir()}/repository_workspace.py"] = (
+                    Path(__file__).resolve().parents[2] / "resources_servers/cvdp/repository_workspace.py"
+                ).read_text()
 
             async with AsyncSandbox(self._sandbox_provider, spec) as box:
-                await box.start()
+                if repository_archive:
+
+                    async def setup_repository(sandbox: AsyncSandbox) -> None:
+                        traj = self._traj_dir()
+                        await sandbox.upload(repository_archive, f"{traj}/repository.tar.gz")
+                        command = (
+                            f"python {shlex.quote(traj + '/repository_workspace.py')} restore "
+                            f"{shlex.quote(wd)} {shlex.quote(traj + '/before.json')} "
+                            f"--archive {shlex.quote(traj + '/repository.tar.gz')}"
+                        )
+                        result = await sandbox.exec(command, timeout_s=600)
+                        if result.error_type or result.return_code != 0:
+                            raise _agent_route_failed(
+                                f"Heavy repository setup failed: {result.stderr or result.stdout}", "agent.setup"
+                            )
+
+                    await box.start_with_setup(None, setup_repository)
+                else:
+                    await box.start()
                 traj = self._traj_dir()
                 agent_deps_dir = self._agent_deps_dir()
                 if self.config.deps_provision == "archive":
@@ -1007,6 +1084,18 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     cwd=wd,
                     timeout_s=self.config.timeout,
                 )
+                if (
+                    agent_result.error_type not in (None, "timeout")
+                    or agent_result.return_code is None
+                    or agent_result.return_code < 0
+                ):
+                    # No exit status, a provider error or a signal kill (OOM) says nothing about the model's run.
+                    raise _agent_route_failed(
+                        f"sandbox harness could not be run to completion: error_type={agent_result.error_type} "
+                        f"return_code={agent_result.return_code}: "
+                        f"{(agent_result.stderr or agent_result.stdout or '')[-500:]}",
+                        "agent.sandbox_exec",
+                    )
                 if agent_result.return_code != 0:
                     details = (agent_result.stderr or agent_result.stdout or "")[-2000:]
                     return self._failed_agentic_response(
@@ -1022,28 +1111,82 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                         await box.download(f"{traj}/response.json", resp_local)
                         response = NeMoGymResponse.model_validate_json(resp_local.read_text())
                     except Exception as e:
-                        return self._failed_agentic_response(body, f"could not load harness response.json: {e}")
+                        # The harness exited 0 but its output is missing or unreadable: a sandbox or harness fault.
+                        raise _agent_route_failed(
+                            f"could not load harness response.json: {e}", "agent.download"
+                        ) from e
 
-                    rtl_files = await self._remote_harvest(
-                        box,
-                        wd,
-                        self.config.harvest_globs,
-                        context_files,
-                        scratch_path / "harvest",
-                    )
-                    # always include declared targets that exist, even outside the harvested dirs
-                    for tf in target_files:
-                        if tf in rtl_files or not _safe_rel(tf):
-                            continue
-                        dest = scratch_path / "targets" / tf
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        try:
-                            await box.download(f"{wd.rstrip('/')}/{tf}", dest)
-                            rtl_files[tf] = dest.read_text(encoding="utf-8")
-                        except Exception:
-                            pass
+                    repository_changes = None
+                    if repository_archive:
+                        collect = await box.exec(
+                            f"python {shlex.quote(traj + '/repository_workspace.py')} collect "
+                            f"{shlex.quote(wd)} {shlex.quote(traj + '/before.json')} "
+                            f"--archive {shlex.quote(traj + '/changes.tar.gz')}",
+                            timeout_s=600,
+                        )
+                        if collect.error_type or collect.return_code != 0:
+                            raise _agent_route_failed(
+                                f"Heavy collection failed: {collect.stderr or collect.stdout}", "agent.harvest"
+                            )
+                        await box.download(f"{traj}/changes.tar.gz", scratch_path / "changes.tar.gz")
+                        await box.download(f"{traj}/changes.tar.json", scratch_path / "changes.json")
+                        repository_changes = json.loads((scratch_path / "changes.json").read_text())
+                        repository_changes["archive"] = base64.b64encode(
+                            (scratch_path / "changes.tar.gz").read_bytes()
+                        ).decode("ascii")
+                        rtl_files = {}
+                        remaining_context = {}
+                    else:
+                        rtl_files = await self._remote_harvest(
+                            box,
+                            wd,
+                            harvest_globs,
+                            context_files,
+                            scratch_path / "harvest",
+                        )
+                        # A deleted starting file must not be silently restored by the
+                        # verifier when it reconstructs the final project workspace.
+                        remaining_context = {
+                            rel: content
+                            for rel, content in context_files.items()
+                            if not _safe_rel(rel)
+                            or _is_harness_path(rel)
+                            or rel.startswith(".")
+                            or any(part in _GENERATED_WORKSPACE_DIRS for part in Path(rel).parts)
+                            or (scratch_path / "harvest" / rel).is_file()
+                        }
+                        # always include declared targets that exist, even outside the harvested dirs
+                        for tf in target_files:
+                            if tf in rtl_files or not _safe_rel(tf):
+                                continue
+                            dest = scratch_path / "targets" / tf
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            target = f"{wd.rstrip('/')}/{tf}"
+                            present = await box.exec(f"test -f {shlex.quote(target)}", timeout_s=30)
+                            if present.error_type or present.return_code not in (0, 1):
+                                raise _agent_route_failed(
+                                    f"could not check target file {tf}: {present.error_type} {present.return_code}",
+                                    "agent.download",
+                                )
+                            if present.return_code != 0:
+                                continue  # the agent did not write this target: a genuine miss
+                            try:
+                                await box.download(target, dest)
+                            except Exception as error:
+                                raise _agent_route_failed(
+                                    f"target file download of {tf} failed: {error}", "agent.download"
+                                ) from error
+                            try:
+                                rtl_files[tf] = dest.read_text(encoding="utf-8")
+                            except UnicodeDecodeError:
+                                return self._failed_agentic_response(
+                                    body, f"target file {tf} is not UTF-8"
+                                ).model_copy(update={"response": response})
 
             payload = body.model_dump() | {"response": response.model_dump()}
+            payload["verifier_metadata"] = meta | {"context_files": remaining_context}
+            if repository_changes is not None:
+                payload["repository_changes"] = repository_changes
             if rtl_files:
                 payload["rtl_files"] = rtl_files
             verify_resp = await self.server_client.post(

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Normalize the demonstrated provider content shape at the response boundary."""
+"""Normalize provider reasoning-item shapes at the response boundary."""
 
 from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock
@@ -174,14 +174,19 @@ async def test_unsupported_content_is_left_for_native_validation(content: object
 
 
 @pytest.mark.parametrize("summary", [None, "missing"])
-async def test_content_correction_keeps_summary_validation(summary: object) -> None:
+async def test_content_correction_fills_missing_summary(summary: object) -> None:
     response = _response([{"type": "output_text", "text": "Reasoning"}])
     if summary == "missing":
         del response["output"][0]["summary"]
     else:
         response["output"][0]["summary"] = summary
-    with pytest.raises(ValidationError):
-        await _server(response).responses(NeMoGymResponseCreateParamsNonStreaming(input="Synthetic request"))
+    original = deepcopy(response)
+    expected = deepcopy(response)
+    expected["output"][0]["summary"] = []
+    expected["output"][0]["content"][0]["type"] = "reasoning_text"
+    result = await _server(response).responses(NeMoGymResponseCreateParamsNonStreaming(input="Synthetic request"))
+    assert result.model_dump() == NeMoGymResponse.model_validate(expected).model_dump()
+    assert response == original
 
 
 @pytest.mark.parametrize("content", [None, [], [{"type": "reasoning_text", "text": "Valid"}]])

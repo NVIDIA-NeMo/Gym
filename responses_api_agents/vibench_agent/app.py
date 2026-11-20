@@ -175,7 +175,7 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         build technically succeeded.
         """
         config = await super()._create_opencode_config(request, image_input=image_input)
-        options = ((config.get("provider") or {}).get("nemo_gym") or {}).get("options")
+        options = ((config.get("provider") or {}).get(self.config.opencode_provider_id) or {}).get("options")
         if not isinstance(options, dict) or not isinstance(options.get("baseURL"), str):
             return config
 
@@ -274,6 +274,8 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         # OpenCodeSandboxedAgentRunRequest is extra="allow"; BaseRunRequest is not, and
         # typing body as the latter silently drops the ViBench task fields (app, artifact,
         # prd_files, test_plans) so /seed_session rejects the request as missing 'app'.
+        if body.sandbox_provider_options or body.sandbox_uploads:
+            raise ValueError("vibench_agent does not apply sandbox_provider_options or sandbox_uploads")
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
