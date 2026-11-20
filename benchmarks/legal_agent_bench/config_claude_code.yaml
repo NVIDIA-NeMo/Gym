@@ -27,3 +27,4 @@ legal_agent_bench_benchmark_agent:
         prepare_project: resources_servers/legal_agent_bench
         num_repeats: 1
 use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
