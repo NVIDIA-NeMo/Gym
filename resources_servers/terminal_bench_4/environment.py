@@ -403,9 +403,7 @@ class Environment:
                 await self.main.start()
         if self.shared_logs is not None:
             await self.shared_logs.initialize_role(self)
-        result = await self.exec("mkdir -p /logs/agent /logs/verifier /logs/artifacts", timeout_sec=60)
-        if result.return_code:
-            raise RuntimeError(f"Failed to initialize task log directories: {result.stderr}")
+        await self.create_log_directories()
         # Published images with a build spec already contain these files.
         if (
             not self.uses_compose
@@ -416,6 +414,32 @@ class Environment:
 
             cwd = self.settings.workdir or (await self.exec("pwd")).stdout.strip()
             await upload_dir(self.main, self.environment_dir, cwd)
+
+    async def create_log_directories(self):
+        command = "mkdir -p /logs/agent /logs/verifier /logs/artifacts"
+        result = await self.exec(command, timeout_sec=60)
+        if result.return_code and self.shared_logs is None:
+            # Without the EFS helper nothing prepares /logs, and an image whose default user cannot write to `/`
+            # (the usual case on a provider that starts the sandbox as that user) fails here. Create the
+            # directories as root and hand them to the image's own user, as the helper does for the mount.
+            result = await self.create_log_directories_as_root(command, result)
+        if result.return_code:
+            raise RuntimeError(f"Failed to initialize task log directories: {result.stderr}")
+
+    async def create_log_directories_as_root(self, command, failed):
+        identity = await self.exec("id -u; id -g", timeout_sec=60)
+        try:
+            uid, gid = (int(value) for value in identity.stdout.split())
+            if identity.return_code or min(uid, gid) < 0:
+                raise ValueError("Invalid workload identity")
+        except (TypeError, ValueError):
+            return failed
+        owned = "/logs /logs/agent /logs/verifier /logs/artifacts"
+        root = await self.exec(
+            f"{command} && chown {uid}:{gid} {owned} && chmod 755 /logs", timeout_sec=60, user="root"
+        )
+        # A sandbox that cannot switch users reports a failure here: keep the original error then.
+        return root if not root.return_code else failed
 
     def sandbox(self, service=None):
         if service not in (None, "main"):

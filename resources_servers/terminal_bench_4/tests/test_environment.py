@@ -680,3 +680,59 @@ def test_tb4_profile_leaves_the_shared_s3_bucket_out(tmp_path, monkeypatch, veri
     ]
     env, *_ = make_environment(tmp_path, monkeypatch, verifier=verifier, config={"sandbox_metadata": metadata})
     assert env.build_spec().metadata["nemo.nvidia.com/s3-hostpath"] == "false"
+
+
+def scripted_exec(box, *, default_user_can_write, can_switch=True, identity="1001\n1001\n"):
+    """Answer the log setup commands as a sandbox whose default user cannot write to `/` would."""
+    calls = []
+
+    async def run(command, **kwargs):
+        calls.append((command, kwargs.get("user")))
+        if "id -u" in command:
+            return SimpleNamespace(return_code=0, stdout=identity, stderr="")
+        if kwargs.get("user") == "root":
+            if not can_switch:
+                return SimpleNamespace(return_code=125, stdout="", stderr="user switch unavailable")
+            return SimpleNamespace(return_code=0, stdout="", stderr="")
+        if "mkdir -p /logs" in command and not default_user_can_write:
+            return SimpleNamespace(
+                return_code=1, stdout="", stderr="mkdir: cannot create directory '/logs': Permission denied"
+            )
+        return SimpleNamespace(return_code=0, stdout="/app\n", stderr="")
+
+    box.exec = AsyncMock(side_effect=run)
+    return calls
+
+
+async def test_log_directories_are_created_by_the_default_user_when_it_can(tmp_path, monkeypatch):
+    env, box, _, _ = make_environment(tmp_path, monkeypatch)
+    calls = scripted_exec(box, default_user_can_write=True)
+    await env.start()
+    assert [user for command, user in calls if "mkdir -p /logs" in command] == [None]
+    assert not any(user == "root" for _, user in calls)
+
+
+async def test_log_directories_without_the_efs_mount_are_given_to_the_image_user(tmp_path, monkeypatch):
+    env, box, _, _ = make_environment(tmp_path, monkeypatch)
+    calls = scripted_exec(box, default_user_can_write=False)
+    await env.start()
+    root = [command for command, user in calls if user == "root"]
+    assert len(root) == 1
+    assert "mkdir -p /logs/agent /logs/verifier /logs/artifacts" in root[0]
+    assert "chown 1001:1001 /logs /logs/agent /logs/verifier /logs/artifacts" in root[0]
+    assert "chmod 755 /logs" in root[0]
+
+
+async def test_log_directory_failure_is_reported_when_the_sandbox_cannot_switch_users(tmp_path, monkeypatch):
+    env, box, _, _ = make_environment(tmp_path, monkeypatch)
+    scripted_exec(box, default_user_can_write=False, can_switch=False)
+    with pytest.raises(RuntimeError, match="Failed to initialize task log directories.*Permission denied"):
+        await env.start()
+
+
+async def test_log_directory_failure_is_reported_when_the_image_user_is_unknown(tmp_path, monkeypatch):
+    env, box, _, _ = make_environment(tmp_path, monkeypatch)
+    calls = scripted_exec(box, default_user_can_write=False, identity="not-a-number")
+    with pytest.raises(RuntimeError, match="Permission denied"):
+        await env.start()
+    assert not any(user == "root" for _, user in calls)
