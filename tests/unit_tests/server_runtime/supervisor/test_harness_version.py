@@ -27,7 +27,7 @@ def test_latest_is_pinned_before_worker_configs_are_serialized(monkeypatch, agen
         return release
 
     monkeypatch.setattr(versions, "_lookup", lookup)
-    config = OmegaConf.create({field: "old", "harness_version": "latest"})
+    config = OmegaConf.create({field: "latest"})
     assert versions.resolve_harness_version(agent, config) is None
     assert OmegaConf.create(OmegaConf.to_yaml(config))[field] == release.removeprefix("v")
     versions.resolve_harness_version(agent, config)
@@ -38,7 +38,7 @@ def test_latest_is_pinned_before_worker_configs_are_serialized(monkeypatch, agen
 def test_hermes_fork_pin_selects_worker_source_without_a_registry_lookup(monkeypatch):
     monkeypatch.setattr(versions, "_lookup", lambda *_: pytest.fail("exact pins do not need a release lookup"))
     sha = "a" * 40
-    config = OmegaConf.create({"harness_version": sha, "hermes_repo": "https://github.com/example/hermes"})
+    config = OmegaConf.create({"hermes_version": sha, "hermes_repo": "https://github.com/example/hermes"})
     assert (
         versions.resolve_harness_version("hermes_agent", config) == f"git+https://github.com/example/hermes.git@{sha}"
     )
@@ -59,7 +59,7 @@ def test_hermes_latest_follows_the_selected_repository(monkeypatch):
         "https://api.github.com/repos/example/hermes/releases/latest",
         "https://api.github.com/repos/example/hermes/commits/v0.23.3",
     ]
-    assert config.harness_version == config.hermes_version == sha
+    assert config.hermes_version == sha
 
 
 def test_no_override_keeps_existing_defaults(monkeypatch):
@@ -68,11 +68,6 @@ def test_no_override_keeps_existing_defaults(monkeypatch):
     assert versions.resolve_harness_version("pi_agent", config) is None
     assert dict(config) == {"pi_version": "0.80.2"}
     assert versions.resolve_harness_version("hermes_agent", OmegaConf.create({})) is None
-
-
-def test_unsupported_selector_fails_before_launch():
-    with pytest.raises(ValueError, match="does not support"):
-        versions.resolve_harness_version("simple_agent", OmegaConf.create({"harness_version": "latest"}))
 
 
 @pytest.mark.parametrize(
@@ -108,25 +103,22 @@ def test_preset_pin_reaches_the_installer(preset, pin, monkeypatch):
     pins = server.get("agent_kwargs", server)
     key = "openclaw_version" if "openclaw" in preset else "pi_version"
     package = "openclaw" if key == "openclaw_version" else "@earendil-works%2fpi-coding-agent"
-    assert pins.harness_version == pin
-    assert key not in pins
+    assert pins[key] == pin
 
     lookup = Mock(return_value="2026.12.1")
     monkeypatch.setattr(versions, "_lookup", lookup)
     versions.resolve_harness_version(instance.agent_type, server)
     assert pins[key] == pin
     lookup.assert_not_called()
-    pins.harness_version = "latest"
+    pins[key] = "latest"
     versions.resolve_harness_version(instance.agent_type, server)
     versions.resolve_harness_version(instance.agent_type, server)
     assert pins[key] == "2026.12.1"
     lookup.assert_called_once_with(f"https://registry.npmjs.org/{package}/latest", "version")
-    if pins is not server:
-        assert "harness_version" not in pins  # kwargs sent to older in-sandbox Gym releases
 
 
 @pytest.mark.parametrize(
-    ("preset", "pin_path", "legacy_key", "old_pin"),
+    ("preset", "pin_path", "key", "old_pin"),
     [
         (
             "responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml",
@@ -154,9 +146,9 @@ def test_preset_pin_reaches_the_installer(preset, pin, monkeypatch):
         ),
     ],
 )
-def test_legacy_override_on_a_migrated_preset(preset, pin_path, legacy_key, old_pin):
+def test_native_override_on_a_shipped_preset(preset, pin_path, key, old_pin):
     overrides = OmegaConf.create({"config_paths": [preset]})
-    OmegaConf.update(overrides, f"{pin_path}.{legacy_key}", old_pin)
+    OmegaConf.update(overrides, f"{pin_path}.{key}", old_pin)
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.merge(
@@ -168,16 +160,5 @@ def test_legacy_override_on_a_migrated_preset(preset, pin_path, legacy_key, old_
         )
     )
     pins = OmegaConf.select(config, pin_path)
-    assert pins[legacy_key] == old_pin
+    assert pins[key] == old_pin
     assert "harness_version" not in pins
-
-
-@pytest.mark.parametrize(
-    ("base_key", "override_key"), [("pi_version", "harness_version"), ("harness_version", "pi_version")]
-)
-def test_pin_override_on_a_composed_instance(base_key, override_key):
-    base = OmegaConf.create({base_key: "1.5.2"})
-    overrides = OmegaConf.create({"task_pi": {"responses_api_agents": {"pi_agent": {override_key: "0.80.2"}}}})
-    GlobalConfigDictParser._apply_held_agent_override(overrides, "task_pi", "pi_agent", base)
-    versions.resolve_harness_version("pi_agent", base)
-    assert base.pi_version == "0.80.2"

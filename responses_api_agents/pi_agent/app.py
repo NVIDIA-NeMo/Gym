@@ -29,7 +29,7 @@ from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -673,7 +673,7 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
             "declares it."
         ),
     )
-    pi_version: Optional[str] = Field(default=None, validation_alias=AliasChoices("harness_version", "pi_version"))
+    pi_version: Optional[str] = None
     mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)

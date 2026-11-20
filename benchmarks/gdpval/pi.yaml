@@ -25,7 +25,7 @@ gdpval_pi_agent:
         type: responses_api_models
         name: policy_model
       model: ${policy_model_name}
-      harness_version: "1.5.2"
+      pi_version: "1.5.2"
       # Concurrent Pi runs, as Stirrup's concurrency. Keep it at least the environment server's
       # max_concurrent_episodes: an episode beyond it waits with its sandbox started and its deadline running.
       concurrency: 32

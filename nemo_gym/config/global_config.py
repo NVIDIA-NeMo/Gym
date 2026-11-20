@@ -69,7 +69,6 @@ from nemo_gym.config.config_types import (
     is_server_ref,
     maybe_get_server_instance_config,
 )
-from nemo_gym.config.harness_version import harness_version_target
 from nemo_gym.config.secret_utils import recursively_hide_secrets
 from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.server_runtime._checkpoint.settings import CHECKPOINT_BLOCK
@@ -895,28 +894,6 @@ Duplicate config paths:
             instances.append(_AgentInstance(name=str(name), agent_type=agent_type, server_config=server_config))
         return instances
 
-    def _apply_legacy_harness_pin_overrides(self, merged: DictConfig, layers: list[DictConfig]) -> None:
-        """A legacy version in a later layer still overrides a migrated preset's harness_version."""
-        for instance in self._agent_instances(merged):
-            target, pins = harness_version_target(instance.agent_type, instance.server_config)
-            if target not in {"pi_agent", "openclaw_agent"}:
-                continue
-            legacy_key = f"{target.removesuffix('_agent')}_version"
-            if not {legacy_key, "harness_version"} <= pins.keys():
-                continue
-            path = f"{instance.name}.{AGENT_SERVER_TYPE_KEY_NAME}.{instance.agent_type}"
-            if pins is not instance.server_config:
-                path += ".agent_kwargs"
-            for layer in reversed(layers):
-                override = OmegaConf.select(layer, path)
-                if isinstance(override, DictConfig):
-                    if "harness_version" in override:
-                        break
-                    if legacy_key in override:
-                        with open_dict(pins):
-                            del pins["harness_version"]
-                        break
-
     @staticmethod
     def _resources_server_reference(server_config: DictConfig) -> Optional[DictConfig]:
         """The agent's `resources_server` block, or None when it declares none.
@@ -1299,20 +1276,6 @@ the check."""
             held_agent_overrides.pop(name, None)
         if not isinstance(override, DictConfig):
             return
-        # A composed instance is merged in struct mode. Accept either spelling of a declared pin,
-        # including a legacy override addressed to the new instance name.
-        target, pins = harness_version_target(agent_type, composed)
-        if target in {"pi_agent", "openclaw_agent"}:
-            legacy = f"{target.removesuffix('_agent')}_version"
-            updates = override if pins is composed else override.get("agent_kwargs")
-            if isinstance(updates, DictConfig) and {legacy, "harness_version"} & pins.keys():
-                with open_dict(pins):
-                    if "harness_version" in updates:
-                        pins.setdefault("harness_version", None)
-                    if legacy in updates:
-                        pins.setdefault(legacy, None)
-                        if "harness_version" not in updates:
-                            pins.pop("harness_version", None)
         # Struct mode is what makes a field the agent does not declare an error rather than a silent add.
         OmegaConf.set_struct(composed, True)
         composed.merge_with(override)
@@ -1843,10 +1806,6 @@ Pass each config with --config (it builds the list for you), e.g.:
         # Rebuilt rather than reused: the command line dict was trimmed after the early merge above.
         global_config_dict = OmegaConf.merge(
             *extra_configs, OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
-        )
-
-        self._apply_legacy_harness_pin_overrides(
-            global_config_dict, [*extra_configs, initial_global_config_dict, cli_global_config_dict]
         )
 
         # Update the config paths after postprocessing

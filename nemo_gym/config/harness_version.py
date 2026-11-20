@@ -15,7 +15,7 @@ def harness_version_target(agent: str, config: DictConfig) -> tuple[str, DictCon
         return "pi_agent", config
     if agent in {"harness_agent", "harness_exa_search", "anyswe_agent", "anyterminal_agent"}:
         kwargs = config.get("agent_kwargs")
-        if isinstance(kwargs, DictConfig) and {"harness_version", "openclaw_version", "pi_version"} & kwargs.keys():
+        if isinstance(kwargs, DictConfig) and {"openclaw_version", "pi_version"} & kwargs.keys():
             if agent in {"harness_agent", "harness_exa_search"}:
                 name = config.get("agent")
                 if name in ("openclaw", "pi"):
@@ -31,7 +31,7 @@ def portable_harness_pin(agent: str, settings: Mapping[str, object]) -> tuple[st
     """Return a cache directory suffix and installer environment for a versioned portable bundle."""
     if agent not in {"openclaw_agent", "pi_agent"}:
         return "", {}
-    version = settings.get("harness_version") or settings.get(f"{agent.removesuffix('_agent')}_version")
+    version = settings.get(f"{agent.removesuffix('_agent')}_version")
     if not isinstance(version, str) or not version:
         return "", {}
     env = {"OPENCLAW_SPEC": f"openclaw@{version}"} if agent == "openclaw_agent" else {"PI_VERSION": version}

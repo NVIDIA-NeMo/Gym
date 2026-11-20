@@ -43,31 +43,16 @@ def _lookup(url: str, key: str) -> str:
 
 def resolve_harness_version(agent: str, config: DictConfig) -> str | None:
     """Set the installer's concrete version. Return the source to pass to the Hermes worker, if selected."""
-    # Wrappers may run an older Gym inside the task container. Give it the concrete
-    # installer field it understands, even when the outer config requests latest.
-    target, pins = harness_version_target(agent, config)
-    if pins is not config and config.get("harness_version") is not None:
-        raise ValueError(f"{agent}: set harness_version under agent_kwargs for {target}")
-    requirement = _resolve_version(target, pins)
-    if pins is not config:
-        with open_dict(pins):
-            pins.pop("harness_version", None)
-    return requirement
-
-
-def _resolve_version(agent: str, config: DictConfig) -> str | None:
-    field = _RELEASES[agent][0] if agent in _RELEASES else None
+    agent, config = harness_version_target(agent, config)
     if agent == "hermes_agent":
         field = "hermes_version"
-    requested = config.get("harness_version")
-    if requested is None:
-        if not field:
-            return None
-        requested = config.get(field)
-        if requested is None or (agent != "hermes_agent" and requested != "latest"):
-            return None
-    if not field:
-        raise ValueError(f"{agent} does not support harness_version")
+    elif agent in _RELEASES:
+        field = _RELEASES[agent][0]
+    else:
+        return None
+    requested = config.get(field)
+    if requested is None or (agent != "hermes_agent" and requested != "latest"):
+        return None
     if not isinstance(requested, str):
         raise ValueError(f"{agent}: expected a quoted harness version or latest")
 
@@ -97,6 +82,5 @@ def _resolve_version(agent: str, config: DictConfig) -> str | None:
 
     with open_dict(config):
         config[field] = resolved
-        config["harness_version"] = resolved
     LOG.info("%s harness version %s resolved to %s", agent, requested, requirement or resolved)
     return requirement

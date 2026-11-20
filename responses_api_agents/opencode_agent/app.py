@@ -557,7 +557,6 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
-    harness_version: str | None = None
 
     # Optional verified, preinstalled runtime for sandboxes without download egress.
     sandbox_path_prefix: list[str] = Field(default_factory=list)
@@ -726,9 +725,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         """Install the local runtime once; for OpenCode 2, return the pinned release binary to run."""
         if self._local_setup_task is None:
             if self._opencode2 and self.config.command == "opencode":
-                install = asyncio.to_thread(
-                    ensure_opencode2, self.config.opencode_version, fetch_digests=bool(self.config.harness_version)
-                )
+                install = asyncio.to_thread(ensure_opencode2, self.config.opencode_version)
             elif self._opencode2:
                 # A configured command is the OpenCode 2 binary to run; nothing is installed.
                 install = asyncio.sleep(0)
@@ -1187,7 +1184,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 raise AgentSeedRejectedError(
                     "OpenCode 2 installs no plugin dependencies; unset sandbox_plugin_dependencies_path and _sha256"
                 )
-            if not release_digests and not self.config.sandbox_executable_path and self.config.harness_version:
+            if not release_digests and not self.config.sandbox_executable_path:
                 release_digests = await asyncio.to_thread(published_release_digests, self.config.opencode_version)
             if not release_digests and self.config.sandbox_executable_path is None:
                 raise AgentSeedRejectedError(

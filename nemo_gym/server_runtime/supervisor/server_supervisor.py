@@ -774,9 +774,6 @@ class ServerSupervisor:  # pragma: no cover
             }
             if hermes_source := harness_sources.get(top_level_path):
                 extra_env["HERMES_SPEC"] = hermes_source
-            if second_key == "openclaw_agent" and server_config_dict.get("harness_version"):
-                # The host installer honors OPENCLAW_VERSION before the config. The sandbox consumes the config.
-                extra_env["OPENCLAW_VERSION"] = str(server_config_dict.openclaw_version)
             if top_level_path not in ray_server_names:
                 # A server that uses Ray without declaring it then fails on its first Ray call, rather than
                 # starting a private cluster in each of its processes.

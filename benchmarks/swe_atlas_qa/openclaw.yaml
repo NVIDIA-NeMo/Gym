@@ -8,7 +8,7 @@ swe_atlas_qa_agent:
       agent_kwargs:
         command: openclaw
         # Required. Match the CLI in the harness bundle.
-        harness_version: "2026.11.5"
+        openclaw_version: "2026.11.5"
         # Bundle directory holding node and openclaw.
         node_bin_dir: /work/gym_mount/runtime/bin
         openclaw_config:

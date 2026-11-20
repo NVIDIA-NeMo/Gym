@@ -34,13 +34,13 @@ A spread this size, with the model and dataset held identical, means the harness
 
 ## Select a harness release
 
-Set `harness_version` on an OpenClaw, OpenCode, Hermes, or Pi agent in the config you pass to `gym env start`. For example, add this override to an existing OpenCode config:
+Set `openclaw_version`, `opencode_version`, `hermes_version`, or `pi_version` on the corresponding agent in the config you pass to `gym env start`. For example, add this override to an existing OpenCode config:
 
 ```yaml
 opencode_agent:
   responses_api_agents:
     opencode_agent:
-      harness_version: "1.17.11"
+      opencode_version: "1.17.11"
 ```
 
 Use `"latest"` to resolve the publisher's latest release at startup. Workers in that launch share the resolved version. Copy the version from the startup log to repeat the run. Omitting the setting uses the agent's configured default.

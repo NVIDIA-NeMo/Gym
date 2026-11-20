@@ -22,7 +22,7 @@ pi_math_agent:
       concurrency: 8
       command: pi
       model: nvinf/nvidia/qwen/qwen3-5-397b-a17b
-      harness_version: "1.5.2"
+      pi_version: "1.5.2"
       timeout: 900
       system_prompt: |
         You are a precise math assistant with a bash tool. Run Python to calculate or verify numeric results when helpful.
