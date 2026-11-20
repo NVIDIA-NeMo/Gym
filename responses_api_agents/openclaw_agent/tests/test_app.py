@@ -1111,7 +1111,9 @@ class _SQLiteHostRun:
                     sessions.mkdir(parents=True)
                     (sessions / f"{session_id}.jsonl").write_text(_sqlite_era_transcript(session_id, reasoning))
                     (sessions / "sessions.json").write_text(
-                        json.dumps({"agent:main:main": {"sessionId": session_id, "sessionFile": f"{session_id}.jsonl"}})
+                        json.dumps(
+                            {"agent:main:main": {"sessionId": session_id, "sessionFile": f"{session_id}.jsonl"}}
+                        )
                     )
                 return export_result
             self.agent_cmd = cmd
@@ -1254,7 +1256,9 @@ def test_host_reasoning_tokens_come_from_per_call_transcript_counts(tmp_path: Pa
 
 
 def test_envelope_reasoning_total_is_not_reported() -> None:
-    _, usage = parse_openclaw_output(_envelope([{"text": "ok"}], usage={"input": 5, "output": 9, "reasoningTokens": 7}))
+    _, usage = parse_openclaw_output(
+        _envelope([{"text": "ok"}], usage={"input": 5, "output": 9, "reasoningTokens": 7})
+    )
     assert usage["reasoning_tokens"] is None
 
 
@@ -1268,4 +1272,3 @@ def test_generated_config_requests_streaming_usage_and_keeps_tools_direct() -> N
     agent.config.openclaw_config = {"tools": {"toolSearch": True}}
     with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
         assert agent._build_openclaw_config({})["tools"]["toolSearch"] is True
-

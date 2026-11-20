@@ -312,7 +312,8 @@ def _executable(path: Path, text: str) -> None:
 
 @pytest.mark.parametrize("script", DEPS_SCRIPTS)
 @pytest.mark.parametrize(
-    ("existing", "downloads"), [(None, True), ("v22.19.0", True), (f"v{DEFAULT_NODE_VERSION}", False), ("broken", True)]
+    ("existing", "downloads"),
+    [(None, True), ("v22.19.0", True), (f"v{DEFAULT_NODE_VERSION}", False), ("broken", True)],
 )
 def test_deps_script_replaces_a_node_that_is_not_the_pinned_release(tmp_path, script, existing, downloads):
     run_dir = tmp_path / "script"
@@ -347,4 +348,3 @@ def test_deps_script_replaces_a_node_that_is_not_the_pinned_release(tmp_path, sc
     url = f"https://nodejs.org/dist/v{DEFAULT_NODE_VERSION}/node-v{DEFAULT_NODE_VERSION}-linux-x64.tar.xz"
     assert (f"curl -fsSL {url}" in calls) is downloads
     assert calls[-1] == f"npm install -g --prefix {deps} openclaw@2026.11.5"
-

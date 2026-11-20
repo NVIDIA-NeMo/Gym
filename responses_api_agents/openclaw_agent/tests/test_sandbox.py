@@ -2618,7 +2618,12 @@ def test_sqlite_transcript_is_exported_when_the_jsonl_is_absent(setup):
     assert destination.startswith(f"{directory}/transcripts-")
     assert session_id == directory.rsplit("/", 1)[-1]
     assert kwargs == {"cwd": directory, "timeout_s": 30}
-    assert [item["type"] for item in body["output"]] == ["reasoning", "function_call", "function_call_output", "message"]
+    assert [item["type"] for item in body["output"]] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
     assert body["output"][1]["call_id"] == body["output"][2]["call_id"] == "tool-1"
     observations = closed.json()["agent_observations"]
     assert "agent_transcript_unavailable" not in {gap["code"] for gap in observations["gaps"]}
@@ -2741,8 +2746,16 @@ def test_memory_search_setting_and_tool_search_follow_the_pinned_release(setup, 
         ("2026.6.11\n24.22.3\n>=22.19.0\nextra", False),
         ("2026.6.11", False),
     ],
-    ids=["match", "other_version", "version_prefix", "old_node", "no_engine_range", "empty_range", "extra", "one_line"],
+    ids=[
+        "match",
+        "other_version",
+        "version_prefix",
+        "old_node",
+        "no_engine_range",
+        "empty_range",
+        "extra",
+        "one_line",
+    ],
 )
 def test_runtime_report_matches_version_and_engine_range(report, accepted):
     assert _runtime_matches(report, "2026.6.11") is accepted
-
