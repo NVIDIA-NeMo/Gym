@@ -13,6 +13,7 @@ from typing import Annotated, ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse, ReverifyMode
@@ -109,7 +110,10 @@ class VideoMMEV2ResourcesServer(VideoSandboxServer):
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
-        self._cohort = CohortManifest.model_validate_json(self.config.cohort_manifest.read_text(encoding="utf-8"))
+        # Resolved as in VideoMCQAResourcesServer: the server runs in its own directory, and the benchmark config
+        # names its prepared cohort relative to the Gym root.
+        manifest = _resolve_under_cwd_or_install(self.config.cohort_manifest)
+        self._cohort = CohortManifest.model_validate_json(manifest.read_text(encoding="utf-8"))
         self._task_levels = validate_metric_cohort(
             self._cohort.task_ids, groups=self._cohort.groups, task_levels=self._cohort.task_levels
         )

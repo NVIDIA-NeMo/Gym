@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -60,6 +61,26 @@ def make_server(
         server_client=client,
     )
     return server, rows, cohort
+
+
+@pytest.mark.parametrize("benchmark", ["videomme_v1", "lvbench"])
+def test_relative_cohort_manifest_is_read_from_the_gym_root(monkeypatch, benchmark) -> None:
+    # Gym starts each resources server in its own directory; benchmark configs name the cohort from the Gym root.
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.chdir(root / "resources_servers" / benchmark)
+    manifest = Path("resources_servers", benchmark, "data", "example_agentic_cohort.json")
+    assert not manifest.exists()
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
+    cls = VideoMMEV1ResourcesServer if benchmark == "videomme_v1" else LVBenchResourcesServer
+    server = cls(
+        config=VideoMCQAResourcesServerConfig(
+            name=benchmark, host="127.0.0.1", port=8000, entrypoint="app.py", cohort_manifest=manifest
+        ),
+        server_client=client,
+    )
+    assert server._cohort == AccuracyCohort.model_validate_json((root / manifest).read_text(encoding="utf-8"))
+    assert server._cohort.benchmark == benchmark and server._cohort.setting == "agentic"
 
 
 def request(row, text=r"\boxed{B}", **updates):

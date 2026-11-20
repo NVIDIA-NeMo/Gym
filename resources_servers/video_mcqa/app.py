@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse, ReverifyMode
@@ -139,7 +140,9 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
-        manifest = self.config.cohort_manifest
+        # The server runs in its own directory, and benchmark configs name their prepared cohort relative to the Gym
+        # root (benchmarks/<name>/data/), so a relative path is resolved the way Gym resolves its other read paths.
+        manifest = _resolve_under_cwd_or_install(self.config.cohort_manifest)
         self._cohort = load_question_set(manifest) or AccuracyCohort.model_validate_json(
             manifest.read_text(encoding="utf-8")
         )

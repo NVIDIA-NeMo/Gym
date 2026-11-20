@@ -291,6 +291,11 @@ URL, pinned dataset revision, setting, task IDs, reporting categories and repeat
 count. Verification rejects cross-benchmark, cross-setting and cross-revision
 results. Duplicate tasks or unexpected repeat indices cannot be aggregated.
 
+A relative `cohort_manifest` is looked up like Gym's other read paths: under
+`NEMO_GYM_EXTRA_ROOTS`, the working directory, then the Gym root. Each
+resources server runs in its own directory, so the agentic benchmarks' default,
+`benchmarks/<name>/data/<name>_cohort.json`, is found under the Gym root.
+
 Each row's `verifier_metadata` holds the question as asked: `question` (its
 text) and `options` (the option texts in label order, without labels), beside
 `expected_answer` and `option_count`. `prepare_single_turn`, `prepare_agentic`
