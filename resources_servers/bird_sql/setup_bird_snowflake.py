@@ -146,15 +146,26 @@ class AccountSnowflake:
     tables: Catalog
 
     def connect(self, db_id: str) -> Any:
+        """A new connection with ``db_id`` selected and only the connection's own role active.
+
+        A user's default secondary roles are often ``ALL``: the session would then hold every role the user has and
+        could write through any of them, whatever read-only role the connection names. They are turned off here.
+        """
         import snowflake.connector
 
         kwargs = {"connection_name": self.connection_name} if self.connection_name else {}
-        return snowflake.connector.connect(
+        conn = snowflake.connector.connect(
             **kwargs,
             database=SNOWFLAKE_DATABASE,
             schema=_quote(db_id),
             session_parameters={"STATEMENT_TIMEOUT_IN_SECONDS": max(1, round(self.timeout_s))},
         )
+        try:
+            conn.cursor().execute("USE SECONDARY ROLES NONE")
+        except BaseException:
+            conn.close()
+            raise
+        return conn
 
     @staticmethod
     def fetch_all(cur: Any) -> List[tuple]:

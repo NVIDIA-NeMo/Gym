@@ -99,6 +99,51 @@ def test_snowflake_engine_selects_a_real_account(tmp_path, monkeypatch):
     assert server._snowflake == "account"
 
 
+class _FakeAccountConnection:
+    """Records what the account engine runs on a new connection; ``fail``: every statement raises."""
+
+    def __init__(self, fail):
+        self.statements, self.closed, self.fail = [], False, fail
+
+    def cursor(self):
+        return self
+
+    def execute(self, sql):
+        if self.fail:
+            raise RuntimeError("network")
+        self.statements.append(sql)
+
+    def close(self):
+        self.closed = True
+
+
+@requires_fakesnow
+@pytest.mark.parametrize("fail", [False, True])
+def test_account_engine_turns_off_secondary_roles(monkeypatch, fail):
+    # With the user's default secondary roles (often ALL), a session on a read-only connection could write through the
+    # user's other roles, so each connection turns them off. A connection where that fails is closed, not returned.
+    import snowflake.connector
+
+    from resources_servers.bird_sql.setup_bird_snowflake import AccountSnowflake
+
+    conn, seen = _FakeAccountConnection(fail), {}
+    monkeypatch.setattr(snowflake.connector, "connect", lambda **kw: seen.update(kw) or conn)
+    engine = AccountSnowflake(connection_name="bird_ro", timeout_s=12.4, tables={})
+    if fail:
+        with pytest.raises(RuntimeError):
+            engine.connect(DB_ID)
+        assert conn.closed
+    else:
+        assert engine.connect(DB_ID) is conn
+        assert (conn.statements, conn.closed) == (["USE SECONDARY ROLES NONE"], False)
+    assert seen == {
+        "connection_name": "bird_ro",
+        "database": "BIRD",
+        "schema": f'"{DB_ID}"',
+        "session_parameters": {"STATEMENT_TIMEOUT_IN_SECONDS": 12},
+    }
+
+
 class _EngineRaising:
     """Stands in for a Snowflake engine whose query raises ``error``."""
 

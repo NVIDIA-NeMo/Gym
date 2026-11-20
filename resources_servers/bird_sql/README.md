@@ -111,7 +111,9 @@ attributes; the default SQLite dialect never imports them.
 `snowflake_engine: snowflake` runs the same grader against a real account instead, through
 `snowflake_connection_name` in the connector's `connections.toml` (no credentials in this
 config), with the data already loaded in the same layout. It has not been run against an
-account yet; a calibration run is planned.
+account yet; a calibration run is planned. Each connection runs `USE SECONDARY ROLES NONE`,
+so only the connection's own role applies: a user's default secondary roles are often `ALL`,
+which would let a session on a read-only role write through the user's other roles.
 
 ## Example usage
 
