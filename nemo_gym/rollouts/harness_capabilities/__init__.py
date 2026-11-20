@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from nemo_gym.rollouts.harness_capabilities.compaction import inspect_compaction
     from nemo_gym.rollouts.harness_capabilities.health import inspect_health
     from nemo_gym.rollouts.harness_capabilities.results import Results, gate_passes, render_matrices
+    from nemo_gym.rollouts.harness_capabilities.tool_timing import ToolTimingScope
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -36,6 +37,7 @@ _PUBLIC_API = {
     "NAMES": "checker",
     "PriorityTier": "checks",
     "Results": "results",
+    "ToolTimingScope": "tool_timing",
     "digest_file": "cli",
     "gate_passes": "results",
     "inspect_behavior": "behavior",
