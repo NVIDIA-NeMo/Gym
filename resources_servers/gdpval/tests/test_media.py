@@ -74,7 +74,7 @@ def test_nested_destination_and_source_symlink_fail_without_changing_source(tmp_
     assert not (tmp_path / "output").exists()
 
 
-@pytest.mark.parametrize("name", ["../escape.txt", "/absolute.txt", "a/../b.txt", "C:/file.txt"])
+@pytest.mark.parametrize("name", ["../escape.txt", "/absolute.txt", "a/../b.txt", "C:/file.txt", "nested\\notes.txt"])
 def test_unsafe_zip_is_preserved_without_extracting_unsafe_members(tmp_path, name, capsys):
     source = tmp_path / "source"
     source.mkdir()
@@ -88,6 +88,35 @@ def test_unsafe_zip_is_preserved_without_extracting_unsafe_members(tmp_path, nam
     assert not (tmp_path / "escape.txt").exists()
     assert not list(tmp_path.glob(".gdpval-media-*"))
     assert "Media conversion skipped" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("names", [["a", "a/b.txt"], ["a/b.txt", "a"], ["a/", "a"]])
+def test_zip_with_conflicting_member_layout_is_retained_complete(tmp_path, names, capsys):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "notes.txt").write_bytes(b"neighbor")
+    with zipfile.ZipFile(source / "files.zip", "w") as archive:
+        for name in names:
+            archive.writestr(name, b"" if name.endswith("/") else b"content")
+    output = tmp_path / "output"
+    manifest = media.build(source, output)
+    assert (output / "files.zip").read_bytes() == (source / "files.zip").read_bytes()
+    assert (output / "notes.txt").read_bytes() == b"neighbor"
+    assert {entry["kind"] for entry in manifest["entries"]} == {"unchanged"}
+    assert "conflicting ZIP member layout" in capsys.readouterr().out
+
+
+def test_zip_with_explicit_and_empty_directories_is_processed(tmp_path, capsys):
+    source = tmp_path / "source"
+    source.mkdir()
+    with zipfile.ZipFile(source / "files.zip", "w") as archive:
+        for name in ["a/", "a/b.txt", "empty/"]:
+            archive.writestr(name, b"" if name.endswith("/") else b"content")
+    output = tmp_path / "output"
+    manifest = media.build(source, output)
+    assert (output / "files.zip").read_bytes() == (source / "files.zip").read_bytes()
+    assert manifest["entries"][0]["kind"] == "zip"
+    assert "Media conversion skipped" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("case", ["duplicate", "symlink", "corrupt", "encrypted"])

@@ -275,12 +275,13 @@ def _zip(source: Path, target: Path, prepare_zip: Callable[[Path], None] | None 
             raise ValueError(f"ZIP exceeds preparation member/expanded-byte limit: {source}")
         names = set()
         for info in infos:
-            name = info.filename.replace("\\", "/")
+            name = info.filename
             parts = name.rstrip("/").split("/")
             mode = stat.S_IFMT(info.external_attr >> 16)
             if (
                 any(p in {"", ".", ".."} for p in parts)
                 or ":" in parts[0]
+                or "\\" in name
                 or mode not in {0, stat.S_IFREG, stat.S_IFDIR}
                 or info.file_size > 1024**3
                 or name in names
@@ -288,13 +289,15 @@ def _zip(source: Path, target: Path, prepare_zip: Callable[[Path], None] | None 
                 raise ValueError(f"unsupported/unsafe/duplicate ZIP member: {source}: {info.filename}")
             names.add(name)
             member = original / name
-            if info.is_dir():
-                member.mkdir(parents=True, exist_ok=True)
-                continue
-            member.parent.mkdir(parents=True, exist_ok=True)
             try:
+                if info.is_dir():
+                    member.mkdir(parents=True, exist_ok=True)
+                    continue
+                member.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(info) as src, member.open("xb") as dst:
                     shutil.copyfileobj(src, dst, 1024 * 1024)
+            except (FileExistsError, IsADirectoryError, NotADirectoryError) as error:
+                raise ValueError(f"conflicting ZIP member layout: {source}: {info.filename}") from error
             except (RuntimeError, NotImplementedError) as error:
                 raise ValueError(f"unreadable ZIP member: {info.filename}: {error}") from error
             if member.stat().st_size != info.file_size:
