@@ -28,7 +28,6 @@ from pydantic import BaseModel, Field
 from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.client.server_client import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER
 from nemo_gym.core.model_call_sampling import model_sampling_context
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
@@ -1083,6 +1082,25 @@ def test_base_agent_rollout_correlation_adds_the_prefix_without_capture():
     assert not agent._model_call_capture_enabled()
 
 
+def test_base_agent_base_url_for_run_names_the_agent_instance_and_takes_the_tag_from_the_caller():
+    body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
+    named = "http://h:1/ng-rollout/3-1/ng-agent-instance/user"
+
+    capturing = _make_base_agent(
+        {"observability_enabled": True, "token_id_capture": {"enabled": True}}, token_id_capture=True
+    )
+    # A name alone keeps the agent's own tag; ``token_capture=False`` drops it for that one URL.
+    assert capturing.base_url_for_run("http://h:1", body, agent_instance="user") == f"{named}/training-token-capture"
+    assert capturing.base_url_for_run("http://h:1", body, agent_instance="user", token_capture=False) == named
+
+    plain = _make_base_agent({"observability_enabled": True})
+    assert plain.base_url_for_run("http://h:1", body, agent_instance="user") == named
+    assert (
+        plain.base_url_for_run("http://h:1", body, agent_instance="user", token_capture=True)
+        == f"{named}/training-token-capture"
+    )
+
+
 def test_base_agent_propagates_explicit_token_capture_intent():
     body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
     global_config = {
@@ -1920,8 +1938,8 @@ async def test_verifier_capture_keeps_retry_ownership_separate_from_agent_observ
         await middleware(
             {
                 "type": "http",
-                "path": "/ng-rollout/judge-retry/v1/responses",
-                "headers": [(VERIFIER_INVOCATION_HEADER.encode("ascii"), b"verification-1")],
+                "path": "/ng-rollout/judge-retry/ng-agent-instance/verify.verification-1/v1/responses",
+                "headers": [],
             },
             receive,
             send,

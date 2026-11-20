@@ -27,6 +27,7 @@ from nemo_gym.models.token_capture.consumer import (
     trajectories_for_rollout,
     trajectories_from_source,
 )
+from nemo_gym.models.token_capture.delivery import finalize_rollout_token_capture
 from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.models.token_capture.lineage import (
     FIRST_CALL_REASON,
@@ -543,9 +544,9 @@ def test_the_assistant_is_the_primary_before_the_unnamed_agent():
     assert primary_agent_instance([None, "assistant"]) == "assistant"
     assert primary_agent_instance(["judge", None]) is None
     assert primary_agent_instance([None]) is None
-    assert primary_agent_instance(["judge"]) == "judge"
-    with pytest.raises(LookupError):
-        primary_agent_instance(["user", "judge"])
+    for others in (["judge"], ["user", "judge"]):
+        with pytest.raises(LookupError):
+            primary_agent_instance(others)
 
 
 def test_an_unnamed_caller_beside_the_assistant_does_not_take_the_scored_response(tmp_path):
@@ -755,6 +756,55 @@ def test_a_lost_agent_instance_leaves_a_lone_captured_one_without_a_primary(tmp_
     assert built["error"] == "no primary agent instance captured"
     assert builds["user"]["mask_sample"] is False and _generation_tokens(builds["user"]) == [[3]]
     assert builds["judge"]["mask_sample"] is True and builds["judge"]["rebuilt_response"] is None
+
+
+# The assistant's response, scored by the verifier, in an episode whose capture holds no call of the assistant.
+UNCAPTURED_ASSISTANT_RESPONSE = {
+    "id": "resp_assistant",
+    "output": [{"type": "message", "role": "assistant", "content": "the answer is 4"}],
+}
+
+
+@pytest.mark.parametrize(
+    "identity", [JUDGE, USER_SIM, CallIdentity(agent_instance="debater.1", model_ref=MODEL_SERVER_A)]
+)
+def test_the_only_captured_agent_instance_is_not_the_primary_unless_it_is_the_assistant(tmp_path, identity):
+    # ``training_agent_instances: [judge]`` tags the judge's URL only, so the ledger never sees the assistant.
+    call = _entry("c1", identity, [USER, ANSWER, JUDGE_PROMPT], "4/5", prompt=[7, 8], generation=[9])
+    _store_with(tmp_path, [call], intents=[("c1", identity)])
+
+    built = trajectories_for_rollout(ROLLOUT, [tmp_path], verified_response=UNCAPTURED_ASSISTANT_RESPONSE)
+
+    assert built["mask_sample"] is True and built["rebuilt_response"] is None
+    assert built["error"] == "no primary agent instance captured"
+    own = built[AGENT_INSTANCE_BUILDS_KEY][identity.agent_instance]
+    assert own["mask_sample"] is False and _generation_tokens(own) == [[9]]
+
+
+def test_the_only_captured_agent_instance_is_the_primary_when_it_is_the_assistant(tmp_path):
+    _store_with(tmp_path, [_assistant_call()], intents=[("a1", ASSISTANT)])
+
+    built = trajectories_for_rollout(ROLLOUT, [tmp_path])
+
+    assert built["mask_sample"] is False and _generation_tokens(built) == [[10, 11]]
+    assert _generation_tokens(built[AGENT_INSTANCE_BUILDS_KEY]["assistant"]) == [[10, 11]]
+
+
+async def test_finalization_keeps_the_scored_output_when_only_another_agent_instance_was_captured(tmp_path):
+    store = _store_with(tmp_path, [_judge_call()], intents=[("j1", JUDGE)])
+    scored_output = [dict(item) for item in UNCAPTURED_ASSISTANT_RESPONSE["output"]]
+    result = {
+        "_ng_rollout_id": ROLLOUT,
+        "reward": 0.75,
+        "response": {**UNCAPTURED_ASSISTANT_RESPONSE, "model": "m"},
+    }
+
+    built = await finalize_rollout_token_capture(result, store)
+
+    # The judge's tokens never become the episode's sample: the scored output stays, masked.
+    assert result["response"]["output"] == scored_output
+    assert result["reward"] == 0.75 and result["mask_sample"] is True
+    assert _generation_tokens(built[AGENT_INSTANCE_BUILDS_KEY]["judge"]) == [[9]]
 
 
 def test_lost_agent_instances_follow_the_captured_ones_in_name_order(tmp_path):

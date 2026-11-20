@@ -47,6 +47,7 @@ _CAPTURE_PUBLIC_FIELDS = frozenset(
     {
         "enabled",
         "all_agents",
+        "training_agent_instances",
         "dir",
         "sink",
         "lineage_store",
