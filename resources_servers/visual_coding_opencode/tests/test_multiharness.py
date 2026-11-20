@@ -179,3 +179,16 @@ def test_the_recipe_has_one_environment_server_per_harness() -> None:
         key for key, value in config.items() if isinstance(value, type(config)) and "environment_servers" in value
     }
     assert names == {f"visual_coding_{h}_environment_server" for h in HARNESSES}
+
+
+def test_the_added_agents_use_an_alias_that_keeps_tool_output_images_inline() -> None:
+    config = _resolve()
+
+    alias = config.visual_coding_policy_model.responses_api_models.vllm_model
+    assert alias.inline_tool_output_images
+    # The shared policy model and the original OpenCode route are unchanged.
+    assert not config.policy_model.responses_api_models.vllm_model.get("inline_tool_output_images", False)
+    assert config.visual_coding_opencode_agent.responses_api_agents.opencode_agent.model_server.name == "policy_model"
+    for harness in ("pi", "codex", "claude_code", "openclaw"):
+        agent = config[f"visual_coding_{harness}_agent"].responses_api_agents[f"{harness}_agent"]
+        assert agent.model_server.name == "visual_coding_policy_model"
