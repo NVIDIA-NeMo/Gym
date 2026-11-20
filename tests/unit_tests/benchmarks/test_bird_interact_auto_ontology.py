@@ -115,4 +115,4 @@ def test_the_a_interact_pairing_runs_the_full_tasks_on_the_auto_ontology_agent_a
     server = loaded["bird_interact_a_interact"]["environment_servers"]["bird_interact"]
     assert server["agent_server"] == {"name": "auto_ontology_agent"}
     # The server waits past the agent's own bound on the task.
-    assert server["turn_timeout_seconds"] > 1800
+    assert server["activation_timeout_seconds"] > 1800

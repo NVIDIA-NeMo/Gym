@@ -40,4 +40,4 @@ bird_interact_a_interact:
         name: auto_ontology_agent
       # The whole task is one activation, which the agent bounds at its episode timeout (1800 s, as auto-ontology-eval
       # bounds an a-Interact task); the server waits a little longer so the agent's own bound ends it.
-      turn_timeout_seconds: 1900
+      activation_timeout_seconds: 1900
