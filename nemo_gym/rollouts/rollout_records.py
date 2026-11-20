@@ -515,13 +515,8 @@ def rejudgment_admission_closed_by(
     return False
 
 
-def settled_judge_result(result: dict) -> bool:
-    """A finite grade or an explicitly completed, masked abstention with a parsed judge verdict."""
-    reward = result.get("reward")
-    if result.get("_ng_failure_class") is not None or type(reward) not in (int, float) or not math.isfinite(reward):
-        return False
-    if not result.get("mask_sample"):
-        return result.get("evaluation_completed") is not False
+def is_parsed_judge_abstention(result: dict) -> bool:
+    """Whether a masked result records a completed, explicitly unresolved judge verdict."""
     evaluations = result.get("judge_evaluations")
     return (
         result.get("mask_sample") is True
@@ -531,7 +526,7 @@ def settled_judge_result(result: dict) -> bool:
         and result.get("verdict") == "unresolved"
         and "correctness" in result
         and result.get("correctness") is None
-        and reward == 0
+        and result.get("reward") == 0
         and isinstance(evaluations, list)
         and len(evaluations) == 1
         and isinstance(evaluations[0], dict)
@@ -551,7 +546,11 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
         (failure.get("_ng_failure_class") is None or matches_failure_class(failure, {"judge_failed"}))
         and _holds_saved_answer(failure)
         and predecessor_id is not None
-        and settled_judge_result(result)
+        and result.get("_ng_failure_class") is None
+        and type(result.get("reward")) in (int, float)
+        and math.isfinite(result["reward"])
+        and result.get("evaluation_completed") is not False
+        and (not result.get("mask_sample") or is_parsed_judge_abstention(result))
         and result.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and result.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
         and result.get(REJUDGED_FAILURE_ID_KEY) == predecessor_id
