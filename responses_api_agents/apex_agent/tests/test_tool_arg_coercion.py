@@ -226,3 +226,28 @@ async def test_patched_run_tool_coerces_mcp_arguments_but_never_finish_tools() -
         assert "Submitted arguments (first 500 chars):" in broken_message.content
     finally:
         Agent.run_tool = unpatched_run_tool
+
+
+def test_tool_calls_keep_only_openai_keys() -> None:
+    call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": "{}"},
+        "name": "read_file",
+        "arguments": "{}",
+        "tool_call_id": "call_1",
+        "signature": None,
+    }
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "", "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+    ]
+
+    plain = stirrup_runtime.normalize_openai_tool_calls(messages)
+
+    assert plain[1]["tool_calls"] == [
+        {"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+    ]
+    assert plain[0] == {"role": "user", "content": "hi"}
+    assert plain[2] == {"role": "tool", "tool_call_id": "call_1", "content": "ok"}

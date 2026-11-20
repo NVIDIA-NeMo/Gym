@@ -20,7 +20,7 @@ the component details; this file records the measurement contract.
 | Grading prompt | Archipelago's criterion grader at commit `b581241ed67deed520f8d7854d20e39569e259f5` |
 
 The dataset revision is not pinned by `prepare.py`; record the revision you prepared from next to any reported
-number.
+number. The port was checked against revision `92c86856cf1b11f9833a8a076b3a45a63afa3929`.
 
 ## Task contract
 

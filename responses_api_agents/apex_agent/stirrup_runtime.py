@@ -415,6 +415,54 @@ def install_tool_schema_type_annotation() -> None:
             module.to_openai_tools = to_openai_tools_with_annotated_ref_types
 
 
+_OPENAI_TOOL_CALL_KEYS = ("id", "type", "function")
+
+
+def normalize_openai_tool_calls(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only the OpenAI keys of each assistant tool call.
+
+    Stirrup serializes a tool call as ``tool.model_dump()`` plus ``id``/``type``/``function``, so every call also
+    carries ``name``, ``arguments``, ``tool_call_id`` and ``signature`` at the top level. Chat templates read
+    ``function``, so the duplicates never reach the prompt, but model servers with a strict request schema reject
+    them with HTTP 422 on the first turn that replays a tool call.
+    """
+    for message in messages:
+        tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if isinstance(tool_calls, list):
+            message["tool_calls"] = [
+                {key: call[key] for key in _OPENAI_TOOL_CALL_KEYS if key in call} if isinstance(call, dict) else call
+                for call in tool_calls
+            ]
+    return messages
+
+
+def install_openai_tool_call_normalization() -> None:
+    """Patch Stirrup's to_openai_messages so assistant tool calls carry only OpenAI keys."""
+    import stirrup.clients.utils as stirrup_client_utils
+
+    original_to_openai_messages = stirrup_client_utils.to_openai_messages
+    if getattr(original_to_openai_messages, "_apex_tool_call_patch", False):
+        return
+
+    def to_openai_messages_with_plain_tool_calls(msgs: Any) -> list[dict[str, Any]]:
+        return normalize_openai_tool_calls(original_to_openai_messages(msgs))
+
+    to_openai_messages_with_plain_tool_calls._apex_tool_call_patch = True
+
+    client_modules: list[Any] = [stirrup_client_utils]
+    with suppress(Exception):
+        import stirrup.clients.chat_completions_client as chat_completions_client_module
+
+        client_modules.append(chat_completions_client_module)
+    with suppress(Exception):
+        import stirrup.clients.litellm_client as litellm_client_module
+
+        client_modules.append(litellm_client_module)
+    for module in client_modules:
+        if hasattr(module, "to_openai_messages"):
+            module.to_openai_messages = to_openai_messages_with_plain_tool_calls
+
+
 # Stock Stirrup raises ContextOverflowError whenever a completion ends with
 # finish_reason "length" (or "max_tokens"). That conflates two different events:
 # the prompt overflowing the context window, which vLLM rejects with HTTP 400
@@ -1442,6 +1490,7 @@ async def run_stirrup_rollout(
     install_tool_argument_coercion(Agent)
     install_json_schema_to_pydantic_array_items_patch()
     install_tool_schema_type_annotation()
+    install_openai_tool_call_normalization()
 
     class ToolNameParams(BaseModel):
         name: Annotated[str, Field(description="Exact MCP tool name from list_tools.")]
