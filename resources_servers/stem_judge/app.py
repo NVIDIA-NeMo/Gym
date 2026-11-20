@@ -94,8 +94,8 @@ from resources_servers.stem_judge.answer_options import (
     VerdictFormat,
     VerdictMode,
     add_answer_rules,
-    assistant_text,
     answer_template,
+    assistant_text,
     final_verdict,
     load_answer_rules,
     parse_json_judgment,
@@ -446,6 +446,15 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
     checkpoint_verify = "replay"
 
     config: StemJudgeConfig
+
+    @classmethod
+    def load_config_from_global_config(cls) -> StemJudgeConfig:
+        config = super().load_config_from_global_config()
+        if isinstance(config.extra_answer_rules, str) and config.extra_answer_rules_sha256 is None:
+            raise ValueError(
+                "The saved STEM config has no digest for its rule file. Resolve the config with Gym before starting the worker."
+            )
+        return config
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

@@ -205,6 +205,16 @@ class TestAnswerOptions:
         assert _judge_prompt(from_file) == _judge_prompt(from_list)
         assert all(rule in _judge_prompt(from_file) for rule in inline)
 
+    def test_managed_worker_requires_a_pinned_file(self, config, monkeypatch):
+        from nemo_gym.server_runtime import SimpleResourcesServer
+
+        config.extra_answer_rules = "rules.yaml"
+        monkeypatch.setattr(SimpleResourcesServer, "load_config_from_global_config", classmethod(lambda cls: config))
+        with raises(ValueError, match="no digest for its rule file"):
+            StemJudgeResourcesServer.load_config_from_global_config()
+        config.extra_answer_rules_sha256 = "a" * 64
+        assert StemJudgeResourcesServer.load_config_from_global_config() is config
+
     def test_changed_rule_file_is_refused_by_the_worker(self, config, tmp_path):
         rules = tmp_path / "rules.yaml"
         rules.write_text("- Require metres.")

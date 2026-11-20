@@ -246,7 +246,9 @@ rollouts. Gym's renderer rejects already materialized input.
 Point `extra_answer_rules` at a UTF-8 YAML file containing a list of rule strings.
 Gym records the file’s SHA-256 in the resolved run configuration. Each worker checks
 the bytes it reads at startup against that digest. Editing the file changes the
-identity used for the next launch or resume. As with prompt templates, relative paths
+identity used for the next launch or resume. A worker receiving an older saved
+configuration without the file digest asks for a fresh configuration resolution.
+As with prompt templates, relative paths
 resolve from the STEM resources server directory. Absolute paths also work.
 The shipped [archive example](prompt_templates/archive_rules.yaml) contains one rule.
 
