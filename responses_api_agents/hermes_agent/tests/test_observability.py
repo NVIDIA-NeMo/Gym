@@ -198,8 +198,6 @@ def test_model_response_id_is_joined_to_the_owning_invocation():
 
 
 def test_concurrent_tool_intervals_end_at_each_worker_not_completion_callback():
-    from run_agent import AIAgent
-
     agent = _FakeAgent()
     release = {"fast": threading.Event(), "slow": threading.Event()}
     entered = {"fast": threading.Event(), "slow": threading.Event()}
@@ -210,34 +208,33 @@ def test_concurrent_tool_intervals_end_at_each_worker_not_completion_callback():
         return function_name
 
     agent._invoke_tool = invoke
-    agent._interrupt_requested = False
-    agent.quiet_mode = False
-    agent.verbose_logging = False
-    agent.log_prefix_chars = 100
-    agent.tool_progress_callback = None
-    agent._checkpoint_mgr = SimpleNamespace(enabled=False)
-    agent._get_budget_warning = lambda _count: None
     observer = HermesAgentObserver().instrument(agent)
-    calls = [
-        SimpleNamespace(id=f"{name}-call", function=SimpleNamespace(name=name, arguments="{}"))
-        for name in ("fast", "slow")
-    ]
-    execute = AIAgent._execute_tool_calls_concurrent.__get__(agent, _FakeAgent)
-    execution = threading.Thread(target=execute, args=(SimpleNamespace(tool_calls=calls), [], "task"))
-    execution.start()
+
+    arguments = {name: {} for name in release}
+
+    def execute(name):
+        agent.tool_start_callback(f"{name}-call", name, arguments[name])
+        agent._invoke_tool(name, arguments[name], "task")
+
+    workers = {name: threading.Thread(target=execute, args=(name,)) for name in release}
+    for worker in workers.values():
+        worker.start()
     assert entered["fast"].wait(timeout=2)
     assert entered["slow"].wait(timeout=2)
     release["fast"].set()
-    assert not threading.Event().wait(timeout=0.02)
+    workers["fast"].join(timeout=2)
+    assert not workers["fast"].is_alive()
     release["slow"].set()
-    execution.join(timeout=2)
-    assert not execution.is_alive()
+    workers["slow"].join(timeout=2)
+    assert not workers["slow"].is_alive()
+    for name in workers:
+        agent.tool_complete_callback(f"{name}-call", name, arguments[name], name)
     bundle = observer.finish({"completed": True, "messages": []})
 
     fast = _tool(bundle, "fast-call")
     slow = _tool(bundle, "slow-call")
     assert fast.completed_at < slow.completed_at
-    assert fast.duration_ms < slow.duration_ms
+    assert fast.timing_source == slow.timing_source == "executor"
 
 
 def test_delegate_child_retains_parent_and_conversation():

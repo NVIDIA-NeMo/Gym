@@ -45,6 +45,16 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
             raise RuntimeError(f"{harness} conformance requires {command} on PATH")
     if definition.builtin:
         return {"installation": "builtin"}
+    if harness == "hermes":
+        # Hermes runs from a pinned upstream checkout in its own Python environment, not from this one.
+        from responses_api_agents.hermes_agent.runtime import HERMES_PYTHON_VERSION, HERMES_SOURCE, source_checkout
+
+        return {
+            "installation": "agent_session" if use_agent_sessions else "host_worker",
+            "hermes_source": HERMES_SOURCE,
+            "python_version": HERMES_PYTHON_VERSION,
+            "lock_sha256": digest_file(source_checkout() / "uv.lock"),
+        }
     if use_agent_sessions and not definition.runtime_modules:
         root = Path(__file__).resolve().parents[2]
         return {

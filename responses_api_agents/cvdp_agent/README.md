@@ -173,8 +173,8 @@ Kept as a plain, lintable module rather than a string template.
   - `_portable_python.sh` — shared base: downloads a relocatable CPython and `pip install`s
   nemo_gym into `$DEPS_DIR`. (Leading underscore = sourced helper, not run directly.)
   - `claude_code_agent_deps.sh` — adds portable Node + the `@anthropic-ai/claude-code` CLI.
-  - `hermes_agent_deps.sh` — adds the `hermes-agent` Python package (version pinned from
-  `responses_api_agents/hermes_agent/pyproject.toml`).
+  - `hermes_agent_deps.sh` — builds the separate Hermes Python 3.14 runtime under `$DEPS_DIR/hermes-runtime`
+  from the source pinned in `responses_api_agents/hermes_agent/pyproject.toml` (`HERMES_SPEC` overrides it).
   - `opencode_agent_deps.sh`: adds portable Node and the pinned `opencode-ai` CLI.
 - `**configs/cvdp_agent_generic_claude.yaml**`, `**configs/cvdp_agent_generic_hermes.yaml**`,
 `**configs/cvdp_agent_generic_opencode.yaml**`

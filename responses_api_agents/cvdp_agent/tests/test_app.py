@@ -1196,3 +1196,60 @@ class TestSimpleRunAttemptEvidence:
         assert result["response"]["usage"] is None
         assert result["response"]["output"] == verified[-1]["response"]["output"]
         assert result["reward"] == 0.0
+
+
+_RESOLVER_PROBE_AGENT = """
+import json
+from types import SimpleNamespace
+
+
+class ProbeConfig:
+    model_fields = {}
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class ProbeAgent:
+    def __init__(self, config, server_client):
+        self.config = config
+
+    def resolve_model_base_url(self, model_server_name, rollout_id=None, *, trace_context=True, trained=True):
+        raise AssertionError("the entrypoint must replace the resolver")
+
+    async def responses(self, request, body):
+        urls = [
+            self.resolve_model_base_url("policy", "rollout-1"),
+            self.resolve_model_base_url("policy", "rollout-1", trained=False),
+        ]
+        return SimpleNamespace(output=[], model_dump_json=lambda: json.dumps(urls))
+"""
+
+
+def test_sandbox_entrypoint_resolver_accepts_untrained_role(tmp_path: Path) -> None:
+    """Hermes resolves its compression URL with ``trained=False``; the guest's single model URL must serve it."""
+    import subprocess
+    import sys
+
+    (tmp_path / "resolver_probe_agent.py").write_text(_RESOLVER_PROBE_AGENT)
+    traj_dir = tmp_path / "traj"
+    traj_dir.mkdir()
+    (traj_dir / "instruction.txt").write_text("solve")
+    entrypoint = Path(__file__).resolve().parents[1] / "sandbox_entrypoint.py"
+    repo_root = Path(__file__).resolve().parents[3]
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(tmp_path), str(repo_root), os.environ.get("PYTHONPATH", "")]),
+        "NV_AGENT_HOME": str(tmp_path / "home"),
+        "NV_MODEL_URL": "http://model/ng-rollout/rollout-1",
+        "NV_MODEL_NAME": "policy",
+        "NV_TRAJ_DIR": str(traj_dir),
+        "NV_AGENT_MODULE": "resolver_probe_agent",
+        "NV_AGENT_CLASS": "ProbeAgent",
+        "NV_AGENT_CFG_CLASS": "ProbeConfig",
+    }
+
+    completed = subprocess.run([sys.executable, str(entrypoint)], env=env, capture_output=True, text=True, timeout=120)
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((traj_dir / "response.json").read_text()) == ["http://model/ng-rollout/rollout-1/v1"] * 2
