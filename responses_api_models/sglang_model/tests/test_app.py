@@ -54,6 +54,20 @@ class FakeTokenizer:
         return self.decoded
 
 
+def test_native_prompt_renders_with_installed_chat_template_engine():
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
+
+    model = make_model()
+    model._sglang_tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "hello": 1}, unk_token="[UNK]")),
+        chat_template="{{ messages[0]['content'] }}",
+    )
+
+    assert model._full_sglang_tokenize([{"role": "user", "content": "hello"}], None, {}) == [1]
+
+
 class FakeSGLangClient:
     def __init__(self, result: dict) -> None:
         self.result = result

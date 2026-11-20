@@ -7,6 +7,7 @@ version = "0.2.0rc0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
+    "jinja2>=3.1",
     # Keep the tokenizer above Gym's shared security floor and lock its version.
     "transformers==5.17.0",
 ]
