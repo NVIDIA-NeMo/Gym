@@ -40,6 +40,7 @@ make the launch shell a process group leader, that process starts the supervisor
 group, passes TERM on to it and exits with its status.
 """
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -104,6 +105,9 @@ class CleanupReceipt(TypedDict):
     # its outcome is lost, so ``return_code`` is None.
     receipt_missing: NotRequired[bool]
     stopped: NotRequired[bool]
+    # A checkpoint pause lasted longer than the supervisor's ``--max-pause`` and the supervisor ended the harness
+    # as at its time limit (``timed_out`` is true too); present only when true.
+    pause_expired: NotRequired[bool]
 
 
 class PauseAcknowledgement(TypedDict):
@@ -197,6 +201,8 @@ def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
         receipt["receipt_missing"] = True
     if isinstance(payload.get("stopped"), bool):
         receipt["stopped"] = payload["stopped"]
+    if payload.get("pause_expired") is True:
+        receipt["pause_expired"] = True
     return receipt
 
 
@@ -226,6 +232,7 @@ def supervised_launch_command(
     timeout: float,
     cleanup_timeout: float,
     pausable: bool = False,
+    max_pause: float | None = None,
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
@@ -238,7 +245,9 @@ def supervised_launch_command(
     TERM disposition.
 
     With ``pausable``, the supervisor also serves pause and continue requests in
-    ``session_dir`` (see ``request_pause`` and ``request_continue``).
+    ``session_dir`` (see ``request_pause`` and ``request_continue``). ``max_pause`` bounds
+    one pause: past it the supervisor ends the harness as at its time limit, so a harness
+    whose agent server died during a checkpoint does not stay paused for good.
     """
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
     pause_options = (
@@ -246,6 +255,7 @@ def supervised_launch_command(
         f"--paused {quote(f'{session_dir}/{PAUSED_FILE}')} "
         f"--continue-file {quote(f'{session_dir}/{CONTINUE_REQUEST_FILE}')} "
         f"--continued {quote(f'{session_dir}/{CONTINUED_FILE}')} "
+        + (f"--max-pause {_seconds(max_pause)} " if max_pause else "")
         if pausable
         else ""
     )
@@ -390,6 +400,36 @@ async def remove_session_directory(
         raise RuntimeError(f"Could not remove {harness} session files")
 
 
+async def request_pause(
+    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, seq: int, timeout: float = DEFAULT_PAUSE_TIMEOUT
+) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
+    """Ask the supervisor in ``session_dir`` to pause the harness, as request ``seq``, and wait for its answer."""
+    return await _request(
+        sandbox,
+        session_dir=session_dir,
+        workdir=workdir,
+        request_file=PAUSE_REQUEST_FILE,
+        acknowledgement_file=PAUSED_FILE,
+        seq=seq,
+        timeout=timeout,
+    )
+
+
+async def request_continue(
+    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, seq: int, timeout: float = DEFAULT_PAUSE_TIMEOUT
+) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
+    """Ask the supervisor in ``session_dir`` to continue after pause ``seq`` and wait for its answer."""
+    return await _request(
+        sandbox,
+        session_dir=session_dir,
+        workdir=workdir,
+        request_file=CONTINUE_REQUEST_FILE,
+        acknowledgement_file=CONTINUED_FILE,
+        seq=seq,
+        timeout=timeout,
+    )
+
+
 _PAUSE_ACKNOWLEDGEMENT = TypeAdapter(PauseAcknowledgement)
 
 
@@ -427,7 +467,12 @@ async def _request(
         f'case "$ack" in *{quote(f'"seq": {seq},')}*) echo acknowledged; printf "%s\\n" "$ack"; exit 0;; esac; fi; '
         "sleep 0.05; done; echo timeout"
     )
-    result = await sandbox.exec(script, cwd=workdir, timeout_s=timeout + 10)
+    # The provider may queue the command behind others, and its own timeout starts only once the command runs:
+    # with every slot taken, by this harness among others, the request would wait for a harness to end.
+    async with asyncio.timeout(timeout + 10):
+        result = await sandbox.exec(
+            script, cwd=control_cwd(session_dir=session_dir, workdir=workdir), timeout_s=timeout + 10
+        )
     if result.return_code != 0 or result.error_type:
         raise RuntimeError(f"supervisor request {request_file} failed: {result.error_type or result.stderr}")
     lines = (result.stdout or "").splitlines()
@@ -440,33 +485,3 @@ async def _request(
     if outcome not in ("not_launched", "finished", "timeout"):
         raise RuntimeError(f"unexpected supervisor request outcome {outcome!r}")
     return outcome, None  # type: ignore[return-value]
-
-
-async def request_pause(
-    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, seq: int, timeout: float = DEFAULT_PAUSE_TIMEOUT
-) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
-    """Ask the supervisor in ``session_dir`` to pause the harness, as request ``seq``, and wait for its answer."""
-    return await _request(
-        sandbox,
-        session_dir=session_dir,
-        workdir=workdir,
-        request_file=PAUSE_REQUEST_FILE,
-        acknowledgement_file=PAUSED_FILE,
-        seq=seq,
-        timeout=timeout,
-    )
-
-
-async def request_continue(
-    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, seq: int, timeout: float = DEFAULT_PAUSE_TIMEOUT
-) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
-    """Ask the supervisor in ``session_dir`` to continue after pause ``seq`` and wait for its answer."""
-    return await _request(
-        sandbox,
-        session_dir=session_dir,
-        workdir=workdir,
-        request_file=CONTINUE_REQUEST_FILE,
-        acknowledgement_file=CONTINUED_FILE,
-        seq=seq,
-        timeout=timeout,
-    )

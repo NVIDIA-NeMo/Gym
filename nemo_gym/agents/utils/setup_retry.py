@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Retry a setup command that is safe to run twice when the sandbox provider fails to run it.
 
-A sandbox that was just created or restored can refuse a connection for a few seconds even after it first answered
-(a 502 from the gateway), so a seed's first commands can fail although the sandbox is fine. The provider does not
-retry a command itself: the error can come after the command started, and running an arbitrary command twice is not
-safe. A caller whose command is idempotent (a read, a ``mkdir -p``, an install that skips what is present) retries it
-here.
+A sandbox that was just created or restored can refuse a connection for a few seconds even after it first answered,
+so a seed's first commands can fail although the sandbox is fine. The provider does not retry a command itself: the
+error can come after the command started, and running an arbitrary command twice is not safe. A caller whose command
+is idempotent (a read, a ``mkdir -p``, an install that skips what is present) retries it here.
 """
 
 import asyncio
@@ -26,16 +25,21 @@ async def exec_idempotent(
     what: str,
     attempts: int = 3,
     delay_s: float = 2.0,
-    **exec_kwargs: object,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+    timeout_s: int | float | None = None,
 ) -> SandboxExecResult:
     """Run ``command``, retrying when ``sandbox.exec`` raises; a returned result, any exit code, ends the retries.
 
-    The delay doubles after each failed attempt (2 s, then 4 s). The last error is raised once ``attempts`` run out.
-    Use only for commands that are safe to run twice.
+    ``cwd``, ``env`` and ``timeout_s`` are passed to ``sandbox.exec``. The delay doubles after each failed attempt
+    (2 s, then 4 s). The last error is raised once ``attempts`` run out.
+
+    Use only for commands that are safe to run twice, and at the same time: the error can arrive after the command
+    started, so a retry may begin while the first attempt is still running in the sandbox.
     """
     for attempt in range(1, attempts + 1):
         try:
-            return await sandbox.exec(command, **exec_kwargs)
+            return await sandbox.exec(command, cwd=cwd, env=env, timeout_s=timeout_s)
         except Exception as error:
             if attempt == attempts:
                 raise

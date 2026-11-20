@@ -142,11 +142,6 @@ if TYPE_CHECKING:
         SingleAgentTurnResult,
         SingleAgentTurnTaskInput,
     )
-    from nemo_gym.server_runtime.testing.checkpoint_conformance import (
-        HarnessFixture,
-        LocalExecProvider,
-        check_harness_adapter,
-    )
     from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
         TOOL_CALL_ID_HEADER,
@@ -202,9 +197,7 @@ _PUBLIC_API = {
     "GenerationCutInventory": "_checkpoint.generation_cut",
     "GenerationCutPrefixAck": "_checkpoint.generation_cut",
     "GenerationCutReceipt": "_checkpoint.generation_cut",
-    "HarnessFixture": "testing.checkpoint_conformance",
     "LegacyRun": "_checkpoint.agent",
-    "LocalExecProvider": "testing.checkpoint_conformance",
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
     "LentSandboxes": "sandbox_lending",
@@ -256,7 +249,6 @@ _PUBLIC_API = {
     "ToolResult": "episode_tools",
     "ToolSpec": "episode_tools",
     "TypedToolset": "episode_tools",
-    "check_harness_adapter": "testing.checkpoint_conformance",
     "check_resources_session_contract": "testing.session_conformance",
     "checkpoint_state_dir": "_checkpoint.sandbox",
     "dependency_failure": "base_environment_server",

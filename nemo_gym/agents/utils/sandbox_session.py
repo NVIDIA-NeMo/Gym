@@ -128,30 +128,11 @@ class HarnessPauseResult:
 
 
 class SandboxSessionCheckpoint(TypedDict):
-    """What ``SandboxSession.reattach`` needs to rebind a session to a sandbox restored from a snapshot."""
+    """What ``SandboxSession.rebind`` needs to rebind a session to a sandbox restored from a snapshot."""
 
     session_root: str
     session_dir: str
     launch_started: bool
-
-
-_CHECKPOINT_STATE = TypeAdapter(SandboxSessionCheckpoint)
-
-
-def _pause_result(
-    outcome: SupervisorRequestOutcome, acknowledgement: PauseAcknowledgement | None
-) -> HarnessPauseResult:
-    if outcome == "finished":
-        return HarnessPauseResult(status="finished")
-    if outcome == "not_launched":
-        return HarnessPauseResult(status="confirmed")
-    if outcome == "timeout" or acknowledgement is None:
-        return HarnessPauseResult(status="unconfirmed", error="the supervisor did not acknowledge in time")
-    return HarnessPauseResult(
-        status="confirmed" if acknowledgement["confirmed"] else "unconfirmed",
-        pids=tuple(acknowledgement["pids"]),
-        error=acknowledgement["error"],
-    )
 
 
 @dataclass(kw_only=True)
@@ -191,7 +172,7 @@ class SandboxSession[Artifacts]:
     checkpoint (``pause_harness`` and ``continue_harness``): every process it reaches, and every
     process carrying its marker, is stopped with SIGSTOP and continued with SIGCONT, and time spent
     paused does not count against the harness timeout. Directories under ``root_dir`` survive a
-    snapshot of a borrowed sandbox; ``checkpoint_state`` and ``reattach`` rebind a session to the
+    snapshot of a borrowed sandbox; ``checkpoint_state`` and ``rebind`` connect a session to the
     sandbox a restore forks from that snapshot.
     """
 
@@ -236,7 +217,7 @@ class SandboxSession[Artifacts]:
     _parked_polls: ExitStack | None = field(default=None, init=False, repr=False)
 
     def checkpoint_state(self) -> SandboxSessionCheckpoint:
-        """Where this session's files are, for ``reattach`` after a restore; JSON-serializable."""
+        """Where this session's files are, for ``rebind`` after a restore; JSON-serializable."""
         return {
             "session_root": self.root_dir,
             "session_dir": self.session_dir,
@@ -244,7 +225,7 @@ class SandboxSession[Artifacts]:
         }
 
     @classmethod
-    def reattach(
+    def rebind(
         cls,
         sandbox: AsyncSandbox,
         state: SandboxSessionCheckpoint,
@@ -257,9 +238,9 @@ class SandboxSession[Artifacts]:
         """Rebind a session from ``checkpoint_state`` to ``sandbox``, restored from a snapshot of the original.
 
         A snapshot keeps files, not processes: no launch recorded in ``state`` still runs in ``sandbox``, so the
-        reattached session has none. Rearm it with ``begin_activation`` and a fresh launch directory under
+        re-bound session has none. Rearm it with ``begin_activation`` and a fresh launch directory under
         ``root_dir`` before the next ``execute``; ``state["launch_started"]`` says whether the harness had
-        already started, for an adapter that resumes the harness's saved conversation.
+        already started, for an adapter that continues the harness's saved conversation.
         """
         state = _CHECKPOINT_STATE.validate_python(state, strict=True)
         session = cls(
@@ -350,6 +331,8 @@ class SandboxSession[Artifacts]:
         ``pause_allowance_s`` extends the provider's execution deadline by the time the harness may
         spend paused for checkpoints, which the supervisor does not count against ``timeout``. A
         longer pause than the allowance fails the execution, so pause only within it, or stop instead.
+        It is also the longest one pause may last: past it the supervisor ends the harness as at its
+        time limit, so a harness is not left paused when nobody continues it.
         """
         if self.closing or self._stage_task is not None:
             raise RuntimeError(f"{self.harness} sandbox session is closing or already activated")
@@ -377,6 +360,8 @@ class SandboxSession[Artifacts]:
                 timeout=timeout,
                 cleanup_timeout=cleanup_timeout,
                 pausable=self.pausable,
+                # One pause may use the whole allowance; a longer one ends the harness (see the supervisor).
+                max_pause=pause_allowance_s or None,
             )
             self.launch_started = True
             self._exec_task = asyncio.create_task(
@@ -473,11 +458,14 @@ class SandboxSession[Artifacts]:
         stage = self._stage_task
         if stage is not None and not stage.done():
             # Staging writes into the sandbox and ends in the launch command. Let it finish, so a snapshot does not
-            # run beside it and the launch's polls are held like a running launch's. A stage that takes longer
-            # than the bound is paused as before, by the request the launch reads when it starts.
+            # run beside it and the launch's polls are held like a running launch's.
             await asyncio.wait({stage}, timeout=timeout)
             if self.cleanup is not None or self.sandbox_stopped or self.closing:
                 return HarnessPauseResult(status="finished")
+            if not stage.done():
+                # A pause request would only hold the launch command: staging itself would keep writing while
+                # the sandbox is snapshotted. The caller stops this launch instead, which cancels the staging.
+                return HarnessPauseResult(status="unconfirmed", error="the launch is still staging its files")
         if self._pause_seq <= self._continued_seq:
             self._pause_seq = self._continued_seq + 1
         outcome, acknowledgement = await request_pause(
@@ -760,3 +748,22 @@ class SandboxSession[Artifacts]:
                         harness=self.harness,
                     )
                 await self.sandbox.disconnect(timeout_s=timeout)
+
+
+_CHECKPOINT_STATE = TypeAdapter(SandboxSessionCheckpoint)
+
+
+def _pause_result(
+    outcome: SupervisorRequestOutcome, acknowledgement: PauseAcknowledgement | None
+) -> HarnessPauseResult:
+    if outcome == "finished":
+        return HarnessPauseResult(status="finished")
+    if outcome == "not_launched":
+        return HarnessPauseResult(status="confirmed")
+    if outcome == "timeout" or acknowledgement is None:
+        return HarnessPauseResult(status="unconfirmed", error="the supervisor did not acknowledge in time")
+    return HarnessPauseResult(
+        status="confirmed" if acknowledgement["confirmed"] else "unconfirmed",
+        pids=tuple(acknowledgement["pids"]),
+        error=acknowledgement["error"],
+    )

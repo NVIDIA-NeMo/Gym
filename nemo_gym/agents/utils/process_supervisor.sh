@@ -30,7 +30,7 @@
 # The expire file, when given, moves the deadline to now: once it appears, the harness ends exactly
 # as at its time limit and the receipt records timed_out. If it appears before launch, the harness
 # never starts. The supervisor never deletes it. An expire that arrives while the harness is paused
-# takes effect when the pause is continued.
+# takes effect when the pause ends.
 #
 # Pause and continue, for a checkpoint that snapshots the sandbox while the harness keeps its state:
 # writing a number N greater than any earlier one to the pause file sends STOP to every process the
@@ -41,18 +41,25 @@
 # sends CONT to the same processes and acknowledges in the continued file the same way. The time
 # spent paused does not count against the deadline. A pause requested before the launch holds the
 # launch until it is continued. A stop requested while paused continues the processes first, so the
-# harness receives TERM and can save its state. The receipt, written when the harness ends, answers
-# any pause the supervisor never acknowledged.
+# harness is running when it receives TERM; one that ignores TERM is killed after the cleanup timeout.
+# The receipt, written when the harness ends, answers any pause the supervisor never acknowledged.
+#
+# A pause nobody continues would hold the harness for good: the deadline does not run, and an expire
+# waits for the continue. With --max-pause, a pause that lasts longer ends as an expire does: the
+# processes are continued, the harness is terminated, and the receipt records timed_out and
+# pause_expired. The limit counts the supervisor's own polls, not the clock, so the time a sandbox
+# spends snapshotted and not running is not counted. A pause also ends when the harness is gone.
 #
 # usage: process_supervisor.sh --timeout SECONDS --cleanup-timeout SECONDS --receipt PATH --stop-file PATH
-#        [--expire-file PATH] [--pause-file PATH --paused PATH --continue-file PATH --continued PATH]
+#        [--expire-file PATH]
+#        [--pause-file PATH --paused PATH --continue-file PATH --continued PATH [--max-pause SECONDS]]
 #        -- COMMAND...
 
 # An inherited BASH_ENV or SHELLOPTS must not turn an expected failure into a missing receipt.
 set +o errexit +o nounset +o pipefail
 
 usage() {
-    echo "usage: process_supervisor.sh --timeout S --cleanup-timeout S --receipt PATH --stop-file PATH [--expire-file PATH] -- COMMAND..." >&2
+    echo "usage: process_supervisor.sh --timeout S --cleanup-timeout S --receipt PATH --stop-file PATH [--expire-file PATH] [--pause-file PATH --paused PATH --continue-file PATH --continued PATH [--max-pause S]] -- COMMAND..." >&2
     exit 2
 }
 
@@ -205,7 +212,8 @@ reached_alive() {
 
 stopped() { ((stopping)) || [[ -e $stop_file ]]; }
 
-expired() { [[ -n $expire_file && -e $expire_file ]]; }
+# A pause that outlasted --max-pause ends the harness as an expire does.
+expired() { ((${pause_expired:-0})) || [[ -n $expire_file && -e $expire_file ]]; }
 
 # A stop signal stops the harness only once the stop file exists; any other is counted and ignored.
 stop_signal() {
@@ -219,6 +227,7 @@ stop_signal() {
 write_receipt() {
     local foreign=
     ((${foreign_signals:-0} > 0)) && foreign=", \"foreign_signals\": $foreign_signals"
+    ((${pause_expired:-0})) && foreign+=', "pause_expired": true'
     printf '{"cleanup_confirmed": %s, "return_code": %s, "error": %s, "timed_out": %s, "stopped": %s%s}' \
         "$1" "$return_code" "$2" "$timed_out" "$requested_stop" "$foreign" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
 }
@@ -331,10 +340,11 @@ resume_paused() {
 }
 
 # Serve a new pause request: pause, wait for its continue or a stop, then continue. Succeeds when a
-# pause was served; the paused time is added to paused_total.
+# pause was served; the paused time is added to paused_total. The wait also ends when the harness is
+# gone, and after --max-pause, which sets pause_expired.
 serve_pause() {
     # Not named started: pause_scan reads the supervisor's own start time under that name.
-    local paused_since
+    local paused_since waited=0
     [[ -n $pause_file && -e $pause_file ]] || return 1
     request_seq "$pause_file"
     ((SEQ > pause_seq)) || return 1
@@ -343,7 +353,14 @@ serve_pause() {
     paused_since=$NOW
     pause "$pause_seq"
     while request_seq "$continue_file" && ((SEQ < pause_seq)) && ! stopped; do
+        [[ -n ${harness-} ]] && ! kill -0 "$harness" 2>/dev/null && break
+        if ((max_pause && waited >= max_pause)); then
+            pause_expired=1
+            break
+        fi
         sleep 0.05
+        # Counted in polls of 5 centiseconds, not read from the clock: see the header.
+        waited=$((waited + 5))
     done
     # A stop while paused continues the processes first, so TERM reaches a running harness.
     request_seq "$continue_file"
@@ -369,6 +386,7 @@ while (($#)) && [[ $1 != -- ]]; do
     --paused) paused_ack=$2 ;;
     --continue-file) continue_file=$2 ;;
     --continued) continued_ack=$2 ;;
+    --max-pause) max_pause=$(centiseconds "$2") || { echo "--max-pause must be finite and positive" >&2; exit 2; } ;;
     *) echo "unexpected argument: $1" >&2; exit 2 ;;
     esac
     shift 2
@@ -380,6 +398,11 @@ pause_file=${pause_file-} paused_ack=${paused_ack-} continue_file=${continue_fil
 if [[ -n $pause_file$paused_ack$continue_file$continued_ack ]] &&
     [[ -z $pause_file || -z $paused_ack || -z $continue_file || -z $continued_ack ]]; then
     echo "--pause-file, --paused, --continue-file and --continued go together" >&2
+    exit 2
+fi
+max_pause=${max_pause-0}
+if ((max_pause)) && [[ -z $pause_file ]]; then
+    echo "--max-pause needs --pause-file" >&2
     exit 2
 fi
 
@@ -403,7 +426,7 @@ return_code=null timed_out=false stopping=0 preserving=0 forced=0 foreign_signal
 tracked=() groups=() preserved=() paused=()
 # A pause waits this long (centiseconds) for reached processes to stop, and this much longer while
 # only processes in uninterruptible sleep are left.
-pause_wait=500 pause_blocked_wait=2500 pause_seq=0 paused_total=0 blocked=0
+pause_wait=500 pause_blocked_wait=2500 pause_seq=0 paused_total=0 blocked=0 pause_expired=0
 # A pause already continued before this supervisor started is not served: the launch starts running,
 # and the continue is acknowledged for a client that waits for it.
 if [[ -n $pause_file ]]; then
