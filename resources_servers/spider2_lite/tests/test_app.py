@@ -166,9 +166,7 @@ class TestEvalUtils:
 
     def test_execute_sqlite_async_ok(self, tiny_db, sql_executor):
         sem = asyncio.Semaphore(1)
-        rows = asyncio.get_event_loop().run_until_complete(
-            execute_sqlite_async(tiny_db, "SELECT id FROM items ORDER BY id", sem, sql_executor)
-        )
+        rows = asyncio.run(execute_sqlite_async(tiny_db, "SELECT id FROM items ORDER BY id", sem, sql_executor))
         assert rows == [(1,), (2,)]
 
     def test_execute_sqlite_timeout_raises(self, tiny_db):
@@ -281,7 +279,7 @@ class TestEvalUtils:
 
     def test_execute_and_compare_match(self, tiny_db, sql_executor):
         sem = asyncio.Semaphore(4)
-        match, gold, pred, err = asyncio.get_event_loop().run_until_complete(
+        match, gold, pred, err = asyncio.run(
             execute_and_compare(
                 tiny_db, "SELECT id FROM items ORDER BY id", "SELECT id FROM items ORDER BY id", sem, sql_executor
             )
@@ -291,7 +289,7 @@ class TestEvalUtils:
 
     def test_execute_and_compare_mismatch(self, tiny_db, sql_executor):
         sem = asyncio.Semaphore(4)
-        match, gold, pred, err = asyncio.get_event_loop().run_until_complete(
+        match, gold, pred, err = asyncio.run(
             execute_and_compare(tiny_db, "SELECT id FROM items", "SELECT name FROM items", sem, sql_executor)
         )
         assert match is False
@@ -299,7 +297,7 @@ class TestEvalUtils:
 
     def test_execute_and_compare_gold_error(self, tiny_db, sql_executor):
         sem = asyncio.Semaphore(4)
-        match, gold, pred, err = asyncio.get_event_loop().run_until_complete(
+        match, gold, pred, err = asyncio.run(
             execute_and_compare(tiny_db, "INVALID SQL", "SELECT 1", sem, sql_executor)
         )
         assert match is False
@@ -307,7 +305,7 @@ class TestEvalUtils:
 
     def test_execute_and_compare_pred_error(self, tiny_db, sql_executor):
         sem = asyncio.Semaphore(4)
-        match, gold, pred, err = asyncio.get_event_loop().run_until_complete(
+        match, gold, pred, err = asyncio.run(
             execute_and_compare(tiny_db, "SELECT id FROM items", "INVALID SQL", sem, sql_executor)
         )
         assert match is False
