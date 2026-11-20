@@ -54,3 +54,34 @@ adopted_from:
   ref: 04eeb7efa7e3e4f83a00cbd5ce436a38fd5dda23  # pragma: allowlist secret
   reconciled: '2026-10-24'
 lifecycle: active
+setups:
+- name: hle_diamond/opencode
+  config_path: ../opencode.yaml
+  integration_profile: custom-gym-agent-loop
+  description: HLE-Diamond's 728 text-only questions graded by an LLM judge, answered by the OpenCode harness in agent sessions. OpenCode keeps its own system prompt, so the HLE authors' answer-format instructions, which the main config sends as the system message, follow the question in the user message word for word.
+  requirements:
+    network: allowlist
+  agent_server: opencode_agent
+  datasets:
+  - name: hle_diamond_text
+    type: benchmark
+    jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl
+    prepare_script: benchmarks/hle_diamond/prepare_text.py
+    prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml
+    num_repeats: 1
+  standard_prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml
+- name: hle_diamond/pi
+  config_path: ../pi.yaml
+  integration_profile: custom-gym-agent-loop
+  description: HLE-Diamond's 728 text-only questions graded by an LLM judge, answered by the pi harness in agent sessions. pi keeps its own system prompt, so the HLE authors' answer-format instructions, which the main config sends as the system message, follow the question in the user message word for word.
+  requirements:
+    network: allowlist
+  agent_server: pi_agent
+  datasets:
+  - name: hle_diamond_text
+    type: benchmark
+    jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl
+    prepare_script: benchmarks/hle_diamond/prepare_text.py
+    prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml
+    num_repeats: 1
+  standard_prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml

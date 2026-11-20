@@ -1,0 +1,57 @@
+name: scicode_verified
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: SciCode-Verified, the human-verified correction of SciCode, scientific
+  research problems split into subproblems that each ask for a Python function, run
+  against test cases.
+modality: text
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- dhruvnathawani
+intended_use:
+- evaluation
+capabilities:
+- coding
+- coding/scientific_coding
+- coding/code_generation
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/task_planning
+domains:
+- physics
+- chemistry
+- biology
+primary_metric: unknown
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: scicode
+agent_server: scicode_agent
+datasets:
+- name: scicode_verified
+  type: benchmark
+  jsonl_fpath: benchmarks/scicode_verified/data/scicode_verified_benchmark.jsonl
+  prepare_script: benchmarks/scicode_verified/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/shhu2001/SciCode-Verified
+  ref: eea11a866be6860725258702b39ef8651ed26abd  # pragma: allowlist secret
+  reconciled: '2026-10-19'
+lifecycle: active

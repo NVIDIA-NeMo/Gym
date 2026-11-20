@@ -1,0 +1,52 @@
+name: labbench2_pdf
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: knowledge
+description: LabBench2 LitQA3, FigQA2 and TableQA2 questions answered from the source
+  papers, given as PDFs in a Harbor sandbox, scored by exact or numeric match with
+  an LLM judge fallback.
+modality: text, image
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- azkalot1
+intended_use:
+- evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/multi_source_synthesis
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/file_operations
+- tool_and_computer_use/multi_step_tool_use
+- knowledge
+- knowledge/expert_knowledge
+domains:
+- biology
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+agent_server: harbor_agent_general
+datasets:
+- name: labbench2_pdf
+  type: benchmark
+  jsonl_fpath: benchmarks/labbench2_pdf/data/labbench2_pdf_benchmark.jsonl
+  prepare_script: benchmarks/labbench2_pdf/prepare.py
+  num_repeats: 1
+canonical_split: train
+prompt_source: prepared
+lifecycle: active
+resources_server: null

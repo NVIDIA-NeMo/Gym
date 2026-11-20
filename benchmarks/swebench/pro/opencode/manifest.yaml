@@ -4,9 +4,9 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
-description: SWE-bench pro test-split software engineering tasks using prepared repair
-  prompts, OpenCode agent sessions in the benchmark's task sandbox, and binary
-  patch-resolution scoring.
+description: SWE-bench Pro test-split software engineering tasks using prepared repair
+  prompts, an agent harness in the benchmark's task sandbox, and binary patch-resolution
+  scoring.
 modality: text
 licensing: unknown
 authors:
@@ -58,3 +58,30 @@ adopted_from:
   ref: 7ab5114912baf22bb098818e604c02fe7ad2c11f  # pragma: allowlist secret
   reconciled: '2026-08-31'
 lifecycle: active
+setups:
+- name: swebench/pro/hermes
+  config_path: ../hermes.yaml
+  description: SWE-bench Pro test-split software engineering tasks using prepared repair prompts, the Hermes harness in the benchmark's task sandbox, and binary patch-resolution scoring.
+  requirements:
+    network: allowlist
+  dataset_owner: null
+  agent_server: hermes_agent
+  datasets:
+  - name: swebench_pro
+    type: benchmark
+    jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
+    prepare_script: benchmarks/swebench/pro/prepare.py
+    num_repeats: 1
+- name: swebench/pro/nooa
+  config_path: ../nooa.yaml
+  description: SWE-bench Pro test-split software engineering tasks using prepared repair prompts, the NOOA harness in the benchmark's task sandbox, and binary patch-resolution scoring.
+  requirements:
+    network: allowlist
+  dataset_owner: null
+  agent_server: nooa_agent
+  datasets:
+  - name: swebench_pro
+    type: benchmark
+    jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
+    prepare_script: benchmarks/swebench/pro/prepare.py
+    num_repeats: 1

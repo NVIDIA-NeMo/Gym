@@ -16,8 +16,33 @@ maintainers:
 - lafrancef
 intended_use:
 - evaluation
-capabilities: unknown
-domains: unknown
+capabilities:
+- coding
+- coding/repository_coding
+- coding/debugging_and_testing
+- coding/code_editing
+- coding/code_understanding
+- coding/code_generation
+- tool_and_computer_use
+- tool_and_computer_use/file_operations
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/multi_step_tool_use
+- human_ai_interaction
+- human_ai_interaction/human_in_the_loop_communication
+- context_management
+- context_management/constraint_preservation
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/evidence_synthesis
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- planning_and_autonomy
+- planning_and_autonomy/self_verification
+- planning_and_autonomy/long_horizon_execution
+domains:
+- computer_science
+- artificial_intelligence
 primary_metric: unknown
 requirements:
   gpu: false
@@ -45,3 +70,10 @@ adopted_from:
   source: https://github.com/Togetherbench/SWE-Together
   ref: 891d19eb4b3a64a47c3d49bbd066a311e0133254  # pragma: allowlist secret
   reconciled: '2026-10-23'
+setups:
+- name: swe_together/opencode
+  config_path: opencode.yaml
+  integration_profile: custom-gym-agent-loop
+  description: Interactive repository tasks with a simulated user and a frozen-goal agentic judge, with OpenCode as the candidate agent; swe_together's main config includes this file.
+  dataset_owner: null
+  agent_server: opencode_agent

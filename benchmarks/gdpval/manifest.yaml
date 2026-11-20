@@ -84,3 +84,33 @@ rollout_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_col
 canonical_split: train
 standard_prompt_config: benchmarks/gdpval/prompts/default-stirrup.yaml
 lifecycle: active
+protocols:
+- name: gdpval/opencode
+  config_path: opencode.yaml
+  description: GDPval professional deliverable tasks with a harness-neutral prompt in place of Stirrup's and the GDPval tools served over MCP, scored by a rubric judge panel and run with the OpenCode harness.
+  maintainers:
+  - Kh4L
+  - vadam5
+  resources_server: null
+  agent_server: opencode_agent
+  datasets:
+  - name: gdpval
+    type: benchmark
+    jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark_harness_neutral.jsonl
+    prepare_script: benchmarks/gdpval/prepare_harness_neutral.py
+    prompt_config: benchmarks/gdpval/prompts/harness-neutral.yaml
+    num_repeats: 1
+  standard_prompt_config: benchmarks/gdpval/prompts/harness-neutral.yaml
+  setups:
+  - name: gdpval/codex
+    config_path: codex.yaml
+    description: GDPval professional deliverable tasks with harness-neutral prompts and rubric scoring, run with the Codex harness.
+    agent_server: codex_agent
+  - name: gdpval/openclaw
+    config_path: openclaw.yaml
+    description: GDPval professional deliverable tasks with harness-neutral prompts and rubric scoring, run with the OpenClaw harness.
+    agent_server: openclaw_agent
+  - name: gdpval/pi
+    config_path: pi.yaml
+    description: GDPval professional deliverable tasks with harness-neutral prompts and rubric scoring, run with the pi harness.
+    agent_server: pi_agent

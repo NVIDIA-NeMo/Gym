@@ -1,0 +1,44 @@
+name: webvoyager
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: WebVoyager tasks on live public websites, judged SUCCESS or FAILURE by
+  a vision LLM from the final answer and screenshots.
+modality: text, image
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- JeffPengCoder
+intended_use:
+- evaluation
+capabilities: unknown
+domains: unknown
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: webvoyager_judge
+agent_server: web_agent
+datasets:
+- name: webvoyager
+  type: benchmark
+  jsonl_fpath: benchmarks/webvoyager/data/webvoyager.jsonl
+  prepare_script: benchmarks/webvoyager/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: full
+prompt_source: prepared
+adopted_from:
+  source: https://github.com/jayl940712/webarena_benchmarks
+  ref: 6a2977939b157b0ab9de7799bb089c721f1ac115  # pragma: allowlist secret
+  reconciled: '2026-11-12'
+lifecycle: active
