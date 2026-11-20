@@ -31,13 +31,36 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 | [ugphysics_judge](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ugphysics_judge) | Undergraduate physics benchmarks | LLM judge (TRUE/FALSE) + math-verify | ✓ |
 | [critpt](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/critpt) | Research-level physics problems scored by the Artificial Analysis API | LLM judge (external) | ✓ |
 | [critpt_custom_grader](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/critpt_custom_grader) | Sandboxed execution grader for CritPt-like tasks with operator-supplied expectations | Sandboxed code execution + comparator | |
-| [ether0](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ether0) | Chemistry benchmark verifiers (ether0) | Rule-based + LLM judge | ✓ |
+| [ether0](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ether0) | Chemistry benchmark verifiers (ether0) | Rules + chemistry models | ✓ |
 | [bunsenbench_chemistry_mcq](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bunsenbench_chemistry_mcq) | BunsenBench chemistry multiple-choice benchmark | Exact match | ✓ |
 | [assaybench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/assaybench) | AssayBench: rank the hit genes of a CRISPR screen from its description (1,920 screens, 3 cohorts) | Adjusted nDCG@100 via the authors' `assaybench` package | ✓ |
 | [frontierscience_judge](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/frontierscience_judge) | FrontierScience olympiad and research answer grading | LLM judge | ✓ |
 | [proof_verification](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) | Proof scoring against ground truth | LLM judge + meta-verifier | |
 | [newton_bench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/newton_bench) | Scientific law discovery across 12 physics domains | Execution | |
 | [math_with_code](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) | Competitive math with calculator tools | Boxed answer + numeric match | |
+
+### ether0 oracle concurrency
+
+The ether0 resources server runs its solubility (`sol_eval`) and retrosynthesis (`rxn_forward`)
+graders in background threads. `oracle_max_concurrency` limits simultaneous oracle-backed grades
+in each server worker and defaults to **8**. It applies to both local chemistry models and a
+configured remote oracle. Override it in the resources-server config:
+
+```yaml
+ether0:
+  resources_servers:
+    ether0:
+      oracle_max_concurrency: 8
+```
+
+Text and molecule comparison, molecular-formula, functional-group, and molecule-completion graders
+keep their existing local execution path and do not wait for an oracle slot. Cancelling a request
+that is already grading does not stop its background calculation; the slot stays occupied until
+that calculation finishes. Requests cancelled while waiting for a slot do not start grading.
+
+Tune the limit against available CPU and memory and the mix of tasks. More concurrent grades can
+improve oracle throughput, but each server worker has its own limit and loads its own local oracle
+models. Raising both the worker count and the per-worker limit increases resource demand.
 
 ## Coding
 
@@ -55,6 +78,7 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 | [scicode](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/scicode) | Multi-step scientific code generation | Code execution | ✓ |
 | [cvdp](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/cvdp) | RTL hardware design code generation | Code execution (simulation) | ✓ |
 | [openenv](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/openenv) | Python code execution environment via OpenEnv | Execution (stdout/stderr) | |
+| [ui_generation_agentic](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ui_generation_agentic) | A coding harness writes one Next.js, Vite or static UI file in a sandbox ([tutorial](/tutorials/evaluation-tutorials/ui-generation-agentic)) | Build in a clean template + LLM judge | |
 
 ## Knowledge & Reasoning
 
@@ -80,15 +104,21 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 | Environment | Description | Verification | Benchmark |
 |---|---|---|---|
 | [workplace_assistant](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant) | Workplace tasks: 27 tools, 5 databases, 690 tasks | Rule-based (task completion) | ✓ |
+| [WebArena](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webarena/README.md) | 812 browser tasks on self-hosted sites; deployment, reset, judge, and single-display requirements in the benchmark README | WebArena reference evaluator: rules and LLM judge | ✓ |
+| [VisualWebArena](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/visualwebarena/README.md) | 908 visually grounded browser tasks; shared reference-image root, self-hosted sites, reset, judge, and single-display requirements in the benchmark README | VisualWebArena reference evaluator: rules, LLM judge, VQA and fuzzy-image matching | ✓ |
 | [aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) | Multi-hop QA with Wikipedia search + GSM8k with calculator | LLM judge + execution | ✓ |
 | [tavily_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tavily_search) | Web search tool use (Tavily API) | Execution + optional LLM judge | ✓ |
 | [calendar](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/calendar) | Multi-turn calendar scheduling with constraint satisfaction | Rule-based (constraints) | ✓ |
+| [OfficeQA Pro](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/officeqa_pro/README.md) | Experimental document retrieval and numerical reasoning: 133 questions over 697 Treasury Bulletin PDFs | OfficeQA reference scorer | ✓ |
+| [PDF Analyst QA](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/pdf_analyst_qa/README.md) | PDF question answering for training on operator-supplied datasets, using OpenCode and OpenSandbox | Binary reward for answer correctness and format compliance | |
 | [finance_sec_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/finance_sec_search) | SEC EDGAR filing search for financial analysis | LLM judge + execution | ✓ |
+| [finance_agent_v2 (FrontierFinance)](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/finance_agent_v2) | FrontierFinance investor-research queries on Finance Agent v2 tools, capped at each query's date | Rubric LLM judge panel (3 judges) | ✓ |
 | [xlam_fc](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xlam_fc) | Function calling from Salesforce xlam-60k | Exact match | ✓ |
 | [single_step_tool_use_with_argument_comparison](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/single_step_tool_use_with_argument_comparison) | Pivot RL for tool use across conversational, SWE, and search domains | Argument comparison | ✓ |
 | [agentic_turn_simulation](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/agentic_turn_simulation) | Whole agent turns in your own agent-harness conversations (Claude Code, Hermes, Cline, ...) against simulated tools | LLM judge + code gates | ✓ ([AgentArena](/evaluation/benchmarks#benchmarks-whose-data-you-stage), data staged by you) |
 | [tales](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tales) | Text-adventure games (AlfWorld, ScienceWorld, Jericho, TextWorld) in Gymnasium API style | Rule-based (task completion) | |
 | [google_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/google_search) | MCQA with integrated Google search tool | Exact match | |
+| [collab_intel](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/collab_intel) | [Collaborative Intelligence](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/collab_intel): the model as a teammate in a team chat with a scripted teammate who creates a problem, 8 dimensions (evaluation only; partners and judges are a configured endpoint) | Upstream harness checkers, test pass on scenarios passed alone | ✓ |
 
 ## Instruction Following & Safety
 
@@ -115,7 +145,12 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 | [wmt_translation](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/wmt_translation) | Machine translation with BLEU and xCOMET-XXL | Execution (COMET metrics) | ✓ |
 | [longmt_eval](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/longmt_eval) | Document-level translation (SEGALE pipeline + COMETKiwi) | Execution (neural QE) | ✓ |
 | [vlm_eval_kit](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/vlm_eval_kit) | VLM benchmarks: MMBench, OCRBench, and others | Execution (VLMEvalKit) | ✓ |
+| [vstar_spatiotemporal](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/vstar_spatiotemporal) | V-STaR video spatio-temporal reasoning: what, when and where for each event, from up to 16 frames sent as images (the video benchmark, not the image visual-search benchmark V\*) | LLM judge (what) + temporal IoU (when) + per-second box IoU (where) | ✓ |
+| [videomme_v2](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/videomme_v2) | Video-MME v2 single-turn video multiple-choice QA (evaluation only) | Boxed letter; fixed-cohort accuracy and grouped nonlinear score | |
+| [videomme_v1](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/videomme_v1) | Video-MME single-turn video multiple-choice QA (evaluation only) | Boxed letter; fixed-cohort accuracy | |
+| [lvbench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/lvbench) | LVBench single-turn long-video multiple-choice QA (evaluation only) | Boxed letter; fixed-cohort accuracy | |
 | [graphwalks](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/graphwalks) | Long-context graph BFS/DFS reasoning | F1 over node sets | ✓ |
+| [got10k](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/got10k) | GOT-10k single-object tracking over image sequences sampled at 1 fps; not the official toolkit protocol. The data needs registration and is non-commercial (CC BY-NC-SA 4.0) | Rule-based (box IoU over visible frames) | ✓ |
 | [arena_judge](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/arena_judge) | Arena Hard v2 pairwise LLM-judge (category-specific, side-swapped) | LLM judge (pairwise) | ✓ |
 | [speed_bench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/speed_bench) | Speculative-decoding throughput measurement | vLLM Prometheus metrics | ✓ |
 | [genrm_compare](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/genrm_compare) | GenRM pairwise comparison for RLHF training | LLM judge (pairwise) | |

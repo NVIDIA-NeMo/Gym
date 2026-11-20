@@ -28,9 +28,11 @@ if TYPE_CHECKING:
         NG_ENVIRONMENT_SERVER_KEY,
         NG_RESULT_TYPE_KEY,
         NG_TERMINAL_KEY,
+        RecordSink,
         RolloutCollectionConfig,
         RolloutCollectionHelper,
         SharedRolloutCollectionConfig,
+        enrich_run_result,
         get_max_rollout_attempts,
     )
     from nemo_gym.rollouts.rollout_health import run_health_checks
@@ -57,6 +59,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "enrich_run_result": "rollout_collection",
     "AGENT_REQUEST_FAILED_FAILURE_CLASS": "rollout_collection",
     "DispatchLatencyTracker": "rollout_perf",
     "ELAPSED_S_KEY": "health.timeouts",
@@ -65,6 +68,7 @@ _PUBLIC_API = {
     "NG_ENVIRONMENT_SERVER_KEY": "rollout_collection",
     "NG_RESULT_TYPE_KEY": "rollout_collection",
     "NG_TERMINAL_KEY": "rollout_collection",
+    "RecordSink": "rollout_collection",
     "RolloutCollectionConfig": "rollout_collection",
     "RolloutCollectionHelper": "rollout_collection",
     "RolloutFailureRecord": "rollout_outcomes",

@@ -34,8 +34,9 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
-from nemo_gym.models.token_capture.lineage import stamp_continuation
+from nemo_gym.models.token_capture.fingerprint import _tools_of, assistant_fingerprint, trailing_assistant_turn
+from nemo_gym.models.token_capture.lineage import MODEL_SERVER_CHANGED_REASON, stamp_continuation
+from nemo_gym.models.token_capture.lineage_scope import lineage_scope_key, row_lineage_scope, same_agent_other_server
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     CaptureInputError,
@@ -50,6 +51,8 @@ from nemo_gym.models.token_capture.protocols import (
 from nemo_gym.models.token_capture.records import (
     ENGINE_REFUSED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
+    CallIdentity,
+    ModelRef,
     ParentResolutionStatus,
     TokenEntry,
     extract_token_fields,
@@ -62,8 +65,29 @@ from nemo_gym.models.token_capture.records import (
 
 logger = logging.getLogger(__name__)
 
+
+def _trailing_tool_names(items: list[dict] | None) -> list[str]:
+    """Return the tool names in a request's last model turn, for the poison log.
+
+    Names only: no arguments, IDs or content, so the log shows which call broke the match without the task data.
+    """
+    try:
+        return [
+            name for item in trailing_assistant_turn(items or []) for _call_id, name, _arguments in _tools_of(item)
+        ]
+    except Exception:  # A log line must never fail the model call.
+        return []
+
+
 if TYPE_CHECKING:
-    from nemo_gym.models.token_capture.staging.records import CaptureAdmission, CaptureLedgerCommit
+    from nemo_gym.models.token_capture.staging.records import (
+        CallRecord,
+        CaptureAdmission,
+        CaptureLedgerCommit,
+        ReplayContext,
+        ReplaySummary,
+        RootReason,
+    )
 
 # Wire field names between the Gym model server and a framework inference
 # worker: the typed admission rides the engine-bound request under
@@ -110,6 +134,7 @@ class CaptureContext:
     # strict tri-state of the lineage result.
     external_staging: bool = False
     parent_resolution_mode: ParentResolutionMode = "fingerprint"
+    allow_system_suffix: bool = False
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.
@@ -141,6 +166,19 @@ class CaptureContext:
     # ``capture_engine_refusal`` recorded that the engine refused this call. The call has no
     # entry, and the worker-custody sweep must not record it a second time as uncommitted.
     engine_refusal_recorded: bool = False
+    # The agent instance the request URL named; ``None`` for an unnamed agent.
+    agent_instance: str | None = None
+    # The serving model server, from its own configuration, never from the request.
+    model_ref: ModelRef | None = None
+
+    @property
+    def identity(self) -> CallIdentity:
+        """The agent instance and model server every record of this call carries."""
+        return CallIdentity(agent_instance=self.agent_instance, model_ref=self.model_ref)
+
+    @property
+    def agent_kind(self) -> str | None:
+        return self.identity.agent_kind
 
     @property
     def parent_call_id(self) -> str | None:
@@ -259,7 +297,9 @@ async def resolve_parent(request_messages: list | None) -> None:
                     "and multi-call rollouts will be masked (allow_unresolved_continuations is set)."
                 )
         else:
-            context.parent_resolution = await context.lineage_store.resolve(context.capture_key, request_messages)
+            context.parent_resolution = await context.lineage_store.resolve(
+                context.capture_key, request_messages, identity=context.identity
+            )
         _count_resolution(context.parent_resolution.status.value)
     except Exception as error:
         # Worker custody fails closed: an unresolved parent would silently
@@ -312,11 +352,13 @@ async def resolve_parent(request_messages: list | None) -> None:
                 context.capture_key,
                 context.model_call_id,
                 UNRESOLVED_PARENT_REASON,
+                identity=context.identity,
             )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
     try:
-        has_rows = await ledger.has_rows(context.capture_key)
+        # Only the call's own lineage scope counts: another agent instance's calls never make this one a continuation.
+        has_rows = await ledger.has_rows(context.capture_key, identity=context.identity)
     except RolloutRetiredError:
         # A late call of an abandoned attempt, or the first call of a duplicate run. Admitting it would stage
         # tokens that the ledger then refuses to record, so no manifest would ever name them.
@@ -327,51 +369,47 @@ async def resolve_parent(request_messages: list | None) -> None:
         )
         return
     if is_root or not has_rows:
+        reason = context.parent_resolution.reason if context.parent_resolution is not None else ""
         context.capture_admission = CaptureAdmission(
             capture_key=context.capture_key,
             model_call_id=context.model_call_id,
             mode="text",
+            root_reason=MODEL_SERVER_CHANGED_REASON if reason == MODEL_SERVER_CHANGED_REASON else None,
         )
         return
     logger.warning(
-        "Unresolved parent for model call %s of rollout %s (reason=%s, %d request items); poisoning the call.",
+        "Unresolved parent for model call %s of rollout %s (reason=%s, %d request items); poisoning the call. "
+        "Tool names in the last model turn: %s.",
         context.model_call_id,
         context.capture_key,
         context.parent_resolution.reason if context.parent_resolution is not None else None,
         len(context.request_items),
+        _trailing_tool_names(context.request_items),
     )
     await ledger.record_failure(
         context.capture_key,
         context.model_call_id,
         UNRESOLVED_PARENT_REASON,
+        identity=context.identity,
     )
 
 
-async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -> None:
-    """Select a source-prefix candidate or a root for rewritten history.
+def _source_history_matches(
+    records: list[CallRecord],
+    request_replay: ReplayContext,
+    prefixes: dict[int, ReplaySummary],
+    root_reason: RootReason,
+    *,
+    allow_system_suffix: bool,
+) -> tuple[list[CallRecord], RootReason]:
+    """Return the recorded calls whose source history the request extends with only user or tool items.
 
-    Match source-prefix evidence, including an older accepted call after a retry.
-    RL still verifies the renderer and converted-message boundary.
+    With ``allow_system_suffix``, system items may also follow the recorded history.
     """
-    # Deferred to avoid the staging records/sink import cycle.
-    from nemo_gym.models.token_capture.replay import replay_context, same_replay_source, summarize_replay
-    from nemo_gym.models.token_capture.staging.records import CaptureAdmission, RolloutManifest, RootReason
+    from nemo_gym.models.token_capture.replay import same_replay_source, summarize_replay
 
-    if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
-        raise ValueError("Source-history parent resolution requires an external capture ledger")
-    try:
-        manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.capture_key))
-    except RolloutRetiredError as error:
-        raise CaptureAdmissionError(str(error)) from error
-    predecessor = None
-    root_reason: RootReason = "first_call" if not manifest.records else "no_prefix_match"
-    try:
-        request_replay = replay_context(request_items)
-    except ValueError as error:
-        raise CaptureInputError(str(error)) from error
-    prefixes = {}
     matches = []
-    for record in manifest.records:
+    for record in records:
         replay = record.replay
         if replay is None:
             raise CaptureAdmissionError("Captured call is missing source replay evidence")
@@ -385,10 +423,52 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
             # proof before using an empty-content-equivalent prefix.
             same_replay_source(prefixes[replay.item_count], replay, allow_empty_tool_content=True) and suffix
         ):
-            if all(item.role in ("user", "tool") for item in suffix):
+            if all(
+                item.role in ("user", "tool") or (allow_system_suffix and item.role == "system") for item in suffix
+            ):
                 matches.append(record)
             else:
                 root_reason = "non_user_suffix"
+    return matches, root_reason
+
+
+async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -> None:
+    """Select a source-prefix candidate or a root for rewritten history.
+
+    Match source-prefix evidence, including an older accepted call after a retry.
+    RL still verifies the renderer and converted-message boundary.
+    """
+    # Deferred to avoid the staging records/sink import cycle.
+    from nemo_gym.models.token_capture.replay import replay_context, same_replay_source
+    from nemo_gym.models.token_capture.staging.records import CaptureAdmission, RolloutManifest
+
+    if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
+        raise ValueError("Source-history parent resolution requires an external capture ledger")
+    try:
+        manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.capture_key))
+    except RolloutRetiredError as error:
+        raise CaptureAdmissionError(str(error)) from error
+    # Candidates come only from the call's own lineage scope: the same agent instance on the same model server.
+    scope = lineage_scope_key(context.identity)
+    own_records = [record for record in manifest.records if row_lineage_scope(record) == scope]
+    predecessor = None
+    root_reason: RootReason = "first_call" if not own_records else "no_prefix_match"
+    try:
+        request_replay = replay_context(request_items)
+    except ValueError as error:
+        raise CaptureInputError(str(error)) from error
+    prefixes = {}
+    matches, root_reason = _source_history_matches(
+        own_records, request_replay, prefixes, root_reason, allow_system_suffix=context.allow_system_suffix
+    )
+    if not matches and any(
+        _source_history_matches(
+            [record], request_replay, prefixes, root_reason, allow_system_suffix=context.allow_system_suffix
+        )[0]
+        for record in manifest.records
+        if same_agent_other_server(scope, row_lineage_scope(record))
+    ):
+        root_reason = MODEL_SERVER_CHANGED_REASON
     if matches:
         # Prefer the longest complete prefix; use identity to break ties when available.
         longest = max(record.replay.item_count for record in matches)
@@ -461,7 +541,7 @@ async def register_call_intent() -> None:
         if begin is None or context.capture_admission is None:
             raise ValueError("Framework-owned capture requires durable call intents")
         try:
-            await begin(context.capture_key, context.model_call_id)
+            await begin(context.capture_key, context.model_call_id, identity=context.identity)
         except RolloutRetiredError as error:
             raise CaptureAdmissionError(str(error)) from error
         context.intent_registered = True
@@ -471,7 +551,7 @@ async def register_call_intent() -> None:
     begin = getattr(context.token_sink, "begin_call", None)
     if begin is None:
         return
-    await begin(context.capture_key, context.model_call_id)
+    await begin(context.capture_key, context.model_call_id, identity=context.identity)
     context.intent_registered = True
 
 
@@ -551,7 +631,9 @@ async def _record_external_refusal(context: CaptureContext) -> None:
     ledger = context.lineage_store
     if context.capture_admission is None or context.committed or not isinstance(ledger, CaptureLedger):
         return
-    await ledger.record_failure(context.capture_key, context.model_call_id, ENGINE_REFUSED_CALL_REASON)
+    await ledger.record_failure(
+        context.capture_key, context.model_call_id, ENGINE_REFUSED_CALL_REASON, identity=context.identity
+    )
     context.engine_refusal_recorded = True
 
 
@@ -674,6 +756,11 @@ async def commit_entry(
     if context.token_sink is None:
         context.committed = True
         return
+    # The identity comes from the capture context, which the model server built from its own configuration
+    # and the request URL; an engine-side caller does not supply it.
+    entry.agent_instance = context.agent_instance
+    entry.agent_kind = context.agent_kind
+    entry.model_ref = context.model_ref
     try:
         # Use the resolution decided before dispatch.
         # Engine-side callers may pass their own resolution.
@@ -792,7 +879,7 @@ async def _mark_incomplete(context: CaptureContext) -> bool:
         )
         return True
     try:
-        await mark(context.capture_key, context.model_call_id)
+        await mark(context.capture_key, context.model_call_id, identity=context.identity)
     except TokenCaptureFrozenError:
         # The rollout was frozen or retired while this call was in flight, for example an abandoned attempt's
         # late call. Its verdict is sealed, or nobody will read it, so there is nothing to mark.

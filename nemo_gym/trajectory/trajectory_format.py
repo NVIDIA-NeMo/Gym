@@ -32,6 +32,7 @@ _TOOL_FLAT_FIELDS = {"started_at", "completed_at", "duration_ms", "timing_source
 # diagnostics remain visible to legacy consumers, including strict exporters.
 _V2_ONLY_GAPS = frozenset(
     {
+        "failure_report_unavailable",
         "tool_attempt_identity_unavailable",
         "tool_agent_instance_unavailable",
         "tool_clock_domain_unavailable",
@@ -355,6 +356,7 @@ def project_trajectory_v1(trajectory: dict[str, Any], *, restore_native_ids: boo
         invocation.pop("agent_instance", None)
     for call in result.get("model_calls", []):
         call.pop("agent_instance", None)
+        call.pop("agent_kind", None)
         call.pop("clock_domain", None)
     if "gaps" in result:
         result["gaps"] = _project_gaps_v1(result["gaps"], trajectory.get("tool_calls", []))

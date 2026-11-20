@@ -29,7 +29,7 @@ When ``put`` returns, the record must be durable and visible to every worker's l
 The harness can then send a continuation to any worker without racing publication of the previous call.
 A transport that returns before cross-client visibility can produce intermittent unresolved samples under load.
 
-A sink may additionally implement ``begin_call(rollout_id, model_call_id)``.
+A sink may additionally implement ``begin_call(rollout_id, model_call_id, *, identity=None)``.
 It is an optional extension and deliberately not part of the ``TokenSink`` protocol.
 ``begin_call`` durably records a pre-dispatch intent.
 An intent with no matching entry at freeze must mask the rollout.
@@ -59,7 +59,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, TypedDict, runtime_checkable
 
-from nemo_gym.models.token_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
+from nemo_gym.models.token_capture.records import CallIdentity, EngineRefusalRecord, ParentResolutionStatus, TokenEntry
 from nemo_gym.models.token_capture.staging.records import CaptureLedgerCommit
 
 
@@ -130,10 +130,23 @@ class TokenCaptureSnapshot:
 
     capture_key: str
     entries: tuple[TokenEntry, ...]
+    # The aggregate across agent instances: any agent instance lost a call, or the episode was marked.
     incomplete: bool
     snapshot_id: str
     version: int
     engine_refusals: tuple[EngineRefusalRecord, ...] = ()
+    # The agent instances with a lost call of their own; ``None`` is the unnamed agent.
+    incomplete_agent_instances: frozenset[str | None] = frozenset()
+    # A mark or failure with no known identity, or one that names no agent instance in an episode that names
+    # them: it masks every agent instance.
+    incomplete_episode: bool = False
+
+    def incomplete_for(self, agent_instance: str | None) -> bool:
+        """Whether this agent instance's sample is incomplete: by its own lost call, or episode-wide."""
+        if not self.incomplete_agent_instances and not self.incomplete_episode:
+            # A source that reports only the aggregate cannot place it, so it applies to everyone.
+            return self.incomplete
+        return self.incomplete_episode or agent_instance in self.incomplete_agent_instances
 
 
 @dataclass(frozen=True)
@@ -181,10 +194,19 @@ class LineageResolver(Protocol):
     Unstamped entries are invisible to resolution.
     """
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+    async def resolve(
+        self, rollout_id: str, request_items: list[dict], *, identity: CallIdentity
+    ) -> LineageResolution:
         """Return whether the request is a root, resolved, or unresolved.
 
         ``request_items`` are the unmodified harness items.
+        ``identity`` names the caller: only calls of the request's own lineage scope (its agent instance and model
+        server) can be its parent. An unnamed agent passes an identity that carries its model server.
+        A request whose only match was served by another model server for the same agent instance is a root
+        with reason ``model_server_changed``.
+        A request that carries model turns while its lineage scope has made no call is a root with reason
+        ``first_call``: the turns are input, such as another agent instance's transcript. An implementation
+        that cannot tell a lineage scope without calls from one whose calls it no longer holds returns ``UNRESOLVED``.
         The implementation must verify the recorded request context.
         A conflicting set of committed payloads for one call id must count as zero candidates.
         UNRESOLVED is always a safe answer; a wrong RESOLVED is caught later by digest verification.
@@ -214,14 +236,17 @@ class CaptureLedger(LineageResolver, Protocol):
     Records must be visible to every serving worker before ``record`` returns.
 
     Framework-owned capture additionally requires ``begin_call(rollout_id,
-    model_call_id)`` and ``close_admissions(rollout_id)``. They share one atomic
+    model_call_id, *, identity=None)`` and ``close_admissions(rollout_id)``. They share one atomic
     admission boundary: close returns a manifest and rejects new calls, while
     existing intents may still commit. These extensions do not freeze writes.
 
-    ``refuse_call(rollout_id, model_call_id)`` optionally settles an intent after
+    ``refuse_call(rollout_id, model_call_id, *, identity=None)`` optionally settles an intent after
     the worker acknowledges a refusal before generation or staging. Such calls
     remain in the audit ledger but are excluded from the training manifest.
     An error status or message alone is not this acknowledgement.
+
+    Every write takes the call's ``identity`` keyword: the agent instance that made it and the model server
+    that served it. The ledger writes it onto the row, omitting the agent instance when none was named.
     """
 
     async def record(self, commit: CaptureLedgerCommit) -> None:
@@ -233,9 +258,12 @@ class CaptureLedger(LineageResolver, Protocol):
         """
         ...
 
-    async def record_failure(self, capture_key: str, model_call_id: str, reason: str) -> None:
+    async def record_failure(
+        self, capture_key: str, model_call_id: str, reason: str, *, identity: CallIdentity | None = None
+    ) -> None:
         """Record a call whose token capture did not complete.
 
+        A failure written without an identity inherits it from the call's intent row in the manifest.
         Failure rows do not participate in parent resolution.
         ``manifest`` includes them under ``failures`` so finalization rejects the rollout.
         """
@@ -252,10 +280,11 @@ class CaptureLedger(LineageResolver, Protocol):
         """
         ...
 
-    async def has_rows(self, rollout_id: str) -> bool:
-        """Return whether any ledger row (committed or failed) exists.
+    async def has_rows(self, rollout_id: str, *, identity: CallIdentity) -> bool:
+        """Return whether any ledger row (committed or failed) exists for ``identity``'s lineage scope.
 
-        A retired rollout raises ``RolloutRetiredError``, so admission can refuse to capture its late calls.
+        A retired rollout whose ledger has no row of that lineage scope raises ``RolloutRetiredError``, so admission
+        can refuse to capture its late calls.
         """
         ...
 
@@ -310,8 +339,13 @@ class TokenSink(Protocol):
         """
         ...
 
-    async def mark_incomplete(self, capture_key: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(
+        self, capture_key: str, model_call_id: str = "", *, identity: CallIdentity | None = None
+    ) -> None:
         """Durably record that a call of this rollout failed to capture.
+
+        ``identity`` names the call's agent instance and model server. A mark with no ``model_call_id``
+        applies to the whole episode.
 
         The rollout is now missing a turn.
         A consumer must mask the sample instead of training on a chain with a hole.

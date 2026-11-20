@@ -67,11 +67,14 @@ def test_partial_start_warns_after_the_deadlines():
     assert table.count("WARNING") == 2
 
 
-@pytest.mark.parametrize("failure_class", ["timeout_exceeded", "agent_timeout"])
-def test_timeout_failure_class_counts_as_timed_out(failure_class):
+@pytest.mark.parametrize(
+    "row", [{"_ng_failure_class": "timeout_exceeded"}, {"failure_kind": "agent_timeout"}], ids=lambda row: str(row)
+)
+def test_timeout_failure_class_counts_as_timed_out(row):
+    # GDPVal keeps an agent wall-time stop as a scored row whose `failure_kind` is `agent_timeout`.
     r = _report(1)
     r.record_start(r._t0)
-    r.record_result({"_ng_failure_class": failure_class}, 10)
+    r.record_result(row, 10)
     assert "100.0% (1)" in _row(r.table(), "hit wall-clock limit")
 
 

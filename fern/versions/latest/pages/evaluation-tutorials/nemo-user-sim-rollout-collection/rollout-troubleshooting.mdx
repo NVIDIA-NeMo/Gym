@@ -125,7 +125,7 @@ Use these sources instead:
 ## Prepared-row mismatch
 
 At seed time, the Resources Server validates required fields, the pinned NeMo User Sim revision, and the
-Nemotron-Personas version (`"0.0.2"`, or `"synthetic"` for the committed example rows), and rejects guarded health
+Nemotron-Personas version pinned for the row's locale (or `"synthetic"` for the committed example rows), and rejects guarded health
 rows. It stores a canonical digest of the resolved row (`resolved_row`). At verification, a changed resolved row or
 mismatched task, episode, or trajectory identity is rejected.
 

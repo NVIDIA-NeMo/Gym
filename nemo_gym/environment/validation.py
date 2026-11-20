@@ -8,22 +8,24 @@ import ast
 import json
 import logging
 import os
+import re
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import orjson
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationResolutionError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 from yaml import YAMLError
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
 from nemo_gym.config.config_types import AlmostServerError, ConfigError
 from nemo_gym.config.global_config import (
+    ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     dataset_agent_pins,
@@ -33,6 +35,7 @@ from nemo_gym.config.global_config import (
     taskset_environment_server_name,
     translate_interpolation_error,
 )
+from nemo_gym.core.episode_types import MaterializedTask, is_materialized_task_row
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.environment.manifest import (
     DatasetKind,
@@ -44,6 +47,7 @@ from nemo_gym.environment.manifest import (
     resolve_manifest_config_path,
 )
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
 logger = logging.getLogger(__name__)
@@ -101,6 +105,10 @@ class ResolvedComposition:
     rollout_driver: str | None
     grading_mode: str | None
     components: tuple[ResolvedComponent, ...]
+    # The implementation of the environment server each routed taskset runs on, from environment_server_routes.
+    taskset_environment_servers: Mapping[str, str] = field(default_factory=dict)
+    # The Harbor target a Harbor-backed config runs (its `harbor_target`); its tasks are the rows.
+    harbor_target: str | None = None
 
 
 def _implementation_name(server: Any) -> str:
@@ -199,9 +207,43 @@ class _ConfigWiring:
     dataset_rs: Any | None
     resources_instance: Any | None
     model_server: str | None
+    # The Harbor target a Harbor-backed config runs (its `harbor_target`); its tasks are the rows.
+    harbor_target: str | None = None
 
 
-class _ServerLookupParser(GlobalConfigDictParser):
+class _StaticWiringParser(GlobalConfigDictParser):
+    """Inspect wiring without deployment credentials or images; runtime parsing stays strict."""
+
+    def _recursively_swap_keys(self, global_config_dict: DictConfig) -> None:
+        # Static checks never start these services. Substitute only known deployment leaves,
+        # before key swapping can turn a broken copy/inherit reference into '???'.
+        placeholders = (
+            (("*", "responses_api_agents", "*", "sandbox_config", "image"), "static-validation-image"),
+            (("*", "responses_api_models", "openai_model", "openai_base_url"), "https://judge.invalid/v1"),
+            (("*", "responses_api_models", "openai_model", "openai_api_key"), "static-validation"),
+            (("*", "opensandbox", "connection", "domain"), "sandbox.invalid"),
+            (("*", "opensandbox", "connection", "api_key"), "static-validation"),
+        )
+        raw = OmegaConf.to_container(global_config_dict, resolve=False)
+
+        def fill(node: object, pattern: tuple[str, ...], path: tuple[str, ...], value: str) -> None:
+            if not pattern:
+                if node == "???" or (isinstance(node, str) and re.fullmatch(r"\$\{oc\.env:[^{}]+\}", node)):
+                    OmegaConf.update(global_config_dict, ".".join(path), value)
+                return
+            if not isinstance(node, dict):
+                return
+            head, *tail = pattern
+            for key in node if head == "*" else (head,):
+                if key in node:
+                    fill(node[key], tuple(tail), (*path, key), value)
+
+        for pattern, value in placeholders:
+            fill(raw, pattern, (), value)
+        super()._recursively_swap_keys(global_config_dict)
+
+
+class _ServerLookupParser(_StaticWiringParser):
     """Reject partially valid server configs before the parser prints its almost-server banner.
 
     Catalog lookup remains strict even with ``error_on_almost_servers: false``: its caller falls back to raw names
@@ -223,12 +265,35 @@ def _resolve_config_wiring(
     parser: GlobalConfigDictParser | None = None,
 ) -> _ConfigWiring:
     """Resolve which servers a workload config wires, without probing or materializing runtime services."""
-    initial = OmegaConf.merge(
-        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        {"config_paths": [str(config_path.resolve())]},
-    )
-    parser = parser or GlobalConfigDictParser()
-    with _with_component_root(config_path):
+    from nemo_gym.data.tasks.harbor.prepare import AGENT_OVERRIDES, HARBOR_TARGET_KEY, harbor_benchmark
+
+    config_paths = [str(config_path.resolve())]
+    parser = parser or _StaticWiringParser()
+    with _with_component_root(config_path), tempfile.TemporaryDirectory() as scratch:
+        try:
+            benchmark = harbor_benchmark(config_path)
+        except ValueError as error:
+            raise EnvironmentValidationError(str(error)) from error
+        except (OSError, YAMLError):
+            benchmark = None  # The parser below reports a file it cannot read.
+        if benchmark is not None and benchmark.agent.impl_name in AGENT_OVERRIDES:
+            # Resolve the agent as the generated Harbor run binds it (``build_run``): a shipped template may leave a
+            # setting such as ``resources_server.name`` for benchmark composition, which the Harbor run clears.
+            normalized = Path(scratch) / "harbor_agent.yaml"
+            agent = benchmark.agent
+            normalized.write_text(
+                json.dumps(
+                    {
+                        agent.instance_name: {
+                            "responses_api_agents": {agent.impl_name: AGENT_OVERRIDES[agent.impl_name]}
+                        }
+                    }
+                )
+            )
+            config_paths.append(str(normalized))
+        initial = OmegaConf.merge(
+            GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, {"config_paths": config_paths}
+        )
         try:
             resolved = parser.parse(
                 GlobalConfigDictParserConfig(
@@ -243,13 +308,26 @@ def _resolve_config_wiring(
     servers = parser.filter_for_server_instance_configs(resolved)
     by_instance = {server.name: server for server in servers}
     agents = [server for server in servers if server.SERVER_TYPE == "responses_api_agents"]
+    harbor_target = None
+    if resolved.get(HARBOR_TARGET_KEY) is not None:
+        # Harbor-backed: the config's one agent instance runs the target's tasks, the rows prepare writes.
+        if benchmark is None:
+            # harbor_benchmark refuses a target only an include sets; this covers one it could not read.
+            raise EnvironmentValidationError(f"{config_path} must set {HARBOR_TARGET_KEY} in the file itself.")
+        harbor_target = benchmark.target
 
     # Datasets may live on a resources server (decoupled layout) or on an agent (legacy and
     # self-contained layouts). The agent is resolved by `resolve_dataset_agent` — the same
     # resolver rollout dispatch uses — so a config that validates is a config that routes.
     rs_with_data = [s for s in servers if s.SERVER_TYPE == "resources_servers" and s.datasets]
     dataset_rs = None
-    if dataset_owner is not None:
+    if harbor_target is not None:
+        if dataset_owner is not None:
+            raise EnvironmentValidationError(
+                f"dataset_owner does not apply to {HARBOR_TARGET_KEY}, whose rows it writes."
+            )
+        selected_agent = by_instance[benchmark.agent.instance_name]
+    elif dataset_owner is not None:
         owner = by_instance.get(dataset_owner)
         if (
             owner is None
@@ -300,6 +378,7 @@ def _resolve_config_wiring(
         dataset_rs=dataset_rs,
         resources_instance=resources_instance,
         model_server=model_ref.get("name") if isinstance(model_ref, DictConfig) else None,
+        harbor_target=harbor_target,
     )
 
 
@@ -311,7 +390,12 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
     agent_server = _implementation_name(selected_agent)
     resources_server = _implementation_name(resources_instance) if resources_instance is not None else None
     owner = wiring.dataset_rs if wiring.dataset_rs is not None else selected_agent
-    datasets = tuple(_manifest_dataset(dataset) for dataset in (owner.datasets or []))
+    # Dataset models retain interpolation text; resolve declarations in their owning config context.
+    declared = owner.get_inner_run_server_config_dict().get("datasets") or []
+    datasets = tuple(
+        _manifest_dataset(type(dataset).model_validate(OmegaConf.to_container(raw, resolve=True)))
+        for dataset, raw in zip(owner.datasets or [], declared, strict=True)
+    )
     grading_mode = None
     if resources_instance is not None:
         grading_mode = resources_instance.get_inner_run_server_config_dict().get("grading_mode")
@@ -365,11 +449,30 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
         rollout_driver=wiring.resolved.get("rollout_collection_driver"),
         grading_mode=str(grading_mode) if grading_mode is not None else None,
         components=tuple(components),
+        taskset_environment_servers=_taskset_environment_servers(wiring),
+        harbor_target=wiring.harbor_target,
     )
+
+
+def _taskset_environment_servers(wiring: _ConfigWiring) -> dict[str, str]:
+    """Each routed taskset's environment server implementation, such as ``single_agent_turn``.
+
+    A route to an instance that is not an environment server is left out, so its tasks count as unknown.
+    """
+    routes = wiring.resolved.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+    implementations: dict[str, str] = {}
+    for taskset in routes if isinstance(routes, DictConfig) else ():
+        server = wiring.by_instance.get(taskset_environment_server_name(wiring.resolved, str(taskset)))
+        if server is not None and server.SERVER_TYPE == "environment_servers":
+            implementations[str(taskset)] = _implementation_name(server)
+    return implementations
 
 
 def _catalog_resources_server(wiring: _ConfigWiring) -> str | None:
     """The resources binding selected by all dataset routes, or unknown when they do not identify one instance."""
+    if wiring.harbor_target is not None:
+        # The generated Harbor environment server grades the target's tasks; no resources server is bound.
+        return None
     if wiring.dataset_rs is not None:
         return _implementation_name(wiring.dataset_rs)
 
@@ -442,9 +545,11 @@ def _mirror_values(composition: ResolvedComposition) -> dict[str, Any]:
         "resources_server": composition.resources_server,
         "agent_server": composition.agent_server,
         "model_server": composition.model_server,
-        "datasets": list(composition.datasets) or None,
+        # A Harbor-backed config declares no datasets: its rows are the target's tasks.
+        "datasets": list(composition.datasets) or (None if composition.harbor_target is None else []),
         "rollout_driver": composition.rollout_driver,
         "grading_mode": composition.grading_mode,
+        "harbor_target": composition.harbor_target,
     }
 
 
@@ -639,6 +744,7 @@ def _validate_dataset(
     *,
     standard_prompt_config: str | None,
     prompt_source: str = "template",
+    taskset_environment_servers: Mapping[str, str] | None = None,
 ) -> DatasetValidation:
     data_path = _resolve_under_cwd_or_install(dataset.jsonl_fpath)
     prompt_path: Path | None = None
@@ -667,6 +773,16 @@ def _validate_dataset(
     row_count = 0
     for line_number, row in _iter_dataset_rows(data_path):
         row_count += 1
+        if is_materialized_task_row(row):
+            _validate_task_row(
+                dataset,
+                line_number,
+                row,
+                prompt_source=prompt_source,
+                templated=prompt is not None,
+                taskset_environment_servers=taskset_environment_servers or {},
+            )
+            continue
         if prompt_source == "prepared" and dataset.type == DatasetKind.BENCHMARK:
             params = row.get("responses_create_params")
             if not isinstance(params, dict) or not params.get("input"):
@@ -704,6 +820,93 @@ def _validate_dataset(
         path=str(data_path),
         rows=row_count,
         prompt_config=str(prompt_path) if prompt_path else None,
+    )
+
+
+# Environment servers that take single-agent-turn tasks: single_agent_turn_legacy accepts them besides flat rows.
+SINGLE_AGENT_TURN_ENVIRONMENT_SERVERS = frozenset({"single_agent_turn", "single_agent_turn_legacy"})
+
+
+class TaskInputObject(BaseModel):
+    """Any task input object: the input of an environment server whose own input model owns its fields."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+def _validate_task_row(
+    dataset: ManifestDataset,
+    line_number: int,
+    row: dict[str, Any],
+    *,
+    prompt_source: str,
+    templated: bool,
+    taskset_environment_servers: Mapping[str, str],
+) -> None:
+    """Check a materialized task row (``task_id`` and ``task_input``) as rollout collection dispatches it.
+
+    Rollout collection sends only the row's ``task_id`` and ``task_input`` to the environment server its taskset
+    routes to (``environment_server_routes``). A single-agent-turn server validates them as
+    ``MaterializedTask[SingleAgentTurnTaskInput]``. For any other server, or a taskset with no route, only the
+    envelope is checked here, a valid ``TaskId`` and a ``task_input`` object, because that server owns its input.
+    """
+    if templated:
+        # Collation and rollout collection apply a template to the row's top level, which a task never reads.
+        raise EnvironmentValidationError(
+            f"Benchmark dataset '{dataset.name}' row {line_number} is a materialized task, and prompt templates "
+            "are not supported for materialized task rows."
+        )
+    task_input = row.get("task_input")
+    environment_server = taskset_environment_servers.get(row["task_id"].get("taskset"))
+    input_model = (
+        SingleAgentTurnTaskInput if environment_server in SINGLE_AGENT_TURN_ENVIRONMENT_SERVERS else TaskInputObject
+    )
+    if input_model is SingleAgentTurnTaskInput and "responses_create_params" in row:
+        raise EnvironmentValidationError(
+            f"Dataset '{dataset.name}' row {line_number} is not a valid task: "
+            "move top-level responses_create_params into task_input instead of mixing rollout envelopes."
+        )
+    # A prepared prompt is in the task's request, so only an input model that carries one can be checked for it.
+    if (
+        prompt_source == "prepared"
+        and dataset.type == DatasetKind.BENCHMARK
+        and "responses_create_params" in input_model.model_fields
+    ):
+        params = task_input.get("responses_create_params") if isinstance(task_input, dict) else None
+        if not isinstance(params, dict) or not params.get("input"):
+            raise EnvironmentValidationError(
+                f"Benchmark dataset '{dataset.name}' row {line_number} declares prepared prompts "
+                "but has no task_input.responses_create_params.input."
+            )
+    try:
+        MaterializedTask[input_model].model_validate({"task_id": row["task_id"], "task_input": task_input})
+    except ValidationError as error:
+        issue = error.errors(include_url=False, include_context=False, include_input=False)[0]
+        location = ".".join(str(part) for part in issue["loc"]) or "row"
+        raise EnvironmentValidationError(
+            f"Dataset '{dataset.name}' row {line_number} is not a valid task at {location}: {issue['msg']}"
+        ) from error
+
+
+def _validate_harbor_target(target: str) -> None:
+    """A Harbor target must name a committed entry, an existing task folder or a ``harbor:`` reference.
+
+    Nothing is fetched: a reference is checked by its shape, and its tasks are validated by ``gym dataset validate``.
+    """
+    from nemo_gym.data.tasks.harbor.entries import entry_target
+    from nemo_gym.data.tasks.harbor.hub import HubError, HubRef, is_hub_ref
+    from nemo_gym.data.tasks.harbor.prepare import HARBOR_TARGET_KEY
+
+    if is_hub_ref(target):
+        try:
+            HubRef.parse(target)
+        except HubError as error:
+            raise EnvironmentValidationError(str(error)) from error
+        return
+    if entry_target(target) is not None or Path(target).expanduser().is_dir():
+        return
+    raise EnvironmentValidationError(
+        f"{HARBOR_TARGET_KEY} {target!r} is not an entry under environments/harbor/, an existing task folder "
+        "or a harbor: reference."
     )
 
 
@@ -775,8 +978,13 @@ def validate_environment(
     config_path: str | Path | None = None,
     *,
     sync: bool = False,
+    validate_datasets: bool = True,
 ) -> EnvironmentValidationReport:
-    """Validate a manifest without probing services or runtime output paths."""
+    """Validate a manifest without probing services or runtime output paths.
+
+    Component CI may disable dataset checks to exercise committed verifier fixtures
+    without downloading a workload's full benchmark or training dataset.
+    """
     resolved_manifest_path = Path(manifest_path).expanduser().resolve()
     manifest = load_manifest(resolved_manifest_path)
     resolved_config_path = (
@@ -814,15 +1022,21 @@ def validate_environment(
         synchronized = tuple(differences)
 
     with _with_component_root(resolved_config_path):
+        if composition.harbor_target is not None:
+            _validate_harbor_target(composition.harbor_target)
         inferred_profile, profile_evidence = _infer_profile(composition)
         _validate_benchmark_prompt_contract(manifest)
         if manifest.rollout_driver:
             _validate_rollout_driver(manifest.rollout_driver)
         dataset_reports = tuple(
             _validate_dataset(
-                dataset, standard_prompt_config=manifest.standard_prompt_config, prompt_source=manifest.prompt_source
+                dataset,
+                standard_prompt_config=manifest.standard_prompt_config,
+                prompt_source=manifest.prompt_source,
+                taskset_environment_servers=composition.taskset_environment_servers,
             )
             for dataset in manifest.datasets
+            if validate_datasets
         )
     if synchronized:
         _write_manifest_atomically(resolved_manifest_path, manifest)

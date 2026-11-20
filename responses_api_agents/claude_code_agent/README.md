@@ -113,6 +113,7 @@ claude_code_agent:
       claude_code_version: null
       thinking: null
       max_thinking_tokens: null
+      fold_thinking: null
       bare: true
       mcp_config: null
       settings: null
@@ -130,6 +131,7 @@ claude_code_agent:
 - `claude_code_version`: npm version to pin on auto-install (null means latest)
 - `thinking`: passed to `--thinking` (`disabled`, `adaptive`, or `enabled`)
 - `max_thinking_tokens`: passed to `--max-thinking-tokens` to cap thinking token usage
+- `fold_thinking`: whether thinking is folded into the assistant message text as `<think>...</think>`. `null` (default) folds it unless training-token capture is on. `false` returns the capture-style transcript without capture: thinking as separate `reasoning` items, so the final message holds only the answer (useful when a judge grades the final message). `true` is rejected under capture
 - `bare`: when `true` (default), pass `--bare` to skip auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md. Set to `false` to let Claude Code discover those from `CLAUDE_CONFIG_DIR` and the working directory
 - `mcp_config`: path to an MCP server config file, passed to `--mcp-config`. Explicit, so it works regardless of `bare`
 - `settings`: path to a settings JSON layered into the per-run `CLAUDE_CONFIG_DIR/settings.json`. Top-level keys override the defaults; the `env` block is shallow-merged so telemetry stays disabled unless you override it
@@ -208,8 +210,26 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   `function_call` items with `status="incomplete"` when the CLI times out. These witnesses let Gym
   attribute the parent transcript without assigning its reward to a subagent's captured chain.
   The served id is not a declared terminal id on `/run`; capture still corroborates it against the
-  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
+  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted, unless
+  `fold_thinking: false` selects the capture-style transcript.
 - `turns_used` counts assistant messages, not tool calls.
+- Token usage covers every model call the CLI made, its subagents' included. Input counts the
+  prompt cache's reads and writes, and `cached_tokens` is the cache reads, or null when no cache
+  count was reported; `reasoning_tokens` is null, since Anthropic reports none. A run that ends on
+  its own takes it from the result event's `modelUsage` (its `usage` covers the main conversation
+  only). A run cut off at the timeout has no result event; it counts each call once by message id,
+  from Claude Code's session transcripts and its stream: a call that finished counts its final
+  usage, and a call cut off in flight counts the input it was sent with but no output, which is
+  reported only when a call ends. A call cut off before Claude Code recorded it, seconds after it
+  started, is in neither and is not counted. Context compaction is missing, since Claude Code leaves
+  it out of its transcripts (each compaction is one call over the whole context, about 0.5% of a
+  long run's input).
+- Through a Gym model server, the Anthropic Messages responses carry the cache reads in
+  `cache_read_input_tokens`, so Claude Code counts them as against an Anthropic endpoint.
+- Usage is Claude Code's own count. Against vLLM it counts a call's prompt twice when the call's
+  final usage reports no uncached input: Claude Code then keeps the prompt total it was sent when
+  the call started and adds the cache reads and writes to it. With DeepSeek V4.1 Flash that is
+  about 1 call in 135, or 0.7% extra input.
 - Runs set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so Bash has no `run_in_background` option and every
   command runs in the foreground under the Bash tool's timeout. The CLI waits for background tasks before it
   exits, so a backgrounded command would hold the run open after the final answer.

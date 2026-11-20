@@ -581,6 +581,21 @@ def test_seed_reply_reports_the_verify_step_type_and_defaults_to_wait() -> None:
     assert seed_verify_step_type(None) == "wait"
 
 
+@pytest.mark.parametrize("session_id", ["resources-session", "session with spaces/%", "会話\r\nsession"])
+def test_seed_reply_reports_a_resources_session_id_without_interpreting_it(session_id: str) -> None:
+    from urllib.parse import quote
+
+    from multidict import CIMultiDict
+
+    from nemo_gym.server_runtime._checkpoint.steps import seed_resources_session_id
+
+    headers = CIMultiDict({"X-NG-Checkpoint-Resources-Session-Id": quote(session_id, safe="")})
+    assert seed_resources_session_id(headers) == session_id
+    assert seed_resources_session_id({}) is None
+    assert seed_resources_session_id(None) is None
+    assert seed_resources_session_id({"x-ng-checkpoint-resources-session-id": ""}) is None
+
+
 async def test_an_episode_woken_by_resume_stays_parked_if_a_new_checkpoint_closes_first() -> None:
     async def notify() -> None:
         return None
@@ -1480,7 +1495,7 @@ async def test_an_export_that_outlives_its_commit_is_awaited_by_the_retry_not_re
     release = asyncio.Event()
 
     class SlowExport(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             exports.append("started")
             await release.wait()
             return self.export_records(episode_ids)
@@ -1577,7 +1592,7 @@ def test_the_control_connection_pool_refuses_negative_limits() -> None:
 
 async def test_resume_does_not_wait_for_an_export_nothing_will_use(tmp_path: Path) -> None:
     class HungExport(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             await asyncio.Event().wait()
             return []
 
@@ -1648,7 +1663,7 @@ async def test_a_failed_export_is_final_for_its_checkpoint_and_a_new_one_commits
     exports: list[None] = []
 
     class FailingOnce(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             exports.append(None)
             if len(exports) == 1:
                 raise RuntimeError("export failed")
@@ -2152,7 +2167,7 @@ async def test_an_export_that_outlives_its_commit_and_then_fails_is_final_for_it
     release = asyncio.Event()
 
     class SlowThenFailing(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             exports.append(None)
             if len(exports) == 1:
                 await release.wait()

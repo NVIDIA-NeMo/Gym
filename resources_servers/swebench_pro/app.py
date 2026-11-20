@@ -27,7 +27,7 @@ from shlex import quote
 from tempfile import TemporaryDirectory
 from time import time
 from traceback import format_exc
-from typing import Annotated, Any, Literal, TypeVar
+from typing import Annotated, Any, ClassVar, Literal, TypeVar
 from uuid import uuid4
 
 import aiohttp
@@ -75,7 +75,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.utils import explicit_causes
+from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
@@ -295,6 +295,7 @@ class SWEBenchProSeedSessionRequest(SWEBenchProInstanceRequest, BaseSeedSessionR
 
 class SWEBenchProSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
+    workdir: str = "/app"
     sandbox_descriptor: dict[str, Any] | None = Field(default=None, exclude_if=lambda value: value is None)
     image_provenance: dict[str, Any] = Field(default_factory=dict)
 
@@ -326,12 +327,13 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
 
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
+    instance_request_cls: ClassVar[type[SWEBenchProInstanceRequest]] = SWEBenchProInstanceRequest
     config: SWEBenchProResourcesServerConfig
+    # Subclasses (e.g. SWE-bench Pro v2) swap in their own verifier workspace.
+    workspace_assembler = staticmethod(assemble_workspace_files)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("SWE-bench Pro process-local sessions require num_workers=1")
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         # Untracked files the image ships, per session. Leading underscore: pydantic needs it.
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
@@ -395,8 +397,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
     async def _stop_session_sandbox(self, session_id: str) -> None:
         sandbox = self._session_id_to_sandbox.get(session_id)
         if sandbox is not None:
-            async with asyncio.timeout(self.config.verification_stop_timeout):
-                await sandbox.stop()
+            await sandbox.stop(timeout_s=self.config.verification_stop_timeout)
             self._session_id_to_sandbox.pop(session_id, None)
         self._session_id_to_pristine_untracked.pop(session_id, None)
 
@@ -427,6 +428,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             return verify_local_image(Path(image), source)
         return {"image": image, "source_uri": image}
 
+    def _sandbox_workdir(self) -> str:
+        return "/app"
+
     async def _create_sandbox(
         self,
         body: SWEBenchProInstanceRequest,
@@ -448,7 +452,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             image=image_info["image"],
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
-            workdir="/app",
+            workdir=self._sandbox_workdir(),
             env=dict.fromkeys(HARNESS_ENV_TO_SCRUB, "") | SANDBOX_ENV_OVERRIDES,
             files=files or {},
             metadata=provider_metadata
@@ -506,7 +510,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 request.session[SESSION_ID_KEY] = session_id
                 return response
             try:
-                task = SWEBenchProInstanceRequest.model_validate(body.task_data)
+                task = self.instance_request_cls.model_validate(body.task_data)
             except ValidationError as error:
                 raise ResourcesSeedRejectedError(f"task_data is not a SWE-bench Pro instance: {error}") from error
             if body.task_id.task_id != task.instance_id:
@@ -523,14 +527,15 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             return response
 
     async def _episode_seed_response(self, session_id: str) -> ResourcesSeedSessionResponse:
+        sandbox = self._session_id_to_sandbox[session_id]
         return ResourcesSeedSessionResponse(
             resources_session_id=session_id,
             sandbox_access=SandboxAccess(
                 connection=DirectSandboxConnection(
                     provider_config_ref=self.config.sandbox_provider,
-                    descriptor=await self._session_id_to_sandbox[session_id].serialize(),
+                    descriptor=await sandbox.serialize(),
                 ),
-                workdir="/app",
+                workdir=await self._repository_dir(sandbox),
             ),
         )
 
@@ -561,6 +566,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             )
             response = SWEBenchProSeedSessionResponse(
                 sandbox_handle=sandbox._handle.sandbox_id,
+                workdir=await self._repository_dir(sandbox),
                 sandbox_descriptor=descriptor,
                 image_provenance=await asyncio.to_thread(self._image_info, body),
             )
@@ -577,7 +583,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
     async def normalize_sandbox_environment(self, sandbox: AsyncSandbox, instance_id: str) -> None:
         """Give the agent container the same repairs the verifier gets; best effort."""
         try:
-            script = build_seed_normalization(self.config.environment_repairs)
+            script = build_seed_normalization(
+                self.config.environment_repairs, repository_dir=await self._repository_dir(sandbox)
+            )
             result = await sandbox.exec(f"bash -c {quote(script)}", timeout_s=300)
             if result.return_code != 0:
                 print(
@@ -588,10 +596,15 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         except Exception:
             print(f"Failed to normalize sandbox environment for {instance_id}", format_exc(), file=sys.stderr)
 
+    async def _repository_dir(self, sandbox: AsyncSandbox) -> str:
+        """The directory holding the task's git repository."""
+        return "/app"
+
     async def pristine_untracked_files(self, sandbox: AsyncSandbox) -> frozenset[str]:
-        """List the untracked files ``/app`` holds before the agent touches it."""
+        """List the untracked files the repository holds before the agent touches it."""
         try:
-            result = await sandbox.exec("git -C /app ls-files --others --exclude-standard")
+            repo_dir = await self._repository_dir(sandbox)
+            result = await sandbox.exec(f"git -C {quote(repo_dir)} ls-files --others --exclude-standard")
             if result.return_code != 0:
                 print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
                 return frozenset()
@@ -605,13 +618,14 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         pristine_untracked = self._session_id_to_pristine_untracked.get(session_id, frozenset())
         patch_path = f"/tmp/nemo-gym-swebench-pro-{uuid4().hex}.diff"
         try:
+            repo_dir = quote(await self._repository_dir(original_sandbox))
             # Only a connect failure is retried. After a request may have been sent, the first git process could
             # still hold the index lock while a second one starts.
             try:
                 result, exec_attempts = await _retry_patch_capture_step(
                     "git diff exec",
                     lambda: original_sandbox.exec(
-                        f"umask 077; git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
+                        f"umask 077; git -C {repo_dir} add -N . && git -C {repo_dir} --no-pager diff {quote(base_commit)}"
                         f" > {quote(patch_path)}"
                     ),
                     idempotent=False,
@@ -681,7 +695,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 extraction_error = f"Failed to extract model patch: {exc}"
 
         inputs = self._verification_inputs(body, model_patch)
-        workspace_files, _ = assemble_workspace_files(body.instance_id, None, model_patch, asdict(inputs))
+        workspace_files, _ = self.workspace_assembler(body.instance_id, None, model_patch, asdict(inputs))
         sandbox_files = {
             f"/workspace/{relative_path}": contents for relative_path, contents in workspace_files.items()
         }
@@ -702,7 +716,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
                     eval_sandbox_start_time_taken = time() - start_time
                     verification_start = time()
-                    result = await run_verification(
+                    result = await self._run_verification(
                         sandbox=eval_sandbox,
                         inputs=inputs,
                         log_dir=run_log_dir,
@@ -723,8 +737,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             finally:
                 if eval_sandbox is not None:
                     try:
-                        async with asyncio.timeout(self.config.verification_stop_timeout):
-                            await eval_sandbox.stop()
+                        await eval_sandbox.stop(timeout_s=self.config.verification_stop_timeout)
                     except Exception:
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
             # Observation is best effort and cannot replace the calculated grade or original error.
@@ -735,7 +748,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 verifier_sandbox_observation = None
             verifier_sandbox_observations.append(verifier_sandbox_observation)
 
-            reason = inconclusive_reason(result)
+            reason = self._inconclusive_reason(result)
             if reason is not None:
                 # Record the actual failed attempt without selecting a retry or claiming a model failure.
                 # Only an exception before sandbox assignment identifies allocation as the failing operation.
@@ -823,6 +836,18 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         response_data.pop("_ng_failure_judge_error", None)
         return SWEBenchProVerifyResponse.model_validate(response_data)
 
+    async def _run_verification(
+        self,
+        sandbox: AsyncSandbox,
+        inputs: VerificationInputs,
+        log_dir: Path,
+        timeout_s: int | None,
+    ) -> VerificationResult:
+        return await run_verification(sandbox=sandbox, inputs=inputs, log_dir=log_dir, timeout_s=timeout_s)
+
+    def _inconclusive_reason(self, result: VerificationResult) -> str | None:
+        return inconclusive_reason(result)
+
 
 def _lost_session_response(body: SWEBenchProVerifyRequest, reason: str) -> SWEBenchProVerifyResponse:
     """A masked, unscored verify response for a rollout whose task sandbox state could not be read."""
@@ -849,3 +874,6 @@ def _lost_session_response(body: SWEBenchProVerifyRequest, reason: str) -> SWEBe
 
 if __name__ == "__main__":
     SWEBenchProResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEBenchProResourcesServer.run_webserver()  # noqa: F401

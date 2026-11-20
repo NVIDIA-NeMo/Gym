@@ -174,7 +174,13 @@ def test_forced_stop_reaches_processes_that_leave_the_harness_during_the_stop(tm
     }[escape]
     (tmp_path / "worker.sh").write_text(worker)
     try:
-        result = _supervise(tmp_path, "bash", "worker.sh", timeout="1", cwd=tmp_path)
+        # The worker touches `ready` once its trap is set. A stop that comes earlier (a slow, loaded host) kills
+        # the shell before it can spawn anything, which tests nothing, so the run is repeated with more time.
+        for timeout in ("1", "4", "10"):
+            result = _supervise(tmp_path, "bash", "worker.sh", timeout=timeout, cwd=tmp_path)
+            if (tmp_path / "ready").exists():
+                break
+        assert (tmp_path / "ready").exists(), "the worker never set its trap before the stop"
         assert result.returncode == 0, result.stderr
         receipt = _receipt(tmp_path)
         assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is True, receipt
@@ -278,10 +284,55 @@ def test_existing_stop_file_fences_the_launch(tmp_path: Path) -> None:
 
 
 @linux_only
-def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path) -> None:
+@pytest.mark.parametrize("initial_scan_delay", [0, 6.2])
+def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_scan_delay: float) -> None:
     # The controller requests a stop with this file rather than a signal.
     stop = tmp_path / "stop.request"
-    worker = "trap 'echo saved > checkpoint; exit 0' TERM; touch ready; while :; do sleep 0.05; done"
+    # Model a busy /proc before TERM, then require time to save after TERM. The initial scan must not
+    # consume the harness's grace period, even when it takes longer than that period.
+    supervisor = tmp_path / "supervisor.sh"
+    supervisor.write_text(
+        Path(SUPERVISOR).read_text().replace("    scan\n", f"    sleep {initial_scan_delay}\n    scan\n", 1)
+    )
+    worker = "trap 'sleep 1; echo saved > checkpoint; exit 0' TERM; touch ready; while :; do sleep 0.05; done"
+    process = subprocess.Popen(
+        [
+            "bash",
+            str(supervisor),
+            "--timeout",
+            "30",
+            "--cleanup-timeout",
+            "5",
+            "--receipt",
+            str(tmp_path / "cleanup.json"),
+        ]
+        + ["--stop-file", str(stop), "--", "bash", "-c", worker],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "ready").exists():
+            assert process.poll() is None and time.monotonic() < deadline
+            time.sleep(0.01)
+        stop.touch()
+        _, stderr = process.communicate(timeout=20)
+        assert process.returncode == 0, stderr
+        receipt = _receipt(tmp_path)
+        assert receipt == {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False}
+        assert (tmp_path / "checkpoint").read_text() == "saved\n"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+@linux_only
+def test_stop_signals_count_only_once_the_stop_file_exists(tmp_path: Path) -> None:
+    """A tool command (`pkill -f ...`, `killall bash`) can signal the supervisor; a controller writes the stop file."""
+    stop = tmp_path / "stop.request"
+    worker = "touch ready; while :; do sleep 0.05; done"
     process = subprocess.Popen(
         ["bash", SUPERVISOR, "--timeout", "30", "--cleanup-timeout", "2", "--receipt", str(tmp_path / "cleanup.json")]
         + ["--stop-file", str(stop), "--", "bash", "-c", worker],
@@ -294,12 +345,18 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path) -> None:
         while not (tmp_path / "ready").exists():
             assert process.poll() is None and time.monotonic() < deadline
             time.sleep(0.01)
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            process.send_signal(signum)
+            time.sleep(0.2)
+        assert process.poll() is None, "a stop signal without the stop file ended the supervisor"
+        assert not (tmp_path / "cleanup.json").exists()
         stop.touch()
+        process.send_signal(signal.SIGTERM)
         _, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, stderr
         receipt = _receipt(tmp_path)
-        assert receipt == {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False}
-        assert (tmp_path / "checkpoint").read_text() == "saved\n"
+        assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is False, receipt
+        assert receipt["foreign_signals"] == 3, receipt
     finally:
         if process.poll() is None:
             process.kill()
@@ -373,6 +430,12 @@ def test_only_detached_services_survive_harness_group_termination(tmp_path: Path
 import ctypes, json, os, pathlib, signal, subprocess, sys, time, urllib.request
 assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
 supervisor, root, ending, detached = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4] == 'True'
+def stat_fields(path):
+    # Processes can exit between listing /proc and opening their stat file.
+    try:
+        return path.read_text().rsplit(')', 1)[1].split()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
 service = root / 'service.py'
 service.write_text("from http.server import HTTPServer, BaseHTTPRequestHandler\n"
                   "from pathlib import Path\n"
@@ -408,17 +471,26 @@ worker.write_text("import os, pathlib, signal, subprocess, sys, time\n"
 timed_out = ending in ('timeout', 'grace', 'stubborn')
 process = None
 try:
-    process = subprocess.Popen(['bash', supervisor, '--timeout', '1.5' if timed_out else '10',
-        '--cleanup-timeout', '0.5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'), '--',
+    # Give real process cleanup and the checkpoint handler time on a busy CI runner.
+    process = subprocess.Popen(['bash', supervisor, '--timeout', '10',
+        '--cleanup-timeout', '5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'),
+        '--expire-file', str(root / 'expire'), '--',
         sys.executable, str(worker), ending], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if ending == 'cancel':
+    if ending == 'cancel' or timed_out:
+        # Interrupt the completed-tool phase, not Python or service startup.
         deadline = time.monotonic() + 5
         while not (root / 'ready').exists():
             assert process.poll() is None and time.monotonic() < deadline
             time.sleep(0.01)
-        process.send_signal(signal.SIGTERM)
-    stdout, stderr = process.communicate(timeout=15)
-    assert process.returncode == 0, (stdout, stderr)
+        if timed_out:
+            (root / 'expire').touch()
+        else:
+            # A stop signal counts only once the stop file exists, as a controller writes it.
+            (root / 'stop').touch()
+            process.send_signal(signal.SIGTERM)
+    stdout, stderr = process.communicate(timeout=30)
+    receipt_path = root / "cleanup.json"
+    assert process.returncode == 0, (stdout, stderr, receipt_path.read_text() if receipt_path.exists() else None)
     receipt = json.loads((root / 'cleanup.json').read_text())
     assert receipt['cleanup_confirmed'] is True, receipt
     assert receipt['timed_out'] is timed_out, receipt
@@ -432,17 +504,17 @@ try:
     except ProcessLookupError:
         pass
     else:
-        stats = [p.read_text() for p in pathlib.Path('/proc').glob('[0-9]*/stat')]
+        stats = [stat_fields(p) for p in pathlib.Path('/proc').glob('[0-9]*/stat')]
         group = int((root / 'worker.pid').read_text())
-        live = [s for s in stats if int(s.rsplit(')', 1)[1].split()[2]) == group and s.rsplit(')', 1)[1].split()[0] not in 'ZX']
+        live = [s for s in stats if s is not None and int(s[2]) == group and s[0] not in 'ZX']
         assert not live, ('supervised process group still running', live)
     port = int((root / 'port').read_text())
     if detached:
         with urllib.request.urlopen('http://127.0.0.1:%d/' % port, timeout=2) as response:
             assert response.read() == b'task solved'
     else:
-        stat = pathlib.Path('/proc/' + (root / 'service.pid').read_text() + '/stat')
-        assert not stat.exists() or stat.read_text().rsplit(')', 1)[1].split()[0] in 'ZX'
+        stat = stat_fields(pathlib.Path('/proc/' + (root / 'service.pid').read_text() + '/stat'))
+        assert stat is None or stat[0] in 'ZX'
         try:
             urllib.request.urlopen('http://127.0.0.1:%d/' % port, timeout=0.2)
         except OSError:
@@ -469,7 +541,7 @@ finally:
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=40,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
 
@@ -507,7 +579,9 @@ try:
     while not (root / 'writer.pid').exists():
         assert process.poll() is None and time.monotonic() < deadline
         time.sleep(.01)
-    if ending == 'cancel': process.send_signal(signal.SIGTERM)
+    if ending == 'cancel':
+        (root / 'stop').touch()
+        process.send_signal(signal.SIGTERM)
     stdout, stderr = process.communicate(timeout=10)
     assert process.returncode == 0, (stdout, stderr)
     receipt = json.loads((root / 'cleanup.json').read_text())

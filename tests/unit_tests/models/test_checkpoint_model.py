@@ -33,7 +33,7 @@ from nemo_gym.models.token_capture.control_routes import install_rollout_control
 from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.models.token_capture.lineage import FileLineageStore
 from nemo_gym.models.token_capture.protocols import CaptureAdmissionError, RolloutRetiredError
-from nemo_gym.models.token_capture.records import ParentResolutionStatus
+from nemo_gym.models.token_capture.records import CallIdentity, ParentResolutionStatus
 from nemo_gym.models.token_capture.sink import NG_COMMIT_COORDS_FIELD, CaptureContext, current_capture_context
 from nemo_gym.models.token_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
@@ -430,7 +430,7 @@ async def test_restored_ledger_lets_the_next_attempt_resolve_its_parent(tmp_path
 
     restored_ledger, restored, restored_controller = await _ledger_participant(tmp_path / "after")
     await restored_controller.restore(_restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
-    resolution = await restored_ledger.resolve("r-a1", [USER_1, ASSISTANT_1, USER_2])
+    resolution = await restored_ledger.resolve("r-a1", [USER_1, ASSISTANT_1, USER_2], identity=CallIdentity())
     manifest = RolloutManifest.model_validate(await restored_ledger.manifest("r-a1"))
 
     assert commit["manifest"]["record_count"] == 1 and commit["episode_ids"] == ["r"]
@@ -486,7 +486,7 @@ async def test_restore_refuses_a_model_server_that_has_served_calls(tmp_path: Pa
             _restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}, {"rollout_id": "s"}])
         )
 
-    assert not await restored_ledger.has_rows("r-a1")
+    assert not await restored_ledger.has_rows("r-a1", identity=CallIdentity())
 
 
 def _held_call(participant: PolicyModelParticipant, capture_key: str, model_call_id: str, request_items: list) -> None:
@@ -1032,9 +1032,9 @@ async def test_retiring_an_attempt_retires_the_ledgers_of_it_and_every_earlier_a
     # A retired ledger has no rows and refuses reads, so a reader cannot mistake it for an empty live one.
     for key in ("r", "r-a1"):
         with pytest.raises(RolloutRetiredError):
-            await ledger.has_rows(key)
+            await ledger.has_rows(key, identity=CallIdentity())
     assert (tmp_path / "r.lineage.retired").exists() and (tmp_path / "r-a1.lineage.retired").exists()
-    assert await ledger.has_rows("r-a2")
+    assert await ledger.has_rows("r-a2", identity=CallIdentity())
 
 
 async def test_a_restore_retires_the_ledgers_of_the_attempts_it_continues(tmp_path: Path) -> None:
@@ -1050,7 +1050,7 @@ async def test_a_restore_retires_the_ledgers_of_the_attempts_it_continues(tmp_pa
     # Attempt 0 continues as attempt 1, so attempt 0's ledger is released and fenced against late rows.
     assert [row["model_call_id"] for row in restored_ledger.export_rows("r-a1")] == ["c1"]
     with pytest.raises(RolloutRetiredError):
-        await restored_ledger.has_rows("r")
+        await restored_ledger.has_rows("r", identity=CallIdentity())
     assert (tmp_path / "ledger" / "r.lineage.retired").exists()
 
 
@@ -1611,7 +1611,11 @@ async def test_a_failed_publication_poisons_the_call_and_sends_no_answer(tmp_pat
     assert isinstance(outcome, OSError)
     assert _answers(sent) == []
     assert ledger.export_rows("r") == [
-        {"model_call_id": contexts[0].model_call_id, "failure_reason": INVALID_COMMIT_COORDS_REASON}
+        {
+            "model_call_id": contexts[0].model_call_id,
+            "failure_reason": INVALID_COMMIT_COORDS_REASON,
+            **contexts[0].identity.columns(),
+        }
     ]
     assert not participant.gate.tickets
 
