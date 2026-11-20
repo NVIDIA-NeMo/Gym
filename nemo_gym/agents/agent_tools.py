@@ -54,14 +54,8 @@ async def seed_mcp_servers(
     timeout_s: float,
     require_reachable: bool = False,
 ) -> dict[str, dict[str, object]]:
-    """Seed host-side tools; pass only per-session MCP authentication into the sandbox.
-
-    Each entry is keyed by the name the server's MCP endpoint lists itself under (its seed metadata's
-    ``server_name``, else the server's name), which MCP clients name its tools by. Its URL is the server's.
-    Two servers listed under one name are refused, since their tools' names would collide.
-    """
+    """Seed host-side tools; pass only per-session MCP authentication into the sandbox."""
     entries = {}
-    listed: dict[str, str] = {}
     for server in servers:
         seeded = await client.post(
             server_name=server.name, url_path="/seed_session", json=body.model_dump(), cookies=cookies
@@ -70,14 +64,7 @@ async def seed_mcp_servers(
         metadata = (await get_response_json(seeded)).get(NEMO_GYM_MCP_METADATA_KEY)
         if not isinstance(metadata, dict) or not metadata.get("headers"):
             raise ValueError(f"Tool server {server.name} must expose authenticated MCP tools")
-        listed_as = metadata.get("server_name") or server.name
-        if listed_as in listed:
-            raise ValueError(
-                f"Tool servers {listed[listed_as]!r} and {server.name!r} both list themselves as {listed_as!r}, so "
-                "their tools' names would collide; give one of them another mcp_server_name"
-            )
-        listed[listed_as] = server.name
-        entries[listed_as] = {
+        entries[server.name] = {
             "url": sandbox_server_url(server.name, require_reachable=require_reachable)
             + "/"
             + metadata.get("url_path", "/mcp").lstrip("/"),

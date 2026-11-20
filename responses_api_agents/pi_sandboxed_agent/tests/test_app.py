@@ -26,7 +26,6 @@ import pytest
 
 from nemo_gym.agents import restricted_network_policy
 from nemo_gym.client import ServerClient
-from nemo_gym.config import ResourcesServerRef
 from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
 from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.pi_agent.app import PiAgentRunRequest, PiMCPServerConfig
@@ -305,45 +304,6 @@ async def test_mcp_discovery_config_is_per_run_and_not_in_receipt(agent, monkeyp
     assert json.loads(next(v for p, v in staged.items() if p.endswith("mcp.json")))["tavily"]["headers"] == {
         "X-NeMo-Gym-Session-Token": "scoped"
     }
-    assert "scoped" not in (Path(result.pi_results_dir) / "generation.json").read_text()
-    assert server.config.mcp_servers == {}
-
-
-async def test_the_mcp_config_names_a_tool_server_as_its_endpoint_lists_itself(agent, monkeypatch):
-    """Pi names a tool server's tools by its MCP config key, so the key is the name the server's seed metadata gives
-    the endpoint (`company_append`, not `store_append`); the URL is still resolved through the server's name."""
-    server, sandbox = agent
-    server.config.tool_servers = [ResourcesServerRef(type="resources_servers", name="store")]
-    resolved = []
-    monkeypatch.setattr(
-        "nemo_gym.agents.agent_tools.sandbox_server_url",
-        lambda name, **_: resolved.append(name) or f"http://{name}.example:8000",
-    )
-    post = server.server_client.post.side_effect
-
-    async def seed_tool_server(**kwargs):
-        if kwargs["server_name"] != "store":
-            return await post(**kwargs)
-        mcp = {"server_name": "company", "url_path": "/mcp", "headers": {"Authorization": "Bearer scoped"}}
-        return response({"mcp": mcp})
-
-    server.server_client.post.side_effect = seed_tool_server
-    staged = {}
-
-    async def upload(local, remote):
-        staged[remote] = local.read_text()
-
-    sandbox.upload.side_effect = upload
-    result = await server.run(SimpleNamespace(cookies={}), request_body())
-    assert json.loads(next(v for p, v in staged.items() if p.endswith("mcp.json"))) == {
-        "company": {
-            "url": "http://store.example:8000/mcp",
-            "headers": {"Authorization": "Bearer scoped"},
-            "enabled": True,
-            "timeout": 600000,
-        }
-    }
-    assert resolved == ["store"]
     assert "scoped" not in (Path(result.pi_results_dir) / "generation.json").read_text()
     assert server.config.mcp_servers == {}
 

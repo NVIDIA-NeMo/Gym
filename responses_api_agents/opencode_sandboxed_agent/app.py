@@ -1401,11 +1401,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             query_seed_str = f"printf '%s' {quote(query)} | "
             query_arg_str = ""
 
-        # The configuration keys each tool server's MCP entry by the name the server lists itself under, not by its
-        # reference (see _seed_tool_servers), so the required-server check looks for those keys.
-        rollout_mcp = getattr(request.state, "_ng_opencode_mcp", None)
-        required_mcp_servers = list(rollout_mcp) if isinstance(rollout_mcp, dict) else []
-
         # @bxyu-nvidia: Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
         # OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
         # and there is no way to set it to null.
@@ -1421,7 +1416,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && rm -f /tmp/nemo-gym-mcp-setup-error {STABLE_DATE_MARKER}
         """
         agent_command = f"""
-        {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps(required_mcp_servers))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
+        {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
         && echo "OpenCode run finished"
         """

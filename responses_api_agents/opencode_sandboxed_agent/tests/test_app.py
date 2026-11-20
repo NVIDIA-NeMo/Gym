@@ -1966,45 +1966,6 @@ class TestBenchmarkLifecycle:
         with raises(ValueError, match="authenticated MCP"):
             await server._seed_tool_servers(request, body)
 
-    async def test_the_config_names_a_tool_server_as_its_endpoint_lists_itself(self, monkeypatch):
-        """OpenCode names a tool server's tools by its MCP config key, so the key is the name the server's seed
-        metadata gives the endpoint; the URL is still resolved through the server's name."""
-        mcp = {"server_name": "company", "url_path": "/mcp", "headers": {"Authorization": "Bearer scoped"}}
-        seeded = MagicMock(read=AsyncMock(return_value=json.dumps({"mcp": mcp}).encode()))
-        client = MagicMock(spec=ServerClient)
-        client.post = AsyncMock(return_value=seeded)
-        config = self._create_config()
-        config.tool_servers = [ResourcesServerRef(type="resources_servers", name="store")]
-        server = OpenCodeSandboxedAgent(config=config, server_client=client)
-        resolved = []
-        monkeypatch.setattr(
-            "nemo_gym.agents.agent_tools.sandbox_server_url",
-            lambda name, **_: resolved.append(name) or f"http://{name}.example:8000",
-        )
-        body = OpenCodeSandboxedAgentRunRequest(
-            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
-        )
-
-        entries = await server._seed_tool_servers(MagicMock(cookies={}), body)
-
-        assert entries == {
-            "company": {
-                "type": "remote",
-                "url": "http://store.example:8000/mcp",
-                "headers": {"Authorization": "Bearer scoped"},
-                "enabled": True,
-                "timeout": 60000,
-            }
-        }
-        assert resolved == ["store"]
-        monkeypatch.setattr(app_module, "sandbox_server_url", lambda _, **kwargs: "http://model.example:8000")
-        monkeypatch.setattr(
-            OpenCodeSandboxedAgent, "base_url_for_run", MagicMock(return_value="http://model.example:8000")
-        )
-        request = MagicMock(state=SimpleNamespace(_ng_opencode_mcp=entries))
-        request.json = AsyncMock(return_value={})
-        assert (await server._create_opencode_config(request))["mcp"] == entries
-
     @mark.parametrize("export_found", [False, True])
     async def test_execution_failure_requires_captured_export_before_zero_verification(
         self, monkeypatch, export_found
@@ -2637,8 +2598,7 @@ async def test_export_failure_prevents_verification_and_stops_sandbox(tmp_path):
     assert server._sandbox_id_to_sandbox == {}
 
 
-@mark.parametrize("listed_as", ["search", "company"])
-async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch, listed_as):
+async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
@@ -2672,8 +2632,7 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch, liste
                 session={SESSION_ID_KEY: "trial"},
                 cookies={"sandbox_id": ""},
                 path_params={},
-                # The tool server `search` lists its endpoint as `listed_as`, which keys its entry.
-                state=SimpleNamespace(_ng_opencode_mcp={listed_as: {}}),
+                state=SimpleNamespace(_ng_opencode_mcp={"search": {}}),
             ),
             body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
         )
@@ -2681,9 +2640,6 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch, liste
         Path(app_module.__file__).with_name("required-mcp.js"), "/tmp/nemo-gym-required-mcp.js"
     )
     assert sandbox.exec.await_count == 2
-    # The required-server check looks for the entry's key.
-    required = f"NEMO_GYM_REQUIRED_MCP_SERVERS={shlex.quote(json.dumps([listed_as]))} "
-    assert required in sandbox.exec.await_args_list[0].kwargs["command"]
     # The only download is the plugin read-back: no export was pulled for an unscored rollout.
     assert [awaited.args[0] for awaited in sandbox.download.await_args_list] == ["/tmp/nemo-gym-required-mcp.js"]
     assert not server._sandbox_id_to_run_result
