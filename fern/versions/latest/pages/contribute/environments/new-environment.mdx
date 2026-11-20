@@ -401,7 +401,7 @@ For benchmarks and named configs, additional fields apply — in particular `con
 
 | Field | Type | Requirement and allowed values |
 | --- | --- | --- |
-| `name` | string | Required; non-empty and must match the catalog path |
+| `name` | string | Required; non-empty; the manifest's ID, unique within its `benchmarks/` or `environments/` tree; see [Names](#names) |
 | `version` | string | Required; non-empty, with Semantic Versioning recommended |
 | `experimental` | boolean | Optional; defaults to `true` |
 | `kind` | string | Required; `environment` or `benchmark` |
@@ -442,6 +442,13 @@ Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `trai
 For named configs, put the manifest in the workload's catalog directory and set `config_path` relative to it. For example, `benchmarks/my_benchmark/config_with_system/manifest.yaml` can declare `name: my_benchmark/config_with_system` and `config_path: ../config_with_system.yaml`. Shared prompts and suite fragments are not standalone workloads.
 
 A named config that only changes the harness, such as `benchmarks/my_benchmark/opencode.yaml`, is a run preset of its benchmark and gets no manifest. If the Resources Server in the benchmark's main config declares `allowed_agents`, add the preset's agent there only after a representative rollout with a real model and verifier shows that the pairing works, as the [Terminal Bench 2.1 note](/main/agent-server/integrate-existing-agents#swap-the-agent-or-the-benchmark) describes. Until then, run the preset with `--allow-unsupported-pairing`. A named config that changes the prompt, scoring, task limits, or tools is a benchmark or environment of its own and gets its own manifest, as above. Do not add manifests for `*_legacy_agent` configs.
+
+### Names
+
+A manifest's `name` is its ID: `gym list environments` lists the manifest under its name, and `--benchmark` and `--environment` take it. The scaffold sets the name to the folder path under `benchmarks/` or `environments/`, such as `aime24` or `indic/frontier_math`. The name does not have to match the folder, so moving the folder does not change the ID. The manifest still sits in a folder of its own, not directly in `benchmarks/` or `environments/`.
+
+- No two manifests in the same `benchmarks/` or `environments/` tree declare the same name, and no two point at the same config. A name in an earlier search root (`--search-dir`) shadows the same name in a later root.
+- `--benchmark` and `--environment` select what the catalog lists under a name: in the first search root that has it, the manifest of that name, or else a config the catalog lists under that name that no manifest claims. Any other config at that path, such as an environment's flavor file `<folder>/<flavor>.yaml` or a config whose manifest has another name, is selected only when no search root lists the name. A name other than the manifest's own folder path cannot be another config's path, because it would hide that config.
 
 `dataset_owner` names a config instance, not a component implementation. It selects the intended dataset declaration when multiple instances have datasets; runtime agent routing must still be unambiguous. New task scaffolds put datasets on the resources-server instance. Existing agent-owned declarations, including the reuse-verifier scaffold, remain supported.
 

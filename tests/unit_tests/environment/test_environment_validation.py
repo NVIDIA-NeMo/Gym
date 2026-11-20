@@ -1067,22 +1067,66 @@ def test_prepare_annotations_are_not_a_runtime_requirement(tmp_path: Path) -> No
     validate_environment(manifest_path)
 
 
-@pytest.mark.parametrize(
-    ("changes", "message"),
-    [
-        ({"name": "other"}, "identity"),
-        ({"kind": "benchmark", "canonical_split": "test", "standard_prompt_config": "prompt.yaml"}, "kind"),
-    ],
-)
-def test_manifest_identity_matches_its_catalog_path(changes: dict, message: str, tmp_path: Path) -> None:
+def test_manifest_kind_matches_its_catalog_tree(tmp_path: Path) -> None:
     manifest_path = _asset(tmp_path)
     raw = load_manifest(manifest_path).model_dump(mode="json", exclude_none=True)
-    raw.update(changes)
-    if changes.get("kind") == "benchmark":
-        raw["datasets"][0].update(type="benchmark", prepare_script="prepare.py")
+    raw.update(kind="benchmark", canonical_split="test", standard_prompt_config="prompt.yaml")
+    raw["datasets"][0].update(type="benchmark", prepare_script="prepare.py")
     manifest_path.write_text(dump_manifest(raw), encoding="utf-8")
 
-    with pytest.raises(EnvironmentValidationError, match=message):
+    with pytest.raises(EnvironmentValidationError, match="kind"):
+        validate_environment(manifest_path)
+
+
+def test_manifest_name_is_an_id_that_need_not_match_its_folder(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    _replace_manifest(manifest_path, name="renamed")
+
+    assert validate_environment(manifest_path).name == "renamed"
+
+
+def test_a_manifest_at_the_root_of_a_catalog_tree_is_refused(tmp_path: Path) -> None:
+    # Catalog discovery refuses it, so validation must too, although its name no longer has to match a folder.
+    manifest_path = _asset(tmp_path)
+    root_manifest = manifest_path.rename(tmp_path / "environments/manifest.yaml")
+    _replace_manifest(root_manifest, config_path="demo/config.yaml")
+
+    with pytest.raises(EnvironmentValidationError, match="named catalog directory"):
+        validate_environment(root_manifest)
+
+
+def test_two_manifests_in_one_tree_cannot_declare_one_name(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    copy_path = tmp_path / "environments/copy/manifest.yaml"
+    copy_path.parent.mkdir()
+    copy = load_manifest(manifest_path).model_copy(update={"config_path": "../demo/config.yaml"})
+    copy_path.write_text(dump_manifest(copy), encoding="utf-8")
+
+    for path in (manifest_path, copy_path):
+        with pytest.raises(EnvironmentValidationError, match="also declared by"):
+            validate_environment(path)
+
+
+def test_two_manifests_in_one_tree_cannot_declare_one_config(tmp_path: Path) -> None:
+    # The config would be listed twice, under two IDs.
+    manifest_path = _asset(tmp_path)
+    copy_path = tmp_path / "environments/copy/manifest.yaml"
+    copy_path.parent.mkdir()
+    copy = load_manifest(manifest_path).model_copy(update={"name": "copy", "config_path": "../demo/config.yaml"})
+    copy_path.write_text(dump_manifest(copy), encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="is also the config of 'copy'.*one ID"):
+        validate_environment(manifest_path)
+
+
+def test_a_renamed_manifest_cannot_take_another_configs_path(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    _replace_manifest(manifest_path, name="other")
+    other_config = tmp_path / "environments/other/config.yaml"
+    other_config.parent.mkdir()
+    other_config.write_text(manifest_path.with_name("config.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="path of another config"):
         validate_environment(manifest_path)
 
 
