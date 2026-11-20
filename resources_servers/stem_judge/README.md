@@ -39,7 +39,8 @@ the reason in `grading_status`.
 | `answer_too_long` | The judge would see the whole final answer, and it is longer than `max_answer_chars`. |
 
 After the gates, a match from the optional Math-Verify check earns 1 immediately.
-All other rows go to the configured judge:
+The base configuration sends all other rows to the judge as follows. The
+[question-bank preset](#question-bank-grading-options) also supports masked abstentions and JSON reasons.
 
 - **Answer rows:** the stem_v11 prompt. The judge's last `Judgement: 'yes'|'no'`
   gives reward 1 or 0.
@@ -184,13 +185,19 @@ With `math_verify: {}`, Math-Verify uses Gym's defaults of `units: true` and
 unit suffixes on both sides. Set it to `false` to preserve a variable such as the
 `t` in `3t`. `precision` is the number of decimal places used for float comparisons.
 At 6 places, `0.0000001` and `0.0000002` compare equal. At 12 they go to the judge.
-Both settings leave the library's equation and set comparisons in effect.
+Math-Verify normally compares the reference to the candidate once. Set
+`bidirectional: true` to require a match with their roles reversed as well.
+For reference `1`, the library accepts `9=1` in only one direction, so STEM
+sends that box to the judge. It accepts `x=1` in both directions. Only a
+forward match between different strings incurs a second comparison. Both
+comparisons share one worker and timeout. The library accepts an open interval
+and its endpoint set in both directions, so that case still earns automatic credit.
 
 For example, add this override to the question-bank launch command to configure one
 STEM instance for algebra:
 
 ```sh
-'++stem_judge.resources_servers.stem_judge.math_verify={units:false,precision:12}'
+'++stem_judge.resources_servers.stem_judge.math_verify={units:false,precision:12,bidirectional:true}'
 ```
 
 To route a math question through STEM, enable Math-Verify on the question-bank preset and give the

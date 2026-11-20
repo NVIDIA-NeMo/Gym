@@ -125,6 +125,7 @@ VERDICT_FALLBACK_PATTERN = (
 class MathVerifyConfig(BaseModel, extra="forbid"):
     units: bool = Field(default=True, description="Strip recognized unit suffixes during LaTeX normalization.")
     precision: int = Field(default=6, ge=0, strict=True, description="Decimal places for comparing floats.")
+    bidirectional: bool = Field(default=False, description="Require Math-Verify to match in both directions.")
     timeout_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     max_concurrency: int = Field(default=8, gt=0)
 

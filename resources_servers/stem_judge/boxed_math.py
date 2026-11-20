@@ -18,16 +18,19 @@ if TYPE_CHECKING:
     from resources_servers.stem_judge.app import MathVerifyConfig
 
 
-def _score_box(reference: str, box: str, units: bool, precision: int, sender: Connection) -> None:
+def _score_box(reference: str, box: str, config: "MathVerifyConfig", sender: Connection) -> None:
     with sender:
         latex = LatexExtractionConfig()
-        latex = replace(latex, normalization_config=replace(latex.normalization_config, units=units))
+        latex = replace(latex, normalization_config=replace(latex.normalization_config, units=config.units))
         metric = math_metric(
             gold_extraction_target=(latex,),
             pred_extraction_target=(ExprExtractionConfig(), latex),
-            precision=precision,
+            precision=config.precision,
         )
         score, _ = _run_math_verify(metric, reference, r"\boxed{" + box + "}")
+        if config.bidirectional and score > 0.5 and box != reference:
+            reference_text = LibraryJudgeMathResourcesServer._strip_math_delimiters(reference)
+            score, _ = _run_math_verify(metric, box, r"\boxed{" + reference_text + "}")
         sender.send((score, None))  # The shared worker protocol also has an optional extracted answer.
 
 
@@ -46,9 +49,7 @@ class BoxedMathVerifier:
             ctx = mp.get_context("fork")
             receiver, sender = ctx.Pipe(duplex=False)
             with receiver, sender:
-                process = ctx.Process(
-                    target=_score_box, args=(reference, box, self.config.units, self.config.precision, sender)
-                )
+                process = ctx.Process(target=_score_box, args=(reference, box, self.config, sender))
                 process.start()
                 sender.close()
                 score, _ = await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(

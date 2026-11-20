@@ -355,6 +355,12 @@ class TestAnswerOptions:
             ({}, "0.0000001", "0.0000002", True),
             ({"precision": 12}, "0.0000001", "0.0000002", False),
             ({"units": False, "precision": 12}, "1/2", "0.5", True),
+            ({}, "1", "9=1", True),
+            ({"bidirectional": True}, "1", "9=1", False),
+            ({"bidirectional": True}, "1", "x=1", True),
+            ({"bidirectional": True}, "1", "1", True),
+            ({"bidirectional": True}, "1", "2", False),
+            ({"bidirectional": True}, r"\(\frac{1}{2}\)", "0.5", True),
         ],
     )
     async def test_math_options_route_boxed_answers(self, config, options, reference, box, library_match):
