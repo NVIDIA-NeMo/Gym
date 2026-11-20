@@ -42,6 +42,7 @@ from nemo_gym.core.failure_kinds import (
     ROLLOUT_ALLOCATION_ENDED,
     FailureClassificationConfig,
 )
+from nemo_gym.rollouts._json_record import json_record_digest
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
@@ -728,11 +729,11 @@ class RolloutRecords:
                 # in its audit evidence, so compare the two physical records before accepting it.
                 if record is not None and previous.record.skip_keys and REJUDGED_FAILURE_ID_KEY in row:
                     if previous.record.large_record_digest() != record.large_record_digest():
-                        # Older writers could append the same settlement in a different JSON key order.
-                        # For those unbound replays compare full values if the byte comparison was inconclusive.
+                        # Older writers could append identical values in a different JSON key order.
+                        # Compare the archived content without materializing either capture.
                         if REJUDGE_RECORD_BINDING_KEY in row or (
-                            replace(previous.record, skip_keys=frozenset()).read()
-                            != replace(record, skip_keys=frozenset()).read()
+                            json_record_digest(previous.record.path, previous.record.offset)
+                            != json_record_digest(record.path, record.offset)
                         ):
                             raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
                 return key, saved if REJUDGED_FAILURE_ID_KEY in row else row

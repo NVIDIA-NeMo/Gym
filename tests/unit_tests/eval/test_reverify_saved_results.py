@@ -572,7 +572,7 @@ async def test_rejudgment_persists_a_parsed_abstention_without_measuring_it(
 
 
 async def test_projected_replay_checks_the_audit_even_when_the_predecessor_was_small(tmp_path, verifier, monkeypatch):
-    output = _run(tmp_path, [ungraded(0)])
+    output = _run(tmp_path, [ungraded(0, ng_agent_observations={"notes": ['quoted "text"', "📘", None, 2.0]})])
     monkeypatch.setattr("nemo_gym.rollouts.rollout_records.PROJECTED_ROW_BYTES", output.stat().st_size + 1)
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
     (saved,) = _selected(output)[0].values()
@@ -584,8 +584,9 @@ async def test_projected_replay_checks_the_audit_even_when_the_predecessor_was_s
         store.record_outcome(reordered)
     assert output.read_bytes().splitlines()[-2:] == [orjson.dumps(saved)] * 2
     # An older journal may already contain the equivalent settlement in a different order.
+    historical = reordered | {audit_key: dict(reversed(saved[audit_key].items()))}
     with output.open("ab") as journal:
-        journal.write(orjson.dumps(reordered) + b"\n")
+        journal.write(json.dumps(historical, ensure_ascii=True).encode() + b"\n")
     (projected,) = RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS).selected("success")
     assert audit_key not in projected and projected["_ng_rejudge_operation_id"] == saved["_ng_rejudge_operation_id"]
 
