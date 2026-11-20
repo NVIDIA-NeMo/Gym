@@ -130,5 +130,3 @@ python resources_servers/visual_coding_opencode/prepare_multiharness.py rows.jso
   Code install their runtimes at start unless the image or a runtime directory already has them, so build the image
   with them or open the network for the install.
 - Other benchmarks' agents are untouched; do not blend this recipe with a profile that edits a stock agent block.
-
-This is configuration and input-boundary coverage. It is not a real-model result, and no cross-harness score is claimed.

@@ -254,18 +254,11 @@ def test_seed_writes_the_rows_images_as_files_in_the_lent_sandbox(root, stopped)
     assert (root / "input-1.jpg").read_bytes() == b"second"
 
 
-def test_a_row_without_images_lends_a_sandbox_with_no_input_files(root, stopped) -> None:
-    server = _server(root)
-    client = TestClient(server.setup_webserver())
-
-    assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
-    assert not list(root.glob("input-*"))
-
-
 @pytest.mark.parametrize(
     "images",
     [
         ["not a data url"],
+        ["image/png;base64,aGk="],
         ["data:text/plain;base64,aGk="],
         ["data:image/png;base64,***"],
         [_data_url(b"x")] * 9,

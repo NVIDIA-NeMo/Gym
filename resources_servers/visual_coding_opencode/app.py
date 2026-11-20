@@ -166,6 +166,18 @@ MAX_INPUT_IMAGES = 8
 INPUT_IMAGE_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
 
 
+def split_image_data_url(url: object) -> tuple[str, str]:
+    """The file extension and base64 payload of a PNG, JPEG, WebP or GIF data URL; ``ValueError`` for anything else."""
+    message = "Images must be base64 data URLs of a PNG, JPEG, WebP or GIF"
+    if not isinstance(url, str) or not url.startswith("data:"):
+        raise ValueError(message)
+    header, _, encoded = url.removeprefix("data:").partition(";base64,")
+    extension = INPUT_IMAGE_EXTENSIONS.get(header)
+    if extension is None or not encoded:
+        raise ValueError(message)
+    return extension, encoded
+
+
 class VisualCodingOpenCodeSandboxConfig(SandboxConfig):
     # An OCI image built from sandbox_image/Dockerfile: OpenCode, Python 3 and the image toolkit.
     image: Optional[str] = None
@@ -182,7 +194,7 @@ class VisualCodingOpenCodeConfig(BaseResourcesServerConfig):
     # model_only: the lent sandbox reaches only sandbox_model_server's host. inherit keeps the provider's network.
     sandbox_network_access: Literal["inherit", "model_only"] = "inherit"
     # The largest decoded image a row's input_images may carry into the lent sandbox.
-    max_input_image_bytes: int = Field(default=20 * 1024 * 1024, ge=1)
+    max_input_image_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
     sandbox_model_server: Optional[ModelServerRef] = None
     # The judge's model server picks the judge model (openai_model's openai_model), so this server names none.
     judge_model_server: ModelServerRef
@@ -264,10 +276,13 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
             raise ResourcesSeedRejectedError(f"input_images must be a list of at most {MAX_INPUT_IMAGES} data URLs")
         files: dict[str, bytes] = {}
         for index, url in enumerate(urls):
-            header, _, encoded = url.partition(";base64,") if isinstance(url, str) else ("", "", "")
-            extension = INPUT_IMAGE_EXTENSIONS.get(header.removeprefix("data:"))
-            if extension is None or not encoded:
-                raise ResourcesSeedRejectedError("input_images must be base64 data URLs of a PNG, JPEG, WebP or GIF")
+            try:
+                extension, encoded = split_image_data_url(url)
+            except ValueError as error:
+                raise ResourcesSeedRejectedError(f"input_images[{index}]: {error}") from error
+            # Check the encoded length first, so an oversized payload is refused before it is decoded.
+            if len(encoded) > 4 * ((self.config.max_input_image_bytes + 2) // 3):
+                raise ResourcesSeedRejectedError(f"input_images[{index}] exceeds max_input_image_bytes")
             try:
                 data = base64.b64decode(encoded, validate=True)
             except binascii.Error as error:

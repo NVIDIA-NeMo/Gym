@@ -12,17 +12,11 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+from resources_servers.visual_coding_opencode.app import MAX_INPUT_IMAGES, split_image_data_url
+
 
 HARNESSES = ("opencode", "pi", "codex", "claude_code", "openclaw")
 WORKDIR = "/workspace"
-EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
-
-
-def _extension(url: str) -> str:
-    mime = url.partition(";base64,")[0].removeprefix("data:")
-    if mime not in EXTENSIONS:
-        raise ValueError("Visual-coding images must be base64 data URLs of a PNG, JPEG, WebP or GIF")
-    return EXTENSIONS[mime]
 
 
 def prepare_row(row: dict, *, harness: str, file_input: bool) -> dict:
@@ -32,15 +26,19 @@ def prepare_row(row: dict, *, harness: str, file_input: bool) -> dict:
     if len(messages) != 1 or messages[0]["role"] != "user" or isinstance(messages[0]["content"], str):
         raise ValueError("Visual-coding rows carry one user message of text and image parts")
     parts = messages[0]["content"]
-    images = [part["image_url"] for part in parts if part["type"] == "input_image"]
+    if any(not isinstance(part, dict) or part.get("type") not in ("input_image", "input_text") for part in parts):
+        raise ValueError("Visual-coding rows carry only text and image parts")
+    images = [part.get("image_url") for part in parts if part["type"] == "input_image"]
     if not images:
         raise ValueError("Visual-coding rows need an image")
-    if any(part["type"] not in ("input_image", "input_text") for part in parts):
-        raise ValueError("Visual-coding rows carry only text and image parts")
+    if len(images) > MAX_INPUT_IMAGES:
+        raise ValueError(f"Visual-coding rows carry at most {MAX_INPUT_IMAGES} images")
+    # The resources server seeds these as files for every harness, so check them whether or not the prompt keeps them.
+    extensions = [split_image_data_url(url)[0] for url in images]
     row["input_images"] = images
     if file_input:
         texts = [part["text"] for part in parts if part["type"] == "input_text"]
-        paths = [f"{WORKDIR}/input-{index}.{_extension(url)}" for index, url in enumerate(images)]
+        paths = [f"{WORKDIR}/input-{index}.{extension}" for index, extension in enumerate(extensions)]
         params["input"] = [{"role": "user", "content": "\n\n".join([*texts, "Image files:\n" + "\n".join(paths)])}]
     row["agent_ref"] = {"name": f"visual_coding_{harness}_agent"}
     row["_ng_environment_server"] = f"visual_coding_{harness}_environment_server"
