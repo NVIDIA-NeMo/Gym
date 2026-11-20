@@ -78,22 +78,6 @@ def _settle(output: Path, failure: dict, reward: float) -> None:
         store.close_rejudgment(logical_rollout_id(failure), pending.operation_id)
 
 
-def test_projected_failure_sidecar_closes_an_interrupted_admission(tmp_path, monkeypatch):
-    from nemo_gym.eval.recovery.evidence import STORE_SKIP_KEYS
-
-    monkeypatch.setattr("nemo_gym.rollouts.rollout_records.PROJECTED_ROW_BYTES", 64)
-    output, [failure] = _run(
-        tmp_path, judge_failures=1, rollouts=1, evidence={"ng_agent_observations": {"history": "saved"}}
-    )
-    # Simulate a crash after writing the result, before closing its admission.
-    monkeypatch.setattr(RolloutStore, "close_rejudgment", lambda *args: None)
-    _settle(output, failure, 1.0)
-    projected = RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS)
-    assert projected.manifest.pending_rejudge and not projected.unresolved_rejudgments()
-    (row,) = projected.selected("success")
-    assert row["reward"] == 1.0
-
-
 def test_a_settled_row_keeps_the_evidence_of_the_judge_failure_it_settles(tmp_path):
     evidence = {
         "ng_perf": {"model_calls": 3, "total_tokens": 1200},

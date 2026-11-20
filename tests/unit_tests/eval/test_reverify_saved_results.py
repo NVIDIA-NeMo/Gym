@@ -24,7 +24,6 @@ from nemo_gym.eval.recovery.decision import (
 )
 from nemo_gym.eval.recovery.evidence import (
     COLLECT_SCRIPT,
-    STORE_SKIP_KEYS,
     CollectedEvidence,
 )
 from nemo_gym.eval.recovery.grading import (
@@ -467,166 +466,45 @@ async def test_an_invalid_judge_response_inside_the_rubric_facts_is_graded_again
     assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
 
 
-def parsed_abstention(row, evaluation):
-    return row | {
-        "reward": 0.0,
-        "mask_sample": True,
-        "failure_kind": None,
-        "evaluation_completed": True,
-        "correctness": None,
-        "verdict": "unresolved",
-        "grading_status": "judge_unresolved",
-        "judge_evaluations": [evaluation],
-    }
-
-
-async def test_a_judge_failure_settles_on_abstention_without_another_policy_attempt(tmp_path, verifier):
-    failure = ident(
-        0,
-        response=ANSWER,
-        reward=0.0,
-        mask_sample=True,
-        failure_kind="judge_failed",
-        _ng_failure_class="judge_failed",
-        _ng_failure_id="judge-outage",
-    )
-    output = _run(tmp_path, [failure])
+@pytest.mark.parametrize("initial", ["judge_unparsed", "judge_failed"])
+@pytest.mark.parametrize("structured", [False, True], ids=["line", "json"])
+async def test_rejudged_abstention_stops_retries_on_the_saved_attempt(tmp_path, verifier, initial, structured):
+    row = ungraded(0) | {"reward": 0.0, "mask_sample": True, "evaluation_completed": False, "correctness": None}
+    if initial == "judge_failed":
+        row.update(_ng_failure_class="judge_failed", _ng_failure_id="judge-outage", failure_kind="judge_failed")
+    else:
+        row.update(grading_status="judge_unparsed", failure_kind="judge_unparseable")
+    output = _run(tmp_path, [row])
     (identity,) = due_judge_failures(output)
     attempts = RolloutStore.read(output).manifest.next_attempt.copy()
-    verifier["grade"] = lambda row: parsed_abstention(row, {"verdict_label": "Judgement: unresolved"})
-
-    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
-    selected, store = _selected(output)
-    saved = selected[identity]
-    assert saved["grading_status"] == "judge_unresolved" and saved["mask_sample"] and saved["correctness"] is None
-    assert saved["response"] == ANSWER and saved["_ng_attempt_index"] == 0
-    assert saved["_ng_rejudged_failure_id"] == "judge-outage"
-    assert store.settled(saved) and not store.manifest.pending_rejudge and store.manifest.next_attempt == attempts
-    assert not due_judge_failures(output)
-    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
-    assert verifier["posted"] == [("rs", "/verify")]
-
-
-@pytest.mark.parametrize("has_trajectory", [False, True])
-async def test_rejudgment_persists_a_parsed_abstention_without_measuring_it(
-    tmp_path, verifier, monkeypatch, has_trajectory
-):
-    monkeypatch.setattr("nemo_gym.rollouts.rollout_records.PROJECTED_ROW_BYTES", 64)
-    original = ungraded(0) | {
-        "reward": 0.0,
-        "mask_sample": True,
-        "failure_kind": "judge_unparseable",
-        "grading_status": "judge_unparsed",
-        "evaluation_completed": False,
-        "correctness": None,
-    }
-    if not has_trajectory:
-        original.pop("ng_trajectory")
-    output = _run(tmp_path, [original])
-    if not has_trajectory:
-        # A valid unterminated last record acquires its separator when the settlement is appended.
-        unterminated = output.read_bytes().removesuffix(b"\n")
-        output.write_bytes(unterminated)
-        monkeypatch.setattr("nemo_gym.rollouts.rollout_records.PROJECTED_ROW_BYTES", len(unterminated))
-    (identity,) = due_judge_failures(output)
     evaluation = {"verdict_label": "Judgement: unresolved"}
-    if has_trajectory:
+    if structured:
         evaluation["judgment"] = {
             "verdict": "unresolved",
             "reason_code": "conflicting_reference",
-            "evidence": "The reference contradicts the question.",
+            "evidence": "The reference contradicts itself.",
         }
-    verifier["grade"] = lambda row: parsed_abstention(row, evaluation)
-    from nemo_gym.rollouts import rollout_records
+    verifier["grade"] = lambda request: request | {
+        "reward": 0.0,
+        "mask_sample": True,
+        "evaluation_completed": True,
+        "failure_kind": None,
+        "grading_status": "judge_unresolved",
+        "verdict": "unresolved",
+        "correctness": None,
+        "judge_evaluations": [evaluation],
+    }
 
-    manifest_path = rollout_records.manifest_path_for(output)
-    close = RolloutStore.close_rejudgment
-    admitted = []
+    for settled in (1, 0, 0):
+        assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == settled
 
-    def capture_before_close(store, *args):
-        admitted.append(manifest_path.read_bytes())
-        return close(store, *args)
-
-    monkeypatch.setattr(RolloutStore, "close_rejudgment", capture_before_close)
-    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
-    selected, store = _selected(output)
+    selected, store = _selected(output)  # Reopen from the source run.
     saved = selected[identity]
-    assert saved["mask_sample"] and saved["verdict"] == "unresolved" and saved["correctness"] is None
+    assert saved["response"] == row["response"] and saved["_ng_attempt_index"] == 0
     assert saved["grading_status"] == "judge_unresolved" and saved["judge_evaluations"] == [evaluation]
-    assert saved["response"] == original["response"] and saved["_ng_attempt_index"] == 0
-    assert store.coverage()["masked"] == 1
-    projected = RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS)
-    (row,) = projected.selected("success")
-    assert row["verdict"] == "unresolved" and row["mask_sample"] and "ng_trajectory" not in row
-    assert not store.manifest.pending_rejudge and due_judge_failures(output) == []
-    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
-    assert verifier["posted"] == [("rs", "/verify")]
-    # Simulate a crash after the settlement was fsynced and before its admission was closed.
-    closed = manifest_path.read_bytes()
-    manifest_path.write_bytes(admitted[0])
-    scan = rollout_records._indexed_records
-
-    def projected_scan(path, **kwargs):
-        if path == output:
-            assert kwargs.get("skip_keys") == STORE_SKIP_KEYS
-        return scan(path, **kwargs)
-
-    with monkeypatch.context() as crash:
-        crash.setattr(rollout_records, "_indexed_records", projected_scan)
-        reopened = RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS)
-        assert reopened.unresolved_rejudgments() == []
-    manifest_path.write_bytes(closed)
-    # Both old and new deliveries may arrive again, in either order.
-    original_bytes = output.read_bytes().splitlines()[0]
-    with RolloutStore.open_for_rejudgment(output) as writer:
-        writer.record_outcome(dict(reversed(selected[identity].items())), sync=True)
-        writer.record_outcome(orjson.loads(original_bytes), sync=True)
-    assert len(set(output.read_bytes().splitlines()[-3:])) == 1
-    # Include a journal written in arrival order by an older writer.
-    with output.open("ab") as writer:
-        writer.write(original_bytes + b"\n")
-    for skipped in (frozenset(), STORE_SKIP_KEYS):
-        (replayed,) = RolloutStore.read(output, import_legacy=False, skip_keys=skipped).selected("success")
-        assert replayed["mask_sample"] and replayed["verdict"] == "unresolved"
-    assert not due_judge_failures(output)
-    # A changed byte in omitted trajectory data must still invalidate the predecessor.
-    before, separator, rest = output.read_bytes().partition(b"\n")
-    altered = (
-        before.replace(b'"task_id":"t0"', b'"task_id":"z0"')
-        if has_trajectory
-        else before[:-1] + b',"ng_agent_observations":{"history":"new"}}'
-    )
-    assert before != altered
-    output.write_bytes(altered + separator + rest)
-    with pytest.raises(ConfigError, match="Conflicting outcomes"):
-        RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS)
-
-
-async def test_projected_replay_checks_the_audit_even_when_the_predecessor_was_small(tmp_path, verifier, monkeypatch):
-    output = _run(tmp_path, [ungraded(0, ng_agent_observations={"notes": ['quoted "text"', "📘", None, 2.0]})])
-    monkeypatch.setattr("nemo_gym.rollouts.rollout_records.PROJECTED_ROW_BYTES", output.stat().st_size + 1)
-    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
-    (saved,) = _selected(output)[0].values()
-    audit_key = "_ng_rejudged_failure_observations"
-    assert "_ng_rejudge_predecessor_record_binding" not in saved
-
-    reordered = dict(reversed(saved.items()))
-    with RolloutStore.open_for_rejudgment(output) as store:
-        store.record_outcome(reordered)
-    assert output.read_bytes().splitlines()[-2:] == [orjson.dumps(saved)] * 2
-    # An older journal may already contain the equivalent settlement in a different order.
-    historical = reordered | {audit_key: dict(reversed(saved[audit_key].items()))}
-    with output.open("ab") as journal:
-        journal.write(json.dumps(historical, ensure_ascii=True).encode() + b"\n")
-    (projected,) = RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS).selected("success")
-    assert audit_key not in projected and projected["_ng_rejudge_operation_id"] == saved["_ng_rejudge_operation_id"]
-
-    altered = saved | {audit_key: saved[audit_key] | {"other_evidence": "changed"}}
-    with output.open("ab") as journal:
-        journal.write(orjson.dumps(altered) + b"\n")
-    for projection in (frozenset(), STORE_SKIP_KEYS):
-        with pytest.raises(ConfigError, match="Conflicting outcomes"):
-            RolloutStore.read(output, import_legacy=False, skip_keys=projection)
+    assert saved["correctness"] is None and saved["mask_sample"] is True and store.settled(saved)
+    assert store.manifest.next_attempt == attempts and not store.manifest.pending_rejudge
+    assert due_judge_failures(output) == [] and verifier["posted"] == [("rs", "/verify")]
 
 
 @pytest.mark.parametrize(

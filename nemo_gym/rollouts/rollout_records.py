@@ -42,7 +42,6 @@ from nemo_gym.core.failure_kinds import (
     ROLLOUT_ALLOCATION_ENDED,
     FailureClassificationConfig,
 )
-from nemo_gym.rollouts._json_record import json_record_digest
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
@@ -75,7 +74,6 @@ REJUDGED_FAILURE_ID_KEY = "_ng_rejudged_failure_id"
 # The pending_rejudge operation an outcome closes.
 REJUDGE_OPERATION_ID_KEY = "_ng_rejudge_operation_id"
 # The settled judge failure's own observations, kept on the selected result.
-REJUDGE_RECORD_BINDING_KEY = "_ng_rejudge_predecessor_record_binding"
 REJUDGED_OBSERVATIONS_KEY = "_ng_rejudged_failure_observations"
 # A re-verified saved result is named by this prefix and the digest of the saved row (``rejudge_predecessor_id``).
 RESULT_PREDECESSOR_PREFIX = "result-sha256:"
@@ -179,22 +177,6 @@ class RolloutRecord:
     expected_identity: tuple[str | None, str, int] | None = None
     # Top-level keys a read-only selection skips in large rows; ``read`` applies the same projection.
     skip_keys: frozenset[str] = frozenset()
-
-    def large_record_digest(self, binding_id: str = "") -> str | None:
-        """Hash a large record’s JSON bytes, optionally bound to a logical predecessor ID."""
-        if self.length < PROJECTED_ROW_BYTES:
-            return None
-        digest = hashlib.sha256(binding_id.encode("utf-8") + b"\0")
-        with self.path.open("rb") as stream:
-            stream.seek(self.offset)
-            remaining = self.length
-            while remaining:
-                chunk = stream.read(min(remaining, _CHUNK_BYTES))
-                if not chunk:
-                    raise ConfigError(f"Incomplete predecessor at byte {self.offset} of {self.path}.")
-                remaining -= len(chunk)
-                digest.update(chunk if remaining else chunk.removesuffix(b"\n"))
-        return digest.hexdigest()
 
     def read(self) -> dict:
         """Read this record with its effective legacy attempt identity."""
@@ -507,13 +489,7 @@ def rejudge_predecessor_id(row: dict) -> str | None:
 
 
 def rejudgment_admission_closed_by(
-    pending,
-    outcome: dict,
-    identity: str,
-    failures_path: Path,
-    results_path: Path | None = None,
-    *,
-    skip_keys: frozenset[str] = frozenset(),
+    pending, outcome: dict, identity: str, failures_path: Path, results_path: Path | None = None
 ) -> bool:
     """Whether outcome is the saved result of admission pending: operation, predecessor id and row hash, identity,
     attempt and admission time all match. Cold readers and the close use this one check.
@@ -528,27 +504,12 @@ def rejudgment_admission_closed_by(
     result_predecessor = pending.predecessor_failure_id.startswith(RESULT_PREDECESSOR_PREFIX)
     if result_predecessor and results_path is None:
         return False
-    binding = outcome.get(REJUDGE_RECORD_BINDING_KEY)
-    path = results_path if result_predecessor else failures_path
-    for record, row in _indexed_records(path, skip_keys=skip_keys):
-        if logical_rollout_id(row) != identity or row.get(ATTEMPT_INDEX_KEY_NAME, 0) != outcome.get(
-            ATTEMPT_INDEX_KEY_NAME, 0
-        ):
-            continue
-        if isinstance(binding, str) and skip_keys:
-            content_id = RESULT_PREDECESSOR_PREFIX + pending.predecessor_sha256
-            source_id = content_id if result_predecessor else row.get("_ng_failure_id")
-            if source_id != pending.predecessor_failure_id:
-                continue
-            if record.large_record_digest(content_id) == binding:
-                return True
-            continue
-        # Only a matching legacy predecessor may require the fields elided by a projection.
-        if skip_keys and record.length > PROJECTED_ROW_BYTES:
-            row = replace(record, skip_keys=frozenset()).read()
+    for _, row in _indexed_records(results_path if result_predecessor else failures_path):
         if rejudge_predecessor_id(row) == pending.predecessor_failure_id:
             return (
-                hashlib.sha256(orjson.dumps(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
+                logical_rollout_id(row) == identity
+                and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == outcome.get(ATTEMPT_INDEX_KEY_NAME, 0)
+                and hashlib.sha256(orjson.dumps(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
                 == pending.predecessor_sha256
             )
     return False
@@ -578,38 +539,22 @@ def settled_judge_result(result: dict) -> bool:
     )
 
 
-def is_rejudgment_of(failure: dict, result: dict, *, record: RolloutRecord | None = None) -> bool:
+def is_rejudgment_of(failure: dict, result: dict) -> bool:
     """Whether ``result`` re-scores the saved answer of ``failure`` without a new model attempt.
 
     ``failure`` is a judge failure, or a saved result whose grading is re-verified from its saved answer (a result
     masked by a judge or verify-transport failure, or one with no recorded grading). Which saved results are
     re-verified is the caller's selection; this checks only that ``result`` binds the same saved answer and attempt.
     """
-    predecessor_id = result.get(REJUDGED_FAILURE_ID_KEY)
-    if not isinstance(predecessor_id, str):
-        return False
-    if (
-        record is not None
-        and record.skip_keys
-        and failure.get("_ng_failure_class") is None
-        and REJUDGE_RECORD_BINDING_KEY in result
-    ):
-        # The projection may omit the fields needed to reconstruct the canonical result ID.
-        binding = result[REJUDGE_RECORD_BINDING_KEY]
-        if (
-            not predecessor_id.startswith(RESULT_PREDECESSOR_PREFIX)
-            or not isinstance(binding, str)
-            or record.large_record_digest(predecessor_id) != binding
-        ):
-            return False
-    elif predecessor_id != rejudge_predecessor_id(failure):
-        return False
+    predecessor_id = rejudge_predecessor_id(failure)
     return (
         (failure.get("_ng_failure_class") is None or matches_failure_class(failure, {"judge_failed"}))
         and _holds_saved_answer(failure)
+        and predecessor_id is not None
         and settled_judge_result(result)
         and result.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and result.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
+        and result.get(REJUDGED_FAILURE_ID_KEY) == predecessor_id
         and result.get("response") == failure.get("response")
     )
 
@@ -692,14 +637,7 @@ class RolloutRecords:
             raise ConfigError("Saved outcome belongs to a different run.")
 
     def check_outcome(self, row: dict, *, legacy: bool = False) -> tuple[str, int]:
-        """Validate an outcome and return its rollout and attempt identity."""
-        key, _ = self.validated_outcome(row, legacy=legacy)
-        return key
-
-    def validated_outcome(
-        self, row: dict, *, legacy: bool = False, record: RolloutRecord | None = None
-    ) -> tuple[tuple[str, int], dict]:
-        """Return the accepted payload, preserving stored JSON order when replaying a bound settlement."""
+        """Validate without mutation, before a writer appends the payload."""
         key = self._key(row)
         self.check_run_identity(row, legacy=legacy)
         if "_ng_failure_record" in row:
@@ -724,31 +662,14 @@ class RolloutRecords:
         previous = self.payloads.get(key)
         if previous is not None:
             saved = previous.record.read()
-            if saved == row:
-                # This is a replay of the settlement itself. A projected equality can hide changes
-                # in its audit evidence, so compare the two physical records before accepting it.
-                if record is not None and previous.record.skip_keys and REJUDGED_FAILURE_ID_KEY in row:
-                    if previous.record.large_record_digest() != record.large_record_digest():
-                        # Older writers could append identical values in a different JSON key order.
-                        # Compare the archived content without materializing either capture.
-                        if REJUDGE_RECORD_BINDING_KEY in row or (
-                            json_record_digest(previous.record.path, previous.record.offset)
-                            != json_record_digest(record.path, record.offset)
-                        ):
-                            raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
-                return key, saved if REJUDGED_FAILURE_ID_KEY in row else row
-            if is_rejudgment_of(saved, row, record=previous.record) or is_rejudgment_failure_of(saved, row):
-                return key, row
-            if is_rejudgment_of(row, saved, record=record):
-                # Failure sidecars retain their debit. Replaying a saved result keeps its successor selected.
-                return key, saved if row.get("_ng_failure_class") is None else row
-            raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
-        return key, row
+            if saved != row and not (
+                is_rejudgment_of(saved, row) or is_rejudgment_of(row, saved) or is_rejudgment_failure_of(saved, row)
+            ):
+                raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
+        return key
 
     def _payload(self, row: dict, record: RolloutRecord, *, legacy: bool = False, count_failure: bool = True) -> None:
-        key, accepted = self.validated_outcome(row, legacy=legacy, record=record)
-        if accepted is not row:
-            return  # The selected outcome already on disk supersedes this delivery.
+        key = self.check_outcome(row, legacy=legacy)
         previous = self.payloads.get(key)
         if previous is not None and previous.failure_class is None and row.get("_ng_failure_class") is not None:
             # The judge failure that a re-judgment of the same attempt already settled: its debit stays and the
@@ -916,7 +837,7 @@ class RolloutRecords:
         for identity, pending in manifest.pending_rejudge.items():
             latest = state.payloads.get((identity, state.latest.get(identity)))
             if latest is None or not rejudgment_admission_closed_by(
-                pending, latest.record.read(), identity, failures_path_for(output), output, skip_keys=skip_keys
+                pending, latest.record.read(), identity, failures_path_for(output), output
             ):
                 # Admitted for re-judgment but no outcome saved: whether the judge ran is unknown.
                 state.unresolved_dispatches.add(identity)
