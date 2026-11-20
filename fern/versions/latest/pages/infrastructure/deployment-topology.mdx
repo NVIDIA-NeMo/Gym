@@ -66,7 +66,7 @@ When NeMo Gym connects to an existing Ray cluster, the same Ray and Python versi
 
 #### NeMo Gym's Own Ray Cluster
 
-When the training framework **does not use Ray**, NeMo Gym spins up its own independent Ray cluster for coordination.
+When the training framework **does not use Ray** and a configured NeMo Gym server declares `ray_enabled = True`, NeMo Gym spins up its own independent Ray cluster for that server. When no configured server uses Ray, NeMo Gym starts no Ray cluster, and its servers run as ordinary processes that communicate over HTTP.
 
 ```mermaid
 %%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
@@ -88,7 +88,7 @@ flowchart LR
     style Gym fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
 ```
 
-The training framework runs its own orchestration (non-Ray). NeMo Gym spins up a separate Ray cluster; only Ray-enabled servers connect to it.
+The training framework runs its own orchestration (non-Ray). If a configured server uses Ray, NeMo Gym spins up a separate Ray cluster; only Ray-enabled servers connect to it.
 
 **When to use:**
 - The training framework has its own orchestration (not Ray-based)
@@ -134,6 +134,7 @@ flowchart LR
 | Factor | Single Ray Cluster | NeMo Gym's Own Ray Cluster | Separate Clusters |
 |--------|-------------------|----------------------|-------------------|
 | **Training framework** | Ray-based | Non-Ray | Any |
+| **NeMo Gym Ray cluster** | Shared with the training framework | Started only if a configured server uses Ray | Started only if a configured server uses Ray |
 | **Startup** | Co-launched | Independent | Independent |
 | **Resource visibility** | Unified | Separate | Separate |
 | **Network requirements** | Intra-cluster | Intra-cluster | Cross-cluster HTTP |
