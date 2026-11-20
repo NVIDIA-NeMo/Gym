@@ -888,7 +888,7 @@ equal to `hle`'s apart from those two keys:
   Such a sandbox cannot download a runtime, so OpenCode runs the science image's
   `/usr/local/bin/opencode` at the digest its Dockerfile checks (`sandbox_executable_path`,
   `sandbox_executable_sha256`) and Pi the image's `/opt/node` and `/opt/pi` (`sandbox_runtime_dir: /opt`,
-  `pi_version: 0.85.1`).
+  `pi_version: 1.5.2`).
 - Search: the agent's `tool_servers` lists the Tavily server (`opencode_hle_tools`: the `hle_tools`
   instance of `hle_web_tools`); the Environment Server seeds a session on that server for every
   episode and grants its MCP tools to the agent. The judge serves no tools, so it grants none of its
