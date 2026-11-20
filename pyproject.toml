@@ -173,7 +173,9 @@ dependencies = [
     # hydra-core license: MIT https://github.com/facebookresearch/hydra/blob/737fc3349ef3a4031035645f7e8c80be66a57042/LICENSE
     # omegaconf license: BSD 3-Clause https://github.com/omry/omegaconf/blob/117f7de07285e4d1324b9229eaf873de15279457/LICENSE
     "hydra-core>=1.4.0rc3",
-    "omegaconf",
+    # hydra-core 1.4.0rc3 imports omegaconf._validation_context, which omegaconf 2.4.0 lacks and
+    # 2.4.1rc2 adds; hydra declares a bare `omegaconf`, so pin the floor here for component venvs.
+    "omegaconf>=2.4.1rc2",
 
     # rich: used for nicer terminal content displays
     # Updated Tue Feb 17, 2026 with rich==14.3.2
