@@ -2397,6 +2397,93 @@ async def test_pinned_pi_reports_a_context_overflow_after_a_long_turn(
         assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
 
 
+def _tool_turns_then_cut_off(requests, summary_status=200):
+    """A streaming chat model that reasons at length and calls `bash` three times, then replies with text cut at
+    `length` well below the output cap, and finally answers. Pi's compaction requests, which carry no tools, get a
+    summary, or `summary_status` with no body.
+    """
+
+    def handle(body):
+        requests.append(body)
+        turn = sum("tools" in request for request in requests)
+        if "tools" not in body:
+            if summary_status != 200:
+                return summary_status, "application/json", b""
+            delta, finish = {"role": "assistant", "content": "Summary."}, "stop"
+        elif turn <= 3:
+            call = {"index": 0, "id": f"call-{turn}", "type": "function"}
+            call["function"] = {"name": "bash", "arguments": json.dumps({"command": "true"})}
+            delta, finish = (
+                {"role": "assistant", "reasoning_content": "r" * 100_000, "tool_calls": [call]},
+                "tool_calls",
+            )
+        elif turn == 4:
+            delta, finish = {"role": "assistant", "content": "The answer is"}, "length"
+        else:
+            delta, finish = {"role": "assistant", "content": "Done."}, "stop"
+        data = {
+            "id": f"chat-{len(requests)}",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": body.get("model"),
+        }
+        chunks = [{**data, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}]
+        chunks.append(
+            {**data, "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+        )
+        stream = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+        return 200, "text/event-stream", f"{stream}data: [DONE]\n\n".encode()
+
+    return handle
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+@pytest.mark.parametrize(
+    ("summary_status", "requests_with_tools"),
+    [(200, [True] * 4 + [False, True]), (503, [True] * 4 + [False] * 4)],
+)
+async def test_pinned_pi_reports_a_failed_recovery_of_a_cut_off_reply(
+    setup, tmp_path, monkeypatch, summary_status, requests_with_tools
+):
+    # Pi compacts and retries a `length` reply cut below the output cap. When its compaction call fails, the cut-off
+    # reply is not the run's result: the run fails as the compaction call did, like a failed overflow recovery.
+    model = functools.partial(_tool_turns_then_cut_off, summary_status=summary_status)
+    agent = setup[0]
+    settings = agent._build_settings_config()
+    settings["retry"] = {**settings["retry"], "maxRetries": 3, "baseDelayMs": 1}
+    with patch.object(agent, "_build_settings_config", return_value=settings):
+        async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: [], model=model) as run:
+            response = await run.activation
+    assert ["tools" in request for request in run.requests] == requests_with_tools
+    texts = [item.content[0].text for item in response.output if item.type == "message"]
+    if summary_status == 200:
+        assert (response.status, response.error) == ("completed", None)
+        # The cut-off reply that Pi retried stays in the output before the reply that replaced it.
+        assert texts == ["The answer is", "Done."]
+    else:
+        assert response.status == "failed"
+        assert re.match(r"Context overflow recovery failed: .*\b503\b", response.error.message)
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+        assert texts == ["The answer is"]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+async def test_pinned_pi_types_a_refused_model_connection_as_a_transport_error(setup, tmp_path, monkeypatch):
+    agent = setup[0]
+    settings = agent._build_settings_config()
+    # Pi would retry the connection; the terminal error is the same.
+    settings["retry"] = {**settings["retry"], "maxRetries": 0}
+    with patch.object(agent, "_build_settings_config", return_value=settings):
+        async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: []) as run:
+            # Pi reads the model server's address when the activation starts.
+            agent.server_client._build_server_base_url.return_value = run.down
+            response = await run.activation
+    assert response.status == "failed"
+    # Pi appends the cause, as in `Connection error.: connect ECONNREFUSED 127.0.0.1:<port>`.
+    assert response.error.message.startswith("Connection error")
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "model_transport_error"}
+
+
 @pytest.mark.parametrize("field", ["timeout", "sandbox_install_timeout_seconds", "session_close_timeout_seconds"])
 @pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
 def test_pi_rejects_invalid_execution_deadlines(field, value):
@@ -2811,7 +2898,7 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     assert state.runtime == "/opt"
     assert not any(path.endswith("/install_pi_runtime.sh") for path in sandbox.files)
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
-    assert "/opt/node/bin/node /opt/pi/node_modules/.bin/pi --version" in commands
+    assert "NODE_DISABLE_COMPILE_CACHE=1 /opt/node/bin/node /opt/pi/node_modules/.bin/pi --version" in commands
 
 
 def test_required_tool_grant_under_model_only_is_a_terminal_seed_refusal(setup):

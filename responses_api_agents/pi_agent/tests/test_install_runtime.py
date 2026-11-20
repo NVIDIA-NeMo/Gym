@@ -250,6 +250,8 @@ def test_installer_checks_the_pinned_pi_through_its_bin_link(
         assert result.returncode == 0, result.stderr
         assert result.stdout.splitlines()[-1] == "0.80.2"
         assert (runtime / "ready").exists()
+        # A task's npm config cannot turn the bin link off.
+        assert "--bin-links" in (root / "node.log").read_text().split()
     else:
         assert result.returncode != 0
         assert not (runtime / "ready").exists()

@@ -145,7 +145,8 @@ def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
     call's result when the call ends, but the turn's tool results only after all of the turn's calls end, so a finish
     call batched with a slower tool shows only in the former. A run whose last reply stopped (`stop` or `length`)
     without a tool call has ended, and the deadline then cut only Pi's compaction call after the run, unless Pi
-    compacts to retry a `length` reply that it counts as a context overflow.
+    compacts to retry the `length` reply, as it may for a reply it counts as a context overflow or one cut below the
+    output cap.
     """
     if any(
         event.get("type") == "tool_execution_end"
@@ -167,8 +168,9 @@ def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
     last = events[replies[-1]][1]["message"]
     # Pi keeps a provider's `stop` for a reply with tool calls, and then runs them.
     called_tools = any(isinstance(part, dict) and part.get("type") == "toolCall" for part in last.get("content") or [])
-    # Pi can count a `length` reply as a context overflow, then compacts (reason `overflow`) to retry it. Pi never
-    # retries a `stop` reply, so its compaction for an overflow after one runs after the run has ended.
+    # Pi recovers a `length` reply it counts as a context overflow, or one cut below the output cap, by compacting
+    # (reason `overflow`) and retrying it. Pi never retries a `stop` reply, so its compaction for an overflow after
+    # one runs after the run has ended.
     recovering = last.get("stopReason") == "length" and any(
         event.get("type") == "compaction_start" and event.get("reason") == "overflow"
         for _, event in events[replies[-1] + 1 :]
@@ -736,9 +738,9 @@ class PiAgent(SimpleResponsesAPIAgent):
     """Runs the pi CLI (pi --print --mode json --no-session)"""
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read the pinned Pi's terminal assistant error, such as `400: {...}` or `HTTP 503: ...`.
+        """Read the pinned Pi's terminal assistant error, such as `400: {...}`, `HTTP 503: ...` or `Connection error.`.
 
-        tests/test_outcome.py checks these messages against the pinned Pi's model client.
+        tests/test_outcome.py and the pinned-Pi tests in test_sandbox.py check these against the pinned Pi.
         """
         if native_result.get("stopReason") != "error":
             return AgentOutcome(failure_kind="unknown")
@@ -746,7 +748,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
         if match:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
-        if message in {"Connection error.", "Connection error", "fetch failed", "Request timed out."}:
+        # Pi appends the underlying cause, as in `Connection error.: connect ECONNREFUSED 127.0.0.1:8000`.
+        if re.match(r"(?:Connection error\.?|fetch failed|Request timed out\.)(?::\s|$)", message):
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return AgentOutcome(failure_kind="unknown")
 
@@ -860,8 +863,9 @@ class PiAgent(SimpleResponsesAPIAgent):
                     f"error_type={prepared.error_type}): {details[-16000:]}"
                 )
             if self.config.sandbox_runtime_dir:
+                # Pi's entry script enables Node's compile cache, which would leave files in the task's /tmp.
                 checked = await sandbox.exec(
-                    f"{shlex.quote(runtime + '/node/bin/node')} "
+                    f"NODE_DISABLE_COMPILE_CACHE=1 {shlex.quote(runtime + '/node/bin/node')} "
                     f"{shlex.quote(runtime + '/pi/node_modules/.bin/pi')} --version",
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
@@ -1083,6 +1087,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
             "PI_SKIP_VERSION_CHECK": "1",
             "PI_TELEMETRY": "0",
+            # Pi's entry script enables Node's compile cache, which would leave files in the task's /tmp.
+            "NODE_DISABLE_COMPILE_CACHE": "1",
             "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
             **mcp_env,
         }
@@ -1164,8 +1170,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                 compaction_started = True
             elif event.get("type") == "compaction_end":
                 # Pi recovers from an overflow by compacting, then retrying. A compaction that started and failed (a 503,
-                # a dropped connection) ends the run with no retry. Pi's verdict that the retry overflowed again comes
-                # with no start.
+                # a dropped connection), after Pi's own retries of the compaction call, ends the run without retrying
+                # the overflowed call. Pi's verdict that the retry overflowed again comes with no start.
                 failure = event.get("errorMessage")
                 if compaction_started and event.get("reason") == "overflow" and isinstance(failure, str):
                     recovery_error = failure
@@ -1207,10 +1213,12 @@ class PiAgent(SimpleResponsesAPIAgent):
         assert cleanup is not None
         model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
         compaction_failure = None
-        if recovery_error and stop_reasons and stop_reasons[-1] == "error":
+        if recovery_error and stop_reasons and stop_reasons[-1] in ("error", "length"):
             # Pi's overflow recovery failed on its compaction call, so the failed call was never retried, even when
-            # Gym does not count its error as an overflow. Pi wraps the compaction call's error in its own message,
-            # which classify_outcome leaves unknown: retryable by default, even if that call hit the context limit.
+            # Gym does not count its error as an overflow. Pi also recovers a `length` reply cut below the output cap
+            # this way, so that reply is not the run's result either. Pi wraps the compaction call's error in its own
+            # message, which classify_outcome leaves unknown: retryable by default, even if that call hit the context
+            # limit.
             model_limit, terminal_error = False, recovery_error
             compaction_failure = {"stopReason": "error", "errorMessage": recovery_error}
         terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
@@ -1310,10 +1318,12 @@ class PiAgent(SimpleResponsesAPIAgent):
                 )
             )
         if error:
-            assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
+            # Classify a failed compaction call, not the overflow or cut-off reply it was recovering from.
+            assistant = compaction_failure or next(
+                (m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {}
+            )
             if not execution_error and _reported_model_error(assistant, cleanup, will_retry=retrying):
-                # Classify a failed compaction call, not the overflow it was recovering from.
-                return self.report_outcome(response, compaction_failure or assistant)
+                return self.report_outcome(response, assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
         return response
 
