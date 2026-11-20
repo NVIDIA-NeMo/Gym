@@ -85,8 +85,13 @@ from nemo_gym.telemetry.setup import (
 logger = logging.getLogger(__name__)
 
 
-def _pin_stem_rule_file(settings: DictConfig) -> None:
-    """Bind the file read by each STEM worker to the same resolved config the collector records."""
+def _resolve_stem_grading_settings(settings: DictConfig) -> None:
+    """Record the grading policy used by the worker in the configuration saved for resume."""
+    math = settings.get("math_verify")
+    if isinstance(math, DictConfig):
+        # Older STEM workers stripped suffixes and accepted one-way matches when these options were omitted.
+        with open_dict(settings):
+            settings.math_verify = OmegaConf.merge({"units": False, "bidirectional": True}, math)
     rules = settings.get("extra_answer_rules")
     if not isinstance(rules, str):
         return
@@ -820,7 +825,7 @@ Duplicate config paths:
                 server_instance_config.SERVER_TYPE == RESOURCES_SERVER_TYPE_KEY_NAME
                 and "stem_judge" in server_instance_config.resources_servers
             ):
-                _pin_stem_rule_file(run_server_config_dict)
+                _resolve_stem_grading_settings(run_server_config_dict)
 
             # Check server refs
             for field_name, v in run_server_config_dict.items():

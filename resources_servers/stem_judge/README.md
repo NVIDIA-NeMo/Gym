@@ -192,6 +192,9 @@ for a `12 J` reference goes to the judge. To reproduce the standalone library
 settings, set `units: true`, `bidirectional: false`, and `precision: 6`. Unit
 stripping can also remove variables such as the `t` in `3t` and trailing LaTeX
 text. `precision` defaults to six decimal places for float comparisons.
+Gym records the effective `units` and `bidirectional` values when math verification
+is enabled. Start a new run if an earlier manifest omitted either value. A run
+that explicitly set both options can resume with the same grading policy.
 At 6 places, `0.0000001` and `0.0000002` compare equal. At 12 they go to the judge.
 For reference `1`, the library accepts `9=1` in only one direction, so STEM
 sends that box to the judge. It accepts `x=1` in both directions. Only a

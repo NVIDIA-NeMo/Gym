@@ -220,6 +220,16 @@ class TestAnswerOptions:
         config.extra_answer_rules_sha256 = "a" * 64
         assert StemJudgeResourcesServer.load_config_from_global_config() is config
 
+    def test_managed_worker_requires_a_resolved_math_policy(self, config, monkeypatch):
+        from nemo_gym.server_runtime import SimpleResourcesServer
+
+        monkeypatch.setattr(SimpleResourcesServer, "load_config_from_global_config", classmethod(lambda cls: config))
+        config.math_verify = MathVerifyConfig(units=False)
+        with raises(ValueError, match="omits units or bidirectional"):
+            StemJudgeResourcesServer.load_config_from_global_config()
+        config.math_verify = MathVerifyConfig(units=False, bidirectional=True)
+        assert StemJudgeResourcesServer.load_config_from_global_config() is config
+
     def test_changed_rule_file_is_refused_by_the_worker(self, config, tmp_path):
         rules = tmp_path / "rules.yaml"
         rules.write_text("- Require metres.")

@@ -452,6 +452,12 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
     @classmethod
     def load_config_from_global_config(cls) -> StemJudgeConfig:
         config = super().load_config_from_global_config()
+        math = config.math_verify
+        if math is not None and not {"units", "bidirectional"}.issubset(math.model_fields_set):
+            raise ValueError(
+                "The saved STEM math_verify config omits units or bidirectional. Resolve the config with Gym "
+                "before starting the worker, or explicitly set both options for this run."
+            )
         if isinstance(config.extra_answer_rules, str) and config.extra_answer_rules_sha256 is None:
             raise ValueError(
                 "The saved STEM config has no digest for its rule file. Resolve the config with Gym before starting the worker."
