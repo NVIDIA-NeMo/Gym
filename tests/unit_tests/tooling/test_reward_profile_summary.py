@@ -264,10 +264,9 @@ def test_fan_out_gap_for_one_run_counts_in_either_version(tmp_path, runs, labels
 
 @pytest.mark.parametrize("shape", ["0.7.0", "main"])
 def test_runs_renamed_by_masking_are_read_from_the_samples(tmp_path, shape):
-    # gym names runs from the measured rows only. With server_b masked everywhere, the agent behind both servers is
-    # named by its own name in the profile but by its servers in the inputs. A row with a measured rollout still shows
-    # its server in `sample`, but main's count-only row for task 1 under server_a does not, so with that row the split
-    # between masked and never-saved rollouts stays unknown.
+    # gym names the runs that masking left. With server_b masked everywhere, the agent behind both servers is named by
+    # its own name in the profile but by its servers in the inputs. A row with a measured rollout still shows its
+    # server in `sample`, and main's count-only row for task 1 under server_a has the label of server_a's task 0 row.
     rows = _fan_out_rows([("agent", "server_a"), ("agent", "server_b"), ("agent_c", None)])
     results = [
         row | {"reward": 1.0, "mask_sample": row.get("_ng_environment_server") == "server_b"}
@@ -281,40 +280,57 @@ def test_runs_renamed_by_masking_are_read_from_the_samples(tmp_path, shape):
     coverage = _summary(profile)["coverage"]
 
     assert (coverage["planned_rollouts"], coverage["measured_rollouts"]) == (12, 6)
-    if shape == "0.7.0":
-        assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (4, 2)
-        assert _ids(coverage["tasks_without_measured_rollout"]) == [(0, "server_b"), (1, "server_a"), (1, "server_b")]
-    else:
-        assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (None, None)
+    assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (4, 2)
+    assert _ids(coverage["tasks_without_measured_rollout"]) == [(0, "server_b"), (1, "server_a"), (1, "server_b")]
 
 
-def test_a_row_of_unknown_run_keeps_the_other_runs_coverage(tmp_path):
-    # As above, with two of task 0's results under server_a masked too. main's count-only row for task 1 under
-    # server_a names neither server, and must not hide that server_a measured only 2 of task 0's 4 repeats.
-    rows = _fan_out_rows([("agent", "server_a"), ("agent", "server_b"), ("agent_c", None)], repeats=4)
-    results = [
-        row
-        | {
-            "reward": 1.0,
-            "mask_sample": row.get("_ng_environment_server") == "server_b" or row["_ng_rollout_index"] < 2,
-        }
+# Two agents behind two servers each, where one server is named like the other agent.
+CLASHING_RUNS = [("agent", "server_a"), ("agent", "server_b"), ("other", "agent"), ("other", "server_d")]
+
+
+def _clashing_results(rows, saved):
+    # Every result of server_b and of the server named "agent" is masked.
+    return [
+        row | {"reward": 1.0, "mask_sample": row["_ng_environment_server"] in ("server_b", "agent")}
         for row in rows
-        if (row["_ng_task_index"], row.get("_ng_environment_server")) != (1, "server_a")
+        if saved(row["_ng_task_index"], row["_ng_environment_server"], row["_ng_rollout_index"])
     ]
+
+
+def test_a_count_only_row_takes_the_run_of_a_measured_row_with_its_label(tmp_path):
+    # With server_b masked, gym labels server_a "agent", the inputs' label of the masked server. server_a saved nothing
+    # for task 1, and its count-only row must not land on that server.
+    rows = _fan_out_rows(CLASHING_RUNS)
+    results = _clashing_results(rows, lambda task, server, _: (task, server) != (1, "server_a"))
     profile = _gym_profile(tmp_path, rows, results)
 
     coverage = _summary(profile)["coverage"]
 
-    assert (coverage["planned_rollouts"], coverage["measured_rollouts"]) == (24, 10)
-    assert (coverage["tasks"], coverage["complete_tasks"]) == (6, 2)
-    assert _ids(coverage["partial_tasks"]) == [(0, "server_a")]
-    assert _ids(coverage["tasks_without_measured_rollout"]) == [(0, "server_b"), (1, "server_a"), (1, "server_b")]
+    assert (coverage["planned_rollouts"], coverage["measured_rollouts"]) == (16, 6)
+    assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (8, 2)
+    absent = [(0, "agent"), (0, "server_b"), (1, "agent"), (1, "server_b")]
+    assert _ids(coverage["tasks_not_in_profile_file"]) == absent
+    assert _ids(coverage["tasks_without_measured_rollout"]) == sorted(absent + [(1, "server_a")])
+
+
+def test_a_row_of_unknown_run_keeps_the_other_runs_coverage(tmp_path):
+    # As above, but server_a saved nothing at all, so no measured row tells which run its count-only rows belong to:
+    # gym's label "agent" may be either of that agent's servers, or the server named "agent". Those runs stay unknown,
+    # and server_d keeps its known coverage: it measured 1 of task 0's 2 repeats.
+    rows = _fan_out_rows(CLASHING_RUNS)
+    results = _clashing_results(rows, lambda task, server, rollout: server != "server_a" and (task, rollout) != (0, 7))
+    profile = _gym_profile(tmp_path, rows, results)
+
+    coverage = _summary(profile)["coverage"]
+
+    assert (coverage["planned_rollouts"], coverage["measured_rollouts"]) == (16, 3)
     assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (None, None)
-    # Only task 0 under server_b is known to have no row; the count-only row is task 1's under one of the servers.
-    assert _ids(coverage["tasks_not_in_profile_file"]) == [(0, "server_b")]
-    assert "  Not in the profile file (never saved, or every saved rollout masked): 0 (server_b)\n" in (
-        _summarize(profile).stdout
-    )
+    assert (coverage["tasks"], coverage["complete_tasks"]) == (8, 1)
+    assert _ids(coverage["partial_tasks"]) == [(0, "server_d")]
+    assert _ids(coverage["tasks_without_measured_rollout"]) == [
+        (task, server) for task in (0, 1) for server in ("agent", "server_a", "server_b")
+    ]
+    assert coverage["tasks_not_in_profile_file"] == []
 
 
 def test_a_run_masked_everywhere_is_reported_apart(tmp_path):

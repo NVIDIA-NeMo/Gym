@@ -92,16 +92,19 @@ def run_labels(rows):
 
 
 def planned_rollouts(read_rows):
-    """Planned rollouts per (task, run label), the label of each run, and whether every row names an agent.
+    """Planned rollouts per (task, run label), the label of each run, whether every row names an agent, and the agents
+    that front several runs.
 
     `read_rows` returns a fresh iterator over the materialized inputs; the file is read twice instead of held in memory.
     """
     labels = run_labels(read_rows())
-    planned, every_row_names_agent = Counter(), True
+    planned, every_row_names_agent, keys_by_agent = Counter(), True, defaultdict(set)
     for row in read_rows():
         planned[(row["_ng_task_index"], labels.get(run_key(row)))] += 1
         every_row_names_agent = every_row_names_agent and agent_name(row) is not None
-    return planned, labels, every_row_names_agent
+        keys_by_agent[agent_name(row)].add(run_key(row))
+    shared_agents = {agent for agent, keys in keys_by_agent.items() if agent is not None and len(keys) > 1}
+    return planned, labels, every_row_names_agent, shared_agents
 
 
 def record_key(record):
@@ -127,14 +130,20 @@ def new_record(task, agent, planned, row=None):
 
 
 def summarize(
-    profile_rows, planned_by_task_label=None, agent_metrics=None, every_input_names_agent=True, input_run_labels=None
+    profile_rows,
+    planned_by_task_label=None,
+    agent_metrics=None,
+    every_input_names_agent=True,
+    input_run_labels=None,
+    input_shared_agents=frozenset(),
 ):
     """Coverage and task groups for one profile.
 
     `planned_by_task_label` counts the materialized input rows per (task, run label) and `input_run_labels` labels
-    their runs; both are None when the inputs were not found. `gym eval profile` leaves masked rollouts out of a row's
-    counts and writes no row for a task whose every planned rollout was saved and masked, so masked rollouts of such
-    tasks show only in the agent metrics' total. That total covers only rows that name an agent.
+    their runs; both are None when the inputs were not found. `input_shared_agents` are the agents that front several
+    runs in the inputs, which label those runs by Environment Server. `gym eval profile` leaves masked rollouts out of
+    a row's counts and writes no row for a task whose every planned rollout was saved and masked, so masked rollouts of
+    such tasks show only in the agent metrics' total. That total covers only rows that name an agent.
     """
     if any("num_rollouts" not in row for row in profile_rows):
         raise ValueError(
@@ -142,13 +151,19 @@ def summarize(
             "the run again with a current nemo-gym."
         )
 
-    # gym names a row's run only when a task ran under several runs, and names runs from the measured rows alone, so
-    # masking can drop or rename them. A row with a measured rollout keeps its first input row in `sample`, so read its
-    # run from there and name it as the inputs do.
+    # gym names a row's run only when a task ran under several runs, and names the runs that masking left, so masking
+    # can drop or rename them. A row with a measured rollout keeps its first input row in `sample`, so read its run
+    # from there and name it as the inputs do.
     labels = input_run_labels
     if labels is None:
         labels = run_labels(row["sample"] for row in profile_rows if isinstance(row.get("sample"), dict))
     several_runs = len(set(labels.values())) > 1
+    # gym gives a run one label across the profile, so a measured row tells the run of a count-only row with its label.
+    input_label_by_profile_label = {
+        agent_name(row): labels.get(run_key(row["sample"]))
+        for row in profile_rows
+        if "agent_ref" in row and isinstance(row.get("sample"), dict)
+    }
 
     def named_run(row):
         """The label of the run the row names, or None when it names none or there is only one run to name."""
@@ -159,7 +174,11 @@ def summarize(
             return None
         if isinstance(row.get("sample"), dict):
             return labels.get(run_key(row["sample"]))
-        return agent_name(row)
+        label = agent_name(row)
+        if label in input_label_by_profile_label:
+            return input_label_by_profile_label[label]
+        # Once masking hides an agent's other runs, gym names the one left by its agent, so the name fits any of them.
+        return None if label in input_shared_agents else label
 
     def mismatch(task):
         return ValueError(
@@ -183,9 +202,9 @@ def summarize(
                 runs_by_task[task].append(key[1])
             planned[key] += count
         # Every planned run of a task gets its own record, which takes the row that names it. A row with no measured
-        # rollout (written by main only) has no sample and names its run as gym labels the measured rows, or not at
-        # all, so it can miss the inputs' labels; it then takes its task's one run left without a row, and with
-        # several left its run stays unknown.
+        # rollout (written by main only) has no sample: it names its run through a measured row with its label, else
+        # by gym's label alone or not at all, so it can miss the inputs' labels. It then takes its task's one run left
+        # without a row, and with several left its run stays unknown.
         row_by_run = {}
         unnamed_by_task = defaultdict(list)
         for row in profile_rows:
@@ -381,9 +400,11 @@ def main():
     metrics_path = args.profile.with_name(stem + "_agent_metrics.json") if stem else None
 
     try:
-        planned, input_run_labels, every_input_names_agent = None, None, True
+        planned, input_run_labels, every_input_names_agent, input_shared_agents = None, None, True, frozenset()
         if inputs_path is not None and inputs_path.is_file():
-            planned, input_run_labels, every_input_names_agent = planned_rollouts(lambda: read_jsonl(inputs_path))
+            planned, input_run_labels, every_input_names_agent, input_shared_agents = planned_rollouts(
+                lambda: read_jsonl(inputs_path)
+            )
         agent_metrics = None
         if metrics_path is not None and metrics_path.is_file():
             try:
@@ -393,7 +414,12 @@ def main():
             if not isinstance(agent_metrics, list):
                 raise ValueError(f"{metrics_path}: expected a list of agent entries from gym eval profile")
         summary = summarize(
-            list(read_jsonl(args.profile)), planned, agent_metrics, every_input_names_agent, input_run_labels
+            list(read_jsonl(args.profile)),
+            planned,
+            agent_metrics,
+            every_input_names_agent,
+            input_run_labels,
+            input_shared_agents,
         )
     except ValueError as e:
         sys.exit(str(e))
