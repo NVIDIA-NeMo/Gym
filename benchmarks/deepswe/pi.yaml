@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSWE with Pi in place of OpenCode: the same resources server, no-network agent sandbox and fresh verifier as
+# opencode.yaml. The agent sandbox cannot download Pi's Node runtime, so the resources server copies a prebuilt one
+# into it: build it on an x86_64 Linux host with network, then point DEEPSWE_PI_RUNTIME at it.
+#
+#   bash responses_api_agents/pi_agent/install_pi_runtime.sh /path/to/pi-runtime 0.80.2
+#   export DEEPSWE_PI_RUNTIME=/path/to/pi-runtime
+config_paths:
+  - responses_api_agents/pi_agent/configs/pi_agent.yaml
+  - resources_servers/deepswe/configs/deepswe.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+deepswe_pi_resources_server:
+  _inherit_from: deepswe_resources_server
+  resources_servers:
+    deepswe:
+      allowed_agents: [pi_agent]
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+      # Copied to /tmp/nemo-gym-deepswe/pi in every agent sandbox (sandbox_runtime_dir below).
+      agent_runtime_paths:
+        pi: ${oc.env:DEEPSWE_PI_RUNTIME,null}
+
+deepswe_pi_agent:
+  _inherit_from: pi_agent
+  responses_api_agents:
+    pi_agent:
+      resources_server:
+        type: resources_servers
+        name: deepswe_pi_resources_server
+      pi_version: 0.80.2
+      sandbox_runtime_dir: /tmp/nemo-gym-deepswe/pi
+      # An admitted episode already holds its agent sandbox, so let it run at once.
+      concurrency: 1024
+      # The three-hour DeepSWE agent budget, in place of the shipped 15 minutes.
+      timeout: 10800
+      # The served model's context length, against which Pi compacts its history.
+      context_window: 262144
+      # No per-call output cap: the model server sizes each reply from the context the request leaves. Pi ends its
+      # run on a reply that stops without a tool call, so a fixed cap that a long reasoning reply reaches (32,768 on
+      # a smoke) ends the task; the shipped 131,072 also stops fitting once a prompt passes about 131k tokens.
+      output_token_policy: remaining_context
+      datasets:
+        - name: deepswe_v1_1
+          type: benchmark
+          jsonl_fpath: benchmarks/deepswe/data/deepswe_benchmark.jsonl
+          prepare_script: benchmarks/deepswe/prepare.py
+          num_repeats: 10
+
+deepswe_pi_environment_server:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: deepswe_pi_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: deepswe_pi_agent
+      # Pi's run (10800) plus seed, runtime copy and verification, within the agent sandbox's ttl_s (18000).
+      default_episode_timeout_seconds: 18000

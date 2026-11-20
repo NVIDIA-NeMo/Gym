@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSWE with Hermes in place of OpenCode: the same resources server, no-network agent sandbox and fresh verifier as
+# opencode.yaml. Hermes's agent server builds Hermes's runtime and uploads it into the task sandbox, so the sandbox
+# needs no network for setup; Hermes calls the model server from the sandbox, whose host the resources server allows.
+config_paths:
+  - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+  - resources_servers/deepswe/configs/deepswe.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+deepswe_hermes_resources_server:
+  _inherit_from: deepswe_resources_server
+  resources_servers:
+    deepswe:
+      allowed_agents: [hermes_agent]
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+
+deepswe_hermes_agent:
+  _inherit_from: hermes_agent
+  responses_api_agents:
+    hermes_agent:
+      resources_server:
+        type: resources_servers
+        name: deepswe_hermes_resources_server
+      model: ${policy_model_name}
+      enabled_toolsets: [terminal]
+      # The shipped 30 turns end most tasks before the agent commits (Hermes made 82 to 143 model calls per task in 40
+      # minutes on a smoke). This leaves the three-hour budget below as what ends a run.
+      max_turns: 1000
+      sandbox_runner_timeout_seconds: 10800
+      datasets:
+        - name: deepswe_v1_1
+          type: benchmark
+          jsonl_fpath: benchmarks/deepswe/data/deepswe_benchmark.jsonl
+          prepare_script: benchmarks/deepswe/prepare.py
+          num_repeats: 10
+
+deepswe_hermes_environment_server:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: deepswe_hermes_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: deepswe_hermes_agent
+      # Hermes's run (10800) plus seed, runtime upload and verification, within the agent sandbox's ttl_s (18000).
+      default_episode_timeout_seconds: 18000

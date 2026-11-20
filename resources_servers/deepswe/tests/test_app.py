@@ -4,6 +4,9 @@
 import asyncio
 import json
 import re
+import shutil
+import subprocess
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
@@ -73,8 +76,10 @@ def _config(
     agent_policy: dict | None = None,
     verification_policy: dict | None = None,
     classification: dict | None = None,
+    agent_runtime_paths: dict | None = None,
 ) -> DeepSWEResourcesServerConfig:
     return DeepSWEResourcesServerConfig(
+        **({"agent_runtime_paths": agent_runtime_paths} if agent_runtime_paths is not None else {}),
         host="0.0.0.0",
         port=8080,
         entrypoint="",
@@ -1835,6 +1840,220 @@ def test_a_missing_ripgrep_refuses_to_start_the_server(task_assets: Path, tmp_pa
     config.agent_ripgrep_path = tmp_path / "rg"
     with pytest.raises(ValueError, match=re.escape("run `gym eval prepare --benchmark deepswe/opencode`")):
         DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def _node_runtime(root: Path) -> Path:
+    """A runtime laid out like the harness installers': an executable, a relative link to it and a data file."""
+    (root / "node" / "bin").mkdir(parents=True)
+    (root / "node" / "bin" / "node").write_bytes(b"#!/bin/sh\necho node\n")
+    (root / "node" / "bin" / "node").chmod(0o755)
+    (root / "openclaw").mkdir()
+    (root / "openclaw" / "package.json").write_text('{"version": "2026.6.11"}')
+    (root / "openclaw" / "node").symlink_to("../node/bin/node")
+    return root
+
+
+async def _run_agent_setup(server: DeepSWEResourcesServer, sandbox: AsyncMock, monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
+    await sandbox.start_with_setup.await_args.args[1](sandbox)
+
+
+async def test_a_runtime_directory_is_packed_once_and_unpacked_into_the_agent_sandbox(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    runtime = _node_runtime(tmp_path / "openclaw-runtime")
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False, agent_runtime_paths={"openclaw": runtime}),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+
+    await _run_agent_setup(server, sandbox, monkeypatch)
+
+    archive, remote = sandbox.upload.await_args.args
+    assert archive.name == "openclaw.tar.gz" and not archive.is_relative_to(runtime)
+    assert re.fullmatch(r"/tmp/nemo-gym-deepswe/\.openclaw-[0-9a-f]{32}", remote)
+    with tarfile.open(archive) as tar:
+        members = {member.name: member for member in tar.getmembers()}
+    assert members["./node/bin/node"].mode & 0o777 == 0o755
+    assert members["./openclaw/node"].issym() and members["./openclaw/node"].linkname == "../node/bin/node"
+    assert {(member.uid, member.gid, member.uname) for member in members.values()} == {(0, 0, "root")}
+    unpacked = f"{remote}.d"
+    assert sandbox.exec.await_args == call(
+        f"(mkdir -- {unpacked} && tar -xzf {remote} -C {unpacked} && chmod 0755 /tmp/nemo-gym-deepswe {unpacked}"
+        f" && mv -f -- {unpacked} /tmp/nemo-gym-deepswe/openclaw); status=$?; rm -rf -- {remote} {unpacked};"
+        " exit $status",
+        timeout_s=300,
+    )
+
+    # A second agent sandbox gets the same archive: the directory is packed once per server.
+    second = AsyncMock()
+    second.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    await _run_agent_setup(server, second, monkeypatch)
+    assert second.upload.await_args.args[0] == archive
+
+
+async def test_a_runtime_file_is_published_as_an_executable_after_ripgrep(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ripgrep = tmp_path / "rg"
+    ripgrep.write_bytes(b"rg")
+    opencode = tmp_path / "opencode-linux-x64"
+    opencode.write_bytes(b"opencode")
+    config = _config(task_assets, golden=False, agent_runtime_paths={"opencode": opencode})
+    config.agent_ripgrep_path = ripgrep
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+
+    await _run_agent_setup(server, sandbox, monkeypatch)
+
+    (rg_source, rg_remote), (source, remote) = [upload.args for upload in sandbox.upload.await_args_list]
+    assert (rg_source, source) == (ripgrep, opencode)
+    assert re.fullmatch(r"/tmp/nemo-gym-deepswe/\.opencode-[0-9a-f]{32}", remote)
+    assert sandbox.exec.await_args == call(
+        f"chmod 0755 /tmp/nemo-gym-deepswe {remote} && mv -f -- {remote} /tmp/nemo-gym-deepswe/opencode",
+        timeout_s=60,
+    )
+
+
+class _LocalShellSandbox:
+    """Runs the staging commands in a local shell, with uploads as copies, to check what they leave behind."""
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    async def exec(self, command: str, timeout_s: float) -> SimpleNamespace:
+        self.commands.append(command)
+        done = subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=timeout_s)
+        return SimpleNamespace(return_code=done.returncode, error_type=None, stderr=done.stderr)
+
+    async def upload(self, source: Path, destination: str) -> None:
+        shutil.copyfile(source, destination)
+
+
+async def test_the_unpacked_runtime_keeps_its_tree_and_the_archive_is_removed(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    runtime = _node_runtime(tmp_path / "runtime")
+    runtime_dir = tmp_path / "sandbox-runtimes"
+    monkeypatch.setattr(app_module, "AGENT_RUNTIME_DIR", str(runtime_dir))
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False, agent_runtime_paths={"openclaw": runtime}),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    sandbox = _LocalShellSandbox()
+    archive, unpack = server._agent_runtimes["openclaw"]
+
+    await server._stage_agent_file(sandbox, archive, name="openclaw", label="agent runtime openclaw", unpack=unpack)
+
+    staged = runtime_dir / "openclaw"
+    assert (staged / "node" / "bin" / "node").read_bytes() == b"#!/bin/sh\necho node\n"
+    assert (staged / "node" / "bin" / "node").stat().st_mode & 0o777 == 0o755
+    assert (staged / "openclaw" / "node").is_symlink()
+    assert subprocess.run([staged / "openclaw" / "node"], capture_output=True, text=True).stdout == "node\n"
+    assert sorted(path.name for path in runtime_dir.iterdir()) == ["openclaw"]
+
+
+async def test_a_runtime_that_does_not_unpack_fails_setup_and_leaves_nothing(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    runtime_dir = tmp_path / "sandbox-runtimes"
+    monkeypatch.setattr(app_module, "AGENT_RUNTIME_DIR", str(runtime_dir))
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    corrupt = tmp_path / "pi.tar.gz"
+    corrupt.write_bytes(b"not a gzip tar")
+
+    with pytest.raises(RuntimeError, match="DeepSWE could not stage agent runtime pi: return_code="):
+        await server._stage_agent_file(_LocalShellSandbox(), corrupt, name="pi", label="agent runtime pi", unpack=True)
+
+    # Neither the uploaded archive nor the partial unpacking is left, and nothing is published.
+    assert list(runtime_dir.iterdir()) == []
+
+
+async def test_the_verifier_sandbox_gets_no_agent_runtime(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(
+            task_assets, golden=False, agent_runtime_paths={"codex": _node_runtime(tmp_path / "codex-runtime")}
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    sandbox = AsyncMock()
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    await server._create_sandbox(server._task_store.get("example-task"), phase="verifier")
+    await sandbox.start_with_setup.await_args.args[1](sandbox)
+    sandbox.upload.assert_not_awaited()
+
+
+def test_an_unset_or_missing_agent_runtime_refuses_to_start_the_server(task_assets: Path, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=re.escape("agent_runtime_paths.pi is not set")):
+        DeepSWEResourcesServer(
+            config=_config(task_assets, agent_runtime_paths={"pi": None}), server_client=MagicMock(spec=ServerClient)
+        )
+    with pytest.raises(ValueError, match=re.escape(f"agent_runtime_paths.pi is missing: {tmp_path / 'absent'}")):
+        DeepSWEResourcesServer(
+            config=_config(task_assets, agent_runtime_paths={"pi": tmp_path / "absent"}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+
+@pytest.mark.parametrize("name", ["rg", "", ".hidden", "-flag", "a/b", "..", "pi runtime"])
+def test_an_agent_runtime_name_is_one_plain_path_component(task_assets: Path, tmp_path: Path, name: str) -> None:
+    with pytest.raises(ValueError, match="must be one path component"):
+        _config(task_assets, agent_runtime_paths={name: tmp_path})
+
+
+_DEEPSWE_BENCHMARKS = Path(__file__).resolve().parents[3] / "benchmarks" / "deepswe"
+
+
+@pytest.mark.parametrize(
+    "harness,agent_type,runtime_setting",
+    [
+        ("hermes", "hermes_agent", None),
+        ("nooa", "nooa_agent", None),
+        ("openclaw", "openclaw_agent", "sandbox_runtime_dir"),
+        ("pi", "pi_agent", "sandbox_runtime_dir"),
+        ("codex", "codex_agent", "sandbox_runtime_dir"),
+    ],
+)
+def test_each_harness_recipe_binds_its_own_deepswe_instances(
+    harness: str, agent_type: str, runtime_setting: str | None
+) -> None:
+    recipe = yaml.safe_load((_DEEPSWE_BENCHMARKS / f"{harness}.yaml").read_text(encoding="utf-8"))
+    opencode = yaml.safe_load((_DEEPSWE_BENCHMARKS / "opencode.yaml").read_text(encoding="utf-8"))
+    resources_name = f"deepswe_{harness}_resources_server"
+    agent_name = f"deepswe_{harness}_agent"
+    resources = recipe[resources_name]["resources_servers"]["deepswe"]
+    agent = recipe[agent_name]["responses_api_agents"][agent_type]
+    environment = recipe[f"deepswe_{harness}_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+
+    assert recipe[resources_name]["_inherit_from"] == "deepswe_resources_server"
+    assert resources["allowed_agents"] == [agent_type]
+    # The harness calls the model server from the no-network agent sandbox, so its host is allowed there.
+    assert resources["sandbox_model_server"] == {"type": "responses_api_models", "name": "policy_model"}
+    assert agent["resources_server"] == {"type": "resources_servers", "name": resources_name}
+    assert environment["resources_server"]["name"] == resources_name
+    assert environment["agent_server"]["name"] == agent_name
+    assert (
+        agent["datasets"] == opencode["deepswe_opencode_agent"]["responses_api_agents"]["opencode_agent"]["datasets"]
+    )
+    if runtime_setting is None:
+        assert "agent_runtime_paths" not in resources
+    else:
+        assert list(resources["agent_runtime_paths"]) == [harness]
+        assert agent[runtime_setting] == f"{app_module.AGENT_RUNTIME_DIR}/{harness}"
 
 
 @pytest.mark.parametrize("return_code,error_type", [(1, None), (0, "timeout")])

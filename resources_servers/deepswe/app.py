@@ -15,8 +15,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import shlex
 import sys
+import tarfile
 import tempfile
 import uuid
 from copy import deepcopy
@@ -96,10 +98,12 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 # The task repository in every DeepSWE image; the agent works and commits here.
 AGENT_WORKDIR = "/app"
-# Where agent_ripgrep_path lands in the agent sandbox, readable and executable by every user.
+# Where agent_ripgrep_path and agent_runtime_paths land in the agent sandbox, readable and executable by every user.
 AGENT_RUNTIME_DIR = "/tmp/nemo-gym-deepswe"
 AGENT_RIPGREP = f"{AGENT_RUNTIME_DIR}/rg"
-_RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
+_AGENT_UPLOAD_MAX_ATTEMPTS = 2
+# An agent_runtime_paths name: one path component under AGENT_RUNTIME_DIR. `rg` belongs to agent_ripgrep_path.
+_AGENT_RUNTIME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 LOGGER = logging.getLogger(__name__)
 
 
@@ -108,6 +112,18 @@ def _resolve_repo_path(path: Path) -> Path:
     if expanded.is_absolute():
         return expanded.resolve()
     return (NEMO_GYM_ROOT / expanded).resolve()
+
+
+def _pack_runtime_directory(source: Path, archive: Path) -> None:
+    """Write ``source``'s contents to a gzip tar owned by root, keeping links and modes, for one upload per sandbox."""
+
+    def owned_by_root(member: tarfile.TarInfo) -> tarfile.TarInfo:
+        member.uid = member.gid = 0
+        member.uname = member.gname = "root"
+        return member
+
+    with tarfile.open(archive, "w:gz", compresslevel=1) as tar:
+        tar.add(source, arcname=".", filter=owned_by_root)
 
 
 # The longest failure_reason a failure event accepts.
@@ -188,6 +204,12 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     # benchmarks/deepswe/opencode.yaml stages OpenCode's ripgrep this way, since the agent sandbox has no network, and
     # opencode_agent checks the copy against its pinned digest.
     agent_ripgrep_path: Path | None = None
+    # Harness runtimes copied into every agent sandbox, by name: a host file lands at AGENT_RUNTIME_DIR/<name> as an
+    # executable, a host directory's contents land in AGENT_RUNTIME_DIR/<name>/ (sent as one gzip tar, packed once at
+    # startup). The agent sandbox has no network, so a harness that downloads its runtime (OpenCode, OpenClaw, Pi,
+    # Codex) cannot install there; point its own setting at the copy instead (`sandbox_executable_path`,
+    # `sandbox_runtime_dir`), and it checks the version it finds. A relative path is under the Gym root.
+    agent_runtime_paths: dict[str, Path | None] = Field(default_factory=dict)
 
     logs_dir: Path = Path("resources_servers/deepswe/logs")
     clear_verifier_logs: bool = False
@@ -197,6 +219,18 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     # a reported command deadline and a conclusive result are not run again; a patch that breaks the
     # test script leaves no verdict every time, so after the bound the outcome stays masked as before.
     inconclusive_verification_retries: int = Field(default=2, ge=0)
+
+    @field_validator("agent_runtime_paths")
+    @classmethod
+    def require_plain_runtime_names(cls, paths: dict[str, Path | None]) -> dict[str, Path | None]:
+        """Each name is one path component of the agent sandbox's runtime directory, other than ripgrep's."""
+        for name in paths:
+            if name == "rg" or not _AGENT_RUNTIME_NAME.fullmatch(name):
+                raise ValueError(
+                    f"agent_runtime_paths name {name!r} must be one path component of letters, digits, '.', '_' "
+                    "and '-' that starts with a letter or digit, other than 'rg' (agent_ripgrep_path)"
+                )
+        return paths
 
     @field_validator("outcome_policy", mode="before")
     @classmethod
@@ -401,7 +435,8 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         )
         self._agent_sessions: dict[str, AgentSandboxSession] = {}
         self._episode_agent_sandboxes: dict[str, AgentSandboxSession] = {}
-        self._ripgrep_upload_sem = asyncio.Semaphore(2)
+        # At most two uploads into agent sandboxes at once per server (ripgrep and agent_runtime_paths).
+        self._agent_upload_sem = asyncio.Semaphore(2)
         self._agent_ripgrep = (
             _resolve_repo_path(self.config.agent_ripgrep_path) if self.config.agent_ripgrep_path else None
         )
@@ -410,6 +445,34 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
                 f"agent_ripgrep_path is missing: {self._agent_ripgrep}; for the benchmark, run "
                 "`gym eval prepare --benchmark deepswe/opencode`"
             )
+        # name -> (host file to upload, whether it is a directory's archive to unpack)
+        self._agent_runtimes: dict[str, tuple[Path, bool]] = {}
+        self._agent_runtime_archive_dir: tempfile.TemporaryDirectory | None = None
+        for name, configured in self.config.agent_runtime_paths.items():
+            if configured is None:
+                raise ValueError(
+                    f"agent_runtime_paths.{name} is not set: build the harness runtime it names and give its path "
+                    "(see the benchmark config's header)"
+                )
+            source = _resolve_repo_path(configured)
+            if source.is_file():
+                self._agent_runtimes[name] = (source, False)
+            elif source.is_dir():
+                if self._agent_runtime_archive_dir is None:
+                    self._agent_runtime_archive_dir = tempfile.TemporaryDirectory(prefix="deepswe-agent-runtimes-")
+                archive = Path(self._agent_runtime_archive_dir.name) / f"{name}.tar.gz"
+                started = monotonic()
+                _pack_runtime_directory(source, archive)
+                LOGGER.info(
+                    "DeepSWE packed agent runtime %s from %s: %d bytes in %.1f s",
+                    name,
+                    source,
+                    archive.stat().st_size,
+                    monotonic() - started,
+                )
+                self._agent_runtimes[name] = (archive, True)
+            else:
+                raise ValueError(f"agent_runtime_paths.{name} is missing: {source}")
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = deepcopy(self.config.sandbox_config.get("provider_options", {}))
@@ -509,56 +572,89 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
                 )
             if self._agent_ripgrep is not None:
                 await self._stage_agent_ripgrep(started, self._agent_ripgrep)
+            for name, (source, unpack) in self._agent_runtimes.items():
+                await self._stage_agent_file(started, source, name=name, label=f"agent runtime {name}", unpack=unpack)
 
         await sandbox.start_with_setup(spec, _run_setup)
         return sandbox
 
     async def _stage_agent_ripgrep(self, sandbox: AsyncSandbox, ripgrep: Path) -> None:
         """Publish executable ripgrep after a bounded upload; ambiguous timeouts never reuse a remote path."""
+        await self._stage_agent_file(sandbox, ripgrep, name="rg", label="ripgrep", unpack=False)
+
+    async def _stage_agent_file(
+        self, sandbox: AsyncSandbox, source: Path, *, name: str, label: str, unpack: bool
+    ) -> None:
+        """Publish ``source`` at AGENT_RUNTIME_DIR/``name`` after a bounded upload.
+
+        A file is published as an executable; with ``unpack``, ``source`` is a gzip tar unpacked into that directory
+        and then removed. An ambiguous upload timeout is retried once at a fresh remote path, never reused.
+        """
         mkdir_result = await sandbox.exec(shlex.join(["mkdir", "-p", AGENT_RUNTIME_DIR]), timeout_s=60)
         if mkdir_result.return_code != 0 or mkdir_result.error_type is not None:
             raise RuntimeError(
                 f"DeepSWE could not create {AGENT_RUNTIME_DIR}: return_code={mkdir_result.return_code}, "
                 f"error_type={mkdir_result.error_type!r}: {mkdir_result.stderr or ''}"
             )
-        for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
-            remote_path = f"{AGENT_RUNTIME_DIR}/.rg-{uuid.uuid4().hex}"
+        destination = f"{AGENT_RUNTIME_DIR}/{name}"
+        for attempt in range(1, _AGENT_UPLOAD_MAX_ATTEMPTS + 1):
+            remote_path = f"{AGENT_RUNTIME_DIR}/.{name}-{uuid.uuid4().hex}"
             started = monotonic()
             try:
-                async with self._ripgrep_upload_sem:
-                    await sandbox.upload(ripgrep, remote_path)
+                async with self._agent_upload_sem:
+                    await sandbox.upload(source, remote_path)
             except (TimeoutError, NgFailureEvent) as error:
                 if isinstance(error, NgFailureEvent):
                     if error.boundary != FailureBoundary.SANDBOX or error.failure_kind != PROVIDER_IO_TIMEOUT:
                         raise
                     observe_failure(error)
                 LOGGER.warning(
-                    "DeepSWE ripgrep upload timed out; remote_path=%s attempt=%d/%d duration_s=%.1f",
+                    "DeepSWE %s upload timed out; remote_path=%s attempt=%d/%d duration_s=%.1f",
+                    label,
                     remote_path,
                     attempt,
-                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    _AGENT_UPLOAD_MAX_ATTEMPTS,
                     monotonic() - started,
                 )
-                if attempt == _RIPGREP_UPLOAD_MAX_ATTEMPTS:
+                if attempt == _AGENT_UPLOAD_MAX_ATTEMPTS:
                     raise
                 await asyncio.sleep(uniform(15.0, 30.0))
             else:
                 LOGGER.info(
-                    "DeepSWE ripgrep upload completed; remote_path=%s attempt=%d/%d duration_s=%.1f",
+                    "DeepSWE %s upload completed; remote_path=%s attempt=%d/%d duration_s=%.1f",
+                    label,
                     remote_path,
                     attempt,
-                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    _AGENT_UPLOAD_MAX_ATTEMPTS,
                     monotonic() - started,
                 )
-                promote_result = await sandbox.exec(
-                    shlex.join(["chmod", "0755", AGENT_RUNTIME_DIR, remote_path])
-                    + " && "
-                    + shlex.join(["mv", "-f", "--", remote_path, AGENT_RIPGREP]),
-                    timeout_s=60,
-                )
+                if unpack:
+                    unpacked = f"{remote_path}.d"
+                    # The archive, and a partial unpacking, go whatever happens; the command keeps the unpacking's
+                    # own status.
+                    publish = (
+                        "("
+                        + shlex.join(["mkdir", "--", unpacked])
+                        + " && "
+                        + shlex.join(["tar", "-xzf", remote_path, "-C", unpacked])
+                        + " && "
+                        + shlex.join(["chmod", "0755", AGENT_RUNTIME_DIR, unpacked])
+                        + " && "
+                        + shlex.join(["mv", "-f", "--", unpacked, destination])
+                        + "); status=$?; "
+                        + shlex.join(["rm", "-rf", "--", remote_path, unpacked])
+                        + "; exit $status"
+                    )
+                else:
+                    publish = (
+                        shlex.join(["chmod", "0755", AGENT_RUNTIME_DIR, remote_path])
+                        + " && "
+                        + shlex.join(["mv", "-f", "--", remote_path, destination])
+                    )
+                promote_result = await sandbox.exec(publish, timeout_s=300 if unpack else 60)
                 if promote_result.return_code != 0 or promote_result.error_type is not None:
                     raise RuntimeError(
-                        f"DeepSWE could not stage ripgrep: return_code={promote_result.return_code}, "
+                        f"DeepSWE could not stage {label}: return_code={promote_result.return_code}, "
                         f"error_type={promote_result.error_type!r}: {promote_result.stderr or ''}"
                     )
                 return
