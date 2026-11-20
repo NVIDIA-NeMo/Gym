@@ -515,6 +515,9 @@ def _reads_config_dict_file(server: _ConfiguredServer, global_config_dict: DictC
     reuses is not set up again and can hold a Gym that reads only `NEMO_GYM_CONFIG_DICT`, so its own interpreter is
     asked, from the directory and with the import path the server starts with. Nothing is installed or written in
     the venv. An interpreter that cannot answer counts as one whose Gym does not read the file.
+
+    A server inside this checkout is not asked: its launch puts the checkout before the venv's packages on the
+    import path, so it imports this process's Gym whatever Gym its venv holds.
     """
     venv_path = get_venv_path(server.dir_path, global_config_dict)
     # The marker first: `_is_complete_venv` warns about a venv without it, and the setup command already does.
@@ -523,7 +526,10 @@ def _reads_config_dict_file(server: _ConfiguredServer, global_config_dict: DictC
         and (venv_path / SETUP_COMPLETE_MARKER).is_file()
         and _is_complete_venv(venv_path)
     )
-    if not reused:
+    project_root = _project_root(server.dir_path)
+    # Resolved on both sides: the server's directory is found under the physical working directory, and
+    # `PARENT_DIR` keeps the path Gym was imported from, which can go through a symlink.
+    if not reused or (project_root is not None and project_root.resolve() == PARENT_DIR.resolve()):
         return True
     # The name of the file's variable arrived in Gym together with the code that reads the file.
     import_file_variable = "from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME"
@@ -534,7 +540,7 @@ def _reads_config_dict_file(server: _ConfiguredServer, global_config_dict: DictC
         f"-B -c {shlex.quote(import_file_variable)} > /dev/null 2>&1",
         server.dir_path,
         server_name=server.top_level_path,
-        project_root=_project_root(server.dir_path),
+        project_root=project_root,
         global_config_dict=global_config_dict,
     )
     return asked.wait() == 0
@@ -1163,6 +1169,12 @@ Process `{process_name}` stderr:
                 sleep(max(0.0, min(sleep_interval, deadline - monotonic())))
 
     def shutdown(self) -> None:
+        # First, so that a shutdown cut short while it waits for the servers leaves no file. The config holds API
+        # keys, and nothing that reads the file starts from here on.
+        if self._config_dict_file is not None:
+            self._config_dict_file.unlink(missing_ok=True)
+            self._config_dict_file = None
+
         memory_profiler = getattr(self, "_memory_profiler", None)
         if memory_profiler is not None:
             memory_profiler.stop()
@@ -1221,9 +1233,6 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
                 "they may remain as zombies until this process exits."
             )
         self._processes = dict()
-        if self._config_dict_file is not None:
-            self._config_dict_file.unlink(missing_ok=True)
-            self._config_dict_file = None
 
         # After the servers, so requests they were still finishing can drain through it. It gets its
         # own, longer grace period (`sidecar.shutdown_grace`).

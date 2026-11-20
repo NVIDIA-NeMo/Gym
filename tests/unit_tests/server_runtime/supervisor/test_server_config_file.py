@@ -11,8 +11,10 @@ import sys
 import sysconfig
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+from omegaconf import DictConfig, OmegaConf
 
 import nemo_gym.server_runtime.supervisor.server_supervisor as server_supervisor
 from nemo_gym.config.config_types import ConfigError
@@ -221,3 +223,107 @@ def test_a_config_no_transport_can_carry_to_a_reused_venv_stops_the_start(
     message = str(stopped.value)
     assert "sample" in message and "Upgrade nemo-gym" in message and "++skip_venv_if_present=false" in message
     assert not list((tmp_path / "config_files").iterdir())
+
+
+def test_a_server_inside_this_checkout_is_not_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its launch imports this checkout's Gym before its venv's, so a reused venv with an earlier Gym gets the file."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    supervisor = _supervisor()
+    server, global_config = _server(tmp_path, reused_venv_gym="reads the variable only")
+    # This checkout is the folder that holds `resources_servers/`, and Gym was imported through a symlink to it.
+    (tmp_path / "pyproject.toml").touch()
+    (tmp_path / "imported_from").symlink_to(tmp_path)
+    monkeypatch.setattr(server_supervisor, "PARENT_DIR", tmp_path / "imported_from")
+    monkeypatch.setattr(server_supervisor, "run_command", MagicMock(side_effect=AssertionError("the venv was asked")))
+    config, _ = _config_with_tasks(MAX_CONFIG_DICT_ENV_BYTES)
+
+    env = supervisor._config_dict_env(config, [server], global_config)
+
+    try:
+        assert env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME] == ""
+        assert Path(env[NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME]).read_text(encoding="utf-8") == config
+    finally:
+        supervisor.shutdown()
+
+
+def test_a_shutdown_cut_short_while_it_waits_for_a_server_leaves_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    supervisor = _supervisor()
+    server, global_config = _server(tmp_path)
+    config, _ = _config_with_tasks(MAX_CONFIG_DICT_ENV_BYTES)
+    config_file = Path(
+        supervisor._config_dict_env(config, [server], global_config)[NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME]
+    )
+    # A second Ctrl-C arrives while the shutdown waits for a server to finish.
+    supervisor._processes = {"sample": MagicMock(pid=123, **{"wait.side_effect": KeyboardInterrupt})}
+    monkeypatch.setattr(server_supervisor, "_signal_server_group", MagicMock())
+
+    with pytest.raises(KeyboardInterrupt):
+        supervisor.shutdown()
+
+    assert not config_file.exists()
+
+
+def _start_with_a_long_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spinup: MagicMock
+) -> tuple[server_supervisor.ServerSupervisor, list[dict[str, str]], DictConfig]:
+    """Run `start()` as a dry run of two servers, with the launch, the head server and the readiness check replaced.
+
+    Returns the supervisor, the environment each server was launched with, and the config.
+    """
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    (tmp_path / "responses_api_agents" / "example").mkdir(parents=True)
+    (tmp_path / "resources_servers" / "another").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    tasks = {f"task-{index:06d}": "a" * 64 for index in range(MAX_CONFIG_DICT_ENV_BYTES // 64)}
+    config = OmegaConf.create(
+        {
+            "example": {"responses_api_agents": {"example": {"entrypoint": "app.py", "host": "127.0.0.1"}}},
+            "another": {"resources_servers": {"another": {"entrypoint": "app.py", "host": "127.0.0.1"}}},
+            "dry_run": True,
+            UV_VENV_DIR_KEY_NAME: str(tmp_path),
+            SKIP_VENV_IF_PRESENT_KEY_NAME: False,
+            "tasks": tasks,
+        }
+    )
+    run = MagicMock(return_value=MagicMock(pid=123))
+    monkeypatch.setattr(server_supervisor, "run_command", run)
+    # The launched servers are not real: the shutdown must not signal whatever process group 123 is on this host.
+    monkeypatch.setattr(server_supervisor, "_signal_server_group", MagicMock())
+    monkeypatch.setattr(server_supervisor, "_server_group_exists", MagicMock(return_value=False))
+    monkeypatch.setattr(server_supervisor, "setup_env_command", lambda *_: "setup")
+    monkeypatch.setattr(server_supervisor, "get_global_config_dict", MagicMock(return_value=config))
+    head_server_client = MagicMock(**{"poll_for_status.return_value": "success"})
+    monkeypatch.setattr(server_supervisor, "ServerClient", MagicMock(return_value=head_server_client))
+    monkeypatch.setattr(server_supervisor.HeadServer, "run_webserver", MagicMock(return_value=(MagicMock(),) * 3))
+    supervisor = server_supervisor.ServerSupervisor()
+    supervisor.wait_for_dry_run_spinup = spinup
+    try:
+        supervisor.start(MagicMock())
+    except RuntimeError:
+        pass
+    return supervisor, [launch.kwargs["extra_env"] for launch in run.call_args_list], config
+
+
+def test_start_gives_every_server_a_long_config_in_a_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    supervisor, envs, config = _start_with_a_long_config(tmp_path, monkeypatch, MagicMock())
+    config_file = Path(envs[0][NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME])
+
+    assert len(envs) == 2
+    for env in envs:
+        assert env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME] == ""
+        assert env[NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME] == str(config_file)
+    assert OmegaConf.create(config_file.read_text(encoding="utf-8")) == config
+    supervisor.shutdown()
+    assert not config_file.exists()
+
+
+def test_a_start_that_fails_after_writing_the_file_removes_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    spinup = MagicMock(side_effect=RuntimeError("a server exited"))
+
+    _, envs, _ = _start_with_a_long_config(tmp_path, monkeypatch, spinup)
+
+    assert spinup.called
+    assert not Path(envs[0][NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME]).exists()
