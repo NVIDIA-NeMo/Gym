@@ -434,7 +434,7 @@ async def test_owned_stop_precedes_waiting_for_cancelled_activation(agent, state
             await stopped.wait()
             raise
 
-    state.session.sandbox.stop.side_effect = stopped.set
+    state.session.sandbox.stop.side_effect = lambda **_: stopped.set()
     download_json = mock_json_download(state.session.sandbox, side_effect=FileNotFoundError("missing cleanup receipt"))
     state.task = asyncio.create_task(activation())
     await started.wait()
@@ -478,7 +478,8 @@ def local_runner(agent, state, monkeypatch, tmp_path):
     directory.mkdir()
     state.session.session_dir = str(directory)
     state.session.workdir = str(tmp_path)
-    agent.config.session_close_timeout_seconds = 2
+    # This fixture runs real subprocesses; keep deadline behavior tests on their own short budgets.
+    agent.config.session_close_timeout_seconds = 15
     monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
     monkeypatch.setattr(
         hermes_sandbox, "_SANDBOX_RUNNER", str(Path(hermes_sandbox.__file__).with_name("sandbox_runner.py"))
@@ -497,7 +498,7 @@ def local_runner(agent, state, monkeypatch, tmp_path):
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=8)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
             return SimpleNamespace(
                 return_code=process.returncode,
                 stdout=stdout.decode(errors="replace"),
@@ -1288,6 +1289,32 @@ async def test_context_limit_keeps_partial_work_verifiable(agent, state, capture
     assert root.stop_reason == "context_limit"
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Response truncated due to output length limit",
+        "Response remained truncated after 3 continuation attempts",
+        "Model used all output tokens on reasoning with none left for the response. "
+        "Try lowering reasoning effort or increasing max_tokens.",
+    ],
+)
+async def test_output_limit_keeps_partial_work_and_reports_agent_limit(agent, state, error):
+    """An exhausted output budget reaches the session response as `agent_limit`, with its partial work graded."""
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Partial answer"}]
+    state.execute = AsyncMock(
+        return_value={"result": {"completed": False, "partial": True, "error": error, "messages": messages}}
+    )
+
+    episode = await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+
+    assert episode.response.status == "failed"
+    assert episode.response.output[-1].content[0].text == "Partial answer"
+    assert json.loads(episode.response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_limit"}
+    assert agent_outcome_policy(episode.response) == OutcomeAction.VERIFY
+
+
 async def test_runner_stopped_at_the_deadline_is_a_partial_response(agent, state):
     """The runner's interrupted transcript is graded as an incomplete response that records the timeout."""
     state.execute = AsyncMock(
@@ -1741,6 +1768,17 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
         ({"stop_reason": "wall_time"}, "agent_limit"),
         ({"failed": True, "error": "First response truncated due to output length limit"}, "agent_limit"),
         ({"partial": True, "error": "Response truncated due to output length limit"}, "agent_limit"),
+        ({"partial": True, "error": "Response remained truncated after 3 continuation attempts"}, "agent_limit"),
+        (
+            {
+                "partial": True,
+                "error": (
+                    "Model used all output tokens on reasoning with none left for the response. "
+                    "Try lowering reasoning effort or increasing max_tokens."
+                ),
+            },
+            "agent_limit",
+        ),
         ({"partial": True, "error": "Request payload too large (413). Cannot compress further."}, "agent_limit"),
         (
             {"partial": True, "error": "Request payload too large: max compression attempts (3) reached."},
@@ -1772,6 +1810,7 @@ def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, exp
         status="failed",
     )
     reported = agent.report_outcome(response, result)
+    assert json.loads(reported.metadata["ng_agent_outcome"])["failure_kind"] == expected_kind
     # Distinct overrides expose misclassification that the default verify policy hides.
     actions = {
         "agent_limit": OutcomeAction.RETRY,

@@ -37,32 +37,41 @@ pytestmark = pytest.mark.sandbox
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 @pytest.mark.parametrize("detached", [False, True])
-async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_path: Path, detached: bool) -> None:
+@pytest.mark.parametrize("startup_delay", [0, 1.5])
+async def test_supervisor_deadline_finishes_before_provider_hard_timeout(
+    tmp_path: Path, detached: bool, startup_delay: float
+) -> None:
     provider = LocalProvider()
     handle = await provider.create(SandboxSpec(workdir=str(tmp_path)))
     worker = tmp_path / "worker.py"
     worker.write_text(
         "import pathlib, signal, subprocess, sys, time\n"
+        f"time.sleep({startup_delay})\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
         f"start_new_session={detached})\n"
-        "pathlib.Path('child.pid').write_text(str(child.pid))\n"
+        "pathlib.Path('child.pid.tmp').write_text(str(child.pid))\n"
+        "pathlib.Path('child.pid.tmp').replace('child.pid')\n"
         "time.sleep(60)\n"
     )
     receipt_path = tmp_path / "cleanup.json"
+    expire_path = tmp_path / "expire.request"
+    child_path = tmp_path / "child.pid"
     command = (
         join(
             [
                 "bash",
                 str(SUPERVISOR_SCRIPT),
                 "--timeout",
-                "1",
+                "60",
                 "--cleanup-timeout",
                 "0.5",
                 "--receipt",
                 str(receipt_path),
                 "--stop-file",
                 str(tmp_path / "stop.request"),
+                "--expire-file",
+                str(expire_path),
                 "--",
                 sys.executable,
                 "-I",
@@ -71,8 +80,20 @@ async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_pat
         )
         + f" >{quote(str(tmp_path / 'output.log'))} 2>&1"
     )
+    execution = asyncio.create_task(
+        provider.exec(handle, command, timeout_s=exec_timeout(timeout=5, cleanup_timeout=0.5))
+    )
     try:
-        result = await provider.exec(handle, command, timeout_s=exec_timeout(timeout=1, cleanup_timeout=0.5))
+        # Expire only after the worker installed SIG_IGN and spawned its child.
+        # The old one-second deadline could kill a cold Python before either.
+        async with asyncio.timeout(20):
+            while not child_path.exists():
+                assert not execution.done(), "supervisor exited before the worker was ready"
+                await asyncio.sleep(0.05)
+        expire_path.touch()
+        # The fallback deadline exceeds the provider's hard timeout, so ignoring
+        # the expiry request cannot pass through a later natural timeout.
+        result = await execution
         assert result.error_type is None, result.stderr
         assert result.return_code == 0
         receipt = loads(receipt_path.read_text())
@@ -80,11 +101,15 @@ async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_pat
         assert receipt["timed_out"] is True
         assert receipt["return_code"] == 128 + signal.SIGKILL
         assert receipt["error"] is None
-        child_pid = int((tmp_path / "child.pid").read_text())
+        child_pid = int(child_path.read_text())
         # A killed tool may linger as a zombie until init reaps it; it can no longer run.
         stat = Path(f"/proc/{child_pid}/stat")
         assert not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] in "ZX", "in-flight tool survived"
     finally:
+        if not execution.done():
+            execution.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await execution
         if (tmp_path / "child.pid").exists():
             try:
                 os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
@@ -278,3 +303,38 @@ async def test_registered_provider_drives_the_public_sandbox_api(tmp_path: Path)
     assert await sandbox.status() is SandboxStatus.RUNNING
     await sandbox.stop()
     assert not workspace.exists()
+
+
+@pytest.mark.parametrize("absolute_cwd", [False, True])
+async def test_exec_uses_requested_sandbox_work_directory(tmp_path: Path, absolute_cwd: bool) -> None:
+    provider = LocalProvider(workspace_root=str(tmp_path))
+    handle = await provider.create(SandboxSpec())
+    work = handle.raw["workspace"] / "work"
+    work.mkdir()
+    (work / "marker.txt").write_text("sandbox runner directory")
+    try:
+        result = await provider.exec(handle, "cat marker.txt", cwd=str(work) if absolute_cwd else "work")
+        assert result.return_code == 0, result.stderr
+        assert result.stdout == "sandbox runner directory"
+    finally:
+        await provider.close(handle)
+
+
+@pytest.mark.parametrize("absolute_workdir", [False, True])
+@pytest.mark.parametrize("exec_cwd", [None, "nested", "absolute"])
+async def test_caller_workdir_and_exec_overrides(tmp_path: Path, monkeypatch, absolute_workdir, exec_cwd) -> None:
+    monkeypatch.chdir(tmp_path)
+    workdir = tmp_path / "repo"
+    override = tmp_path / "nested"
+    override.mkdir()
+    sandbox = AsyncSandbox(LocalProvider())
+    await sandbox.start(SandboxSpec(workdir=str(workdir) if absolute_workdir else "repo"))
+    try:
+        # Caller-supplied execution overrides retain their host-relative semantics.
+        cwd = str(override) if exec_cwd == "absolute" else exec_cwd
+        result = await sandbox.exec("pwd", cwd=cwd)
+        assert result.return_code == 0, result.stderr
+        assert Path(result.stdout.strip()).resolve() == (workdir if exec_cwd is None else override).resolve()
+    finally:
+        await sandbox.stop()
+    assert workdir.is_dir() and override.is_dir()

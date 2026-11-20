@@ -32,6 +32,10 @@ so `"*": allow` then overrides every rule for those keys (naming `bash` voids ev
 Other flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint and configuration for their
 Resources-owned lifecycle. HLE and APEX Shortlist run this agent from their plain-named OpenCode presets, with
 `configs/profiles/offline_science.yaml`; their `*_legacy_agent` presets keep the deprecated agent.
+BrowseComp's `benchmarks/browsecomp/configs/browsecomp_opencode.yaml` runs this agent in the sandbox that
+`opencode_search` lends, with owner-staged plugins, `compaction.reserved` and `exclude_compaction_summaries`. The
+other BrowseComp OpenCode preset, `browsecomp_opencode_legacy_agent.yaml`, keeps the deprecated agent; the
+BrowseComp README lists how the two differ.
 
 The old `opencode_sandboxed_agent` package remains separate; only its shell PATH
 quoting is fixed for directories containing spaces.
@@ -110,7 +114,7 @@ the runtime: set `sandbox_executable_path` and `sandbox_executable_sha256`, or u
 image that already holds the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
 (see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity)).
 Without either, the seed is accepted and each attempt then fails downloading OpenCode.
-Preinstall `rg` too, since OpenCode otherwise tries to download ripgrep on demand.
+Preinstall or pin `rg` too: without one, setup fails (see below).
 Under `model_only`, a required MCP grant is refused at seed with a 422, since the
 policy would block its host; under `model_and_tools`, a grant at an address the
 sandbox cannot reach, such as loopback, refuses the seed. A borrowed sandbox relies on
@@ -123,10 +127,12 @@ needs Linux and Bash; it does not need Python. Missing Bash can be installed wit
 apt-get or apk when running as root; otherwise preinstall it.
 Online installation needs GitHub access, curl, tar, gzip and a Debian or RHEL CA
 bundle. Missing required packages are installed with apt-get or apk as root;
-non-root images must preinstall them. System `rg` is a best-effort optimization:
-setup tries apt-get or apk as root, but only warns if it is unavailable. OpenCode
-can then download ripgrep on demand; offline images should preinstall it, or pin one
-(see [Owner extensions](#owner-extensions)). Cached matching OpenCode runtimes need no
+non-root images must preinstall them. OpenCode's grep and glob tools need `rg`:
+setup tries apt-get or apk as root and fails if `rg` is still missing, since those
+tools would otherwise fail inside the trajectory with no failure recorded. Preinstall
+it, pin one (see [Owner extensions](#owner-extensions)), or set
+`sandbox_ripgrep_download: true` to let OpenCode download ripgrep on demand, which
+needs GitHub access from the sandbox. Cached matching OpenCode runtimes need no
 runtime download. A pinned binary is never downloaded. Task dependencies are preserved.
 
 Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
@@ -198,9 +204,9 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto` and
-`agent.build.steps`, preserving Gym capture. With token capture on, a session refuses
-`agent.build.steps` (see below).
+Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto`,
+the compaction buffer (`compaction.reserved` on OpenCode 1, `compaction.buffer` on OpenCode 2),
+`agent.build.steps` and subagents (below), preserving Gym capture.
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
@@ -208,6 +214,16 @@ adapter then omits `tools` and passes `permission` exactly as given.
 Setting `compaction.auto: false` keeps OpenCode from
 summarizing the session and continuing from the summary, in model calls that training cannot join
 to the scored call; a run that fills the context then ends with a context-limit error.
+`compaction.reserved` (a positive integer) is the token buffer OpenCode 1 keeps below `context_window`:
+automatic compaction starts after a call whose tokens reach `context_window` minus this buffer. Unset,
+the buffer is the smaller of 20000 and `max_output_tokens`. It moves only that trigger;
+`compaction.prune`, which rewrites earlier tool output, stays refused. A session refuses a buffer of
+`context_window` or more, which would compact after every call.
+OpenCode 2 renamed the setting `compaction.buffer`, and OpenCode 1.17.11 does not read that name. The
+agent's config refuses `compaction.reserved` on OpenCode 2 and `compaction.buffer` on OpenCode 1 when it
+loads: validating the config reports it, the agent server does not start with it, and the local path
+never runs with it. A seed refuses one set after the config loaded, with HTTP 422. The error says to
+remove the other version's name and set this version's.
 `agent.build.steps` sets the step limit of the `build` agent, which the session runs, for each
 prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
 asks for a text answer. It still offers the tools, so a model that keeps calling them runs past
@@ -216,6 +232,18 @@ and compaction does not restart the count. A response whose prompt reached the l
 `metadata.harness_step_limit_reached: "true"`. Token capture recognizes this message
 (`nemo_gym.models.token_capture.harness_notes`) and joins the calls after it to the earlier calls of
 the rollout.
+
+Subagents. The default permission profile leaves OpenCode's `task` tool enabled, which starts a child session
+with its own context; with no session configuration it offers OpenCode's built-in `general` and `explore`.
+A session defines its own with `agent.<name>` entries whose `mode` is `subagent` (`description`, what the
+primary agent is told about it; `prompt`; `steps`; `permission` and `tools`, its tool access) and hides a
+built-in one with `agent.general: {disable: true}` or `agent.explore: {disable: true}`; any other agent
+field (a model, sampling, OpenCode's own agent names) is refused, so a child runs on the session's model
+with the request's sampling. A child's model calls are captured with the rollout's and the observations
+report its session as a child invocation of the primary agent's (`parent_invocation_id`,
+`spawned_by_tool_call_id`); which of them train, and how a child's context is reconstructed, is the
+training framework's (Gym's local lineage treats a child's first call as a new root). The Agentic-VBench
+training entry's `subagents.yaml` is an example.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
@@ -380,8 +408,12 @@ capture is on, then `task_environment.mjs`), in the given order, in every activa
 Seed checks that each path is a regular file and returns 422 otherwise. Their correctness
 is the owner's responsibility: OpenCode logs a plugin that fails to load and continues,
 so a plugin that matters must fail closed through its own receipt, as
-`task_environment.mjs` does with `task-environment.ready`. The adapter's environment is
-fixed, so plugins should read their settings from files beside them (`import.meta.url`).
+`task_environment.mjs` does with `task-environment.ready`. A session refuses the adapter's
+`env` setting, but OpenCode and its plugins run with the sandbox's environment, which its
+owner sets (`sandbox_config.env`, or `opencode_search`'s `episode_sandbox_env`); a variable
+the adapter sets itself, such as `HOME`, an XDG directory or `OPENCODE_CONFIG_CONTENT`,
+takes the adapter's value. An owner that cannot set the environment can put a plugin's
+settings in files beside it (`import.meta.url`).
 
 ### Pinned offline runtime bundle
 
@@ -399,7 +431,7 @@ killer's), is a retryable setup error.
 
 | Item | Fields | Where it goes | How to build it |
 | --- | --- | --- | --- |
-| ripgrep | `sandbox_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's best-effort package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
+| ripgrep | `sandbox_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
 | Plugin dependencies | `sandbox_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256` | Unpacked into `XDG_CONFIG_HOME/opencode` before launch by the sandbox's `tar`, once the agent server has checked a download of the verified copy: members must be files, folders or links that stay inside it, no member path or link target may pass through a link, and none may carry setuid, setgid or sticky bits; npm's `node_modules/.bin` links pass | See below |
 
 With any plugin configured (the adapter always configures `task_environment.mjs`),
@@ -429,6 +461,16 @@ configuration Gym passes is merged last and still takes precedence. A repository
 add instructions, agents, plugins or tools, so set it only for task repositories you would
 run OpenCode in yourself. Export and import never read project config.
 
+### Compaction summaries in the output
+
+By default, a session's response output includes OpenCode's compaction summaries. A summary is
+an assistant message like any other, so when a run ends on a compaction, a verifier that grades
+the last assistant text gets the summary instead of an answer. With
+`exclude_compaction_summaries: true`, the output leaves out each assistant message that
+OpenCode marks `summary: true` or that its `compaction` agent wrote. The compaction record in
+the observations keeps the summary text either way. The response usage counts the summary calls
+whatever the setting.
+
 ### Session exports
 
 `export_dir` is an absolute sandbox directory chosen by the sandbox owner, outside the
@@ -453,9 +495,11 @@ budget, never fails the activation or blocks release: it is reported as an
 `export_dir_write_failed` observation gap whose detail names each failed session and
 why. Files the model's tools can reach are not a trusted
 channel; pick a fresh directory. The owner can then grade OpenCode's own transcript
-after agent close. In a sandbox the agent owns, the files last only as long as the
-provider keeps the sandbox's files after close: a provider that deletes the sandbox
-deletes them too.
+after agent close. In a borrowed sandbox the files last until the owner stops it:
+`opencode_search`, for example, copies them to its host at verify, before it stops the
+sandbox, when `episode_export_copy_dir` is set. In a sandbox the agent owns, the files
+last only as long as the provider keeps the sandbox's files after close: a provider that
+deletes the sandbox deletes them too.
 
 ### Session import
 
@@ -506,8 +550,9 @@ handled in `opencode2/`:
   private server exits with the CLI.
 - **Configuration.** The adapter writes OpenCode 2's schema for the provider, model, plugins, MCP servers and image
   limits. The session's `opencode_config` keys keep their OpenCode 1 form, which OpenCode 2 migrates: `bash` rules
-  apply to its `shell` tool and `task` rules to `subagent`; `attachment` becomes `media`. OpenCode 2 assumes image
-  input for a model it does not know, so a text-only session declares `capabilities.input: ["text"]`.
+  apply to its `shell` tool and `task` rules to `subagent`; `attachment` becomes `media`. The compaction buffer is
+  the exception: set `compaction.buffer`; the config refuses `compaction.reserved`. OpenCode 2 assumes image input for
+  a model it does not know, so a text-only session declares `capabilities.input: ["text"]`.
 - **Plugin.** OpenCode 2 loads plugins from directories through a new API, so `opencode2/plugin/index.js` replaces
   the three OpenCode 1 plugin files. It gives tool shells the task's HOME and XDG directories, applies request
   `temperature` and `top_p` to every model call (OpenCode 2 accepts per-agent sampling but does not apply it),

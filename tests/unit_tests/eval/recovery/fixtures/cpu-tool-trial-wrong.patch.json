@@ -1,0 +1,27 @@
+{
+  "base": "cpu-tool-trial-healthy.json",
+  "set": [
+    [["results", 0, "reward"], 0.0],
+    [["results", 0, "_ng_collected_grading_binding"], "eb6d859a0c81be10599bb4fe1d86e67c22b37c0197f5f9af69b2997e85efc3b7"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "invocation_id"], "verify-f7a1e36d3dc0441398bb6ffb6f76c736"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "grading_operations", 0, "operation_id"], "grade-aa65bd7ee5c547e4b70cb34d950e86e6"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "grading_operations", 0, "result_binding_sha256"], "eb6d859a0c81be10599bb4fe1d86e67c22b37c0197f5f9af69b2997e85efc3b7"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "model_call_id"], "6999c10240f74270bc204852973c480b"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "response_metadata", "model_operations", 0, "operation_id"], "684696f6cf1a4f51a478f041e0684c09"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "response_metadata", "model_operations", 0, "final_attempt_id"], "684696f6cf1a4f51a478f041e0684c09-1"],
+    [["results", 0, "ng_trial_observations", "model_calls", 1, "model_call_id"], "df0b9391a5ba4cb39bfa7ec1cce62c46"],
+    [["results", 0, "ng_trial_observations", "model_calls", 1, "response_metadata", "model_operations", 0, "operation_id"], "7e4d244543b543cf866854869cdddd60"],
+    [["results", 0, "ng_trial_observations", "model_calls", 1, "response_metadata", "model_operations", 0, "final_attempt_id"], "7e4d244543b543cf866854869cdddd60-1"],
+    [["quality", "provenance", "rollout_artifact_digests", 0, "rollouts_jsonl_fpath"], "eacd0158f16143d58d5b61c7480ad7cce84583d4bee106c3fa6f11de9d0d3105"],
+    [["quality", "provenance", "rollout_artifact_digests", 0, "resolved_config_yaml_fpath"], "97b0144868da53e47775c0372999416ffb9a6cb1a39acbec0fd378c5e6b924ee"],
+    [["quality", "observed_runtime", "row_elapsed_s", "sum_observed"], 0.06877769099082798],
+    [["quality", "observed_request_effort", "request_elapsed_ms", "sum_observed"], 2.0366270327940583],
+    [["source_digests", "rollouts.jsonl"], "eacd0158f16143d58d5b61c7480ad7cce84583d4bee106c3fa6f11de9d0d3105"],
+    [["source_digests", "rollouts_resolved_config.yaml"], "97b0144868da53e47775c0372999416ffb9a6cb1a39acbec0fd378c5e6b924ee"],
+    [["source_digests", "rollouts_aggregate_metrics.json"], "42507bc278d654e24232d53022503c14ca97d94b1198dd8e0c0a7a79c9b0ab3f"],
+    [["source_digests", "quality_summary.json"], "758fe2d404d9e5be1e5d92ad9c2a9332f538de71e015143f766da9662f642986"],
+    [["source_digests", "rollouts_manifest.json"], "956581b4b35201764c8f868e8e7a66dbbc57f736a7726f8b840cc78dd4107f03"],
+    [["source_digests", "rollouts_coverage.json"], "eeac10a7c106158aee08a3e5ed19a815919754e8039fa236339bb5f8ca26c928"],
+    [["source_job_identity", 2], 30320726]
+  ]
+}

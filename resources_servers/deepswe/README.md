@@ -8,9 +8,13 @@ same task image.
 
 ```bash
 python -m resources_servers.deepswe.prepare \
-  --source-dir /path/to/deep-swe \
-  --no-download
+  --source-dir /path/to/deep-swe
 ```
+
+Preparation also downloads the pinned ripgrep executable that OpenCode needs into
+`resources_servers/deepswe/data/cache/opencode-runtime/rg` and checks its digest. With `--no-download`, preparation
+uses no network: place the pinned `rg` at that path first, or preparation stops with an error naming the missing or
+differing file.
 
 The preparation step copies each immutable, versioned upstream image reference from the pinned task definition into
 the Gym JSONL alongside the instruction and task ID. The resources server rejects a row whose image differs from its
@@ -29,6 +33,18 @@ run) is run again on a fresh sandbox with the same collected patch, at most `inc
 (default 2) more times; the response records `verification_attempts` and the reason of each inconclusive attempt. A
 malformed verdict, a timeout and a conclusive result are not run again, and a patch that breaks the test script stays
 an inconclusive, masked result after the bound as before.
+
+Tests that GNU `timeout` stops at the task's limit (`verifier.timeout_sec`) inside the verifier sandbox on the model's
+patch are a confirmed deadline: the failure kind `deepswe:test_deadline`, classified as the model's, at the
+`verification` stage. This server's default for that kind is `count_as_zero`, so the patch scores 0
+(`verifier_timeout_s` records the limit). The default gives way to what the deployment writes: an explicit
+`outcome_policy.by_stage.verification.default_action: fail` (or `by_failure_class.model: fail`) leaves the deadline
+ungraded and masked, and a rule `by_failure_kind.deepswe:test_deadline` decides it over everything (`count_as_zero` or
+`fail`; `retry` is refused at load, since a confirmed deadline is never run again). A `retry` as the stage's default
+is for inconclusive attempts and does not apply to the deadline. `count_as_zero` is accepted only for the deadline's
+own rule: the other verification rules also decide inconclusive attempts. The applied action and classification are
+saved with the result (`failure_outcome_action`, `failure_outcome_attribution`). A timeout reported only by the
+sandbox provider, and a golden patch past the limit, stay inconclusive.
 
 ## Oracle checkpoint
 
@@ -58,9 +74,12 @@ Finally it calls verify and closes the resources session, which stops the agent 
 The agent sandbox has no internet access, so the pinned OpenCode runtime cannot be downloaded into it. Set
 `sandbox_executable_path` to an OpenCode 1.17.11 binary already inside the sandbox, for example on a read-only mount,
 and `sandbox_executable_sha256` to its digest; session setup refuses any other file.
-`benchmarks/nemotron_3.5_super/sandbox_utils.yaml` does this for its mounted copy. Pin ripgrep and OpenCode's plugin
-dependencies the same way (`sandbox_ripgrep_*`, `sandbox_plugin_dependencies_*`, see the `opencode_agent` README):
-without them OpenCode's `glob` and `grep` tools need an image that provides `rg`, and each start waits for a plugin
+`benchmarks/nemotron_3.5_super/sandbox_utils.yaml` does this for its mounted copy. The benchmark stages ripgrep
+itself: `prepare.py` downloads ripgrep 15.1.0 (x86_64 musl) and checks its digest, the resources server copies it into
+each agent sandbox (`agent_ripgrep_path`), and the agent pins that copy (`sandbox_ripgrep_*`) and puts its directory
+on the PATH of its tool subprocesses (`sandbox_path_prefix`), so OpenCode's `glob` and `grep` tools and `rg` in the
+shell work without network, as on the previous recipe. Pin OpenCode's plugin dependencies the same way
+(`sandbox_plugin_dependencies_*`, see the `opencode_agent` README): without them each start waits for a plugin
 install that cannot reach npm. Launch Gym with `+use_absolute_ip=true` when OpenSandbox needs a host-routable
 model-server address.
 

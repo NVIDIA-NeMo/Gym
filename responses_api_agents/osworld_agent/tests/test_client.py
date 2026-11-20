@@ -346,6 +346,61 @@ def test_gym_policy_runner_preserves_existing_pyautogui_flow(monkeypatch) -> Non
 
 
 @pytest.mark.parametrize(
+    "code",
+    [
+        "if True:\n    marker.append('ran')",
+        "for i in range(1):\n    marker.append('ran')",
+        "while not marker:\n    marker.append('ran')",
+        "with contextlib.nullcontext():\n    marker.append('ran')",
+        "try:\n    marker.append('ran')\nexcept Exception:\n    pass",
+        "def action():\n    marker.append('ran')\naction()",
+    ],
+)
+def test_super35_executes_compound_python_after_controller_preamble(monkeypatch, code: str) -> None:
+    from responses_api_agents.osworld_agent.adapter_agents import OSWorldProtocolAgent
+
+    _patch_client_for_fake_runtime(monkeypatch)
+    load_attr = osworld_client.load_attr
+    monkeypatch.setattr(
+        osworld_client,
+        "load_attr",
+        lambda path: OSWorldProtocolAgent if path.endswith(".OSWorldProtocolAgent") else load_attr(path),
+    )
+    preamble = "import contextlib; marker = []; "
+    with pytest.raises(SyntaxError):
+        compile(preamble + code, "<old-controller>", "exec")
+
+    def step(self, action, pause):
+        self.actions.append(action)
+        namespace = {}
+        exec(preamble + action, namespace)
+        assert namespace["marker"] == ["ran"]
+        return self._get_obs(), 0.0, False, {}
+
+    monkeypatch.setattr(FakeEnv, "step", step)
+    response = {
+        "content": f"<tool_call><function=exec_py><parameter=code_block>{code}</parameter></function></tool_call>"
+    }
+    result = osworld_client.run_osworld_task(
+        {"id": "compound-python", "instruction": "Execute a compound statement."},
+        model_fn=lambda *_: "unused",
+        runner_name="nemotron_super35_agent",
+        env_class_path="fake.FakeEnv",
+        messages_model_fn=lambda *_: response,
+        max_steps=1,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+    assert result.error is None
+    step_record = result.steps[0]
+    assert step_record.info["agent"]["original_code"] == code
+    assert step_record.info["agent"]["model_calls"][0]["response"] == response
+    assert step_record.info["python_execution"] == "exec"
+    assert step_record.actions[0] != FakeEnv.instances[0].actions[0]
+    assert step_record.info["execution_action"] == FakeEnv.instances[0].actions[0]
+
+
+@pytest.mark.parametrize(
     "failure_stage", [None, "registration", "reset", "rollout", "evaluate", "close", "close_cancel"]
 )
 def test_task_plugins_are_cleaned_before_reusing_a_worker(monkeypatch, failure_stage) -> None:

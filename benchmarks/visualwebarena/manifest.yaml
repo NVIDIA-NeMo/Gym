@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: visualwebarena
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: VisualWebArena's maintained 908 visually grounded browser tasks on self-hosted sites, using WebAgent and the reference rules, semantic judge and image evaluator.
+modality: multimodal
+licensing: Apache-2.0
+authors:
+  - Jeff Peng
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: stochastic
+resources_server: webarena_browser
+agent_server: web_agent
+model_server: policy_model
+dataset_owner: visualwebarena_benchmark_agent
+datasets:
+  - name: visualwebarena
+    type: benchmark
+    jsonl_fpath: benchmarks/visualwebarena/data/visualwebarena.jsonl
+    prepare_script: benchmarks/visualwebarena/prepare.py
+    num_repeats: 1
+canonical_split: test
+prompt_source: agent
+lifecycle: active

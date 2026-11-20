@@ -153,7 +153,7 @@ def trajectory_response(result, body, model, error_type=None):
                 "input_tokens": inputs,
                 "output_tokens": outputs,
                 "total_tokens": inputs + outputs,
-                "input_tokens_details": {"cached_tokens": usage.get("cached_tokens", 0)},
+                "input_tokens_details": {"cached_tokens": usage.get("cached_tokens")},
                 "output_tokens_details": {"reasoning_tokens": usage.get("reasoning_tokens", 0)},
             },
         }
@@ -439,8 +439,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     LOG.exception("Failed to stop Hermes sandbox")
                     if sandbox is not None:
                         try:
-                            async with asyncio.timeout(self.config.cleanup_timeout):
-                                await sandbox.stop()
+                            await sandbox.stop(timeout_s=self.config.cleanup_timeout)
                         except Exception:
                             LOG.exception("Sandbox fallback cleanup also failed")
                 finally:

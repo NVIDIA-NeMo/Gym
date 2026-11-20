@@ -629,3 +629,32 @@ async def test_framework_ack_cannot_change_the_admitted_parent(ledger, continuat
         assert [record["model_call_id"] for record in manifest["records"]] == ["a"]
     finally:
         reset_token_sink(token)
+
+
+def test_system_suffix_opt_in_requires_source_history():
+    from nemo_gym.models.token_capture.config import TokenCaptureConfig
+
+    with pytest.raises(ValueError, match="allow_system_suffix requires"):
+        TokenCaptureConfig(token_id_capture={"allow_system_suffix": True})
+
+
+@pytest.mark.parametrize("backend", ["vllm_worker", "dynamo_worker"])
+@pytest.mark.parametrize("allow_system_suffix", [False, True])
+def test_system_suffix_opt_in_requires_verified_worker(backend: str, allow_system_suffix: bool) -> None:
+    from nemo_gym.models.token_capture.config import TokenCaptureConfig
+
+    settings = {
+        "enabled": True,
+        "external_staging": True,
+        "external_staging_backend": backend,
+        "rebuild_response": False,
+        "parent_resolution": "source_history",
+        "allow_system_suffix": allow_system_suffix,
+    }
+    if allow_system_suffix and backend != "vllm_worker":
+        with pytest.raises(ValueError, match="allow_system_suffix requires external_staging_backend=vllm_worker"):
+            TokenCaptureConfig(token_id_capture=settings)
+    else:
+        config = TokenCaptureConfig(token_id_capture=settings)
+        assert config.token_id_capture.allow_system_suffix is allow_system_suffix
+        assert config.token_id_capture.external_staging_backend == backend

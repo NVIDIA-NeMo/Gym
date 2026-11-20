@@ -64,6 +64,7 @@ from nemo_gym.data.hf_utils import (
 )
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.data.task_data import (
+    SERVER_DIR_MARKERS,
     TaskDataSchemaError,
     TaskDataValidator,
     find_server_dir,
@@ -556,6 +557,19 @@ def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
     return "gym eval prepare --config <config path>"
 
 
+def _missing_server_dir_hint(impl_key: str, base_folder: str, instance_name: str) -> str:
+    """Why a schema home resolved to no server directory, and what to do about it.
+
+    A dangling ``resources_server`` reference never reaches this point (``_schema_home_for`` returns None for
+    it), so the directory that is missing is the implementation's own.
+    """
+    return (
+        f"no {base_folder}/{impl_key} directory holding one of {', '.join(SERVER_DIR_MARKERS)} under the "
+        f"component search roots. Check that `{impl_key}`, the implementation {instance_name} resolves to, has a "
+        "server directory, or add its root to the search roots (NEMO_GYM_EXTRA_ROOTS / --search-dir)."
+    )
+
+
 class TrainDataProcessor(BaseModel):
     # Every server instance of the run config, kept by `load_and_validate_server_instance_configs`. The
     # in-scope list it returns holds only dataset-bearing instances, but the schema that validates an
@@ -609,6 +623,17 @@ class TrainDataProcessor(BaseModel):
     ) -> List[ServerInstanceConfig]:
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
+        for instance in server_instance_configs:
+            inner = instance.get_inner_run_server_config()
+            if inner.datasets is not None:
+                declared = instance.get_inner_run_server_config_dict().datasets
+                # An unused dataset may reference unavailable input paths; resolve only selected types.
+                inner.datasets = [
+                    type(dataset).model_validate(OmegaConf.to_container(raw, resolve=True))
+                    if dataset.type in config.in_scope_dataset_types
+                    else dataset
+                    for dataset, raw in zip(inner.datasets, declared, strict=True)
+                ]
         self._all_server_instance_configs = list(server_instance_configs)
 
         # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
@@ -1175,6 +1200,12 @@ This could be due to a change in how metrics are calculated, leading to outdated
         impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
+            # Say so: a schema home that resolves to no server directory used to switch the gate off silently.
+            warnings.warn(
+                f"Skipping task_data validation for {d.jsonl_fpath}: "
+                + _missing_server_dir_hint(impl_key, base_folder, c.name),
+                stacklevel=2,
+            )
             return None
         try:
             adapter = load_task_data_schema(server_dir)
@@ -1219,6 +1250,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
         impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
+            warnings.warn(
+                f"Skipping the dataset metrics hook lookup for {c.name}: "
+                + _missing_server_dir_hint(impl_key, base_folder, c.name),
+                stacklevel=2,
+            )
             return None
         try:
             return load_dataset_metrics_hook(server_dir)
@@ -1231,6 +1267,8 @@ This could be due to a change in how metrics are calculated, leading to outdated
         server_instance_configs: List[ServerInstanceConfig],
         task_data_validation: str = "warn",
         num_repeats: Optional[Union[int, Dict[str, int]]] = None,
+        *,
+        output_dir: Path,
     ) -> List[Path]:
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
@@ -1244,7 +1282,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 if d.type == "benchmark" and d.prompt_config:
                     prompt_cfg = load_prompt_config(d.prompt_config)
 
-                data_path = Path(d.jsonl_fpath)
+                data_path = output_dir / Path(d.jsonl_fpath).name
                 # Per-declaration output: every declaration of a jsonl_fpath gets its own prepared
                 # file (previously a second declaration silently truncated the first, so all copies
                 # carried the last declarer's stamp). Candidates are tried until one is unused, so
@@ -1260,8 +1298,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 )
                 prepare_path = next(p for p in candidates if p not in used_prepare_paths)
                 used_prepare_paths.add(prepare_path)
-                # Create the artifact dir if needed (the prepared file is written next to the
-                # cwd-relative jsonl_fpath, which may not exist when collating from a fresh cwd).
+                # Prepared rows belong to this run; source datasets may be shared or read-only.
                 prepare_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # The routing stamp: task_source names the declaring instance; the agent is
@@ -1303,7 +1340,14 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         # Count each source row once, using its original JSONL line index.
                         if validator is not None and row_index % d.num_repeats == 0:
                             validator.validate_row(row_index // d.num_repeats, row)
-                        if d.taskset is not None:
+                        if d.taskset is not None and is_materialized_task_row(row):
+                            # A prepared task row already names its taskset; it must be this dataset's.
+                            if row["task_id"].get("taskset") != d.taskset:
+                                raise ValueError(
+                                    f"{d.jsonl_fpath} row {row_index}: task_id.taskset "
+                                    f"{row['task_id'].get('taskset')!r} differs from the dataset taskset {d.taskset!r}"
+                                )
+                        elif d.taskset is not None:
                             # Keep collector identity outside task_data so shards and retries
                             # retain their capture keys after materialization, and keep a row's
                             # request to skip token capture.
@@ -1390,6 +1434,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 server_instance_configs=server_instance_configs,
                 task_data_validation=config.effective_task_data_validation,
                 num_repeats=config.num_repeats,
+                output_dir=parent / "prepared" / type,
             )
             collated_fpath = parent / f"{type}.jsonl"
             with open(collated_fpath, "wb") as outfile:

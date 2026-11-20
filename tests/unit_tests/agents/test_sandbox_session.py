@@ -7,7 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
-from time import monotonic
+from time import monotonic, sleep
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,7 +23,7 @@ from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failu
 from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.core.failure_records import SandboxFailureDetails
 from nemo_gym.core.typed_exceptions import NgFailureEvent
-from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox
 from nemo_gym.sandbox.providers import SupportsSandboxIndependentUploads
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
@@ -98,14 +98,28 @@ async def test_completed_execution_captures_once_before_release(session, owned):
     assert session.closed
     if owned:
         session.sandbox.stop.assert_awaited_once()
+        # The close's own limit reaches the sandbox's stop, which is otherwise bounded only by its default.
+        assert 0 < session.sandbox.stop.await_args.kwargs["timeout_s"] <= 1
         session.sandbox.disconnect.assert_not_awaited()
         assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
     else:
         session.sandbox.stop.assert_not_awaited()
         session.sandbox.disconnect.assert_awaited_once()
+        assert 0 < session.sandbox.disconnect.await_args.kwargs["timeout_s"] <= 1
         assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
     with pytest.raises(RuntimeError, match="closing or already activated"):
         await execute(session)
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_release_receives_a_close_limit_longer_than_the_stop_default(session, owned):
+    # A caller that allows longer than STOP_TIMEOUT_S gets that limit on either release, not the 120 s default.
+    session.owns_sandbox = owned
+    await execute(session)
+    await session.close(timeout=300)
+    release = session.sandbox.stop if owned else session.sandbox.disconnect
+    release.assert_awaited_once()
+    assert release.await_args.kwargs["timeout_s"] > STOP_TIMEOUT_S
 
 
 @pytest.mark.parametrize("owned", [False, True])
@@ -134,8 +148,8 @@ async def test_interruption_captures_before_transport_cancellation_and_release(s
         return "partial transcript"
 
     session.sandbox.exec.side_effect = provider_exec
-    session.sandbox.stop.side_effect = lambda: events.append("stop_sandbox")
-    session.sandbox.disconnect.side_effect = lambda: events.append("disconnect")
+    session.sandbox.stop.side_effect = lambda **_: events.append("stop_sandbox")
+    session.sandbox.disconnect.side_effect = lambda **_: events.append("disconnect")
     collector = AsyncMock(side_effect=collect)
     running = asyncio.create_task(execute(session, collect=collector))
     await asyncio.wait_for(launched.wait(), 2)
@@ -240,6 +254,15 @@ async def test_rearm_uses_fresh_launch_files_and_close_removes_the_root(session)
     assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
     with pytest.raises(RuntimeError, match="closing"):
         await session.begin_activation(session_dir="/session/activation-3", timeout=1)
+
+
+async def test_root_dir_stays_at_the_starting_directory_across_activations(session):
+    assert session.root_dir == "/session"
+    await session.begin_activation(session_dir="/session/activation-1", timeout=1)
+    assert (session.session_dir, session.root_dir) == ("/session/activation-1", "/session")
+    await execute(session)
+    await session.begin_activation(session_dir="/session/activation-2", timeout=1)
+    assert (session.session_dir, session.root_dir) == ("/session/activation-2", "/session")
 
 
 async def test_rearm_rejects_unconfirmed_termination(session, receipt_reader):
@@ -604,7 +627,7 @@ async def test_close_during_supervisor_upload_joins_staging_before_release(sessi
 
     session.sandbox.upload.side_effect = upload
     release = session.sandbox.stop if owned else session.sandbox.disconnect
-    release.side_effect = lambda: events.append("release")
+    release.side_effect = lambda **_: events.append("release")
     collector = AsyncMock()
     running = asyncio.create_task(execute(session, collect=collector))
     await asyncio.wait_for(uploading.wait(), 2)
@@ -637,7 +660,7 @@ async def test_supervisor_upload_failure_preserves_error_and_allows_close(sessio
 async def test_cancelled_close_stays_closing_and_can_retry(session):
     release_started = asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         release_started.set()
         await asyncio.Future()
 
@@ -770,9 +793,11 @@ async def test_failed_expire_request_can_be_retried(session):
     await session.close(timeout=1)
 
 
-async def test_expire_is_bounded_when_the_marker_cannot_be_written(session):
+@pytest.mark.parametrize("loop_pause", [0, 1.1])
+async def test_expire_is_bounded_when_the_marker_cannot_be_written(session, monkeypatch, loop_pause):
     launched = asyncio.Event()
     finish = asyncio.Event()
+    cancelled = asyncio.Event()
 
     async def exec_(command, **_):
         if "--expire-file" in command:
@@ -783,16 +808,30 @@ async def test_expire_is_bounded_when_the_marker_cannot_be_written(session):
     async def upload(source, target):
         if target == EXPIRE_MARKER and upload.stall:
             # A transport that never answers, or a provider queue the call cannot leave.
-            await asyncio.Future()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
 
     upload.stall = True
     session.sandbox.exec.side_effect = exec_
     session.sandbox.upload.side_effect = upload
     async with _launched(session, launched) as activation:
-        started = asyncio.get_running_loop().time()
+        timeout_calls = []
+        real_timeout = asyncio.timeout
+
+        def observed_timeout(delay):
+            timeout_calls.append(delay)
+            return real_timeout(delay)
+
+        monkeypatch.setattr(asyncio, "timeout", observed_timeout)
+        if loop_pause:
+            asyncio.get_running_loop().call_later(0.1, sleep, loop_pause)
         with pytest.raises(RuntimeError, match="Could not request test expiry within 0.2 s"):
-            await session.expire(timeout=0.2, reason="budget")
-        assert asyncio.get_running_loop().time() - started < 1
+            await asyncio.wait_for(session.expire(timeout=0.2, reason="budget"), 5)
+        # Check the real timeout and cancellation, without assuming how quickly
+        # a busy runner schedules the timeout callback or resumes this task.
+        assert 0.2 in timeout_calls and cancelled.is_set()
         assert session.expire_reason is None
         upload.stall = False
         assert await session.expire(timeout=1, reason="operator") is True

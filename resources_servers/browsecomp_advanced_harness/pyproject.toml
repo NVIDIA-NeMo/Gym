@@ -8,6 +8,7 @@ requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev,sandbox]",
     "tavily-python==0.7.21",
+    "rapidfuzz==3.14.1",
     "pocketshell[pcre]",
 ]
 

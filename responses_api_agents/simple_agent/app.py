@@ -93,6 +93,8 @@ from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SESSION_OWNER_HEADER,
+    TOOL_CALL_ID_HEADER,
+    TOOL_ERROR_HEADER,
     Activation,
     ActivationOutOfOrderError,
     BaseRunRequest,
@@ -339,6 +341,26 @@ class SimpleAgentVerifyRequest(BaseVerifyRequest):
 
 class SimpleAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+def mark_missing_assistant_output(response: NeMoGymResponse) -> str:
+    """Share the ordinary agent's reasoning-only/empty-output termination semantics."""
+    termination_message = (
+        "Ending trajectory: model returned no assistant message or tool calls "
+        "(reasoning-only or empty output) without reported truncation. "
+        "This is the stop-token case (finish_reason='stop'), not length truncation "
+        "(finish_reason='length', handled separately via incomplete_details). "
+        "This indicates either a badly trained model requiring training-level fixes "
+        "or a bug in the inference engine."
+    )
+    termination_reason = "incomplete_reasoning" if response.output else "empty_output"
+    response.status = "incomplete"
+    response.metadata = {
+        **(response.metadata or {}),
+        "ng_termination_reason": termination_reason,
+        "ng_termination_message": termination_message,
+    }
+    return termination_message
 
 
 class SimpleAgent(SimpleResponsesAPIAgent):
@@ -694,21 +716,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 if not all_fn_calls:
                     if not all_output_messages:
                         invocation_status = "incomplete"
-                        termination_message = (
-                            "Ending trajectory: model returned no assistant message or tool calls "
-                            "(reasoning-only or empty output) without reported truncation. "
-                            "This is the stop-token case (finish_reason='stop'), not length truncation "
-                            "(finish_reason='length', handled separately via incomplete_details). "
-                            "This indicates either a badly trained model requiring training-level fixes "
-                            "or a bug in the inference engine."
-                        )
-                        termination_reason = "incomplete_reasoning" if output else "empty_output"
-                        model_response.status = "incomplete"
-                        model_response.metadata = {
-                            **(model_response.metadata or {}),
-                            "ng_termination_reason": termination_reason,
-                            "ng_termination_message": termination_message,
-                        }
+                        termination_message = mark_missing_assistant_output(model_response)
                         LOG.warning(
                             "%s model_server=%s response_id=%s rollout_id=%s step=%s",
                             termination_message,
@@ -746,7 +754,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
-                            headers=dict(tool_access.headers),
+                            # The call's ID lets the server join its record to this trajectory and recognize the
+                            # client's resend of a call whose connection dropped.
+                            headers=dict(tool_access.headers) | {TOOL_CALL_ID_HEADER: output_function_call.call_id},
                             _internal=True,
                         )
                     else:
@@ -774,8 +784,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     resources_server_cookies.update(_cookies(api_response))
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
-                        tool_status = "completed" if completed else "failed"
-                        error_type = None if completed else f"http_{api_response.status}"
+                        error_result = api_response.headers.get(TOOL_ERROR_HEADER) == "true"
+                        tool_status = "completed" if completed and not error_result else "failed"
+                        error_type = (
+                            f"http_{api_response.status}" if not completed else "tool_error" if error_result else None
+                        )
 
                 if collect_trajectory:
                     tool_records.append(

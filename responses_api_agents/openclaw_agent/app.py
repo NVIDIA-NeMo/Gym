@@ -46,6 +46,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -80,6 +81,12 @@ from nemo_gym.core import (
     UnsupportedContentError,
     split_text_and_media,
 )
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import (
+    await_model_call_capture_quiescence,
+    model_call_capture_dirs_from_config,
+    read_available_model_call_records,
+)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -103,6 +110,7 @@ from responses_api_agents.openclaw_agent.observability import (
     build_openclaw_observation_tree,
     build_openclaw_observations,
     discover_openclaw_session_tree,
+    reconcile_openclaw_calls,
 )
 from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK, OpenClawSandboxSession
 from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
@@ -164,10 +172,10 @@ def _openclaw_output_items(envelope: dict[str, Any]) -> list[Any]:
     return output_items
 
 
-def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
+def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int | None]]:
     envelope = _decode_last_json_dict_suffix(stdout)
     if not envelope:
-        return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+        return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
     output_items = _openclaw_output_items(envelope)
 
     meta = envelope.get("meta") if isinstance(envelope.get("meta"), dict) else {}
@@ -179,7 +187,9 @@ def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
     return output_items, {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "cached_tokens": cache_read,
+        # The pinned provider defaults unavailable backend cache details to zero, so only a positive
+        # count is a measurement.
+        "cached_tokens": cache_read if cache_read > 0 else None,
     }
 
 
@@ -1330,6 +1340,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 prefer_openclaw_session_id=False,
                 capture_correlated=capture_correlated,
                 model_ref=self.config.model_server,
+                runtime_log=artifacts.get("stderr.log", ""),
             )
             # Sandbox sessions disable child agents, so there is exactly one invocation.
             state.observations.gaps = [
@@ -1343,6 +1354,22 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed"), *gaps],
             )
+        if capture_correlated and self.config.model_server is not None:
+            try:
+                capture_dirs = model_call_capture_dirs_from_config(self.server_client.global_config_dict)
+                if capture_dirs:
+                    rollout_id = state.request.episode_id.capture_key
+                    await await_model_call_capture_quiescence(rollout_id, capture_dirs)
+                    calls, _ = await asyncio.to_thread(
+                        read_available_model_call_records, CaptureStore(capture_dirs[0], create=False), rollout_id
+                    )
+                    calls = [call for call in calls if call.model_ref == self.config.model_server]
+                    state.observations, usage = reconcile_openclaw_calls(state.observations, calls)
+                    if usage is not None:
+                        response.usage = usage
+            except Exception:
+                LOG.warning("Could not reconcile OpenClaw captured calls", exc_info=True)
+                state.observations.gaps.append(ObservationGap(code="model_call_reconciliation_failed"))
         if (
             result
             and (
@@ -1733,7 +1760,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
-        cached_tokens = usage.get("cached_tokens", 0)
+        cached_tokens = usage.get("cached_tokens")
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -1765,12 +1792,14 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         except (AssertionError, AttributeError):
             legacy_marker = False
         if legacy_marker:
-            raise HTTPException(409, "Obsolete OpenClaw session cookie; seed a new agent session")
+            raise AgentSessionConflictError("Obsolete OpenClaw session cookie; seed a new agent session")
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, OpenClawSandboxSession)
             if state.request.episode_id.capture_key != request.path_params.get("rollout_id"):
-                raise HTTPException(409, "OpenClaw activation does not match the seeded session and rollout route")
+                raise AgentSessionConflictError(
+                    "OpenClaw activation does not match the seeded session and rollout route"
+                )
             if state.task is None:
                 prompt, system, media = self._sandbox_input(body)
                 # Bind the immutable request before yielding, so identical retries
@@ -1780,7 +1809,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     self._sandbox_response(state, state.activation_request, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "OpenClaw sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "OpenClaw sandbox sessions support one activation; retry the same request"
+                )
             # Session close owns cancellation, not an individual HTTP waiter.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         path_params = getattr(request, "path_params", None)
@@ -1873,10 +1904,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: OpenClawAgentRunRequest) -> OpenClawAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "OpenClaw sandbox sessions must use EnvironmentServer /run")
+            raise AgentSessionConflictError("OpenClaw sandbox sessions must use EnvironmentServer /run")
         try:
             if isinstance(request.session, Mapping) and _SANDBOX_SESSION_KEY in request.session:
-                raise HTTPException(409, "OpenClaw sandbox sessions must use EnvironmentServer /run")
+                raise AgentSessionConflictError("OpenClaw sandbox sessions must use EnvironmentServer /run")
         except (AssertionError, AttributeError):
             pass
         if self.config.resources_server is None:
