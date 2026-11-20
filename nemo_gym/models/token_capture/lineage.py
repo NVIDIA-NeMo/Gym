@@ -1470,12 +1470,13 @@ class FileLineageStore(IncrementalLineageStore):
         with self._locked(rollout_id):
             return list(self._read(rollout_id))
 
-    def discard_calls(self, rollout_id: str, model_call_ids: Sequence[str]) -> int:
-        """Drop the rows of these calls from a live ledger and return how many were dropped.
+    def delete_calls(self, rollout_id: str, model_call_ids: Sequence[str]) -> int:
+        """Delete every row of these calls from a live ledger and return how many rows were deleted.
 
-        For calls a checkpoint abandoned: the harness that issued them was interrupted before it received the
-        response and re-issues the call, so their rows (or failure rows) describe nothing the trajectory
-        contains. The file is rewritten atomically under the ledger's lock; other rows keep their order.
+        Any row with one of these call IDs goes: intent, failure or committed. A checkpoint uses this for calls
+        that ended while admission was closed, before their response started; they leave an intent row and
+        sometimes a failure row (``UNCOMMITTED_CALL_REASON``). The file is rewritten atomically under the rollout's
+        lock; other rows keep their order.
         """
         drop = set(model_call_ids)
         with self._locked(rollout_id):
@@ -1485,14 +1486,13 @@ class FileLineageStore(IncrementalLineageStore):
                 return 0
             path = self._ledger_path(rollout_id)
             payload = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in kept)
-            temporary = path.with_name(f".{path.name}.discard")
+            temporary = path.with_name(f".{path.name}.delete-calls")
             with temporary.open("wb") as handle:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
-            with self._cache_guard:
-                self._ledger_cache.pop(rollout_id, None)
+            self._ledger_cache_pop(rollout_id)
             return len(rows) - len(kept)
 
     def import_rows(self, rollout_id: str, rows: list[dict]) -> None:

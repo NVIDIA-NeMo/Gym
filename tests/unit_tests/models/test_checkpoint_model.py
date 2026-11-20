@@ -647,11 +647,11 @@ async def test_undelivered_rows_are_excluded_on_any_capture_path(tmp_path: Path)
     assert '"c1"' in rows and '"c2"' not in rows
 
 
-async def test_a_call_abandoned_while_held_is_left_out_of_the_commit_and_dropped_at_resume(tmp_path: Path) -> None:
-    """A harness interrupted at the checkpoint gives up on its held call. The ledger recorded the call (here a
-    row; in the external path often a failure row for a request that ended without coordinates). The commit
-    leaves it out, and the resume drops it from the live ledger, so neither the restored attempt nor the
-    continued one carries a call no trajectory contains."""
+async def test_a_call_that_ends_while_held_is_left_out_of_the_commit_and_deleted_at_resume(tmp_path: Path) -> None:
+    """A call ends while admission is closed, before its response starts (here its client leaves).
+    The ledger has rows for it (here a committed row the stand-in handler wrote early; with the capture middleware,
+    an intent row and sometimes a failure row). The commit leaves them out and the resume deletes them from the
+    live ledger, so neither the restored attempt nor the continued one carries a call no client got an answer for."""
     ledger = FileLineageStore(tmp_path / "store")
     await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
     participant = PolicyModelParticipant(ledger)
@@ -663,11 +663,11 @@ async def test_a_call_abandoned_while_held_is_left_out_of_the_commit_and_dropped
         # The call has recorded its row and is held before the checkpoint opens.
         await wait_until(lambda: [row["model_call_id"] for row in ledger.export_rows("r")] == ["c1", "c2"])
         await controller.prepare(CheckpointRequest(**control()))
-        # The client (the interrupted harness) goes away while the response is held.
+        # The client goes away while the response is held.
         call.cancel()
         with pytest.raises(asyncio.CancelledError):
             await call
-        await wait_until(lambda: participant.gate.abandoned == {"c2": "r"})
+        await wait_until(lambda: participant.gate.disconnected == {"c2": "r"})
         live_rows = [row["model_call_id"] for row in ledger.export_rows("r")]
         snapshot = participant.gate.snapshot()
         commit = await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
@@ -676,14 +676,14 @@ async def test_a_call_abandoned_while_held_is_left_out_of_the_commit_and_dropped
         after_resume = [row["model_call_id"] for row in ledger.export_rows("r")]
 
     rows = (tmp_path / "ckpt" / "gym" / "model" / "policy" / commit["manifest"]["records_file"]).read_text()
-    assert live_rows == ["c1", "c2"], "the abandoned call's row was in the live ledger"
-    assert snapshot.abandoned == {"c2": "r"} and participant.gate.tickets == set()
-    assert '"c1"' in rows and '"c2"' not in rows, "the commit left the abandoned call out"
-    assert after_resume == ["c1"], "the resume dropped it from the live ledger"
-    assert participant.gate.abandoned == {}, "cleared for the next checkpoint"
+    assert live_rows == ["c1", "c2"], "the disconnected call's row was in the live ledger"
+    assert snapshot.disconnected == {"c2": "r"} and participant.gate.tickets == set()
+    assert '"c1"' in rows and '"c2"' not in rows, "the commit left the disconnected call out"
+    assert after_resume == ["c1"], "the resume deleted it from the live ledger"
+    assert participant.gate.disconnected == {}, "cleared for the next checkpoint"
 
 
-async def test_only_a_held_call_that_ends_while_the_checkpoint_is_open_is_abandoned() -> None:
+async def test_only_a_held_call_that_ends_while_admission_is_closed_is_recorded_as_disconnected() -> None:
     gate = PolicyModelParticipant().gate
 
     def entered(model_call_id: str | None):
@@ -702,19 +702,19 @@ async def test_only_a_held_call_that_ends_while_the_checkpoint_is_open_is_abando
         await gate.exit(ticket)
 
     # Not a call that ended before the checkpoint, one whose response had started, or one without a capture.
-    assert gate.snapshot().abandoned == {"held": "r"}
-    assert gate.take_abandoned() == {"held": "r"} and gate.abandoned == {}
+    assert gate.snapshot().disconnected == {"held": "r"}
+    assert gate.take_disconnected() == {"held": "r"} and gate.disconnected == {}
     gate.open()
 
 
-async def test_discarding_calls_the_ledger_does_not_hold_leaves_it_untouched(tmp_path: Path) -> None:
+async def test_deleting_calls_the_ledger_does_not_hold_leaves_it_untouched(tmp_path: Path) -> None:
     ledger = FileLineageStore(tmp_path / "store")
     await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
     before = ledger.export_rows("r")
 
-    assert ledger.discard_calls("r", ["c9"]) == 0
+    assert ledger.delete_calls("r", ["c9"]) == 0
     assert ledger.export_rows("r") == before
-    assert ledger.discard_calls("r", ["c1", "c9"]) == 1
+    assert ledger.delete_calls("r", ["c1", "c9"]) == 1
     assert ledger.export_rows("r") == []
 
 
