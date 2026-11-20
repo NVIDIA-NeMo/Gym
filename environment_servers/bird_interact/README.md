@@ -254,7 +254,7 @@ image. For queries, `test_case_default` on six Lite databases gave the same verd
 management phases, the ADK's submit flow and its helpers gave the same verdict in 306 of 306 comparisons: 17
 scenarios with test cases written for the check (writes, views, functions, errors, imports, the helpers, and one task
 across both phases) on each of the 18 Lite databases. Each time, the episode's database was unchanged afterwards.
-The real management test cases arrive with the ground truth (GYMINT-685).
+The real management test cases arrive with the ground truth.
 
 The ADK's original evaluation (`evaluation/src`) gives a test case more names than the ADK does, such as
 `check_sql_function_usage` and `performance_compare_by_qep`. Gym gives the ADK's six; a test case that calls another

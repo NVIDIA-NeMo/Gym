@@ -119,6 +119,8 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
+# The reply to a submission that an infrastructure failure kept from being graded; the sample is masked.
+SUBMISSION_NOT_GRADED_REPLY = "The submission could not be graded."
 USER_SIMULATOR_FAILED = "bird_interact:user_simulator_failed"
 SANDBOX_FAILED = "bird_interact:sandbox_failed"
 # Runs inside the episode's sandbox; see its module docstring.
@@ -435,7 +437,15 @@ class CInteractTools:
             return ToolResult(output=TASK_COMPLETED_REPLY, ends_activation=True)
         if self._episode.submitted_this_turn:
             return ToolResult(output=SUBMITTED_REPLY, ends_activation=True)
-        output = await run(parsed)
+        try:
+            output = await run(parsed)
+        except Exception:
+            if name != "submit_sql":
+                raise
+            # ``_submit_sql`` recorded why, and the sample is masked. The turn still ends at its submission, as a
+            # graded one does, so the policy is not called again.
+            LOGGER.exception(f"A submission of {self._episode.task.instance_id} could not be graded")
+            return ToolResult(output=SUBMISSION_NOT_GRADED_REPLY, is_error=True, ends_activation=True)
         return ToolResult(output=output, ends_activation=self._episode.submitted_this_turn)
 
     async def _ask_user(self, arguments: AskArguments) -> str:
@@ -513,9 +523,11 @@ class AInteractTools:
             if result["error"] is not None:
                 return f"Error: {result['error']}"
             count = result["row_count"]
+            # Over the row cap, the count is a lower bound.
+            plus = "+" if result.get("truncated") else ""
             shown = "\n".join(result["preview"])
-            more = f"\n... {count - MAX_PREVIEW_ROWS} more rows" if count > MAX_PREVIEW_ROWS else ""
-            return f"{count} rows\n{shown}{more}"
+            more = f"\n... {count - MAX_PREVIEW_ROWS}{plus} more rows" if count > MAX_PREVIEW_ROWS else ""
+            return f"{count}{plus} rows\n{shown}{more}"
 
         return await self._charge("execute", act)
 

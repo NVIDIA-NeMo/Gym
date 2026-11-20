@@ -37,6 +37,7 @@ from environment_servers.bird_interact.adk_prompts import (
 )
 from environment_servers.bird_interact.app import (
     SANDBOX_FAILED,
+    SUBMISSION_NOT_GRADED_REPLY,
     USER_SIMULATOR_FAILED,
     BirdInteractEnvironmentServer,
     BirdInteractEnvironmentServerConfig,
@@ -441,7 +442,7 @@ class TestGrading:
             {"predicted_sql": CORRECT_1, "solution_sql": ["SELECT nope"], "ordered": False, "timeout_seconds": 5},
         )
 
-        assert executed == {"error": None, "row_count": 1, "preview": ["(1,)"]}
+        assert executed == {"error": None, "row_count": 1, "truncated": False, "preview": ["(1,)"]}
         assert graded == {"solution_error": "The ground-truth SQL failed: no such column: nope"}
 
     def test_a_task_setup_that_fails_fails_the_runner_command(self, tmp_path: Path) -> None:
@@ -457,6 +458,30 @@ class TestGrading:
         # A non-zero exit, so the server runs the setup again on a fresh sandbox, and then fails the episode.
         with pytest.raises(RuntimeError, match="Setup SQL failed: no such column: nope"):
             main(["setup", str(request_path)])
+
+    def test_a_failing_submission_is_not_applied(self, tmp_path: Path) -> None:
+        database = _bookshop(tmp_path)
+        grade(
+            database,
+            "CREATE TABLE IF NOT EXISTS note (x); SELECT name FROM authors",
+            ["SELECT title FROM books"],
+            ordered=False,
+            timeout_seconds=5,
+            apply_if_passed=True,
+        )
+        (result,) = database.run(["SELECT 1 FROM note"], timeout_seconds=5)
+        assert not result.ok
+
+    def test_comments_are_removed_before_the_round_rewrite(self, tmp_path: Path) -> None:
+        # A comment holding an unbalanced "ROUND(" would stop the rewrite if it stayed.
+        outcome = grade(
+            _bookshop(tmp_path),
+            "/* ROUND( */ SELECT ROUND(list_price / 7, 0) FROM books",
+            ["SELECT list_price / 7 FROM books"],
+            ordered=False,
+            timeout_seconds=5,
+        )
+        assert outcome.passed
 
 
 class TestTestCases:
@@ -1171,6 +1196,30 @@ class TestCInteract:
         assert (response.result.mask_sample, response.result.stop_reason) == (True, USER_SIMULATOR_FAILED)
         assert len(client.agent_inputs) == 1
 
+    async def test_phase_2_sees_what_phase_1_changed_on_the_same_sandbox(self) -> None:
+        server, _ = _server(
+            turns=[
+                _submit(f"CREATE TABLE IF NOT EXISTS note (x); {PHASE_1_OF_3}"),
+                _submit(f"SELECT * FROM ({PHASE_2_OF_3}) WHERE NOT EXISTS (SELECT 1 FROM note)"),
+            ]
+        )
+
+        response = await _run(server, "bookshop_3")
+
+        assert response.result.reward == pytest.approx(1.0)
+
+    async def test_a_submission_over_the_sql_timeout_gets_the_timeout_message(self) -> None:
+        replies: list = []
+        endless = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT MAX(x) FROM c"
+        server, client = _server(turns=[_submit(endless, replies), _submit("SELECT 1")], sql_timeout_seconds=0.5)
+
+        await _run(server)
+
+        assert replies == ["SQL failed Phase 1. Submitted SQL execution timed out\nBudget remaining: 0 bird-coins"]
+        assert client.agent_inputs[1]["input"][0]["content"].startswith(
+            "Your SQL is not executable: Submitted SQL execution timed out"
+        )
+
 
 class TestAInteract:
     async def test_the_agent_calls_the_tools_over_its_grant_and_each_call_is_charged(self) -> None:
@@ -1341,6 +1390,26 @@ class TestAInteract:
 
         assert seen["result"]["observation"].startswith("95 rows\n(1,)")
         assert seen["result"]["observation"].endswith("... 75 more rows")
+
+    @pytest.mark.parametrize(
+        ("rows", "count", "more"), [(10_000, "10000 rows", "9980 more"), (10_001, "10000+ rows", "9980+ more")]
+    )
+    async def test_a_result_over_the_row_cap_reports_its_count_as_a_lower_bound(
+        self, rows: int, count: str, more: str
+    ) -> None:
+        seen: dict[str, Any] = {}
+        sql = f"WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {rows}) SELECT x FROM c"
+
+        async def agent(tools: _Tools) -> str:
+            seen["result"] = await tools.observe("execute", sql=sql)
+            return "Done."
+
+        server, _ = _server("a_interact", turns=[agent])
+
+        await _run(server)
+
+        assert seen["result"]["observation"].startswith(f"{count}\n(1,)")
+        assert seen["result"]["observation"].endswith(f"... {more} rows")
 
     async def test_a_simulator_failure_masks_the_sample(self) -> None:
         seen: dict[str, Any] = {}
@@ -1737,12 +1806,17 @@ class TestDatabaseSandbox:
         async def break_the_sandbox(tools: _Tools) -> str:
             (sandbox,) = _sandboxes(sandbox_workspace)
             (sandbox / "grading.py").unlink()
-            assert (await tools.call("submit_sql", sql=CORRECT_1)).status_code == 500
+            reply = await tools.call("submit_sql", sql=CORRECT_1)
+            # The turn ends at the submission, as a graded one does, so the policy is not called again.
+            seen.append((reply.status_code, reply.json(), reply.headers.get(END_ACTIVATION_HEADER)))
             return "Submitted."
 
+        seen: list[tuple] = []
         server, _ = _server(turns=[break_the_sandbox], inconclusive_verification_retries=0)
 
         response = await _run(server)
+
+        assert seen == [(200, SUBMISSION_NOT_GRADED_REPLY, "true")]
 
         assert response.failure is None
         assert (response.result.mask_sample, response.result.stop_reason) == (True, SANDBOX_FAILED)
