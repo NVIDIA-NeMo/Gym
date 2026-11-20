@@ -80,6 +80,7 @@ from nemo_gym.eval.recovery.rows import (
     omission_summary,
 )
 from nemo_gym.eval.recovery.trials import (
+    CUTOFF_REASONS,
     UNVERIFIED_NOTE,
     _answer_fault,
     _count,
@@ -870,6 +871,7 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         "metric_coverage": metric_coverage(decision, collected),
         "output_budget_refits": output_budget_refits(decision, collected),
         "repetition_stops": repetition_stops(decision, collected),
+        "length_cutoffs": length_cutoffs(decision, collected),
         "agent_adaptations": agent_adaptations(decision, collected),
     }
 
@@ -951,6 +953,33 @@ def repetition_stops(decision: RecoveryDecision, collected: CollectedEvidence | 
         )
         count += stops
         rows += stops > 0
+    return {"count": count, "rows": rows}
+
+
+def length_cutoffs(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, int]:
+    """How many of the policy's model calls in the rows that decide the scored trials ended on a length cutoff, and in
+    how many of those rows: a ``length`` finish reason, or its ``max_output_tokens`` and ``max_tokens`` spellings, as
+    the evidence collector records each call.
+
+    A fact, never a failure: the model server returned the shortened answer and the rollout carried on from it, so
+    a run that lost output to the context window or the output budget does not read as clean. The finish reason does
+    not tell the two limits apart. A call a verifier owns (a judge's, also when it shares the policy's server) or
+    another model's call is not counted, nor is an attempt a later one superseded.
+    """
+    count = rows = 0
+    for row in _deciding_rows(decision, collected):
+        observed = row.get("ng_trial_observations")
+        calls = observed.get("model_calls") if isinstance(observed, dict) else None
+        cuts = sum(
+            isinstance(call, dict)
+            and isinstance(call.get("response_metadata"), dict)
+            and call["response_metadata"].get("finish_reason") in CUTOFF_REASONS
+            and _policy_call(row, call)
+            and not _verifier_owned(row, call)
+            for call in calls or []
+        )
+        count += cuts
+        rows += cuts > 0
     return {"count": count, "rows": rows}
 
 
@@ -1036,6 +1065,9 @@ def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | No
         text += (
             f"; repetition stops: {stops['count']} policy calls in {stops['rows']} trials (model, scored as answered)"
         )
+    cuts = facts.get("length_cutoffs")
+    if cuts and cuts["count"]:
+        text += f"; length cutoffs: {cuts['count']} policy calls in {cuts['rows']} trials"
     coverage = facts.get("metric_coverage")
     if coverage is not None:
         text += f"; {coverage.get('name') or 'metric'} over {coverage['trials']} of {coverage['expected']} trials"

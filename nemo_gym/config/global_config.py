@@ -40,7 +40,7 @@ import rich
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.artifacts.exporters import setup_exporters
@@ -106,6 +106,10 @@ HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 HEAD_SERVER_CONSTRAINTS_KEY_NAME = "head_server_constraints"
+# true: the head server's /global_config_dict_yaml keeps credential values (api keys, passwords, *_token). By default
+# it masks them: anything on the head server's network (an agent sandbox sharing its loopback) can read that route,
+# and Gym-launched servers get the unmasked config from their environment instead.
+HEAD_SERVER_SERVE_CREDENTIALS_KEY_NAME = "head_server_serve_credentials"
 PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
@@ -153,7 +157,7 @@ MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # See ``nemo_gym/models/token_capture/config.py``.
 TOKEN_CAPTURE_BLOCK = "token_id_capture"
 # Set by a training framework whose rows carry model-call sampling values.
-# See ``nemo_gym/core/model_call_sampling.py``.
+# See ``ModelCallSamplingConfig`` below, and ``nemo_gym/core/model_call_sampling.py`` for the values themselves.
 MODEL_CALL_SAMPLING_BLOCK = "model_call_sampling"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
@@ -174,6 +178,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
+    HEAD_SERVER_SERVE_CREDENTIALS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
@@ -294,6 +299,46 @@ SERVER_TYPE_KEYS: Tuple[str, ...] = (
     MODEL_SERVER_TYPE_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
 )
+
+
+class ModelCallSamplingConfig(BaseModel):
+    """The global ``model_call_sampling`` block. A training framework sets it when its rows carry values.
+
+    Its presence marks the run: resources servers then send ``null`` with the model calls they make through Gym's
+    server client while handling a request, so their judges keep their own sampling.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Model Servers of the agents the framework trains. A generation call without a segment fails on them, so a path
+    # that drops the values fails instead of sampling with others. They cannot also pin sampling with
+    # ``sampling_overrides``; they may pin only ``logprobs`` and ``top_logprobs``, which change what the engine reports.
+    required_model_servers: list[str] = Field(default_factory=list)
+
+
+def model_call_sampling_config(global_config_dict: Optional[Mapping[str, Any]]) -> Optional[ModelCallSamplingConfig]:
+    """Return the run's ``model_call_sampling`` block, or ``None`` when the run sets none.
+
+    Raises ``ValueError`` when ``required_model_servers`` names a server that is not a Model Server of the run: a
+    misspelled name would otherwise leave the trained agent's Model Server unenforced, without an error.
+    """
+    if not isinstance(global_config_dict, Mapping):
+        return None
+    block = global_config_dict.get(MODEL_CALL_SAMPLING_BLOCK)
+    if block is None:
+        return None
+    config = ModelCallSamplingConfig.model_validate(block)
+    model_servers = {
+        name
+        for name, value in global_config_dict.items()
+        if isinstance(value, Mapping) and MODEL_SERVER_TYPE_KEY_NAME in value
+    }
+    if unknown := sorted(set(config.required_model_servers) - model_servers):
+        raise ValueError(
+            f"{MODEL_CALL_SAMPLING_BLOCK}.required_model_servers names servers that are not Model Servers in this "
+            f"run: {unknown}"
+        )
+    return config
 
 
 def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
@@ -559,7 +604,18 @@ class GlobalConfigDictParser(BaseModel):
         original_get_args_parser = hydra_main_module.get_args_parser
 
         def new_get_args_parser():
-            parser: ArgumentParser = original_get_args_parser()
+            # Python 3.14's argparse checks each help string in add_argument and rejects hydra-core 1.3.x's
+            # `--shell-completion`, whose help is an object rather than a str ("badly formed help string"). The check
+            # is skipped only while hydra builds its parser; Gym replaces hydra's help, so that string is never shown.
+            # hydra-core 1.4 applies the same workaround itself; remove this once Gym requires hydra-core>=1.4.
+            original_check_help = getattr(ArgumentParser, "_check_help", None)
+            if original_check_help is not None:
+                ArgumentParser._check_help = lambda self, action: None
+            try:
+                parser: ArgumentParser = original_get_args_parser()
+            finally:
+                if original_check_help is not None:
+                    ArgumentParser._check_help = original_check_help
             # Set the conflict handlers to resolve so we can disable the help.
             parser.conflict_handler = "resolve"
             for action_group in parser._action_groups:

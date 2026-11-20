@@ -265,6 +265,15 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "recorded in the trajectory, so it is off by default to keep rollouts unsteered; the GDPVal "
         "benchmark config opts in.",
     )
+    context_overflow_recovery: bool = Field(
+        default=False,
+        description="When the model server rejects a request with HTTP 400 or 413 and the structured error "
+        "code `context_length_exceeded`, let Stirrup drop the latest completed turn and send the request "
+        "again instead of ending the episode on the rejection. A dropped turn no longer counts against "
+        "`agent_max_turns`, so only `sandbox_runner_timeout_seconds` bounds repeated recovery. It changes "
+        "which turns a rollout keeps, so it is off by default; a benchmark config opts in. Pair it with the "
+        "model server settings the README lists, so that the code means the prompt alone fills the window.",
+    )
     min_compaction_summary_words: int = Field(
         default=1,
         ge=1,
@@ -430,6 +439,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "min_completion_tokens": self.config.min_completion_tokens,
                 "prompt_estimator_truncate_history_thinking": self.config.prompt_estimator_truncate_history_thinking,
                 "truncation_recovery": self.config.truncation_recovery,
+                "context_overflow_recovery": self.config.context_overflow_recovery,
             },
         }
         # A task row's own budget shortens the run; it never extends the configured one.
