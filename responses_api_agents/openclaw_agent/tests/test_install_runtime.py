@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from responses_api_agents.openclaw_agent.app import _EXEC_HELPER_CHECK
 from responses_api_agents.openclaw_agent.setup_openclaw import DEFAULT_NODE_VERSION
 
 
@@ -155,7 +156,10 @@ def test_concurrent_installs_share_one_verified_runtime(sandbox):
     node.write_text("""#!/bin/bash
 case "$1" in
   */npm-cli.js) echo install >> "$TEST_ROOT/npm-installs"; sleep 0.3 ;;
-  -e) echo version-check >> "$TEST_ROOT/version-checks" ;;
+  -e) case "$2" in
+        *proc-safe*) echo helper-check >> "$TEST_ROOT/helper-checks" ;;
+        *) echo version-check >> "$TEST_ROOT/version-checks" ;;
+      esac ;;
   *) echo 2026.6.11 ;;
 esac
 """)
@@ -174,7 +178,44 @@ esac
     assert (root / "npm-installs").read_text().splitlines() == ["install"]
     assert len((root / "downloads").read_text().splitlines()) == 2
     assert len((root / "version-checks").read_text().splitlines()) == 2
+    # Both the installer and the process that reuses its runtime check the exec tool's native helper.
+    assert len((root / "helper-checks").read_text().splitlines()) == 2
     assert (root / "runtime/ready").read_text().strip() == "2026.6.11"
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["fresh_install", "cached_runtime"])
+def test_runtime_whose_exec_helper_does_not_load_is_refused(sandbox, cached):
+    """OpenClaw 2026.11.5's exec tool needs a native helper that needs glibc 2.33; an older image must fail setup."""
+    root, env = sandbox
+    bindir = root / "bin"
+    replacements = {
+        "curl": '#!/bin/bash\nfor last; do :; done\n: > "$last"\n',
+        "sha256sum": "#!/bin/bash\nwhile read -r line; do :; done\n",
+        "tar": "#!/bin/bash\nexit 0\n",
+    }
+    for name, script in replacements.items():
+        path = bindir / name
+        path.unlink(missing_ok=True)
+        path.write_text(script)
+        path.chmod(0o755)
+    node = root / "runtime/node/bin/node"
+    node.parent.mkdir(parents=True)
+    node.write_text("""#!/bin/bash
+case "$1" in
+  */npm-cli.js) ;;
+  -e) case "$2" in *proc-safe*) exit 4 ;; esac ;;
+  *) echo 2026.6.11 ;;
+esac
+""")
+    node.chmod(0o755)
+    if cached:
+        (root / "runtime/ready").write_text("2026.6.11")
+
+    result = run_installer(root, env)
+
+    assert result.returncode == 3, result.stderr
+    assert "OpenClaw 2026.6.11 cannot run its exec tool in this image" in result.stderr
+    assert "glibc 2.33" in result.stderr
 
 
 def test_missing_awk_explains_prerequisite_before_download(sandbox):
@@ -292,6 +333,10 @@ esac
     assert (root / "npm.log").read_text().splitlines() == ["install"]
     assert (root / "runtime/ready").exists()
     assert not (root / "packages.log").exists()
+
+
+def test_installer_checks_the_exec_helper_like_a_preinstalled_runtime():
+    assert _EXEC_HELPER_CHECK in INSTALLER.read_text()
 
 
 def test_installer_installs_the_default_node_release():

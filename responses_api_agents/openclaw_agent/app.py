@@ -578,6 +578,17 @@ _RUNTIME_VERSION_REPORT = (
 )
 
 
+# OpenClaw 2026.11.5 runs exec-tool commands through its native process helper (@openclaw/proc-safe), whose glibc
+# build needs glibc 2.33 or newer. Exits 4 when the helper does not load; releases without the helper pass.
+# install_openclaw_runtime.sh runs the same check.
+_EXEC_HELPER_CHECK = (
+    'const r=require("module").createRequire(process.argv[1]); let p; '
+    'try { p=r.resolve("@openclaw/proc-safe/reaper") } catch { process.exit(0) } '
+    'import(require("url").pathToFileURL(p).href).then((m)=>process.exit(m.isSupported()?0:4))'
+)
+_EXEC_TOOL_UNAVAILABLE = "cannot run its exec tool in this image"
+
+
 def _runtime_matches(report: str, version: str) -> bool:
     try:
         package, node, engines = report.splitlines()
@@ -815,16 +826,23 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 )
             prepared_directory = True
             if self.config.sandbox_runtime_dir:
-                # Probe the CLI with a private home, then verify the package version and its Node engine range.
+                # Probe the CLI with a private home, then verify the package version, its Node engine range and that
+                # the exec tool's native helper loads.
                 node = shlex.quote(runtime + "/node/bin/node")
+                package = shlex.quote(runtime + "/openclaw/node_modules/openclaw/package.json")
                 version_home = f"{directory}/openclaw-version-home"
+                unavailable = shlex.quote(
+                    f"OpenClaw {self.config.openclaw_version} {_EXEC_TOOL_UNAVAILABLE}: its native process helper "
+                    "does not load (it needs glibc 2.33 or newer, or musl)."
+                )
                 checked = await sandbox.exec(
                     f"mkdir -p {shlex.quote(version_home)} && "
                     f"HOME={shlex.quote(version_home)} XDG_CACHE_HOME={shlex.quote(version_home + '/cache')} "
                     f"XDG_CONFIG_HOME={shlex.quote(version_home + '/config')} "
                     f"{node} {shlex.quote(runtime + '/openclaw/node_modules/openclaw/openclaw.mjs')} --version "
-                    f">/dev/null && {node} -e {shlex.quote(_RUNTIME_VERSION_REPORT)} "
-                    f"{shlex.quote(runtime + '/openclaw/node_modules/openclaw/package.json')}",
+                    f">/dev/null && {node} -e {shlex.quote(_RUNTIME_VERSION_REPORT)} {package} && "
+                    f"{{ {node} -e {shlex.quote(_EXEC_HELPER_CHECK)} {package} || "
+                    f"{{ echo {unavailable} >&2; exit 4; }}; }}",
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
@@ -853,6 +871,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
+                unavailable = _EXEC_TOOL_UNAVAILABLE in (installed.stderr or "")
+                if installed.return_code == 3 and not installed.error_type and unavailable:
+                    # The image cannot load OpenClaw's native process helper; every attempt fails the same way.
+                    raise AgentSeedRejectedError(
+                        f"OpenClaw {self.config.openclaw_version} cannot run in this task image: "
+                        f"{(installed.stderr or '').strip()[-2000:]}"
+                    )
                 if installed.return_code != 0 or installed.error_type:
                     raise RuntimeError(
                         f"OpenClaw runtime setup failed (exit {installed.return_code}, error={installed.error_type}): "

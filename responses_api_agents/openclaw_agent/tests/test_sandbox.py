@@ -941,6 +941,27 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
     sandbox.stop.assert_not_awaited()
 
 
+async def test_image_that_cannot_load_the_exec_helper_is_refused_at_seed(setup):
+    """The installer's exit 3 is deterministic for the image, so seed refuses it instead of failing retryably."""
+    agent, sandbox = setup
+    message = (
+        "OpenClaw 2026.6.11 cannot run its exec tool in this image: its native process helper does not load "
+        "(it needs glibc 2.33 or newer, or musl)."
+    )
+    sandbox.exec.side_effect = [
+        SimpleNamespace(return_code=0, error_type=None),
+        SimpleNamespace(return_code=3, error_type=None, stdout="", stderr=message),
+        SimpleNamespace(return_code=0, error_type=None),
+    ]
+    request = Request({"type": "http", "session": {}})
+    with pytest.raises(HTTPException) as raised:
+        await agent.seed_agent_session(request, seed())
+    assert raised.value.status_code == 422
+    assert "glibc 2.33" in raised.value.detail
+    assert all(record.state is None for record in agent._session_records.values())
+    sandbox.disconnect.assert_awaited_once()
+
+
 async def test_cancelled_install_never_publishes_session_or_launches_openclaw(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
@@ -2019,7 +2040,7 @@ def test_unenforceable_network_access_is_a_terminal_seed_refusal(
 
 
 def _runtime_check(commands: list[str]) -> str:
-    (check,) = [command for command in commands if command.endswith("/openclaw/node_modules/openclaw/package.json")]
+    (check,) = [command for command in commands if "/openclaw.mjs --version >/dev/null" in command]
     return check
 
 
@@ -2046,7 +2067,7 @@ def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, r
     run_exec = sandbox.run_exec
 
     async def report_version(command, **kwargs):
-        if command.endswith("/opt/openclaw-runtime/openclaw/node_modules/openclaw/package.json"):
+        if "/opt/openclaw-runtime/openclaw/node_modules/openclaw/openclaw.mjs --version >/dev/null" in command:
             return SimpleNamespace(error_type=error_type, return_code=return_code, stdout=reported, stderr="")
         return await run_exec(command, **kwargs)
 
@@ -2057,6 +2078,8 @@ def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, r
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
     check = _runtime_check(commands)
     assert "pkg.engines.node" in check
+    # The exec tool's native helper must load too; a release without it passes.
+    assert "@openclaw/proc-safe/reaper" in check
     assert "HOME=/tmp/nemo-gym-openclaw-sessions/" in check
     assert "/opt/openclaw-runtime/openclaw/node_modules/openclaw/openclaw.mjs --version >/dev/null" in check
     assert not any("install_openclaw_runtime.sh" in command for command in commands)
@@ -2089,7 +2112,7 @@ def test_preinstalled_runtime_check_runs_under_a_real_node(setup, tmp_path):
 
     async def run_check_locally(command, **kwargs):
         # The runtime path has a space, so the command quotes it.
-        if command.endswith("/openclaw/node_modules/openclaw/package.json'"):
+        if "openclaw.mjs' --version >/dev/null" in command:
             local = command.replace("/tmp/nemo-gym-openclaw-sessions/", f"{tmp_path}/sessions/")
             done = subprocess.run(["bash", "-c", local], capture_output=True, text=True, timeout=60)
             outcome.update(stdout=done.stdout, stderr=done.stderr, return_code=done.returncode)
@@ -2111,6 +2134,52 @@ def test_preinstalled_runtime_check_runs_under_a_real_node(setup, tmp_path):
         assert created.status_code == 200, created.text
     else:
         assert created.status_code == 422, created.text
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+@pytest.mark.parametrize("supported", [True, False])
+def test_preinstalled_runtime_exec_helper_check_runs_under_a_real_node(setup, tmp_path, supported):
+    """A preinstalled runtime whose exec-tool helper does not load is refused like an unsupported Node."""
+    agent, sandbox = setup
+    runtime = tmp_path / "runtime"
+    (runtime / "node" / "bin").mkdir(parents=True)
+    (runtime / "node" / "bin" / "node").symlink_to(shutil.which("node"))
+    package = runtime / "openclaw" / "node_modules" / "openclaw"
+    package.mkdir(parents=True)
+    node_major = subprocess.check_output(["node", "-p", "process.versions.node"], text=True).split(".")[0]
+    (package / "package.json").write_text(
+        json.dumps({"version": agent.config.openclaw_version, "engines": {"node": f">={node_major}"}})
+    )
+    (package / "openclaw.mjs").write_text("console.log('OpenClaw CLI');\n")
+    helper = runtime / "openclaw" / "node_modules" / "@openclaw" / "proc-safe"
+    helper.mkdir(parents=True)
+    (helper / "package.json").write_text(
+        json.dumps({"name": "@openclaw/proc-safe", "exports": {"./reaper": {"default": "./reaper.mjs"}}})
+    )
+    (helper / "reaper.mjs").write_text(f"export function isSupported() {{ return {str(supported).lower()}; }}\n")
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.sandbox_runtime_dir = str(runtime)
+    run_exec = sandbox.run_exec
+
+    async def run_check_locally(command, **kwargs):
+        if "openclaw.mjs --version >/dev/null" in command:
+            local = command.replace("/tmp/nemo-gym-openclaw-sessions/", f"{tmp_path}/sessions/")
+            done = subprocess.run(["bash", "-c", local], capture_output=True, text=True, timeout=60)
+            return SimpleNamespace(
+                error_type=None, return_code=done.returncode, stdout=done.stdout, stderr=done.stderr
+            )
+        return await run_exec(command, **kwargs)
+
+    sandbox.exec.side_effect = run_check_locally
+
+    _, created = seed_owned(agent, sandbox, owned_seed_with_search_grant())
+
+    if supported:
+        assert created.status_code == 200, created.text
+    else:
+        assert created.status_code == 422, created.text
+        assert "cannot run its exec tool in this image" in created.text
 
 
 def test_runtime_dir_must_be_absolute(setup):

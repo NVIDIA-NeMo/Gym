@@ -108,6 +108,9 @@ others), and a cached local toolchain is only
 reused when it reports exactly the requested Node version. Incompatible runtimes
 are replaced, not bypassed silently.
 
+Local CLI calls need the same glibc 2.33 or newer on the host for OpenClaw 2026.11.5's `exec` tool; on an older
+glibc each `exec` call fails with "native child reaping is unavailable".
+
 The host installer settings above apply only to local CLI calls, with installation deferred
 until the first call rather than startup. Concurrent callers share one background-thread
 attempt; it does not block the event loop, and failed installs can be retried.
@@ -188,6 +191,9 @@ the supervisor and harness runner are Bash scripts. Session setup installs a mis
 when running as root; otherwise preinstall Bash. Existing tools are preserved. Node 24.22.3 and OpenClaw are installed under
 `/tmp/nemo-gym-openclaw-node-24.22.3-<version>`. Node archives are checked against upstream SHA-256
 sums; the installed package version is verified before caching and when reusing a cached runtime.
+OpenClaw 2026.11.5 runs exec-tool commands through a native process helper whose glibc build needs glibc 2.33 or
+newer (Debian 12, Ubuntu 22.04 or later); the musl build has no such floor. The installer checks that the helper
+loads, and session setup refuses an image where it does not with HTTP 422 instead of letting every `exec` call fail.
 A version-scoped `flock` serializes runtime installation and cache validation across session setup
 attempts. Missing `flock`, `curl`, CA certificates, `tar`, `gzip`, `sha256sum`, and `awk` are installed with `apt-get` or `apk` only when
 running as root. Other images receive an actionable prerequisite error. Installation errors include
@@ -339,7 +345,8 @@ other than `inherit` (the default, the provider's network), and it cannot be com
 `sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `openclaw/` as the installer lays them out.
 Build it into the image with `bash install_openclaw_runtime.sh <dir> <openclaw_version>`; the image also needs `bash`,
 since the session prepare step would otherwise run `apk` or `apt-get`, which the policy blocks. Instead of installing,
-setup checks that the runtime's Node satisfies the installed package's engine range, that the CLI runs, and that the package declares
+setup checks that the runtime's Node satisfies the installed package's engine range, that the CLI runs, that the exec
+tool's native helper loads, and that the package declares
 `openclaw_version` (an exact match), and refuses the seed with a 422 when any of these fails.
 
 Under `model_only`, a required MCP grant is refused at seed with a 422, since the policy would block its host; under
