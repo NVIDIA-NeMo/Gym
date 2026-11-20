@@ -95,7 +95,12 @@ async def test_runner_stops_before_verification_and_retains_partial_trajectory(t
         pid = int(Path(harness.context.workdir, "tool.pid").read_text())
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
-        assert len(extra["ng_agent_observations"]["records"]) == 1
+        # The cancelled command keeps the start the recorder wrote before it ran.
+        invocation, tool = extra["ng_agent_observations"]["records"]
+        assert invocation["kind"] == "agent_invocation"
+        assert (tool["kind"], tool["tool_call_id"], tool["status"]) == ("tool_call", "call_1", "cancelled")
+        assert tool["timings"][0]["started_at"] is not None
+        assert tool["timings"][0].get("completed_at") is None
 
 
 async def test_cleanup_transport_failure_keeps_captured_response(tmp_path, runner_factory, monkeypatch):

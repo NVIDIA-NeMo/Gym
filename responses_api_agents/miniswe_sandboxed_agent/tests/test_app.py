@@ -11,6 +11,7 @@ from minisweagent.config import builtin_config_dir
 from minisweagent.models.utils.actions_toolcall_response import BASH_TOOL_RESPONSE_API
 
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.trajectory import project_bundle_v1
 from responses_api_agents.miniswe_sandboxed_agent import harness as module
 
 
@@ -104,26 +105,33 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
     # The host dispatches one runner command, never the model's shell commands.
     assert not any(command in dispatched for command in commands for dispatched in harness.sandbox.commands)
     if observability_enabled:
-        records = extra["ng_agent_observations"]["records"]
+        bundle = extra["ng_agent_observations"]
+        records = bundle["records"]
         assert records[0]["status"] == "completed"
-        assert [r["status"] for r in records[1:]] == ["completed", "timeout", "completed"]
-        # The submission has no tool output, but its successful command has an exit record with real timing.
-        saved = json.loads((harness.directory / "trajectory.json").read_text())
-        executions = {
-            message.get("call_id") or message["extra"].get("tool_call_id"): message["extra"]
-            for message in saved["messages"]
-            if message.get("type") == "function_call_output" or message.get("role") == "exit"
-        }
-        assert set(executions) == {"call_0", "call_1", "call_2"}
-        assert executions["call_2"]["exit_status"] == "Submitted"
-        for record in records[1:]:
-            execution = executions[record["tool_call_id"]]
+        tools = [r for r in records if r["kind"] == "tool_call"]
+        # The submission has no tool output, but its successful command was recorded where it executed.
+        assert [(t["tool_call_id"], t["status"]) for t in tools] == [
+            ("call_0", "completed"),
+            ("call_1", "timeout"),
+            ("call_2", "completed"),
+        ]
+        for index, tool in enumerate(tools):
+            (timing,) = tool["timings"]
+            assert (timing["boundary"], timing["timing_source"]) == ("executor", "miniswe.environment")
+            assert timing["started_at"] <= timing["completed_at"] and timing["duration_ms"] >= 0
+            # The call joins the response that requested it.
+            reference = tool.get("model_call_ref")
+            assert (reference or {}).get("response_id") == (f"resp_test_{index}" if response_id else None)
+        # The v1 view labels the executor boundary as such, with the recorded times unchanged.
+        for tool, projected in zip(
+            tools, (r for r in project_bundle_v1(bundle)["records"] if r["kind"] == "tool_call")
+        ):
+            assert projected["timing_source"] == "executor"
             for field in ("started_at", "completed_at", "duration_ms"):
-                assert record[field] == execution[field]
-                assert isinstance(record[field], float)
-            assert record["started_at"] <= record["completed_at"]
-            assert record["duration_ms"] >= 0
-            assert record["timing_source"] == "artifact"
+                assert projected[field] == tool["timings"][0][field]
+        # The saved trajectory is not a timing source.
+        saved = json.loads((harness.directory / "trajectory.json").read_text())
+        assert not any("started_at" in message.get("extra", {}) for message in saved["messages"])
         assert [t["step_count"] for t in extra["ng_trajectory"]["turns"]] == [1, 2, 2]
         assert [gap["code"] for gap in extra["ng_trajectory"]["gaps"]] == (
             [] if response_id else ["model_call_reference_unavailable"] * 3

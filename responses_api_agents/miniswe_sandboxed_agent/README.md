@@ -104,23 +104,23 @@ Gym disables extra SDK/model retries; the model server retains its retry policy.
 
 `trajectory.json` is the unmodified native transcript; `agent.log` contains CLI
 stdout/stderr. With `observability_enabled: true`, Gym projects saved decisions,
-reasoning, tool results, return codes, completion timestamps, usage, and native
-model response references into `ng_agent_observations` and `ng_trajectory`.
+reasoning, tool results, return codes, usage, and native model response
+references into `ng_agent_observations` and `ng_trajectory`.
 LiteLLM's response-ID envelope is decoded to join Gym's original capture IDs.
 Missing aggregate usage stays unknown. Submission is separate from verifier success.
 
 Removing the custom wrapper has these limits:
 
-- Gym’s native Bash execution wrapper records observed start/end timestamps and
-  monotonic durations for supported tool executions. Older or incomplete native
-  records can still lack those facts; Gym records the observation-gap code
-  `tool_timing_unavailable` (not a failure kind) rather than estimating missing
-  timings.
-- A correlated native `Submitted` exit records the submit command as completed,
-  with its observed start/end timestamps and duration. It carries no final
-  tool-output body. Older or partial artifacts without that exit evidence remain
-  incomplete. Submission completion alone does not establish verifier success
-  or full conformance.
+- Tool timing comes from the shared tool call recorder, at the `executor`
+  boundary: Gym's Bash execution wrapper appends each command's start to
+  `tool_events.jsonl` before it runs and its finish after it returns. A command
+  still running when the agent dies keeps its start. A requested call without a
+  recorded attempt keeps the outcome its saved output shows, and Gym records
+  the observation-gap code `tool_timing_unavailable` (not a failure kind) rather
+  than estimating its timing.
+- The submit command is recorded as completed, with its start/end timestamps and
+  duration, but has no final tool-output body. Submission completion alone does
+  not establish verifier success or full conformance.
 - Native trajectories are saved after each step. A forced kill during a model
   request or command can lose the active step, or leave a partially written
   trajectory. Gym model-server capture remains independent of that file. A run

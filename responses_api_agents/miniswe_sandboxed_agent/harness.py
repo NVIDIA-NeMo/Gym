@@ -8,6 +8,7 @@ import base64
 import binascii
 import json
 import logging
+import tempfile
 from pathlib import Path
 from shlex import quote
 from time import monotonic, time
@@ -42,7 +43,9 @@ from nemo_gym.trajectory import (
     ToolCallObservation,
     TrajectoryRecord,
     TrajectoryTurn,
+    read_tool_events,
 )
+from nemo_gym.utils import tool_recording_files
 from responses_api_agents.miniswe_sandboxed_agent.bootstrap import bootstrap_assets
 
 
@@ -77,7 +80,7 @@ def original_response_id(response_id: str) -> str:
 
 
 def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]:
-    """Project saved native decisions and observations without inventing timings."""
+    """Project saved native decisions and observations; tool timing comes from the recorded tool events."""
     history, tools, conversation = [], [], []
     for message in trajectory.get("messages", []):
         extra = message.get("extra", {})
@@ -107,10 +110,6 @@ def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]
                 error = extra.get("exception_type")
                 tool.update(
                     message={"role": "tool", "tool_call_id": message["call_id"], "content": message["output"]},
-                    started_at=extra.get("started_at"),
-                    # The environment's own end time; artifacts without it keep the observation's save time.
-                    completed_at=extra.get("completed_at", extra.get("timestamp")),
-                    duration_ms=extra.get("duration_ms"),
                     status="timeout"
                     if error == "TimeoutExpired"
                     else "failed"
@@ -120,16 +119,6 @@ def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]
                 )
         elif message.get("role") in {"system", "user", "assistant"}:
             conversation.append({k: v for k, v in message.items() if k != "extra"})
-        elif message.get("role") == "exit" and extra.get("exit_status") == "Submitted" and extra.get("tool_call_id"):
-            # mini-SWE submits only after the command exited 0; the exit message carries its timing, no output.
-            tool = next((t for t in reversed(tools) if t["tool_call_id"] == extra["tool_call_id"]), None)
-            if tool is not None:
-                tool.update(
-                    started_at=extra.get("started_at"),
-                    completed_at=extra.get("completed_at"),
-                    duration_ms=extra.get("duration_ms"),
-                    status="completed",
-                )
     return history, tools
 
 
@@ -354,6 +343,11 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 "environment_class": "timed_environment.TimedLocalEnvironment",
                 "cwd": self.context.workdir or "",
                 "timeout": max(1, int(min(budget, self.config.step_timeout_sec))),
+                **(
+                    {"tool_events_path": f"{remote}/tool_events.jsonl", "invocation_id": self.context.session_id}
+                    if self.observability_enabled
+                    else {}
+                ),
             },
             "model": {
                 "model_class": "litellm_response",
@@ -384,6 +378,13 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             await self.sandbox.upload(
                 Path(__file__).with_name("timed_environment.py"), f"{remote}/timed_environment.py"
             )
+            if self.observability_enabled:
+                # The recorder modules sit beside the environment, which imports them by name.
+                with tempfile.TemporaryDirectory(prefix="gym-miniswe-recorder-") as staging:
+                    for path, text in tool_recording_files(remote).items():
+                        local = Path(staging) / Path(path).name
+                        local.write_text(text)
+                        await self.sandbox.upload(local, path)
             # --wait keeps this single exec open until mini-SWE exits. There is
             # no host-side request loop or sandbox polling between model calls.
             run_result = await self.sandbox.exec(
@@ -442,6 +443,14 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             native_trajectory = await self._download_artifact("trajectory.json")
         except Exception:
             native_trajectory = None
+        tool_events = None
+        if self.observability_enabled:
+            tool_events = self.directory / "tool_events.jsonl"
+            try:
+                await self.sandbox.download(f"{remote}/tool_events.jsonl", tool_events)
+            except Exception:
+                # No command ran, or the events are lost; the tools the trajectory names say which.
+                tool_events = None
         result = native_trajectory or {}
         info = result.get("info", {})
         if termination.reason == "completed" or (termination.detail or "").startswith("mini-SWE command exited"):
@@ -526,7 +535,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             termination.artifacts.append(str(self.directory / "agent.log"))
         if self.observability_enabled:
             invocation = AgentInvocation(invocation_id=self.context.session_id)
-            observations = AgentObservationBundle(source="miniswe", records=[invocation])
+            observations = AgentObservationBundle(schema_version="2.0", source="miniswe", records=[invocation])
             # The resources server owns the sandbox lifecycle; the agent observes only which sandbox it ran in.
             sandbox_id = getattr(self.sandbox, "sandbox_id", None)
             if sandbox_id is not None:
@@ -546,6 +555,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                     )
                 )
             adapter = TypeAdapter(list[NeMoGymResponseInputItem])
+            references: dict[int, ModelCallRef] = {}
             for index, entry in enumerate(history, start=1):
                 model_response = responses[index - 1]
                 request_items = entry["request"]["input"]
@@ -558,6 +568,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                         response_id=model_response.id,
                     )
                     invocation.model_calls.append(reference)
+                    references[index] = reference
                 else:
                     trajectory.gaps.append(
                         ObservationGap(
@@ -587,37 +598,55 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                         model_calls=[reference] if reference else [],
                     )
                 )
-            for tool in tool_history:
-                status = tool.get("status", "incomplete")
-                if status == "incomplete":
-                    status = termination.reason if termination.reason in {"cancelled", "timeout"} else "incomplete"
-                if tool.get("duration_ms") is None:
-                    trajectory.gaps.append(
+            recorded, tool_gaps = read_tool_events(tool_events) if tool_events is not None else ([], [])
+            observations.gaps.extend(tool_gaps)
+            if tool_events is None and tool_history:
+                observations.gaps.append(
+                    ObservationGap(code="tool_capture_unavailable", invocation_id=invocation.invocation_id)
+                )
+            requested = {tool["tool_call_id"]: tool for tool in tool_history}
+            recorded_ids = {record.tool_call_id for record in recorded}
+            # A requested call without a recorded attempt never started, or its events were lost: it keeps the
+            # outcome its saved output shows, with unknown timing.
+            unrecorded = [
+                ToolCallObservation(
+                    invocation_id=invocation.invocation_id,
+                    tool_call_id=call_id,
+                    tool_name="bash",
+                    status=tool.get("status", "incomplete"),
+                )
+                for call_id, tool in requested.items()
+                if call_id not in recorded_ids
+            ]
+            for record in [*recorded, *unrecorded]:
+                tool = requested.get(record.tool_call_id, {})
+                status = record.status
+                if status == "incomplete" and termination.reason in {"cancelled", "timeout"}:
+                    status = termination.reason
+                if not record.timings:
+                    observations.gaps.append(
                         ObservationGap(
                             code="tool_timing_unavailable",
                             invocation_id=invocation.invocation_id,
-                            detail=tool["tool_call_id"],
+                            detail=record.tool_call_id,
                         )
                     )
                 observations.records.append(
-                    ToolCallObservation(
-                        invocation_id=invocation.invocation_id,
-                        tool_call_id=tool["tool_call_id"],
-                        sandbox_id=sandbox_id,
-                        tool_name="bash",
-                        started_at=tool.get("started_at"),
-                        completed_at=tool.get("completed_at"),
-                        duration_ms=tool.get("duration_ms"),
-                        timing_source="artifact",
-                        status=status,
-                        error_type=tool.get("error_type")
-                        or (
-                            termination.reason
-                            if tool.get("status") == "incomplete" and termination.reason != "completed"
-                            else None
-                        ),
+                    record.model_copy(
+                        update={
+                            "sandbox_id": sandbox_id,
+                            "model_call_ref": references.get(tool.get("model_index")),
+                            "status": status,
+                            "error_type": tool.get("error_type")
+                            or (
+                                termination.reason
+                                if record.status == "incomplete" and termination.reason != "completed"
+                                else None
+                            ),
+                        }
                     )
                 )
+            for tool in tool_history:
                 if tool.get("message") is not None and tool["model_index"] == len(history):
                     invocation.conversation.append(
                         NeMoGymFunctionCallOutput.model_validate(responses_input([tool["message"]])[0])

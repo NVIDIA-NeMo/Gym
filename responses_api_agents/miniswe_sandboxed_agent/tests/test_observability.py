@@ -215,17 +215,18 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         **extra,
     }
     merge_model_call_capture_into_record(record, [capture_dir], include_payloads=True)
-    _attach_trajectory_record(record, record)
+    # Rollout collection writes the v1 view of the v2 bundle by default.
+    _attach_trajectory_record(record, record, schema_version="1.0")
     trajectory = record["ng_trajectory"]
     assert {call.get("sandbox_id") for call in trajectory["tool_calls"]} == {sandbox_id}
-    # Commands that ran, the submission included, carry the environment's own start, end and monotonic duration
-    # into the canonical record; a tool whose command never ran keeps them unknown.
+    # Commands that ran, the submission included, carry the start, end and monotonic duration recorded where they
+    # executed into the canonical record; a tool whose command never ran keeps them unknown.
     executed = [call for call in trajectory["tool_calls"] if call.get("completed_at") is not None]
     assert executed
     for call in executed:
         assert isinstance(call["started_at"], float) and call["started_at"] <= call["completed_at"]
         assert isinstance(call["duration_ms"], float) and call["duration_ms"] >= 0
-        assert call["timing_source"] == "artifact"
+        assert call["timing_source"] == "executor"
     for call in trajectory["tool_calls"]:
         if call.get("completed_at") is None:
             assert call.get("started_at") is None and call.get("duration_ms") is None
@@ -264,7 +265,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert response.usage.input_tokens_details.cached_tokens == 2
         assert trajectory["tool_calls"][0]["status"] == ("failed" if scenario == "tool_error" else "completed")
     if scenario != "http_error":
-        # Submission exits before saving the final tool observation; its exit message keeps the command's timing.
+        # Submission exits before saving the final tool observation; the recorder keeps the command's timing.
         assert trajectory["tool_calls"][-1]["output"] is None
         assert trajectory["tool_calls"][-1]["status"] == "completed"
         assert trajectory["tool_calls"][-1]["duration_ms"] is not None
@@ -384,17 +385,9 @@ async def test_unconfirmed_process_cleanup_is_a_typed_harness_failure(tmp_path, 
         assert row[FailureReportRow.FAILURE_ID] == event["event_id"]
 
 
-@pytest.mark.parametrize(
-    "exit_extra",
-    [
-        {"exit_status": "LimitsExceeded", "tool_call_id": "tool-1", "started_at": 1.0, "completed_at": 2.0},
-        {"tool_call_id": "tool-1", "started_at": 1.0, "completed_at": 2.0, "duration_ms": 1000.0},
-        {"exit_status": "Submitted", "started_at": 1.0, "completed_at": 2.0, "duration_ms": 1000.0},
-        {"exit_status": "Submitted", "tool_call_id": "other", "started_at": 1.0, "completed_at": 2.0},
-    ],
-)
-def test_only_a_submission_exit_completes_its_tool(exit_extra):
-    """An exit that is not mini-SWE's submission of this tool call leaves the call incomplete with unknown timing."""
+def test_the_saved_trajectory_is_not_a_tool_timing_source():
+    """Tool timing comes only from the recorded tool events, whatever the saved messages carry."""
+    timing = {"started_at": 1.0, "completed_at": 2.0, "duration_ms": 1000.0}
     trajectory = {
         "messages": [
             {
@@ -403,9 +396,103 @@ def test_only_a_submission_exit_completes_its_tool(exit_extra):
                 "output": [],
                 "extra": {"actions": [{"tool_call_id": "tool-1", "command": "echo hi"}], "timestamp": 0.5},
             },
-            {"role": "exit", "content": "", "extra": exit_extra},
+            {
+                "type": "function_call_output",
+                "call_id": "tool-1",
+                "output": "hi",
+                "extra": {**timing, "returncode": 0},
+            },
+            {"role": "exit", "content": "", "extra": {"exit_status": "Submitted", "tool_call_id": "tool-1", **timing}},
         ]
     }
     _, (tool,) = project_native_trajectory(trajectory)
-    assert tool["status"] == "incomplete"
+    assert tool["status"] == "completed"
     assert "started_at" not in tool and "completed_at" not in tool and "duration_ms" not in tool
+
+
+async def _run_scripted(tmp_path, runner_factory, commands, *, lose_tool_events=False):
+    """Run mini-SWE against a model that requests one bash command per reply."""
+    app = FastAPI()
+    requests = []
+
+    @app.post("/v1/responses")
+    async def model(body: dict = Body()):
+        requests.append(body)
+        return {
+            "id": f"response-{len(requests)}",
+            "object": "response",
+            "model": "controlled",
+            "created_at": 0,
+            "status": "completed",
+            "parallel_tool_calls": False,
+            "tools": [],
+            "tool_choice": "auto",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": f"tool-{len(requests)}",
+                    "name": "bash",
+                    "arguments": json.dumps({"command": commands[len(requests) - 1]}),
+                }
+            ],
+        }
+
+    client = TestClient(app)
+
+    async def query(params):
+        response = await asyncio.to_thread(client.post, "/v1/responses", json=params)
+        response.raise_for_status()
+        return NeMoGymResponse.model_validate(response.json())
+
+    harness = await runner_factory(
+        context=HarnessContext(session_id="invocation", task_id="0", rollout_id="0-0", instruction="run"),
+        config=MiniSWEConfig(step_limit=len(commands)),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=tmp_path,
+        observability_enabled=True,
+    )
+    if lose_tool_events:
+        download = harness.sandbox.download
+
+        async def download_without_events(remote, local):
+            if remote.endswith("/tool_events.jsonl"):
+                raise FileNotFoundError(remote)
+            await download(remote, local)
+
+        harness.sandbox.download = download_without_events
+    try:
+        return await harness.execute(15)
+    finally:
+        client.close()
+
+
+async def test_a_command_that_kills_the_agent_keeps_its_recorded_start(tmp_path, runner_factory):
+    """The start is written before the command runs, so an agent killed mid-command keeps the attempt."""
+    _, outcome, extra = await _run_scripted(tmp_path, runner_factory, ["kill -KILL $PPID"])
+    assert outcome.reason != "completed"
+    bundle = extra["ng_agent_observations"]
+    (tool,) = [r for r in bundle["records"] if r["kind"] == "tool_call"]
+    assert (tool["tool_call_id"], tool["status"]) == ("tool-1", "incomplete")
+    (timing,) = tool["timings"]
+    assert timing["boundary"] == "executor" and timing["started_at"] is not None
+    assert timing["completed_at"] is None and timing["duration_ms"] is None
+    assert tool["error_type"] == outcome.reason
+    assert "tool_completion_unavailable" in {gap["code"] for gap in bundle["gaps"]}
+
+
+async def test_lost_tool_events_keep_the_saved_outcomes_without_timing(tmp_path, runner_factory):
+    """Without the events file, the calls the trajectory saved keep their outcomes and no timing is invented."""
+    _, outcome, extra = await _run_scripted(
+        tmp_path, runner_factory, ["exit 7", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"], lose_tool_events=True
+    )
+    assert outcome.reason == "completed"
+    bundle = extra["ng_agent_observations"]
+    tools = [r for r in bundle["records"] if r["kind"] == "tool_call"]
+    # The submission saved no output, so only its request is known.
+    assert [(t["tool_call_id"], t["status"]) for t in tools] == [("tool-1", "failed"), ("tool-2", "incomplete")]
+    assert all(not t.get("timings") for t in tools)
+    gaps = [(gap["code"], gap.get("detail")) for gap in bundle["gaps"]]
+    assert ("tool_capture_unavailable", None) in gaps
+    assert {detail for code, detail in gaps if code == "tool_timing_unavailable"} == {"tool-1", "tool-2"}
