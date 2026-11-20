@@ -97,6 +97,11 @@
       "pathspec"
     ]
   },
+  "resources_servers/voicebench": {
+    "override-dependencies": [
+      "scikit-learn>=1.5,<1.8"
+    ]
+  },
   "resources_servers/wmt_translation": {
     "constraint-dependencies": [
       "transformers>=4.17,<5"
@@ -204,11 +209,6 @@
     ]
   },
   "responses_api_models/vllm_model": {
-    "override-dependencies": [
-      "pathspec"
-    ]
-  },
-  "responses_api_models/vllm_model_with_compaction": {
     "override-dependencies": [
       "pathspec"
     ]

@@ -158,6 +158,12 @@ def _load_apptainer_provider() -> ProviderClass:
     return ApptainerProvider
 
 
+def _load_bwrap_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.bwrap import BwrapProvider
+
+    return BwrapProvider
+
+
 def _load_enroot_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.enroot import EnrootProvider
 
@@ -201,6 +207,7 @@ def _load_luxor_provider() -> ProviderClass:
 
 
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
+_BUILTIN_PROVIDER_LOADERS["bwrap"] = _load_bwrap_provider
 _BUILTIN_PROVIDER_LOADERS["daytona"] = _load_daytona_provider
 _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
 _BUILTIN_PROVIDER_LOADERS["e2b"] = _load_e2b_provider
