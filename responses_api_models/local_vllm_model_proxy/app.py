@@ -75,7 +75,9 @@ class LocalVLLMModelProxyServer(VLLMModel):
             if remaining is not None and remaining <= 0:
                 raise TimeoutError(f"LocalVLLMModelServer `{model_server_name}` was not up within {timeout_s} s")
             status = self.server_client.poll_for_status(
-                model_server_name, timeout_seconds=5 if remaining is None else min(5, remaining)
+                model_server_name,
+                timeout_seconds=5 if remaining is None else min(5, remaining),
+                total_deadline=remaining is not None,  # Without a limit, the poll keeps its usual per-phase timeout.
             )
             remaining = None if deadline is None else deadline - monotonic()
             if remaining is not None and remaining <= 0:

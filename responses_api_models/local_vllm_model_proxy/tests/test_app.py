@@ -126,7 +126,8 @@ class TestApp:
         monkeypatch.setattr(responses_api_models.local_vllm_model_proxy.app, "sleep", lambda seconds: None)
         timeouts = []
 
-        def slow_success(server_name, *, timeout_seconds):
+        def slow_success(server_name, *, timeout_seconds, total_deadline):
+            assert total_deadline  # a limit is set, so the poll must end at its budget in total
             timeouts.append(timeout_seconds)
             now[0] += 5  # the answer comes after the 1 s limit
             return "success"
