@@ -467,6 +467,46 @@ async def test_an_invalid_judge_response_inside_the_rubric_facts_is_graded_again
     assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
 
 
+def parsed_abstention(row, evaluation):
+    return row | {
+        "reward": 0.0,
+        "mask_sample": True,
+        "failure_kind": None,
+        "evaluation_completed": True,
+        "correctness": None,
+        "verdict": "unresolved",
+        "grading_status": "judge_unresolved",
+        "judge_evaluations": [evaluation],
+    }
+
+
+async def test_a_judge_failure_settles_on_abstention_without_another_policy_attempt(tmp_path, verifier):
+    failure = ident(
+        0,
+        response=ANSWER,
+        reward=0.0,
+        mask_sample=True,
+        failure_kind="judge_failed",
+        _ng_failure_class="judge_failed",
+        _ng_failure_id="judge-outage",
+    )
+    output = _run(tmp_path, [failure])
+    (identity,) = due_judge_failures(output)
+    attempts = RolloutStore.read(output).manifest.next_attempt.copy()
+    verifier["grade"] = lambda row: parsed_abstention(row, {"verdict_label": "Judgement: unresolved"})
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+    selected, store = _selected(output)
+    saved = selected[identity]
+    assert saved["grading_status"] == "judge_unresolved" and saved["mask_sample"] and saved["correctness"] is None
+    assert saved["response"] == ANSWER and saved["_ng_attempt_index"] == 0
+    assert saved["_ng_rejudged_failure_id"] == "judge-outage"
+    assert store.settled(saved) and not store.manifest.pending_rejudge and store.manifest.next_attempt == attempts
+    assert not due_judge_failures(output)
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert verifier["posted"] == [("rs", "/verify")]
+
+
 @pytest.mark.parametrize("has_trajectory", [False, True])
 async def test_rejudgment_persists_a_parsed_abstention_without_measuring_it(
     tmp_path, verifier, monkeypatch, has_trajectory
@@ -496,16 +536,7 @@ async def test_rejudgment_persists_a_parsed_abstention_without_measuring_it(
             "reason_code": "conflicting_reference",
             "evidence": "The reference contradicts the question.",
         }
-    verifier["grade"] = lambda row: row | {
-        "reward": 0.0,
-        "mask_sample": True,
-        "failure_kind": None,
-        "evaluation_completed": True,
-        "correctness": None,
-        "verdict": "unresolved",
-        "grading_status": "judge_unresolved",
-        "judge_evaluations": [evaluation],
-    }
+    verifier["grade"] = lambda row: parsed_abstention(row, evaluation)
     from nemo_gym.rollouts import rollout_records
 
     manifest_path = rollout_records.manifest_path_for(output)
