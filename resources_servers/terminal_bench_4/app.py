@@ -940,11 +940,6 @@ def _lost_session(body: ResourcesSessionVerifyRequest, reason: str, failure_kind
 
 def _termination_from_response(response: NeMoGymResponse) -> AgentTermination:
     """Map a closed agent's final response onto TB4's termination record (grading still runs)."""
-    graded_agent_error = (response.metadata or {}).get("graded_agent_error")
-    if graded_agent_error:
-        # An agent that died while its sandbox still runs (codex_agent's verify_after_agent_error) is graded, and its
-        # response is completed or incomplete, but its harness exited abnormally, as Harbor records it.
-        return AgentTermination(reason="nonzero_exit", detail=f"Agent error: {graded_agent_error}")
     if response.status in (None, "completed"):
         return AgentTermination(reason="completed")
     if response.status == "incomplete":

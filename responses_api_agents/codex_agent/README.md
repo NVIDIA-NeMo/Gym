@@ -204,18 +204,21 @@ Responses and close observations preserve text, reasoning, tool events, partial 
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
 model-output-limit event yield incomplete, potentially gradable work. A run that hit its time limit is graded unless every model attempt the forwarder started had finished and the last one failed to connect, was cut short, or answered 408, 425, 429 or a 5xx: then the deadline was spent on the endpoint, and the response is `failed` with that model error, which is retried. A retry still in flight at the deadline leaves it graded. A reply that Codex hung up on before it arrived is not a model reply; when Codex reported that stream as idle or broken after its last model output and had not started its retry, the deadline is a transport fault, retried. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. A reported 400 whose body is the model server's context-overflow envelope (code `context_length_exceeded`) is a context limit: `incomplete` and graded, even on the first request. A run that leaves no usable result (a nonzero or signalled exit, a failed turn, a missing `turn.completed`) is a `failed` response with `agent_run_error`, retried by default. Supervisor, cleanup and capture failures remain execution errors. The shared outcome ladder decides each status (see the harness guide). Only Resources determines reward.
 
-`verify_after_agent_error: true` grades a failed run the way Harbor grades after any agent
-exit: a nonzero or signalled Codex exit, a failed turn, or a missing `turn.completed` counts the
-work left in the sandbox as the run's result, so the response is `completed` (`incomplete` if
-the run also hit its time limit; the error is in `metadata.graded_agent_error`) instead of
-`failed` with `agent_run_error`, and the Environment Server verifies it. It applies only when
-Codex started a turn, the supervisor confirmed cleanup, the Codex error that ended the run names
-no model-endpoint transport or 429/5xx failure, and the sandbox still reports running and
-answers a probe command. A lost or unresponsive sandbox and an endpoint outage stay
-`agent_run_error`, and an unconfirmed cleanup stays an execution error, so the episode is
-retried. A reported provider failure keeps its classified cause, so the Environment Server's
-outcome policy decides it as before, and a run that failed before its first turn stays
-`agent_run_error` with Codex's stderr in its error.
+`verify_after_agent_error: true` labels a failed run that Resources can still grade, the run
+Harbor grades after any agent exit: a nonzero or signalled Codex exit, a failed turn, or a missing
+`turn.completed` keeps its error in `metadata.graded_agent_error`, and the unfinished turn's usage
+is read from Codex's session transcript. The label applies only when Codex started a turn, the
+supervisor confirmed cleanup, the Codex error that ended the run names no model-endpoint transport
+or 429/5xx failure, and the sandbox still reports running and answers a probe command. The
+response is `failed` with `agent_run_error` either way, as for any run that leaves no usable
+result, so the Environment Server's outcome policy decides whether it is graded. To grade it as
+Harbor does, set `agent_outcome_policy.by_failure_kind: {agent_run_error: verify}` on the
+Environment Server, as Terminal-Bench-Science's Codex profile does. That policy grades every
+`agent_run_error`, also the runs the flag leaves unlabeled: a lost or unresponsive sandbox, an
+endpoint outage that ended the run without a reported provider failure, and a run that failed
+before its first turn (its error carries Codex's stderr). An unconfirmed cleanup stays an
+execution error, so the episode is retried, and a reported provider failure keeps its classified
+cause, so the policy decides it as before.
 
 The endpoint check reads only the failure that ended the run, after its last model output:
 `turn.failed` and the last error event before it, or the last event when Codex was killed while

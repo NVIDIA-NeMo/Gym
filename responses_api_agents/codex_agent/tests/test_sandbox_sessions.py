@@ -31,6 +31,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
+    AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
     OutcomeAction,
@@ -62,6 +63,24 @@ def no_result_message(result) -> str:
     assert body["status"] == "failed"
     assert json.loads(body["metadata"]["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
     return body["error"]["message"]
+
+
+# The Environment Server policy that grades a run without a usable result, as Harbor grades after any agent exit
+# (Terminal-Bench-Science's Codex profile sets it).
+GRADE_AGENT_RUN_ERRORS = AgentOutcomePolicyConfig(by_failure_kind={"agent_run_error": "verify"})
+
+
+def assert_labeled_agent_error(result, return_code: int) -> None:
+    """verify_after_agent_error labels a run that died while its sandbox still runs, and the run stays failed with
+    ``agent_run_error``: the default policy retries it, and only GRADE_AGENT_RUN_ERRORS grades it. Between the
+    outcome ladder and this rule the run was ``completed``; before the ladder it was failed with no failure kind."""
+    no_result_message(result)
+    body = result.json()
+    assert body["metadata"]["graded_agent_error"].startswith(f"exit {return_code}: ")
+    assert "Fixed" in json.dumps(body["output"])
+    response = NeMoGymResponse.model_validate(body)
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    assert agent_outcome_policy(response, config=GRADE_AGENT_RUN_ERRORS) == OutcomeAction.VERIFY
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -787,11 +806,11 @@ def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
 @pytest.mark.parametrize(
     "case",
     [
-        # Graded, as Harbor grades after any agent exit:
+        # Labeled gradable, as Harbor grades after any agent exit:
         "process-killed",  # Codex or its runner was killed: the receipt reports the shell status 128+9
         "failed-turn",
         "timed-out",  # an error event in a run that hit its time limit: graded as a timeout
-        # Retried as before (agent_run_error; the supervisor error is a lifecycle failure):
+        # Not labeled (agent_run_error without the label; the supervisor error is a lifecycle failure):
         "flag-off",
         "not-started",  # Codex failed before its first turn, as when a required MCP server does not connect
         "cleanup-error",
@@ -801,7 +820,7 @@ def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
         "probe-fails",
     ],
 )
-def test_failed_codex_run_is_graded_only_while_its_sandbox_still_runs(setup, case) -> None:
+def test_failed_codex_run_is_labeled_gradable_only_while_its_sandbox_still_runs(setup, case) -> None:
     agent, sandbox = setup
     agent.config.verify_after_agent_error = case != "flag-off"
     records = [json.loads(line) for line in events().splitlines()]
@@ -839,33 +858,33 @@ def test_failed_codex_run_is_graded_only_while_its_sandbox_still_runs(setup, cas
         return await execute(command, **kwargs)
 
     sandbox.exec.side_effect = probe_or_execute
-    graded = case in ("process-killed", "failed-turn", "timed-out")
+    labeled = case in ("process-killed", "failed-turn", "timed-out")
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
     probed = any(call.args[:1] == ("true",) for call in sandbox.exec.await_args_list)
-    assert probed is (graded or case in ("sandbox-silent", "probe-fails"))
-    # The setting counts the work left in the running sandbox as the run's result: completed (it was failed with no
-    # failure kind before the outcome ladder), or incomplete at the time limit.
-    expected_status = "incomplete" if case == "timed-out" else "completed" if graded else "failed"
+    assert probed is (labeled or case in ("sandbox-silent", "probe-fails"))
+    # A run that hit its time limit is incomplete and graded; every other failed run stays failed.
+    expected_status = "incomplete" if case == "timed-out" else "failed"
     assert closed.json()["agent_observations"]["records"][0]["status"] == expected_status
     if case == "cleanup-error":
         # The supervisor could not account for Codex: a typed lifecycle failure (5xx), retried.
         assert result.status_code == 500, result.text
         return
-    if not graded:
-        assert "Codex exited with code" in no_result_message(result)
+    if case == "timed-out":
+        assert result.status_code == 200, result.text
+        body = result.json()
+        assert (body["status"], body["error"]) == ("incomplete", None)
+        assert body["metadata"]["graded_agent_error"].startswith(f"exit {sandbox.result['return_code']}: ")
+        assert "ng_agent_outcome" not in body["metadata"]
         return
-    assert result.status_code == 200, result.text
-    body = result.json()
-    assert body["status"] == expected_status
-    assert body["error"] is None
-    assert "Fixed" in json.dumps(body["output"])
-    assert body["metadata"]["graded_agent_error"].startswith(f"exit {sandbox.result['return_code']}: ")
-    assert "ng_agent_outcome" not in body["metadata"]
-    assert agent_outcome_policy(NeMoGymResponse.model_validate(body)) == OutcomeAction.VERIFY
+    if not labeled:
+        assert "Codex exited with code" in no_result_message(result)
+        assert "graded_agent_error" not in result.json()["metadata"]
+        return
+    assert_labeled_agent_error(result, sandbox.result["return_code"])
 
 
 # Codex 0.154.0's final error once its retries against a failing endpoint are spent (a top-level error
@@ -1079,7 +1098,7 @@ def test_recovered_codex_0154_retries_keep_the_run_gradable(setup, ending) -> No
     assert "Fixed" in json.dumps(body["output"])
 
 
-def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup) -> None:
+def test_recovered_codex_0154_retries_then_an_agent_error_is_labeled_gradable(setup) -> None:
     # Endpoint retries early in the run, recovered; the run then ends on an unrelated agent error.
     agent, sandbox = setup
     transcript = [
@@ -1092,13 +1111,10 @@ def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup) -> No
     # Codex or its runner was killed after the model requests recovered.
     sandbox.result["return_code"] = 128 + signal.SIGKILL
     result, closed, probed = run_codex_transcript(agent, sandbox, transcript)
-    # Graded as a nonzero agent exit, as the reference runs grade it: the work in the sandbox is the result.
-    assert result.status_code == 200, result.text
-    body = result.json()
-    assert (body["status"], body["error"]) == ("completed", None)
-    assert body["metadata"]["graded_agent_error"].startswith(f"exit {sandbox.result['return_code']}: ")
+    # Labeled as a nonzero agent exit, which the reference runs grade: the work in the sandbox is the result.
+    assert_labeled_agent_error(result, sandbox.result["return_code"])
     assert probed
-    assert closed["agent_observations"]["records"][0]["status"] == "completed"
+    assert closed["agent_observations"]["records"][0]["status"] == "failed"
 
 
 def test_codex_0154_killed_while_waiting_for_the_network_is_rerun(setup) -> None:
@@ -2404,7 +2420,8 @@ async def test_session_lifecycle_uses_shared_bookkeeping(setup):
 async def test_independent_configs_collect_flat_rows_through_environment_run(setup, monkeypatch, outcome):
     """Exercise the checked-in recipe through collector, real environment, and real Codex lifecycle.
 
-    A failed Codex run bypasses verification unless verify_after_agent_error grades it."""
+    A failed Codex run (agent_run_error) bypasses verification unless the environment's outcome policy grades
+    agent_run_error, as Terminal-Bench-Science's Codex profile does; verify_after_agent_error labels it."""
     from environment_servers.single_agent_turn_legacy.app import (
         SingleAgentTurnLegacyEnvironmentServer,
         SingleAgentTurnLegacyEnvironmentServerConfig,
@@ -2444,6 +2461,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
     if outcome == "graded-failure":
         agent.config.verify_after_agent_error = True
         sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
+        environment_config.agent_outcome_policy = {"by_failure_kind": {"agent_run_error": "verify"}}
     config.policy_model = {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}}
     transport = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
     agent.server_client = transport
@@ -2496,8 +2514,8 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
                 else:
                     # The graded run did model work after the CLI's last total: its usage is unknown, not zero.
                     assert body["response"]["usage"] is None
-                # verify_after_agent_error counts the work in the running sandbox as the run's result.
-                assert body["response"]["status"] == "completed"
+                # The failed run is graded as it stands, the work in the running sandbox being its result.
+                assert body["response"]["status"] == ("completed" if outcome == "completed" else "failed")
                 assert ("graded_agent_error" in body["response"]["metadata"]) is (outcome == "graded-failure")
                 return Response({**body, "reward": 1.0})
             assert url_path == "/close_session"
@@ -2543,7 +2561,9 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
             assert result["response"]["usage"] is None
         assert result["ng_agent_observations"]["source"] == "codex"
     assert close_replies[-1].agent_observations.source == "codex"
-    assert close_replies[-1].agent_observations.records[0].status == ("failed" if provider_failure else "completed")
+    assert close_replies[-1].agent_observations.records[0].status == (
+        "completed" if outcome == "completed" else "failed"
+    )
     expected = [
         (environment_name, "/run"),
         (resources_name, "/seed_session"),
@@ -3719,7 +3739,7 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
 
 @pytest.mark.parametrize("usage_source", ["native", "missing"])
 def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
-    """A killed run that is graded reports the native cumulative usage, or none, never the CLI's zero."""
+    """A killed run labeled gradable reports the native cumulative usage, or none, never the CLI's zero."""
     agent, sandbox = setup
     agent.config.verify_after_agent_error = True
     sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
@@ -3764,11 +3784,9 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
         client.post("/v1/agent_sessions/close", json=close_body(session_id))
-    assert response.status_code == 200, response.text
+    no_result_message(response)
     body = response.json()
-    assert (body["status"], body["error"]) == ("completed", None)
     assert body["metadata"]["graded_agent_error"].startswith("exit 137: ")
-    assert "ng_agent_outcome" not in body["metadata"]
     if usage_source == "native":
         assert body["usage"] == {
             "input_tokens": 20,

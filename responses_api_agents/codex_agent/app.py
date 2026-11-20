@@ -26,7 +26,6 @@ from asyncio import Semaphore
 from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
 from copy import deepcopy
-from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from time import monotonic, time
 from typing import Any, ClassVar, Literal, Mapping, Optional
@@ -707,12 +706,13 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # CODEX_HOME private. Use only when the sandbox environment is the task's own (remote
     # providers), not a local provider that inherits the agent host's environment.
     inherit_sandbox_environment: bool = False
-    # Sandbox sessions: return a failed run (nonzero or signalled exit, failed turn, missing
-    # turn.completed) as a `failed` response so Resources still grades it, as Harbor grades after
-    # any agent exit, when the supervisor confirmed cleanup, no explicit error event names a
-    # model-endpoint failure, and the sandbox still runs and answers a command. Anything else (a
-    # lost or unresponsive sandbox, an unconfirmed cleanup, an endpoint outage) stays an execution
-    # error that bypasses verification, so the episode is retried.
+    # Sandbox sessions: for a failed run (nonzero or signalled exit, failed turn, missing
+    # turn.completed) after Codex started a turn, read its usage from the session transcript, and
+    # label it gradable (`metadata.graded_agent_error`) when the supervisor confirmed cleanup, no
+    # explicit error event names a model-endpoint failure, and the sandbox still runs and answers a
+    # command. The response is `failed` with `agent_run_error` either way; the Environment Server's
+    # outcome policy decides whether it is graded (`by_failure_kind: {agent_run_error: verify}` grades
+    # it, as Harbor grades after any agent exit).
     verify_after_agent_error: bool = False
     # Sandbox sessions: raise the oom_score_adj of Codex and everything it starts to 1000 (0 when
     # the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent work rather than
@@ -1297,9 +1297,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         terminal = next((event for _, event in reversed(events) if event.get("type") == "turn.failed"), {})
         if attempts:
             terminal = {**terminal, "upstream_attempt": attempts[-1]}
-        # Any error above leaves no usable result, unless it is the provider failure Codex reported, which is the
-        # run's classified error, or verify_after_agent_error grades it (below). The model replied if Codex emitted
-        # model output or the forwarder relayed a whole 200 reply (not one Codex hung up on before it arrived).
+        # Any error above leaves no usable result (agent_run_error), unless it is the provider failure Codex
+        # reported, which is the run's classified error. The model replied if Codex emitted model output or the
+        # forwarder relayed a whole 200 reply (not one Codex hung up on before it arrived).
         evidence = RunEvidence(
             has_result=error is None,
             timed_out=timed_out,
@@ -1502,11 +1502,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         graded_error = None
         if gradable:
             # The observations are stored first, so a close during the liveness probe still finds them.
+            # The run stays failed with agent_run_error: whether it is graded is the Environment Server's outcome
+            # policy (agent_run_error: verify grades it, as Harbor grades after any agent exit). The marker only
+            # records that Codex, not its sandbox or the model endpoint, ended the run.
             graded_error = await self._gradable_agent_error(state, error, cleanup=cleanup, events=events)
-            if graded_error is not None:
-                # The operator chose to grade a run that failed while its sandbox still runs: the work it left in
-                # the sandbox is its result. A run that also hit its time limit is still graded as a timeout.
-                evidence = replace(evidence, has_result=True)
         if failure is not None:
             raise failure
         if lifecycle_error:
@@ -1553,7 +1552,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             response = response.model_copy(
                 update={"error": ResponseError(code="server_error", message=f"Codex execution failed: {error}")}
             )
-        # The invocation's observed status is the response's, a rollout stop or a graded failure included.
+        # The invocation's observed status is the response's, a rollout stop included.
         for record in state.observations.records:
             if isinstance(record, AgentInvocation) and record.invocation_id == invocation_id:
                 record.status = response.status
@@ -1591,34 +1590,39 @@ class CodexAgent(SimpleResponsesAPIAgent):
         cleanup: Any,
         events: list[tuple[float, dict[str, Any]]],
     ) -> Optional[str]:
-        """Describe a failed Codex run that Resources can still grade, or return None.
+        """Describe a failed Codex run whose sandbox Resources can still grade, or return None.
 
         The supervisor's confirmed cleanup means Codex ended and nothing it started still runs. An
-        endpoint outage, or a sandbox that no longer runs or answers, keeps the run an execution
-        error, so the episode is retried rather than graded.
+        endpoint outage, or a sandbox that no longer runs or answers, returns None. The run is
+        `failed` with `agent_run_error` either way: the description only labels it
+        (`metadata.graded_agent_error`), and the Environment Server's outcome policy decides grading.
         """
         if cleanup is None or cleanup["error"]:
             return None
         detail = f"exit {cleanup['return_code']}: {error}"
         marker = _model_endpoint_error(events)
         if marker is not None:
-            LOG.warning("Codex failed on a model endpoint error (%r); not grading it: %s", marker, detail)
+            LOG.warning("Codex failed on a model endpoint error (%r); not labeling it gradable: %s", marker, detail)
             return None
         sandbox = state.session.sandbox
         try:
             async with asyncio.timeout(_LIVENESS_TIMEOUT_S):
                 sandbox_status = await sandbox.status()
                 if sandbox_status != SandboxStatus.RUNNING:
-                    LOG.warning("Sandbox is %s after Codex failed; not grading it: %s", sandbox_status, detail)
+                    LOG.warning(
+                        "Sandbox is %s after Codex failed; not labeling it gradable: %s", sandbox_status, detail
+                    )
                     return None
                 probe = await sandbox.exec("true", timeout_s=_LIVENESS_TIMEOUT_S)
         except Exception as probe_error:
-            LOG.warning("Sandbox did not answer after Codex failed (%r); not grading it: %s", probe_error, detail)
+            LOG.warning(
+                "Sandbox did not answer after Codex failed (%r); not labeling it gradable: %s", probe_error, detail
+            )
             return None
         if probe.return_code or probe.error_type:
-            LOG.warning("Sandbox failed a liveness probe after Codex failed; not grading it: %s", detail)
+            LOG.warning("Sandbox failed a liveness probe after Codex failed; not labeling it gradable: %s", detail)
             return None
-        LOG.warning("Codex failed while its sandbox still runs; grading it as a nonzero agent exit: %s", detail)
+        LOG.warning("Codex failed while its sandbox still runs; labeling it a gradable nonzero agent exit: %s", detail)
         return detail
 
     def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:

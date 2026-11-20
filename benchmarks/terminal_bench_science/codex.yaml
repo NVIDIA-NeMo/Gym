@@ -71,9 +71,10 @@ terminal_bench_science_codex_agent:
       stream_max_retries: ${oc.select:tbsci_codex_stream_max_retries,null}
       # Closing an 8-hour session stops its process tree and copies its event log.
       session_close_timeout_seconds: 300
-      # As Harbor does: grade a Codex run that died (for example the kernel's OOM kill picked
-      # Codex) while its sandbox still runs, instead of retrying it, and make Codex and its tools,
-      # not the exec daemon, the OOM killer's preferred victims.
+      # Label a Codex run that died (for example the kernel's OOM kill picked Codex) while its
+      # sandbox still runs (metadata.graded_agent_error; the environment server's outcome policy
+      # below grades it), and make Codex and its tools, not the exec daemon, the OOM killer's
+      # preferred victims.
       verify_after_agent_error: ${oc.select:tbsci_verify_after_agent_error,true}
       raise_oom_score_adj: ${oc.select:tbsci_raise_oom_score_adj,true}
       # Codex's session rollouts (per-call token counts and timestamps, also for a run stopped at its time limit):
@@ -95,3 +96,9 @@ terminal_bench_science_codex:
       # 12000 seconds for the slowest verifier, plus its startup).
       default_episode_timeout_seconds: ${oc.select:tbsci_episode_timeout_sec,46800}
       cleanup_timeout_seconds: 600
+      # As Harbor does: grade a Codex run that left no usable result (a nonzero exit, a failed turn,
+      # no turn.completed), such as one the OOM killer ended, instead of retrying it. The other
+      # failure kinds keep their default actions. ++tbsci_agent_run_error_action=retry retries it.
+      agent_outcome_policy:
+        by_failure_kind:
+          agent_run_error: ${oc.select:tbsci_agent_run_error_action,verify}
