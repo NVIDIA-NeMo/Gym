@@ -4,6 +4,7 @@
 """Exercise Gym's real response schemas, verifier routes, cohort and mask contract."""
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -144,6 +145,19 @@ def agentic_body() -> VideoMMEV2VerifyRequest:
         0, {"id": "call", "type": "function_call", "call_id": "call", "name": "watch_video", "arguments": "{}"}
     )
     return VideoMMEV2VerifyRequest.model_validate({**row, "response": generated})
+
+
+def test_relative_cohort_manifest_is_read_from_the_gym_root(monkeypatch, server) -> None:
+    # Gym starts the server in its own directory; benchmarks/videomme_v2_agentic names the cohort from the Gym root.
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.chdir(root / "resources_servers" / "videomme_v2")
+    manifest = Path("resources_servers/videomme_v2/data/example_agentic_cohort.json")
+    assert not manifest.exists()
+    relative = VideoMMEV2ResourcesServer(
+        config=server.config.model_copy(update={"cohort_manifest": manifest}), server_client=server.server_client
+    )
+    assert relative._cohort == CohortManifest.model_validate_json((root / manifest).read_text(encoding="utf-8"))
+    assert relative._cohort.setting == "agentic" and len(relative._cohort.task_ids) == 5
 
 
 async def test_agentic_tool_calls_do_not_invalidate_a_final_answer(agentic_server) -> None:
