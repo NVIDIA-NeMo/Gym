@@ -63,21 +63,21 @@ protocols:
   - name: deepsearchqa/configs/deepsearchqa_kilocode
     config_path: configs/deepsearchqa_kilocode.yaml
     description: Multi-step web research with answer-set F1 scoring using the kilocode harness and Exa search. It sets the protocol's 7200 s budget; kilocode has no turn limit setting.
-  - name: deepsearchqa/configs/deepsearchqa_nemo_fabric_deepagents
-    config_path: configs/deepsearchqa_nemo_fabric_deepagents.yaml
-    description: Multi-step web research with answer-set F1 scoring using the deepagents harness and Exa search. It sets the protocol's 7200 s budget and blocks the web_fetch_exa tool; deepagents has no turn limit setting.
   - name: deepsearchqa/configs/deepsearchqa_openclaw
     config_path: configs/deepsearchqa_openclaw.yaml
     description: Multi-step web research with answer-set F1 scoring using the openclaw harness and Exa search. It sets the protocol's 7200 s budget; openclaw has no turn limit setting.
   - name: deepsearchqa/configs/deepsearchqa_opencode
     config_path: configs/deepsearchqa_opencode.yaml
     description: Multi-step web research with answer-set F1 scoring using the opencode harness and Exa search. It sets the protocol's 7200 s budget; opencode has no turn limit setting.
-  - name: deepsearchqa/configs/deepsearchqa_pi
-    config_path: configs/deepsearchqa_pi.yaml
-    description: Multi-step web research with answer-set F1 scoring using the pi harness and Exa search. It sets the protocol's 7200 s budget; pi has no turn limit setting.
   - name: deepsearchqa/configs/deepsearchqa_prime_agent
     config_path: configs/deepsearchqa_prime_agent.yaml
     description: Multi-step web research with answer-set F1 scoring using the prime harness and Exa search. It sets the protocol's 7200 s budget; prime has no turn limit setting.
   - name: deepsearchqa/configs/deepsearchqa_simple_strands
     config_path: configs/deepsearchqa_simple_strands.yaml
     description: Multi-step web research with answer-set F1 scoring using the simple_strands harness and Exa search. It sets the protocol's 200-turn and 7200 s budgets.
+- name: deepsearchqa/configs/deepsearchqa_nemo_fabric_deepagents
+  config_path: configs/deepsearchqa_nemo_fabric_deepagents.yaml
+  description: Multi-step web research with answer-set F1 scoring, run with the deepagents harness and other web tools than the main config. It reaches Exa through the MCP server with the page-fetch tool (`web_fetch_exa`) blocked, so the model reads only the text that search returns. Compared with the main config it also has a 7200 s budget instead of 12 turns and 600 s (deepagents has no turn limit setting), no cap of four web searches, and another system prompt.
+- name: deepsearchqa/configs/deepsearchqa_pi
+  config_path: configs/deepsearchqa_pi.yaml
+  description: Multi-step web research with answer-set F1 scoring, run with the pi harness and other web tools than the main config. It has one custom `exa_search` tool that returns up to 4,000 characters of page text per result, and no page-fetch tool. Compared with the main config it also has a 7200 s budget instead of 12 turns and 600 s (pi has no turn limit setting), no cap of four web searches, and another system prompt.
