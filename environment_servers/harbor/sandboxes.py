@@ -29,12 +29,21 @@ from typing import Any
 import yaml
 from fastapi import HTTPException
 
-from environment_servers.harbor.entrypoint import is_keepalive_entrypoint
+from environment_servers.harbor.entrypoint import (
+    healthcheck_bound_s,
+    image_healthcheck_settings,
+    is_keepalive_entrypoint,
+)
 from environment_servers.harbor.network_policy import phase_network_policy
 from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import HarborSession, _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user, _is_root
-from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
+from environment_servers.harbor.verifier import (
+    _verifier_image,
+    _verifier_key,
+    _verifier_runs_task_image,
+    _verifier_start,
+)
 from nemo_gym.agents import sandbox_server_url
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import get_global_config_dict, model_call_sampling_config
@@ -868,17 +877,14 @@ class HarborSandboxMixin:
         """The episode's separate verifier sandbox, its create retried once after a ready timeout.
 
         The rollout is complete by now, so a verifier sandbox the provider never made ready is retried before the
-        episode is masked, once, and only while the episode's task deadline still leaves a whole create, the overlay
-        when there is one, and ``test.sh`` with its grace. Any other create failure is reported at once.
+        episode is masked, once, and only while the episode's task deadline still leaves room for the second
+        verifier (:meth:`_verifier_retry_fits`), checked before the timed-out one is released and again after.
+        Any other create failure is reported at once.
         """
         try:
             return await self._create_verifier_sandbox(task, episode_key=session.session_id)
         except HarborSeedTimeoutError as exc:
-            need = self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S
-            need += settings.timeout_sec + self.config.verifier_grace_s
-            if overlaid:
-                need += task.config.environment.build_timeout_sec
-            if session.deadline is not None and session.deadline - asyncio.get_running_loop().time() < need:
+            if not self._verifier_retry_fits(session, task, settings, overlaid=overlaid):
                 raise
             LOGGER.warning(f"{task.task_id}: retrying the verifier sandbox once: {exc}")
             try:
@@ -888,7 +894,26 @@ class HarborSandboxMixin:
                 LOGGER.exception(f"{task.task_id}: could not release the verifier sandbox that was never ready")
                 exc.__suppress_context__ = True
                 raise exc
+            # The release has no bound of its own and may have used the time the retry needs.
+            if not self._verifier_retry_fits(session, task, settings, overlaid=overlaid):
+                raise
         return await self._create_verifier_sandbox(task, episode_key=session.session_id)
+
+    def _verifier_retry_fits(self, session: HarborSession, task: HarborTask, settings: Any, *, overlaid: bool) -> bool:
+        """Whether the task deadline still holds a whole verifier create, the overlay when there is one, the verifier
+        image's ``HEALTHCHECK`` at its worst (:func:`healthcheck_bound_s`; the task's own check is not run there) and
+        ``test.sh`` with its grace. Always true when the deadline is not enforced."""
+        if session.deadline is None:
+            return True
+        need = self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S
+        need += settings.timeout_sec + self.config.verifier_grace_s
+        if overlaid:
+            need += task.config.environment.build_timeout_sec
+        start = _verifier_start(task, True)
+        check = image_healthcheck_settings(start.image_healthcheck, start.image_shell) if start is not None else None
+        if check is not None:
+            need += healthcheck_bound_s(check)
+        return session.deadline - asyncio.get_running_loop().time() >= need
 
     async def _start_with_pull_retries(
         self,

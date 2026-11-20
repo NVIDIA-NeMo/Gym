@@ -4557,6 +4557,45 @@ class TestSeedGuards:
         # Still owned under the verifier key, for the episode cleanup and shutdown to stop.
         assert [key for key in server._sandboxes if key.endswith("/verifier")]
 
+    async def test_separate_verifier_is_not_retried_when_the_release_used_the_time(self, tmp_path, monkeypatch):
+        """The budget is checked again after the timed-out sandbox is released: a slow release can use the
+        retry's reservation, and the row stays masked instead of ending at the task deadline."""
+        server, task, agent, stopped = self.separate_with_verifier_starts(tmp_path, monkeypatch, None, None)
+        release = server._stop_sandbox
+
+        async def slow_release(episode_key):
+            if episode_key.endswith("/verifier"):
+                for session in server._sessions.values():
+                    session.deadline = asyncio.get_running_loop().time() + 1.0
+            await release(episode_key)
+
+        monkeypatch.setattr(server, "_stop_sandbox", slow_release)
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        assert response.result.mask_sample is True and response.result.failure_kind == "provider_unavailable"
+        assert stopped == ["hanging"] and not server._sandboxes
+
+    async def test_verifier_retry_reserves_the_verifier_image_healthcheck(self, tmp_path, monkeypatch):
+        """The verifier image's HEALTHCHECK runs between the create and test.sh, so its worst case is reserved."""
+        server, task, agent, stopped = self.separate_with_verifier_starts(tmp_path, monkeypatch)
+        settings = task.config.verifier
+        # 30 s interval and timeout, 3 retries: 35 + 5 + 3 * 35 + 2 * 30 = 205 s at worst.
+        record = {"Test": ["CMD", "true"], "Interval": 30_000_000_000, "Timeout": 30_000_000_000, "Retries": 3}
+        start = SimpleNamespace(image_healthcheck=record, image_shell=None)
+        monkeypatch.setattr("environment_servers.harbor.sandboxes._verifier_start", lambda task, separate: start)
+        # Without the check: the 0.05 s create plus test.sh and its grace.
+        need = 0.05 + settings.timeout_sec + server.config.verifier_grace_s
+        now = asyncio.get_running_loop().time()
+
+        def fits(remaining):
+            session = SimpleNamespace(deadline=now + remaining)
+            return server._verifier_retry_fits(session, task, settings, overlaid=False)
+
+        assert not fits(need + 100) and fits(need + 300)
+        start.image_healthcheck = None
+        assert fits(need + 100)
+        assert server._verifier_retry_fits(SimpleNamespace(deadline=None), task, settings, overlaid=False)
+
     async def test_separate_verifier_create_failure_other_than_the_ready_timeout_is_not_retried(
         self, tmp_path, monkeypatch
     ):
