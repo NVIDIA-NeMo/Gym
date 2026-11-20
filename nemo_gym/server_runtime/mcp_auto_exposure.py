@@ -96,6 +96,7 @@ from starlette.routing import Mount, Route
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.core.episode_context import current_episode_id
+from nemo_gym.core.tool_output_images import split_tool_output_images
 from nemo_gym.server_runtime._checkpoint.errors import RolloutIdRequiredError
 from nemo_gym.server_runtime.base_resources_server import (
     MCP_TOKEN_EPISODE_CLAIM,
@@ -127,7 +128,7 @@ _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 # Path-template params from the public route.path string ("/{tool_name}", "/items/{id:int}").
 _PATH_PARAM_RE = re.compile(r"{([^}:]+)(?::[^}]*)?}")
 
-# Set to True on Gym middleware, a class or a function, that direct MCP dispatch may skip.
+# Set to True on a Gym middleware class that direct MCP dispatch may skip.
 # Matching by attribute rather than by module name keeps the check right when the middleware moves to another module.
 # A server's own middleware must not set it.
 SKIPPED_ON_DIRECT_MCP_DISPATCH = "skipped_on_direct_mcp_dispatch"
@@ -306,7 +307,7 @@ async def call_direct(
 ) -> Any:
     """Invoke the handler resolved at startup once and return its JSON-able payload.
 
-    Replicates what skipping Gym's own stack would otherwise lose: SessionMiddleware + add_session_id
+    Replicates what skipping Gym's own stack would otherwise lose: SessionMiddleware + SessionIDMiddleware
     become ``scope["session"] = {SESSION_ID_KEY: sid}`` (handlers only read request.session); the
     exception middleware's status-carrying text is reproduced by pre-formatting HTTPException /
     ValidationError / ClientResponseError into DirectDispatchError.
@@ -461,12 +462,9 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             continue  # Gym's SessionMiddleware — replaced by a materialized session on direct dispatch
         # Only the class's own marker counts: a subclass that overrides __call__ adds behaviour dispatch would skip.
         if vars(cls).get(SKIPPED_ON_DIRECT_MCP_DISPATCH, False):
-            continue  # Gym's rollout prefix and client disconnect middleware; see their definitions.
+            continue  # Gym's session ID, exception, rollout prefix and client disconnect middleware.
         if getattr(cls, "applies_to_mcp_requests", False):
             continue  # It does its job on the /mcp request as a whole (for example, checkpoint admission).
-        dispatch = m.kwargs.get("dispatch")
-        if dispatch is not None and getattr(dispatch, SKIPPED_ON_DIRECT_MCP_DISPATCH, False):
-            continue  # Gym's add_session_id / exception middleware
         custom_middleware.append(f"{cls.__module__}.{cls.__name__}")
     if custom_middleware:
         raise ValueError(
@@ -772,9 +770,20 @@ def _parse_session_token(
     return payload["sid"], None if allowed is None else frozenset(allowed)
 
 
-def _to_result(payload: Any, *, output_schema: Optional[dict] = None) -> types.CallToolResult:
-    """Preserve text content and object-only structured content on both SDK versions."""
-    structured = payload if isinstance(payload, dict) else None
+def to_call_tool_result(
+    payload: Any, *, output_schema: Optional[dict] = None, is_error: bool = False
+) -> types.CallToolResult:
+    """Preserve text content and object-only structured content on both SDK versions.
+
+    ``is_error`` marks a result the agent should see as a failed call.
+
+    Images a tool lists under ``tool_output_images`` leave the text and structured content and follow it as MCP
+    image content, each after its label. A result with images carries no structured content unless the tool declares
+    an output schema: some clients, such as OpenCode, replace the content with the structured content when it is
+    present, which would drop the images.
+    """
+    payload, images = split_tool_output_images(payload)
+    structured = payload if isinstance(payload, dict) and (not images or output_schema is not None) else None
     if output_schema is not None:
         if structured is None:
             raise ValueError("Output validation error: outputSchema defined but no structured output returned")
@@ -783,9 +792,12 @@ def _to_result(payload: Any, *, output_schema: Optional[dict] = None) -> types.C
         except jsonschema.ValidationError as exc:
             raise ValueError(f"Output validation error: {exc.message}") from exc
     text = payload if isinstance(payload, str) else JSONResponse(payload).body.decode("utf-8")
-    return types.CallToolResult(
-        content=[types.TextContent(type="text", text=text)], structuredContent=structured, isError=False
-    )
+    content: list[types.TextContent | types.ImageContent] = [types.TextContent(type="text", text=text)]
+    for image in images:
+        if image.label:
+            content.append(types.TextContent(type="text", text=image.label))
+        content.append(types.ImageContent(type="image", data=image.data, mimeType=image.media_type))
+    return types.CallToolResult(content=content, structuredContent=structured, isError=is_error)
 
 
 def _make_mcp_server(
@@ -892,15 +904,31 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
             payload = await call_direct(app, tool.binding, session_id, arguments, path_value=tool.path_value)
         except DirectDispatchError as exc:
             raise ValueError(f"HTTP {exc.status} from POST /{name}: {exc.detail}")
-        return _to_result(payload, output_schema=tool.tool.model_dump(by_alias=True).get("outputSchema"))
+        return to_call_tool_result(payload, output_schema=tool.tool.model_dump(by_alias=True).get("outputSchema"))
 
-    mcp_server = _make_mcp_server(server.config.name or type(server).__name__, list_tools, call_tool)
+    mount_mcp_endpoint(app, server.config.name or type(server).__name__, list_tools, call_tool)
+    return tools
+
+
+def mount_mcp_endpoint(
+    app: FastAPI,
+    server_name: str,
+    list_tools: Callable[[Optional[Request]], Awaitable[list[types.Tool]]],
+    call_tool: Callable[[Optional[Request], str, dict], Awaitable[types.CallToolResult]],
+) -> None:
+    """Serve ``list_tools`` and ``call_tool`` at ``/mcp`` on ``app``.
+
+    The endpoint is stateless Streamable HTTP with JSON responses, and runs within the app's lifespan. Each
+    handler receives the HTTP request that carried the MCP message (``None`` outside a request), so it can read
+    the caller's headers, such as a session token.
+    """
+    mcp_server = _make_mcp_server(server_name, list_tools, call_tool)
     manager = StreamableHTTPSessionManager(
         app=mcp_server,
         event_store=None,
         json_response=True,
         stateless=True,
-        # The agent reaches this endpoint server-to-server via the resources server's resolved host
+        # The agent reaches this endpoint server-to-server via the server's resolved host
         # (a routable IP/hostname on multi-node runs); enabling the SDK's Host/Origin allowlist would
         # mean enumerating every such host. DNS-rebinding protection defends browsers, which never
         # talk to this endpoint; disabling it is not what makes the endpoint safe.
@@ -932,4 +960,10 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
                 yield state
 
     app.router.lifespan_context = lifespan_wrapper
-    return tools
+
+
+# Serves the names this module had before a rename, such as _to_result, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)

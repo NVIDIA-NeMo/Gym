@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 
 from pydantic import ConfigDict, Field
 
@@ -51,9 +51,11 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 
 
@@ -120,6 +122,8 @@ def parse_points(judge_text: str) -> Optional[int]:
 
 
 class FalseStatementJudgeConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
@@ -226,7 +230,12 @@ class FalseStatementJudgeServer(SimpleResourcesServer):
             content = chat_response.choices[0].message.content if chat_response.choices else None
             return observed_text(
                 content.strip() if content else "",
-                completed=bool(chat_response.choices) and chat_response.choices[0].finish_reason == "stop",
+                completed=(
+                    bool(chat_response.choices)
+                    and chat_response.choices[0].finish_reason == "stop"
+                    and getattr(chat_response.choices[0], "native_finish_reason", None) != "repetition"
+                    and getattr(chat_response.choices[0], "stop_reason", None) != "repetition_detected"
+                ),
             )
 
         request_params = judge_params.model_copy(deep=True)
@@ -288,3 +297,6 @@ class FalseStatementJudgeServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     FalseStatementJudgeServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = FalseStatementJudgeServer.run_webserver()  # noqa: F401

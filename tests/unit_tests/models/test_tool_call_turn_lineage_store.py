@@ -25,10 +25,14 @@ from nemo_gym.models.token_capture.fingerprint import (
     tool_call_turn_fingerprint,
 )
 from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore, stamp_continuation
-from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
+from nemo_gym.models.token_capture.records import CallIdentity, ParentResolutionStatus, TokenEntry, stamp_lineage
 from nemo_gym.models.token_capture.staging.digest import EMPTY_EXTRAS_DIGEST, compute_chain_hash, hash_token_ids
 from nemo_gym.models.token_capture.staging.records import CallRecord, CaptureLedgerCommit
 from nemo_gym.models.token_capture.store import TokenCaptureStore
+
+
+# An unnamed agent on a model server without a configured name: the lineage scope of these tests' calls.
+UNNAMED_IDENTITY = CallIdentity()
 
 
 CONTEXT = [{"role": "user", "content": "Inspect the repository."}]
@@ -122,9 +126,9 @@ async def _publish(
 async def test_rewritten_turn_resolves_original_tokens_or_custody(stores) -> None:
     kind, _, reader = stores
     # Populate the reader's empty cache before another handle commits.
-    assert (await reader.resolve("r", _request())).match is None
+    assert (await reader.resolve("r", _request(), identity=UNNAMED_IDENTITY)).match is None
     await _publish(stores)
-    result = await reader.resolve("r", _request())
+    result = await reader.resolve("r", _request(), identity=UNNAMED_IDENTITY)
     assert result.status == ParentResolutionStatus.RESOLVED
     assert result.reason == "tool_call_turn"
     assert result.match.model_call_id == "a"
@@ -137,7 +141,7 @@ async def test_rewritten_turn_resolves_original_tokens_or_custody(stores) -> Non
     else:
         assert result.match.cumulative_token_ids == tuple(TOKENS)
         if kind == "local-file":
-            assert reader._cache["r"][2].by_call_id["a"].cum_tokens is None
+            assert reader._cache["r"][2][(None, None)].by_call_id["a"].cum_tokens is None
 
 
 @pytest.mark.asyncio
@@ -145,11 +149,11 @@ async def test_strict_same_id_sibling_wins_but_rewritten_siblings_are_ambiguous(
     await _publish(stores)
     await _publish(stores, "b", output=_turn('{"command":"pytest"}'), tokens=[11, 12, 102])
     reader = stores[2]
-    exact = await reader.resolve("r", _request(rewritten=False))
+    exact = await reader.resolve("r", _request(rewritten=False), identity=UNNAMED_IDENTITY)
     assert exact.status == ParentResolutionStatus.RESOLVED
     assert exact.match.model_call_id == "a"
     assert exact.reason == ""
-    rewritten = await reader.resolve("r", _request())
+    rewritten = await reader.resolve("r", _request(), identity=UNNAMED_IDENTITY)
     assert rewritten.status == ParentResolutionStatus.UNRESOLVED
     assert rewritten.match is None
     assert rewritten.reason == "ambiguous"
@@ -160,7 +164,7 @@ async def test_strict_same_id_sibling_wins_but_rewritten_siblings_are_ambiguous(
 async def test_identical_retries_collapse_consistently(stores, rewritten) -> None:
     await _publish(stores, "z")
     await _publish(stores, "a")
-    result = await stores[2].resolve("r", _request(rewritten=rewritten))
+    result = await stores[2].resolve("r", _request(rewritten=rewritten), identity=UNNAMED_IDENTITY)
     assert result.status == ParentResolutionStatus.RESOLVED
     assert result.match.model_call_id == "a"
     assert result.reason == ("tool_call_turn" if rewritten else "")
@@ -215,7 +219,7 @@ async def test_whole_turn_fallback_rejects_other_changes(stores, change) -> None
         ]
     elif change == "inserted_text":
         request[1:1] = [{"role": "assistant", "content": "uncaptured"}, {"role": "user", "content": "next"}]
-    result = await stores[2].resolve("r", request)
+    result = await stores[2].resolve("r", request, identity=UNNAMED_IDENTITY)
     assert result.status == ParentResolutionStatus.UNRESOLVED
     assert result.match is None
 
@@ -234,7 +238,7 @@ async def test_opencode_unavailable_tool_placeholder_resolves_to_the_served_call
     request = _unavailable_tool_placeholder(
         {"tool": "Read", "error": "Model tried to call unavailable tool 'Read'. Available tools: bash, invalid."}
     )
-    result = await stores[2].resolve("r", request)
+    result = await stores[2].resolve("r", request, identity=UNNAMED_IDENTITY)
     assert result.status == ParentResolutionStatus.RESOLVED
     assert result.match.model_call_id == "a"
     assert result.reason == "tool_call_turn"
@@ -253,7 +257,7 @@ async def test_opencode_unavailable_tool_placeholder_resolves_to_the_served_call
 )
 async def test_only_the_exact_placeholder_of_the_served_tool_resolves(stores, arguments) -> None:
     await _publish(stores)
-    result = await stores[2].resolve("r", _unavailable_tool_placeholder(arguments))
+    result = await stores[2].resolve("r", _unavailable_tool_placeholder(arguments), identity=UNNAMED_IDENTITY)
     assert result.status == ParentResolutionStatus.UNRESOLVED
     assert result.match is None
 
@@ -321,7 +325,7 @@ async def test_a_served_placeholder_shaped_call_resolves_when_its_echo_rewrites_
     await _publish(stores, output=_placeholder_shaped("bad"))
     request = _request()
     request[3] = _placeholder_shaped("bad, as the harness re-serialized it")[2]
-    result = await stores[2].resolve("r", request)
+    result = await stores[2].resolve("r", request, identity=UNNAMED_IDENTITY)
     assert result.status == ParentResolutionStatus.RESOLVED
     assert result.match.model_call_id == "a"
     assert result.reason == "tool_call_turn"
@@ -340,7 +344,7 @@ async def test_a_turn_mixing_a_rewritten_call_and_an_own_invalid_call_resolves(s
         served[1], served[2] = served[2], served[1]
         echoed[1], echoed[2] = echoed[2], echoed[1]
     await _publish(stores, output=served)
-    result = await stores[2].resolve("r", deepcopy(CONTEXT) + echoed + _request()[4:])
+    result = await stores[2].resolve("r", deepcopy(CONTEXT) + echoed + _request()[4:], identity=UNNAMED_IDENTITY)
     assert result.status == ParentResolutionStatus.RESOLVED
     assert result.match.model_call_id == "a"
     assert result.reason == "tool_call_turn"
@@ -384,7 +388,9 @@ async def test_every_placeholder_reading_competes_before_a_parent_is_chosen(stor
             await _publish(
                 stores, name, output=[{"role": "assistant", "content": "Read them all."}, *turns[name]], tokens=tokens
             )
-    result = await stores[2].resolve("r", _calls_request([_invalid_call(call_id, "rewritten") for call_id in ids]))
+    result = await stores[2].resolve(
+        "r", _calls_request([_invalid_call(call_id, "rewritten") for call_id in ids]), identity=UNNAMED_IDENTITY
+    )
     if published == "both":
         assert result.status == ParentResolutionStatus.UNRESOLVED
         assert result.reason == "ambiguous"
@@ -401,11 +407,13 @@ async def test_more_placeholder_shaped_calls_than_the_cap_leave_only_the_strict_
     served = [_read_call(f"c{index}") for index in range(7)]
     await _publish(stores, output=[{"role": "assistant", "content": "Read them all."}, *served])
     rewritten = await stores[2].resolve(
-        "r", _calls_request([_invalid_call(call["call_id"], "rewritten") for call in served])
+        "r",
+        _calls_request([_invalid_call(call["call_id"], "rewritten") for call in served]),
+        identity=UNNAMED_IDENTITY,
     )
     assert rewritten.status == ParentResolutionStatus.UNRESOLVED
     assert rewritten.match is None
-    exact = await stores[2].resolve("r", _calls_request(served))
+    exact = await stores[2].resolve("r", _calls_request(served), identity=UNNAMED_IDENTITY)
     assert exact.status == ParentResolutionStatus.RESOLVED
     assert exact.match.model_call_id == "a"
     assert echoed_tool_call_turn_fingerprints(_calls_request(served)[1:])
@@ -435,11 +443,11 @@ async def test_a_served_placeholder_shaped_call_keeps_its_stored_key_across_repl
 async def test_incompatible_versions_do_not_resolve_then_refresh_current_rows(stores, version) -> None:
     await _publish(stores, "old", version=version)
     for rewritten in (False, True):
-        result = await stores[2].resolve("r", _request(rewritten=rewritten))
+        result = await stores[2].resolve("r", _request(rewritten=rewritten), identity=UNNAMED_IDENTITY)
         assert result.status == ParentResolutionStatus.UNRESOLVED
         assert result.match is None
     await _publish(stores, "current")
-    result = await stores[2].resolve("r", _request())
+    result = await stores[2].resolve("r", _request(), identity=UNNAMED_IDENTITY)
     assert result.match.model_call_id == "current"
     assert result.reason == "tool_call_turn"
 
@@ -451,7 +459,7 @@ async def test_interleaved_reasoning_is_part_of_the_whole_turn(stores) -> None:
     await _publish(stores, output=output)
     request = _request()
     request.insert(3, {"type": "reasoning", "summary": []})
-    result = await stores[2].resolve("r", request)
+    result = await stores[2].resolve("r", request, identity=UNNAMED_IDENTITY)
     assert result.match.model_call_id == "a"
     assert result.reason == "tool_call_turn"
 
@@ -467,7 +475,7 @@ async def test_custody_column_survives_restart_and_checkpoint_import(tmp_path) -
     assert rows[0].get("output_items") is None
     for reader in (FileLineageStore(tmp_path / "source"), FileLineageStore(tmp_path / "restored")):
         reader.import_rows("r", rows)
-        result = await reader.resolve("r", _request())
+        result = await reader.resolve("r", _request(), identity=UNNAMED_IDENTITY)
         assert result.reason == "tool_call_turn"
         assert result.match.staging_chain == ("r/a",)
         assert result.match.cumulative_token_ids == ()
@@ -484,11 +492,11 @@ async def test_legacy_custody_rows_are_strict_only_and_replay_is_idempotent(tmp_
     writer.import_rows("r", rows)
     await writer.record(commit)
     assert len(writer.export_rows("r")) == 1
-    assert (await reader.resolve("r", _request(rewritten=False))).match.model_call_id == "a"
-    assert (await reader.resolve("r", _request())).match is None
+    assert (await reader.resolve("r", _request(rewritten=False), identity=UNNAMED_IDENTITY)).match.model_call_id == "a"
+    assert (await reader.resolve("r", _request(), identity=UNNAMED_IDENTITY)).match is None
     # The old cached row does not hide a new schema row appended by another worker.
     await writer.record(_commit("b", _turn(), TOKENS, FINGERPRINT_VERSION))
-    result = await reader.resolve("r", _request())
+    result = await reader.resolve("r", _request(), identity=UNNAMED_IDENTITY)
     assert result.match.model_call_id == "b"
     assert result.reason == "tool_call_turn"
     assert len((await reader.manifest("r"))["records"]) == 2
@@ -501,6 +509,38 @@ async def test_unversioned_custody_row_cannot_use_persisted_fallback_key(tmp_pat
     rows = writer.export_rows("r")
     rows[0].pop("fingerprint_version")
     writer.import_rows("r", rows)
-    result = await FileLineageStore(tmp_path).resolve("r", _request())
+    result = await FileLineageStore(tmp_path).resolve("r", _request(), identity=UNNAMED_IDENTITY)
     assert result.status == ParentResolutionStatus.UNRESOLVED
     assert result.match is None
+
+
+def _repaired_request(name: str, arguments: str = '{"command":"cd /repo && ls"}') -> list[dict]:
+    """The request after OpenCode's tool-call repair renamed the served ``Bash`` call ``call_0``."""
+    request = _request(rewritten=False)
+    request[2] = {"type": "function_call", "call_id": "call_0", "name": name, "arguments": arguments}
+    return request
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_opencode_lowercased_resolves_to_the_served_call(stores) -> None:
+    # OpenCode renames a call whose lowercase name is a known tool to that name, in every later request.
+    await _publish(stores)
+    result = await stores[2].resolve("r", _repaired_request("bash"), identity=UNNAMED_IDENTITY)
+    assert result.status == ParentResolutionStatus.RESOLVED
+    assert result.reason == "tool_call_turn"
+    assert result.match.model_call_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_a_call_renamed_to_another_tool_stays_unresolved(stores) -> None:
+    await _publish(stores)
+    result = await stores[2].resolve("r", _repaired_request("grep"), identity=UNNAMED_IDENTITY)
+    assert result.status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_the_poison_log_names_only_the_tools_of_the_last_model_turn() -> None:
+    from nemo_gym.models.token_capture.sink import _trailing_tool_names
+
+    assert _trailing_tool_names(_repaired_request("bash")) == ["bash", "Read"]
+    assert _trailing_tool_names(None) == []
+    assert _trailing_tool_names([{"role": "user", "content": "hi"}]) == []

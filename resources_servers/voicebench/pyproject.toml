@@ -12,6 +12,13 @@ dependencies = [
     "langdetect",
     "nltk",
     "loguru",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    # qa-metrics (SD-QA PEDANT) pins scikit-learn==1.3.2, which has no Python 3.13 wheel. The vendored PEDANT
+    # export only needs TfidfVectorizer, so [tool.uv] override-dependencies (recorded in
+    # scripts/component-lock-policy.json) allows a 3.13-compatible release.
+    "qa-metrics==0.2.17",
 ]
 
 [tool.uv]
@@ -34,6 +41,7 @@ override-dependencies = [
     "pycountry; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",
     "pathspec; sys_platform == 'never'",
+    "scikit-learn>=1.5,<1.8",
 ]
 exclude-dependencies = [
     "fasttext-wheel",

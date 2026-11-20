@@ -98,7 +98,10 @@ def test_readme_trajectory_collation_repeats_dapo17k_train_as_validation(
     TrainDataProcessor().run(config)
 
     collated = tmp_path / "collated"
-    assert sorted(p.name for p in collated.iterdir()) == ["validation.jsonl", "validation_metrics.json"]
+    assert sorted(p.name for p in collated.iterdir()) == ["prepared", "validation.jsonl", "validation_metrics.json"]
+    prepared = collated / "prepared" / "validation" / f"{fixture.stem}_prepare.jsonl"
+    assert prepared.read_bytes() == (collated / "validation.jsonl").read_bytes()
+    assert not fixture.with_name(f"{fixture.stem}_prepare.jsonl").exists()
     rows = [json.loads(line) for line in (collated / "validation.jsonl").read_text().splitlines()]
     expected_questions = [row["question"] for row in source_rows for _ in range(TRAJECTORY_REPEATS)]
     assert [row["question"] for row in rows] == expected_questions

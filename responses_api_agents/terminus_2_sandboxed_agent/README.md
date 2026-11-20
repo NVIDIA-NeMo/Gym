@@ -2,7 +2,7 @@
 
 > [!WARNING]
 > **The legacy `/run` path is deprecated.** With `resources_server` set, as in the benchmark presets
-> (for example [`benchmarks/terminal_bench_2_1/terminus_2.yaml`](../../benchmarks/terminal_bench_2_1/terminus_2.yaml)),
+> (for example [`benchmarks/terminal_bench_2_1/terminus_2_legacy_agent.yaml`](../../benchmarks/terminal_bench_2_1/terminus_2_legacy_agent.yaml)),
 > this agent runs each episode through its own `/run` behind a `legacy_agent` environment server.
 > That path will be removed after the environment-server migration, and the agent logs a deprecation
 > warning when it starts with a `resources_server`. Do not build new benchmarks, agents or configs on it.
@@ -20,6 +20,10 @@ the NeMo Gym resources server. It adapts the small Harbor environment interface
 that Terminus uses (`exec` and `is_dir`) to `AsyncSandbox`; task state therefore
 remains owned by the resources server.
 
+The agent drives only its tmux terminal. An episode session that is seeded with a required tool
+grant (an MCP or direct HTTP tool from the environment server) is refused with HTTP 422 at seed, so the
+episode fails once instead of running without the tool. Optional grants are ignored.
+
 Before launching, complete [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
 for sandbox credentials, endpoint configuration, and resource limits.
 
@@ -35,7 +39,7 @@ gym env start \
 To run one row from a benchmark JSONL after starting the servers:
 
 ```bash
-gym eval prepare --config benchmarks/terminal_bench_2_1/terminus_2.yaml
+gym eval prepare --config benchmarks/terminal_bench_2_1/terminus_2_legacy_agent.yaml
 
 python responses_api_agents/terminus_2_sandboxed_agent/client.py \
     +benchmark_jsonl=benchmarks/terminal_bench_2_1/data/benchmark.jsonl

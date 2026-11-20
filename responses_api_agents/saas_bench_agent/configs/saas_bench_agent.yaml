@@ -1,0 +1,11 @@
+saas_bench_agent:
+  responses_api_agents:
+    saas_bench_agent:
+      entrypoint: app.py
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: policy
+      cache_root: ${oc.env:SAAS_BENCH_CACHE_ROOT}
+      output_root: ${oc.env:SAAS_BENCH_RUN_ROOT}/episodes

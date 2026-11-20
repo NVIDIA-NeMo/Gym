@@ -13,6 +13,7 @@ from yaml import safe_load
 import nemo_gym.config.global_config
 from nemo_gym.cli.eval import plan_benchmark
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.data.task_materialization import materialize_task
 from nemo_gym.eval.eval_plan import (
     EvalPlan,
     PlanBenchmark,
@@ -26,6 +27,10 @@ from nemo_gym.eval.eval_plan import (
 
 def _row(task_id: str, prompt: str = "solve it", **extra: object) -> dict:
     return {"task_id": task_id, "responses_create_params": {"input": [{"role": "user", "content": prompt}]}, **extra}
+
+
+def _typed(task_id: str, taskset: str = "bench", **task_input: object) -> dict:
+    return {"task_id": {"taskset": taskset, "task_id": task_id}, "task_input": task_input or {"prompt": "solve it"}}
 
 
 def _plan(rows: list[dict], **kwargs: object) -> EvalPlan:
@@ -80,11 +85,78 @@ class TestBuildEvalPlan:
         with pytest.raises(ConfigError, match=r"1 of 2 tasks have no task id .*rows \[1\]"):
             _plan(rows)
 
-    def test_already_materialized_rows_are_refused(self) -> None:
-        row = {"task_id": {"taskset": "bench", "task_id": "a"}, "task_input": {"prompt": "solve it"}}
+    def test_a_row_with_a_task_input_but_a_plain_task_id_is_refused(self) -> None:
+        row = {"task_id": "a", "task_input": {"prompt": "solve it"}}
 
         with pytest.raises(ConfigError, match=r"Benchmark 'bench': Expected a flat dataset row"):
             _plan([row])
+
+    def test_materialized_rows_keep_their_identity_and_digest_their_task_input(self) -> None:
+        plan = _plan([_typed("b", "set_one"), _typed("a", "set_one")], taskset=None)
+
+        assert [(task.task_id.taskset, task.task_id.task_id) for task in plan.tasks] == [
+            ("set_one", "a"),
+            ("set_one", "b"),
+        ]
+        assert (
+            plan.tasks[0].digest == "sha256:" + hashlib.sha256(canonical_json(_typed("a")["task_input"])).hexdigest()
+        )
+
+    def test_the_plan_of_materialized_rows_is_the_plan_of_the_flat_rows_they_come_from(self) -> None:
+        flat = [_row("b", "two"), _row("a", "one", task_source="agent_1", _ng_task_index=3)]
+        collated = [materialize_task(row, taskset="bench") for row in flat]
+
+        assert eval_plan_json(_plan(flat)) == eval_plan_json(_plan(collated, taskset="bench"))
+
+    def test_flat_and_materialized_rows_can_share_a_dataset(self) -> None:
+        plan = _plan([_row("a"), _typed("b", "bench")], taskset="bench")
+
+        assert [task.task_id.task_id for task in plan.tasks] == ["a", "b"]
+
+    def test_materialized_rows_must_name_the_declared_taskset(self) -> None:
+        with pytest.raises(ConfigError, match=r"Benchmark 'bench': task_id.taskset 'other' differs from the dataset"):
+            _plan([_typed("a", "bench"), _typed("b", "other")], taskset="bench")
+
+    def test_without_a_declared_taskset_materialized_rows_keep_theirs_and_flat_rows_take_the_name(self) -> None:
+        plan = _plan([_typed("a", "set_one"), _row("b")], taskset=None)
+
+        assert {task.task_id.task_id: task.task_id.taskset for task in plan.tasks} == {"a": "set_one", "b": "bench"}
+
+    def test_duplicate_materialized_ids_are_refused(self) -> None:
+        with pytest.raises(ConfigError, match=r"not unique: \['a'\]"):
+            _plan([_typed("a", prompt="one"), _typed("a", prompt="two"), _typed("b")])
+
+    def test_selected_task_ids_limit_a_plan_of_materialized_rows(self) -> None:
+        plan = _plan([_typed("a"), _typed("b"), _typed("c")], selected_task_ids=["c", "a"])
+
+        assert [task.task_id.task_id for task in plan.tasks] == ["a", "c"]
+        assert plan.selected_task_ids == ["a", "c"]
+
+    def test_unknown_selected_ids_of_materialized_rows_are_refused(self) -> None:
+        with pytest.raises(ConfigError, match=r"no tasks with ids \['z'\]"):
+            _plan([_typed("a")], selected_task_ids=["z"])
+
+    @pytest.mark.parametrize(
+        "task_id",
+        [{"taskset": "bench"}, {"task_id": "a"}, {"taskset": "", "task_id": "a"}, {"taskset": "bench", "task_id": ""}],
+    )
+    def test_a_malformed_task_id_envelope_is_refused(self, task_id: dict) -> None:
+        with pytest.raises(ConfigError, match=r"Benchmark 'bench'"):
+            _plan([{"task_id": task_id, "task_input": {"prompt": "solve it"}}], taskset=None)
+
+    def test_flat_rows_without_an_id_are_still_refused_next_to_materialized_rows(self) -> None:
+        rows = [_typed("a"), {"responses_create_params": {"input": []}}, _row("c")]
+
+        with pytest.raises(ConfigError, match=r"1 of 3 tasks have no task id .*rows \[1\]"):
+            _plan(rows)
+
+    def test_the_digest_covers_the_task_input_and_not_the_rest_of_the_row(self) -> None:
+        plain = _plan([_typed("a")]).tasks[0]
+        outside = _plan([{**_typed("a"), "responses_create_params": {"input": []}}]).tasks[0]
+        inside = _plan([_typed("a", prompt="another")]).tasks[0]
+
+        assert outside.digest == plain.digest
+        assert inside.digest != plain.digest
 
     def test_duplicate_ids_are_refused(self) -> None:
         with pytest.raises(ConfigError, match=r"not unique: \['a'\]"):
@@ -127,7 +199,7 @@ def _mock_port_allocation(monkeypatch):
 
 
 class TestPlanBenchmarkCommand:
-    def _config(self, tmp_path: Path, **plan_args: object) -> dict:
+    def _config(self, tmp_path: Path, taskset: str | None = None, **plan_args: object) -> dict:
         prepare_script = tmp_path / "prepare.py"
         prepare_script.write_text("")
         dataset = {
@@ -135,12 +207,29 @@ class TestPlanBenchmarkCommand:
             "type": "benchmark",
             "jsonl_fpath": str(tmp_path / "benchmark.jsonl"),
             "prepare_script": str(prepare_script),
+            **({"taskset": taskset} if taskset is not None else {}),
         }
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
             json.dumps({"fake_agent": {"responses_api_agents": {"simple_agent": {"datasets": [dataset]}}}})
         )
-        return {"config_paths": [str(config_path)], **safe_load(config_path.read_text()), **plan_args}
+        routes = (
+            {
+                "environment_routing_mode": "taskset",
+                "environment_server_routes": {taskset: "fake_env"},
+                "fake_env": {
+                    "environment_servers": {
+                        "fake_server": {
+                            "entrypoint": "app.py",
+                            "agent_server": {"type": "responses_api_agents", "name": "fake_agent"},
+                        }
+                    }
+                },
+            }
+            if taskset is not None
+            else {}
+        )
+        return {"config_paths": [str(config_path)], **safe_load(config_path.read_text()), **routes, **plan_args}
 
     def _prepare_module(self, tmp_path: Path, rows: list[dict]) -> MagicMock:
         def prepare() -> Path:
@@ -155,7 +244,9 @@ class TestPlanBenchmarkCommand:
     def _run(self, config: dict, module: MagicMock | None = None) -> None:
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=OmegaConf.create(config)),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=module or MagicMock()),
+            patch(
+                "nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=module or MagicMock()
+            ),
         ):
             plan_benchmark()
 
@@ -168,6 +259,29 @@ class TestPlanBenchmarkCommand:
         plan = EvalPlan.model_validate_json(out.read_text())
         assert [task.task_id.task_id for task in plan.tasks] == ["a", "b"]
         assert plan.benchmark.name == "fake_bench"
+
+    def test_materialized_prepared_rows_are_planned_by_the_declared_taskset(self, tmp_path: Path) -> None:
+        out = tmp_path / "plan.json"
+        rows = [_typed("b", "fake_set"), _typed("a", "fake_set")]
+
+        self._run(
+            self._config(tmp_path, taskset="fake_set", plan_output_fpath=str(out)),
+            self._prepare_module(tmp_path, rows),
+        )
+
+        plan = EvalPlan.model_validate_json(out.read_text())
+        assert [(task.task_id.taskset, task.task_id.task_id) for task in plan.tasks] == [
+            ("fake_set", "a"),
+            ("fake_set", "b"),
+        ]
+
+    def test_materialized_prepared_rows_of_another_taskset_are_refused(self, tmp_path: Path, capsys) -> None:
+        config = self._config(tmp_path, taskset="fake_set", plan_output_fpath=str(tmp_path / "p"))
+
+        with pytest.raises(SystemExit):
+            self._run(config, self._prepare_module(tmp_path, [_typed("a", "other_set")]))
+
+        assert "differs from the dataset taskset" in " ".join(capsys.readouterr().out.split())
 
     def test_task_ids_select_a_subset(self, tmp_path: Path) -> None:
         out = tmp_path / "plan.json"

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import logging
 from abc import abstractmethod
 from typing import Any, ClassVar, Dict, Optional
 
@@ -22,11 +23,15 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import (
+    EPISODE_FAILED,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
 from nemo_gym.server_runtime import BaseVerifyRequest, SimpleResourcesServer
+
+
+logger = logging.getLogger(__name__)
 
 
 class EnvResetRequest(BaseModel):
@@ -115,6 +120,13 @@ class GymnasiumServer(SimpleResourcesServer):
         # A reserved key set to None (an env that computes the flag) counts as absent; the session is already
         # closed below, so a value that fails EnvStepResponse validation would turn the step into a 500.
         failure = {key: value for key in FAILURE_INFO_KEYS if (value := info.pop(key, None)) is not None}
+        if failure.get("mask_sample") and "failure_kind" not in failure:
+            # A masked episode must say why. An environment that masks without a kind gets the generic one, and the
+            # warning names the environment so it can set its own.
+            logger.warning(
+                "%s masked a step without a failure_kind; reporting %s", type(self).__name__, EPISODE_FAILED
+            )
+            failure["failure_kind"] = EPISODE_FAILED
         if terminated or truncated:
             await self.close_session(session_id)
             self.checkpoint_session_ended(request)
@@ -137,7 +149,7 @@ class GymnasiumServer(SimpleResourcesServer):
         """Release state owned by a session. Safe to call repeatedly."""
         self.session_state.pop(session_id, None)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         return {
             session_id: self.export_env_state(self.session_state[session_id])
             for session_id in session_ids

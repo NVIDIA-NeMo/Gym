@@ -122,7 +122,9 @@ class ClientDisconnectCancellationMiddleware:
                     if response_complete.is_set():
                         return
 
-                    await received_messages.put(message)
+                    # The app never receives this disconnect: it is cancelled instead.
+                    # A handler reading the body would otherwise get ClientDisconnect before the cancellation lands,
+                    # and one that treats a failed read as an empty body would act on it.
                     client_disconnected.set()
                     self.num_cancelled += 1
                     if counts is not None:
