@@ -1025,7 +1025,7 @@ class TestAgentSession:
         assert "timed out" in response.failure.failure_reason
 
     async def test_the_interaction_deadline_stops_the_turns_and_the_episode_is_graded(self) -> None:
-        server, client = _server(turns=[_submit(WRONG), _hang], interaction_timeout_seconds=0.5)
+        server, client = _server(turns=["Hmm.", _hang], interaction_timeout_seconds=0.5)
 
         response = await _run(server)
 
