@@ -139,6 +139,10 @@ class SandboxSession[Artifacts]:
     capture_error: Exception | None = field(default=None, init=False)
     termination_error: NgFailureEvent | None = field(default=None, init=False)
     sandbox_stopped: bool = field(default=False, init=False)
+    # Exit status of the launch exec once it returned normally (the supervisor's own exit).
+    launch_return_code: int | None = field(default=None, init=False)
+    # Cleanup was confirmed by the provider because the supervisor left no receipt.
+    cleanup_receipt_missing: bool = field(default=False, init=False)
     execution_oom: NgFailureEvent | None = field(default=None, init=False)
     _session_root: str | None = field(default=None, init=False)
     _stage_task: asyncio.Future[SandboxCommand] | None = field(default=None, init=False)
@@ -262,6 +266,8 @@ class SandboxSession[Artifacts]:
                 if error.boundary == "sandbox" and error.failure_kind == PROVIDER_OOM_KILLED:
                     self.execution_oom = error
                 raise
+            if not result.error_type:
+                self.launch_return_code = result.return_code
             if result.error_type == "timeout":
                 raise TimeoutError(f"{self.harness} sandbox supervisor exceeded its execution deadline")
             if result.error_type:
@@ -313,6 +319,8 @@ class SandboxSession[Artifacts]:
         self.session_dir = session_dir
         self.launch_started = False
         self.cleanup = None
+        self.launch_return_code = None
+        self.cleanup_receipt_missing = False
         self.artifacts = None
         self.capture_error = None
         self._stage_task = None
@@ -395,13 +403,22 @@ class SandboxSession[Artifacts]:
                     workdir=self.workdir,
                     timeout=timeout,
                     harness=self.harness,
+                    launch_finished=self._launch_returned(),
                 )
+            self.cleanup_receipt_missing = self.cleanup.get("receipt_missing") is True
         except TimeoutError as error:
             raise RuntimeError(f"{self.harness} launch outcome is unknown; termination deadline exceeded") from error
         except NgFailureEvent as error:
             if is_harness_termination_failure(error):
                 self.termination_error = error
             raise
+
+    def _launch_returned(self) -> bool:
+        """Whether the provider exec of the launch command returned normally (its process exited)."""
+        task = self._exec_task
+        if task is None or not task.done() or task.cancelled() or task.exception() is not None:
+            return False
+        return not task.result().error_type
 
     async def _finish(self, *, timeout: float) -> None:
         """Join process finalization without releasing the sandbox connection."""

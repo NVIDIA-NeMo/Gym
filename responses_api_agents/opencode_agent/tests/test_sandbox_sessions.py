@@ -2725,6 +2725,13 @@ def test_provider_report_does_not_hide_other_execution_outcomes(change):
     assert not OpenCodeAgent._reported_model_error(native, cleanup)
 
 
+def test_only_context_overflow_is_reported_on_exit_zero():
+    cleanup = {"return_code": 0, "timed_out": False, "error": None}
+    overflow = {"error": {"name": "ContextOverflowError"}, "finish": "error", "time": {"completed": 1}}
+    assert OpenCodeAgent._reported_model_error(overflow, cleanup)
+    assert not OpenCodeAgent._reported_model_error({"error": {"name": "APIError"}, "time": {"completed": 1}}, cleanup)
+
+
 @pytest.mark.parametrize(
     "message, code",
     [
@@ -2766,8 +2773,12 @@ def test_statusless_error_without_native_retry_flag_remains_unknown(setup, retry
     assert outcome.failure_kind == "unknown"
 
 
+# OpenCode 1.15.x exits 0 when compaction itself overflows; 1.17.x exits 1.
+@pytest.mark.parametrize("return_code", [0, 1])
 @pytest.mark.parametrize("cleanup_error", [None, "cleanup failed"])
-async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failure(setup, tmp_path, cleanup_error):
+async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failure(
+    setup, tmp_path, cleanup_error, return_code
+):
     from nemo_gym.agents import OutcomeAction, agent_outcome_policy
 
     agent, sandbox = setup
@@ -2779,7 +2790,7 @@ async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failu
         "data": {"message": "context is too large", "responseBody": "provider detail"},
     }
     sandbox.events = json.dumps(export)
-    sandbox.result.update(return_code=1, error=cleanup_error)
+    sandbox.result.update(return_code=return_code, error=cleanup_error)
     capture_observations(sandbox, tmp_path)
     request, session_id, task = await activate(agent, sandbox)
     if cleanup_error:
