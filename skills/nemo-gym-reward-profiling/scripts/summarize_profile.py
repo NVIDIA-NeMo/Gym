@@ -92,19 +92,21 @@ def run_labels(rows):
 
 
 def planned_rollouts(read_rows):
-    """Planned rollouts per (task, run label), the label of each run, whether every row names an agent, and the agents
-    that front several runs.
+    """Planned rollouts per (task, run label), the label of each run, whether every row names an agent, and the names
+    that several runs have as their agent or key.
 
     `read_rows` returns a fresh iterator over the materialized inputs; the file is read twice instead of held in memory.
     """
     labels = run_labels(read_rows())
-    planned, every_row_names_agent, keys_by_agent = Counter(), True, defaultdict(set)
+    planned, every_row_names_agent, runs_by_name = Counter(), True, defaultdict(set)
     for row in read_rows():
-        planned[(row["_ng_task_index"], labels.get(run_key(row)))] += 1
+        key = run_key(row)
+        planned[(row["_ng_task_index"], labels.get(key))] += 1
         every_row_names_agent = every_row_names_agent and agent_name(row) is not None
-        keys_by_agent[agent_name(row)].add(run_key(row))
-    shared_agents = {agent for agent, keys in keys_by_agent.items() if agent is not None and len(keys) > 1}
-    return planned, labels, every_row_names_agent, shared_agents
+        runs_by_name[key].add(key)
+        runs_by_name[agent_name(row)].add(key)
+    ambiguous_labels = {name for name, keys in runs_by_name.items() if name is not None and len(keys) > 1}
+    return planned, labels, every_row_names_agent, ambiguous_labels
 
 
 def record_key(record):
@@ -135,15 +137,16 @@ def summarize(
     agent_metrics=None,
     every_input_names_agent=True,
     input_run_labels=None,
-    input_shared_agents=frozenset(),
+    input_ambiguous_labels=frozenset(),
 ):
     """Coverage and task groups for one profile.
 
     `planned_by_task_label` counts the materialized input rows per (task, run label) and `input_run_labels` labels
-    their runs; both are None when the inputs were not found. `input_shared_agents` are the agents that front several
-    runs in the inputs, which label those runs by Environment Server. `gym eval profile` leaves masked rollouts out of
-    a row's counts and writes no row for a task whose every planned rollout was saved and masked, so masked rollouts of
-    such tasks show only in the agent metrics' total. That total covers only rows that name an agent.
+    their runs; both are None when the inputs were not found. `input_ambiguous_labels` are the names that several input
+    runs have as their agent or key, so gym may label any of those runs with them. `gym eval profile` leaves masked
+    rollouts out of a row's counts and writes no row for a task whose every planned rollout was saved and masked, so
+    masked rollouts of such tasks show only in the agent metrics' total. That total covers only rows that name an
+    agent.
     """
     if any("num_rollouts" not in row for row in profile_rows):
         raise ValueError(
@@ -177,8 +180,9 @@ def summarize(
         label = agent_name(row)
         if label in input_label_by_profile_label:
             return input_label_by_profile_label[label]
-        # Once masking hides an agent's other runs, gym names the one left by its agent, so the name fits any of them.
-        return None if label in input_shared_agents else label
+        # gym labels a run by its agent or its key, depending on which runs masking left, so a name that several input
+        # runs have may be any of them.
+        return None if label in input_ambiguous_labels else label
 
     def mismatch(task):
         return ValueError(
@@ -400,9 +404,9 @@ def main():
     metrics_path = args.profile.with_name(stem + "_agent_metrics.json") if stem else None
 
     try:
-        planned, input_run_labels, every_input_names_agent, input_shared_agents = None, None, True, frozenset()
+        planned, input_run_labels, every_input_names_agent, input_ambiguous_labels = None, None, True, frozenset()
         if inputs_path is not None and inputs_path.is_file():
-            planned, input_run_labels, every_input_names_agent, input_shared_agents = planned_rollouts(
+            planned, input_run_labels, every_input_names_agent, input_ambiguous_labels = planned_rollouts(
                 lambda: read_jsonl(inputs_path)
             )
         agent_metrics = None
@@ -419,7 +423,7 @@ def main():
             agent_metrics,
             every_input_names_agent,
             input_run_labels,
-            input_shared_agents,
+            input_ambiguous_labels,
         )
     except ValueError as e:
         sys.exit(str(e))

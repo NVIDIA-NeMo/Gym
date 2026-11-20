@@ -284,24 +284,15 @@ def test_runs_renamed_by_masking_are_read_from_the_samples(tmp_path, shape):
     assert _ids(coverage["tasks_without_measured_rollout"]) == [(0, "server_b"), (1, "server_a"), (1, "server_b")]
 
 
-# Two agents behind two servers each, where one server is named like the other agent.
-CLASHING_RUNS = [("agent", "server_a"), ("agent", "server_b"), ("other", "agent"), ("other", "server_d")]
-
-
-def _clashing_results(rows, saved):
-    # Every result of server_b and of the server named "agent" is masked.
-    return [
+def test_a_count_only_row_takes_the_run_of_a_measured_row_with_its_label(tmp_path):
+    # With server_b masked, gym labels server_a "agent", the inputs' label of the masked server named "agent". server_a
+    # saved nothing for task 1, and its count-only row must not land on that server.
+    rows = _fan_out_rows([("agent", "server_a"), ("agent", "server_b"), ("other", "agent"), ("other", "server_d")])
+    results = [
         row | {"reward": 1.0, "mask_sample": row["_ng_environment_server"] in ("server_b", "agent")}
         for row in rows
-        if saved(row["_ng_task_index"], row["_ng_environment_server"], row["_ng_rollout_index"])
+        if (row["_ng_task_index"], row["_ng_environment_server"]) != (1, "server_a")
     ]
-
-
-def test_a_count_only_row_takes_the_run_of_a_measured_row_with_its_label(tmp_path):
-    # With server_b masked, gym labels server_a "agent", the inputs' label of the masked server. server_a saved nothing
-    # for task 1, and its count-only row must not land on that server.
-    rows = _fan_out_rows(CLASHING_RUNS)
-    results = _clashing_results(rows, lambda task, server, _: (task, server) != (1, "server_a"))
     profile = _gym_profile(tmp_path, rows, results)
 
     coverage = _summary(profile)["coverage"]
@@ -314,11 +305,17 @@ def test_a_count_only_row_takes_the_run_of_a_measured_row_with_its_label(tmp_pat
 
 
 def test_a_row_of_unknown_run_keeps_the_other_runs_coverage(tmp_path):
-    # As above, but server_a saved nothing at all, so no measured row tells which run its count-only rows belong to:
-    # gym's label "agent" may be either of that agent's servers, or the server named "agent". Those runs stay unknown,
-    # and server_d keeps its known coverage: it measured 1 of task 0's 2 repeats.
-    rows = _fan_out_rows(CLASHING_RUNS)
-    results = _clashing_results(rows, lambda task, server, rollout: server != "server_a" and (task, rollout) != (0, 7))
+    # The inputs label server_a by its server, as its agent's name is the key of the server named "agent". With that
+    # server and server_c masked, gym labels server_a "agent". server_a saved nothing, so no measured row tells which
+    # run the count-only rows labelled "agent" belong to. Those runs stay unknown, and agent_d keeps its known
+    # coverage: it measured 1 of task 0's 2 repeats.
+    rows = _fan_out_rows([("agent", "server_a"), ("other", "agent"), ("other", "server_c"), ("agent_d", None)])
+    results = [
+        row | {"reward": 1.0, "mask_sample": row.get("_ng_environment_server") in ("agent", "server_c")}
+        for row in rows
+        if row.get("_ng_environment_server") != "server_a"
+        and (row["_ng_task_index"], row["_ng_rollout_index"]) != (0, 7)
+    ]
     profile = _gym_profile(tmp_path, rows, results)
 
     coverage = _summary(profile)["coverage"]
@@ -326,9 +323,9 @@ def test_a_row_of_unknown_run_keeps_the_other_runs_coverage(tmp_path):
     assert (coverage["planned_rollouts"], coverage["measured_rollouts"]) == (16, 3)
     assert (coverage["masked_rollouts"], coverage["never_saved_rollouts"]) == (None, None)
     assert (coverage["tasks"], coverage["complete_tasks"]) == (8, 1)
-    assert _ids(coverage["partial_tasks"]) == [(0, "server_d")]
+    assert _ids(coverage["partial_tasks"]) == [(0, "agent_d")]
     assert _ids(coverage["tasks_without_measured_rollout"]) == [
-        (task, server) for task in (0, 1) for server in ("agent", "server_a", "server_b")
+        (task, server) for task in (0, 1) for server in ("agent", "server_a", "server_c")
     ]
     assert coverage["tasks_not_in_profile_file"] == []
 
