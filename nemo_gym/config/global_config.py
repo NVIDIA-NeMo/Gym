@@ -98,6 +98,9 @@ ray_version = _installed_version("ray")
 _GLOBAL_CONFIG_DICT = None
 _SCOPED_GLOBAL_CONFIG_LOCK = threading.RLock()
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
+# Path of a file holding the same YAML, used instead of NEMO_GYM_CONFIG_DICT when the config exceeds the kernel's
+# per-string argument/environment limit (MAX_ARG_STRLEN, 128 KiB on Linux), e.g. a Harbor run config of a thousand tasks.
+NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT_FILE"
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
 ENTRYPOINT_KEY_NAME = "entrypoint"
@@ -2167,6 +2170,11 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
         return _GLOBAL_CONFIG_DICT
 
     nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
+    if not nemo_gym_config_dict_str_from_env:
+        config_dict_file = getenv(NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME)
+        if config_dict_file:
+            with open(config_dict_file, encoding="utf-8") as f:
+                nemo_gym_config_dict_str_from_env = f.read()
     if nemo_gym_config_dict_str_from_env:
         global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
 
