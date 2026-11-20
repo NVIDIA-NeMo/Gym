@@ -22,6 +22,7 @@ to it. The model endpoint is reached directly from the sandbox, or via the SSH r
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.ecs_fargate import engine
+from nemo_gym.sandbox.providers.utils import require_shell_text
 
 
 def _outside_endpoints(spec: SandboxSpec) -> list[engine.OutsideEndpoint]:
@@ -123,13 +125,14 @@ class EcsFargateProvider:
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
+        command = require_shell_text(command, provider=self.name)
         sandbox: engine.EcsFargateSandbox = handle.raw
         result = await sandbox.exec(
             command,

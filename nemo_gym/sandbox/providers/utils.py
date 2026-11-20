@@ -23,10 +23,12 @@ import contextlib
 import os
 import posixpath
 import signal
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import anyio
+
+from nemo_gym.sandbox.providers.base import SandboxExecArgvUnsupportedError
 
 
 # How long a cancelled CLI command's process may take to be reaped after it is killed.
@@ -75,3 +77,16 @@ async def kill_cancelled_command(proc: asyncio.subprocess.Process) -> None:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     with anyio.CancelScope(shield=True), anyio.move_on_after(REAP_TIMEOUT_S), contextlib.suppress(Exception):
         await proc.wait()
+
+
+def require_shell_text(command: str | Sequence[str], *, provider: str) -> str:
+    """``command`` as the shell text a provider without ``SupportsSandboxExecArgv`` runs.
+
+    An argument list raises ``SandboxExecArgvUnsupportedError`` instead of being joined into shell text: its
+    caller relies on no shell running. ``AsyncSandbox.exec`` refuses one first; this covers direct provider calls.
+    """
+    if isinstance(command, str):
+        return command
+    raise SandboxExecArgvUnsupportedError(
+        f"Sandbox provider {provider!r} cannot run an argument list without a shell; pass shell text instead"
+    )
