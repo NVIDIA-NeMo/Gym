@@ -296,6 +296,26 @@ async def test_optional_close_cancels_an_active_judge_and_is_idempotent(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_retirement_releases_only_the_retired_episode(monkeypatch):
+    resource, _ = server(monkeypatch)
+    await reset(resource)
+    await resource._reset_endpoint(EnvResetRequest.model_validate(TASK), request("other"))
+    retired = resource._episodes["episode"]
+    other = resource._episodes["other"]
+
+    await resource.retire_session_state("episode")
+    assert retired.simulator is None and retired.closed_at is not None
+    assert other.simulator is not None and other.closed_at is None
+
+    later = retired.closed_at + resource.config.session_close_retry_window_seconds + 1
+    monkeypatch.setattr("resources_servers.partner_if.recorded_context_app.time", lambda: later)
+    await resource.retire_session_state("episode")
+    await resource.retire_session_state("unknown")
+    resource._prune()
+    assert set(resource._episodes) == set(resource._locks) == {"other"}
+
+
+@pytest.mark.asyncio
 async def test_prefix_observations_are_preserved_without_false_programmatic_grading(monkeypatch):
     resource, calls = server(monkeypatch, observed=True)
     await reset(resource)

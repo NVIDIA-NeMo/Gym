@@ -120,7 +120,7 @@ class ReadonlyTools:
                     raise CoverageGap("Unmodeled shell control flow")
                 else:
                     current.append(token)
-            stdin = ""
+            stdin: str | None = None
             for segment in pipeline:
                 cleaned, merge, discard_stderr = [], False, False
                 destination = None
@@ -158,10 +158,10 @@ class ReadonlyTools:
                 if stderr and not merge:
                     append(stderr)
                 self.last_status = status
-            append(stdin)
+            append(stdin or "")
         return "".join(pieces), "readonly_tool_result"
 
-    def command(self, tokens: list[str], stdin: str) -> tuple[str, str, int]:
+    def command(self, tokens: list[str], stdin: str | None) -> tuple[str, str, int]:
         if not tokens:
             raise CoverageGap("Missing command")
         name, args = tokens[0], tokens[1:]
@@ -170,7 +170,7 @@ class ReadonlyTools:
         if name == "echo":
             return " ".join(a.replace("$?", str(self.last_status)) for a in args) + "\n", "", 0
         if name == "head":
-            return self.head(args, stdin), "", 0
+            return self.head(args, stdin or ""), "", 0
         if name == "cat" and len(args) == 1:
             if args[0] in self.files:
                 return self.files[args[0]], "", 0
@@ -271,7 +271,7 @@ class ReadonlyTools:
             else "".join(stdin.splitlines(keepends=True)[:count])
         )
 
-    def search(self, args: list[str], stdin: str) -> tuple[str, str, int]:
+    def search(self, args: list[str], stdin: str | None) -> tuple[str, str, int]:
         """Run trusted rg only against isolated copies of frozen file content."""
         executable = shutil.which("rg")
         if executable is None:
@@ -281,6 +281,7 @@ class ReadonlyTools:
         flags = {"-n", "--line-number", "-i", "-S", "-s", "-F", "--fixed-strings", "-l", "--files-with-matches"}
         if self.workspace_listing:
             flags.add("--files")
+        list_files = False
         i = 0
         while i < len(args):
             token = args[i]
@@ -293,6 +294,7 @@ class ReadonlyTools:
                 i += 2
             elif token in flags:
                 options.append(token)
+                list_files |= token == "--files"
                 i += 1
             elif token.startswith("--glob="):
                 options.append(token)
@@ -304,11 +306,13 @@ class ReadonlyTools:
                 positional.append(token)
                 i += 1
         explicit_pattern = any(x in options for x in {"-e", "--regexp"})
-        if not explicit_pattern and "--files" not in options:
+        if not explicit_pattern and not list_files:
             if not positional:
                 raise CoverageGap("Missing search pattern")
             options.append(positional.pop(0))
-        if not positional and not stdin:
+        if list_files and not positional:
+            raise CoverageGap("Listing files needs a frozen path")
+        if not positional and stdin is None:
             raise CoverageGap("Search needs a frozen path or pipeline input")
         # Source selection is intentionally explicit: Python libraries plus the
         # API schema. Unknown file requests are exclusions, not empty matches.
@@ -339,8 +343,8 @@ class ReadonlyTools:
                 target.write_text(self.files.get(virtual, ""))
             # Search the isolated tree so glob filters apply to directory entries,
             # rather than passing explicit filenames that override rg's filters.
-            paths = [str(root)] if selected else []
-            if selected - self.files.keys() and "--files" not in options:
+            paths = [str(root)] if selected else ["-"]
+            if selected - self.files.keys() and not list_files:
                 # Apply the same trusted glob filter to inventory placeholders. Empty
                 # placeholders may select files, but never supply content evidence.
                 scope = subprocess.run(
@@ -369,7 +373,7 @@ class ReadonlyTools:
                 *paths,
             ]
             result = subprocess.run(
-                command, input=stdin, text=True, errors="replace", capture_output=True, timeout=10, check=False
+                command, input=stdin or "", text=True, errors="replace", capture_output=True, timeout=10, check=False
             )
             stdout = result.stdout.replace(str(root), "")
             stderr = result.stderr.replace(str(root), "")

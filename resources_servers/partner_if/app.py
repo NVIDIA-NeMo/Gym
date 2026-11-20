@@ -32,12 +32,17 @@ from resources_servers.partner_if.grading_contract import (
     Evaluation,
     GradingContract,
 )
-from resources_servers.partner_if.grading_service import JudgeRejection, grade, unanswered
+from resources_servers.partner_if.grading_service import JudgeRejection, grade, grade_without_evidence
 from resources_servers.partner_if.llm import MAX_JUDGE_INPUT_CHARS, PROTOCOL
 from resources_servers.partner_if.metrics import PartnerIFMetricsMixin
 from resources_servers.partner_if.native_evidence import LiveAgentCapture, live_agent_evidence, visible_events
 from resources_servers.partner_if.receipt import masked_fields, scoring_fields
 from resources_servers.partner_if.schema import IFResult, VerifierMetadata, validate_input
+from resources_servers.partner_if.tool_checks import (
+    SINGLE_ADVERTISED_TOOL_CALL,
+    InvalidAdvertisedToolRegistry,
+    advertised_tool_validators,
+)
 from resources_servers.partner_if.verifier_fixture import create_fixture_server
 
 
@@ -152,7 +157,7 @@ def visible_answer(response: NeMoGymResponse) -> list[dict]:
     return messages
 
 
-def tool_response_evidence(params: dict, response: NeMoGymResponse) -> EvidenceBundle:
+def tool_response_evidence(params: dict, response: NeMoGymResponse, contract: GradingContract) -> EvidenceBundle:
     """Capture one new response, including unexecuted calls, for the shared judge.
 
     A malformed argument is candidate behavior, not a capture failure. Frozen history stays
@@ -170,12 +175,15 @@ def tool_response_evidence(params: dict, response: NeMoGymResponse) -> EvidenceB
         if item.type == "message" and item.role != "assistant":
             raise ValueError("New response messages must belong to the assistant")
     events = visible_events([item.model_dump(exclude_none=True) for item in response.output])
+    tools = params.get("tools") or []
     if not any(event.kind == "tool_call" or event.text.strip() for event in events):
+        if any(item.verifier.id == SINGLE_ADVERTISED_TOOL_CALL for item in contract.checks):
+            advertised_tool_validators(tools)
         raise NoAnswer(NO_ANSWER, "The reply has neither a visible answer nor a tool call")
     return EvidenceBundle(
         context=params["input"],
         instructions=params.get("instructions"),
-        tools=params.get("tools") or [],
+        tools=tools,
         answer="\n".join(event.text for event in events if event.kind == "assistant"),
         trajectory=events,
     )
@@ -196,14 +204,16 @@ class PartnerIFGradingMixin:
     ) -> dict[str, JsonValue]:
         """The Gym verify fields for one rollout. In order: an unsigned contract is masked; a reply that gives
         nothing to grade fails every item without the judge (`build_evidence` raises NoAnswer, TRUNCATED when
-        the output-token cap cut the reply off); evidence that cannot be assessed (ValueError) is masked; any
-        other evidence is graded."""
+        the output-token cap cut the reply off); evidence that cannot be assessed (ValueError) is masked.
+        An invalid advertised registry on a completed empty reply also records unscorable checks."""
         if not contract.audit_signoff and not self.config.allow_provisional_rubrics:
             return masked_fields(contract, UNSIGNED_CONTRACT, UNSIGNED)
         try:
             evidence = build_evidence()
         except NoAnswer as missing:
-            receipt = unanswered(contract, missing.failure_kind, str(missing))
+            receipt = grade_without_evidence(contract, missing.failure_kind, str(missing), passed=False)
+        except InvalidAdvertisedToolRegistry as invalid:
+            receipt = grade_without_evidence(contract, UNSCORABLE, str(invalid), passed=None)
         except ValueError as error:
             return masked_fields(contract, UNSCORABLE, str(error))
         else:
@@ -248,7 +258,7 @@ class PartnerIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
                 return bundle
             validate_input(params, evidence_mode=contract.evidence_mode)
             if contract.evidence_mode == "tool_call_response":
-                return tool_response_evidence(params, body.response)
+                return tool_response_evidence(params, body.response, contract)
             answer = visible_answer(body.response)
             return EvidenceBundle(
                 context=params["input"],

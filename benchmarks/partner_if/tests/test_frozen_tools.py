@@ -11,7 +11,7 @@ import pytest
 
 from benchmarks.partner_if.tests.fixture_data import BUNDLE, PARAMS, RUNTIME, SOURCE
 from resources_servers.partner_if.recorded_context.assets import ReplayConfig, load_inputs, load_runtime
-from resources_servers.partner_if.recorded_context.fixtures import Fixtures
+from resources_servers.partner_if.recorded_context.fixtures import Fixtures, shell_tokens
 from resources_servers.partner_if.recorded_context.readonly_tools import CoverageGap, ReadonlyTools
 from resources_servers.partner_if.recorded_context.runtime_contract import RuntimeContract
 
@@ -62,8 +62,6 @@ def test_optional_missing_runtime_paths_are_declared_not_invented():
     ],
 )
 def test_readonly_conditionals_preserve_exit_status(command, expected):
-    from resources_servers.partner_if.recorded_context.fixtures import shell_tokens
-
     assert state(shell_control_flow=True).readonly.run(shell_tokens(command))[0] == expected
 
 
@@ -75,6 +73,17 @@ def test_source_search_uses_actual_frozen_bytes_and_rejects_shell_options():
         tool.search(["--pre=touch /tmp/escape", "x", RUNTIME["source_root"]], "")
     with pytest.raises(CoverageGap):
         tool.search(["x", "/etc/passwd"], "")
+
+
+@pytest.mark.parametrize("content,expected_status", [("", 1), ("needle\n", 0)])
+def test_search_accepts_empty_pipeline_input(content, expected_status):
+    tool = ReadonlyTools({"/repo/input.txt": content}, {}, workspace_listing=True)
+    text, kind = tool.run(shell_tokens("cat /repo/input.txt | rg needle"))
+    assert (text, kind, tool.last_status) == (content, "readonly_tool_result", expected_status)
+    with pytest.raises(CoverageGap, match="Search needs a frozen path or pipeline input"):
+        tool.run(shell_tokens("rg needle"))
+    with pytest.raises(CoverageGap, match="Listing files needs a frozen path"):
+        tool.run(shell_tokens("cat /repo/input.txt | rg --files"))
 
 
 def test_search_requires_complete_content_but_inventory_listing_does_not():

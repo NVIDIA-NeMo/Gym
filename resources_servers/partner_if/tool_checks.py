@@ -5,6 +5,7 @@
 from typing import TYPE_CHECKING
 
 from jsonschema.exceptions import SchemaError
+from jsonschema.protocols import Validator
 from jsonschema.validators import validator_for
 from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
@@ -15,6 +16,13 @@ from resources_servers.partner_if.evidence import EvidenceUnavailable
 
 if TYPE_CHECKING:
     from resources_servers.partner_if.checks import CheckContext
+
+
+SINGLE_ADVERTISED_TOOL_CALL = "single_advertised_tool_call_v1"
+
+
+class InvalidAdvertisedToolRegistry(EvidenceUnavailable):
+    """The advertised functions cannot be used to score the candidate."""
 
 
 def _check_references(schema: dict, validator: type) -> None:
@@ -43,19 +51,12 @@ def _check_references(schema: dict, validator: type) -> None:
         pending.extend((child, resolver.in_subresource(child)) for child in current.subresources())
 
 
-def single_advertised_tool_call(context: "CheckContext") -> tuple[bool, str]:
-    """Require one call to an advertised function with schema-valid object arguments.
-
-    The adapter keeps supplied history in context and newly emitted calls in trajectory.
-    Code strings are data: neither their syntax nor their execution is assessed here.
-    """
-    evidence = context.evidence
-    if evidence.trajectory_error:
-        raise EvidenceUnavailable(evidence.trajectory_error)
-    if not evidence.tools:
-        raise EvidenceUnavailable("The advertised function registry is missing")
+def advertised_tool_validators(tools: list[dict]) -> dict[str, Validator]:
+    """Validate the entire advertised registry and prepare its offline argument validators."""
+    if not tools:
+        raise InvalidAdvertisedToolRegistry("The advertised function registry is missing")
     validators = {}
-    for tool in evidence.tools:
+    for tool in tools:
         name = tool.get("name")
         schema = tool.get("parameters")
         if (
@@ -65,21 +66,36 @@ def single_advertised_tool_call(context: "CheckContext") -> tuple[bool, str]:
             or name in validators
             or not isinstance(schema, dict)
         ):
-            raise EvidenceUnavailable("Expected unique named functions with JSON parameter schemas")
+            raise InvalidAdvertisedToolRegistry("Expected unique named functions with JSON parameter schemas")
         try:
             validator = validator_for(schema)
             validator.check_schema(schema)
             _check_references(schema, validator)
         except SchemaError as error:
-            raise EvidenceUnavailable("The advertised function has an invalid parameter schema") from error
+            raise InvalidAdvertisedToolRegistry("The advertised function has an invalid parameter schema") from error
         except Unresolvable as error:
-            raise EvidenceUnavailable("The advertised parameter schema contains an unresolved reference") from error
+            raise InvalidAdvertisedToolRegistry(
+                "The advertised parameter schema contains an unresolved reference"
+            ) from error
         except RecursionError as error:
-            raise EvidenceUnavailable(
+            raise InvalidAdvertisedToolRegistry(
                 "The advertised parameter schema exceeded the validator recursion limit"
             ) from error
         # Dataset schemas may use local references, but must never fetch remote resources while grading.
         validators[name] = validator(schema, registry=Registry())
+    return validators
+
+
+def single_advertised_tool_call(context: "CheckContext") -> tuple[bool, str]:
+    """Require one call to an advertised function with schema-valid object arguments.
+
+    The adapter keeps supplied history in context and newly emitted calls in trajectory.
+    Code strings are data: neither their syntax nor their execution is assessed here.
+    """
+    evidence = context.evidence
+    if evidence.trajectory_error:
+        raise EvidenceUnavailable(evidence.trajectory_error)
+    validators = advertised_tool_validators(evidence.tools)
     calls = [event for event in evidence.trajectory if event.kind == "tool_call"]
     if len(calls) != 1:
         return False, f"Expected exactly one new function call; received {len(calls)}"

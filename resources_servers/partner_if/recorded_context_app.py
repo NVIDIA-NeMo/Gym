@@ -746,6 +746,14 @@ class RecordedContextResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixi
         episode.messages = []
         episode.schemas = {}
 
+    async def close_session(self, session_id: str | None) -> None:
+        """Release simulator state on close and checkpoint retirement."""
+        if session_id is not None and session_id in self._episodes:
+            async with self._lock(session_id):
+                if episode := self._episodes.get(session_id):
+                    self._release(episode)
+        await super().close_session(session_id)
+
     async def _close_endpoint(self, request: Request) -> dict:
         session_id = self._session_id(request)
         episode = self._episodes.get(session_id)
@@ -757,10 +765,7 @@ class RecordedContextResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixi
             episode.active_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await episode.active_task
-        async with self._lock(session_id):
-            episode = self._episodes.get(session_id)
-            if episode is not None:
-                self._release(episode)
+        await self.close_session(session_id)
         self.checkpoint_session_ended(request)
         return {"closed": True}
 

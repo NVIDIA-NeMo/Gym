@@ -111,6 +111,29 @@ async def test_no_call_and_multiple_calls_fail(output):
     assert result.reward == 0 and not result.mask_sample
 
 
+@pytest.mark.parametrize("invalid_registry", [False, True])
+def test_completed_empty_response_validates_registry_through_verify_endpoint(invalid_registry):
+    advertised = [tool()]
+    if invalid_registry:
+        advertised.append(tool("unused") | {"parameters": {"$ref": "https://example.invalid/missing.json"}})
+    body = {
+        "responses_create_params": {
+            "input": [{"role": "user", "content": "Call an advertised function."}],
+            "tools": advertised,
+        },
+        "verifier_metadata": {"partner_if": contract().model_dump()},
+        "response": response(output=[]).model_dump(mode="json"),
+    }
+    with TestClient(server().setup_webserver(), raise_server_exceptions=False) as client:
+        result = client.post("/verify", json=body)
+    assert result.status_code == 200
+    row = result.json()
+    assert row["mask_sample"] is invalid_registry
+    assert row["evaluation_completed"] is not invalid_registry
+    assert row["grading_result"]["reward"] == (None if invalid_registry else 0)
+    assert row["failure_kind"] == ("partner_if:unscorable" if invalid_registry else "partner_if:no_answer")
+
+
 async def test_token_cutoff_fails_but_provider_and_capture_errors_are_masked():
     cutoff = await verify([], status="incomplete", incomplete_details={"reason": "max_output_tokens"})
     assert cutoff.reward == 0 and not cutoff.mask_sample and cutoff.failure_kind == "partner_if:truncated"

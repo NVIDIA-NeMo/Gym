@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import Field
 
@@ -128,10 +129,13 @@ async def grade(
     )
 
 
-def unanswered(contract: GradingContract, failure_kind: str, reason: str) -> GradeResponse:
-    """With no answer to grade, every check fails without the judge, so a prohibition cannot pass by omission."""
+def grade_without_evidence(
+    contract: GradingContract, failure_kind: str, reason: str, *, passed: Literal[False] | None
+) -> GradeResponse:
+    """Record a failed or unscorable verdict for every check without calling the judge."""
+    evidence = "No answer to grade" if passed is False else reason
     judgments = [
-        RawJudgment(id=item.id, passed=False, reason=reason, evidence="No answer to grade", failure_kind=failure_kind)
+        RawJudgment(id=item.id, passed=passed, reason=reason, evidence=evidence, failure_kind=failure_kind)
         for item in contract.checks
     ]
     return GradeResponse(grading_result=aggregate(contract, judgments))
