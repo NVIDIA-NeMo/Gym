@@ -139,9 +139,9 @@ supplied order before all prompt text, uses `detail: high` regardless of the req
 over 2048 px on a side or 2,500 tiles of 32 px. For example, a 2400x2400 PNG becomes 1600x1600. GIF is re-encoded
 as PNG. These native processing limits cannot be disabled. Image-only prompts are supported in sessions;
 local execution rejects images with HTTP 422. Exported conversations retain images as data URIs. When the native
-transcript shows fewer images than supplied, completed and output-limit runs fail with HTTP 502 instead of
-scoring an answer made without all prompt images. Wall-time limits and reported model failures keep their
-existing outcomes.
+transcript shows fewer images than supplied, a run the outcome ladder would grade (completed, or an output or context
+limit) fails with a typed HTTP 500 (`agent_route_failed`, retried) instead of scoring an answer made without all
+prompt images. A deadline and a run that already failed keep their own outcomes.
 
 Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and unsupported tool
 policies are rejected rather than ignored. Codex cannot enforce these request-level controls
@@ -202,19 +202,23 @@ does not end Codex, as it would not under Harbor.
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
-model-output-limit event yield incomplete, potentially gradable work. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. Worker and cleanup failures remain execution errors. Only Resources determines reward.
+model-output-limit event yield incomplete, potentially gradable work. A run that hit its time limit is graded unless every model attempt the forwarder started had finished and the last one failed to connect, was cut short, or answered 408, 425, 429 or a 5xx: then the deadline was spent on the endpoint, and the response is `failed` with that model error, which is retried. A retry still in flight at the deadline leaves it graded. A reply that Codex hung up on before it arrived is not a model reply; when Codex reported that stream as idle or broken after its last model output and had not started its retry, the deadline is a transport fault, retried. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. A reported 400 whose body is the model server's context-overflow envelope (code `context_length_exceeded`) is a context limit: `incomplete` and graded, even on the first request. A run that leaves no usable result (a nonzero or signalled exit, a failed turn, a missing `turn.completed`) is a `failed` response with `agent_run_error`, retried by default. Supervisor, cleanup and capture failures remain execution errors. The shared outcome ladder decides each status (see the harness guide). Only Resources determines reward.
 
-`verify_after_agent_error: true` grades a failed run the way Harbor grades after any agent
-exit: a nonzero or signalled Codex exit, a failed turn, or a missing `turn.completed` returns a
-`failed` response (`incomplete` if the run also hit its time limit; the error is in
-`metadata.graded_agent_error`) with no classified cause instead of an execution error, so the
-Environment Server still verifies it. It applies only when Codex started a turn, the supervisor
-confirmed cleanup, the Codex error that ended the run names no model-endpoint transport or
-429/5xx failure, and the sandbox still reports running and answers a probe command. A lost or
-unresponsive sandbox, an unconfirmed cleanup, and an endpoint outage stay execution errors, so
-the episode is retried. A reported provider failure keeps its classified cause, so the
-Environment Server's outcome policy decides it as before, and a run that failed before its first
-turn stays an execution error that carries Codex's stderr.
+`verify_after_agent_error: true` labels a failed run that Resources can still grade, the run
+Harbor grades after any agent exit: a nonzero or signalled Codex exit, a failed turn, or a missing
+`turn.completed` keeps its error in `metadata.graded_agent_error`, and the unfinished turn's usage
+is read from Codex's session transcript. The label applies only when Codex started a turn, the
+supervisor confirmed cleanup, the Codex error that ended the run names no model-endpoint transport
+or 429/5xx failure, and the sandbox still reports running and answers a probe command. The
+response is `failed` with `agent_run_error` either way, as for any run that leaves no usable
+result, so the Environment Server's outcome policy decides whether it is graded. To grade it as
+Harbor does, set `agent_outcome_policy.by_failure_kind: {agent_run_error: verify}` on the
+Environment Server, as Terminal-Bench-Science's Codex profile does. That policy grades every
+`agent_run_error`, also the runs the flag leaves unlabeled: a lost or unresponsive sandbox, an
+endpoint outage that ended the run without a reported provider failure, and a run that failed
+before its first turn (its error carries Codex's stderr). An unconfirmed cleanup stays an
+execution error, so the episode is retried, and a reported provider failure keeps its classified
+cause, so the policy decides it as before.
 
 The endpoint check reads only the failure that ended the run, after its last model output:
 `turn.failed` and the last error event before it, or the last event when Codex was killed while

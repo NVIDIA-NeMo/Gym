@@ -19,6 +19,7 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
     active_sessions,
     capture_observations,
     close_body,
+    failed_message,
     rejected_events,
     seed,
     setup,  # noqa: F401
@@ -238,7 +239,7 @@ def test_combined_diagnostics_are_bounded_and_stderr_is_not_duplicated(stderr_al
     assert result.count("STDERR TAIL") == 1
 
 
-def test_model_error_502_uses_the_same_combined_diagnostic_bound(setup):
+def test_model_error_failure_uses_the_same_combined_diagnostic_bound(setup):
     agent, sandbox = setup
     artifact = json.loads(sandbox.events)
     assistant = next(message["info"] for message in artifact["messages"] if message["info"]["role"] == "assistant")
@@ -257,15 +258,16 @@ def test_model_error_502_uses_the_same_combined_diagnostic_bound(setup):
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         created.raise_for_status()
         response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == 502
-        detail = response.json()["detail"]
+        # No usable result: a failed response (agent_run_error) whose error carries the bounded diagnostic.
+        detail = failed_message(response)
         assert len(detail) <= 16000
         assert "MODEL ERROR TAIL" in detail
         assert detail.count("STDERR TAIL") == 1
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
 
 
-@pytest.mark.parametrize("failure,status", [("receipt", 500), ("missing_database", 500), ("malformed_export", 502)])
+# An unreadable export is a typed lifecycle failure (500); it was a 502.
+@pytest.mark.parametrize("failure,status", [("receipt", 500), ("missing_database", 500), ("malformed_export", 500)])
 def test_single_turn_failure_preserves_observations_and_runtime(setup, tmp_path, failure, status):
     agent, sandbox = setup
     capture_observations(sandbox, tmp_path)

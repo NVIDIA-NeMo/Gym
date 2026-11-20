@@ -127,7 +127,10 @@ function post(url, headers, body, timeoutMs) {
     });
 }
 
-/** Forward one response body, showing each chunk to `observe`; resolves to the upstream error that cut it short. */
+/**
+ * Forward one response body, showing each chunk to `observe`. Resolves to `{error, cancelled}`: the upstream error
+ * that cut it short, and whether Codex hung up first (then the body never reached Codex, and is no error).
+ */
 function relay(upstream, outgoing, observe) {
     return new Promise((resolve) => {
         let error = null;
@@ -143,7 +146,10 @@ function relay(upstream, outgoing, observe) {
             error ??= cause.message;
         });
         upstream.on("close", () => {
-            resolve(cancelled ? null : error ?? (upstream.complete ? null : "upstream response ended early"));
+            resolve({
+                cancelled,
+                error: cancelled ? null : error ?? (upstream.complete ? null : "upstream response ended early"),
+            });
         });
         // Codex closing its side can be cancellation, not a model failure.
         const cancel = () => {
@@ -175,6 +181,9 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
     headers["content-length"] = body.length;
     headers["x-session-id"] = invocationId;
     for (let attempt = 0; ; attempt++) {
+        // A start without a later result is an attempt still in flight, which a deadline must not blame on an
+        // earlier attempt's failure. `at` is the sandbox's wall clock, which also stamps the CLI's events.
+        record({ started: true, at: Date.now() / 1000 });
         let upstream;
         try {
             upstream = await post(url, headers, body, timeoutMs);
@@ -210,7 +219,7 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
         // capture owns those.
         let evidence = compacting && upstream.statusCode === 200 ? [] : null;
         let evidenceBytes = 0;
-        const error = await relay(upstream, outgoing, (chunk) => {
+        const { error, cancelled } = await relay(upstream, outgoing, (chunk) => {
             if (evidence && evidenceBytes + chunk.length <= MAX_COMPACTION_RESPONSE_BYTES) {
                 evidence.push(chunk);
                 evidenceBytes += chunk.length;
@@ -219,7 +228,8 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
             }
         });
         if (error) attemptRecord.transport_error = error;
-        const helper = evidence && !error ? compactionResponse(Buffer.concat(evidence)) : null;
+        if (cancelled) attemptRecord.cancelled = true;
+        const helper = evidence && !error && !cancelled ? compactionResponse(Buffer.concat(evidence)) : null;
         if (helper) attemptRecord.compaction_response = helper;
         record(attemptRecord);
         outgoing.end();
@@ -227,7 +237,7 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
     }
 }
 
-/** Listen on a loopback port that forwards Responses requests, recording every upstream attempt. */
+/** Listen on a loopback port that forwards Responses requests, recording each upstream attempt's start and result. */
 export async function rateLimitProxy(baseUrl, invocationId, attemptsPath, { timeoutMs }) {
     const url = new URL(`${baseUrl}/responses`);
     const record = (attempt) => appendFileSync(attemptsPath, `${JSON.stringify(attempt)}\n`);

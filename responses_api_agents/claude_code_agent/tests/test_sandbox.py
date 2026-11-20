@@ -289,9 +289,15 @@ async def test_failed_seed_releases_and_failed_release_retains_state(monkeypatch
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "timed_out,code,status", [(False, 0, "completed"), (False, 7, "failed"), (True, -15, "incomplete")]
+    "timed_out,code,status,outcome",
+    [
+        (False, 0, "completed", None),
+        # A nonzero exit after a success result leaves no usable result: retried, not graded (decision 3).
+        (False, 7, "failed", {"failure_kind": "agent_run_error"}),
+        (True, -15, "incomplete", None),
+    ],
 )
-async def test_native_events_outcome_and_shared_command_options(monkeypatch, timed_out, code, status):
+async def test_native_events_outcome_and_shared_command_options(monkeypatch, timed_out, code, status, outcome):
     instance = agent(anthropic_base_url="https://model.example", max_turns=4, thinking="adaptive")
     raw = "\n".join(
         map(
@@ -315,6 +321,7 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
             workdir="/app",
             cleanup={"timed_out": timed_out, "return_code": code, "cleanup_confirmed": True},
             artifacts=None,
+            expired=False,
         ),
     )
     execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(raw))
@@ -335,7 +342,10 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
     assert response.output[0].content[0].text == "partial"
     assert response.status == status
     assert response.usage.total_tokens == 12
-    assert response.metadata is None  # no adapter-specific runtime policy fields
+    # No adapter-specific runtime policy fields: only the outcome ladder's markers.
+    assert set(response.metadata) == {"ng_agent_stop_reason"} | ({"ng_agent_outcome"} if outcome else set())
+    if outcome:
+        assert json.loads(response.metadata["ng_agent_outcome"]) == outcome
     assert "model_call_ownership_unavailable" in [gap.code for gap in state.observations.gaps]
 
 
@@ -486,7 +496,7 @@ async def test_sandbox_honors_task_timeout_and_server_ceiling(monkeypatch, metad
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
         runtime="/runtime",
-        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None, expired=False),
     )
     execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
@@ -573,7 +583,11 @@ async def test_empty_sandbox_output_uses_local_padding(monkeypatch):
         request=seed(),
         runtime="/runtime",
         session=SimpleNamespace(
-            session_dir="/tmp/session", workdir="/app", artifacts=None, cleanup={"timed_out": False, "return_code": 0}
+            session_dir="/tmp/session",
+            workdir="/app",
+            artifacts=None,
+            cleanup={"timed_out": False, "return_code": 0},
+            expired=False,
         ),
     )
     monkeypatch.setattr(
@@ -583,7 +597,10 @@ async def test_empty_sandbox_output_uses_local_padding(monkeypatch):
     response = await instance._sandbox_response(state, body, prompt="Question", system=None)
     assert response.output[0].content[0].text == ""
     assert response.output[0].role == "assistant"
-    assert response.status == "incomplete"
+    # No result event is no usable result: failed agent_run_error, retried by default, where it was incomplete
+    # and graded before the outcome ladder (decision 3).
+    assert response.status == "failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
 
 
 @pytest.mark.asyncio
@@ -594,7 +611,7 @@ async def test_sandbox_only_receives_direct_credentials_without_gym_model_server
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
         runtime="/runtime",
-        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None, expired=False),
     )
     execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)

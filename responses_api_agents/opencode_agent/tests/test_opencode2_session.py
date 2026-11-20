@@ -36,6 +36,7 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  #
     PNG_URI,
     capture_observations,
     close_body,
+    lifecycle_reason,
     seed,
     setup,
 )
@@ -193,7 +194,7 @@ def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
         return await wait_exit()
 
     sandbox.wait_exit = plugin_then_exit
-    with TestClient(agent.setup_webserver()) as client:
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=body)
         assert created.status_code == 200, created.text
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
@@ -211,8 +212,7 @@ def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
         assert options["mcpStatusFile"] == f"{sandbox.directory}/mcp-status.json"
         assert options["mcpStartupMs"] == 900000
         assert not [path for path in sandbox.files if path.endswith("required_mcp.mjs")]
-        assert result.status_code == 502
-        assert result.json()["detail"] == (
+        assert lifecycle_reason(agent, created.json()["agent_session_id"], result) == (
             "Required Gym MCP tools could not be initialized: task_tools: failed (connection refused)"
         )
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))

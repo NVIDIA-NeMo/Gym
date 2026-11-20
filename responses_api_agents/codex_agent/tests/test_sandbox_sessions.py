@@ -31,24 +31,56 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
+    AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
+    OutcomeAction,
     RolloutStopRequest,
+    agent_outcome_policy,
     is_harness_termination_failure,
     parse_cleanup_receipt,
     raises_agent_failure,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
+from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import MEDIA_DIRECTORY, SandboxStatus, SandboxTransferError, SandboxUnavailableError
 from responses_api_agents.codex_agent.app import (
     _SANDBOX_SESSION_KEY,
     CodexAgent,
     CodexAgentConfig,
+    _deadline_model_fault,
     _model_endpoint_error,
 )
 from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE
+
+
+def no_result_message(result) -> str:
+    """The error of a run that left no usable result: HTTP 200, failed, ``agent_run_error``, which the Environment
+    Server retries by default. Before the outcome ladder the activation answered 502."""
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["status"] == "failed"
+    assert json.loads(body["metadata"]["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+    return body["error"]["message"]
+
+
+# The Environment Server policy that grades a run without a usable result, as Harbor grades after any agent exit
+# (Terminal-Bench-Science's Codex profile sets it).
+GRADE_AGENT_RUN_ERRORS = AgentOutcomePolicyConfig(by_failure_kind={"agent_run_error": "verify"})
+
+
+def assert_labeled_agent_error(result, return_code: int) -> None:
+    """verify_after_agent_error labels a run that died while its sandbox still runs, and the run stays failed with
+    ``agent_run_error``: the default policy retries it, and only GRADE_AGENT_RUN_ERRORS grades it. Between the
+    outcome ladder and this rule the run was ``completed``; before the ladder it was failed with no failure kind."""
+    no_result_message(result)
+    body = result.json()
+    assert body["metadata"]["graded_agent_error"].startswith(f"exit {return_code}: ")
+    assert "Fixed" in json.dumps(body["output"])
+    response = NeMoGymResponse.model_validate(body)
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    assert agent_outcome_policy(response, config=GRADE_AGENT_RUN_ERRORS) == OutcomeAction.VERIFY
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -609,8 +641,7 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started, native):
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
-    assert result.status_code == 502
-    detail = result.json()["detail"]
+    detail = no_result_message(result)
     gaps = closed["agent_observations"]["gaps"]
     # Only the CLI-events path lacks the model-call join key, so this shows which path built the observations.
     assert ("model_call_join_key_unavailable" in [gap["code"] for gap in gaps]) is not native
@@ -624,7 +655,7 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started, native):
         assert detail.endswith(" (-32603)")
         assert len(detail) < 2100, "the stderr tail is bounded"
         assert "x" * 600 not in detail, "long stderr lines are shortened"
-        # Environment Servers record the observations, not the 502 body.
+        # Environment Servers record the observations as well as the response's error.
         assert len(startup_gaps) == 1 and startup_gaps[0] in detail
 
 
@@ -661,9 +692,9 @@ def test_startup_failure_stderr_hides_the_grant_tokens(setup):
         assert client.post("/v1/agent_sessions", json=body).status_code == 200
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
         closed = client.post("/v1/agent_sessions/close", json=close_body(body["agent_session_id"])).json()
-    assert result.status_code == 502
+    detail = no_result_message(result)
     gap = {gap["code"]: gap["detail"] for gap in closed["agent_observations"]["gaps"]}["agent_startup_failed"]
-    for text in (result.json()["detail"], gap):
+    for text in (detail, gap):
         assert "token-gd" not in text
         assert "s3cret" not in text
         assert "secret-123" not in text
@@ -692,8 +723,7 @@ def test_unreadable_startup_stderr_does_not_hold_the_activation(setup):
         started = time.monotonic()
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
         elapsed = time.monotonic() - started
-    assert result.status_code == 502
-    assert result.json()["detail"] == "Codex execution failed: Codex exited with code 1"
+    assert no_result_message(result) == "Codex execution failed: Codex exited with code 1"
     # The read is bounded by session_close_timeout_seconds (1 s in this fixture).
     assert elapsed < 5
 
@@ -765,8 +795,7 @@ def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
-        assert result.status_code == 502
-        assert "model error" in result.json()["detail"]
+        assert "model error" in no_result_message(result)
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200
         invocation = closed.json()["agent_observations"]["records"][0]
@@ -777,11 +806,11 @@ def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
 @pytest.mark.parametrize(
     "case",
     [
-        # Graded, as Harbor grades after any agent exit:
+        # Labeled gradable, as Harbor grades after any agent exit:
         "process-killed",  # Codex or its runner was killed: the receipt reports the shell status 128+9
         "failed-turn",
         "timed-out",  # an error event in a run that hit its time limit: graded as a timeout
-        # Retried as before:
+        # Not labeled (agent_run_error without the label; the supervisor error is a lifecycle failure):
         "flag-off",
         "not-started",  # Codex failed before its first turn, as when a required MCP server does not connect
         "cleanup-error",
@@ -791,7 +820,7 @@ def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
         "probe-fails",
     ],
 )
-def test_failed_codex_run_is_graded_only_while_its_sandbox_still_runs(setup, case) -> None:
+def test_failed_codex_run_is_labeled_gradable_only_while_its_sandbox_still_runs(setup, case) -> None:
     agent, sandbox = setup
     agent.config.verify_after_agent_error = case != "flag-off"
     records = [json.loads(line) for line in events().splitlines()]
@@ -829,28 +858,33 @@ def test_failed_codex_run_is_graded_only_while_its_sandbox_still_runs(setup, cas
         return await execute(command, **kwargs)
 
     sandbox.exec.side_effect = probe_or_execute
-    graded = case in ("process-killed", "failed-turn", "timed-out")
-    with TestClient(agent.setup_webserver()) as client:
+    labeled = case in ("process-killed", "failed-turn", "timed-out")
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
     probed = any(call.args[:1] == ("true",) for call in sandbox.exec.await_args_list)
-    assert probed is (graded or case in ("sandbox-silent", "probe-fails"))
+    assert probed is (labeled or case in ("sandbox-silent", "probe-fails"))
+    # A run that hit its time limit is incomplete and graded; every other failed run stays failed.
     expected_status = "incomplete" if case == "timed-out" else "failed"
     assert closed.json()["agent_observations"]["records"][0]["status"] == expected_status
-    if not graded:
-        assert result.status_code == 502, result.text
+    if case == "cleanup-error":
+        # The supervisor could not account for Codex: a typed lifecycle failure (5xx), retried.
+        assert result.status_code == 500, result.text
         return
-    # A response, not an execution error: Resources grades it as a nonzero agent exit.
-    assert result.status_code == 200, result.text
-    body = result.json()
-    assert body["status"] == expected_status
-    assert body["error"] is None
-    assert "Fixed" in json.dumps(body["output"])
-    assert body["metadata"]["graded_agent_error"].startswith(f"exit {sandbox.result['return_code']}: ")
-    # No classified cause, so the Environment Server's outcome policy verifies it.
-    assert "ng_agent_outcome" not in body["metadata"]
+    if case == "timed-out":
+        assert result.status_code == 200, result.text
+        body = result.json()
+        assert (body["status"], body["error"]) == ("incomplete", None)
+        assert body["metadata"]["graded_agent_error"].startswith(f"exit {sandbox.result['return_code']}: ")
+        assert "ng_agent_outcome" not in body["metadata"]
+        return
+    if not labeled:
+        assert "Codex exited with code" in no_result_message(result)
+        assert "graded_agent_error" not in result.json()["metadata"]
+        return
+    assert_labeled_agent_error(result, sandbox.result["return_code"])
 
 
 # Codex 0.154.0's final error once its retries against a failing endpoint are spent (a top-level error
@@ -961,9 +995,6 @@ def test_only_the_failure_that_ended_the_run_is_checked(transcript, ended_by_end
 @pytest.mark.parametrize("ending", ["retries-spent", "killed-while-retrying"])
 @pytest.mark.parametrize("case", list(CODEX_0154_ENDPOINT_FAILURES))
 def test_codex_0154_endpoint_outage_is_retried_not_graded(setup, case, ending) -> None:
-    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
-    from nemo_gym.core import NeMoGymResponse
-
     agent, sandbox = setup
     message, retries = CODEX_0154_ENDPOINT_FAILURES[case]
     transcript = [
@@ -981,8 +1012,8 @@ def test_codex_0154_endpoint_outage_is_retried_not_graded(setup, case, ending) -
     assert not probed
     assert closed["agent_observations"]["records"][0]["status"] == "failed"
     if ending == "killed-while-retrying":
-        # An execution error.
-        assert result.status_code == 502, result.text
+        # No usable result, retried.
+        assert "Codex exited with code" in no_result_message(result)
         return
     # Codex reported the failure: its classified cause reaches the outcome policy, which retries it.
     assert result.status_code == 200, result.text
@@ -1003,9 +1034,6 @@ CODEX_NATIVE_ENDPOINT_FAILURES = {
 @pytest.mark.parametrize("ending", ["reported", "killed-after-reporting"])
 @pytest.mark.parametrize("case", list(CODEX_NATIVE_ENDPOINT_FAILURES))
 def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) -> None:
-    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
-    from nemo_gym.core import NeMoGymResponse
-
     agent, sandbox = setup
     message = CODEX_NATIVE_ENDPOINT_FAILURES[case]
     assert _model_endpoint_error([(9.0, event) for event in codex_error(message)]) is not None
@@ -1015,7 +1043,7 @@ def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) ->
     assert not probed
     assert closed["agent_observations"]["records"][0]["status"] == "failed"
     if ending == "killed-after-reporting":
-        assert result.status_code == 502, result.text
+        assert message in no_result_message(result)
         return
     assert result.status_code == 200, result.text
     response = NeMoGymResponse.model_validate(result.json())
@@ -1034,9 +1062,6 @@ def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) ->
 )
 def test_reported_provider_failure_keeps_its_classified_outcome(setup, message, action) -> None:
     """Codex exited 1 on turn.failed: the outcome policy decides it, not verify_after_agent_error."""
-    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
-    from nemo_gym.core import NeMoGymResponse
-
     agent, sandbox = setup
     sandbox.result["return_code"] = 1
     transcript = [{"type": "turn.started"}, MODEL_OUTPUT, *codex_error(message)]
@@ -1073,7 +1098,7 @@ def test_recovered_codex_0154_retries_keep_the_run_gradable(setup, ending) -> No
     assert "Fixed" in json.dumps(body["output"])
 
 
-def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup) -> None:
+def test_recovered_codex_0154_retries_then_an_agent_error_is_labeled_gradable(setup) -> None:
     # Endpoint retries early in the run, recovered; the run then ends on an unrelated agent error.
     agent, sandbox = setup
     transcript = [
@@ -1086,11 +1111,8 @@ def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup) -> No
     # Codex or its runner was killed after the model requests recovered.
     sandbox.result["return_code"] = 128 + signal.SIGKILL
     result, closed, probed = run_codex_transcript(agent, sandbox, transcript)
-    # Graded as a nonzero agent exit, as the reference runs grade it.
-    assert result.status_code == 200, result.text
-    body = result.json()
-    assert (body["status"], body["error"]) == ("failed", None)
-    assert body["metadata"]["graded_agent_error"].startswith(f"exit {sandbox.result['return_code']}: ")
+    # Labeled as a nonzero agent exit, which the reference runs grade: the work in the sandbox is the result.
+    assert_labeled_agent_error(result, sandbox.result["return_code"])
     assert probed
     assert closed["agent_observations"]["records"][0]["status"] == "failed"
 
@@ -1105,7 +1127,7 @@ def test_codex_0154_killed_while_waiting_for_the_network_is_rerun(setup) -> None
         WAITING,
     ]
     result, _, probed = run_codex_transcript(agent, sandbox, transcript)
-    assert result.status_code == 502, result.text
+    assert "Codex exited with code" in no_result_message(result)
     assert not probed
 
 
@@ -1189,7 +1211,7 @@ def test_startup_model_metadata_advisory_requires_successful_turn(setup, conditi
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == (200 if condition in ("completed", "timed-out") else 502), response.text
+        assert response.status_code == 200, response.text
         body = response.json()
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
@@ -1202,12 +1224,12 @@ def test_startup_model_metadata_advisory_requires_successful_turn(setup, conditi
             assert [gap["detail"] for gap in warnings] == [warning]
             assert observations["records"][0]["status"] == "completed"
         else:
-            assert "detail" in body
-            assert diagnostic["item"]["message"] in body["detail"]
+            detail = no_result_message(response)
+            assert diagnostic["item"]["message"] in detail
             if condition == "failed-turn":
-                assert "model error" in body["detail"]
+                assert "model error" in detail
             if condition == "later-error":
-                assert "Model call failed" in body["detail"]
+                assert "Model call failed" in detail
             assert not warnings
             assert observations["records"][0]["status"] == "failed"
 
@@ -1261,7 +1283,7 @@ def test_advisories_remain_visible_on_completion_or_gradable_limits(setup, condi
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
-        assert result.status_code == (200 if condition in ("completed", "timed-out") else 502), result.text
+        assert result.status_code == 200, result.text
         body = result.json()
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
@@ -1277,13 +1299,13 @@ def test_advisories_remain_visible_on_completion_or_gradable_limits(setup, condi
         assert [gap["detail"] for gap in startup_gaps] == [startup]
         assert observations["records"][0]["status"] == expected_status
     else:
-        assert "detail" in body
-        assert warning in body["detail"]
-        assert startup in body["detail"]
+        detail = no_result_message(result)
+        assert warning in detail
+        assert startup in detail
         if condition == "other-error":
-            assert "Unknown model call error" in body["detail"]
+            assert "Unknown model call error" in detail
         if condition == "failed-turn":
-            assert "Final model call failed" in body["detail"]
+            assert "Final model call failed" in detail
         assert not advisories
         assert not startup_gaps
         assert observations["records"][0]["status"] == "failed"
@@ -1665,8 +1687,8 @@ async def test_worker_diagnostics_never_override_exit_or_cleanup(setup, artifact
         if artifact != "unknown_exit":
             assert "harness_hostname" not in response.metadata
     else:
-        with pytest.raises(HTTPException, match="exited with code 7"):
-            await task
+        response = await task
+        assert response.status == "failed" and "exited with code 7" in response.error.message
     state = agent._session_records[session_id].state
     assert state.session.cleanup["cleanup_confirmed"] is True
     if artifact != "unknown_exit":
@@ -2398,7 +2420,8 @@ async def test_session_lifecycle_uses_shared_bookkeeping(setup):
 async def test_independent_configs_collect_flat_rows_through_environment_run(setup, monkeypatch, outcome):
     """Exercise the checked-in recipe through collector, real environment, and real Codex lifecycle.
 
-    A failed Codex run bypasses verification unless verify_after_agent_error grades it."""
+    A failed Codex run (agent_run_error) bypasses verification unless the environment's outcome policy grades
+    agent_run_error, as Terminal-Bench-Science's Codex profile does; verify_after_agent_error labels it."""
     from environment_servers.single_agent_turn_legacy.app import (
         SingleAgentTurnLegacyEnvironmentServer,
         SingleAgentTurnLegacyEnvironmentServerConfig,
@@ -2438,6 +2461,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
     if outcome == "graded-failure":
         agent.config.verify_after_agent_error = True
         sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
+        environment_config.agent_outcome_policy = {"by_failure_kind": {"agent_run_error": "verify"}}
     config.policy_model = {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}}
     transport = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
     agent.server_client = transport
@@ -2490,7 +2514,9 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
                 else:
                     # The graded run did model work after the CLI's last total: its usage is unknown, not zero.
                     assert body["response"]["usage"] is None
+                # The failed run is graded as it stands, the work in the running sandbox being its result.
                 assert body["response"]["status"] == ("completed" if outcome == "completed" else "failed")
+                assert ("graded_agent_error" in body["response"]["metadata"]) is (outcome == "graded-failure")
                 return Response({**body, "reward": 1.0})
             assert url_path == "/close_session"
             return Response({"resources_session_id": body["resources_session_id"]})
@@ -2822,12 +2848,13 @@ async def test_execution_outcomes_preserve_evidence_and_only_limits_are_gradable
         sandbox.events = "\n".join(events().splitlines()[:-1])
     request, session_id, task = await activate(agent, sandbox)
     if outcome in ("provider", "runtime"):
-        with pytest.raises(HTTPException) as failed:
-            await task
-        assert failed.value.status_code == 502
-        with pytest.raises(HTTPException) as replay:
-            await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-        assert replay.value.detail == failed.value.detail
+        # No usable result: failed agent_run_error with the partial output, where it was a 502.
+        failed = await task
+        assert failed.status == "failed"
+        assert json.loads(failed.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+        assert failed.output[-1].content[0].text == "Fixed"
+        replay = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        assert replay == failed
     else:
         result = await task
         assert result.status == ("completed" if outcome == "completed" else "incomplete")
@@ -3294,8 +3321,9 @@ async def test_missing_exit_and_empty_output_are_not_success(setup):
     sandbox.result["return_code"] = None
     sandbox.events = ""
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(HTTPException, match="without turn.completed"):
-        await task
+    response = await task
+    assert response.status == "failed" and "without turn.completed" in response.error.message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
     state = agent._session_records[session_id].state
     assert state.session.cleanup["cleanup_confirmed"] is True
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -3379,8 +3407,18 @@ def test_sandbox_environment_inheritance_is_opt_in(setup, inherit) -> None:
     }
 
 
-@pytest.mark.parametrize("status", [400, 401, 429, 503])
-async def test_native_model_error_is_reported_with_classification(setup, status):
+# A 4xx other than 408, 425 and 429 on the run's first model call is model_request_rejected (decision 4): it was
+# model_request_error, graded for a 400 and failed for a 401.
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (400, {"failure_kind": "model_request_rejected"}),
+        (401, {"failure_kind": "model_request_rejected"}),
+        (429, {"failure_kind": "model_request_error", "status_code": 429}),
+        (503, {"failure_kind": "model_request_error", "status_code": 503}),
+    ],
+)
+async def test_native_model_error_is_reported_with_classification(setup, status, expected):
     agent, sandbox = setup
     message = f"unexpected status {status}: provider error"
     sandbox.events = "\n".join(
@@ -3406,12 +3444,47 @@ async def test_native_model_error_is_reported_with_classification(setup, status)
     response = await task
     assert response.status == "failed"
     assert response.error.message.endswith(message)
-    assert json.loads(response.metadata["ng_agent_outcome"]) == {
-        "failure_kind": "model_request_error",
-        "status_code": status,
-    }
+    assert json.loads(response.metadata["ng_agent_outcome"]) == expected
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert closed.agent_observations.records[0].status == "failed"
+
+
+# Codex's turn.failed message for an HTTP error is the endpoint's body; here, the model server's envelope for a
+# context overflow it propagates (the text a scripted-model smoke of the pinned CLI recorded).
+CONTEXT_OVERFLOW_BODY = (
+    '{"error":{"message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens '
+    'in the messages, Please reduce the length of the messages.","type":"invalid_request_error","param":null,'
+    '"code":"context_length_exceeded"}}'
+)
+
+
+# A context limit is graded as incomplete, before or after the first reply (decision 1). It was failed
+# model_request_error 400, and model_request_rejected (never graded) on the first request.
+@pytest.mark.parametrize("after_reply", [False, True])
+async def test_a_propagated_context_overflow_is_a_graded_context_limit(setup, after_reply):
+    agent, sandbox = setup
+    events = [
+        {"type": "turn.started"},
+        *([MODEL_OUTPUT] if after_reply else []),
+        {"type": "turn.failed", "error": {"message": CONTEXT_OVERFLOW_BODY}},
+    ]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(events))
+    sandbox.result["return_code"] = 1
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        attempts = ['{"status":200}'] if after_reply else []
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = "\n".join([*attempts, '{"status":400}']) + "\n"
+
+    sandbox.publish = publish
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.status == "incomplete" and response.error is None
+    assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+    assert "ng_agent_outcome" not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
 async def test_native_failure_without_http_status_reports_unknown(setup):
@@ -3490,29 +3563,37 @@ def test_session_uses_native_call_identity_arguments_and_results(setup, custom):
     assert not any(gap["code"] == "model_call_join_key_unavailable" for gap in bundle["gaps"])
 
 
+REJECTED = {"failure_kind": "model_request_rejected"}
+NO_RESULT = {"failure_kind": "agent_run_error"}
+
+
+# ``expected`` is the ng_agent_outcome of a reported provider failure, the outcome of a run that is not one, or an
+# HTTP status. A forwarded 200 is a model reply, so a later 4xx is not a rejection of the run's first request.
 @pytest.mark.parametrize(
-    "statuses,timed_out,returncode,worker_error,extra_error,accepted",
+    "statuses,timed_out,returncode,worker_error,extra_error,accepted,expected",
     [
-        ([400], False, 1, None, None, True),
-        ([200, 400], False, 1, None, None, True),
-        ([429, 400], False, 1, None, None, True),
-        ([400, 200], False, 1, None, None, True),
-        ([401], False, 1, None, None, True),
-        ([403], False, 1, None, None, True),
-        ([429, 429, 429], False, 1, None, None, True),
-        ([500], False, 1, None, None, True),
-        ([], False, 1, None, None, True),
-        ([429, None], False, 1, None, None, True),
-        ([400], True, 1, None, None, False),
-        ([400], False, None, None, None, False),
-        ([400], False, 0, None, None, False),
-        ([400], False, 7, None, None, False),
-        ([400], False, 1, "worker failed", None, False),
-        ([400], False, 1, None, "sandbox state lost", False),
+        ([400], False, 1, None, None, True, REJECTED),
+        ([200, 400], False, 1, None, None, True, {"failure_kind": "model_request_error", "status_code": 400}),
+        ([429, 400], False, 1, None, None, True, REJECTED),
+        ([400, 200], False, 1, None, None, True, {"failure_kind": "unknown"}),
+        ([401], False, 1, None, None, True, REJECTED),
+        ([403], False, 1, None, None, True, REJECTED),
+        ([429, 429, 429], False, 1, None, None, True, {"failure_kind": "model_request_error", "status_code": 429}),
+        ([500], False, 1, None, None, True, {"failure_kind": "model_request_error", "status_code": 500}),
+        ([], False, 1, None, None, True, {"failure_kind": "unknown"}),
+        ([429, None], False, 1, None, None, True, {"failure_kind": "model_transport_error"}),
+        # A deadline whose last forwarded attempt was a 400, not an endpoint fault: graded as a timeout (was a 502).
+        ([400], True, 1, None, None, False, None),
+        ([400], False, None, None, None, False, NO_RESULT),
+        ([400], False, 0, None, None, False, NO_RESULT),
+        ([400], False, 7, None, None, False, NO_RESULT),
+        # The supervisor's own error is a lifecycle failure.
+        ([400], False, 1, "worker failed", None, False, 500),
+        ([400], False, 1, None, "sandbox state lost", False, NO_RESULT),
     ],
 )
 def test_terminal_model_error_preserves_provider_and_worker_error_boundary(
-    setup, statuses, timed_out, returncode, worker_error, extra_error, accepted
+    setup, statuses, timed_out, returncode, worker_error, extra_error, accepted, expected
 ):
     agent, sandbox = setup
     sandbox.result.update(return_code=returncode, timed_out=timed_out, error=worker_error)
@@ -3535,32 +3616,31 @@ def test_terminal_model_error_preserves_provider_and_worker_error_boundary(
         )
 
     sandbox.publish = publish
-    with TestClient(agent.setup_webserver()) as client:
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == (200 if accepted else 502), response.text
+        assert response.status_code == (expected if isinstance(expected, int) else 200), response.text
+        body = response.json() if response.status_code == 200 else None
         if accepted:
-            body = response.json()
             assert body["status"] == "failed"
             assert body["error"] == {
                 "code": "rate_limit_exceeded" if statuses and statuses[-1] == 429 else "server_error",
                 "message": "model rejected request",
             }
             assert body["output"] == []
-            outcome = json.loads(body["metadata"]["ng_agent_outcome"])
-            if statuses and statuses[-1] is None:
-                assert outcome == {"failure_kind": "model_transport_error"}
-            elif statuses and statuses[-1] >= 400:
-                assert outcome == {"failure_kind": "model_request_error", "status_code": statuses[-1]}
-            else:
-                assert outcome == {"failure_kind": "unknown"}
+            assert json.loads(body["metadata"]["ng_agent_outcome"]) == expected
             if 200 in statuses or not statuses:
                 assert body["usage"] is None
             else:
                 assert body["usage"]["total_tokens"] == 0
+        elif expected is None:
+            assert (body["status"], body["error"]) == ("incomplete", None)
+        elif not isinstance(expected, int):
+            assert body["status"] == "failed"
+            assert json.loads(body["metadata"]["ng_agent_outcome"]) == expected
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
         invocation = closed["agent_observations"]["records"][0]
-        assert invocation["status"] == "failed"
+        assert invocation["status"] == ("incomplete" if expected is None else "failed")
         if accepted:
             assert invocation["error_type"] == "provider_error"
         assert all(item.get("role") == "user" for item in invocation["conversation"])
@@ -3659,7 +3739,7 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
 
 @pytest.mark.parametrize("usage_source", ["native", "missing"])
 def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
-    """A killed run that is graded reports the native cumulative usage, or none, never the CLI's zero."""
+    """A killed run labeled gradable reports the native cumulative usage, or none, never the CLI's zero."""
     agent, sandbox = setup
     agent.config.verify_after_agent_error = True
     sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
@@ -3704,11 +3784,9 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
         client.post("/v1/agent_sessions/close", json=close_body(session_id))
-    assert response.status_code == 200, response.text
+    no_result_message(response)
     body = response.json()
-    assert (body["status"], body["error"]) == ("failed", None)
     assert body["metadata"]["graded_agent_error"].startswith("exit 137: ")
-    assert "ng_agent_outcome" not in body["metadata"]
     if usage_source == "native":
         assert body["usage"] == {
             "input_tokens": 20,
@@ -3760,6 +3838,213 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
         await state.close(1)
 
 
+def _starts(count: int) -> list[float]:
+    return [float(index) for index in range(count)]
+
+
+@pytest.mark.parametrize(
+    "attempts,started,expected",
+    [
+        (None, None, None),
+        ([], 0, None),
+        ([{"status": 200}], 1, None),
+        # Recovered: the last attempt answered.
+        ([{"status": 503}, {"status": 200}], 2, None),
+        # A rejection is not an unavailable endpoint.
+        ([{"status": 400}], 1, None),
+        ([{"status": 503}], 1, ("model_request_error", 503)),
+        ([{"status": 200}, {"status": 429}], 2, ("model_request_error", 429)),
+        ([{"status": 408}], 1, ("model_request_error", 408)),
+        ([{"status": None, "error": "connect ECONNREFUSED"}], 1, ("model_transport_error", None)),
+        ([{"status": 200, "transport_error": "upstream response ended early"}], 1, ("model_transport_error", None)),
+        # A retry still in flight at the deadline (after the forwarder's 429 wait, or Codex's own retry of a 503):
+        # the earlier failure is not what the deadline was spent on.
+        ([{"status": 429}], 2, None),
+        ([{"status": 200}, {"status": 503}], 3, None),
+        # No start records (an attempts file without them): the last result decides.
+        ([{"status": 503}], None, ("model_request_error", 503)),
+    ],
+)
+def test_deadline_fault_is_the_last_forwarded_attempt_that_failed(attempts, started, expected):
+    fault = _deadline_model_fault(attempts, starts=None if started is None else _starts(started))
+    assert (fault and (fault.failure_kind, fault.http_status)) == expected
+    if fault is not None:
+        assert fault.boundary == "model"
+
+
+IDLE_MARKER = "stream disconnected before completion: idle timeout waiting for sse"
+# The forwarder's record of a reply Codex hung up on before it arrived.
+CANCELLED = {"status": 200, "cancelled": True}
+
+
+@pytest.mark.parametrize(
+    "attempts,starts,stream_failure,expected",
+    [
+        # Codex hung up on a stalled reply and reported it; the deadline came before its retry started.
+        ([CANCELLED], [10.0], (IDLE_MARKER, 40.0), ("model_transport_error", None)),
+        # The retry was in flight: the deadline is the model's.
+        ([CANCELLED], [10.0, 41.0], (IDLE_MARKER, 40.0), None),
+        # The deadline killed Codex in a healthy retry; the notice is about the attempt before it.
+        ([{"status": 200}, CANCELLED], [10.0, 41.0], (IDLE_MARKER, 40.0), None),
+        ([{"status": 503}, CANCELLED], [10.0, 41.0], ("unexpected status 503", 40.0), None),
+        # The deadline killed Codex mid-reply: a hang-up without a reported endpoint failure.
+        ([CANCELLED], [10.0], None, None),
+        # A start without a time cannot be ordered against the notice.
+        ([CANCELLED], [None], (IDLE_MARKER, 40.0), None),
+        # A whole reply is no stream failure, whatever Codex reported.
+        ([{"status": 200}], [10.0], (IDLE_MARKER, 40.0), None),
+    ],
+)
+def test_deadline_fault_of_a_reply_codex_hung_up_on(attempts, starts, stream_failure, expected):
+    fault = _deadline_model_fault(attempts, starts=starts, stream_failure=stream_failure)
+    assert (fault and (fault.failure_kind, fault.http_status)) == expected
+    if fault is not None:
+        assert fault.boundary == "model"
+
+
+TIMED_OUT = {"timed_out": True, "return_code": 128 + signal.SIGKILL}
+STARTED = {"type": "turn.started"}
+# The forwarder's record of an upstream attempt it started; its result follows in a separate record.
+STARTED_ATTEMPT = {"started": True, "at": 0.5}
+
+
+# One Codex run event per row, through an agent session: the CLI events, the receipt and the forwarded model attempts
+# give the response's status, its ng_agent_outcome and the Environment Server's action. Before the outcome ladder the
+# no-result row and the timed-out run with a failed turn answered 502 (retried).
+@pytest.mark.parametrize(
+    "records,receipt,attempts,status,outcome,action",
+    [
+        pytest.param([STARTED], TIMED_OUT, [], "incomplete", None, OutcomeAction.VERIFY, id="deadline_before_reply"),
+        pytest.param(
+            [STARTED, retry_notice(BAD_GATEWAY)],
+            TIMED_OUT,
+            [{"status": None, "error": "connect ECONNREFUSED"}],
+            "failed",
+            {"failure_kind": "model_transport_error"},
+            OutcomeAction.RETRY,
+            id="deadline_before_reply_endpoint_unreachable",
+        ),
+        pytest.param(
+            [STARTED, MODEL_OUTPUT],
+            TIMED_OUT,
+            [{"status": 200}],
+            "incomplete",
+            None,
+            OutcomeAction.VERIFY,
+            id="deadline_after_reply",
+        ),
+        pytest.param(
+            [STARTED, MODEL_OUTPUT, retry_notice(BAD_GATEWAY)],
+            TIMED_OUT,
+            [STARTED_ATTEMPT, {"status": 200}, STARTED_ATTEMPT, {"status": 503}],
+            "failed",
+            {"failure_kind": "model_request_error", "status_code": 503},
+            OutcomeAction.RETRY,
+            id="deadline_after_reply_endpoint_503",
+        ),
+        pytest.param(
+            [STARTED, MODEL_OUTPUT, retry_notice(BAD_GATEWAY)],
+            TIMED_OUT,
+            [STARTED_ATTEMPT, {"status": 200}, STARTED_ATTEMPT, {"status": 503}, STARTED_ATTEMPT],
+            "incomplete",
+            None,
+            OutcomeAction.VERIFY,
+            id="deadline_after_reply_retry_in_flight",
+        ),
+        # Events are seen at their index (0.0, 1.0, ...); the second attempt started at 2.5.
+        pytest.param(
+            [STARTED, MODEL_OUTPUT, retry_notice(IDLE), retry_notice(IDLE, 2)],
+            TIMED_OUT,
+            [STARTED_ATTEMPT, {"status": 200}, {"started": True, "at": 2.5}, CANCELLED],
+            "failed",
+            {"failure_kind": "model_transport_error"},
+            OutcomeAction.RETRY,
+            id="deadline_after_stalled_stream",
+        ),
+        pytest.param(
+            [STARTED, MODEL_OUTPUT, retry_notice(IDLE)],
+            TIMED_OUT,
+            [STARTED_ATTEMPT, {"status": 200}, {"started": True, "at": 2.5}, CANCELLED],
+            "incomplete",
+            None,
+            OutcomeAction.VERIFY,
+            id="deadline_killed_a_healthy_retry",
+        ),
+        pytest.param(
+            [STARTED],
+            TIMED_OUT,
+            [STARTED_ATTEMPT, {"status": 429}, STARTED_ATTEMPT],
+            "incomplete",
+            None,
+            OutcomeAction.VERIFY,
+            id="deadline_rate_limit_retry_in_flight",
+        ),
+        # A reply Codex hung up on before it arrived is no model reply: the 400 that follows is the first request
+        # the endpoint answered, so it is rejected. A whole reply before the 400 keeps it a graded model error.
+        pytest.param(
+            [STARTED, *codex_error(BAD_REQUEST)],
+            {"return_code": 1},
+            [STARTED_ATTEMPT, CANCELLED, STARTED_ATTEMPT, {"status": 400}],
+            "failed",
+            {"failure_kind": "model_request_rejected"},
+            OutcomeAction.FAIL,
+            id="rejected_after_cancelled_reply",
+        ),
+        pytest.param(
+            [STARTED, *codex_error(BAD_REQUEST)],
+            {"return_code": 1},
+            [STARTED_ATTEMPT, {"status": 200}, STARTED_ATTEMPT, {"status": 400}],
+            "failed",
+            {"failure_kind": "model_request_error", "status_code": 400},
+            OutcomeAction.VERIFY,
+            id="rejected_after_whole_reply",
+        ),
+        pytest.param(
+            [STARTED, MODEL_OUTPUT, *codex_error("model error")],
+            TIMED_OUT,
+            [{"status": 200}],
+            "incomplete",
+            None,
+            OutcomeAction.VERIFY,
+            id="deadline_with_failed_turn",
+        ),
+        pytest.param(
+            [STARTED, MODEL_OUTPUT],
+            {"return_code": 128 + signal.SIGKILL},
+            [{"status": 200}],
+            "failed",
+            {"failure_kind": "agent_run_error"},
+            OutcomeAction.RETRY,
+            id="no_result",
+        ),
+    ],
+)
+def test_each_run_event_gets_the_ladder_outcome(setup, records, receipt, attempts, status, outcome, action):
+    agent, sandbox = setup
+    sandbox.result.update(receipt)
+    sandbox.events = "\n".join(json.dumps([float(index), event]) for index, event in enumerate(records))
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = "".join(
+            json.dumps(attempt) + "\n" for attempt in attempts
+        )
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+    assert result.status_code == 200, result.text
+    response = NeMoGymResponse.model_validate(result.json())
+    assert response.status == status
+    assert json.loads(response.metadata.get("ng_agent_outcome", "null")) == outcome
+    assert agent_outcome_policy(response) == action
+    assert (response.error is not None) is (status == "failed")
+    assert closed["agent_observations"]["records"][0]["status"] == status
+
+
 @pytest.mark.parametrize("transport_error", ["timed out", "IncompleteRead(0 bytes read, 20 more expected)", None])
 def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
     from nemo_gym.agents import OutcomeAction, agent_outcome_policy
@@ -3801,9 +4086,10 @@ def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
     "attempt,message,expected",
     [
         (
+            # The run's first model request: rejected (decision 4), not graded.
             {"status": 400},
             '{"error":{"message":"invalid input","code":"bad_request"}}',
-            {"failure_kind": "model_request_error", "status_code": 400},
+            {"failure_kind": "model_request_rejected"},
         ),
         (
             {"status": 429},
@@ -3857,7 +4143,7 @@ def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expec
         assert result.error.code == ("rate_limit_exceeded" if expected.get("status_code") == 429 else "server_error")
         assert json.loads(result.metadata["ng_agent_outcome"]) == expected
         assert agent_outcome_policy(result) == (
-            OutcomeAction.VERIFY if attempt["status"] == 400 else OutcomeAction.RETRY
+            OutcomeAction.FAIL if attempt["status"] == 400 else OutcomeAction.RETRY
         )
         client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
 
@@ -4062,13 +4348,21 @@ def test_session_requires_every_native_prompt_image(setup, ending, retained):
 
     sandbox.publish = publish_images
     body = {"input": [{"role": "user", "content": [image_part(), image_part()]}]}
-    with TestClient(agent.setup_webserver()) as client:
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json=body)
         missing = retained < 2 and ending in {"completed", "output-limit"}
         if missing:
-            assert result.status_code == 502, result.text
-            assert f"Codex attached {retained} of 2 prompt images" in result.json()["detail"]
+            # Missing required input is still retried, now as the ladder's typed lifecycle failure.
+            assert result.status_code == 500, result.text
+            failure = agent._session_records[session_id].state.task.exception()
+            assert isinstance(failure, NgFailureEvent)
+            assert (failure.boundary, failure.failure_kind, failure.operation) == (
+                "harness",
+                "agent_route_failed",
+                "codex.execute",
+            )
+            assert f"Codex attached {retained} of 2 prompt images" in str(failure)
         else:
             assert result.status_code == 200, result.text
             assert result.json()["status"] == (

@@ -177,7 +177,8 @@ as zero. Response usage must cover the same invocation tree, including child ses
 Response usage counts the tokens reported by model responses that finished. A failed call that returned no finished
 response contributes nothing to either side of the comparison, so a rollout whose every call was rejected reports usage of
 zero, not missing usage. Missing usage means a finished response's usage was lost, and only that makes the comparison
-unobserved.
+unobserved. A rollout that ended as a failure row, such as one whose first request was rejected, has no response; its
+retained partial response (`_ng_failure_partial_response`) supplies the usage instead.
 
 `task_no_successful_model_calls` remains turn-bound: an invocation-only support or compaction call must not establish a
 successful task turn. Structural turn checks are unchanged.

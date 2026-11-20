@@ -20,6 +20,7 @@ from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentContinuationRequirements,
+    decide_outcome,
 )
 from nemo_gym.core import (
     PROVIDER_OOM_KILLED,
@@ -34,9 +35,15 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  #
     PNG,
     PNG_URI,
     count_media_decodes,
+    failed_message,
     seed,
     setup,
 )
+
+
+def status(outcome) -> str:
+    """The status the outcome ladder decides from a classified run, before the adapter adds a reported error."""
+    return decide_outcome(outcome.evidence).status
 
 
 def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
@@ -555,7 +562,7 @@ def test_opencode_budget_uses_response_incomplete_details(finish, reason):
         stdout="",
         continuation=True,
     )
-    assert result.status == "incomplete" and result.incomplete_reason == reason
+    assert status(result) == "incomplete" and result.incomplete_reason == reason
 
 
 @pytest.mark.parametrize(
@@ -576,7 +583,7 @@ def test_interrupted_checkpoint_does_not_hide_opencode_error(session_id, previou
         stdout=json.dumps({"type": "error"}) if error_event else "",
         continuation=True,
     )
-    assert outcome.status == expected
+    assert status(outcome) == expected
 
 
 @pytest.mark.parametrize("previous", [None, "opencode-session"])
@@ -592,9 +599,12 @@ def test_timeout_opencode_error_overrides_partial_assistant(previous, assistant,
         continuation=True,
     )
     if error_event:
-        assert outcome.status == "failed" and outcome.error_type == "server_error" and outcome.error
+        assert outcome.error_type == "server_error" and outcome.error
+        # A deadline is graded after a saved assistant message (this bare error event names no unavailable
+        # endpoint); before any, it keeps its retry. Both were failed (502) before the outcome ladder.
+        assert status(outcome) == ("incomplete" if assistant else "failed")
     else:
-        assert outcome.status == "incomplete" and outcome.error_type == "timeout"
+        assert status(outcome) == "incomplete" and outcome.error_type == "timeout"
 
 
 def test_single_turn_timeout_keeps_existing_opencode_error_classification():
@@ -606,12 +616,32 @@ def test_single_turn_timeout_keeps_existing_opencode_error_classification():
         stdout=json.dumps({"type": "error"}),
         continuation=False,
     )
-    assert outcome.status == "incomplete" and outcome.error_type == "timeout"
+    assert status(outcome) == "incomplete" and outcome.error_type == "timeout"
+
+
+@pytest.mark.parametrize("statuses,last", [((400, 503), 503), ((503, 400), 400)])
+def test_timed_out_continuation_records_the_last_error_event(statuses, last):
+    """The deadline's fault is the error OpenCode emitted last: an earlier error the run went past does not decide."""
+    events = [{"type": "error", "error": {"name": "APIError", "data": {"statusCode": code}}} for code in statuses]
+    outcome = classify_opencode_run(
+        {"messages": [{"info": {"role": "assistant"}, "parts": []}]},
+        cleanup={"return_code": -9, "error": None, "timed_out": True, "cleanup_confirmed": True},
+        previous_session_id="opencode-session",
+        session_id="opencode-session",
+        stdout="\n".join([json.dumps(events[0]), "not json", json.dumps(events[1])]),
+        continuation=True,
+    )
+    assert outcome.recorded_error == {"error": events[-1]["error"]}
+    assert outcome.recorded_error["error"]["data"]["statusCode"] == last
 
 
 @pytest.mark.parametrize("prior_success", [False, True])
-@pytest.mark.parametrize("error_event", [False, True])
-def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, prior_success, error_event):
+@pytest.mark.parametrize("error_status", [None, 400, 503])
+def test_opencode_error_during_timeout_is_graded_unless_it_names_an_unavailable_endpoint(
+    setup, tmp_path, prior_success, error_status
+):
+    """A deadline is graded, unless the error OpenCode emitted names an unavailable endpoint (a 503 here): then the
+    deadline was spent on our servers and the run is retried. Any error event answered 502 before the outcome ladder."""
     agent, sandbox = setup
     payloads = install_artifact_runner(sandbox, tmp_path)
     launch = sandbox.launch.side_effect
@@ -619,8 +649,8 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
     async def interrupted(**kwargs):
         result = await launch(**kwargs)
         sandbox.files[f"{payloads[-1]['directory']}/stdout.jsonl"] = (
-            json.dumps({"type": "error", "error": {"name": "APIError", "data": {"statusCode": 400}}})
-            if error_event
+            json.dumps({"type": "error", "error": {"name": "APIError", "data": {"statusCode": error_status}}})
+            if error_status
             else ""
         )
         return result
@@ -632,17 +662,15 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
         sandbox.launch.side_effect = interrupted
         sandbox.result.update(timed_out=True, return_code=-9)
         response = activate(client, 2 if prior_success else 1)
-        if error_event:
-            assert response.status_code == 502
-            assert "OpenCode emitted an error event" in response.json()["detail"]
-            assert (
-                '"name": "APIError"' in response.json()["detail"] and '"statusCode": 400' in response.json()["detail"]
-            )
+        if error_status == 503:
+            message = failed_message(response, "model_request_error")
+            assert "OpenCode emitted an error event" in message and '"statusCode": 503' in message
+            assert json.loads(response.json()["metadata"]["ng_agent_outcome"])["status_code"] == 503
         else:
             assert response.status_code == 200 and response.json()["status"] == "incomplete"
         invocation = roots(close(client, request)["agent_observations"])[-1]
-        assert invocation["status"] == ("failed" if error_event else "incomplete")
-        assert invocation["error_type"] == ("server_error" if error_event else "timeout")
+        assert invocation["status"] == ("failed" if error_status == 503 else "incomplete")
+        assert invocation["error_type"] == ("server_error" if error_status else "timeout")
 
 
 @pytest.mark.parametrize(
@@ -801,12 +829,12 @@ def test_permission_yield_is_opencode_continuation_outcome_not_a_task_policy():
     result = classify_opencode_run(
         export, cleanup=cleanup, previous_session_id=None, session_id="opencode-session", stdout="", continuation=True
     )
-    assert result.status == "incomplete" and result.error_type == "permission_denied"
+    assert status(result) == "incomplete" and result.error_type == "permission_denied"
     export["messages"][0]["parts"][0]["state"]["error"] = "A different tool failure"
     result = classify_opencode_run(
         export, cleanup=cleanup, previous_session_id=None, session_id="opencode-session", stdout="", continuation=True
     )
-    assert result.status == "failed"
+    assert status(result) == "failed"
 
 
 def test_ordinary_seed_does_not_add_continuation_capabilities(setup):

@@ -184,6 +184,13 @@ async def test_session_composition_routes_collector_through_environment_and_resp
             [(0, json.dumps(materialized), materialized)], collection_config
         )
         _, result = await next(RolloutCollectionHelper().run_examples(rows))
+    if outcome == "initial-rejection":
+        # The endpoint refused the run's very first request (decision 4): failed, neither graded nor retried.
+        # The rejection rule follows the one PR #5798 proposed for OpenCode.
+        assert result["result"] is None and result["failure"]["stage"] == "agent", result
+        assert result["failure"]["failure_reason"] == "HTTP 400: model rejected request"
+        assert [path for _, path, _ in calls][-2:] == ["/v1/agent_sessions/close", "/close_session"]
+        return
     assert result["failure"] is None, result
     assert result["result"]["reward"] == reward
     assert result["result"]["evaluation_completed"] is True

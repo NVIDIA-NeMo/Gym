@@ -10,6 +10,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from nemo_gym.agents import decide_outcome
 from nemo_gym.core import MODEL_CONTEXT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.trajectory import ContextCompactionObservation, ToolCallObservation, TrajectoryRecord
 from responses_api_agents.opencode_agent.app import OpenCodeAgent
@@ -438,7 +439,7 @@ def test_a_step_opencode_continued_after_does_not_fail_the_run(tmp_path: Path):
         stdout="",
         continuation=False,
     )
-    assert outcome.status == "completed"
+    assert decide_outcome(outcome.evidence).status == "completed"
     assert [turn.source_message_id for turn in trajectory.turns] == ["msg_a1", "msg_a2"]
 
 
@@ -454,4 +455,4 @@ def test_an_error_on_the_last_reply_still_ends_the_run(tmp_path: Path):
         stdout="",
         continuation=False,
     )
-    assert outcome.status == "failed" and "socket hang up" in outcome.error
+    assert decide_outcome(outcome.evidence).status == "failed" and "socket hang up" in outcome.error

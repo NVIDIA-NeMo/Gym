@@ -425,11 +425,18 @@ as for mini-SWE. Defaults:
 - The CLI's own provider settings: a 300-second stream idle timeout
   (`++tbsci_stream_idle_timeout_ms`) and Codex's default request and stream retries
   (`++tbsci_codex_request_max_retries`, `++tbsci_codex_stream_max_retries`).
-- A Codex run that fails or dies while its sandbox still runs is graded as a nonzero agent exit,
-  as Harbor grades it (`++tbsci_verify_after_agent_error=false` retries it instead); a lost
-  sandbox or a model-endpoint outage is still retried. A provider failure Codex reports itself
+- A Codex run that leaves no usable result (a nonzero or signalled exit, a failed turn, no
+  `turn.completed`) is graded as a nonzero agent exit, as Harbor grades it: Codex reports it
+  `failed` with `agent_run_error`, and the environment's outcome policy maps that kind to
+  `verify` (`++tbsci_agent_run_error_action=retry` retries it instead). The policy grades every
+  such run, so a sandbox that stopped answering after Codex exited, or an endpoint outage that
+  ended Codex without a reported provider failure, is graded too, where it used to be retried;
+  only a run that died while its sandbox still answers carries `metadata.graded_agent_error`. An
+  unconfirmed cleanup is still retried. A provider failure Codex reports itself
   goes to the environment's outcome policy (#4834), which by default grades a rejected request
-  (400, 413, 422) and retries a transient one. See `codex_agent`'s `verify_after_agent_error`.
+  (400, 413, 422) after a model reply, fails one on the first request without grading it
+  (`model_request_rejected`), and retries a transient one. See `codex_agent`'s
+  `verify_after_agent_error`.
 - Codex and its tools get `oom_score_adj` 1000 (0 when the sandbox starts below zero), so an
   OOM kill inside the sandbox picks agent work, not the exec daemon
   (`++tbsci_raise_oom_score_adj=false` turns it off).

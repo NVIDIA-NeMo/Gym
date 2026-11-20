@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_science import prepare as preparation
+from nemo_gym.agents import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, global_config
 from nemo_gym.core import NeMoGymResponse
@@ -971,6 +972,37 @@ def _load_run_config(path: Path):
     run_config = OmegaConf.load(path)
     parts = [_load_run_config(REPOSITORY / part) for part in run_config.pop("config_paths", [])]
     return OmegaConf.merge(*parts, run_config)
+
+
+@pytest.mark.parametrize(
+    "overrides, action", [({}, OutcomeAction.VERIFY), ({"tbsci_agent_run_error_action": "retry"}, OutcomeAction.RETRY)]
+)
+def test_codex_profile_grades_a_codex_run_without_a_usable_result(overrides, action):
+    """Codex reports a run that died (for example OOM-killed) as failed with agent_run_error; the profile's outcome
+    policy grades it, as Harbor grades after any agent exit, and keeps every other kind's default action."""
+    config = OmegaConf.merge(_load_run_config(BENCHMARK_DIR / "codex.yaml"), overrides)
+    environment = config.terminal_bench_science_codex.environment_servers.single_agent_turn_legacy
+    policy = AgentOutcomePolicyConfig.model_validate(
+        OmegaConf.to_container(environment.agent_outcome_policy, resolve=True)
+    )
+    response = NeMoGymResponse(
+        id="resp",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=[],
+        tool_choice="auto",
+        tools=[],
+        parallel_tool_calls=False,
+        status="failed",
+        metadata={"ng_agent_outcome": json.dumps({"failure_kind": "agent_run_error"})},
+    )
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    assert agent_outcome_policy(response, config=policy) == action
+    defaults = AgentOutcomePolicyConfig().by_failure_kind
+    assert {kind: act for kind, act in policy.by_failure_kind.items() if kind != "agent_run_error"} == {
+        kind: act for kind, act in defaults.items() if kind != "agent_run_error"
+    }
 
 
 def test_codex_profile_passes_codex_provider_retries_through():
