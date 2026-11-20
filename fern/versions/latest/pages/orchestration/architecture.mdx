@@ -1,0 +1,59 @@
+---
+title: "Orchestration Architecture"
+description: "How a submit config becomes jobs, how the job record ties later commands to the scheduler, and how the configurations relate."
+position: 3
+---
+
+This page explains how the orchestration layer is put together: what each step of a submission produces, how `gym job` commands find the right scheduler later, and how the configurations you write, the files NeMo Gym saves, and the arguments it passes on relate to each other. For the commands themselves, see [Orchestration](/orchestration) and [Job Management](/orchestration/job-management).
+
+The orchestration layer is a Gym-aware orchestrator. It adds no core functionality: nothing outside `nemo_gym/orchestration/` imports it, except the CLI entry point that registers `gym eval submit` and `gym job`. Deleting it leaves the rest of NeMo Gym working, and a run it starts uses the same `gym eval run` that you can start yourself.
+
+## From config to jobs
+
+```text
+ submit.yaml + overrides
+          |  Hydra compose, interpolation, env prefixes
+          v
+     SubmitConfig                    strict schema; unknown keys are errors
+          |  executor chosen by compute.<name>.type
+          v
+   Executor.run()  ------------->  one job per benchmark on the scheduler
+          |                                    |
+          v                                    v
+  SubmissionRecord               run directory: gym-job.json, resolved-config.yaml,
+  (local index + run dir)        logs/, artifacts/ ...
+```
+
+1. **Compose and validate.** Hydra merges the file with your command-line overrides, resolves interpolations, and the result is validated as a `SubmitConfig`. `host:` values are read from your shell here.
+2. **Choose the executor.** The type of the single `compute` entry selects the executor: `slurm` or `kubernetes`. A config the executor cannot run, such as a Kubernetes submit with `otel` left on, stops the submit before anything reaches the cluster.
+3. **Run the executor.** It renders one job per benchmark (a script for Slurm, a manifest for Kubernetes), puts it where the scheduler can see it, and queues it. A failure for one benchmark is recorded for that benchmark and does not stop the others.
+4. **Record.** The executor builds a `SubmissionRecord`. A copy goes to the local index on your machine. The run directory holds the durable copy and the resolved config.
+
+[Slurm Executor](/orchestration/slurm-executor) and [Kubernetes Executor](/orchestration/kubernetes-executor) describe step 3 for each scheduler.
+
+## How a later command finds the scheduler
+
+The record is the link between a submission and its executor. It stores the executor's name, and every `gym job` command starts from it:
+
+1. The command loads the record by its `gym_job_id` from the local index.
+2. It looks up the executor class by `record.executor`.
+3. It asks for the capability the command needs. If the executor lacks it, the command stops with `<executor> executor does not support <command>`.
+4. The executor does the work. The code that turns its answers into output (`operations.py`) imports only the capability interfaces, never an executor, so it works for any executor that has the capability.
+
+Because the lookup uses the stored name, not your current configuration, a command reaches the right scheduler even after you change the config file. [Executors and Capabilities](/orchestration/executors) lists which executor has which capability.
+
+## How the configurations relate
+
+Several files and argument sets take part in a run. They do not all merge into one: each layer hands a defined piece to the next.
+
+| Layer | You write it | What happens to it |
+| --- | --- | --- |
+| Submit config | `submit.yaml` plus Hydra overrides after the flags | Composed and validated once, at submit. The result is saved as `resolved-config.yaml`. |
+| `env` values | `lit:`, `host:` and `runtime:` entries | `lit:` and `host:` are resolved at submit, and `host:` is saved as a reference, not as the secret. `runtime:` is resolved on the compute node. See [env values](/orchestration/configuration#env-values). |
+| Policy wiring | `driver.policy_model` | Submit adds `policy_base_url`, `policy_model_name` and `policy_api_key` to each benchmark's `run` block. A conflicting value you set is an error. See [Policy wiring](/orchestration/configuration#policy-wiring). |
+| Benchmark `prepare` and `run` | Overrides under `driver.benchmarks.<name>` | Passed as arguments to `gym eval prepare` and `gym eval run`, on the driver. Gym's own configs, such as the benchmark's `config.yaml` in `config_paths`, are composed there, by `gym eval run`, not at submit. |
+| Executor settings | `compute.<name>` | Read only by the executor of that type. They shape the job: nodes, GPUs, namespace, claim, time limit. |
+
+Two consequences follow. A submit config checks the part of a benchmark it can see, so a mistake inside a Gym config named in `config_paths` appears when the job runs, not at submit. And `resolved-config.yaml` is the record of what was submitted, so diff it, not the original file, when two runs differ.
+
+To add an executor for another scheduler, see [Add an Executor](/contribute/add-an-executor).

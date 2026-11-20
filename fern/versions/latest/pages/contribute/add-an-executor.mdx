@@ -1,0 +1,45 @@
+---
+title: "Add an Executor"
+description: "Let gym eval submit and the gym job commands work with a new scheduler."
+position: 7
+---
+
+An executor submits a run to one scheduler and serves the later `gym job` commands for the jobs it queued. This page is for contributors who add one. To use the executors that exist, see [Executors and Capabilities](/orchestration/executors).
+
+## Where the code lives
+
+| Module | Role |
+| --- | --- |
+| `api.py` | The input schema: `SubmitConfig` and its parts, including each compute type. |
+| `jobs.py` | The output schema: `SubmissionRecord`, `BenchmarkJob`, and the status types such as `JobState`. |
+| `operations.py` | What you do with a submission: status, info, cancel, logs. It imports no executor, only capability interfaces. |
+| `submit.py` | The entry points the CLI calls. It is the only module that knows which executors exist. |
+| `executors/base.py` | `BaseExecutor`: the one method a new executor must implement, `run`. |
+| `executors/capabilities.py` | The opt-in interfaces an executor adds, and `require`. |
+| `executors/<name>/` | One scheduler. |
+
+All of it is under `nemo_gym/orchestration/`. Nothing outside that package may import it, except the CLI entry point, and a test enforces this. If your executor needs code that other packages also need, put that code in the package that owns it.
+
+## Implement the executor
+
+1. **Add a compute config.** In `api.py`, add a model for the new `compute.<name>.type` and add it to the `ComputeConfig` union, tagged with its type. Validation errors raised there reach the user before anything is submitted.
+2. **Extend `BaseExecutor`.** Set `name`, which is stored in every job record and is what later commands dispatch on. Implement `run(config, dry_run=...)`: render and queue one job per benchmark, return a `SubmissionRecord`, and record a failure for one benchmark without failing the others. Return `None` on a dry run. Set `supports_resumable = True` only if the executor can chain follow-up jobs; otherwise `resumable` is a configuration error for it.
+3. **Add capabilities.** List the interfaces from `capabilities.py` in the class bases and implement every abstract method of each. `Terminable` and `LogReadable` include `Inspectable`, because both need `query_states`. Add only what the scheduler can really do: a command for a capability the executor lacks stops with a clear error, which is better than a command that guesses.
+4. **Register it.** In `submit.py`, add the compute config class and executor to `_EXECUTORS`. `gym eval submit` and every `gym job` command find the executor through this table.
+5. **Write the record.** `executor` must be your `name`, and `job_id` must be whatever the scheduler's own tools take, so a user can fall back to them. Put anything else needed to find the run again in `executor_metadata`.
+
+## Keep the docs in step
+
+The capability table on [Executors and Capabilities](/orchestration/executors#capabilities) is generated from the executor classes. After you register an executor, regenerate it:
+
+```bash
+python -m nemo_gym.orchestration.capability_matrix --write
+```
+
+`tests/unit_tests/orchestration/test_capability_matrix.py` fails when the page differs from the generated output, and when a `gym job` command in `submit.py` asks for a different capability than the table names.
+
+Then add a page for the executor beside [Slurm Executor](/orchestration/slurm-executor) and [Kubernetes Executor](/orchestration/kubernetes-executor): what it needs, how a benchmark runs, what it does not support, and how to manage a run when a command is unsupported.
+
+## Test it
+
+Use `tests/unit_tests/orchestration/test_kubernetes_executor.py` as a model. Test that a submit returns a record naming every benchmark, that a failed benchmark is recorded without disturbing the others, that a dry run submits nothing, and that each setting the executor rejects fails with an error naming it. As for any change that alters behavior, also run a real benchmark through it.

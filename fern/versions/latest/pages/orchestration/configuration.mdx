@@ -1,7 +1,7 @@
 ---
 title: "Configuration Reference"
 description: "Every field of the gym eval submit config, with defaults and validation rules."
-position: 3
+position: 4
 ---
 
 A submit config is a YAML file with the top-level sections `services`, `compute`, `driver`, `job`, and optionally `otel`. All models are strict: an unknown key anywhere is an error, which is how typos surface. Top-level keys that start with `_` are the exception; they are [scratch namespaces](/orchestration#scratch-keys) for interpolation and are dropped before validation.
@@ -141,6 +141,23 @@ to the job; an explicit `--export=NONE` prevents that inheritance.
 | `extra_args` | `{}` | Extra `#SBATCH` directives, written without leading dashes. |
 
 A benchmark is **one** Slurm job. Pools do not create separate Slurm requests; they divide the one allocation between services. The job requests the sum of every pool's `nodes`, and pool `i` owns the contiguous node range after all pools before it, in declaration order. Because Slurm takes one value per job, pools must agree on `partition`, `ntasks_per_node`, and `gpus_per_node`, and may not set the same `extra_args` key to different values. Disagreement is an error.
+
+### type: kubernetes
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `pvc_name` | required | Existing `PersistentVolumeClaim`, mounted at `job.output_path` in every container. |
+| `context` | `null` | kubeconfig context. `null` uses the current one. |
+| `namespace` | `default` | Namespace the Jobs are created in. |
+| `gpus_per_node` | `null` | Size of the one node. Also used to check vLLM deployments. |
+| `node_selector` | `{}` | Copied into the pod's `nodeSelector`. |
+| `service_account` | `null` | Pod service account. |
+| `memory_per_gpu` | `32Gi` | Memory request per GPU on a service container. |
+| `extra_args` | `{}` | Copied as pod labels and annotations. |
+| `ttl_seconds_after_finished` | `86400` | How long a finished Job is kept. |
+| `active_deadline_seconds` | `null` | Kills a Job still running after this long. |
+
+The Kubernetes executor covers one node and supports only part of the schema: it rejects `ray` services, `use_ray_serve`, `mounts`, `runtime:` env values, `resumable`, and an enabled `otel`. See [Kubernetes Executor](/orchestration/kubernetes-executor#what-is-not-supported-yet).
 
 ## driver
 
