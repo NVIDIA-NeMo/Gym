@@ -416,6 +416,30 @@ class SandboxProvider(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxCloseByMetadata(Protocol):
+    """A provider that can find the sandboxes carrying given labels, so a live worker can stop a dead worker's.
+
+    Callers stop them through ``nemo_gym.sandbox.close_by_metadata``.
+    It re-reads each sandbox's labels before it closes it.
+    A provider's filter may therefore be advisory, as OpenSandbox's server-side metadata filter is.
+    """
+
+    async def list_by_metadata(self, labels: Mapping[str, str]) -> list[SandboxHandle]:
+        """Handles of the sandboxes the provider reports as carrying every label in ``labels``.
+
+        ``close`` accepts each handle.
+        """
+        ...
+
+    async def metadata_of(self, handle: SandboxHandle) -> dict[str, str] | None:
+        """The sandbox's labels as the provider holds them now, read fresh.
+
+        ``None`` when the sandbox no longer exists.
+        """
+        ...
+
+
+@runtime_checkable
 class SupportsSandboxBackgroundServices(Protocol):
     """Optional execution override for services needed by a later command."""
 

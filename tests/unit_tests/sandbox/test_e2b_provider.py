@@ -23,6 +23,7 @@ import re
 import sys
 import tomllib
 import types
+import urllib.parse
 from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -31,6 +32,7 @@ import pytest
 from packaging.requirements import Requirement
 
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.core.worker_resources import worker_routing_id
 from nemo_gym.package_info import __version__ as nemo_gym_version
 from nemo_gym.sandbox import attribution
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
@@ -1706,3 +1708,132 @@ async def test_real_sdk_status_only_reads_control_plane(
     # Only the control-plane GET: an envd health check would resume a paused sandbox.
     assert [method for method, _ in requests] == ["GET"]
     assert requests[0][1].endswith("/sandboxes/sbx-1")
+
+
+# --------------------------------------------------------------------------
+# Close by metadata -- the real SDK against a mocked control plane
+# --------------------------------------------------------------------------
+
+
+class TestCloseByMetadata:
+    LABELS = {"nemo-gym.nvidia.com/worker": "w1", "nemo-gym.nvidia.com/run": "r1"}
+
+    @pytest.fixture
+    def control_plane(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        """A fake E2B control plane: sandboxes by ID with their metadata, two listing pages, recorded requests."""
+        e2b = pytest.importorskip("e2b", reason="e2b optional sandbox dependency is not installed")
+        import httpx
+        from e2b.api import client_async
+
+        plane: dict = {"sandboxes": {}, "requests": [], "page_size": 1, "relabel_on_list": {}}
+
+        def record(sandbox_id: str, metadata: dict) -> dict:
+            return {
+                "sandboxID": sandbox_id,
+                "templateID": "base",
+                "clientID": "c",
+                "envdVersion": "0.4.0",
+                "startedAt": "2026-01-01T00:00:00Z",
+                "endAt": "2026-01-01T01:00:00Z",
+                "cpuCount": 1,
+                "memoryMB": 512,
+                "diskSizeMB": 1024,
+                "state": "running",
+                "metadata": metadata,
+            }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            plane["requests"].append((request.method, request.url.path, dict(request.url.params)))
+            sandboxes = plane["sandboxes"]
+            if request.method == "GET" and request.url.path == "/v2/sandboxes":
+                # The SDK URL-encodes the metadata query, including the "/" in prefixed keys.
+                wanted = dict(urllib.parse.parse_qsl(request.url.params.get("metadata", "")))
+                matching = [
+                    sandbox_id
+                    for sandbox_id, metadata in sandboxes.items()
+                    if all(metadata.get(key) == value for key, value in wanted.items())
+                ]
+                start = int(request.url.params.get("nextToken") or 0)
+                page = matching[start : start + plane["page_size"]]
+                headers = {}
+                if start + plane["page_size"] < len(matching):
+                    headers["x-next-token"] = str(start + plane["page_size"])
+                # Labels that change once the listing is out, so the re-read sees something else.
+                for sandbox_id, metadata in plane["relabel_on_list"].items():
+                    sandboxes[sandbox_id] = metadata
+                return httpx.Response(
+                    200,
+                    json=[record(sandbox_id, sandboxes.get(sandbox_id, {})) for sandbox_id in page],
+                    headers=headers,
+                )
+            sandbox_id = request.url.path.rsplit("/", 1)[-1]
+            if sandbox_id not in sandboxes:
+                return httpx.Response(404, json={"code": 404, "message": "not found"})
+            if request.method == "DELETE":
+                del sandboxes[sandbox_id]
+                return httpx.Response(204)
+            return httpx.Response(200, json=record(sandbox_id, sandboxes[sandbox_id]))
+
+        monkeypatch.setattr(client_async, "get_transport", lambda *args, **kwargs: httpx.MockTransport(handler))
+        monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: e2b)
+        return plane
+
+    @staticmethod
+    def _provider() -> E2BProvider:
+        return E2BProvider(connection={"api_key": "k", "api_url": "http://api.test"}, create={"template": "base"})
+
+    async def test_is_a_close_by_metadata_provider(self) -> None:
+        from nemo_gym.sandbox.providers.base import SupportsSandboxCloseByMetadata
+
+        assert isinstance(self._provider(), SupportsSandboxCloseByMetadata)
+
+    async def test_lists_by_the_metadata_query_across_pages(self, control_plane: dict) -> None:
+        control_plane["sandboxes"].update(
+            {"a": {**self.LABELS, "x": "1"}, "b": dict(self.LABELS), "other": {"nemo-gym.nvidia.com/worker": "w2"}}
+        )
+
+        handles = await self._provider().list_by_metadata(self.LABELS)
+
+        assert sorted(handle.sandbox_id for handle in handles) == ["a", "b"]
+        lists = [params for method, path, params in control_plane["requests"] if path == "/v2/sandboxes"]
+        assert len(lists) == 2  # One page per sandbox: the second request follows the next token.
+        assert all(dict(urllib.parse.parse_qsl(params["metadata"])) == self.LABELS for params in lists)
+        assert "nextToken" not in lists[0] and lists[1]["nextToken"] == "1"
+
+    async def test_metadata_of_reads_fresh_and_is_none_once_gone(self, control_plane: dict) -> None:
+        control_plane["sandboxes"]["a"] = dict(self.LABELS)
+        provider = self._provider()
+        [handle] = await provider.list_by_metadata(self.LABELS)
+
+        control_plane["sandboxes"]["a"] = {"nemo-gym.nvidia.com/worker": "w2"}
+        assert await provider.metadata_of(handle) == {"nemo-gym.nvidia.com/worker": "w2"}
+        del control_plane["sandboxes"]["a"]
+        assert await provider.metadata_of(handle) is None
+
+    async def test_close_by_metadata_kills_matches_and_refuses_relabeled_sandboxes(self, control_plane: dict) -> None:
+        from nemo_gym.sandbox.worker_labels import close_by_metadata
+
+        control_plane["sandboxes"].update({"keep": dict(self.LABELS), "stop": dict(self.LABELS)})
+        control_plane["page_size"] = 10
+        control_plane["relabel_on_list"] = {"keep": {**self.LABELS, "nemo-gym.nvidia.com/worker": "w2"}}
+
+        result = await close_by_metadata(self._provider(), self.LABELS)
+
+        assert result.closed == ("stop",)
+        assert result.refused == ("keep",)
+        assert result.failed == ()
+        assert list(control_plane["sandboxes"]) == ["keep"]
+        deletes = [path for method, path, _ in control_plane["requests"] if method == "DELETE"]
+        assert deletes == ["/sandboxes/stop"]  # Killed by ID, never connected to.
+        assert not any(path.endswith("/connect") for _, path, _ in control_plane["requests"])
+
+
+async def test_the_worker_label_reaches_the_e2b_create_call() -> None:
+    # The worker label is written even with attribution off, under its fixed key.
+    sandbox = AsyncSandbox(E2BProvider(create={"template": "base"}, attribution={"enabled": False}))
+    await sandbox.start(_spec(metadata={"task": "t1"}))
+
+    metadata = FakeSandbox.instances[-1].create_kwargs["metadata"]
+    assert metadata["task"] == "t1"
+    assert metadata["nemo-gym.nvidia.com/worker"] == worker_routing_id()
+    await sandbox.stop()

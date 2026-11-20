@@ -20,10 +20,10 @@ import logging
 import os
 import shutil
 import signal
-import tempfile
 import uuid
 from pathlib import Path
 
+from nemo_gym.core.worker_resources import record_process_group, worker_workspace_dir
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
@@ -79,13 +79,16 @@ class LocalProvider:
         if spec.workdir:
             workspace, owned = Path(spec.workdir).expanduser(), False
         else:
-            root = self._workspace_root or Path(tempfile.gettempdir())
+            # Without a configured root, the workspace sits under this worker's directory.
+            # A peer can then remove it if this worker dies.
+            root = self._workspace_root or worker_workspace_dir()
             workspace, owned = root / sandbox_id, True
         workspace.mkdir(parents=True, exist_ok=True)
         return SandboxHandle(
             sandbox_id=sandbox_id,
             provider_name=self.name,
-            raw={"workspace": workspace, "env": dict(spec.env), "owned": owned},
+            # Records of process groups a command left running in the background; close ends them.
+            raw={"workspace": workspace, "env": dict(spec.env), "owned": owned, "process_groups": []},
         )
 
     async def exec(
@@ -108,19 +111,40 @@ class LocalProvider:
         if cwd and inst["owned"] and not exec_cwd.is_absolute():
             exec_cwd = inst["workspace"] / exec_cwd
         timeout = timeout_s if timeout_s is not None else self._default_timeout_s
+        # Each command confirms the groups earlier commands left running, so their records keep trusting them.
+        # A group that has ended drops its record.
+        # The list is rewritten in place with no await, so a concurrent command's appended record is never lost.
+        # Confirming costs a few system calls and one small write to the node-local record file.
+        groups = inst.setdefault("process_groups", [])
+        for index, group in reversed(list(enumerate(groups))):
+            confirmed = group.confirm()
+            if confirmed is None:
+                group.forget()
+                del groups[index]
+            else:
+                groups[index] = confirmed
         async with self._semaphore:
+            # The shell waits for one line on stdin, sent once its process group is recorded, then runs the command in
+            # place with stdin from /dev/null.
+            # Recording after the command started would race a command that exits at once and leaves a process
+            # running in the background.
             process = await asyncio.create_subprocess_exec(
                 self._shell,
                 "-c",
+                'read -r _ && exec "$0" -c "$1" </dev/null',
+                self._shell,
                 command,
                 cwd=str(exec_cwd),
                 env={**os.environ, **inst["env"], **(env or {})},
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
+            # Recorded under this worker, so a peer can kill the group if this worker dies.
+            record = record_process_group(process.pid)
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                stdout, stderr = await asyncio.wait_for(process.communicate(b"\n"), timeout=timeout)
             except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError) as exc:
                 with contextlib.suppress(ProcessLookupError):
                     # start_new_session makes the PID the group ID, even after the shell exits.
@@ -135,6 +159,15 @@ class LocalProvider:
                     return_code=SANDBOX_RUNTIME_RETURN_CODE,
                     error_type="timeout",
                 )
+            finally:
+                if record is not None:
+                    # A process the command left running in the background keeps the group alive.
+                    # The record then tracks those processes, and the sandbox keeps it until close ends the group.
+                    tracked = record.track_members()
+                    if tracked is not None:
+                        inst.setdefault("process_groups", []).append(tracked)
+                    else:
+                        record.forget()
         return SandboxExecResult(
             stdout=stdout.decode(errors="replace"),
             stderr=stderr.decode(errors="replace"),
@@ -164,7 +197,14 @@ class LocalProvider:
         return SandboxStatus.RUNNING if handle.raw["workspace"].is_dir() else SandboxStatus.STOPPED
 
     async def close(self, handle: SandboxHandle) -> None:
+        """End the processes commands left running in the background, then remove an owned workspace."""
         inst = handle.raw
+        groups = inst.get("process_groups", [])
+        # No await between ending a record and removing it, so a record a concurrent command appends is not skipped.
+        # A record whose end raises stays for the next close.
+        while groups:
+            groups[-1].end()
+            groups.pop()
         if inst["owned"]:
             await asyncio.to_thread(shutil.rmtree, inst["workspace"], ignore_errors=True)
 

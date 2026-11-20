@@ -278,6 +278,17 @@ class E2BOperationConfig:
         _validate_nonnegative_number("operations.retry_max_delay_s", self.retry_max_delay_s)
 
 
+class _ListedSandbox:
+    """A sandbox found by listing, which ``E2BProvider.close`` kills by ID without connecting to it."""
+
+    def __init__(self, sandbox_class: Any, sandbox_id: str) -> None:
+        self._sandbox_class = sandbox_class
+        self.sandbox_id = sandbox_id
+
+    async def kill(self, **params: Any) -> bool:
+        return await self._sandbox_class.kill(self.sandbox_id, **params)
+
+
 class E2BProvider:
     """Provider backed by the E2B Python SDK."""
 
@@ -693,6 +704,46 @@ class E2BProvider:
             if killed is False:
                 LOGGER.debug("e2b sandbox %s already gone on close", handle.sandbox_id)
         handle.raw = None
+
+    async def list_by_metadata(self, labels: Mapping[str, str]) -> list[SandboxHandle]:
+        """Running and paused sandboxes whose metadata the list API matches against every label in ``labels``.
+
+        The handles kill by ID through the control plane, without connecting.
+        A paused sandbox is therefore not resumed only to be stopped.
+        """
+        e2b = _require_e2b_sdk()
+        query = e2b.SandboxQuery(metadata={str(key): str(value) for key, value in labels.items()})
+        paginator = e2b.AsyncSandbox.list(query=query, **self._api_params())
+        handles: list[SandboxHandle] = []
+        while paginator.has_next:
+            page = await self._with_retries(paginator.next_items, operation="list", retry_timeouts=True)
+            handles.extend(
+                SandboxHandle(
+                    sandbox_id=str(info.sandbox_id),
+                    provider_name=self.name,
+                    raw=_ListedSandbox(e2b.AsyncSandbox, str(info.sandbox_id)),
+                )
+                for info in page
+            )
+        return handles
+
+    async def metadata_of(self, handle: SandboxHandle) -> dict[str, str] | None:
+        """The sandbox's metadata from a fresh control-plane read; ``None`` once the sandbox is gone."""
+        e2b = _require_e2b_sdk()
+        not_found = tuple(
+            exc
+            for exc in (getattr(e2b, "SandboxNotFoundException", None), getattr(e2b, "NotFoundException", None))
+            if isinstance(exc, type)
+        )
+        try:
+            info = await self._with_retries(
+                lambda: e2b.AsyncSandbox.get_info(handle.sandbox_id, **self._api_params()),
+                operation="get_info",
+                retry_timeouts=True,
+            )
+        except not_found:
+            return None
+        return {str(key): str(value) for key, value in (info.metadata or {}).items()}
 
     async def aclose(self) -> None:
         """No provider-scoped client to close; sandboxes own their connections."""

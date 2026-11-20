@@ -51,6 +51,7 @@ from nemo_gym.agents.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import worker_resources
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.server_runtime.base_resources_server import (
     RESOURCES_SESSIONS,
@@ -1531,3 +1532,22 @@ class TestPrivateSocketBacklog:
         asyncio.run(serve())
 
         assert backlogs == [16384]
+
+
+def test_a_routing_worker_labels_its_resources_with_its_routing_id(
+    socket_dir: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_resources, "_routing_id", None)
+    app = FastAPI()
+
+    routing_id = install_session_routing(
+        app,
+        kind=RESOURCES_SESSIONS,
+        socket_dir=socket_dir,
+        session_cookie="c",
+        secret_key="c",
+        close_retry_window_seconds=1.0,
+    )
+
+    # Sandbox labels, workspaces and process group records all name the worker by the ID its peers route to.
+    assert routing_id is not None and worker_resources.worker_routing_id() == routing_id

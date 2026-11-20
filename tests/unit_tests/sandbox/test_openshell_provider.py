@@ -22,14 +22,14 @@ import inspect
 import re
 import threading
 import time
-from os import getpid as os_getpid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox import attribution
+from nemo_gym.core import worker_resources
+from nemo_gym.core.worker_resources import worker_routing_id
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.registry import get_provider_class
 
@@ -428,19 +428,23 @@ async def test_create_adds_attribution_labels_with_spec_keys_winning(
         "nemo-gym.nvidia.com/user": "alice",
         "nemo-gym.nvidia.com/workload": "bench",
         "nemo-gym.nvidia.com/run": "run-1",
-        "nemo-gym.nvidia.com/process": openshell_provider.resolve_process_id(),
+        "nemo-gym.nvidia.com/worker": worker_routing_id(),
         "task": "demo",
         SANDBOX_LABEL: "1",
     }
 
 
-async def test_create_attribution_disabled_adds_nothing(
+async def test_create_attribution_disabled_adds_only_the_worker_and_marker_labels(
     make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("NEMO_GYM_TEAM", "team-a")
     provider = make_provider(attribution={"enabled": False})
     await provider.create(SandboxSpec(metadata={"task": "demo"}))
-    assert _create_labels(fake_client) == {"task": "demo", SANDBOX_LABEL: "1"}
+    assert _create_labels(fake_client) == {
+        "task": "demo",
+        "nemo-gym.nvidia.com/worker": worker_routing_id(),
+        SANDBOX_LABEL: "1",
+    }
 
 
 async def test_create_attribution_custom_prefix_and_run_key_present(
@@ -492,7 +496,7 @@ async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) 
     assert call["name"].startswith(SANDBOX_NAME_PREFIX)
     assert len(call["name"]) <= MAX_SANDBOX_NAME_LENGTH
     # The marker label is applied last, so user metadata cannot clobber it.
-    assert call["labels"] == {"task": "demo", SANDBOX_LABEL: "1"}
+    assert call["labels"] == {"task": "demo", "nemo-gym.nvidia.com/worker": worker_routing_id(), SANDBOX_LABEL: "1"}
     pb_spec = call["spec"]
     assert pb_spec.template.image == "python:3.12-slim"
     assert dict(pb_spec.environment) == {"FOO": "bar"}
@@ -1255,50 +1259,30 @@ async def test_aclose_reaps_orphaned_sandboxes_of_this_process(make_provider, fa
     assert fake_client.list_calls == [
         {
             "workspace": "default",
-            "label_selector": f"nemo-gym.nvidia.com/process={attribution.resolve_process_id()},{SANDBOX_LABEL}=1",
+            "label_selector": f"nemo-gym.nvidia.com/worker={worker_routing_id()},{SANDBOX_LABEL}=1",
         }
     ]
     assert [call["name"] for call in fake_client.delete_calls] == ["orphan"]
 
 
-async def test_reap_never_deletes_another_process_sandboxes_of_the_same_run(
+async def test_reap_never_deletes_another_workers_sandboxes_of_the_same_run(
     make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Two processes of one job share the run id (NEMO_GYM_RUN_ID is inherited), so the run label must not
-    # decide what this process may delete: process B's live sandbox shares the run but not the process label.
+    # Two workers of one job share the run id (NEMO_GYM_RUN_ID is inherited), so the run label must not decide what
+    # this worker may delete: worker B's live sandbox shares the run but not the worker label.
     monkeypatch.setenv("NEMO_GYM_RUN_ID", "shared-run")
-    monkeypatch.setattr(openshell_provider, "resolve_process_id", lambda: "process-a")
+    monkeypatch.setattr(worker_resources, "_routing_id", None)
+    worker_resources.set_worker_routing_id("worker-a")
     provider = make_provider()
     prefix = "nemo-gym.nvidia.com/"
     fake_client.gateway_labels = {
-        "a-orphan": {f"{prefix}run": "shared-run", f"{prefix}process": "process-a", SANDBOX_LABEL: "1"},
-        "b-live": {f"{prefix}run": "shared-run", f"{prefix}process": "process-b", SANDBOX_LABEL: "1"},
+        "a-orphan": {f"{prefix}run": "shared-run", "nemo-gym.nvidia.com/worker": "worker-a", SANDBOX_LABEL: "1"},
+        "b-live": {f"{prefix}run": "shared-run", "nemo-gym.nvidia.com/worker": "worker-b", SANDBOX_LABEL: "1"},
         "unlabeled": {},
     }
     await provider.aclose()
     await _drain_deletes_only()
     assert [call["name"] for call in fake_client.delete_calls] == ["a-orphan"]
-
-
-async def test_create_process_label_differs_per_process(
-    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("NEMO_GYM_RUN_ID", "shared-run")
-    provider = make_provider()
-    monkeypatch.setattr(openshell_provider, "resolve_process_id", lambda: "process-a")
-    await provider.create(SandboxSpec())
-    monkeypatch.setattr(openshell_provider, "resolve_process_id", lambda: "process-b")
-    await provider.create(SandboxSpec())
-    first, second = (call["labels"] for call in fake_client.create_calls)
-    assert first["nemo-gym.nvidia.com/run"] == second["nemo-gym.nvidia.com/run"] == "shared-run"
-    assert (first["nemo-gym.nvidia.com/process"], second["nemo-gym.nvidia.com/process"]) == ("process-a", "process-b")
-
-
-def test_process_id_is_stable_in_a_process_and_new_after_fork(monkeypatch: pytest.MonkeyPatch) -> None:
-    first = attribution.resolve_process_id()
-    assert attribution.resolve_process_id() == first
-    monkeypatch.setattr(attribution.os, "getpid", lambda: os_getpid() + 1)
-    assert attribution.resolve_process_id() != first
 
 
 async def test_aclose_reap_skips_when_a_sandbox_is_still_live_in_this_process(
@@ -1326,10 +1310,20 @@ async def test_reap_never_deletes_a_live_sandbox(make_provider, fake_client: Fak
     await provider.aclose()
 
 
-async def test_reap_skipped_without_attribution(make_provider, fake_client: FakeClient) -> None:
+async def test_create_labels_the_worker_and_the_sweep_runs_without_attribution(
+    make_provider, fake_client: FakeClient
+) -> None:
     provider = make_provider(attribution={"enabled": False})
+    await provider.create(SandboxSpec())
+    assert _create_labels(fake_client) == {"nemo-gym.nvidia.com/worker": worker_routing_id(), SANDBOX_LABEL: "1"}
+    openshell_provider._LIVE_SANDBOXES.clear()
     await provider.aclose()
-    assert not fake_client.list_calls
+    assert fake_client.list_calls == [
+        {
+            "workspace": "default",
+            "label_selector": f"nemo-gym.nvidia.com/worker={worker_routing_id()},{SANDBOX_LABEL}=1",
+        }
+    ]
 
 
 async def test_reap_list_failure_is_logged_not_raised(make_provider, fake_client: FakeClient, caplog) -> None:
@@ -1343,18 +1337,17 @@ async def test_reap_list_failure_is_logged_not_raised(make_provider, fake_client
 @pytest.mark.parametrize(
     "metadata",
     [
-        {"nemo-gym.nvidia.com/process": "mine", "nemo-gym.nvidia.com/run": "task-run"},
+        {"nemo-gym.nvidia.com/worker": "mine", "nemo-gym.nvidia.com/run": "task-run"},
         {SANDBOX_LABEL: "0"},
     ],
 )
-async def test_caller_metadata_cannot_replace_the_process_or_marker_label(
-    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch, metadata: dict[str, str]
+async def test_caller_metadata_cannot_replace_the_worker_or_marker_label(
+    make_provider, fake_client: FakeClient, metadata: dict[str, str]
 ) -> None:
-    monkeypatch.setattr(openshell_provider, "resolve_process_id", lambda: "process-a")
     provider = make_provider()
     await provider.create(SandboxSpec(metadata=metadata))
     labels = _create_labels(fake_client)
-    assert labels["nemo-gym.nvidia.com/process"] == "process-a"
+    assert labels["nemo-gym.nvidia.com/worker"] == worker_routing_id()
     assert labels[SANDBOX_LABEL] == "1"
     assert labels["nemo-gym.nvidia.com/run"] == metadata.get(
         "nemo-gym.nvidia.com/run", labels["nemo-gym.nvidia.com/run"]
@@ -1494,3 +1487,81 @@ async def test_delete_uses_its_own_long_deadline(monkeypatch: pytest.MonkeyPatch
     )
     await provider.aclose()
     assert sorted(built) == [30, 90]
+
+
+def _labeled_ref(name: str, labels: dict[str, str]) -> SandboxRef:
+    return dataclasses.replace(
+        make_ref(openshell_pb2.SANDBOX_PHASE_READY, name=name, sandbox_id=f"id-{name}"), labels=labels
+    )
+
+
+async def test_list_by_metadata_selects_gym_sandboxes_carrying_every_label(
+    make_provider, fake_client: FakeClient
+) -> None:
+    fake_client.list_results = [[_labeled_ref("a", {})]]
+    provider = make_provider()
+
+    handles = await provider.list_by_metadata(
+        {"nemo-gym.nvidia.com/worker": "w1", "nemo-gym.nvidia.com/run": "my/run"}
+    )
+
+    assert fake_client.list_calls == [
+        {
+            "workspace": "default",
+            "label_selector": f"nemo-gym.nvidia.com/worker=w1,nemo-gym.nvidia.com/run=my_run,{SANDBOX_LABEL}=1",
+        }
+    ]
+    assert [(h.sandbox_id, h.raw.name, h.raw.workspace) for h in handles] == [("id-a", "a", "default")]
+    fake_client.list_results = [[]]
+    await _drain(provider)
+
+
+async def test_list_by_metadata_refuses_a_key_that_would_split_the_selector(make_provider) -> None:
+    provider = make_provider()
+    with pytest.raises(ValueError, match="cannot contain"):
+        await provider.list_by_metadata({"a,b": "x"})
+    await _drain(provider)
+
+
+async def test_metadata_of_reads_fresh_labels_and_none_once_gone(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider()
+    fake_client.get_results = [_labeled_ref("a", {"nemo-gym.nvidia.com/worker": "w1"})]
+    assert await provider.metadata_of(_make_handle(name="a")) == {"nemo-gym.nvidia.com/worker": "w1"}
+
+    fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
+    assert await provider.metadata_of(_make_handle(name="a")) is None
+
+    fake_client.get_results = [FakeRpcError(grpc.StatusCode.UNAVAILABLE)]
+    with pytest.raises(grpc.RpcError):
+        await provider.metadata_of(_make_handle(name="a"))
+    await _drain(provider)
+
+
+async def test_close_by_metadata_closes_matching_and_refuses_relabeled(make_provider, fake_client: FakeClient) -> None:
+    from nemo_gym.sandbox.worker_labels import close_by_metadata
+
+    labels = {"nemo-gym.nvidia.com/worker": "w1"}
+    fake_client.list_results = [[_labeled_ref("kept", labels), _labeled_ref("moved", labels)]]
+    current = {
+        "kept": {**labels, SANDBOX_LABEL: "1"},
+        "moved": {"nemo-gym.nvidia.com/worker": "w2", SANDBOX_LABEL: "1"},
+    }
+
+    def get(sandbox_name: str, *, workspace: str) -> SandboxRef:
+        fake_client.get_calls.append({"name": sandbox_name, "workspace": workspace})
+        if sandbox_name in fake_client.deleted:
+            raise FakeRpcError(grpc.StatusCode.NOT_FOUND)
+        return _labeled_ref(sandbox_name, current[sandbox_name])
+
+    fake_client.get = get
+    provider = make_provider()
+
+    result = await close_by_metadata(provider, labels)
+    await _drain_deletes_only()
+
+    assert result.closed == ("id-kept",)
+    assert result.refused == ("id-moved",)
+    assert result.failed == ()
+    assert [call["name"] for call in fake_client.delete_calls] == ["kept"]
+    fake_client.list_results = [[]]  # nothing of this process is orphaned at shutdown
+    await _drain(provider)

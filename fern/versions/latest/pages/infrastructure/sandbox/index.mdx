@@ -369,6 +369,25 @@ sandbox = fake_sandbox()
 sandbox.provider.on_close.side_effect = RuntimeError("provider unreachable")
 ```
 
+### The Worker Label and Closing by Label
+
+`AsyncSandbox.start()` adds one label to every sandbox's `metadata`, after the spec's own keys, so a spec cannot replace it:
+
+| Label | Value |
+| --- | --- |
+| `nemo-gym.nvidia.com/worker` | The routing ID of the worker that created the sandbox. With several workers, session routing sets it; otherwise it is generated once per process. |
+
+The key is fixed. It is written on every provider, whatever the provider block's `attribution.key_prefix` says and even with `attribution.enabled: false`, because a worker that reaps a dead peer must find every sandbox that peer created. The attribution labels (`team`, `user`, `workload`, `run`) are unchanged and still follow both settings. A deployment with a custom `key_prefix` therefore sees the worker key under the default prefix, next to its attribution keys under the custom one.
+
+With this label, a live worker can stop the sandboxes of a worker that died, instead of leaving them to the provider's `ttl_s`. `close_by_metadata(provider, labels)` lists the provider's sandboxes that carry every label, re-reads each one's labels, and closes it only if they still match. It returns the sandbox IDs it closed, refused because their labels changed, failed to close, and found already gone. Docker, OpenSandbox, OpenShell, E2B and Daytona support it. On OpenShell, closed means the delete was handed to its delete workers. Local, Apptainer, Enroot and ECS Fargate do not support it, and `close_by_metadata` raises `NotImplementedError` for them.
+
+Every sandbox that carries all the given labels is closed. Label values must be valid Kubernetes label values, which every provider stores unchanged; `close_by_metadata` refuses any other value. A run or workload label alone therefore also stops live workers' sandboxes; include `nemo-gym.nvidia.com/worker` to end one worker's sandboxes.
+
+A worker also groups what it creates on the host under its routing ID, in `<root>/<routing ID>/`. The root is `NEMO_GYM_WORKSPACE_ROOT`, or `nemo-gym-workspaces-<uid>` in the system temporary directory. The root must be on a node-local filesystem, not a shared one such as Lustre: process group records name processes of the node that wrote them, and each local command writes and removes one. The worker directory, and the default root, must be directories this user owns that nobody else can write; a worker refuses a symbolic link or one another user controls. A worker that exits removes its directory once it is empty. The directory holds:
+
+- The local provider's workspaces, unless its `workspace_root` is configured.
+- One record per child process group that the local provider runs a command in. The record is kept while the group has a process, including one the command left running in the background, and closing the local sandbox kills such a group and removes its record. Each record holds the start time of the group's leader in clock ticks since boot, the processes left in the group when its command returned, and the kernel's last allocated process ID when the group was last confirmed: at creation, when its command returns, and before each later command in the sandbox. While the leader runs, its start time identifies the group. Once it has exited, the group counts as the original one while a recorded process still runs in it, or while the kernel's process ID counter has not wrapped past the group ID since the last confirmation; Linux hands out process IDs in order, so no other group can have taken the ID before then. A reused process ID is therefore never mistaken for the group, unless the counter wraps all the way around between two confirmations. Records need Linux's `/proc`; elsewhere commands run unrecorded.
+
 ## Image Rewrites
 
 Use `rewrite_image()` when a benchmark's upstream image needs to run through an internal registry mirror.

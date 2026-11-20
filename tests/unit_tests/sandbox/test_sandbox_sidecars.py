@@ -35,6 +35,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
     SupportsSandboxSidecars,
 )
+from nemo_gym.sandbox.worker_labels import worker_labels
 
 
 class PlainProvider:
@@ -155,7 +156,7 @@ async def test_start_without_sidecars_works_on_provider_without_support() -> Non
     provider = PlainProvider()
     sandbox = await AsyncSandbox(provider, SandboxSpec(image="task:1")).start()
 
-    assert provider.created == [SandboxSpec(image="task:1")]
+    assert provider.created == [SandboxSpec(image="task:1", metadata=worker_labels())]
     descriptor = await sandbox.serialize()
     assert "sidecars" not in descriptor
     with pytest.raises(NotImplementedError, match="'plain' does not support sidecars"):

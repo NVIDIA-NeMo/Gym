@@ -116,6 +116,7 @@ from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
 from nemo_gym.config.config_types import DEFAULT_UVICORN_BACKLOG, ROLLOUT_PATH_PREFIX
+from nemo_gym.core.worker_resources import set_worker_routing_id
 from nemo_gym.server_runtime.runtime_dir import server_runtime_dir
 
 
@@ -1078,6 +1079,8 @@ def install_session_routing(
 
     routing_id = uuid4().hex
     app.state.nemo_gym_routing_id = routing_id
+    # Labels, workspaces and process group records name the worker by the same ID, so a peer can reap them.
+    set_worker_routing_id(routing_id)
     clients: dict[str, ClientSession] = {}
     if agent_sessions is not None:
         lifetimes: SessionLifetimes = _AgentSessionLifetimes(agent_sessions)
