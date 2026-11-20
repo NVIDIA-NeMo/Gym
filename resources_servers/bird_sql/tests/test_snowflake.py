@@ -253,12 +253,53 @@ _TABLES = {
         ('SELECT m."n" AS N2 FROM "Mixed Case" m WHERE m.n2 > 0', "unknown_column:M.N2"),  # but not table-qualified
         ('SELECT s.k FROM (SELECT "n" AS k FROM "Mixed Case") AS s', None),  # a derived table's column is fine
         ("WITH total(x) AS (SELECT 1) SELECT x FROM total", None),  # a CTE named TOTAL is not the function
+        # Snowflake refuses a BOOLEAN argument to SUM/AVG (DuckDB counts the true rows); a number in between is fine.
+        ('SELECT SUM("x" = 1) FROM "t"', "boolean_aggregate:SUM"),
+        ('SELECT AVG(NOT ("x" > 1)) FROM "t"', "boolean_aggregate:AVG"),
+        ('SELECT SUM(DISTINCT ("x" > 1 AND "x" < 5)) FROM "t"', "boolean_aggregate:SUM"),
+        ('SELECT SUM(IFF("x" = 1, 1, 0)), SUM(CAST("x" = 1 AS INT)), COUNT_IF("x" = 1) FROM "t"', None),
+        ('SELECT SUM(IFF("x" = 1, TRUE, FALSE)) FROM "t"', "boolean_aggregate:SUM"),  # still a BOOLEAN
+        ('SELECT SUM(COALESCE("x" = 1, FALSE)) FROM "t"', "boolean_aggregate:SUM"),
+        ('SELECT AVG(CASE WHEN "x" = 1 THEN TRUE ELSE FALSE END) FROM "t"', "boolean_aggregate:AVG"),
+        ('SELECT SUM(CASE WHEN "x" = 1 THEN 1 ELSE 0 END), SUM(COALESCE("x", 0)) FROM "t"', None),
+        ('SELECT AVG(DISTINCT) FROM "t"', "unparsable"),
+        # SELECT DISTINCT can't ORDER BY a column it doesn't select; a selected column, alias or position can, and so
+        # can an expression that is selected or built from selected columns.
+        ('SELECT DISTINCT "n" FROM "Mixed Case" ORDER BY "ID"', "distinct_order_by:ID"),
+        ('SELECT DISTINCT "n" AS k FROM "Mixed Case" ORDER BY k, "n" DESC, 1', None),
+        ('SELECT DISTINCT * FROM "Mixed Case" ORDER BY "ID"', None),
+        ('SELECT "n" FROM "Mixed Case" ORDER BY "ID"', None),  # without DISTINCT
+        ('SELECT DISTINCT "n" + 1 AS k FROM "Mixed Case" ORDER BY "n"', "distinct_order_by:n"),
+        ('SELECT DISTINCT "n" + 1 AS k FROM "Mixed Case" ORDER BY "n" + 1, k', None),
+        ('SELECT DISTINCT "n", "ID" FROM "Mixed Case" ORDER BY "ID" - 1', None),
+        # The same column name from another table is not the selected column.
+        (
+            'SELECT DISTINCT a."n" FROM "Mixed Case" AS a JOIN "Mixed Case" AS b ON a."ID" = b."ID" ORDER BY b."n"',
+            "distinct_order_by:n",
+        ),
+        ('SELECT DISTINCT a."n" FROM "Mixed Case" AS a JOIN "Mixed Case" AS b ON a."ID" = b."ID" ORDER BY "n"', None),
+        ('SELECT DISTINCT "n" FROM "Mixed Case" AS a ORDER BY a."n"', None),
     ],
 )
 def test_snowflake_rejection(sql, reason):
     from resources_servers.bird_sql.eval_utils import snowflake_rejection
 
     assert snowflake_rejection(sql, DB_ID, _TABLES) == reason
+
+
+@requires_sqlglot
+def test_snowflake_rejection_never_raises_on_a_cut_off_query():
+    # A crash here would mask the answer as a verifier error instead of scoring it 0.
+    from resources_servers.bird_sql.eval_utils import snowflake_rejection
+
+    queries = [
+        'SELECT AVG(DISTINCT "x") FROM "t" WHERE "x" > 1 GROUP BY "x" ORDER BY SUM(IFF("x" = 1, TRUE, FALSE))',
+        'SELECT DISTINCT a."n" FROM "Mixed Case" AS a JOIN "t" USING ("x") ORDER BY a."ID" LIMIT 1',
+    ]
+    for query in queries:
+        words = query.split(" ")
+        for k in range(1, len(words) + 1):
+            snowflake_rejection(" ".join(words[:k]), DB_ID, _TABLES)
 
 
 class _SnowflakeEnv:

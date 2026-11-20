@@ -340,6 +340,25 @@ _SQLITE_ONLY_FUNCTIONS = frozenset({"GROUP_CONCAT", "IIF", "INSTR", "JULIANDAY",
 _FLATTEN_COLUMNS = frozenset({"SEQ", "KEY", "PATH", "INDEX", "VALUE", "THIS"})
 
 
+def _is_boolean(node: Any) -> bool:
+    """Whether a sqlglot expression is BOOLEAN: a comparison or logical operator, ``TRUE``/``FALSE``, or an ``IFF``,
+    ``CASE`` or ``COALESCE`` whose every result is."""
+    from sqlglot import exp
+
+    node = node.unnest()
+    if isinstance(node, (exp.Predicate, exp.Connector, exp.Not, exp.Boolean)):
+        return True
+    if isinstance(node, exp.If):
+        results = [node.args.get("true"), node.args.get("false")]
+    elif isinstance(node, exp.Case):
+        results = [branch.args.get("true") for branch in node.args.get("ifs") or []] + [node.args.get("default")]
+    elif isinstance(node, exp.Coalesce):
+        results = [node.this, *node.expressions]
+    else:
+        return False
+    return all(result is not None and _is_boolean(result) for result in results)
+
+
 def snowflake_rejection(
     sql: str, db_id: str, tables: Dict[str, FrozenSet[str]], database: str = "BIRD"
 ) -> Optional[str]:
@@ -350,7 +369,8 @@ def snowflake_rejection(
     - exactly one query (``SELECT``/``WITH``/set operation): the data is shared by every rollout;
     - identifiers resolve as on Snowflake, where an unquoted name means its upper-case spelling and a quoted one is
       exact (DuckDB matches names in any case);
-    - no SQLite-only function (``_SQLITE_ONLY_FUNCTIONS``), ``LIMIT offset, count``, or two-argument ``MAX``/``MIN``.
+    - no SQLite-only function (``_SQLITE_ONLY_FUNCTIONS``), ``LIMIT offset, count``, or two-argument ``MAX``/``MIN``;
+    - no ``SUM``/``AVG`` of a boolean expression, and no ``SELECT DISTINCT`` ordered by a column it doesn't select.
 
     The identifier check knows the catalog, the query's own aliases and CTEs, and ``FLATTEN``'s columns; a column is
     accepted if any table of the schema has it. A column qualified by a catalog table (or its alias) must be a catalog
@@ -380,6 +400,38 @@ def snowflake_rejection(
     tree = normalize_identifiers(statements[0], dialect="snowflake")
     if any(f.expressions for f in tree.find_all(exp.Max, exp.Min)):
         return "scalar_max_min"
+    for agg in tree.find_all(exp.Sum, exp.Avg):
+        # SUM("x" = 'y'): DuckDB counts the true rows, Snowflake refuses a BOOLEAN argument.
+        arg = agg.this
+        if isinstance(arg, exp.Distinct):
+            if not arg.expressions:
+                return "unparsable"  # SUM(DISTINCT)
+            arg = arg.expressions[0]
+        if _is_boolean(arg):
+            return f"boolean_aggregate:{agg.key.upper()}"
+    for select in tree.find_all(exp.Select):
+        # SELECT DISTINCT ... ORDER BY a column it doesn't select: DuckDB sorts by it, Snowflake refuses it. An item
+        # that repeats a selected expression, names an output, or uses only selected columns is fine (a column
+        # qualified by another table is not the selected one); aggregates in the ORDER BY are left alone.
+        distinct, order = select.args.get("distinct"), select.args.get("order")
+        if not distinct or distinct.args.get("on") or not order or select.is_star:
+            continue
+        repeated = {e.unalias().sql() for e in select.expressions}
+        bare = [e.unalias() for e in select.expressions if isinstance(e.unalias(), exp.Column)]
+        outputs = set(select.named_selects)
+        for ordered in order.expressions:
+            if ordered.this.sql() in repeated:
+                continue
+            for column in ordered.find_all(exp.Column):
+                if column.find_ancestor(exp.Select) is not select or column.find_ancestor(exp.AggFunc):
+                    continue
+                if not column.table and column.name in outputs:
+                    continue
+                if not any(
+                    c.name == column.name and (not c.table or not column.table or c.table == column.table)
+                    for c in bare
+                ):
+                    return f"distinct_order_by:{column.name}"
 
     ctes = {cte.alias for cte in tree.find_all(exp.CTE)}
     table_aliases = list(tree.find_all(exp.TableAlias))
