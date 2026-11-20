@@ -346,11 +346,36 @@ class TestAnswerOptions:
         assert result.mask_sample is (verdict == "unresolved")
         assert _judge_prompt(server).endswith("**Student Solution**:\n" + r"\frac{4}{2}")
 
+    @mark.parametrize(
+        "options,reference,box,library_match",
+        [
+            ({}, "3t", "3", True),
+            ({"units": False}, "3t", "3", False),
+            ({"units": False}, "3t", "t+t+t", True),
+            ({}, "0.0000001", "0.0000002", True),
+            ({"precision": 12}, "0.0000001", "0.0000002", False),
+            ({"units": False, "precision": 12}, "1/2", "0.5", True),
+        ],
+    )
+    async def test_math_options_route_boxed_answers(self, config, options, reference, box, library_match):
+        config.boxed_judge_input = "box"
+        config.math_verify = MathVerifyConfig(**options)
+        server = _server(config, "Judgement: 'no'")
+        result = await server.verify(_request(_split(r"\boxed{" + box + "}"), expected=reference))
+        assert result.grading_status == ("math_verified" if library_match else "judged")
+        assert result.reward == float(library_match)
+        assert server.server_client.post.await_count == (0 if library_match else 1)
+
+    @mark.parametrize("precision", [-1, 1.5, True])
+    def test_math_precision_requires_nonnegative_decimal_places(self, precision):
+        with raises(ValidationError, match="precision"):
+            MathVerifyConfig(precision=precision)
+
     async def test_math_worker_unavailable_defers_to_judge(self, config, monkeypatch):
         config.boxed_judge_input = "box"
         config.math_verify = MathVerifyConfig()
         server = _server(config, "Judgement: 'yes'")
-        monkeypatch.setattr(server._math_library, "_verify_answer_with_library_async", AsyncMock(side_effect=OSError))
+        monkeypatch.setattr(server._math_library, "matches", AsyncMock(side_effect=OSError))
         result = await server.verify(_request(_split(r"\boxed{2}")))
         server.server_client.post.assert_awaited_once()
         assert (result.reward, result.grading_status) == (1, "judged")
@@ -360,7 +385,7 @@ class TestAnswerOptions:
             time.sleep(1)
             return 1.0, "2"
 
-        monkeypatch.setattr("resources_servers.math_with_judge.app._run_math_verify", slow_match)
+        monkeypatch.setattr("resources_servers.stem_judge.boxed_math._run_math_verify", slow_match)
         config.boxed_judge_input = "box"
         config.math_verify = MathVerifyConfig(timeout_seconds=0.02)
         server = _server(config, "Judgement: 'yes'")

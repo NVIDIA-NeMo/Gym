@@ -123,6 +123,8 @@ VERDICT_FALLBACK_PATTERN = (
 
 
 class MathVerifyConfig(BaseModel, extra="forbid"):
+    units: bool = Field(default=True, description="Strip recognized unit suffixes during LaTeX normalization.")
+    precision: int = Field(default=6, ge=0, strict=True, description="Decimal places for comparing floats.")
     timeout_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     max_concurrency: int = Field(default=8, gt=0)
 
@@ -493,26 +495,9 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
 
         self._math_library = None
         if (math_config := self.config.math_verify) is not None:
-            from resources_servers.math_with_judge.app import (
-                LibraryJudgeMathResourcesServer,
-                LibraryJudgeMathResourcesServerConfig,
-            )
+            from resources_servers.stem_judge.boxed_math import BoxedMathVerifier
 
-            # Use the existing bounded library operation locally. STEM owns every model call.
-            self._math_library = LibraryJudgeMathResourcesServer(
-                config=LibraryJudgeMathResourcesServerConfig(
-                    host=self.config.host,
-                    port=self.config.port,
-                    name=self.config.name,
-                    entrypoint=self.config.entrypoint,
-                    judge_model_server=self.config.judge_model_server,
-                    judge_responses_create_params=self.config.judge_responses_create_params,
-                    should_use_judge=False,
-                    library_verifier_timeout_seconds=math_config.timeout_seconds,
-                    library_verifier_max_concurrency=math_config.max_concurrency,
-                ),
-                server_client=self.server_client,
-            )
+            self._math_library = BoxedMathVerifier(math_config, self.config.name)
 
         # The host and pid suffix keeps server worker processes from sharing one file. Writes run
         # in a worker thread so a slow filesystem does not stall the event loop; the lock keeps the
@@ -559,13 +544,11 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
 
         if self._math_library and not body.rubric and not judges_whole_answer:
             try:
-                score, _ = await self._math_library._verify_answer_with_library_async(
-                    expected, "\\boxed{" + solution + "}"
-                )
+                matches = await self._math_library.matches(expected, solution)
             except OSError as exc:
                 logger.warning("Math-Verify unavailable, grading with the STEM judge: %s", exc)
             else:
-                if score > 0.5:
+                if matches:
                     return await self._finish(body, expected, answer_format, "math_verified", 1.0, solution, [])
 
         question = _extract_question_text(body.responses_create_params, self._question_regex())

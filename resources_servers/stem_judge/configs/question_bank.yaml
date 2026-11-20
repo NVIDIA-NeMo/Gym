@@ -10,5 +10,5 @@ stem_judge:
       verdict_format: json
       box_parser: last_command
       boxed_judge_input: box
-      math_verify: null  # Set to {} for math sources where equivalence is sufficient.
+      math_verify: null  # Set to {} for Gym defaults, or e.g. {units: false, precision: 12}.
       verified: false

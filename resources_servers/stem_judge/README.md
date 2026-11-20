@@ -175,10 +175,23 @@ usual model arguments. It includes the base config and overrides its answer opti
 Set each option independently. The prompt options reuse the sections of the shipped
 `stem_v11.txt` template. Custom templates used with those options must retain its section
 markers. Enable Math-Verify only for sources where symbolic equivalence establishes
-the answer. The library uses approximate numeric equality and normalizes some units
-and expressions. For example, it can accept `3` against `3t`. Route other sources to a STEM instance with `math_verify: null`.
+the answer. Route other sources to a STEM instance with `math_verify: null`.
 Free answers, whole-answer comparisons and rubric rows always use the judge. For NeMoRL SingleController with source scheduling, enable
 `grpo.exclude_failed_judge_groups` to keep a masked group out of the trainer and reward cache.
+
+With `math_verify: {}`, Math-Verify uses Gym's defaults of `units: true` and
+`precision: 6`. Here `units` controls whether LaTeX normalization strips recognized
+unit suffixes on both sides. Set it to `false` to preserve a variable such as the
+`t` in `3t`. `precision` is the number of decimal places used for float comparisons.
+At 6 places, `0.0000001` and `0.0000002` compare equal. At 12 they go to the judge.
+Both settings leave the library's equation and set comparisons in effect.
+
+For example, add this override to the question-bank launch command to configure one
+STEM instance for algebra:
+
+```sh
+'++stem_judge.resources_servers.stem_judge.math_verify={units:false,precision:12}'
+```
 
 To route a math question through STEM, enable Math-Verify on the question-bank preset and give the
 dataset row the STEM agent reference, as in this JSONL row.
