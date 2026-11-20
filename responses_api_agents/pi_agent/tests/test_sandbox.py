@@ -343,7 +343,7 @@ async def test_close_during_media_staging_stops_it_before_releasing_the_sandbox(
                 raise
         await upload(source, destination)
 
-    sandbox.disconnect.side_effect = lambda: order.append("sandbox released")
+    sandbox.disconnect.side_effect = lambda **_: order.append("sandbox released")
     with patch.object(sandbox, "upload", side_effect=blocked_media_upload):
         request, session_id, task = await start_image_activation(agent)
         await asyncio.wait_for(staging.wait(), 2)
@@ -1224,7 +1224,7 @@ async def test_close_stops_each_activation_upload_before_releasing_the_sandbox(s
             raise
 
     sandbox.upload = stall
-    sandbox.disconnect.side_effect = lambda: events.append("sandbox released")
+    sandbox.disconnect.side_effect = lambda **_: events.append("sandbox released")
     request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
     seeded = await agent.seed_agent_session(request, seed_with_tools(mcp_grant("resources")))
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
@@ -1424,7 +1424,7 @@ async def test_concurrent_closes_share_the_saved_reply(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -3006,8 +3006,8 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, owned):
         await asyncio.Future()
 
     state.execute = pause_after_capture
-    sandbox.stop.side_effect = sandbox.files.clear
-    sandbox.disconnect.side_effect = sandbox.files.clear
+    sandbox.stop.side_effect = lambda **_: sandbox.files.clear()
+    sandbox.disconnect.side_effect = lambda **_: sandbox.files.clear()
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await asyncio.wait_for(captured.wait(), 2)
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id)))

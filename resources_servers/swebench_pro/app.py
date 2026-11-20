@@ -397,8 +397,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
     async def _stop_session_sandbox(self, session_id: str) -> None:
         sandbox = self._session_id_to_sandbox.get(session_id)
         if sandbox is not None:
-            async with asyncio.timeout(self.config.verification_stop_timeout):
-                await sandbox.stop()
+            await sandbox.stop(timeout_s=self.config.verification_stop_timeout)
             self._session_id_to_sandbox.pop(session_id, None)
         self._session_id_to_pristine_untracked.pop(session_id, None)
 
@@ -738,8 +737,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             finally:
                 if eval_sandbox is not None:
                     try:
-                        async with asyncio.timeout(self.config.verification_stop_timeout):
-                            await eval_sandbox.stop()
+                        await eval_sandbox.stop(timeout_s=self.config.verification_stop_timeout)
                     except Exception:
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
             # Observation is best effort and cannot replace the calculated grade or original error.
