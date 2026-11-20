@@ -861,7 +861,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             if self.config.sandbox_runtime_dir:
                 checked = await sandbox.exec(
                     f"{shlex.quote(runtime + '/node/bin/node')} "
-                    f"{shlex.quote(runtime + '/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js')} --version",
+                    f"{shlex.quote(runtime + '/pi/node_modules/.bin/pi')} --version",
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
@@ -1044,7 +1044,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [
             f"{state.runtime}/node/bin/node",
-            f"{state.runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+            f"{state.runtime}/pi/node_modules/.bin/pi",
             "--print",
             "--mode",
             "json",

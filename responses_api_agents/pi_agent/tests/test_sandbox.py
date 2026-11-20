@@ -2776,7 +2776,7 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     execute = sandbox.exec.side_effect
 
     async def report_version(command, **kwargs):
-        if command.endswith("/dist/cli.js --version"):
+        if command.endswith("/.bin/pi --version"):
             return SimpleNamespace(return_code=return_code, error_type=None, stdout=f"{reported}\n", stderr="")
         return await execute(command, **kwargs)
 
@@ -2793,7 +2793,7 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     assert state.runtime == "/opt"
     assert not any(path.endswith("/install_pi_runtime.sh") for path in sandbox.files)
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
-    assert "/opt/node/bin/node /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version" in commands
+    assert "/opt/node/bin/node /opt/pi/node_modules/.bin/pi --version" in commands
 
 
 def test_required_tool_grant_under_model_only_is_a_terminal_seed_refusal(setup):
@@ -2844,7 +2844,7 @@ async def test_preinstalled_runtime_check_that_cannot_run_stays_retryable(setup)
     execute = sandbox.exec.side_effect
 
     async def time_out(command, **kwargs):
-        if command.endswith("/dist/cli.js --version"):
+        if command.endswith("/.bin/pi --version"):
             return SimpleNamespace(return_code=None, error_type="timeout", stdout="", stderr="")
         return await execute(command, **kwargs)
 

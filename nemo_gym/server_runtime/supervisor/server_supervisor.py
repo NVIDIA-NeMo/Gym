@@ -60,6 +60,7 @@ from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAIL
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
 from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
 from nemo_gym.server_runtime.supervisor.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
+from nemo_gym.server_runtime.supervisor.harness_version import resolve_harness_version
 from nemo_gym.server_runtime.supervisor.server_venv import get_venv_path, run_command, setup_env_command
 from nemo_gym.telemetry.config import MemoryProfilingConfig
 from nemo_gym.telemetry.memory import MemoryProfiler, ServerMemoryTarget, process_tree_memory_supported
@@ -720,6 +721,11 @@ class ServerSupervisor:  # pragma: no cover
         self._startup.mark("init_telemetry")
 
         configured_servers = list(_configured_servers(global_config_dict))
+        harness_sources = {
+            server.top_level_path: resolve_harness_version(server.name, server.config)
+            for server in configured_servers
+            if server.server_type == "responses_api_agents"
+        }
 
         # Start or join Ray only when a configured server may use it. Servers inherit the cluster address through
         # the config dict below, so this has to happen before any of them are spawned.
@@ -766,6 +772,11 @@ class ServerSupervisor:  # pragma: no cover
                 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
                 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path,
             }
+            if hermes_source := harness_sources.get(top_level_path):
+                extra_env["HERMES_SPEC"] = hermes_source
+            if second_key == "openclaw_agent" and server_config_dict.get("harness_version"):
+                # The host installer honors OPENCLAW_VERSION before the config. The sandbox consumes the config.
+                extra_env["OPENCLAW_VERSION"] = str(server_config_dict.openclaw_version)
             if top_level_path not in ray_server_names:
                 # A server that uses Ray without declaring it then fails on its first Ray call, rather than
                 # starting a private cluster in each of its processes.

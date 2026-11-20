@@ -139,6 +139,7 @@ from responses_api_agents.opencode_agent.runtime import (
     apply_observability_patch,
     command_failure_reason,
     opencode_major,
+    published_release_digests,
 )
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, cli_environment, format_error_message
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode, ensure_opencode2
@@ -556,6 +557,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
+    harness_version: str | None = None
 
     # Optional verified, preinstalled runtime for sandboxes without download egress.
     sandbox_path_prefix: list[str] = Field(default_factory=list)
@@ -724,7 +726,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         """Install the local runtime once; for OpenCode 2, return the pinned release binary to run."""
         if self._local_setup_task is None:
             if self._opencode2 and self.config.command == "opencode":
-                install = asyncio.to_thread(ensure_opencode2, self.config.opencode_version)
+                install = asyncio.to_thread(
+                    ensure_opencode2, self.config.opencode_version, fetch_digests=bool(self.config.harness_version)
+                )
             elif self._opencode2:
                 # A configured command is the OpenCode 2 binary to run; nothing is installed.
                 install = asyncio.sleep(0)
@@ -1177,15 +1181,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 self.config.opencode_version,
                 tested,
             )
+        release_digests = OPENCODE_RELEASE_SHA256.get(self.config.opencode_version, {})
         if self._opencode2:
             if self.config.sandbox_plugin_dependencies_path or self.config.sandbox_plugin_dependencies_sha256:
                 raise AgentSeedRejectedError(
                     "OpenCode 2 installs no plugin dependencies; unset sandbox_plugin_dependencies_path and _sha256"
                 )
-            if (
-                self.config.opencode_version not in OPENCODE_RELEASE_SHA256
-                and self.config.sandbox_executable_path is None
-            ):
+            if not release_digests and not self.config.sandbox_executable_path and self.config.harness_version:
+                release_digests = await asyncio.to_thread(published_release_digests, self.config.opencode_version)
+            if not release_digests and self.config.sandbox_executable_path is None:
                 raise AgentSeedRejectedError(
                     f"OpenCode {self.config.opencode_version} has no pinned release digest; pin a binary with "
                     "sandbox_executable_path and sandbox_executable_sha256"
@@ -1345,14 +1349,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     ":".join(self.config.sandbox_path_prefix),
                     # OpenCode 2 downloads are checked against the release's pinned SHA-256 digests.
                     *(
-                        [
-                            " ".join(
-                                f"{arch}={digest}"
-                                for arch, digest in OPENCODE_RELEASE_SHA256.get(
-                                    self.config.opencode_version, {}
-                                ).items()
-                            )
-                        ]
+                        [" ".join(f"{arch}={digest}" for arch, digest in release_digests.items())]
                         if self._opencode2
                         else []
                     ),

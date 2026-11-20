@@ -29,10 +29,10 @@ from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, re
 LOG = logging.getLogger(__name__)
 
 _PI_PKG = "@earendil-works/pi-coding-agent"
-_NODE_VERSION = "22.15.0"
+_NODE_VERSION = "22.19.0"
 _NODE_ARCH = "arm64" if platform.machine().lower() in ("aarch64", "arm64") else "x64"
 _NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-{_NODE_ARCH}.tar.xz"
-_LOCAL_PREFIX = Path(__file__).parent / ".pi_node"
+_LOCAL_PREFIX = Path(__file__).parent / f".pi_node-{_NODE_VERSION}"
 # Beside the toolchain directory rather than in it, because an interrupted install's cleanup removes that directory.
 _INSTALL_LOCK = _LOCAL_PREFIX.with_name(_LOCAL_PREFIX.name + ".lock")
 _INSTALL_RECORD = _LOCAL_PREFIX.with_name(_LOCAL_PREFIX.name + ".installed")
@@ -83,20 +83,24 @@ def _install_node_locally() -> Path:
 
 def ensure_pi(version: str | None = None) -> None:
     """Ensure ``pi`` is on PATH, installing it via npm if necessary."""
-    if shutil.which("pi"):
-        return
-
     local_bin = Path.home() / ".local" / "bin"
-    if (local_bin / "pi").is_file():
-        os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
-        return
+    if not shutil.which("pi"):
+        if (local_bin / "pi").is_file():
+            os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
+        else:
+            # Other workers may be installing the same release on their first local call.
+            with install_lock(_INSTALL_LOCK):
+                if not adopt_recorded_install(_INSTALL_RECORD, "pi", version=version):
+                    _install_pi(version, local_bin)
+                    record_install(_INSTALL_RECORD, Path(shutil.which("pi")).parent, version=version)
 
-    # With num_workers > 1, every worker installs on its own first local call, and those calls can arrive together.
-    # One worker installs while the others wait here, then they reuse the install it recorded.
-    with install_lock(_INSTALL_LOCK):
-        if not adopt_recorded_install(_INSTALL_RECORD, "pi", version=version):
-            _install_pi(version, local_bin)
-            record_install(_INSTALL_RECORD, Path(shutil.which("pi")).parent, version=version)
+    if version:
+        result = subprocess.run(["pi", "--version"], capture_output=True, text=True, errors="replace", timeout=30)
+        if result.returncode or result.stdout.strip() != version:
+            raise RuntimeError(
+                f"Expected Pi {version} at {shutil.which('pi')}; install {_PI_PKG}@{version} with npm "
+                f"and check pi --version. Got: {(result.stderr or result.stdout).strip()}"
+            )
     LOG.info("pi is ready at %s", shutil.which("pi"))
 
 

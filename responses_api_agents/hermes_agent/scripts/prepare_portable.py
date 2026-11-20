@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from nemo_gym.agents import SandboxPlatform
-from responses_api_agents.hermes_agent.runtime import HERMES_SOURCE
+from responses_api_agents.hermes_agent.runtime import HERMES_DEFAULT_SOURCE, HERMES_SOURCE
 from responses_api_agents.hermes_agent.sandbox import _HERMES_RUNTIME, HERMES_MIN_GLIBC_MINOR
 
 
@@ -29,7 +29,7 @@ async def prepare(prefix: Path, *, target: str, source: str) -> None:
         for path in (interpreter, packages):
             with tarfile.open(path) as archive:
                 archive.extractall(staged, filter="data")
-        (staged / "python/hermes-source").write_text(json.dumps({"default": HERMES_SOURCE, "source": source}))
+        (staged / "python/hermes-source").write_text(json.dumps({"default": HERMES_DEFAULT_SOURCE, "source": source}))
         # The enclosing portable installer serializes rebuilds before publishing the sentinel.
         if destination.exists():
             os.rename(destination, staged / "previous")

@@ -32,6 +32,21 @@ Each run writes its own `_aggregate_metrics.json` next to its rollouts file. Com
 A spread this size, with the model and dataset held identical, means the harness — not the model — is the lever to pull. Refer to [Diagnose Results](/evaluation/diagnose-results) to have an agent explain *why* the harnesses diverged, or [Aggregate Metrics](/evaluation/aggregate-metrics) to build your own comparison across shards. For the flag reference itself, see
 [Swapping the agent](/reference/cli-commands#swapping-the-agent).
 
+## Select a harness release
+
+Set `harness_version` on an OpenClaw, OpenCode, Hermes, or Pi agent in the config you pass to `gym env start`. For example, add this override to an existing OpenCode config:
+
+```yaml
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      harness_version: "1.17.11"
+```
+
+Use `"latest"` to resolve the publisher's latest release at startup. Workers in that launch share the resolved version. Copy the version from the startup log to repeat the run. Omitting the setting uses the agent's configured default.
+
+OpenClaw and Pi use npm's `latest` tag. OpenCode and Hermes use the release marked latest on GitHub. Hermes also accepts a full commit SHA and an optional `hermes_repo` (for example, `https://github.com/your-team/hermes-agent`). Its worker installs dependencies from the selected checkout's own lock. Selecting a release leaves Gym's checked-in lockfiles untouched. A selected release must support the adapter's CLI or Python interfaces and the task sandbox's platform.
+
 ## The composed instance is renamed
 
 For a benchmark that composes its own servers, such as the relay recipe `terminal_bench_2_1/opencode_legacy_agent`,
