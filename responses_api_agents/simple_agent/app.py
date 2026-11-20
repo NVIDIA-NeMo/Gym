@@ -93,6 +93,8 @@ from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SESSION_OWNER_HEADER,
+    TOOL_CALL_ID_HEADER,
+    TOOL_ERROR_HEADER,
     Activation,
     ActivationOutOfOrderError,
     BaseRunRequest,
@@ -107,6 +109,7 @@ from nemo_gym.server_runtime import (
     StepType,
     is_retryable_dependency_status,
     require_rollout,
+    seed_resources_session_id,
     seed_restarts,
     seed_verify_step_type,
 )
@@ -339,6 +342,26 @@ class SimpleAgentVerifyRequest(BaseVerifyRequest):
 
 class SimpleAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+def mark_missing_assistant_output(response: NeMoGymResponse) -> str:
+    """Share the ordinary agent's reasoning-only/empty-output termination semantics."""
+    termination_message = (
+        "Ending trajectory: model returned no assistant message or tool calls "
+        "(reasoning-only or empty output) without reported truncation. "
+        "This is the stop-token case (finish_reason='stop'), not length truncation "
+        "(finish_reason='length', handled separately via incomplete_details). "
+        "This indicates either a badly trained model requiring training-level fixes "
+        "or a bug in the inference engine."
+    )
+    termination_reason = "incomplete_reasoning" if response.output else "empty_output"
+    response.status = "incomplete"
+    response.metadata = {
+        **(response.metadata or {}),
+        "ng_termination_reason": termination_reason,
+        "ng_termination_message": termination_message,
+    }
+    return termination_message
 
 
 class SimpleAgent(SimpleResponsesAPIAgent):
@@ -604,7 +627,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     forwarded = FailureHeader.decode(error.headers)
                     if forwarded is not None:
                         report = report.merged(forwarded)
-                    reported_kind = MODEL_POLICY_RESPONSE_TIMEOUT if failure is not None else MODEL_REQUEST_ERROR
+                    reported_kind = failure.failure_kind if failure is not None else MODEL_REQUEST_ERROR
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
                     content = getattr(error, "response_content", b"")
                     detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
@@ -694,21 +717,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 if not all_fn_calls:
                     if not all_output_messages:
                         invocation_status = "incomplete"
-                        termination_message = (
-                            "Ending trajectory: model returned no assistant message or tool calls "
-                            "(reasoning-only or empty output) without reported truncation. "
-                            "This is the stop-token case (finish_reason='stop'), not length truncation "
-                            "(finish_reason='length', handled separately via incomplete_details). "
-                            "This indicates either a badly trained model requiring training-level fixes "
-                            "or a bug in the inference engine."
-                        )
-                        termination_reason = "incomplete_reasoning" if output else "empty_output"
-                        model_response.status = "incomplete"
-                        model_response.metadata = {
-                            **(model_response.metadata or {}),
-                            "ng_termination_reason": termination_reason,
-                            "ng_termination_message": termination_message,
-                        }
+                        termination_message = mark_missing_assistant_output(model_response)
                         LOG.warning(
                             "%s model_server=%s response_id=%s rollout_id=%s step=%s",
                             termination_message,
@@ -746,7 +755,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
-                            headers=dict(tool_access.headers),
+                            # The call's ID lets the server join its record to this trajectory and recognize the
+                            # client's resend of a call whose connection dropped.
+                            headers=dict(tool_access.headers) | {TOOL_CALL_ID_HEADER: output_function_call.call_id},
                             _internal=True,
                         )
                     else:
@@ -774,8 +785,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     resources_server_cookies.update(_cookies(api_response))
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
-                        tool_status = "completed" if completed else "failed"
-                        error_type = None if completed else f"http_{api_response.status}"
+                        error_result = api_response.headers.get(TOOL_ERROR_HEADER) == "true"
+                        tool_status = "completed" if completed and not error_result else "failed"
+                        error_type = (
+                            f"http_{api_response.status}" if not completed else "tool_error" if error_result else None
+                        )
 
                 if collect_trajectory:
                     tool_records.append(
@@ -1087,6 +1101,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         cookies: Any = continuation.get("cookies", request.cookies)
         # Whether the resources server's /verify may be replayed, as its seed reply reported.
         resources_verify_step_type: StepType = continuation.get("resources_verify_step_type", "wait")
+        resources_session_id: str | None = continuation.get("resources_session_id")
 
         async def boundary(state: dict[str, Any]) -> None:
             if legacy_run is None:
@@ -1097,6 +1112,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 # Dropped with no await before the boundary is recorded, so no export sees both or neither.
                 # The completed activation stays, so a late duplicate of the loop request is refused, not run again.
                 loop.completed_reply = None
+            if resources_session_id is not None:
+                state = {**state, "resources_session_id": resources_session_id}
             await legacy_run.boundary(state)
 
         def step(step_type: StepType) -> AbstractAsyncContextManager[None]:
@@ -1114,6 +1131,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 )
                 await raise_for_status(seed_session_response)
             cookies = _cookie_values(seed_session_response.cookies)
+            resources_session_id = seed_resources_session_id(seed_session_response.headers)
             resources_verify_step_type = seed_verify_step_type(seed_session_response.headers)
             if legacy_run is not None and seed_restarts(seed_session_response.headers):
                 # The resources server cannot capture its session, so this episode starts over after a crash.
@@ -1259,7 +1277,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 }
             )
         if self._closes_after_verify(legacy_run, resources_verify_step_type) and not self.config.skip_verification:
-            await self._close_legacy_resources_session(body, cookies)
+            await self._close_legacy_resources_session(body, cookies, resources_session_id=resources_session_id)
         if trajectory is not None:
             for invocation in trajectory.invocations:
                 invocation.verification_skipped = verification_skipped
@@ -1276,11 +1294,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         """Whether a legacy /run closes its resources session after a verification a checkpoint does not wait for."""
         return legacy_run is not None and resources_verify_step_type == "replay"
 
-    async def _close_legacy_resources_session(self, body: SimpleAgentRunRequest, cookies: Any) -> None:
+    async def _close_legacy_resources_session(
+        self, body: SimpleAgentRunRequest, cookies: Any, *, resources_session_id: str | None = None
+    ) -> None:
         """Close the resources session a legacy /run seeded, keeping the run's verdict if the close fails.
 
-        The session cookie names the session.
-        A legacy seed assigns no resources session ID, so the close names the /run's own session key.
+        The seed reply reports the resources session ID bound to the session cookie, and the close names that ID.
+        A seed reply or restored boundary without one falls back to the /run's own session key. Session routing
+        refuses that close with HTTP 409, so it cannot release the session.
         """
         episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
         try:
@@ -1288,7 +1309,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 server_name=self.config.resources_server.name,
                 url_path="/close_session",
                 json=ResourcesCloseSessionRequest(
-                    resources_session_id=f"{_LEGACY_SESSION_PREFIX}{episode_id.capture_key}", episode_id=episode_id
+                    resources_session_id=resources_session_id or f"{_LEGACY_SESSION_PREFIX}{episode_id.capture_key}",
+                    episode_id=episode_id,
                 ).model_dump(mode="json"),
                 cookies=cookies,
             )

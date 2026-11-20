@@ -141,7 +141,7 @@ class TestParseKiloEvents:
     def test_empty_stream(self) -> None:
         items, usage = parse_kilo_events("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     def test_malformed_lines_skipped(self) -> None:
         stream = "not json\n" + _events(_text_event("answer is 4")) + "\n{ broken"
@@ -185,6 +185,24 @@ class TestParseKiloEvents:
         _, usage = parse_kilo_events(stream)
         assert usage["input_tokens"] == 105
         assert usage["output_tokens"] == 20
+        assert usage["cached_tokens"] == 5
+
+    @pytest.mark.parametrize(
+        ("cache_reads", "expected"),
+        [([5, 7], 12), ([5, 0], None), ([5, None], None), ([0], None)],
+    )
+    def test_step_finish_cached_tokens_sum_only_measured_cache_reads(self, cache_reads, expected) -> None:
+        stream = _events(
+            *(
+                _step_finish_event(
+                    {"input": 10, "output": 1, "cache": {} if read is None else {"read": read}}, pid=f"prt_{i}"
+                )
+                for i, read in enumerate(cache_reads)
+            )
+        )
+        _, usage = parse_kilo_events(stream)
+        # Kilo stores zero for a cache read the backend did not report, so zero is not a measurement.
+        assert usage["cached_tokens"] == expected
 
     def test_empty_length_stop_warns(self, caplog) -> None:
         # The signature of an output budget that does not fit the model server's context window.
@@ -236,7 +254,7 @@ class TestParseKiloEvents:
             "NeMoGymFunctionCallOutput",
             "NeMoGymResponseOutputMessage",
         ]
-        assert usage == {"input_tokens": 105, "output_tokens": 20}
+        assert usage == {"input_tokens": 105, "output_tokens": 20, "cached_tokens": 5}
 
 
 class TestDeepMerge:

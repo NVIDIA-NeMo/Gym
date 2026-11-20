@@ -162,7 +162,7 @@ async def test_runner_sandbox_environment_runs_commands_through_the_provider(tmp
             )
             return SandboxExecResult(done.stdout, done.stderr, done.returncode)
 
-        async def disconnect(self):
+        async def disconnect(self, **_):
             pass
 
     with (
@@ -189,6 +189,16 @@ def test_iteration_limit_is_an_incomplete_graded_response():
     finished = agent()._response(body, {"messages": messages, "stop_reason": None}, "policy")
     assert (limited.status, finished.status) == ("incomplete", "completed")
     assert limited.output[0].type == "function_call"
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"), [({}, None), ({"cacheReadInputTokens": 0}, 0), ({"cacheReadInputTokens": 7}, 7)]
+)
+def test_cache_reads_are_reported_only_when_strands_reports_them(usage, expected):
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Fix the bug.")
+    usage = {"inputTokens": 10, "outputTokens": 2, **usage}
+    response = agent()._response(body, {"messages": [], "usage": usage}, "policy")
+    assert response.usage.input_tokens_details.cached_tokens == expected
 
 
 @pytest.mark.parametrize(
@@ -224,9 +234,12 @@ async def test_close_during_a_run_confirms_cleanup_only_for_an_owned_sandbox(own
         workdir="/repo",
     )
     state.task = asyncio.create_task(asyncio.sleep(60))
-    close = await agent()._close_agent_session_state(state)
+    server = agent()
+    close = await server._close_agent_session_state(state)
     # A borrowed sandbox may still run the interrupted tool command, which disconnect does not stop.
     assert close.cleanup_confirmed is confirmed and state.task.cancelled()
+    release = sandbox.stop if owns_sandbox else sandbox.disconnect
+    release.assert_awaited_once_with(timeout_s=server.config.session_close_timeout_seconds)
 
 
 def test_runner_upload_outage_fails_the_run_instead_of_a_tool_error():

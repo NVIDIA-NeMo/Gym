@@ -111,6 +111,55 @@ def test_a_settled_row_keeps_the_evidence_of_the_judge_failure_it_settles(tmp_pa
     assert settled["_ng_rejudged_failure_observations"]["ng_perf"] == evidence["ng_perf"]
 
 
+# A verdict that did not parse is saved under its own kind; the producer's routing class stays in the legacy field.
+JUDGE_CLASSES = [
+    {"_ng_failure_class": "judge_failed"},
+    {"_ng_failure_class": "judge_unparseable", "_ng_failure_legacy_class": "judge_failed"},
+]
+
+
+@pytest.mark.parametrize("classes", JUDGE_CLASSES)
+def test_every_due_judge_failure_is_bound_and_settled(tmp_path, classes):
+    output, [failure] = _run(tmp_path, judge_failures=1, evidence=classes)
+    identity = logical_rollout_id(failure)
+    assert due_judge_failures(output) == [identity]
+    assert list(bind_judge_failures(output)["failures"]) == [identity]
+
+    _settle(output, failure, 0.5)
+
+    assert due_judge_failures(output) == []
+    assert sorted(row["reward"] for row in RolloutStore.read(output).selected("success")) == [0.5, 1.0, 1.0]
+
+
+@pytest.mark.parametrize("classes", JUDGE_CLASSES)
+def test_a_rejudgment_that_fails_again_spends_a_failure_attempt(tmp_path, classes):
+    output, [failure] = _run(tmp_path, judge_failures=1, evidence=classes)
+    identity = logical_rollout_id(failure)
+    spent = RolloutStore.read(output)._state.failure_count(identity)
+    with RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(failure)
+        again = failure | {
+            "_ng_failure_id": "judge-0-again",
+            "_ng_rejudged_failure_id": failure["_ng_failure_id"],
+            "_ng_rejudge_operation_id": pending.operation_id,
+            "_ng_rejudge_admitted_at": pending.admitted_at,
+        }
+        assert store.record_rejudgment(failure, again)
+        store.close_rejudgment(identity, pending.operation_id)
+
+    assert RolloutStore.read(output)._state.failure_count(identity) == spent + 1
+
+
+@pytest.mark.parametrize("classes", JUDGE_CLASSES)
+def test_a_spent_judge_failure_is_refused_whichever_class_names_it(tmp_path, monkeypatch, classes):
+    """The budget check is the binding's other single-field comparison, which neither case above reaches."""
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+    output, _ = _run(tmp_path, judge_failures=1, evidence=classes)
+    with pytest.raises(ConfigError, match="has spent its 1 saved failure attempts"):
+        bind_judge_failures(output)
+    assert bind_judge_failures(output, skip_spent=True)["failures"] == {}
+
+
 async def test_a_run_with_nothing_due_runs_no_pass(tmp_path, monkeypatch):
     output, _ = _run(tmp_path, judge_failures=0)
     before = output.read_bytes()
@@ -311,12 +360,12 @@ def _decision(job: Path, live_job: bool | None = False):
     import subprocess
     import sys
 
-    from nemo_gym.orchestration.recovery import (
+    from nemo_gym.eval.recovery.evidence import (
         COLLECT_SCRIPT,
         CollectedEvidence,
-        decide_from_collected,
         select_managed_evidence,
     )
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     raw = subprocess.run([sys.executable, "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True)
     collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
@@ -331,7 +380,7 @@ def _state(output: Path) -> tuple[dict, list[str], dict]:
 
 
 async def test_a_pass_that_fails_after_admitting_leaves_the_judge_failure_for_reverify(tmp_path, monkeypatch):
-    from nemo_gym.orchestration.recovery import RecoveryAction
+    from nemo_gym.eval.recovery.decision import RecoveryAction
 
     job, output, (identity,) = _job(tmp_path, judge_failures=1)
 
@@ -354,7 +403,7 @@ async def test_a_regrade_that_answered_is_settled_when_a_later_one_disconnects(t
 
     from aiohttp import ServerDisconnectedError
 
-    from nemo_gym.orchestration.recovery import RecoveryAction
+    from nemo_gym.eval.recovery.decision import RecoveryAction
 
     job, output, (answered, lost) = _job(tmp_path, judge_failures=2)
 
@@ -380,12 +429,12 @@ async def test_a_failed_pass_records_what_it_settled_and_is_not_counted_as_settl
 
     from aiohttp import ServerDisconnectedError
 
+    from nemo_gym.eval.recovery.decision import failed_judge_jobs_blocking
     from nemo_gym.eval.rollout_reverification import (
         RolloutReverificationConfig,
         RolloutReverificationHelper,
         write_settle_receipt,
     )
-    from nemo_gym.orchestration.recovery import failed_judge_jobs_blocking
 
     _, output, (answered, lost) = _job(tmp_path, judge_failures=2)
 
@@ -463,8 +512,8 @@ def _settling_pass(helper, output: Path, tmp_path: Path):
 
 
 async def test_a_grade_saved_before_the_coverage_write_failed_counts_as_settled(tmp_path, monkeypatch):
+    from nemo_gym.eval.recovery.decision import failed_judge_jobs_blocking
     from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper
-    from nemo_gym.orchestration.recovery import failed_judge_jobs_blocking
 
     _, output, identities = _job(tmp_path, judge_failures=2)
 
@@ -540,7 +589,7 @@ async def test_a_failed_pass_counts_each_withdrawn_admission_once(tmp_path, monk
     ],
 )
 def test_the_note_on_a_failed_judge_job_says_what_it_settled_and_withdrew(counts, says):
-    from nemo_gym.orchestration.recovery import judge_job_note
+    from nemo_gym.eval.recovery.gate import judge_job_note
 
     job = {"job_id": "1", "state": "failed", "ended_at": "2026-01-01T00:00:00Z", "error": "OSError: disk full"}
     assert judge_job_note(job | counts) == f"judge-only job 1 failed: OSError: disk full; {says}"

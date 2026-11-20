@@ -25,8 +25,10 @@ from nemo_gym.agents.utils.supervisor_client import (
     SUPERVISOR_FILE,
     SUPERVISOR_PID_FILE,
     SUPERVISOR_SCRIPT,
+    control_cwd,
     exec_timeout,
     parse_cleanup_receipt,
+    remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
     supervision_timeouts,
@@ -453,3 +455,165 @@ def test_absent_exit_code_is_not_success(caplog):
     assert parse_cleanup_receipt({"cleanup_confirmed": True}) == full
     with pytest.raises(ValueError, match="termination was not confirmed"):
         parse_cleanup_receipt({"return_code": 0, "error": None})
+
+
+async def test_stop_and_removal_do_not_need_a_workdir_the_task_moved(session, tmp_path):
+    # A task may run `mv /app /app.bak`; Docker then refuses `exec -w /app`, and so does this local sandbox.
+    sandbox, session_dir = session
+    moved = tmp_path / "app"
+
+    receipt = await stop_and_confirm_cleanup(
+        sandbox, session_dir=str(session_dir), workdir=str(moved), timeout=1, harness="test"
+    )
+    await remove_session_directory(
+        sandbox, session_dir=str(session_dir), workdir=str(moved), timeout=5, harness="test"
+    )
+
+    assert receipt["cleanup_confirmed"] is True
+    assert not session_dir.exists() and not moved.exists()
+
+
+def test_a_relative_session_directory_still_resolves_against_the_workdir():
+    assert control_cwd(session_dir="/tmp/session", workdir="/app") == "/"
+    assert control_cwd(session_dir=".gym/session", workdir="/app") == "/app"
+
+
+def test_receipt_keeps_counted_foreign_signals():
+    receipt = {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False, "foreign_signals": 3}
+    assert parse_cleanup_receipt(receipt) == receipt
+    # A malformed receipt keeps a valid count; an invalid one is dropped.
+    assert parse_cleanup_receipt(receipt | {"error": 1})["foreign_signals"] == 3
+    assert "foreign_signals" not in parse_cleanup_receipt(receipt | {"error": 1, "foreign_signals": "3"})
+
+
+# Seen in a real run: the launch exec returned normally but its supervisor left no
+# cleanup.json.
+
+
+@pytest.mark.parametrize("terminated", [True, False])
+async def test_missing_receipt_after_launch_returned_needs_provider_proof(session, terminated):
+    sandbox, session_dir = session
+    (session_dir / LAUNCH_CLAIM_FILE).symlink_to("launch")
+    (session_dir / SUPERVISOR_PID_FILE).write_text("2147483647")
+    sandbox.exec_processes_terminated = AsyncMock(return_value=terminated)
+    exec_spy = AsyncMock(wraps=sandbox.exec)
+    sandbox.exec = exec_spy
+    if terminated:
+        receipt = await stop_and_confirm_cleanup(
+            sandbox,
+            session_dir=str(session_dir),
+            workdir=str(session_dir.parent),
+            timeout=1,
+            harness="test",
+            launch_finished=True,
+        )
+        assert receipt == {
+            "cleanup_confirmed": True,
+            "error": None,
+            "return_code": None,
+            "timed_out": False,
+            "receipt_missing": True,
+        }
+        # Only the claim check ran: nothing to stop, and no stale pid to signal.
+        assert [call.args[0].split()[0] for call in exec_spy.await_args_list] == ["readlink"]
+        assert parse_cleanup_receipt(receipt)["receipt_missing"] is True
+    else:
+        with pytest.raises(RuntimeError, match="test launch outcome is unknown"):
+            await stop_and_confirm_cleanup(
+                sandbox,
+                session_dir=str(session_dir),
+                workdir=str(session_dir.parent),
+                timeout=1,
+                harness="test",
+                launch_finished=True,
+            )
+    assert not (session_dir / CLEANUP_RECEIPT_FILE).exists()
+
+
+async def test_provider_proof_needs_the_supervisors_launch_claim(session):
+    # A launch shell that returned before the supervisor claimed the launch ran no harness: the stop fences it.
+    sandbox, session_dir = session
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    receipt = await stop_and_confirm_cleanup(
+        sandbox,
+        session_dir=str(session_dir),
+        workdir=str(session_dir.parent),
+        timeout=1,
+        harness="test",
+        launch_finished=True,
+    )
+    sandbox.exec_processes_terminated.assert_not_awaited()
+    assert "receipt_missing" not in receipt and receipt["return_code"] is None
+    assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
+
+
+async def test_a_failed_receipt_read_is_retried_after_the_proof(session, monkeypatch):
+    # A transient read error on a receipt that exists must not turn a timed-out run into a lost receipt.
+    from nemo_gym.agents.utils import supervisor_client
+
+    sandbox, session_dir = session
+    (session_dir / LAUNCH_CLAIM_FILE).symlink_to("launch")
+    (session_dir / CLEANUP_RECEIPT_FILE).write_text(
+        json.dumps({"cleanup_confirmed": True, "return_code": -15, "error": None, "timed_out": True})
+    )
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    real_read = supervisor_client.read_text
+    failures = [OSError("transient download error")]
+
+    async def flaky_read(*args, **kwargs):
+        if failures:
+            raise failures.pop()
+        return await real_read(*args, **kwargs)
+
+    monkeypatch.setattr(supervisor_client, "read_text", flaky_read)
+    receipt = await stop_and_confirm_cleanup(
+        sandbox,
+        session_dir=str(session_dir),
+        workdir=str(session_dir.parent),
+        timeout=1,
+        harness="test",
+        launch_finished=True,
+    )
+    assert receipt["timed_out"] is True and "receipt_missing" not in receipt
+
+
+async def test_a_failing_provider_proof_leaves_the_outcome_unknown(session):
+    sandbox, session_dir = session
+    (session_dir / LAUNCH_CLAIM_FILE).symlink_to("launch")
+    sandbox.exec_processes_terminated = AsyncMock(side_effect=RuntimeError("provider gone"))
+    with pytest.raises(RuntimeError, match="test launch outcome is unknown"):
+        await stop_and_confirm_cleanup(
+            sandbox,
+            session_dir=str(session_dir),
+            workdir=str(session_dir.parent),
+            timeout=1,
+            harness="test",
+            launch_finished=True,
+        )
+
+
+async def test_provider_proof_is_consulted_only_after_the_launch_returned(session):
+    sandbox, session_dir = session
+    (session_dir / LAUNCH_CLAIM_FILE).symlink_to("launch")
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    with pytest.raises(RuntimeError, match="test launch outcome is unknown"):
+        await stop_and_confirm_cleanup(
+            sandbox, session_dir=str(session_dir), workdir=str(session_dir.parent), timeout=1, harness="test"
+        )
+    sandbox.exec_processes_terminated.assert_not_awaited()
+
+
+async def test_unprovable_finished_launch_still_fences_an_unclaimed_launch(session):
+    # A launch shell that exited before claiming (e.g. failed bootstrap) is still fenced by the stop.
+    sandbox, session_dir = session
+    sandbox.exec_processes_terminated = AsyncMock(return_value=False)
+    receipt = await stop_and_confirm_cleanup(
+        sandbox,
+        session_dir=str(session_dir),
+        workdir=str(session_dir.parent),
+        timeout=1,
+        harness="test",
+        launch_finished=True,
+    )
+    assert receipt["cleanup_confirmed"] is True and receipt["return_code"] is None
+    assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")

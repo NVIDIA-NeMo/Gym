@@ -2,8 +2,6 @@
 title: "New Environment"
 description: "Compose task and harness components, declare a workload manifest, and validate a contribution."
 ---
-# New Environment
-
 An environment is the logical execution composition of a task, agent harness, model bindings, resources, and episode protocol. A Gym config selects and connects these participants. The task defines what must be done and how it is scored; the harness decides how to solve it.
 In Gym, a benchmark is a special kind of environment: a reproducible evaluation workload that requires a canonical split, a data preparation step, and a fixed prompt configuration so any user can reproduce the same score.
 General-purpose environments and benchmarks are stored in `environments` and `benchmarks` directories, respectively, each composed with a resources server under `resources_servers/`.
@@ -407,7 +405,7 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | `experimental` | boolean | Optional; defaults to `true` |
 | `kind` | string | Required; `environment` or `benchmark` |
 | `integration_profile` | string | Required; one of the profiles below |
-| `domain` | string | Required; `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, or `other` |
+| `domain` | string | Required; `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `asr`, `e2e`, `rlhf`, or `other` |
 | `description` | string | Required; non-empty |
 | `modality` | string | Required; non-empty |
 | `licensing` | string | Optional; defaults to `unknown`; SPDX expression, `internal`, `proprietary`, or `unknown` |

@@ -393,6 +393,11 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(
 
     assert isinstance(control_transport, GymAiohttpTransport)
     assert isinstance(envd_transport, GymAiohttpTransport)
+    # E2B 2.62 builds envd health-probe and streaming clients with these keywords.
+    assert isinstance(
+        client_async_module.get_transport(config, for_streaming=True, http_version="1.1", retry_connect=False),
+        GymAiohttpTransport,
+    )
     proxy = httpx.Proxy("http://proxy.example:8080", auth=("user", "password"))
     assert client_async_module.get_transport(types.SimpleNamespace(proxy=proxy)).proxy is proxy
     assert str(client_async_module.get_transport(types.SimpleNamespace(proxy="http://proxy.example")).proxy.url) == (
@@ -405,7 +410,7 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(
 def test_loader_reports_missing_optional_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "e2b", None)
 
-    with pytest.raises(ImportError, match=r"pip install 'e2b>=2\.46\.0,<3\.0\.0'"):
+    with pytest.raises(ImportError, match=r"pip install 'e2b>=2\.46\.0,<2\.51\.0'"):
         e2b_sdk.require_e2b_sdk("Testing the e2b provider")
 
 
@@ -433,7 +438,9 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
     ).get_async_httpx_client()
     assert str(api_client.base_url) == "http://gw:8080"
     assert (api_client.headers["X-API-KEY"], api_client.headers["Authorization"]) == ("k", "Bearer t")
-    for transport in (client_async.get_transport(connection), envd_client._transport, api_client._transport):
+    # E2B 2.62+ wraps the API client's transport in its response-retry transport.
+    api_transport = getattr(api_client._transport, "transport", api_client._transport)
+    for transport in (client_async.get_transport(connection), envd_client._transport, api_transport):
         assert isinstance(transport, GymAiohttpTransport)
     await envd_client.aclose()
     await api_client.aclose()
@@ -603,6 +610,36 @@ class TestResourceHandling:
         provider = E2BProvider(create={"template": "base", "strict_resources": True})
         with pytest.raises(E2BCreateError, match="fixes sandbox resources"):
             await provider.create(_spec(resources=resources))
+        assert FakeSandbox.instances == []
+
+    async def test_scheduling_resource_requests_warn_instead_of_failing(self, caplog) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        with caplog.at_level("WARNING"):
+            await provider.create(_spec(provider_options={"resource_requests": {"cpu": 0.5, "memory_mib": 2048}}))
+        warnings = [r for r in caplog.records if "fixes sandbox resources" in r.message]
+        assert len(warnings) == 1
+        assert "resource_requests.cpu=0.5" in warnings[0].message
+        assert "resource_requests.memory_mib=2048" in warnings[0].message
+        assert len(FakeSandbox.instances) == 1
+
+    async def test_strict_resources_rejects_scheduling_resource_requests(self) -> None:
+        provider = E2BProvider(create={"template": "base", "strict_resources": True})
+        with pytest.raises(E2BCreateError, match="fixes sandbox resources"):
+            await provider.create(_spec(provider_options={"resource_requests": {"cpu": 0.5}}))
+        assert FakeSandbox.instances == []
+
+    async def test_limits_resource_requests_add_no_scheduling_warning(self, caplog) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        with caplog.at_level("WARNING"):
+            await provider.create(_spec(provider_options={"resource_requests": "limits"}))
+        assert not [r for r in caplog.records if "fixes sandbox resources" in r.message]
+        assert len(FakeSandbox.instances) == 1
+
+    @pytest.mark.parametrize("requests", ["cpu=1", [], 0, False])
+    async def test_invalid_resource_requests_are_rejected_before_create(self, requests: object) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        with pytest.raises(TypeError, match="resource_requests"):
+            await provider.create(_spec(provider_options={"resource_requests": requests}))
         assert FakeSandbox.instances == []
 
     async def test_no_warning_without_resource_request(self, caplog) -> None:
@@ -1166,6 +1203,25 @@ class TestExec:
 
         with pytest.raises(TimeoutError, match=r"deadline exceeded.*wait/stream budget=1s"):
             await provider.exec(handle, "sleep 999", timeout_s=1)
+
+    @pytest.mark.parametrize("background", [False, True])
+    async def test_sandbox_not_running_is_a_sandbox_error_result(
+        self, monkeypatch: pytest.MonkeyPatch, background: bool
+    ) -> None:
+        # E2B 2.62+ raises this TimeoutException subclass once the sandbox reached its lifetime.
+        not_running = type("FakeSandboxNotRunning", (FakeTimeout,), {})
+        sdk = _fake_sdk()
+        sdk.SandboxNotRunningException = not_running
+        monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: sdk)
+        provider = E2BProvider(create={"template": "base"}, exec={"background": background})
+        handle = await provider.create(_spec())
+        handle.raw.exec_behaviour = not_running("The sandbox was killed or reached its timeout.")
+
+        result = await provider.exec(handle, "sleep 999", timeout_s=60)
+
+        assert result.error_type == "sandbox"
+        assert result.return_code == e2b_provider.SANDBOX_RUNTIME_RETURN_CODE
+        assert result.stderr == "e2b sandbox is not running: The sandbox was killed or reached its timeout."
 
     @pytest.mark.parametrize("timeout_s", [-1, float("nan"), float("inf"), True, "1"])
     async def test_invalid_timeout_is_rejected_before_command_start(self, timeout_s: object) -> None:

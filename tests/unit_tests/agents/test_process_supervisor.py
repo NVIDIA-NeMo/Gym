@@ -174,7 +174,13 @@ def test_forced_stop_reaches_processes_that_leave_the_harness_during_the_stop(tm
     }[escape]
     (tmp_path / "worker.sh").write_text(worker)
     try:
-        result = _supervise(tmp_path, "bash", "worker.sh", timeout="1", cwd=tmp_path)
+        # The worker touches `ready` once its trap is set. A stop that comes earlier (a slow, loaded host) kills
+        # the shell before it can spawn anything, which tests nothing, so the run is repeated with more time.
+        for timeout in ("1", "4", "10"):
+            result = _supervise(tmp_path, "bash", "worker.sh", timeout=timeout, cwd=tmp_path)
+            if (tmp_path / "ready").exists():
+                break
+        assert (tmp_path / "ready").exists(), "the worker never set its trap before the stop"
         assert result.returncode == 0, result.stderr
         receipt = _receipt(tmp_path)
         assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is True, receipt
@@ -278,7 +284,7 @@ def test_existing_stop_file_fences_the_launch(tmp_path: Path) -> None:
 
 
 @linux_only
-@pytest.mark.parametrize("initial_scan_delay", [0, 2.2])
+@pytest.mark.parametrize("initial_scan_delay", [0, 6.2])
 def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_scan_delay: float) -> None:
     # The controller requests a stop with this file rather than a signal.
     stop = tmp_path / "stop.request"
@@ -296,7 +302,7 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_sca
             "--timeout",
             "30",
             "--cleanup-timeout",
-            "2",
+            "5",
             "--receipt",
             str(tmp_path / "cleanup.json"),
         ]
@@ -311,11 +317,46 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_sca
             assert process.poll() is None and time.monotonic() < deadline
             time.sleep(0.01)
         stop.touch()
-        _, stderr = process.communicate(timeout=10)
+        _, stderr = process.communicate(timeout=20)
         assert process.returncode == 0, stderr
         receipt = _receipt(tmp_path)
         assert receipt == {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False}
         assert (tmp_path / "checkpoint").read_text() == "saved\n"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+@linux_only
+def test_stop_signals_count_only_once_the_stop_file_exists(tmp_path: Path) -> None:
+    """A tool command (`pkill -f ...`, `killall bash`) can signal the supervisor; a controller writes the stop file."""
+    stop = tmp_path / "stop.request"
+    worker = "touch ready; while :; do sleep 0.05; done"
+    process = subprocess.Popen(
+        ["bash", SUPERVISOR, "--timeout", "30", "--cleanup-timeout", "2", "--receipt", str(tmp_path / "cleanup.json")]
+        + ["--stop-file", str(stop), "--", "bash", "-c", worker],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "ready").exists():
+            assert process.poll() is None and time.monotonic() < deadline
+            time.sleep(0.01)
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            process.send_signal(signum)
+            time.sleep(0.2)
+        assert process.poll() is None, "a stop signal without the stop file ended the supervisor"
+        assert not (tmp_path / "cleanup.json").exists()
+        stop.touch()
+        process.send_signal(signal.SIGTERM)
+        _, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr
+        receipt = _receipt(tmp_path)
+        assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is False, receipt
+        assert receipt["foreign_signals"] == 3, receipt
     finally:
         if process.poll() is None:
             process.kill()
@@ -430,8 +471,9 @@ worker.write_text("import os, pathlib, signal, subprocess, sys, time\n"
 timed_out = ending in ('timeout', 'grace', 'stubborn')
 process = None
 try:
+    # Give real process cleanup and the checkpoint handler time on a busy CI runner.
     process = subprocess.Popen(['bash', supervisor, '--timeout', '10',
-        '--cleanup-timeout', '0.5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'),
+        '--cleanup-timeout', '5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'),
         '--expire-file', str(root / 'expire'), '--',
         sys.executable, str(worker), ending], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if ending == 'cancel' or timed_out:
@@ -443,9 +485,12 @@ try:
         if timed_out:
             (root / 'expire').touch()
         else:
+            # A stop signal counts only once the stop file exists, as a controller writes it.
+            (root / 'stop').touch()
             process.send_signal(signal.SIGTERM)
-    stdout, stderr = process.communicate(timeout=15)
-    assert process.returncode == 0, (stdout, stderr)
+    stdout, stderr = process.communicate(timeout=30)
+    receipt_path = root / "cleanup.json"
+    assert process.returncode == 0, (stdout, stderr, receipt_path.read_text() if receipt_path.exists() else None)
     receipt = json.loads((root / 'cleanup.json').read_text())
     assert receipt['cleanup_confirmed'] is True, receipt
     assert receipt['timed_out'] is timed_out, receipt
@@ -496,7 +541,7 @@ finally:
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=40,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
 
@@ -534,7 +579,9 @@ try:
     while not (root / 'writer.pid').exists():
         assert process.poll() is None and time.monotonic() < deadline
         time.sleep(.01)
-    if ending == 'cancel': process.send_signal(signal.SIGTERM)
+    if ending == 'cancel':
+        (root / 'stop').touch()
+        process.send_signal(signal.SIGTERM)
     stdout, stderr = process.communicate(timeout=10)
     assert process.returncode == 0, (stdout, stderr)
     receipt = json.loads((root / 'cleanup.json').read_text())

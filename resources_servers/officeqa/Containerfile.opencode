@@ -29,4 +29,6 @@ RUN case "$(uname -m)" in \
     && node --version > /usr/local/share/document-tools/node-version.txt \
     && mkdir -p /tmp/opencode \
     && chown -R 65534:65534 /tmp/opencode
-USER 65534:65534
+# PDF Analyst QA overrides this user for trusted document staging.
+ARG SANDBOX_USER=65534:65534
+USER ${SANDBOX_USER}

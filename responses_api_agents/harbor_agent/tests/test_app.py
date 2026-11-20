@@ -705,6 +705,26 @@ class TestExtractUsage:
     def test_extract_usage(self, trial_result, trajectory, expected_total) -> None:
         assert HarborAgentUtils.extract_usage(trial_result, trajectory)["total_tokens"] == expected_total
 
+    @pytest.mark.parametrize(
+        "trial_result, trajectory, expected_cached",
+        [
+            (DEFAULT_TRIAL_RESULT, DEFAULT_TRAJECTORY, 0),
+            ({"agent_result": {"n_input_tokens": 100, "n_output_tokens": 50, "n_cache_tokens": 30}}, None, 30),
+            # Harbor reported no cache reads: unknown, not zero.
+            (DEFAULT_TRIAL_RESULT, None, None),
+            ({"agent_result": None}, None, None),
+        ],
+    )
+    def test_extract_usage_reports_cache_reads_only_when_harbor_does(
+        self, trial_result, trajectory, expected_cached
+    ) -> None:
+        usage = HarborAgentUtils.extract_usage(trial_result, trajectory)
+        assert usage["input_tokens_details"]["cached_tokens"] == expected_cached
+
+    def test_default_response_does_not_claim_zero_cache_reads(self) -> None:
+        usage = HarborAgentUtils.get_default_response_object()["usage"]
+        assert usage["input_tokens_details"]["cached_tokens"] is None
+
 
 class TestExtractReward:
     @pytest.mark.parametrize(
