@@ -668,6 +668,8 @@ _COLLECTION_OPTIONS = frozenset(
         "long_rollout_max_fraction",
         "timing_summary_interval_s",
         "timed_out_max_fraction",
+        # How model calls are stored: evidence layout, not task execution.
+        "model_call_capture_format",
     }
 )
 # Server addresses and credentials are resolved anew when a job restarts. Keep model

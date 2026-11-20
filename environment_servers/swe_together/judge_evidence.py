@@ -3,7 +3,6 @@
 """Preserve separately captured judge exchanges using the judge's own close evidence."""
 
 import json
-import shutil
 from collections import defaultdict
 from pathlib import Path
 
@@ -175,7 +174,8 @@ async def collect_judge_evidence(
         store = CaptureStore(directories[0], create=False)
         if not store.path_for(episode).is_file():
             raise FileNotFoundError("Judge capture is unavailable")
-        shutil.copyfile(store.path_for(episode), artifact_dir / "judge-model-calls.capture.jsonl")
+        # Delta-format lines are written rebuilt, so the artifact needs no blobs or capture dir to read.
+        store.copy_full(episode, artifact_dir / "judge-model-calls.capture.jsonl")
         entries, invalid_count = store.read_available(episode)
         exchanges = [exchange for _, exchange in entries]
         (artifact_dir / "judge-model-calls.json").write_text(json.dumps(exchanges, indent=2))

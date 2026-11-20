@@ -104,6 +104,16 @@ Other features use some of these words in their own senses and keep them:
 | **Multi-step** | Sequential tool calls or intermediate steps in the agent loop before completion (may be single- or multi-turn). See [Multi-Step Environment](/environment-tutorials/multi-step-environment). |
 | **Tool use** | Function calling — invoking external capabilities (APIs, code execution, databases, and so on). |
 
+### Model-call capture
+
+What [model-call capture](/main/model-server/model-call-capture) writes for each rollout. See
+[Linear Model-Call Capture](/main/infrastructure/engineering-notes/linear-model-call-capture).
+
+| Term | Definition | Not |
+| --- | --- | --- |
+| **Capture format** | How a capture file stores each exchange, set by `model_call_capture_format`: `full` writes every line whole, `delta` writes only what earlier calls of the rollout did not hold. | capture version, v2 capture, compressed capture |
+| **Blob** | A large base64 `data:` URL stored once per rollout, in a file named by its SHA-256 under `blobs/<rollout_id>/` beside the captures. | attachment, asset |
+
 ### Evaluation
 
 | Term | Definition |

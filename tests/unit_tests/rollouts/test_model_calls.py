@@ -311,3 +311,16 @@ def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
     clear_model_call_captures_for_rollouts([{"_ng_task_index": 5, "_ng_rollout_index": 0}], [tmp_path])
 
     assert store.has_pending("5-0") is False
+
+
+def test_clear_captures_for_rollouts_removes_delta_blobs(tmp_path):
+    from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
+
+    store = CaptureStore(tmp_path, capture_format="delta")
+    image = "data:image/png;base64," + "A" * 2048
+    store.record("6-0", {"model_call_id": "a", "request": {"input": [{"content": image}]}, "response": {}})
+    assert any(store.blob_dir_for("6-0").iterdir())
+
+    clear_model_call_captures_for_rollouts([{"_ng_task_index": 6, "_ng_rollout_index": 0}], [tmp_path])
+
+    assert not store.path_for("6-0").exists() and not store.blob_dir_for("6-0").exists()

@@ -153,6 +153,8 @@ OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 # Agents add the /ng-rollout/<id> prefix to model calls without capturing them, so model servers know the rollout.
 ROLLOUT_CORRELATION_KEY_NAME = "rollout_correlation"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+# How capture files store each call: ``full`` or ``delta``. See ``nemo_gym/models/capture_format.py``.
+MODEL_CALL_CAPTURE_FORMAT_KEY_NAME = "model_call_capture_format"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/models/token_capture/config.py``.
 TOKEN_CAPTURE_BLOCK = "token_id_capture"
@@ -209,6 +211,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     OBSERVABILITY_ENABLED_KEY_NAME,
     ROLLOUT_CORRELATION_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    MODEL_CALL_CAPTURE_FORMAT_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
     MODEL_CALL_SAMPLING_BLOCK,
     COMPONENT_NAME_KEY_NAME,

@@ -151,9 +151,7 @@ def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: lis
         for record in records:
             rollout_id = maybe_rollout_id_from_run_body(record)
             if rollout_id:
-                store.path_for(rollout_id).unlink(missing_ok=True)
-                store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-                store.clear_all_pending(rollout_id)
+                store.delete(rollout_id)
 
 
 def merge_model_call_capture_into_record(
