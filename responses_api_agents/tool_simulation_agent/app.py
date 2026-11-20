@@ -37,6 +37,7 @@ from nemo_gym.server_runtime import (
     RestoredAgentSession,
     StepType,
     require_rollout,
+    seed_resources_session_id,
     seed_restarts,
     seed_verify_step_type,
 )
@@ -193,6 +194,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
             raise ValueError(f"unknown tool-simulation checkpoint stage {stage!r}")
         cookies = continuation.get("cookies", {})
         resources_verify_step_type: StepType = continuation.get("resources_verify_step_type", "wait")
+        resources_session_id: str | None = continuation.get("resources_session_id")
         model_reply = self._model_replies[legacy_run.key] if legacy_run is not None else None
 
         @asynccontextmanager
@@ -215,6 +217,8 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                     # No await between removing the cached reply and recording
                     # the boundary that now owns it.
                     model_reply.response = None
+                if resources_session_id is not None:
+                    state = {**state, "resources_session_id": resources_session_id}
                 await legacy_run.boundary(state)
 
         if stage == "seed":
@@ -225,6 +229,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                 )
                 await raise_for_status(seed)
             cookies = _cookies(seed.cookies)
+            resources_session_id = seed_resources_session_id(seed.headers)
             resources_verify_step_type = seed_verify_step_type(seed.headers)
             if seed_restarts(seed.headers):
                 await legacy_run.mark_restart()
@@ -302,7 +307,9 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                     server_name=config.resources_server.name,
                     url_path="/close_session",
                     json=ResourcesCloseSessionRequest(
-                        resources_session_id=f"{_LEGACY_SESSION_PREFIX}{episode_id.capture_key}", episode_id=episode_id
+                        resources_session_id=resources_session_id
+                        or f"{_LEGACY_SESSION_PREFIX}{episode_id.capture_key}",
+                        episode_id=episode_id,
                     ).model_dump(mode="json"),
                     cookies=cookies,
                 )

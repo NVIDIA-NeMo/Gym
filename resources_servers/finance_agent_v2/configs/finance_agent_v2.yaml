@@ -37,7 +37,7 @@ finance_agent_v2_resources_server:
         name: policy_model
       retrieval_responses_create_params:
         input: []
-      retrieval_max_output_tokens: 8192
+      retrieval_max_output_tokens: 32768
       retrieval_system_prompt_fpath: prompt_templates/finance_agent_v2_retrieval.yaml
       judge_model_server:
         type: responses_api_models
@@ -56,7 +56,7 @@ finance_agent_v2_resources_server:
       judge_max_attempts: 10
       judge_max_concurrency: 4
       # Soft budget: on overrun tools return an error asking the model to submit.
-      max_rollout_time_seconds: 1200
+      max_rollout_time_seconds: null
       max_end_date: "2026-03-01"
 
       # Caches raw upstream responses, so a hit is byte-identical to a live call.
@@ -96,7 +96,7 @@ finance_agent_v2:
       # belt-and-braces cap so a looping model cannot burn the full hour.
       max_steps: 50
       truncate_on_overflow: true
-      tool_call_timeout: 300
+      tool_call_timeout: 3600
       resources_server:
         type: resources_servers
         name: finance_agent_v2_resources_server
