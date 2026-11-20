@@ -59,7 +59,7 @@ def _prepare_in_server_environment(arguments: list[str]) -> Path:
     """Run this module with the terminal_bench_4 server's Python, setting up its environment first."""
     from omegaconf import open_dict
 
-    from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, maybe_get_global_config_dict
     from nemo_gym.server_runtime.supervisor import get_venv_path, run_command, setup_env_command
 
     setup_config = GlobalConfigDictParser().parse(
@@ -72,7 +72,7 @@ def _prepare_in_server_environment(arguments: list[str]) -> Path:
     )
     # `gym eval prepare` runs with the caller's resolved config: build or reuse the environment where, and how, the
     # caller's own servers would (venv directory, uv cache, Python version, ...). A direct run has none of these keys.
-    caller = global_config._GLOBAL_CONFIG_DICT
+    caller = maybe_get_global_config_dict()
     if caller is not None:
         with open_dict(setup_config):
             for key in ENVIRONMENT_SETUP_KEYS:
