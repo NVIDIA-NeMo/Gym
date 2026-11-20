@@ -40,6 +40,7 @@ from nemo_gym.server_runtime import ReverifyMode, verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 from nemo_gym.verification import judge_failsafe
 from resources_servers.stem_judge.app import (
+    MathVerifyConfig,
     RubricCriterion,
     StemJudgeConfig,
     StemJudgeResourcesServer,
@@ -136,6 +137,121 @@ def _request(response: NeMoGymResponse, expected: str = "2", **row) -> StemJudge
 
 def _judge_prompt(server: StemJudgeResourcesServer) -> str:
     return server.server_client.post.await_args.kwargs["json"].input[-1].content
+
+
+class TestAnswerOptions:
+    @mark.parametrize(
+        "text,exact,command",
+        [
+            (r"\boxed{1} then \boxed {2}", "1", "2"),
+            (r"\boxed{1} then \boxed {2", "1", None),
+            (r"\boxed{1} then \boxed{}", None, None),
+            (r"\boxed{\frac{1}{2}} and a literal \\boxed{7}", "7", r"\frac{1}{2}"),
+            (r"\boxed {\{a,b\}}", None, r"\{a,b\}"),
+            (r"\boxed{1} then \boxedExtra{2}", "1", "1"),
+        ],
+    )
+    def test_box_parser(self, text, exact, command):
+        assert last_boxed(text) == exact
+        assert last_boxed(text, last_command=True) == command
+
+    @mark.parametrize("scope", ["stem", "cross_domain"])
+    @mark.parametrize("mode", ["binary", "yes_no_unresolved"])
+    async def test_scope_and_verdict_are_independent(self, config, scope, mode):
+        server = _server(
+            config.model_copy(update={"guideline_scope": scope, "verdict_mode": mode}), "Judgement: 'yes'"
+        )
+        result = await server.verify(_request(_split(r"\boxed{2}")))
+        prompt = _judge_prompt(server)
+        assert ("any subject" in prompt) == (scope == "cross_domain")
+        assert ("Judgement: 'unresolved'" in prompt) == (mode == "yes_no_unresolved")
+        assert ("Your final judgement must be in the following format:" in prompt) == (mode == "binary")
+        assert result.reward == 1.0
+
+    @mark.parametrize(
+        "reply,verdict,status,known",
+        [
+            ("Judgement: 'yes'\nJudgement: 'no'", "no", "judged", True),
+            ("Judgement: 'no'</think>\nJudgement: 'unresolved'", "unresolved", "judge_unresolved", False),
+            ("Judgement: 'yes'\nI cannot decide", "unresolved", "judge_unparsed", False),
+            ("Judgement: 'yesterday'", "unresolved", "judge_unparsed", False),
+        ],
+    )
+    async def test_saved_no_and_abstention(self, config, reply, verdict, status, known):
+        server = _server(config.model_copy(update={"verdict_mode": "yes_no_unresolved"}), reply)
+        result = await server.verify(
+            _request(_split(r"\boxed{3}"), verdict="yes", correctness=True, evaluation_completed=True)
+        )
+        saved = json.loads(result.model_dump_json())
+        assert saved["verdict"] == verdict and saved["grading_status"] == status
+        assert saved["evaluation_completed"] is known and saved["mask_sample"] is (not known)
+        assert saved["correctness"] is (False if known else None)
+        assert saved["reward"] == 0.0
+        assert saved["judge_evaluations"][0]["verdict_label"] == (
+            None if status == "judge_unparsed" else f"Judgement: {verdict}"
+        )
+
+    async def test_math_match_skips_model_and_nonmatch_uses_the_same_box(self, config):
+        config.box_parser = "last_command"
+        config.boxed_judge_input = "box"
+        config.math_verify = MathVerifyConfig()
+        server = _server(config, "Judgement: 'no'")
+        response = _split(r"\boxed{5} then \boxed {\frac{4}{2}}")
+        result = await server.verify(_request(response, math_equivalence=True))
+        assert (result.reward, result.grading_status, result.judge_evaluations) == (1, "math_verified", [])
+        server.server_client.post.assert_not_awaited()
+        result = await server.verify(_request(response, expected="5", math_equivalence=True))
+        assert (result.reward, result.grading_status) == (0, "judged")
+        assert _judge_prompt(server).endswith("**Student Solution**:\n" + r"\frac{4}{2}")
+
+    @mark.parametrize(
+        "row,view,reply",
+        [
+            ({}, "box", "Judgement: 'no'"),
+            ({"math_equivalence": True, "answer_format": "free"}, "box", "Judgement: 'no'"),
+            ({"math_equivalence": True}, "final_answer", "Judgement: 'no'"),
+            ({"math_equivalence": True, "rubric": RUBRIC}, "box", '{"r1":false,"r2":false,"r3":false}'),
+        ],
+    )
+    async def test_math_precheck_only_for_declared_box_equivalence(self, config, row, view, reply):
+        config.boxed_judge_input = view
+        config.math_verify = MathVerifyConfig()
+        server = _server(config, reply)
+        result = await server.verify(_request(_split(r"\boxed{2}"), **row))
+        server.server_client.post.assert_awaited_once()
+        assert result.reward == 0 and result.grading_status == "judged"
+
+    async def test_reverify_drops_stale_answer_evidence(self, config):
+        server = _server(config, "Judgement: 'yes'")
+        result = await server.verify(
+            _request(
+                _split(r"\boxed{2}"),
+                mask_sample=True,
+                evaluation_completed=False,
+                correctness=None,
+                verdict="unresolved",
+                library_reward=0.0,
+            )
+        )
+        saved = result.model_dump()
+        assert saved["reward"] == 1 and saved["mask_sample"] is False
+        assert saved["judge_evaluations"][0]["verdict_label"] == "Judgement: yes"
+        assert {"evaluation_completed", "correctness", "verdict", "library_reward"}.isdisjoint(saved)
+
+    def test_policy_template_renders_only_the_question(self):
+        from nemo_gym.data import fill_prompt, load_prompt_config
+
+        template = load_prompt_config(str(SERVER_DIR / "prompt_templates" / "boxed_final_answer.yaml"))
+        messages = fill_prompt(template, {"question": "Compute 2 + 3.", "expected_answer": "private reference"})
+        assert messages == [
+            {
+                "role": "user",
+                "content": (
+                    "Compute 2 + 3.\n\nSolve the problem step by step. "
+                    r"Put your final answer, and only your final answer, in \boxed{}."
+                ),
+            }
+        ]
 
 
 class TestShippedConfig:

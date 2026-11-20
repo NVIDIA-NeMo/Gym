@@ -155,6 +155,40 @@ to the shipped config's `policy_model`.
 commands: the policy `nvidia/nemotron-3.5-lightning-30b-a3b` and the judge
 `nvidia/nemotron-3-ultra-550b-a55b`.
 
+## Question-bank grading options
+
+The question-bank preset uses the same resources server, agent and rubric grader.
+Load `resources_servers/stem_judge/configs/question_bank.yaml` as the resources
+configuration. It includes the base config and overrides its answer options.
+
+| Answer option | Base config | Question-bank preset |
+| --- | --- | --- |
+| `guideline_scope` | `stem` | `cross_domain` treats v11 examples as guidance for reference comparisons in any subject. |
+| `verdict_mode` | `binary` | `yes_no_unresolved` reads the closing verdict line. An explicit no is a measured zero. An abstention or unparseable verdict has unknown correctness and sets `mask_sample=true`. |
+| `box_parser` | `exact` | `last_command` recognizes whitespace before the opening brace, skips escaped commands, and rejects a malformed final box even when an earlier one is valid. |
+| `boxed_judge_input` | `final_answer` | `box` grades the extracted answer. Free-answer rows use their full final message. |
+| `math_verify` | Disabled | Checks rows declaring `math_equivalence: true` when the row is a box-only answer comparison. A match earns 1 immediately. A nonmatch or timeout sends that same candidate to the LLM judge. |
+
+Set each option independently. The prompt options reuse the sections of the shipped
+`stem_v11.txt` template. Custom templates used with those options must retain its section
+markers. Mark a row `math_equivalence: true` only when equivalence alone establishes the
+answer. Leave proofs, explanations and rows with additional obligations on the judge
+or rubric path. For NeMoRL SingleController with source scheduling, enable
+`grpo.exclude_failed_judge_groups` to keep a masked group out of the trainer and reward cache.
+
+The solver instruction is a separate generation option. For a dataset of **boxed**
+questions with a raw `question` field, render it once before generating rollouts:
+
+```bash
+gym dataset render --input boxed_questions.jsonl \
+  --prompt-config resources_servers/stem_judge/prompt_templates/boxed_final_answer.yaml \
+  --output boxed_prompts.jsonl
+```
+
+The template asks the solver to put its final answer, and only its final answer,
+inside `\boxed{}`. Use the original prompts for free-response tasks or historical
+rollouts. Gym's renderer rejects already materialized input.
+
 ## Test
 
 ```bash

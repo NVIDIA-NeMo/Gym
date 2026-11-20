@@ -70,6 +70,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serial
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -85,6 +86,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
+from resources_servers.stem_judge.answer_options import GuidelineScope, VerdictMode, answer_template, final_verdict
 from resources_servers.stem_judge.task_data import RubricCriterion, TaskData, reference_of
 
 
@@ -107,6 +109,11 @@ VERDICT_FALLBACK_PATTERN = (
     r"[\s*]*+[:=][\s*]*+"
     r"\**+\s*+\$?\s*+(?:\\boxed\s*+\{)?\s*+(?:\\text\s*+\{)?\s*+\{?\s*+['\"]?(yes|no)\b"
 )
+
+
+class MathVerifyConfig(BaseModel, extra="forbid"):
+    timeout_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
+    max_concurrency: int = Field(default=8, gt=0)
 
 
 class StemJudgeConfig(BaseResourcesServerConfig):
@@ -144,6 +151,11 @@ class StemJudgeConfig(BaseResourcesServerConfig):
             except re.error as e:
                 raise ValueError(f"question_extract_regex does not compile: {e}") from e
         return regex
+
+    guideline_scope: GuidelineScope = "stem"
+    verdict_mode: VerdictMode = "binary"
+    box_parser: Literal["exact", "last_command"] = "exact"
+    math_verify: MathVerifyConfig | None = None
 
     # --- Answer contract. A row's own answer_format wins. ---
     default_answer_format: Literal["boxed", "free"] = "boxed"
@@ -274,17 +286,33 @@ def final_answer(response: NeMoGymResponse) -> tuple[Optional[str], str]:
     return text, "ok"
 
 
-def last_boxed(text: str) -> Optional[str]:
+def last_boxed(text: str, *, last_command: bool = False) -> Optional[str]:
     r"""Content of the last ``\boxed{...}``, brace-balanced; None if absent, unclosed or blank.
 
     As in math_with_judge's ``_extract_last_boxed_answer``, only the last ``\boxed{``
-    counts and a blank box is no answer. Escaped braces (``\{``, ``\}``) are literal, so
+    counts in exact mode. With last_command, a final bare or spaced command
+    supersedes earlier boxes. A blank box is no answer. Escaped braces (``\{``, ``\}``) are literal, so
     ``\boxed{f=\left\{ ... \right.}`` closes at its last brace.
     """
-    start = text.rfind("\\boxed{")
-    if start < 0:
-        return None
-    content_start = start + len("\\boxed{")
+    if last_command:
+        # Select the final unescaped command first. An invalid final argument
+        # belongs to that command and cannot expose an earlier boxed answer.
+        opening = None
+        for match in re.finditer(r"\\\\|\\boxed(?![A-Za-z])", text):
+            if match[0].endswith("boxed"):
+                opening = match.end()
+        if opening is None:
+            return None
+        while opening < len(text) and text[opening].isspace():
+            opening += 1
+        if opening == len(text) or text[opening] != "{":
+            return None
+        content_start = opening + 1
+    else:
+        start = text.rfind("\\boxed{")
+        if start < 0:
+            return None
+        content_start = start + len("\\boxed{")
     depth = 1
     index = content_start
     while index < len(text):
@@ -420,7 +448,7 @@ def _extract_step(req: BaseVerifyRequest) -> Optional[str]:
 
 
 class StemJudgeResourcesServer(SimpleResourcesServer):
-    # Each verification is one judge call: there is no session state to export,
+    # Verification has no session state to export,
     # and a checkpoint can re-run a verification after a crash instead of waiting for it.
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
@@ -436,12 +464,22 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             self._judge_endpoint_max_concurrency = nullcontext()
 
         with open(self.config.answer_prompt_template_fpath, encoding="utf-8") as f:
-            self._answer_template = f.read().strip()
+            self._answer_template = answer_template(
+                f.read().strip(), scope=self.config.guideline_scope, verdict_mode=self.config.verdict_mode
+            )
         with open(self.config.rubric_prompt_template_fpath, encoding="utf-8") as f:
             self._rubric_template = f.read().strip()
         # A custom template with an unknown placeholder or a stray brace fails here, not on every judged row.
         self._answer_template.format(question="", expected_answer="", generated_answer="")
         self._rubric_template.format(question="", expected_answer="", rubric="", generated_answer="")
+
+        self._math_library = None
+        if self.config.math_verify is not None:
+            from resources_servers.math_with_judge.library import MathLibraryVerifier
+
+            self._math_library = MathLibraryVerifier(
+                server_name=self.config.name, **self.config.math_verify.model_dump()
+            )
 
         # The host and pid suffix keeps server worker processes from sharing one file. Writes run
         # in a worker thread so a slow filesystem does not stall the event loop; the lock keeps the
@@ -475,7 +513,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
 
         solution = final
         if answer_format == "boxed":
-            box = last_boxed(final)
+            box = last_boxed(final, last_command=cfg.box_parser == "last_command")
             if box is None:
                 return await zero("no_boxed")
             if cfg.max_box_chars is not None and len(box) > cfg.max_box_chars:
@@ -485,6 +523,11 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         judges_whole_answer = answer_format == "free" or cfg.boxed_judge_input == "final_answer"
         if judges_whole_answer and cfg.max_answer_chars is not None and len(final) > cfg.max_answer_chars:
             return await zero("answer_too_long")
+
+        if self._math_library and body.math_equivalence and not body.rubric and not judges_whole_answer:
+            score, _ = await self._math_library.verify(expected, "\\boxed{" + solution + "}")
+            if score > 0.5:
+                return await self._finish(body, expected, answer_format, "math_verified", 1.0, solution, [])
 
         question = _extract_question_text(body.responses_create_params, self._question_regex())
         grade = self._grade_rubric if body.rubric else self._grade_answer
@@ -497,10 +540,13 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             question=question, expected_answer=render_reference(expected), generated_answer=solution
         )
         evaluation, text = await self._call_judge(prompt)
-        verdict = parse_verdict(text) if text is not None else None
+        parser = final_verdict if self.config.verdict_mode == "yes_no_unresolved" else parse_verdict
+        verdict = parser(text) if text is not None else None
         evaluation.verdict_label = f"Judgement: {verdict}" if verdict is not None else None
         if evaluation.verdict_label is None:
             return await self._finish(body, expected, answer_format, "judge_unparsed", 0.0, solution, [evaluation])
+        if verdict == "unresolved":
+            return await self._finish(body, expected, answer_format, "judge_unresolved", 0.0, solution, [evaluation])
         record_parsed_judge_verdict()
         reward = 1.0 if verdict == "yes" else 0.0
         return await self._finish(body, expected, answer_format, "judged", reward, solution, [evaluation])
@@ -573,8 +619,32 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             await asyncio.to_thread(self._append_log_line, line)
         payload = body.model_dump()
         # Fields this server sets; a row that carries them (e.g. one rebuilt from a rollout) must not override them.
-        for key in (*RESPONSE_FIELDS, *FAILURE_FIELDS):
+        for key in (
+            *RESPONSE_FIELDS,
+            *FAILURE_FIELDS,
+            "verdict",
+            "correctness",
+            "evaluation_completed",
+            "library_reward",
+        ):
             payload.pop(key, None)
+        if status == "math_verified":
+            payload["library_reward"] = reward
+        if self.config.verdict_mode == "yes_no_unresolved" and not body.rubric:
+            unknown = status in ("judge_unparsed", "judge_unresolved")
+            payload.update(
+                verdict="unresolved" if unknown else ("yes" if reward else "no"),
+                evaluation_completed=not unknown,
+                correctness=None if unknown else bool(reward),
+                mask_sample=unknown,
+            )
+            if unknown:
+                payload["failure_kind"] = (
+                    "stem_judge:unresolved" if status == "judge_unresolved" else JUDGE_UNPARSEABLE
+                )
+                payload["failure_reason"] = (
+                    "Judge abstained" if status == "judge_unresolved" else "Missing or incomplete final verdict"
+                )
         return StemJudgeVerifyResponse(
             **payload,
             reward=reward,
