@@ -8,7 +8,7 @@ import pytest
 from aiohttp import ClientResponseError
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_models.openai_model import app
 from responses_api_models.openai_model.provider_refusals import provider_refusal
 
@@ -95,6 +95,39 @@ async def test_default_and_unrelated_errors_are_not_converted(status, codes, bod
     model._client = SimpleNamespace(create_response=AsyncMock(side_effect=failure(status, body)))
     with pytest.raises(ClientResponseError):
         await model.responses(NeMoGymResponseCreateParamsNonStreaming(input="A benign test"))
+
+
+async def test_chat_completion_refusal_has_no_content_and_keeps_its_evidence():
+    model = server(provider_refusal_codes=ALLOWED)
+    model._client = SimpleNamespace(create_chat_completion=AsyncMock(side_effect=failure(400, BODY)))
+    completion = await model.chat_completions(
+        NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "A benign test"}])
+    )
+    choice = completion.choices[0]
+    assert choice.finish_reason == "content_filter"
+    assert choice.message.content is None
+    assert choice.message.refusal == BODY["error"]["message"]
+    assert completion.usage is None
+    assert completion.metrics["provider_http_refusal"]["error_code"] == "bio_policy"
+    assert json.loads(completion.metrics["provider_http_refusal"]["raw_error_body"]) == BODY
+    assert model._client.create_chat_completion.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "status,codes,body",
+    [
+        (400, frozenset(), BODY),
+        (400, ALLOWED, {"error": {"code": "bad_input", "message": "Invalid request"}}),
+        (503, ALLOWED, BODY),
+    ],
+)
+async def test_chat_completion_errors_other_than_an_allowed_refusal_still_raise(status, codes, body):
+    model = server(provider_refusal_codes=codes)
+    model._client = SimpleNamespace(create_chat_completion=AsyncMock(side_effect=failure(status, body)))
+    with pytest.raises(ClientResponseError):
+        await model.chat_completions(
+            NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "A benign test"}])
+        )
 
 
 def test_configuration_cannot_label_capacity_error_as_refusal():
