@@ -362,3 +362,40 @@ example even though semantic turns are unavailable. Token totals include only ob
 Collection adds measured wall-clock latency when available. `ng_perf` is absent when observability
 is disabled or no valid trajectory invocation exists. Aggregate metrics include `perf_summary`
 when rollouts contain `ng_perf`.
+
+### Every captured call
+
+`ng_perf` covers agent turns only, so `token_observability_coverage` can be 1.0 while other captured
+calls, such as judge calls made during verification, are outside its totals. `ng_captured_calls`
+counts every captured call of the rollout by the role that owns it:
+
+| Role | Owner |
+| --- | --- |
+| `agent` | Referenced by an agent invocation. Counted once even when several invocations reference it. |
+| `verifier` | Referenced by a verifier invocation. |
+| `unattributed` | Captured under the rollout but referenced by neither. |
+
+```json
+"ng_captured_calls": {
+  "calls": 3, "calls_without_usage": 0, "attributed_call_coverage": 0.333, "capture_complete": true,
+  "by_role": {
+    "agent": {"calls": 1, "calls_without_usage": 0, "prompt_tokens": 100, "call_latency_ms": 40.0},
+    "unattributed": {"calls": 2, "calls_without_usage": 0, "prompt_tokens": 500, "call_latency_ms": 50.0}
+  }
+}
+```
+
+Token fields use the `ng_perf` names (`prompt_tokens`, `cached_prompt_tokens`, `completion_tokens`,
+`reasoning_tokens`, `total_tokens`) and include only reported values. A call that reports no token
+counts adds to `calls_without_usage` instead of adding zero. `attributed_call_coverage` is the share of
+captured calls with a role other than `unattributed`; it is null for a rollout with no captured calls.
+`call_latency_ms` sums call durations; calls can overlap, so it is not wall-clock time.
+
+`ng_captured_calls` is absent when observability is disabled, capture produced no trajectory, or none of
+the rollout's capture could be read: those calls are unknown, not zero. `capture_complete` is false when
+capture writes were still pending or incomplete, or some records could not be read, so the counts are a
+lower bound.
+`perf_summary.captured_calls` adds the rollout summaries into run totals by role, with
+`rollouts_with_capture` out of `total_rollouts`, and `rollouts_with_incomplete_capture` of those (with
+`capture_complete` false when any was). A run without capture has no `captured_calls` block rather than
+zero totals.
