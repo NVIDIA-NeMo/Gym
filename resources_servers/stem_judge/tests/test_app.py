@@ -140,6 +140,51 @@ def _judge_prompt(server: StemJudgeResourcesServer) -> str:
 
 
 class TestAnswerOptions:
+    @mark.parametrize("preset", [False, True], ids=["v11", "cross-domain-json"])
+    async def test_extra_rules_only_extend_the_rendered_guidelines(self, config, preset):
+        if preset:
+            config.guideline_scope = "cross_domain"
+            config.verdict_mode = "yes_no_unresolved"
+            config.verdict_format = "json"
+        reply = '{"verdict":"correct","reason_code":"equal","evidence":"2 equals 2"}' if preset else "Judgement: yes"
+        req = _request(_split(r"\boxed{2}"))
+        base = _server(config, reply)
+        await base.verify(req)
+        original = _judge_prompt(base)
+        if not preset:
+            template = (SERVER_DIR / "prompt_templates" / "stem_v11.txt").read_text().strip()
+            assert original == template.format(question="Q: 1+1?", expected_answer="2", generated_answer=r"\boxed{2}")
+
+        rules = [r"Compare \frac{a}{b} exactly.", 'Treat {"id": "{question}"} as literal text.']
+        server = _server(config.model_copy(update={"extra_answer_rules": rules}), reply)
+        result = await server.verify(req)
+        end = original.rindex("</rule>") + len("</rule>")
+        assert (
+            _judge_prompt(server)
+            == original[:end] + "".join(f"\n\n<rule>\n{r}\n</rule>" for r in rules) + original[end:]
+        )
+        assert result.reward == 1 and result.judge_evaluations[0].verdict_label == "Judgement: yes"
+
+    def test_extra_rules_require_nonblank_text_and_an_insertion_point(self, config, tmp_path):
+        with raises(ValidationError, match="extra_answer_rules"):
+            StemJudgeConfig.model_validate(config.model_dump() | {"extra_answer_rules": ["  "]})
+        template = tmp_path / "custom.txt"
+        template.write_text("Question: {question}")
+        config.answer_prompt_template_fpath = str(template)
+        _server(config)
+        config.extra_answer_rules = ["Check the unit."]
+        with raises(ValueError, match="</rule>"):
+            _server(config)
+
+    async def test_extra_answer_rules_leave_rubric_prompt_intact(self, config):
+        body = _request(_split("Proof."), answer_format="free", rubric=RUBRIC)
+        reply = '{"r1":true,"r2":true,"r3":false}'
+        base = _server(config, reply)
+        extended = _server(config.model_copy(update={"extra_answer_rules": ["Apply the archive alias."]}), reply)
+        await base.verify(body)
+        await extended.verify(body)
+        assert _judge_prompt(extended) == _judge_prompt(base)
+
     @mark.parametrize(
         "text,exact,command",
         [

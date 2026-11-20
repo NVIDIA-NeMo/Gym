@@ -62,6 +62,18 @@ def answer_template(
     return "\n\n".join((context.strip(), sep, guidelines.strip(), instructions.strip(), fields + inputs))
 
 
+def add_answer_rules(template: str, rules: list[str]) -> str:
+    """Append literal rule text to the configured answer template's last rule block."""
+    if not rules:
+        return template
+    before, closing_tag, after = template.rpartition("</rule>")
+    if not closing_tag:
+        raise ValueError("extra_answer_rules requires an answer template with a </rule> marker")
+    blocks = "".join(f"\n\n<rule>\n{rule}\n</rule>" for rule in rules)
+    # Only the template's own placeholders should be expanded when rendering the row.
+    return before + closing_tag + blocks.replace("{", "{{").replace("}", "}}") + after
+
+
 def final_verdict(text: str) -> str | None:
     """Only the closing verdict line can decide a three-way judgment."""
     final = text.rsplit("</think>", 1)[-1].strip().splitlines()

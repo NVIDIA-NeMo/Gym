@@ -65,9 +65,9 @@ import socket
 import threading
 import time
 from contextlib import nullcontext
-from typing import ClassVar, Literal, Optional
+from typing import Annotated, ClassVar, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_serializer
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -92,6 +92,7 @@ from resources_servers.stem_judge.answer_options import (
     JsonJudgment,
     VerdictFormat,
     VerdictMode,
+    add_answer_rules,
     answer_template,
     final_verdict,
     parse_json_judgment,
@@ -162,6 +163,9 @@ class StemJudgeConfig(BaseResourcesServerConfig):
         return regex
 
     guideline_scope: GuidelineScope = "stem"
+    extra_answer_rules: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]] = Field(
+        default_factory=list
+    )
     verdict_mode: VerdictMode = "binary"
     verdict_format: VerdictFormat = "line"
     box_parser: Literal["exact", "last_command"] = "exact"
@@ -475,12 +479,13 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             self._judge_endpoint_max_concurrency = nullcontext()
 
         with open(self.config.answer_prompt_template_fpath, encoding="utf-8") as f:
-            self._answer_template = answer_template(
+            template = answer_template(
                 f.read().strip(),
                 scope=self.config.guideline_scope,
                 verdict_mode=self.config.verdict_mode,
                 verdict_format=self.config.verdict_format,
             )
+        self._answer_template = add_answer_rules(template, self.config.extra_answer_rules)
         with open(self.config.rubric_prompt_template_fpath, encoding="utf-8") as f:
             self._rubric_template = f.read().strip()
         # A custom template with an unknown placeholder or a stray brace fails here, not on every judged row.
