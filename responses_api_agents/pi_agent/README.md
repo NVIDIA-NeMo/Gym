@@ -99,10 +99,10 @@ benchmark whose Resources server serves its tools over direct HTTP does not pair
 
 ## Runtime and model requirements
 
-Use an exact `pi_version` (default **1.5.2**), and a Gym `model_server`.
+Use `pi_version: "1.5.2"` with a Gym `model_server`. Set `pi_version: "latest"` to resolve an exact release once at Gym startup. Wrapped presets take the setting under `agent_kwargs`.
 For a Resources-owned task sandbox, supply direct `SandboxAccess` with an absolute
 task working directory. Without access, configure agent-owned creation as noted below.
-Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
+Pi's `resources_server` setting is required
 only for its compatibility `/run`, not agent sessions.
 
 Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with
@@ -274,7 +274,7 @@ detail, not a separate endpoint or a setup step users must run.
 - `timeout`: seconds for the `pi` run
 - `extra_args`: extra Pi flags for local compatibility calls
 - `models_config`: provider configuration for local compatibility calls
-- `pi_version`: npm version to pin on install (null means latest on the local path; sandbox sessions require an exact version)
+- `pi_version`: Pi release to install. DeepSearchQA and WideSearch pin 0.80.2 for the Gym adapter installed by their sandbox setup command.
 - `resources_server`: required only for the agent's existing `/run` endpoint, not for sandbox sessions or direct `/v1/responses`
 - `sandbox_install_timeout_seconds`: sandbox runtime installation timeout (default 600)
 - `sandbox_runtime_dir`: absolute sandbox path of a preinstalled runtime to use instead of installing one

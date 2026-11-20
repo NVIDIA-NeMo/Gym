@@ -13,7 +13,7 @@ pi_benchmark_agent:
         type: responses_api_models
         name: policy_model
       model: benchmark-model
-      pi_version: 1.5.2
+      pi_version: "1.5.2"
       concurrency: 512
       timeout: 14400
       bash_timeout: 120

@@ -27,7 +27,11 @@ import urllib.request
 from pathlib import Path
 
 from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
-from responses_api_agents.opencode_agent.runtime import OPENCODE_RELEASE_SHA256, OPENCODE_VERSION
+from responses_api_agents.opencode_agent.runtime import (
+    OPENCODE_RELEASE_SHA256,
+    OPENCODE_VERSION,
+    published_release_digests,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -95,8 +99,12 @@ def ensure_opencode2(version: str) -> str:
         )
     digests = OPENCODE_RELEASE_SHA256.get(version)
     if not digests:
+        digests = published_release_digests(version)
+    if not digests:
         raise RuntimeError(f"OpenCode {version} has no pinned release digest; set the agent's command to a binary")
     arch = _linux_release_arch()
+    if arch not in digests:
+        raise RuntimeError(f"OpenCode {version} has no published digest for {arch}")
     _OPENCODE2_PREFIX.mkdir(parents=True, exist_ok=True)
     with install_lock(_OPENCODE2_PREFIX / f"{version}.lock"):
         if _reports_version(binary, version):

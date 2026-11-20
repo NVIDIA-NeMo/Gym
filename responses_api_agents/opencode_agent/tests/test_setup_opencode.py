@@ -167,3 +167,24 @@ def test_an_opencode_2_download_with_another_digest_is_not_installed(opencode2_r
     with pytest.raises(RuntimeError, match="not the pinned"):
         setup_opencode.ensure_opencode2("2.9.9")
     assert not (tmp_path / "runtime" / "2.9.9" / "opencode").exists()
+
+
+def test_selected_release_uses_only_the_matching_publishers_sha256_assets(monkeypatch):
+    from unittest.mock import Mock
+
+    from responses_api_agents.opencode_agent import runtime
+
+    release = Mock()
+    release.json.return_value = {
+        "tag_name": "v2.9.8",
+        "assets": [
+            {"name": "opencode-linux-x64-baseline.tar.gz", "digest": "sha256:" + "a" * 64},
+            {"name": "opencode-linux-arm64-musl.tar.gz", "digest": "sha256:" + "b" * 64},
+            {"name": "opencode-linux-arm64.tar.gz", "digest": None},
+            {"name": "opencode-linux-x64.tar.gz", "digest": "sha256:" + "c" * 64},
+        ],
+    }
+    get = Mock(return_value=release)
+    monkeypatch.setattr(runtime.requests, "get", get)
+    assert runtime.published_release_digests("2.9.8") == {"x64-baseline": "a" * 64, "arm64-musl": "b" * 64}
+    get.assert_called_once_with("https://api.github.com/repos/anomalyco/opencode/releases/tags/v2.9.8", timeout=20)

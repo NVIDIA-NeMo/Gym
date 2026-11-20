@@ -14,6 +14,22 @@ from responses_api_agents.anyswe_agent.tests.test_app import _config
 
 
 class TestRuntimeBundle:
+    def test_selected_pi_release_gets_its_own_reusable_install(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(anyswe_app, "__file__", str(tmp_path / "app.py"))
+        monkeypatch.setattr(anyswe_app, "PARENT_DIR", tmp_path)
+        scripts = tmp_path / "setup_scripts"
+        scripts.mkdir()
+        (scripts / "pi_agent_deps.sh").write_text('echo "$PI_VERSION" >> "$DEPS_DIR/installs"')
+        cfg = _config(agent_server_module="responses_api_agents.pi_agent.app", agent_kwargs={"pi_version": "1.5.2"})
+        processor = GymAgentHarnessProcessor(config=cfg)
+        first = processor.setup()
+        cfg.agent_kwargs["pi_version"] = "0.80.2"
+        second = processor.setup()
+        cfg.agent_kwargs["pi_version"] = "1.5.2"
+        assert processor.setup() == first
+        assert (first / "installs").read_text().splitlines() == ["1.5.2"]
+        assert (second / "installs").read_text().splitlines() == ["0.80.2"]
+
     def test_recipe_changes_when_nemo_gym_changes(self, tmp_path: Path) -> None:
         (tmp_path / "nemo_gym" / "token_id_capture").mkdir(parents=True)
         library_file = tmp_path / "nemo_gym" / "token_id_capture" / "lineage.py"

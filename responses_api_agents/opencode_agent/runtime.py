@@ -3,8 +3,12 @@
 
 """Stock OpenCode plus the same observability patch, locally and in sandboxes."""
 
+import re
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import requests
 
 
 if TYPE_CHECKING:
@@ -14,8 +18,7 @@ if TYPE_CHECKING:
 OPENCODE_VERSION = "1.17.11"
 # OpenCode 2 (npm @opencode/cli, GitHub releases of anomalyco/opencode), selected with opencode_version.
 OPENCODE_V2_VERSION = "2.2.7"
-# SHA-256 of each Linux release asset the sandbox installer downloads, from the release's SHA256SUMS. A 2.x version
-# without an entry here cannot be downloaded into a sandbox; pin a binary with sandbox_executable_path instead.
+# Built-in Linux release checksums. A user-selected release can use the checksums published with its assets.
 OPENCODE_RELEASE_SHA256 = {
     "2.2.7": {
         "x64-baseline": "89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7",  # pragma: allowlist secret
@@ -24,6 +27,25 @@ OPENCODE_RELEASE_SHA256 = {
         "arm64-musl": "a03405f94ae02db7acb0870cf32030bab86460dc7faf524780e9cae305526b96",  # pragma: allowlist secret
     },
 }
+
+
+@cache
+def published_release_digests(version: str) -> dict[str, str]:
+    """Read the checksums published for an explicitly selected OpenCode 2 release."""
+    if not re.fullmatch(r"2\.\d+\.\d+", version):
+        raise ValueError(f"Expected an exact OpenCode 2 release, got {version!r}")
+    response = requests.get(f"https://api.github.com/repos/anomalyco/opencode/releases/tags/v{version}", timeout=20)
+    response.raise_for_status()
+    release = response.json()
+    digests = {}
+    for asset in release["assets"]:
+        name = re.fullmatch(r"opencode-linux-(x64-baseline|arm64)(-musl)?\.tar\.gz", asset["name"])
+        digest = re.fullmatch(r"sha256:([0-9a-f]{64})", asset.get("digest") or "")
+        if name and digest:
+            digests[name[1] + (name[2] or "")] = digest[1]
+    if release["tag_name"] != f"v{version}" or not digests:
+        raise ValueError(f"OpenCode {version} has no published Linux release checksums")
+    return digests
 
 
 def opencode_major(version: str) -> int:

@@ -16,6 +16,7 @@ import base64
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -35,6 +36,7 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.config.harness_version import portable_harness_pin
 from nemo_gym.core import (
     AGENT_LIMIT,
     AGENT_TIMEOUT,
@@ -479,7 +481,8 @@ class GymAgentHarnessProcessor(BaseModel):
         return hashlib.sha256(b"".join(path.read_bytes() for path in sources if path.exists())).hexdigest()
 
     def setup(self) -> Path:
-        deps_dir = Path(__file__).parent / f"anyswe_{self._agent_key}_deps"
+        suffix, install_env = portable_harness_pin(self._agent_key, self.config.agent_kwargs)
+        deps_dir = Path(__file__).parent / f"anyswe_{self._agent_key}{suffix}_deps"
         sentinel = deps_dir / ".installed"
         script = Path(__file__).parent / "setup_scripts" / f"{self._agent_key}_deps.sh"
         recipe = self._recipe()
@@ -503,7 +506,10 @@ class GymAgentHarnessProcessor(BaseModel):
             if not script.exists():
                 raise ValueError(f"missing agent runtime setup script: {script}")
             deps_dir.mkdir(parents=True, exist_ok=True)
-            proc = Popen(f"DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}", shell=True)
+            proc = Popen(
+                ["bash", str(script)],
+                env={**os.environ, "DEPS_DIR": str(deps_dir), "NEMO_GYM_ROOT": str(PARENT_DIR), **install_env},
+            )
             if proc.wait() != 0:
                 raise RuntimeError(f"agent runtime setup failed: {script}")
             sentinel.write_text(recipe)

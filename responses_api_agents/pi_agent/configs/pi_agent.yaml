@@ -13,5 +13,5 @@ pi_agent:
         type: responses_api_models
         name: policy_model
       model: ${policy_model_name}
-      pi_version: 1.5.2
+      pi_version: "1.5.2"
       timeout: 900

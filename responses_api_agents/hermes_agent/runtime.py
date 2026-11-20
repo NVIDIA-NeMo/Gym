@@ -23,7 +23,8 @@ from nemo_gym.config import CACHE_DIR_KEY_NAME, maybe_get_global_config_dict
 # Wheel metadata reports 0.0.0 and wheels omit runtime assets.
 with Path(__file__).with_name("pyproject.toml").open("rb") as metadata:
     _RUNTIME = tomllib.load(metadata)["tool"]["nemo-gym"]["hermes"]
-HERMES_SOURCE = _RUNTIME["source"]
+HERMES_DEFAULT_SOURCE = _RUNTIME["source"]
+HERMES_SOURCE = os.environ.get("HERMES_SPEC") or HERMES_DEFAULT_SOURCE
 HERMES_PYTHON_VERSION = _RUNTIME["python-version"]
 HERMES_COMMIT = HERMES_SOURCE.rsplit("@", 1)[1]
 
@@ -77,7 +78,7 @@ def _host_python() -> Path:
     if (bundled / "hermes-source").is_file():
         recorded = json.loads((bundled / "hermes-source").read_text())
         expected = os.environ.get("HERMES_SPEC") or recorded["source"]
-        if recorded["default"] != HERMES_SOURCE or recorded["source"] != expected:
+        if recorded["default"] != HERMES_DEFAULT_SOURCE or recorded["source"] != expected:
             raise RuntimeError(f"Portable Hermes at {bundled} was built from a different source")
         return bundled / "bin/python3"
     source = source_checkout()

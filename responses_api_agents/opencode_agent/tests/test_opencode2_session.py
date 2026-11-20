@@ -246,7 +246,8 @@ def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
         ({"opencode_config": {"compaction": {"buffer": 32000}}}, "compaction.buffer must be below context_window"),
     ],
 )
-def test_settings_opencode_2_cannot_use_refuse_the_seed(opencode2, setting, message):
+def test_settings_opencode_2_cannot_use_refuse_the_seed(opencode2, setting, message, monkeypatch):
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.published_release_digests", lambda version: {})
     agent, sandbox = opencode2
     for key, value in setting.items():
         setattr(agent.config, key, value)

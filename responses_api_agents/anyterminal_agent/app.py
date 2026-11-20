@@ -14,6 +14,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import shlex
 import shutil
 import sys
@@ -35,6 +36,7 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.config.harness_version import portable_harness_pin
 from nemo_gym.core import (
     AGENT_TIMEOUT,
     PROVIDER_UNAVAILABLE,
@@ -304,7 +306,8 @@ class GymAgentHarnessProcessor(BaseModel):
     def setup(self) -> Path:
         """Install agent deps into a portable prefix (idempotent, hash-keyed)."""
         agent_dir = PARENT_DIR / "responses_api_agents" / self._agent_key
-        deps_dir = self._parent / "deps" / f"anyterminal_{self._agent_key}_deps"
+        suffix, install_env = portable_harness_pin(self._agent_key, self.config.agent_kwargs)
+        deps_dir = self._parent / "deps" / f"anyterminal_{self._agent_key}{suffix}_deps"
         sentinel = deps_dir / ".installed"
         script = agent_dir / "scripts" / f"{self._agent_key}_deps.sh"
         shared = self._parent / "setup_scripts" / "_portable_python.sh"
@@ -337,8 +340,14 @@ class GymAgentHarnessProcessor(BaseModel):
 
             deps_dir.mkdir(parents=True, exist_ok=True)
             proc = Popen(
-                f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}",
-                shell=True,
+                ["bash", str(script)],
+                env={
+                    **os.environ,
+                    "PORTABLE_PYTHON_SH": str(shared),
+                    "DEPS_DIR": str(deps_dir),
+                    "NEMO_GYM_ROOT": str(PARENT_DIR),
+                    **install_env,
+                },
             )
             assert proc.wait() == 0, f"Agent deps setup failed ({script})"
             sentinel.write_text(recipe)

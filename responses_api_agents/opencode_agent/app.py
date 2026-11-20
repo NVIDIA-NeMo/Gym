@@ -139,6 +139,7 @@ from responses_api_agents.opencode_agent.runtime import (
     apply_observability_patch,
     command_failure_reason,
     opencode_major,
+    published_release_digests,
 )
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, cli_environment, format_error_message
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode, ensure_opencode2
@@ -1177,15 +1178,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 self.config.opencode_version,
                 tested,
             )
+        release_digests = OPENCODE_RELEASE_SHA256.get(self.config.opencode_version, {})
         if self._opencode2:
             if self.config.sandbox_plugin_dependencies_path or self.config.sandbox_plugin_dependencies_sha256:
                 raise AgentSeedRejectedError(
                     "OpenCode 2 installs no plugin dependencies; unset sandbox_plugin_dependencies_path and _sha256"
                 )
-            if (
-                self.config.opencode_version not in OPENCODE_RELEASE_SHA256
-                and self.config.sandbox_executable_path is None
-            ):
+            if not release_digests and not self.config.sandbox_executable_path:
+                release_digests = await asyncio.to_thread(published_release_digests, self.config.opencode_version)
+            if not release_digests and self.config.sandbox_executable_path is None:
                 raise AgentSeedRejectedError(
                     f"OpenCode {self.config.opencode_version} has no pinned release digest; pin a binary with "
                     "sandbox_executable_path and sandbox_executable_sha256"
@@ -1345,14 +1346,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     ":".join(self.config.sandbox_path_prefix),
                     # OpenCode 2 downloads are checked against the release's pinned SHA-256 digests.
                     *(
-                        [
-                            " ".join(
-                                f"{arch}={digest}"
-                                for arch, digest in OPENCODE_RELEASE_SHA256.get(
-                                    self.config.opencode_version, {}
-                                ).items()
-                            )
-                        ]
+                        [" ".join(f"{arch}={digest}" for arch, digest in release_digests.items())]
                         if self._opencode2
                         else []
                     ),

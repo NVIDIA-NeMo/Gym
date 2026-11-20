@@ -22,7 +22,7 @@ openclaw_math_agent:
       concurrency: 8
       command: openclaw
       model: nvinf/nvidia/qwen/qwen3-5-397b-a17b
-      openclaw_version: 2026.11.5
+      openclaw_version: "2026.11.5"
       thinking: "off"
       setup_timeout: 900
       timeout: 900
