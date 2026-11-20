@@ -59,9 +59,9 @@ def stopped(monkeypatch) -> list[str]:
     return stopped
 
 
-def _lender(workdir: Path) -> LentSandboxes:
+def _lender(workdir: Path, **options: object) -> LentSandboxes:
     config = SandboxConfig(ttl_s=60, metadata={"team": "gym"})
-    return LentSandboxes("sandbox", config, image="unused-by-the-local-provider", workdir=str(workdir))
+    return LentSandboxes("sandbox", config, image="unused-by-the-local-provider", workdir=str(workdir), **options)
 
 
 async def test_lend_starts_one_sandbox_per_session_and_release_stops_it(workdir, started, stopped) -> None:
@@ -546,11 +546,36 @@ async def test_a_setup_that_fails_stops_the_sandbox_and_fails_the_lend(workdir, 
     assert len({id(sandbox) for sandbox in stopped}) == 1 and lender.get("session") is None
 
 
-async def test_a_lend_cancelled_while_its_sandbox_is_created_stops_it_once_the_create_returns(
+async def test_a_lend_cancelled_while_its_sandbox_starts_cuts_the_start_by_default(workdir, monkeypatch) -> None:
+    # Without start_timeout_s a cancel cuts the start as it cuts any await, and the lend stops the sandbox it began.
+    lender = _lender(workdir)
+    entered = anyio.Event()
+    stops: list[AsyncSandbox] = []
+
+    async def start(self: AsyncSandbox, *_: object, **__: object) -> None:
+        entered.set()
+        await anyio.sleep_forever()
+
+    async def stop(self: AsyncSandbox, **_: object) -> None:
+        stops.append(self)
+
+    monkeypatch.setattr(AsyncSandbox, "start", start)
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as group:
+            group.start_soon(lender.lend, "session", TASK)
+            await entered.wait()
+            group.cancel_scope.cancel()
+
+    assert len(stops) == 1 and lender.get("session") is None
+
+
+async def test_with_a_start_time_limit_a_lend_cancelled_while_its_sandbox_is_created_stops_it_once_it_returns(
     workdir, monkeypatch, caplog
 ) -> None:
-    # A create cut in flight would leave a sandbox whose id the provider never returned, so the create runs to its end.
-    lender = _lender(workdir)
+    # A create cut in flight would leave a sandbox whose id the provider never returned, so with start_timeout_s the
+    # create runs to its end.
+    lender = _lender(workdir, start_timeout_s=60)
     seed = anyio.CancelScope()
     created: list[object] = []
     closed: list[object] = []
