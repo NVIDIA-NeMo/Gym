@@ -2,4 +2,4 @@
 
 set -euo pipefail
 
-uv run /tests/grade.py 2>&1
+uv run /tests/grade.py
