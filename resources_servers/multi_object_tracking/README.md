@@ -10,8 +10,8 @@ be written in the row format below, for example box tracks derived from video se
 ## Request
 
 Each row carries its ground truth in `verifier_metadata`. The schema is `MultiObjectTrackingVerifierMetadata` in
-[`task_data.py`](task_data.py), which is both the verify request model and the `TaskData` that dataset tooling
-validates rows against:
+[`task_data.py`](task_data.py), the verify request model. `TaskData`, which dataset tooling validates rows against,
+is the same fields plus the row's optional top-level `task_id`:
 
 ```json
 {
@@ -25,7 +25,7 @@ validates rows against:
 }
 ```
 
-`id` is the number the prompt gives the object. Each target is the got10k server's `Got10kTarget`: `frame` is the
+`id` is the number the prompt gives the object; ids must be unique within a row. Each target is the got10k server's `Got10kTarget`: `frame` is the
 image number used in the prompt (1..N), `bbox` is in pixels as `[x, y, width, height]`, and the frame is scored for
 that object only when `visible` is above 0. `sequence` and `split` are bookkeeping and optional.
 
@@ -40,16 +40,21 @@ The expected answer is
 with `xyxy` coordinates on a 0-1000 grid and one entry per (object, frame) pair. Only the assistant message is read,
 not reasoning items.
 
-- The entries are read from the last `<answer>` block, or from the full text when there is none. The list may sit
-  under `tracks`, `boxes`, `bboxes`, `predictions` or `answers`, or be a bare list.
+- Each `<answer>` block is tried, the last one first so that a corrected answer wins over an earlier draft, then
+  the full text; the first that yields a box is used. The list may sit under `tracks`, `boxes`, `bboxes`,
+  `predictions` or `answers`, or be a bare list.
 - The object id is read from `box`, `id`, `object`, `object_id`, `track_id` or `track`, the first that holds an
   integer. The box is read from `bbox`, `bbox_2d`, `bounding_box` or `pred_bbox`, or from `box` when `box` holds a
   list.
 - An entry without an id is used only when the row has a single object. A single-object row answered in the got10k
   format (`{"boxes":[{"frame":1,"bbox":[...]}]}`) therefore gets the same reward here as in the got10k server.
-- An entry with `"visible": false` is not used as a box.
+- An entry with `"visible": false` is not used as a box. Only the JSON literal `false` does this; the string
+  `"false"` or `0` does not.
 - The first usable entry for an (object, frame) pair wins. Entries for other objects or frames are ignored.
 - An answer cut off mid-entry keeps its complete entries.
+- The got10k server's looser fallbacks (bare runs of numbers, `frame N: [...]`, one object repeating its keys) are
+  not read here, because they carry no object id. The single-object equivalence above holds for the
+  `{"boxes":[...]}` shape.
 
 ## Scoring
 
@@ -76,6 +81,7 @@ dataset imagery.
 
 ```bash
 gym env test --resources-server multi_object_tracking
+pytest resources_servers/multi_object_tracking/tests
 ```
 
 ## Licensing

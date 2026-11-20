@@ -25,6 +25,7 @@ frames where the target is not visible are not scored.
     not used as a box. Visibility claims earn nothing and cost nothing by
     themselves, as in GOT-10k; a hidden claim on a visible frame scores 0 for it.
   * The first usable entry for an (object, frame) pair wins.
+  * <answer> blocks are tried last one first, then the whole text; the first that yields a box is used.
   * A truncated answer is salvaged entry by entry.
 
 The per-task reward is the mean, over the objects that are visible in at least one
@@ -37,7 +38,7 @@ frame-weighted `visible_gt_AO` / `visible_gt_SR@*` as the single-object server.
 import json
 import re
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -85,7 +86,7 @@ SUMMED_FIELDS = (
 class MultiObjectTrackingObjectScore(BaseModel):
     id: int
     # Mean IoU over the object's visible frames; None when it is never visible (not scored).
-    reward: Optional[float] = None
+    reward: float | None = None
     target_frames: int
     parsed_frames: int
     visible_frames: int
@@ -122,7 +123,7 @@ class MultiObjectTrackingVerifyResponse(BaseVerifyResponse):
 # ---------------------------------------------------------------------------
 
 
-def _as_int(value: Any) -> Optional[int]:
+def _as_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -130,11 +131,15 @@ def _as_int(value: Any) -> Optional[int]:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     if isinstance(value, str) and re.fullmatch(r"\s*-?\d+\s*", value):
-        return int(value)
+        try:
+            return int(value)
+        except ValueError:
+            # A digit string beyond Python's int conversion limit is not an id or a frame.
+            return None
     return None
 
 
-def _read_entry(entry: Any) -> Optional[tuple[Optional[int], int, list[float]]]:
+def _read_entry(entry: Any) -> tuple[int | None, int, list[float]] | None:
     """(object id or None, frame, grid box) of one answer entry, or None when it holds no usable box."""
     if not isinstance(entry, dict) or entry.get("visible") is False:
         return None
@@ -162,12 +167,16 @@ def _entries_of(value: Any) -> list[Any]:
 
 
 def parse_tracks(text: str, object_ids: list[int]) -> tuple[dict[int, dict[int, list[float]]], str]:
-    """Boxes keyed by object id, then frame. An entry without an id belongs to the only object, if there is one."""
+    """Boxes keyed by object id, then frame. An entry without an id belongs to the only object, if there is one.
+
+    Each <answer>...</answer> payload is tried, last one first (a later block corrects an earlier draft), then the
+    whole text, stopping at the first that yields a box. A payload is read as one JSON value, then as the JSON
+    objects embedded in it, then entry by entry for an answer that was cut off.
+    """
     tracks: dict[int, dict[int, list[float]]] = {}
-    if not text.strip():
+    text = text.strip()
+    if not text:
         return tracks, "empty"
-    matches = ANSWER_PATTERN.findall(text)
-    payload = matches[-1] if matches else text
 
     def add(entries: list[Any]) -> None:
         for entry in entries:
@@ -181,16 +190,19 @@ def parse_tracks(text: str, object_ids: list[int]) -> tuple[dict[int, dict[int, 
                 object_id = object_ids[0]
             tracks.setdefault(object_id, {}).setdefault(frame, box)
 
-    add(_entries_of(_load_json_or_literal(payload)))
-    if tracks:
-        return tracks, "structured"
-    for value in _iter_json_objects(payload):
-        add(_entries_of(value))
-    if tracks:
-        return tracks, "structured"
-    # A cut-off or otherwise damaged answer: read every complete flat {...} entry on its own.
-    add([_load_json_or_literal(chunk) for chunk in FLAT_OBJECT_PATTERN.findall(payload)])
-    return tracks, ("salvaged" if tracks else "parse_failed")
+    for payload in [*reversed(ANSWER_PATTERN.findall(text)), text]:
+        add(_entries_of(_load_json_or_literal(payload)))
+        if tracks:
+            return tracks, "structured"
+        for value in _iter_json_objects(payload):
+            add(_entries_of(value))
+        if tracks:
+            return tracks, "structured"
+        # A cut-off or otherwise damaged answer: read every complete flat {...} entry on its own.
+        add([_load_json_or_literal(chunk) for chunk in FLAT_OBJECT_PATTERN.findall(payload)])
+        if tracks:
+            return tracks, "salvaged"
+    return tracks, "parse_failed"
 
 
 # ---------------------------------------------------------------------------

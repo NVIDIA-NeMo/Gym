@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Multi-object tracking task fields, carried inside verifier_metadata."""
+"""Multi-object tracking task fields.
 
-from typing import Optional
+`MultiObjectTrackingVerifierMetadata` is the model `app.py` validates `verifier_metadata` with; `TaskData` is the
+whole row: the same fields plus the row's top-level `task_id`.
+"""
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,8 +28,8 @@ class MultiObjectTrackingVerifierMetadata(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     # Bookkeeping; not read by the verifier.
-    sequence: Optional[str] = Field(default=None, json_schema_extra={"legacy_location": "verifier_metadata"})
-    split: Optional[str] = Field(default=None, json_schema_extra={"legacy_location": "verifier_metadata"})
+    sequence: str | None = Field(default=None, json_schema_extra={"legacy_location": "verifier_metadata"})
+    split: str | None = Field(default=None, json_schema_extra={"legacy_location": "verifier_metadata"})
     image_width: float = Field(gt=0, json_schema_extra={"legacy_location": "verifier_metadata"})
     image_height: float = Field(gt=0, json_schema_extra={"legacy_location": "verifier_metadata"})
     objects: list[MultiObjectTrackingObject] = Field(
@@ -35,4 +37,6 @@ class MultiObjectTrackingVerifierMetadata(BaseModel):
     )
 
 
-TaskData = MultiObjectTrackingVerifierMetadata
+class TaskData(MultiObjectTrackingVerifierMetadata):
+    # The row's own ID, beside `verifier_metadata`. The verifier does not read it.
+    task_id: str | None = None

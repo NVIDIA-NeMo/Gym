@@ -243,6 +243,35 @@ def test_an_answer_cut_off_mid_entry_keeps_the_complete_entries() -> None:
     assert result["reward"] == 0.5
 
 
+@pytest.mark.parametrize("key", ["frame", "box"])
+def test_a_digit_string_too_long_to_convert_drops_that_entry_only(key: str) -> None:
+    # Longer than Python's int-from-string limit (4300 digits by default).
+    oversized = {**_entry(1, 1, DISJOINT), key: "9" * 5000}
+    text = _answer(oversized, _entry(1, 1, A1), _entry(1, 2, A2), _entry(2, 1, B1))
+
+    assert score_objects(text, _metadata())["reward"] == 1.0
+
+
+def test_the_last_answer_block_wins_over_an_earlier_draft() -> None:
+    draft = _answer(_entry(1, 1, DISJOINT), _entry(1, 2, DISJOINT), _entry(2, 1, DISJOINT))
+
+    assert score_objects(f"{draft}\nCorrection:\n{EXACT}", _metadata())["reward"] == 1.0
+    assert score_objects(f"{EXACT}\nCorrection:\n{draft}", _metadata())["reward"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "last_block", ["<answer></answer>", "<answer>see above</answer>", '<answer>{"tracks":[]}</answer>']
+)
+def test_an_unusable_last_answer_block_falls_back_to_an_earlier_one(last_block: str) -> None:
+    assert score_objects(f"{EXACT}\n{last_block}", _metadata())["reward"] == 1.0
+
+
+def test_tracks_outside_answer_tags_are_read_when_the_answer_block_is_unusable() -> None:
+    tracks = json.dumps({"tracks": [_entry(1, 1, A1), _entry(1, 2, A2), _entry(2, 1, B1)]})
+
+    assert score_objects(f"{tracks}\n<answer>done</answer>", _metadata())["reward"] == 1.0
+
+
 def test_swapped_ids_are_scored_against_the_wrong_object() -> None:
     text = _answer(_entry(2, 1, A1), _entry(2, 2, A2), _entry(1, 1, B1))
 
@@ -287,6 +316,9 @@ def test_a_task_where_no_object_is_ever_visible_has_zero_reward_and_no_weight() 
         '<answer>{"boxes":[{"frame":1,"bbox":[100,100,300,300]},{"frame":2,"bbox":[400,500,700,900]}]}</answer>',
         '<answer>{"boxes":[{"frame":1,"bbox":[100,100,200,300]},{"frame":2,"bbox":[450,500,700,800]}]}</answer>',
         '<answer>{"boxes":[{"frame":2,"bbox":[400,500,700,900]}]}</answer>',
+        # A corrected answer after a draft, and an unusable last block after a usable one.
+        '<answer>{"boxes":[{"frame":1,"bbox":[0,0,10,10]}]}</answer> <answer>{"boxes":[{"frame":1,"bbox":[100,100,300,300]}]}</answer>',
+        '<answer>{"boxes":[{"frame":1,"bbox":[100,100,300,300]}]}</answer> <answer>n/a</answer>',
         "",
     ],
 )
@@ -366,15 +398,21 @@ def test_committed_example_rows_are_the_synthetic_ones_and_their_ground_truth_sc
     committed = [json.loads(line) for line in path.read_text().splitlines()]
 
     assert committed == example_rows()
+    assert len({row["task_id"] for row in committed}) == len(committed)
     for row in committed:
         metadata = TaskData.model_validate(row["verifier_metadata"])
         assert score_objects(ground_truth_answer(row), metadata)["reward"] == pytest.approx(1.0, abs=0.05)
         assert score_objects("", metadata)["reward"] == 0.0
 
 
-def test_the_request_model_and_the_task_data_schema_are_one_class() -> None:
-    assert TaskData is MultiObjectTrackingVerifierMetadata
-    assert MultiObjectTrackingVerifyRequest.model_fields["verifier_metadata"].annotation is TaskData
+def test_task_data_is_the_request_metadata_plus_the_row_task_id() -> None:
+    assert issubclass(TaskData, MultiObjectTrackingVerifierMetadata)
+    assert set(TaskData.model_fields) - set(MultiObjectTrackingVerifierMetadata.model_fields) == {"task_id"}
+    metadata_model = MultiObjectTrackingVerifyRequest.model_fields["verifier_metadata"].annotation
+    assert metadata_model is MultiObjectTrackingVerifierMetadata
+
+    assert TaskData.model_validate(METADATA).task_id is None
+    assert TaskData.model_validate({**METADATA, "task_id": "clip_1"}).task_id == "clip_1"
 
 
 def test_task_data_defaults_and_required_fields() -> None:

@@ -101,6 +101,7 @@ def build_row(name: str, objects: list[dict], num_frames: int) -> dict:
         }
     )
     return {
+        "task_id": name,
         "responses_create_params": {"input": [{"role": "user", "content": content}]},
         "verifier_metadata": {
             "sequence": name,
