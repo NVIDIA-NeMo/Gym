@@ -794,7 +794,7 @@ class TestAgentSessions:
         image pins."""
         agent = get_first_server_config_dict(_resolve("pi.yaml"), "hle_diamond_pi_agent")
         pinned = json.loads(PI_SCIENCE_PACKAGE.read_text(encoding="utf-8"))["dependencies"]
-        assert agent["pi_version"] == pinned["@earendil-works/pi-coding-agent"]
+        assert agent["harness_version"] == pinned["@earendil-works/pi-coding-agent"]
 
 
 LEGACY_PRESETS = [

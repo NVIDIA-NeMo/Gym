@@ -18,7 +18,7 @@ job_bench_pi_agent:
         workspace_root: /tmp/pi-agent
         thinking: high
         timeout: 7200
-        pi_version: 1.5.2
+        harness_version: "1.5.2"
         context_window: 262144
         max_output_tokens: 65536
         models_config: {}

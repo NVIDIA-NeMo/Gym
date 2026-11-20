@@ -144,7 +144,7 @@ HARNESSES = {
     ),
     "pi": HarnessDefinition(
         agent="PiAgent",
-        npm_version_key="pi_version",
+        npm_version_key="harness_version",
         base_settings=lambda directory, timeout: {
             "harness_overrides": {"timeout": timeout},
             "legacy": {"harness_overrides": {"workspace_root": str(directory / "workspace")}},

@@ -76,58 +76,87 @@ def test_unsupported_selector_fails_before_launch():
 
 
 @pytest.mark.parametrize(
-    "preset",
+    ("preset", "pin"),
     [
-        "benchmarks/gdpval/openclaw.yaml",
-        "environments/openclaw_math/config.yaml",
-        "environments/openclaw_reasoning_gym/config.yaml",
-        "responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml",
-        "benchmarks/deepsearchqa/configs/deepsearchqa_openclaw.yaml",
-        "benchmarks/widesearch/configs/widesearch_openclaw.yaml",
-        "benchmarks/swe_atlas_qa/openclaw.yaml",
-        "responses_api_agents/anyswe_agent/configs/anyswe_openclaw.yaml",
-        "responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml",
+        ("benchmarks/deepsearchqa/configs/deepsearchqa_openclaw.yaml", "2026.11.5"),
+        ("benchmarks/deepsearchqa/configs/deepsearchqa_pi.yaml", "0.80.2"),
+        ("benchmarks/gdpval/openclaw.yaml", "2026.11.5"),
+        ("benchmarks/gdpval/pi.yaml", "1.5.2"),
+        ("benchmarks/job_bench/pi.yaml", "1.5.2"),
+        ("benchmarks/swe_atlas_qa/openclaw.yaml", "2026.11.5"),
+        ("benchmarks/widesearch/configs/widesearch_openclaw.yaml", "2026.11.5"),
+        ("benchmarks/widesearch/configs/widesearch_pi.yaml", "0.80.2"),
+        ("benchmarks/workspace_bench/pi.yaml", "1.5.2"),
+        ("environments/openclaw_math/config.yaml", "2026.11.5"),
+        ("environments/openclaw_reasoning_gym/config.yaml", "2026.11.5"),
+        ("environments/pi_math/config.yaml", "1.5.2"),
+        ("environments/pi_reasoning_gym/config.yaml", "1.5.2"),
+        ("responses_api_agents/anyswe_agent/configs/anyswe_openclaw.yaml", "2026.11.5"),
+        ("responses_api_agents/anyswe_agent/configs/anyswe_pi.yaml", "1.5.2"),
+        ("responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml", "2026.11.5"),
+        ("responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml", "2026.11.5"),
+        ("responses_api_agents/pi_agent/configs/pi_agent.yaml", "1.5.2"),
+        ("responses_api_agents/pi_agent/configs/profiles/offline_science.yaml", "1.5.2"),
+        ("responses_api_agents/pi_sandboxed_agent/configs/benchmark.yaml", "1.5.2"),
     ],
 )
-def test_openclaw_preset_pin_reaches_the_installer(preset, monkeypatch):
+def test_preset_pin_reaches_the_installer(preset, pin, monkeypatch):
     root = Path(__file__).resolve().parents[4]
     config = OmegaConf.load(root / preset)
     (instance,) = GlobalConfigDictParser()._agent_instances(config)
     server = instance.server_config
-    pins = server if instance.agent_type == "openclaw_agent" else server.agent_kwargs
-    assert pins.harness_version == "2026.11.5"
-    assert "openclaw_version" not in pins
+    pins = server.get("agent_kwargs", server)
+    key = "openclaw_version" if "openclaw" in preset else "pi_version"
+    package = "openclaw" if key == "openclaw_version" else "@earendil-works%2fpi-coding-agent"
+    assert pins.harness_version == pin
+    assert key not in pins
 
     lookup = Mock(return_value="2026.12.1")
     monkeypatch.setattr(versions, "_lookup", lookup)
     versions.resolve_harness_version(instance.agent_type, server)
-    assert pins.openclaw_version == "2026.11.5"
+    assert pins[key] == pin
     lookup.assert_not_called()
     pins.harness_version = "latest"
     versions.resolve_harness_version(instance.agent_type, server)
     versions.resolve_harness_version(instance.agent_type, server)
-    assert pins.openclaw_version == "2026.12.1"
-    lookup.assert_called_once_with("https://registry.npmjs.org/openclaw/latest", "version")
-    if instance.agent_type != "openclaw_agent":
+    assert pins[key] == "2026.12.1"
+    lookup.assert_called_once_with(f"https://registry.npmjs.org/{package}/latest", "version")
+    if pins is not server:
         assert "harness_version" not in pins  # kwargs sent to older in-sandbox Gym releases
 
 
 @pytest.mark.parametrize(
-    ("preset", "pin_path"),
+    ("preset", "pin_path", "legacy_key", "old_pin"),
     [
         (
             "responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml",
             "openclaw_agent.responses_api_agents.openclaw_agent",
+            "openclaw_version",
+            "2026.6.11",
         ),
         (
             "responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml",
             "anyterminal_openclaw.responses_api_agents.anyterminal_agent.agent_kwargs",
+            "openclaw_version",
+            "2026.6.11",
+        ),
+        (
+            "responses_api_agents/pi_agent/configs/pi_agent.yaml",
+            "pi_agent.responses_api_agents.pi_agent",
+            "pi_version",
+            "0.80.2",
+        ),
+        (
+            "benchmarks/widesearch/configs/widesearch_pi.yaml",
+            "widesearch_pi_benchmark.responses_api_agents.harness_exa_search.agent_kwargs",
+            "pi_version",
+            "0.85.1",
         ),
     ],
 )
-def test_legacy_override_on_a_migrated_preset(preset, pin_path):
+def test_legacy_override_on_a_migrated_preset(preset, pin_path, legacy_key, old_pin):
     overrides = OmegaConf.create({"config_paths": [preset]})
-    OmegaConf.update(overrides, f"{pin_path}.openclaw_version", "2026.6.11")
+    OmegaConf.update(overrides, f"{pin_path}.{legacy_key}", old_pin)
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.merge(
@@ -139,5 +168,16 @@ def test_legacy_override_on_a_migrated_preset(preset, pin_path):
         )
     )
     pins = OmegaConf.select(config, pin_path)
-    assert pins.openclaw_version == "2026.6.11"
+    assert pins[legacy_key] == old_pin
     assert "harness_version" not in pins
+
+
+@pytest.mark.parametrize(
+    ("base_key", "override_key"), [("pi_version", "harness_version"), ("harness_version", "pi_version")]
+)
+def test_pin_override_on_a_composed_instance(base_key, override_key):
+    base = OmegaConf.create({base_key: "1.5.2"})
+    overrides = OmegaConf.create({"task_pi": {"responses_api_agents": {"pi_agent": {override_key: "0.80.2"}}}})
+    GlobalConfigDictParser._apply_held_agent_override(overrides, "task_pi", "pi_agent", base)
+    versions.resolve_harness_version("pi_agent", base)
+    assert base.pi_version == "0.80.2"

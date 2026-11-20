@@ -2122,7 +2122,7 @@ async def test_receipt_read_failure_does_not_signal_reused_pid(local_session):
 def _pinned_pi_package() -> tuple[str, Path]:
     """Node and the installed Pi package, when it is the version the shipped config pins (as CI installs)."""
     config = OmegaConf.load(Path(__file__).parents[1] / "configs/pi_agent.yaml")
-    pinned = config.pi_agent.responses_api_agents.pi_agent.pi_version
+    pinned = config.pi_agent.responses_api_agents.pi_agent.harness_version
     node, pi = shutil.which("node"), shutil.which("pi")
     if not node or not pi:
         pytest.skip("Installed Pi and Node are required for the real Pi contract")

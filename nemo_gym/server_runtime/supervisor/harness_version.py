@@ -9,7 +9,7 @@ import re
 import requests
 from omegaconf import DictConfig, open_dict
 
-from nemo_gym.config.global_config import wrapped_openclaw_kwargs
+from nemo_gym.config.harness_version import harness_version_target
 
 
 LOG = logging.getLogger(__name__)
@@ -45,12 +45,17 @@ def resolve_harness_version(agent: str, config: DictConfig) -> str | None:
     """Set the installer's concrete version. Return the source to pass to the Hermes worker, if selected."""
     # Wrappers may run an older Gym inside the task container. Give it the concrete
     # installer field it understands, even when the outer config requests latest.
-    kwargs = wrapped_openclaw_kwargs(agent, config)
-    if kwargs is not None:
-        resolve_harness_version("openclaw_agent", kwargs)
-        with open_dict(kwargs):
-            kwargs.pop("harness_version", None)
+    target, pins = harness_version_target(agent, config)
+    if pins is not config and config.get("harness_version") is not None:
+        raise ValueError(f"{agent}: set harness_version under agent_kwargs for {target}")
+    requirement = _resolve_version(target, pins)
+    if pins is not config:
+        with open_dict(pins):
+            pins.pop("harness_version", None)
+    return requirement
 
+
+def _resolve_version(agent: str, config: DictConfig) -> str | None:
     field = _RELEASES[agent][0] if agent in _RELEASES else None
     if agent == "hermes_agent":
         field = "hermes_version"

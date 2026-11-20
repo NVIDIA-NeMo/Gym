@@ -14,7 +14,7 @@ anyswe_pi:
         workspace_root: /tmp/pi-agent
         thinking: high
         timeout: 3600
-        pi_version: 1.5.2
+        harness_version: "1.5.2"
         system_prompt: Fix the bug in the repository at /testbed. Inspect and edit the source, run relevant checks, and leave the final fix applied.
         models_config: {}
 
