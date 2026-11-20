@@ -1,0 +1,45 @@
+# Bubblewrap (bwrap) sandbox provider config.
+#
+# `sandbox` is the instance name an agent or resources server references
+# (`sandbox_provider: sandbox`, `agent_sandbox_provider: sandbox`); the child key
+# `bwrap` selects the provider class and its value is passed to the constructor.
+#
+# A sandbox is a directory <base_dir>/<id>/{workspace,tmp,home}; each exec is a
+# fresh `bwrap` over the Gym process's own filesystem (bind-mounted read-only).
+# Sandboxes are connectable on the same host and uid, so a resources server can
+# create one and an agent server in the same container can borrow it. See
+# nemo_gym/sandbox/providers/bwrap/README.md.
+sandbox:
+  default_metadata:
+    sandbox-api: bwrap
+  bwrap:
+    # Required: absolute path to a pinned bwrap binary (no PATH lookup).
+    bwrap_path: ${oc.env:NEMO_GYM_BWRAP_PATH}
+    # Node-local storage for sandbox directories (default: <tmp>/nemo-gym-bwrap-<uid>).
+    base_dir: ${oc.env:NEMO_GYM_BWRAP_BASE,null}
+    workdir: /workspace
+    home_path: /home/sandbox
+    # none: private network namespace (loopback only). host: the Gym process's network,
+    # needed when sandboxed code must reach Gym servers (e.g. Codex -> model server).
+    network: none
+    shell: /bin/bash
+    # Read-only system binds. A string is required; {path, optional: true} is skipped if
+    # absent. Globs are expanded. The defaults are the set measured on a Slurm + pyxis GB300 cluster:
+    # ro_binds: [/usr, /bin, /lib, {path: /sbin, optional: true}, {path: /lib64, optional: true},
+    #            {path: /opt, optional: true}, {path: /venv, optional: true},
+    #            {path: /etc/ld.so.cache, optional: true}, {path: /etc/ld.so.conf, optional: true},
+    #            {path: /etc/ld.so.conf.d, optional: true}, {path: /etc/alternatives, optional: true}]
+    # network_host_ro_binds: [/etc/resolv.conf, /etc/hosts, /etc/nsswitch.conf, /etc/ssl,
+    #                         /etc/ca-certificates, /etc/passwd, /etc/group, {path: /etc/pki, optional: true}]
+    # Extra binds for every sandbox. Targets must not sit inside a read-only bind
+    # (bwrap cannot create mount points there): use top-level paths.
+    mounts: []
+    #   - {src: /path/to/codex-runtime/node, dst: /codex-runtime/node, ro: true}
+    # Fixed environment values, plus names copied from the Gym process environment.
+    env: {}
+    env_passthrough: [PATH, LANG, LD_LIBRARY_PATH, CUDA_HOME]
+    hide_gpus: true
+    remount_root_ro: true
+    exec_concurrency: 256
+    default_timeout_s: 180
+    probe_on_create: true

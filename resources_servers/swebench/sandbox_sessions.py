@@ -123,7 +123,8 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         """Start and prepare the task sandbox for ``session_id`` and return the agent's working directory.
 
         Register the sandbox in ``_session_id_to_sandbox`` as soon as it exists, so a failed preparation can
-        still stop it.
+        still stop it. A ``CheckpointedSandboxSessionResourcesServer`` creates it with ``new_task_sandbox`` instead,
+        which registers it there and for checkpoints.
         """
 
     def _forget_task_sandbox_state(self, session_id: str) -> None:
@@ -329,6 +330,14 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
             except TimeoutError:
                 # A claim that was never released must not keep close, expiry and shutdown from stopping it.
                 LOG.warning("Session %s claimed its task sandbox and never released it; stopping it here", session_id)
+        await self._stop_unclaimed_task_sandbox(session_id)
+
+    async def _stop_unclaimed_task_sandbox(self, session_id: str) -> None:
+        """Stop the task sandbox once no verify holds a claim on it; ``_stop_task_sandbox`` waits for that first.
+
+        A subclass that serialises stops with other work takes its lock here, not around ``_stop_task_sandbox``:
+        ``_release_task_sandbox``, which ends the claim and so the wait, would need the same lock.
+        """
         sandbox = self._session_id_to_sandbox.get(session_id)
         if sandbox is not None:
             # Forget the sandbox only once it stopped, so a failed stop can be retried.

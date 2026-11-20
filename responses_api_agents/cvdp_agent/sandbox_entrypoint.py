@@ -35,6 +35,10 @@ agent_home.mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:
+    # CVDP exposes these project directories even for generation tasks with no
+    # starting RTL. Creating them does not add any reference solution content.
+    for directory in ("rtl", "verif", "docs", "rundir"):
+        Path(directory).mkdir(exist_ok=True)
     model_url = os.environ.get("NV_MODEL_URL", "")
     model_name = os.environ["NV_MODEL_NAME"]
     traj_dir = os.environ.get("NV_TRAJ_DIR", "/trajectories_mount")

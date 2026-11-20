@@ -1,5 +1,7 @@
 # CVDP Agent
 
+For heavy repository tasks, follow the [CVDP heavy preparation and run procedure](https://docs.nvidia.com/nemo/gym/main/build-verifiers/verification-patterns/execution-and-state-match#cvdp-heavy-repository-tasks).
+
 Agents for the **CVDP** (Comprehensive Verilog Design Problems) benchmark — hardware
 (RTL/SystemVerilog) design and code-comprehension tasks. All flavors here share the same
 CVDP resources server, which owns task data, verification, and reward computation. See
