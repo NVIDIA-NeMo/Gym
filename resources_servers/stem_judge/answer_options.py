@@ -4,9 +4,10 @@
 
 import json
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+import yaml
+from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
 
 from nemo_gym.core import NeMoGymResponse
 
@@ -14,6 +15,7 @@ from nemo_gym.core import NeMoGymResponse
 VerdictMode = Literal["binary", "yes_no_unresolved"]
 VerdictFormat = Literal["line", "json"]
 GuidelineScope = Literal["stem", "cross_domain"]
+type AnswerRuleList = list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]]
 
 _CROSS_DOMAIN = """The question may come from any subject. The named subjects and examples illustrate ways to
 evaluate equivalence. Apply only rules relevant to what this question asks. Preserve distinctions
@@ -62,8 +64,16 @@ def answer_template(
     return "\n\n".join((context.strip(), sep, guidelines.strip(), instructions.strip(), fields + inputs))
 
 
-def add_answer_rules(template: str, rules: list[str]) -> str:
-    """Append literal rule text to the configured answer template's last rule block."""
+def add_answer_rules(template: str, rules: AnswerRuleList | str) -> str:
+    """Append rules from an inline list or a YAML file to the answer template."""
+    if isinstance(rules, str):
+        with open(rules, encoding="utf-8") as stream:
+            try:
+                rules = TypeAdapter(AnswerRuleList).validate_python(yaml.safe_load(stream))
+            except (yaml.YAMLError, ValidationError) as exc:
+                raise ValueError(
+                    f"Invalid extra_answer_rules file {stream.name}: expected a YAML list of nonblank strings"
+                ) from exc
     if not rules:
         return template
     before, closing_tag, after = template.rpartition("</rule>")

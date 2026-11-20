@@ -1052,6 +1052,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "math-verify" },
     { name = "nemo-gym", extra = ["dev"] },
+    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
@@ -1064,6 +1065,7 @@ requires-dist = [
     { name = "math-verify", specifier = "==0.8.0" },
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
+    { name = "pyyaml" },
 ]
 provides-extras = ["telemetry"]
 

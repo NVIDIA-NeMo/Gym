@@ -65,9 +65,9 @@ import socket
 import threading
 import time
 from contextlib import nullcontext
-from typing import Annotated, ClassVar, Literal, Optional
+from typing import ClassVar, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -88,6 +88,7 @@ from nemo_gym.server_runtime import (
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 from resources_servers.stem_judge.answer_options import (
+    AnswerRuleList,
     GuidelineScope,
     JsonJudgment,
     VerdictFormat,
@@ -163,9 +164,7 @@ class StemJudgeConfig(BaseResourcesServerConfig):
         return regex
 
     guideline_scope: GuidelineScope = "stem"
-    extra_answer_rules: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]] = Field(
-        default_factory=list
-    )
+    extra_answer_rules: AnswerRuleList | str = Field(default_factory=list)
     verdict_mode: VerdictMode = "binary"
     verdict_format: VerdictFormat = "line"
     box_parser: Literal["exact", "last_command"] = "exact"

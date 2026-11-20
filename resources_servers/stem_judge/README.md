@@ -165,7 +165,7 @@ configuration. It includes the base config and overrides its answer options.
 | Answer option | Base config | Question-bank preset |
 | --- | --- | --- |
 | `guideline_scope` | `stem` | `cross_domain` treats v11 examples as guidance for reference comparisons in any subject. |
-| `extra_answer_rules` | `[]` | Optional list of rules for model-judged answer rows, in the order listed. |
+| `extra_answer_rules` | `[]` | An inline list or a path to a YAML list of rules for model-judged answer rows. |
 | `verdict_mode` | `binary` | `yes_no_unresolved` adds abstention. An explicit no is a measured zero. An abstention or unparseable verdict has unknown correctness and sets `mask_sample=true`. |
 | `verdict_format` | `line` | `line` reads the text verdict. Set `json` to request and save a structured explanation on model-judged answer rows. |
 | `box_parser` | `exact` | `last_command` recognizes whitespace before the opening brace, skips escaped commands, and rejects a malformed final box even when an earlier one is valid. |
@@ -221,17 +221,25 @@ rollouts. Gym's renderer rejects already materialized input.
 
 ### Adding rules to the answer judge
 
-Set `extra_answer_rules` on a STEM resources server instance. This example adds a
-dataset-specific alias for a run grading archive records.
+Point `extra_answer_rules` at a UTF-8 YAML file containing a list of rule strings.
+The judge reads it once at startup. As with prompt templates, relative paths
+resolve from the STEM resources server directory. Absolute paths also work.
+The shipped [archive example](prompt_templates/archive_rules.yaml) contains one rule.
 
 ```yaml
 stem_judge:
   resources_servers:
     stem_judge:
-      extra_answer_rules:
-        - 'For archive classes, accept K-17 as an alias for Blue Ledger.'
+      extra_answer_rules: prompt_templates/archive_rules.yaml
 ```
 
+Contents of `archive_rules.yaml`:
+
+```yaml
+- 'For archive classes, accept K-17 as an alias for Blue Ledger.'
+```
+
+You can also put the list directly under `extra_answer_rules` in the server config.
 Each string becomes a `<rule>` block immediately after the last built-in rule,
 before the verdict instructions. Braces in LaTeX, JSON and examples are literal.
 Custom answer templates using this option need a closing `</rule>` marker.

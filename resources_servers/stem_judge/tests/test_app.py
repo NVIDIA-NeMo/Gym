@@ -176,6 +176,34 @@ class TestAnswerOptions:
         with raises(ValueError, match="</rule>"):
             _server(config)
 
+    async def test_rule_file_renders_the_same_prompt_as_inline_rules(self, config, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        path = tmp_path / "rules.yaml"
+        path.write_text(
+            "- 'Compare {α} literally.'\n- |-\n  Check the unit.\n  Preserve its sign.\n", encoding="utf-8"
+        )
+        inline = ["Compare {α} literally.", "Check the unit.\nPreserve its sign."]
+        from_file = _server(
+            StemJudgeConfig.model_validate(config.model_dump() | {"extra_answer_rules": path.name}), "Judgement: yes"
+        )
+        path.unlink()  # A running worker has already loaded its rules.
+        from_list = _server(
+            StemJudgeConfig.model_validate(config.model_dump() | {"extra_answer_rules": inline}), "Judgement: yes"
+        )
+        req = _request(_split(r"\boxed{2}"))
+        await from_file.verify(req)
+        await from_list.verify(req)
+        assert _judge_prompt(from_file) == _judge_prompt(from_list)
+        assert all(rule in _judge_prompt(from_file) for rule in inline)
+
+    @mark.parametrize("contents", ["rules: [some rule]", "- '  '", "- 42", "- [broken", ""])
+    def test_invalid_rule_file_fails_at_startup(self, config, tmp_path, contents):
+        path = tmp_path / "rules.yaml"
+        config.extra_answer_rules = str(path)
+        path.write_text(contents, encoding="utf-8")
+        with raises(ValueError, match=r"extra_answer_rules file .*rules\.yaml"):
+            _server(config)
+
     async def test_extra_answer_rules_leave_rubric_prompt_intact(self, config):
         body = _request(_split("Proof."), answer_format="free", rubric=RUBRIC)
         reply = '{"r1":true,"r2":true,"r3":false}'
