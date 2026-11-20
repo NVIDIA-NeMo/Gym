@@ -94,8 +94,10 @@ from resources_servers.stem_judge.answer_options import (
     VerdictFormat,
     VerdictMode,
     add_answer_rules,
+    assistant_text,
     answer_template,
     final_verdict,
+    load_answer_rules,
     parse_json_judgment,
 )
 from resources_servers.stem_judge.task_data import RubricCriterion, TaskData, reference_of
@@ -168,6 +170,7 @@ class StemJudgeConfig(BaseResourcesServerConfig):
 
     guideline_scope: GuidelineScope = "stem"
     extra_answer_rules: AnswerRuleList | str = Field(default_factory=list)
+    extra_answer_rules_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     verdict_mode: VerdictMode = "binary"
     verdict_format: VerdictFormat = "line"
     box_parser: Literal["exact", "last_command"] = "exact"
@@ -251,34 +254,6 @@ FAILURE_FIELDS = (
 )
 
 
-def _assistant_text(response: NeMoGymResponse) -> str:
-    """Text of the last assistant message; content blocks are joined with newlines."""
-    for item in reversed(response.output):
-        if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
-            content = getattr(item, "content", None)
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                return "\n".join(t for t in (getattr(c, "text", None) for c in content) if isinstance(t, str))
-            return ""
-    return ""
-
-
-def judge_text(response: NeMoGymResponse) -> Optional[str]:
-    """Text of the judge's closing message; None when the reply does not end in a message with text.
-
-    A reply cut off while the judge was still reasoning ends in a reasoning item instead.
-    """
-    last = response.output[-1] if response.output else None
-    content = getattr(last, "content", None) if getattr(last, "type", None) == "message" else None
-    if isinstance(content, str):
-        return content
-    if not content:
-        return None
-    text = getattr(content[-1], "text", None)
-    return text if isinstance(text, str) else None
-
-
 def _is_length_truncated(response: NeMoGymResponse) -> bool:
     """True if the policy hit its length cap.
 
@@ -297,7 +272,7 @@ def final_answer(response: NeMoGymResponse) -> tuple[Optional[str], str]:
     """
     if _is_length_truncated(response):
         return None, "truncated"
-    text = _assistant_text(response).strip()
+    text = (assistant_text(response) or "").strip()
     if not text:
         return None, "empty_final_answer"
     return text, "ok"
@@ -487,7 +462,8 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
                 verdict_mode=self.config.verdict_mode,
                 verdict_format=self.config.verdict_format,
             )
-        self._answer_template = add_answer_rules(template, self.config.extra_answer_rules)
+        rules = load_answer_rules(self.config.extra_answer_rules, self.config.extra_answer_rules_sha256)
+        self._answer_template = add_answer_rules(template, rules)
         with open(self.config.rubric_prompt_template_fpath, encoding="utf-8") as f:
             self._rubric_template = f.read().strip()
         # A custom template with an unknown placeholder or a stray brace fails here, not on every judged row.
@@ -495,7 +471,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         self._rubric_template.format(question="", expected_answer="", rubric="", generated_answer="")
 
         self._math_library = None
-        if (math_config := self.config.math_verify) is not None:
+        if (math_config := self.config.math_verify) is not None and not rules:
             from resources_servers.stem_judge.boxed_math import BoxedMathVerifier
 
             self._math_library = BoxedMathVerifier(math_config, self.config.name)
@@ -565,7 +541,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         json_answer = self.config.verdict_format == "json"
         evaluation, text = await self._call_judge(prompt, json_answer=json_answer)
         if json_answer:
-            evaluation.judgment = parse_json_judgment(evaluation.response, verdict_mode=self.config.verdict_mode)
+            evaluation.judgment = parse_json_judgment(text, verdict_mode=self.config.verdict_mode)
             verdict = evaluation.judgment.label if evaluation.judgment else None
         else:
             parser = final_verdict if self.config.verdict_mode == "yes_no_unresolved" else parse_verdict
@@ -633,7 +609,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         if judge_response.status == "incomplete":
             # A cut-off reply has no final judgement; a verdict-like line in it could be quoted text.
             return evaluation, None
-        return evaluation, judge_text(judge_response)
+        return evaluation, assistant_text(judge_response, judge_reply=True)
 
     async def _finish(
         self,
@@ -698,7 +674,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         evaluations: list[JudgeEvaluation],
     ) -> str:
         """One JSONL record for the generation log."""
-        judge_texts = [judge_text(e.response) or "" for e in evaluations]
+        judge_texts = [assistant_text(e.response, judge_reply=True) or "" for e in evaluations]
         record = {
             "ts": time.time(),
             "step": _extract_step(body),
@@ -707,7 +683,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             "expected_answer": expected,
             "answer_format": answer_format,
             "rubric": [c.model_dump() for c in body.rubric] if body.rubric else None,
-            "generation": _assistant_text(body.response),
+            "generation": assistant_text(body.response, allow_partial=True) or "",
             "judged_generation": judged,
             "grading_status": status,
             "reward": reward,

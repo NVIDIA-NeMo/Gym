@@ -21,6 +21,8 @@ stem_judge:
       question_extract_regex: null
       extract_problem_from_prompt: false
 
+      # Optional answer settings default to guideline_scope: stem, extra_answer_rules: [],
+      # verdict_mode: binary, verdict_format: line, box_parser: exact, and math_verify: null.
       # --- Answer contract (a row's answer_format wins) ---
       # The final answer is the assistant message: the policy's model server
       # must run with a reasoning parser.

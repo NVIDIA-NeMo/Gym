@@ -1053,6 +1053,7 @@ dependencies = [
     { name = "math-verify" },
     { name = "nemo-gym", extra = ["dev"] },
     { name = "pyyaml" },
+    { name = "sympy" },
 ]
 
 [package.optional-dependencies]
@@ -1066,6 +1067,7 @@ requires-dist = [
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
     { name = "pyyaml" },
+    { name = "sympy" },
 ]
 provides-extras = ["telemetry"]
 

@@ -17,6 +17,7 @@ import importlib.metadata
 import sys
 from argparse import ArgumentParser
 from contextlib import nullcontext as does_not_raise
+from hashlib import sha256
 from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, PropertyMock
@@ -137,6 +138,36 @@ class TestGlobalConfig:
 
         global_config_dict = get_global_config_dict()
         assert self._default_global_config_dict_values == global_config_dict
+
+    def test_stem_rule_file_is_pinned_in_the_resolved_instance(self, tmp_path, monkeypatch):
+        root = tmp_path / "resources_servers" / "stem_judge"
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").touch()
+        rules = root / "rules.yaml"
+        rules.write_text("- Require metres.")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
+        settings = {"entrypoint": "app.py", "domain": "other", "extra_answer_rules": "rules.yaml"}
+
+        def resolve():
+            cfg = GlobalConfigDictParser().parse(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=DictConfig(
+                        {"my_judge": {"resources_servers": {"stem_judge": settings}}}
+                    ),
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
+            )
+            return cfg.my_judge.resources_servers.stem_judge
+
+        digest = resolve().extra_answer_rules_sha256
+        assert digest == sha256(rules.read_bytes()).hexdigest()
+        rules.write_text("- Require seconds.")
+        assert resolve().extra_answer_rules_sha256 != digest
+        settings["extra_answer_rules_sha256"] = digest
+        with raises(ConfigError, match="differs from its saved SHA-256"):
+            resolve()
 
     def test_offline_resolution_uses_invalid_port_without_probing(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)

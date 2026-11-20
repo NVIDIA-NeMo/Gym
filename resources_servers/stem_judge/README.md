@@ -190,8 +190,9 @@ Math-Verify normally compares the reference to the candidate once. Set
 For reference `1`, the library accepts `9=1` in only one direction, so STEM
 sends that box to the judge. It accepts `x=1` in both directions. Only a
 forward match between different strings incurs a second comparison. Both
-comparisons share one worker and timeout. The library accepts an open interval
-and its endpoint set in both directions, so that case still earns automatic credit.
+comparisons share one worker and timeout. For mathematical sets, STEM also asks
+SymPy to prove that their symmetric difference is empty. An open interval and its endpoint set go to the model judge. Equivalent
+intervals and reordered finite sets can still earn automatic credit.
 
 For example, add this override to the question-bank launch command to configure one
 STEM instance for algebra:
@@ -243,7 +244,9 @@ rollouts. Gym's renderer rejects already materialized input.
 ### Adding rules to the answer judge
 
 Point `extra_answer_rules` at a UTF-8 YAML file containing a list of rule strings.
-The judge reads it once at startup. As with prompt templates, relative paths
+Gym records the file’s SHA-256 in the resolved run configuration. Each worker checks
+the bytes it reads at startup against that digest. Editing the file changes the
+identity used for the next launch or resume. As with prompt templates, relative paths
 resolve from the STEM resources server directory. Absolute paths also work.
 The shipped [archive example](prompt_templates/archive_rules.yaml) contains one rule.
 
@@ -264,9 +267,9 @@ You can also put the list directly under `extra_answer_rules` in the server conf
 Each string becomes a `<rule>` block immediately after the last built-in rule,
 before the verdict instructions. Braces in LaTeX, JSON and examples are literal.
 Custom answer templates using this option need a closing `</rule>` marker.
-Rules apply to every model-judged answer on that instance. Rubric rows use their
-own criteria. When a rule must be checked even for a symbolically equivalent
-answer, use an environment with `math_verify: null` so the model sees it.
+Additional rules take precedence over the default exact-match shortcut. A STEM
+instance with extra rules sends answer comparisons to the model, including exact
+math matches. Rubric rows use their own criteria.
 
 ## Test
 

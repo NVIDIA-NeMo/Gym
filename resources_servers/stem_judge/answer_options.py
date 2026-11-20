@@ -4,10 +4,11 @@
 
 import json
 import re
+from hashlib import sha256
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
+from pydantic import BaseModel, StringConstraints, TypeAdapter
 
 from nemo_gym.core import NeMoGymResponse
 
@@ -64,22 +65,30 @@ def answer_template(
     return "\n\n".join((context.strip(), sep, guidelines.strip(), instructions.strip(), fields + inputs))
 
 
-def add_answer_rules(template: str, rules: AnswerRuleList | str) -> str:
-    """Append rules from an inline list or a YAML file to the answer template."""
-    if isinstance(rules, str):
-        with open(rules, encoding="utf-8") as stream:
-            try:
-                rules = TypeAdapter(AnswerRuleList).validate_python(yaml.safe_load(stream))
-            except (yaml.YAMLError, ValidationError) as exc:
-                raise ValueError(
-                    f"Invalid extra_answer_rules file {stream.name}: expected a YAML list of nonblank strings"
-                ) from exc
+def load_answer_rules(rules: AnswerRuleList | str, digest: str | None) -> AnswerRuleList:
+    if isinstance(rules, list):
+        if digest is not None:
+            raise ValueError("extra_answer_rules_sha256 requires a rule file")
+        return rules
+    with open(rules, "rb") as stream:
+        contents = stream.read()
+    if digest is not None and sha256(contents).hexdigest() != digest:
+        raise ValueError(f"STEM extra_answer_rules file {rules} differs from its saved SHA-256.")
+    try:
+        return TypeAdapter(AnswerRuleList).validate_python(yaml.safe_load(contents.decode("utf-8")))
+    except (ValueError, yaml.YAMLError) as exc:
+        raise ValueError(f"Invalid extra_answer_rules file {rules}: expected a YAML list of nonblank strings") from exc
+
+
+def add_answer_rules(template: str, rules: AnswerRuleList) -> str:
+    """Append the environment's additional answer requirements."""
     if not rules:
         return template
     before, closing_tag, after = template.rpartition("</rule>")
     if not closing_tag:
         raise ValueError("extra_answer_rules requires an answer template with a </rule> marker")
-    blocks = "".join(f"\n\n<rule>\n{rule}\n</rule>" for rule in rules)
+    precedence = "Apply the additional rules below even for an exact reference match. They take precedence over the built-in guidelines."
+    blocks = "\n\n" + precedence + "".join(f"\n\n<rule>\n{rule}\n</rule>" for rule in rules)
     # Only the template's own placeholders should be expanded when rendering the row.
     return before + closing_tag + blocks.replace("{", "{{").replace("}", "}}") + after
 
@@ -112,24 +121,45 @@ def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return fields
 
 
-def parse_json_judgment(response: NeMoGymResponse, *, verdict_mode: VerdictMode) -> JsonJudgment | None:
-    """Read one complete assistant message and reject ambiguous or incomplete judgments."""
-    if response.status not in (None, "completed") or response.incomplete_details is not None or not response.output:
+def assistant_text(response: NeMoGymResponse, *, judge_reply: bool = False, allow_partial: bool = False) -> str | None:
+    """Read the closing assistant message. Compaction items are opaque provider bookkeeping."""
+    items = [item for item in response.output if item.type != "compaction"]
+    if not items:
         return None
-    *prefix, final = response.output
-    if (
-        final.type != "message"
-        or final.role != "assistant"
+    *prefix, final = items
+    if final.type != "message" or final.role != "assistant":
+        return None
+    if not allow_partial and (
+        response.status not in (None, "completed")
+        or response.incomplete_details is not None
+        or response.error
+        or getattr(final, "phase", None) == "commentary"
         or getattr(final, "status", "completed") != "completed"
-        or final.phase == "commentary"
-        or any(item.type != "reasoning" for item in prefix)
+    ):
+        return None
+    if judge_reply and any(
+        (item.type == "message" and (item.role != "assistant" or getattr(item, "phase", None) != "commentary"))
+        or (item.type != "message" and getattr(item, "status", None) not in (None, "completed"))
+        for item in prefix
     ):
         return None
     if isinstance(final.content, str):
-        text = final.content
-    elif all(getattr(block, "type", None) == "output_text" for block in final.content):
-        text = "".join(block.text for block in final.content)
-    else:
+        return final.content
+    parts = []
+    for block in final.content:
+        if isinstance(block, dict):
+            if block.get("type") != "input_text" or not isinstance(block.get("text"), str):
+                return None
+            parts.append(block["text"])
+        elif block.type == "output_text":
+            parts.append(block.text)
+        else:
+            return None
+    return "".join(parts) or None
+
+
+def parse_json_judgment(text: str | None, *, verdict_mode: VerdictMode) -> JsonJudgment | None:
+    if not text:
         return None
     try:
         judgment = JsonJudgment.model_validate(json.loads(text, object_pairs_hook=_unique_fields))

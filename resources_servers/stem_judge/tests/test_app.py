@@ -159,12 +159,20 @@ class TestAnswerOptions:
         rules = [r"Compare \frac{a}{b} exactly.", 'Treat {"id": "{question}"} as literal text.']
         server = _server(config.model_copy(update={"extra_answer_rules": rules}), reply)
         result = await server.verify(req)
-        end = original.rindex("</rule>") + len("</rule>")
-        assert (
-            _judge_prompt(server)
-            == original[:end] + "".join(f"\n\n<rule>\n{r}\n</rule>" for r in rules) + original[end:]
-        )
+        prompt = _judge_prompt(server)
+        assert "take precedence" in prompt and all(rule in prompt for rule in rules)
+        assert prompt.index(rules[0]) < prompt.index(rules[1])
+        assert prompt.split("</rule>")[0] == original.split("</rule>")[0]
         assert result.reward == 1 and result.judge_evaluations[0].verdict_label == "Judgement: yes"
+
+    async def test_additional_rule_reaches_model_even_on_a_math_match(self, config):
+        config.math_verify = MathVerifyConfig()
+        config.boxed_judge_input = "box"
+        config.extra_answer_rules = ["Reject answers that omit the unit."]
+        server = _server(config, "Judgement: no")
+        result = await server.verify(_request(_split(r"\boxed{2}")))
+        assert result.grading_status == "judged" and result.reward == 0
+        assert config.extra_answer_rules[0] in _judge_prompt(server)
 
     def test_extra_rules_require_nonblank_text_and_an_insertion_point(self, config, tmp_path):
         with raises(ValidationError, match="extra_answer_rules"):
@@ -196,6 +204,16 @@ class TestAnswerOptions:
         await from_list.verify(req)
         assert _judge_prompt(from_file) == _judge_prompt(from_list)
         assert all(rule in _judge_prompt(from_file) for rule in inline)
+
+    def test_changed_rule_file_is_refused_by_the_worker(self, config, tmp_path):
+        rules = tmp_path / "rules.yaml"
+        rules.write_text("- Require metres.")
+        config.extra_answer_rules = str(rules)
+        config.extra_answer_rules_sha256 = hashlib.sha256(rules.read_bytes()).hexdigest()
+        _server(config)
+        rules.write_text("- Accept any unit.")
+        with raises(ValueError, match="differs from its saved SHA-256"):
+            _server(config)
 
     @mark.parametrize("contents", ["rules: [some rule]", "- '  '", "- 42", "- [broken", ""])
     def test_invalid_rule_file_fails_at_startup(self, config, tmp_path, contents):
@@ -329,6 +347,46 @@ class TestAnswerOptions:
         assert saved["judge_evaluations"][0]["verdict_label"] is None
         assert "judgment" not in saved["judge_evaluations"][0]
 
+    @mark.parametrize(
+        "fmt,text",
+        [
+            ("line", "Judgement: 'yes'"),
+            ("json", '{"verdict":"correct","reason_code":"ok","evidence":"<think>quoted</think>"}'),
+        ],
+    )
+    async def test_complete_assistant_message_shapes(self, config, fmt, text):
+        config.verdict_format = fmt
+        config.verdict_mode = "yes_no_unresolved"
+        split = _msg(text[:3])
+        split.content.append(NeMoGymResponseOutputText(annotations=[], text=text[3:], type="output_text"))
+        for message, expected in [
+            (split, "judged"),
+            (NeMoGymEasyInputMessage(role="assistant", content=text), "judged"),
+            (NeMoGymEasyInputMessage(role="assistant", content=[{"type": "input_text", "text": text}]), "judged"),
+            (NeMoGymEasyInputMessage(role="user", content=text), "judge_unparsed"),
+            (_msg(text).model_copy(update={"phase": "commentary"}), "judge_unparsed"),
+            (_msg(text).model_copy(update={"status": "incomplete"}), "judge_unparsed"),
+        ]:
+            result = await _server(config, _response(message)).verify(_request(_split(r"\boxed{2}")))
+            assert result.grading_status == expected
+            assert result.mask_sample is (expected == "judge_unparsed")
+
+    @mark.parametrize(
+        "fmt,text",
+        [
+            ("line", "Judgement: 'yes'"),
+            ("json", '{"verdict":"correct","reason_code":"equal","evidence":"2 equals 2"}'),
+        ],
+    )
+    async def test_commentary_before_final_verdict(self, config, fmt, text):
+        config.verdict_mode = "yes_no_unresolved"
+        config.verdict_format = fmt
+        commentary = _msg("Interim decision").model_copy(update={"phase": "commentary"})
+        final = _msg(text).model_copy(update={"phase": "final_answer"})
+        server = _server(config, _response(commentary, _reasoning(), final))
+        result = await server.verify(_request(_split(r"\boxed{2}")))
+        assert result.reward == 1 and not result.mask_sample
+
     @mark.parametrize("verdict,status", [("yes", "judged"), ("no", "judged"), ("unresolved", "judge_unresolved")])
     async def test_math_match_skips_model_and_nonmatch_uses_the_same_box(self, config, verdict, status):
         config.box_parser = "last_command"
@@ -360,6 +418,10 @@ class TestAnswerOptions:
             ({"bidirectional": True}, "1", "x=1", True),
             ({"bidirectional": True}, "1", "1", True),
             ({"bidirectional": True}, "1", "2", False),
+            ({"bidirectional": True}, "(1,2)", r"\{1,2\}", False),
+            ({"bidirectional": True}, r"\{1,2\}", "(1,2)", False),
+            ({"bidirectional": True}, "(1,2)", "(1,1+1)", True),
+            ({"bidirectional": True}, r"\{1,2\}", r"\{2,1\}", True),
             ({"bidirectional": True}, r"\(\frac{1}{2}\)", "0.5", True),
         ],
     )
