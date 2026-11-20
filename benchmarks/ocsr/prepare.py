@@ -30,9 +30,9 @@ from huggingface_hub import hf_hub_download
 
 
 HF_DATASET = "EdisonScientific/glyph-datasets"
-HF_REVISION = "86f8e17d75699d8ed0799eb6d100ceba3faac56e"
+HF_REVISION = "86f8e17d75699d8ed0799eb6d100ceba3faac56e"  # pragma: allowlist secret
 HF_FILE = "ocsr/uspto_ocsr_benchmark.parquet"
-SOURCE_SHA256 = "b24e61e4e49c08b051d66a24a9ef8beafc6980c620bc5c976166e676c00fa52f"
+SOURCE_SHA256 = "b24e61e4e49c08b051d66a24a9ef8beafc6980c620bc5c976166e676c00fa52f"  # pragma: allowlist secret
 SOURCE_ROWS = 5719
 
 # Unscoreable gold labels in the pinned file (2 empty, 6 not parseable by RDKit 2025.09).

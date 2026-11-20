@@ -1,3 +1,0 @@
--e nemo-gym[dev] @ ../..
-# Chemistry parsing and scoring (BSD-3-Clause), same pin as the other chemistry servers.
-rdkit==2026.3.6

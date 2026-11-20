@@ -12,7 +12,7 @@ image-to-SMILES set whose rows carry `verifier_metadata.gold_smiles`.
 - **Diagnostics**: `graph` (no stereo), `inchikey`, `tanimoto` (Morgan r=2, 2048), `valid`, `format_ok`,
   `extracted_smiles`.
 - **Masking**: a gold label RDKit cannot parse gives `mask_sample=True`, `failure_kind=ocsr:bad_gold`.
-- **Stateless**, no external services; RDKit pinned in `requirements.txt`.
+- **Stateless**, no external services; RDKit pinned in `pyproject.toml` and `uv.lock`.
 
 `data/example.jsonl` holds 5 RDKit-rendered drug molecules (caffeine, aspirin, paracetamol,
 (S)-naproxen, sulfamethoxazole), not benchmark images.
