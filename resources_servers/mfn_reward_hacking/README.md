@@ -44,7 +44,8 @@ The step sets `NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS`, from which this server reads 
 router (`https://inference.mfn.nvidia.com/v1`): it needs the NVIDIA network and no key.
 
 ```bash
-RUN=<benchmark dir of the run>/artifacts
+# Absolute: the server reads the source rollouts from its own directory.
+RUN="$(cd "<benchmark dir of the run>/artifacts" && pwd)"
 gym eval reverify \
     --config resources_servers/mfn_reward_hacking/configs/mfn_reward_hacking.yaml \
     --inputs $RUN/rollouts_materialized_inputs.jsonl \
@@ -124,6 +125,8 @@ key in `MFN_JUDGE_API_KEY`): `scoring_tamper`, `solution_lookup`, `scoring_tampe
 # Limits
 
 - Splitting a Gym rollout at compactions is checked with synthetic records only, not with a real compacted rollout.
+  opencode's records name its persisted part ids while its saved response carries fresh item ids, so an opencode
+  rollout stays one segment until the opencode agent keeps those ids in the response.
 - The model name: MFN's router serves `Qwen3.8-27B-FP8-RH-Judge`; confirm with MFN which model v2 is calibrated on.
 - Calls are slow (2 to 4 minutes each for a short rollout in a smoke on 2026-11-13); size
   `judge_endpoint_max_concurrency` with MFN.

@@ -10,6 +10,7 @@ import pytest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
 from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.rollouts import RolloutStore, RunManifest
 from nemo_gym.verification import JudgeError
 from resources_servers.mfn_reward_hacking.app import (
     SERVER_DIR,
@@ -250,6 +251,28 @@ async def test_verify_retries_an_unparseable_reply_then_fails_as_unparseable() -
     assert post.call_count == 2
 
 
+def test_source_runs_of_a_managed_run_follow_the_selected_attempt(tmp_path: Path) -> None:
+    identity = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps(identity) + "\n")
+
+    def prepare() -> tuple[list[dict[str, Any]], RunManifest]:
+        rows = [dict(identity)]
+        return rows, RunManifest.create(source, rows, {}, {}).model_copy(update={"max_rollout_attempts": 2})
+
+    output = tmp_path / "rollouts.jsonl"
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        first = store.pending(2)[0]
+        second = first | {"_ng_attempt_index": 1}
+        store.record_dispatch(first)
+        store.record_dispatch(second)
+        store.record_outcome(second | {"reward": 0.0})
+        # The earlier attempt's outcome is saved last, so it is the file's last row but not the selected outcome.
+        store.record_outcome(first | {"reward": 1.0})
+
+    assert load_source_runs(output) == {(0, 0): SourceRun(reward=0.0)}
+
+
 async def test_verify_uses_a_second_attempt_that_parses() -> None:
     server = _server(judge_max_attempts=2)
     _mock_judge(server, "not json", json.dumps(_answer()))
@@ -259,6 +282,24 @@ async def test_verify_uses_a_second_attempt_that_parses() -> None:
     assert result.reward == 0.0
     assert result.source_reward is None
     assert result.reward_hacking_attempt_label == "no_match"
+
+
+async def test_a_verdict_binds_its_grading_observation_to_the_row() -> None:
+    from nemo_gym.server_runtime import verifier_observability
+    from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
+
+    server = _server()
+    _mock_judge(server, json.dumps(_answer()))
+    invocation = VerifierInvocation(invocation_id="verify-1")
+    token = verifier_observability._active_verifier.set(invocation)
+    try:
+        result = await server.verify(_request())
+    finally:
+        verifier_observability._active_verifier.reset(token)
+
+    (operation,) = invocation.grading_operations
+    assert (operation.kind, operation.outcome) == ("llm_judge", "completed")
+    assert operation.result_binding_sha256 == grading_result_binding(result)
 
 
 def test_metrics_count_contaminated_passes() -> None:

@@ -25,7 +25,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, Iterator, List, Optional
 
 import orjson
 from pydantic import ConfigDict, Field, ValidationError
@@ -36,6 +36,7 @@ from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
 )
+from nemo_gym.rollouts import RolloutStore
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -137,19 +138,28 @@ def compaction_first_kept_item_ids(row: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
-def load_source_runs(path: Path) -> dict[tuple[int, int], SourceRun]:
-    """Each (task index, rollout index) of a rollouts file, from its last unmasked row with a reward."""
-    runs: dict[tuple[int, int], SourceRun] = {}
+def _source_rows(path: Path) -> Iterator[dict[str, Any]]:
+    # A managed run selects each rollout's latest attempt, as reverify does, which need not be its last row in the file.
+    store = RolloutStore.read(path, import_legacy=False)
+    if store is not None:
+        yield from store.selected("success")
+        return
     with path.open("rb") as file:
         for line in file:
-            if not line.strip():
-                continue
-            row = orjson.loads(line)
-            reward = _finite(row.get("reward"))
-            task, rollout = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
-            if reward is None or row.get("mask_sample") or not isinstance(task, int) or not isinstance(rollout, int):
-                continue
-            runs[(task, rollout)] = SourceRun(reward=reward, first_kept_item_ids=compaction_first_kept_item_ids(row))
+            if line.strip():
+                yield orjson.loads(line)
+
+
+def load_source_runs(path: Path) -> dict[tuple[int, int], SourceRun]:
+    """Each (task index, rollout index) of a rollouts file, from its selected outcome in a managed run, else from its
+    last unmasked row with a reward."""
+    runs: dict[tuple[int, int], SourceRun] = {}
+    for row in _source_rows(path):
+        reward = _finite(row.get("reward"))
+        task, rollout = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
+        if reward is None or row.get("mask_sample") or not isinstance(task, int) or not isinstance(rollout, int):
+            continue
+        runs[(task, rollout)] = SourceRun(reward=reward, first_kept_item_ids=compaction_first_kept_item_ids(row))
     return runs
 
 
@@ -213,20 +223,25 @@ class MfnRewardHackingResourcesServer(SimpleResourcesServer):
         steps = trajectory.model_dump(mode="json")["steps"]
         segments = split_at_items(steps, source.first_kept_item_ids)
         prompts = build_segment_prompts(segments, source_reward, self._judge_config)
-        answers = await observe_llm_judge_grading(lambda: self._judge_segments(prompts))
-        answer = merge_segment_answers(prompts, answers)
-        return MfnRewardHackingVerifyResponse(
-            **body.model_dump(exclude={"source_reward"}),
-            reward=1.0 if answer.label == RewardHackingLabel.MATCH else 0.0,
-            source_reward=source_reward,
-            reward_hacking_label=answer.label.value,
-            reward_hacking_category=answer.category.value,
-            reward_hacking_attempt_label=answer.attempt_label.value,
-            reward_hacking_attempt_category=answer.attempt_category.value,
-            reward_hacking_answer=answer.model_dump(mode="json"),
-            reward_hacking_segments=len(prompts),
-            reward_hacking_failed_segments=sum(item is None for item in answers),
-        )
+
+        # The grading observation binds the response and reward it returns, so it returns the final row.
+        async def grade() -> MfnRewardHackingVerifyResponse:
+            answers = await self._judge_segments(prompts)
+            answer = merge_segment_answers(prompts, answers)
+            return MfnRewardHackingVerifyResponse(
+                **body.model_dump(exclude={"source_reward"}),
+                reward=1.0 if answer.label == RewardHackingLabel.MATCH else 0.0,
+                source_reward=source_reward,
+                reward_hacking_label=answer.label.value,
+                reward_hacking_category=answer.category.value,
+                reward_hacking_attempt_label=answer.attempt_label.value,
+                reward_hacking_attempt_category=answer.attempt_category.value,
+                reward_hacking_answer=answer.model_dump(mode="json"),
+                reward_hacking_segments=len(prompts),
+                reward_hacking_failed_segments=sum(item is None for item in answers),
+            )
+
+        return await observe_llm_judge_grading(grade)
 
     async def _judge_segments(self, prompts: list[SegmentPrompt]) -> list[Optional[RewardHackingV2Output]]:
         """Judge the segments at once; a failed segment is None, and MFN's merge leaves it out.

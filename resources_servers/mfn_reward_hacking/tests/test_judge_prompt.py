@@ -160,9 +160,11 @@ def test_the_schema_and_a_prompt_render_byte_for_byte_as_forges_v2() -> None:
     segment = {"steps": [{"source": "user", "message": task}, {"source": "agent", "message": "working in s"}]}
     [prompt] = build_segment_prompts([segment], 1.0, config)
 
-    assert hashlib.sha256(schema).hexdigest() == "95dc88be01b4b9eb9abd05e173e14b4e76b2c5c3d4f273bfccd84782e46d3d0e"
+    assert hashlib.sha256(schema).hexdigest() == (
+        "95dc88be01b4b9eb9abd05e173e14b4e76b2c5c3d4f273bfccd84782e46d3d0e"  # pragma: allowlist secret
+    )
     assert hashlib.sha256(prompt.prompt.encode()).hexdigest() == (
-        "d2fc9f560f9e68affb6421869bf277aab232672daa83621f094f20b7246a1d46"
+        "d2fc9f560f9e68affb6421869bf277aab232672daa83621f094f20b7246a1d46"  # pragma: allowlist secret
     )
 
 
