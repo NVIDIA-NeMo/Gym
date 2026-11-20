@@ -11,6 +11,13 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+RoboDojoSimulator = Literal["isaaclab3_newton", "isaacsim_physx"]
+ROBODOJO_SIMULATORS: dict[str, RoboDojoSimulator] = {
+    "isaaclab3": "isaaclab3_newton",
+    "isaacsim": "isaacsim_physx",
+}
+
+
 class SourceFile(BaseModel):
     path: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -58,8 +65,10 @@ def bind_case(
         raise ValueError(f"Unknown RoboDojo case {case_id!r}")
 
     config = json.loads(template_path.read_text())
-    if config.get("integration") != "robodojo" or config.get("simulator_backend") != "isaaclab3":
-        raise ValueError("The EmberBridge configuration must select RoboDojo with Isaac Lab 3")
+    if config.get("integration") != "robodojo" or config.get("simulator_backend") not in ROBODOJO_SIMULATORS:
+        raise ValueError(
+            "The EmberBridge configuration must select RoboDojo with simulator_backend isaaclab3 or isaacsim"
+        )
     sdk = config.get("sdk", {})
     if sdk.get("execution") != "ttc" or sdk.get("gates") is not False:
         raise ValueError("The evaluation requires an ungated TTC SDK session")

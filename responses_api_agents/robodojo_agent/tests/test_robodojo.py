@@ -103,9 +103,16 @@ def test_prepare_and_bind_the_same_frozen_layout(runtime, tmp_path):
         bind_case(**kwargs)
 
 
-@pytest.mark.parametrize("fault", ["success", "decision_budget", "deadline", "unscored", "unclean"])
-def test_run_uses_native_horizon_and_masks_missing_measurement(runtime, tmp_path, monkeypatch, fault):
+@pytest.mark.parametrize("backend", ["isaaclab3", "isaacsim"])
+@pytest.mark.parametrize("fault", ["success", "decision_budget", "deadline", "unscored", "unclean", "wrong_backend"])
+def test_run_uses_native_horizon_and_masks_missing_measurement(runtime, tmp_path, monkeypatch, backend, fault):
     template, manifest, _, digest = runtime
+    write_json(template, {**json.loads(template.read_text()), "simulator_backend": backend})
+    native_metadata = {
+        "isaaclab3": {"simulator": "Isaac Lab 3.0 / Newton", "physics_backend": "isaaclab3_newton"},
+        "isaacsim": {"simulator": "RoboDojo"},
+    }
+    other_backend = "isaacsim" if backend == "isaaclab3" else "isaaclab3"
     commands = []
 
     async def engine(self, *args, timeout, log=None):
@@ -116,12 +123,14 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(runtime, tmp_path
             config = json.loads(Path(args[args.index("--config") + 1]).read_text())
             assert config["task"] == "general_pickup"
             assert config["step_limit"] == 400
+            assert config["simulator_backend"] == backend
             assert config["model"]["base_url"] == "http://127.0.0.1:8011/v1"
             native = Path(args[args.index("--output") + 1])
             write_json(native / "result.json", {"sdk_summary": {"closed": fault != "unclean", "faults": []}})
             write_json(native / "outcome.json", {"schema": "ember_bridge.outcome.v1", "readback_verified": True})
             write_json(native / "actor" / "ttc-runtime.json", {"state": "closed"})
-            (native / "evaluation").mkdir()
+            recorded_backend = other_backend if fault == "wrong_backend" else backend
+            write_json(native / "evaluation" / "reset.json", {"metadata": native_metadata[recorded_backend]})
             (native / "evaluation" / "sensors.mp4").touch()
             return b""
         if CLEANUP_AUDIT in args or "validate" in args:
@@ -130,10 +139,10 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(runtime, tmp_path
             return json.dumps(
                 {
                     "schema": "ember_bridge.evaluation_result.v1",
-                    "counted": fault in ("decision_budget", "deadline", "success"),
+                    "counted": fault in ("decision_budget", "deadline", "success", "wrong_backend"),
                     "class": (
                         "scored"
-                        if fault == "success"
+                        if fault in ("success", "wrong_backend")
                         else f"policy_failure.{fault}"
                         if fault in ("decision_budget", "deadline")
                         else "infrastructure.worker"
@@ -174,8 +183,9 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(runtime, tmp_path
         result = asyncio.run(agent.run(row))
     assert result.case_id == result.assigned_case_id == CASE
     assert result.layout_sha256 == digest
+    assert result.simulator == ("isaacsim_physx" if backend == "isaacsim" else "isaaclab3_newton")
     assert result.reward == float(fault == "success")
-    if fault in ("unscored", "unclean", "deadline"):
+    if fault in ("unscored", "unclean", "deadline", "wrong_backend"):
         assert result.mask_sample is True
         assert result.native_score is None
         assert result.ng_verifier_invocations == []
@@ -185,8 +195,11 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(runtime, tmp_path
                 "unscored": ENVIRONMENT_SERVER_FAILED,
                 "unclean": HARNESS_TERMINATION_UNCONFIRMED,
                 "deadline": AGENT_TIMEOUT,
+                "wrong_backend": ENVIRONMENT_SERVER_FAILED,
             }[fault]
         )
+        if fault == "wrong_backend":
+            assert all(HORIZON_AUDIT not in command for command in commands)
         return
     assert result.mask_sample is False
     assert result.failure_kind == (None if fault == "success" else AGENT_LIMIT)

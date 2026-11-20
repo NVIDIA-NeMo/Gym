@@ -1,7 +1,7 @@
 # RoboDojo
 
-Run RoboDojo manipulation episodes on Newton with EmberBridge's OpenCode harness
-and Nanoverse's native grader. Use this experimental benchmark for evaluation.
+Run RoboDojo manipulation episodes on Newton or Isaac Sim with EmberBridge's
+OpenCode harness and Nanoverse's native grader. Use this experimental benchmark for evaluation.
 The comparison unit is the selected panel, simulator, SDK profile, model and
 episode budget.
 
@@ -29,9 +29,12 @@ Set these variables on the Gym driver.
 | `ROBODOJO_EVIDENCE_EXPORT_ROOT` | Optional job artifact directory for grading receipts and video |
 | `NANOVERSE_TTC_MANIFEST`, `NANOVERSE_GUEST_PROGRAMS` | Installed TTC SDK runtime and guest programs |
 
-The base JSON selects `integration: robodojo`, `simulator_backend: isaaclab3`,
-the OpenCode harness command, the simulator and asset paths, and an ungated
-TTC SDK profile. Validate it with the installed EmberBridge CLI. Gym binds the
+The base JSON selects `integration: robodojo` and the backend through
+`simulator_backend`. Use `isaaclab3` for Newton or `isaacsim` for PhysX.
+Provide the OpenCode harness command, the simulator and asset paths, and an
+ungated TTC SDK profile. Headless Isaac Sim also needs the worker's NVIDIA
+graphics libraries and Vulkan and EGL configuration. Validate the configuration
+with the installed EmberBridge CLI. Gym binds the
 task, evaluation seed, layout, control budget and model-server URL to each
 episode. Its default `native_x2` profile lets the actor use up to twice
 RoboDojo's standard control limit. The actor receives task instructions and
@@ -64,8 +67,10 @@ stops the actor process as part of each episode.
 
 Gym reward is the native success flag at the selected control budget. The
 rollout also contains the native-limit and extended `Score` and success flags,
-slot and assigned case identifiers, a layout hash, and paths to the native
-evidence and video when available. The aggregate includes both horizon means
+slot and assigned case identifiers, a layout hash, the simulator identity,
+and paths to the native evidence and video when available. Gym checks the
+backend against the simulator's reset receipt before scoring. Compare
+results using the same simulator. The aggregate includes both horizon means
 and counts of scored and unscored episodes. Missing or unverified simulation
 evidence is masked. The engine owns policy replies and simulator trajectories,
 which are written alongside the Gym rollout.

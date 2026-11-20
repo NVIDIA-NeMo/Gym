@@ -88,6 +88,8 @@ class Episode:
                 "NVIDIA_VISIBLE_DEVICES",
                 "NVIDIA_DRIVER_CAPABILITIES",
                 "LD_LIBRARY_PATH",
+                "VK_ICD_FILENAMES",
+                "__EGL_VENDOR_LIBRARY_FILENAMES",
                 "NANOVERSE_TTC_MANIFEST",
                 "NANOVERSE_GUEST_PROGRAMS",
                 "WARP_CACHE_PATH",
@@ -121,6 +123,7 @@ class Episode:
             "native/actor/transcript.jsonl",
             "native/actor/ttc-runtime.json",
             "native/evaluation/metadata.json",
+            "native/evaluation/reset.json",
             "native/evaluation/sensors.mp4",
         ):
             source = (self.directory / relative).resolve()
@@ -247,6 +250,20 @@ class Episode:
             "policy_failure.no_progress",
         }:
             raise EpisodeError(f"Unsupported counted outcome ({classification})")
+        reset = json.loads((evidence / "evaluation" / "reset.json").read_text())
+        metadata = reset.get("metadata") if isinstance(reset, dict) else None
+        if not isinstance(metadata, dict):
+            raise EpisodeError("Native RoboDojo reset did not record its simulator")
+        # The PhysX session identifies itself as RoboDojo and has no Newton backend field.
+        physics_backend = metadata.get("physics_backend")
+        if physics_backend == "isaaclab3_newton":
+            backend = "isaaclab3"
+        elif metadata.get("simulator") == "RoboDojo" and physics_backend is None:
+            backend = "isaacsim"
+        else:
+            backend = None
+        if backend != configuration["simulator_backend"]:
+            raise EpisodeError("Native RoboDojo simulator differs from the configured backend")
         horizon = await self.execute(
             str(self.simulation_python),
             "-c",

@@ -27,7 +27,7 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, observe_verifier
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from responses_api_agents.robodojo_agent.cases import bind_case
+from responses_api_agents.robodojo_agent.cases import ROBODOJO_SIMULATORS, RoboDojoSimulator, bind_case
 from responses_api_agents.robodojo_agent.episode import CleanupUnconfirmed, Episode, EpisodeError
 
 
@@ -65,7 +65,7 @@ class RoboDojoResponse(BaseVerifyResponse):
     case_id: str
     assigned_case_id: str
     layout_sha256: str
-    simulator: Literal["isaaclab3_newton"] = "isaaclab3_newton"
+    simulator: RoboDojoSimulator = "isaaclab3_newton"
     outcome_class: str | None = None
     native_score: float | None = None
     extended_score: float | None = None
@@ -138,6 +138,7 @@ class RoboDojoAgent(SimpleResponsesAPIAgent):
             "response": response,
             "assigned_case_id": case.case_id,
             "layout_sha256": case.layout.sha256,
+            "simulator": ROBODOJO_SIMULATORS[bound["simulator_backend"]],
             "evidence_dir": str(directory),
         }
         outcome = None
