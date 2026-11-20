@@ -48,7 +48,7 @@ bash benchmarks/indic/arena_proxy_v3/slurm/submit.sh
 ```
 
 Separate languages with spaces. Set `TEMPERATURE=0.6` for that sampling experiment.
-Use `LIMIT=3 LANGUAGES="en hi ta"` for a smoke submission.
+`LIMIT` applies per language; the five-sample example below uses `LIMIT=1`.
 
 Generation uses `gym eval run` with verification deferred. Judging uses
 `gym eval reverify` on the saved responses, without running policy inference again.
@@ -87,6 +87,26 @@ RUN_DIR/
 To resume, reuse the run directory and original model, data, sampling, and judge
 settings, then resubmit the appropriate batch script. Use a fresh run directory
 when those settings change. A judge retry reuses the saved policy answers.
+
+### Five-sample Gemma smoke run
+
+With deployment settings configured for `google/gemma-4-31B-it`, use:
+
+```bash
+export MODEL_KEY=gemma4-31b-it-smoke
+export LANGUAGES="en hi bn ta te" LIMIT=1
+export CONTEXT=131072 MAX_OUTPUT_TOKENS=120000
+export TEMPERATURE=1.0 TOP_P=0.95 TOP_K=64
+export PARSER=gemma4 TOOL_PARSER=gemma4
+export TP=8 DP=1 EP=0
+export CONCURRENCY=5 JUDGE_CONCURRENCY=5
+bash benchmarks/indic/arena_proxy_v3/slurm/submit.sh
+```
+
+This selects five translated versions of the first source conversation, one per
+language. Use a fresh run directory. The full-run defaults remain unchanged;
+the context, top-k, parsers, and expert-parallel setting above are specific to
+this model configuration.
 
 ## Scoring
 
@@ -139,6 +159,11 @@ Compare completed runs with valid provider responses and no aborted reference
 generations. Gym retains its transport retries, cancellation handling, and response
 validation; unresolved failures do not produce an official headline.
 
+The existing English `benchmarks/lmarena_v3` integration is unchanged and uses
+the separate `arena` resources server. The English slice here belongs to the
+Indic Arena Proxy v3 dataset and comparison protocol; report its results separately
+from that existing benchmark.
+
 ## Validation
 
 ```bash
@@ -146,5 +171,19 @@ pytest tests/unit_tests/benchmarks/test_indic_arena_proxy_v3*.py \
   resources_servers/arena_judge/tests/test_app.py
 ```
 
-The integration remains experimental pending live model validation and score
-comparison.
+On November 20, 2026, a live smoke run with `google/gemma-4-31B-it` at revision
+`842da3794eaa0b77d5f08bae87a17459d91ff475` and vLLM 0.26.0 completed both stages:
+
+- Five of five samples generated and judged across English, Hindi, Bengali,
+  Tamil, and Telugu using the settings above.
+- Ten valid verdicts from the default judge, covering both answer positions for
+  every sample, with zero current failures or invalid verdicts.
+- Conversation inputs, frozen baselines, and saved policy responses preserved
+  through judging and retry recovery.
+- Complete coverage of the selected subset, with English separate and the
+  official Indic headline suppressed.
+
+This smoke validates the generation, judging, recovery, and summary workflow.
+It covers one conversation across five languages and does not establish aggregate
+model quality or score agreement with a separate reference run. The integration
+remains experimental pending full benchmark evaluation and reference comparison.

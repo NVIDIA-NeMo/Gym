@@ -77,9 +77,9 @@ dataset overlay uses `.yml` so it is not discovered as another benchmark.
 validation, reporting all 5,199 prepared rows. Catalog discovery also printed an
 existing unrelated `opencode_sandboxed_search_agent` migration warning.
 
-## Remaining external validation
+## External validation status at initial integration
 
-No GPU generation or live NVIDIA judge request was performed. A representative
+At this stage, no GPU generation or live NVIDIA judge request was performed. A representative
 real smoke still needs a checkpoint, an authorized Slurm account, and the user's
 NVIDIA judge-key file. Endpoint/model availability and score agreement with a
 reference run remain unverified. The benchmark stays experimental and
@@ -146,5 +146,37 @@ The dataset is now private. An authenticated full Hub preparation verified all
 The downloaded cache and prepared data are owner-only. The code requests cached
 authentication with `token=True`; no token value is embedded or printed.
 
-A live paired evaluation still needs a checkpoint, Slurm account, and NVIDIA
-judge-key file path. No GPU job or live judge request was submitted in this follow-up.
+No GPU job or live judge request was submitted during this score-comparison
+follow-up. The subsequent live smoke is recorded below; a full paired evaluation
+remains pending.
+
+## Live Gemma smoke (November 20, 2026)
+
+The GPU generation and CPU judging workflow completed successfully with
+`google/gemma-4-31B-it` at revision
+`842da3794eaa0b77d5f08bae87a17459d91ff475`, vLLM 0.26.0, and the pinned dataset
+revision `da63b1db1770bc219962b196f4f93b066fa2e400`.
+
+The selection used `--languages en hi bn ta te --limit 1`: five translated
+versions of one source conversation, with three user turns per sample. Settings
+were context 131,072, maximum output 120,000, temperature 1.0, top-p 0.95, top-k 64,
+seed 42, tensor parallelism 8, data parallelism 1, expert parallelism disabled,
+and the `gemma4` reasoning and tool parsers. Generation and judge concurrency
+were both 5. Judging used the default Gemini 3.8 Flash configuration and frozen
+GPT-5.4-mini baselines.
+
+- Both jobs completed with exit code 0:0; generation produced all five answers.
+- Judging produced all ten valid swapped-position verdicts, with no current
+  failures, masked samples, or invalid verdicts.
+- Original conversation messages, baseline answers, generated responses, and
+  source-answer identities were preserved exactly.
+- Ten historical authentication-failure records reconciled with the five
+  successful retries. The saved generation file's SHA-256 remained unchanged.
+- Each selected language has one judged row and complete coverage. The summary
+  identifies a subset, reports English separately, and suppresses every official
+  Indic average and the headline score.
+
+This establishes a working live pipeline and successful retry recovery for the
+selected samples. It does not establish full-benchmark performance or live score
+parity with the standalone reference setup. The benchmark remains experimental
+and `verified: false`.
