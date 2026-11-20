@@ -102,7 +102,7 @@ _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
 def _reported_model_error(assistant: Mapping[str, Any], cleanup: Mapping[str, Any], *, will_retry: bool) -> bool:
-    """Recognize Pi 0.80.2's final agent_end error report without hiding worker or cleanup failures."""
+    """Recognize the pinned Pi's final agent_end error report without hiding worker or cleanup failures."""
     return (
         cleanup["return_code"] == 0
         and not cleanup["timed_out"]
@@ -144,9 +144,8 @@ def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
     A finish tool call that succeeded is a submission; gym_mcp.mjs marks only those results terminal. Pi reports each
     call's result when the call ends, but the turn's tool results only after all of the turn's calls end, so a finish
     call batched with a slower tool shows only in the former. A run whose last reply stopped (`stop` or `length`)
-    without a tool call has ended, and the deadline then cut only Pi's compaction call after the run, unless the reply
-    was an empty `length` reply that Pi counts as a context overflow: Pi compacts to retry it (Pi 0.80.2 then exits
-    with code 1, a failure).
+    without a tool call has ended, and the deadline then cut only Pi's compaction call after the run, unless Pi
+    compacts to retry a `length` reply that it counts as a context overflow.
     """
     if any(
         event.get("type") == "tool_execution_end"
@@ -168,9 +167,8 @@ def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
     last = events[replies[-1]][1]["message"]
     # Pi keeps a provider's `stop` for a reply with tool calls, and then runs them.
     called_tools = any(isinstance(part, dict) and part.get("type") == "toolCall" for part in last.get("content") or [])
-    # pi-ai also counts an empty `length` reply at a full context as an overflow, and Pi compacts to retry it (Pi
-    # 0.80.2 then exits with code 1, a failure). Pi never retries a `stop` reply, so its compaction for an overflow
-    # after one runs after the run has ended.
+    # Pi can count a `length` reply as a context overflow, then compacts (reason `overflow`) to retry it. Pi never
+    # retries a `stop` reply, so its compaction for an overflow after one runs after the run has ended.
     recovering = last.get("stopReason") == "length" and any(
         event.get("type") == "compaction_start" and event.get("reason") == "overflow"
         for _, event in events[replies[-1] + 1 :]
@@ -738,7 +736,10 @@ class PiAgent(SimpleResponsesAPIAgent):
     """Runs the pi CLI (pi --print --mode json --no-session)"""
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read Pi 0.80.2's terminal assistant error; tested on that pinned version."""
+        """Read the pinned Pi's terminal assistant error, such as `400: {...}` or `HTTP 503: ...`.
+
+        tests/test_outcome.py checks these messages against the pinned Pi's model client.
+        """
         if native_result.get("stopReason") != "error":
             return AgentOutcome(failure_kind="unknown")
         message = str(native_result.get("errorMessage") or "")
@@ -1388,7 +1389,11 @@ class PiAgent(SimpleResponsesAPIAgent):
         # Local callers still get automatic installation. Sandbox sessions never
         # enter this path, so their host does not need Pi, Node, or npm.
         if self._local_setup_task is None:
-            self._local_setup_task = asyncio.create_task(asyncio.to_thread(ensure_pi, self.config.pi_version))
+            # The version check runs the launcher and environment overrides that the run below uses.
+            overrides = {key: value for key, value in self.config.env.items() if value}
+            self._local_setup_task = asyncio.create_task(
+                asyncio.to_thread(ensure_pi, self.config.pi_version, command=self.config.command_parts, env=overrides)
+            )
         setup_task = self._local_setup_task
         try:
             # Share one installation across concurrent local calls. Cancelling

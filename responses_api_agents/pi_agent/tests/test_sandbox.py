@@ -1071,8 +1071,7 @@ def deadline_events(case):
             compaction,
         ]
     elif case == "overflow-at-output-limit":
-        # An empty `length` reply at a full context is an overflow to Pi, which compacts to retry it (Pi 0.80.2 then
-        # exits with code 1).
+        # Pi counts this `length` reply as a context overflow and compacts to retry it, so the run was still working.
         last = reply("length")
         recorded = [
             last,
@@ -2251,7 +2250,9 @@ async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies
     Yields the activation to await; close runs on exit, and its response is left on the yielded namespace.
     """
     agent, sandbox = setup
-    node, _ = _pinned_pi_package()
+    node, package = _pinned_pi_package()
+    # The session runs the pinned Pi, so it seeds that pin and reports it in the response metadata.
+    agent.config.pi_version = json.loads((package / "package.json").read_text())["version"]
     # Pi sends fetch, including gym_mcp.mjs's, through proxies set in the environment.
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         monkeypatch.delenv(name, raising=False)
@@ -2299,16 +2300,23 @@ def _url_grant(name, url, *, required=True):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
-@pytest.mark.parametrize("case", ["finish", "finish-cut-at-output-limit", "finish-cut-as-vllm-reports-it"])
+@pytest.mark.parametrize(
+    "case",
+    ["finish", "finish-cut-at-output-limit", "finish-cut-as-vllm-reports-it", "finish-cut-with-complete-arguments"],
+)
 async def test_pinned_pi_ends_the_run_on_finish(setup, tmp_path, monkeypatch, case):
     paths = ["/app/report.docx", "/app/data.xlsx"]
     replies = [(json.dumps({"paths": paths}), "tool_calls", False)]
     if case.startswith("finish-cut"):
-        # Pi parses the cut-off arguments as `{"paths": ["/app/report.docx"]}`; the call must not run. A server may
-        # report `length` (here under a lower limit than the request's), while vLLM reports `tool_calls` for a reply
-        # it parsed a call from, even when the reply used its whole output budget.
-        vllm = case == "finish-cut-as-vllm-reports-it"
-        replies.insert(0, ('{"paths": ["/app/report.docx", ', "tool_calls" if vllm else "length", vllm))
+        # A finish call in a reply cut at the output limit must not run. A server may report `length` (here under a
+        # lower limit than the request's), and Pi then runs none of the reply's calls. vLLM reports `tool_calls` for a
+        # reply it parsed a call from, even when the reply used its whole output budget: Pi refuses arguments that
+        # are not a complete JSON object, and Gym's finish tool refuses a call whose arguments parse.
+        vllm = case != "finish-cut-at-output-limit"
+        arguments = '{"paths": ["/app/report.docx", '
+        if case == "finish-cut-with-complete-arguments":
+            arguments = json.dumps({"paths": paths[:1]})
+        replies.insert(0, (arguments, "tool_calls" if vllm else "length", vllm))
 
     def grants(up, down):
         return [_url_grant("resources", up)]
@@ -2335,6 +2343,11 @@ async def test_pinned_pi_ends_the_run_on_finish(setup, tmp_path, monkeypatch, ca
     # Pi's agent_end carries the terminal tool result, so the invocation record agrees with the response.
     records = run.close.agent_observations.records
     assert [record.status for record in records if record.kind == "agent_invocation"] == ["completed"]
+    assert response.metadata["pi_version"] == setup[0].config.pi_version
+    if case == "finish-cut-with-complete-arguments":
+        # Gym's finish tool refused the cut-off call, and the next request tells the model why.
+        replayed = [message for message in run.requests[1]["messages"] if message.get("role") == "tool"]
+        assert "Not run: the reply with this call hit the output limit" in json.dumps(replayed)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
@@ -2364,9 +2377,14 @@ async def test_pinned_pi_reports_a_context_overflow_after_a_long_turn(
     # split one of them or be lost. Gym grades the final 400 as a model limit only when that event reaches it.
     # With compaction on, Pi first compacts and retries; a failed compaction call is reported as the run's failure.
     model = functools.partial(_long_turn_then_overflow, summary_status=summary_status)
-    async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: [], model=model) as run:
-        response = await run.activation
-    # Pi's compaction request is the one without tools; Pi retries the overflowed call only after it worked.
+    agent = setup[0]
+    # Pi retries a failed compaction call under its retry policy: here three times, without the default backoff.
+    settings = agent._build_settings_config()
+    settings["retry"] = {**settings["retry"], "maxRetries": 3, "baseDelayMs": 1}
+    with patch.object(agent, "_build_settings_config", return_value=settings):
+        async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: [], model=model) as run:
+            response = await run.activation
+    # Pi's compaction requests are the ones without tools; Pi retries the overflowed call only after one worked.
     assert ["tools" in request for request in run.requests] == requests_with_tools
     # The long turn ran and reached Gym whole; without it the pipe never fills.
     assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output"]
@@ -2394,7 +2412,7 @@ _COMPACTION_CALL_FAILED = "Context overflow recovery failed: Summarization faile
     [
         (False, [], "model error"),
         (True, [], None),
-        # Pi 0.80.2's events after the overflow: it compacted, its retry overflowed again, and it gave up.
+        # The pinned Pi's events after the overflow: it compacted, its retry overflowed again, and it gave up.
         (
             True,
             [

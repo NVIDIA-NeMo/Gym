@@ -117,7 +117,9 @@ Installation needs network access to nodejs.org and npm; musl also uses unoffici
 and, for the older C++ runtime fallback, dl-cdn.alpinelinux.org. An image without that access can carry the
 runtime instead: set `sandbox_runtime_dir` to the directory `install_pi_runtime.sh` produces, copied whole
 (`node/`, `pi/` and, on older Alpine, `libstdcpp/`), and setup checks that it runs `pi_version` rather than
-installing one. A runtime that is missing or runs another version refuses the seed with HTTP 422.
+installing one. Copy it with its symbolic links: Gym runs `pi/node_modules/.bin/pi`, npm's link to Pi's entry
+script, which fails when copied as a plain file. A runtime that is missing or runs another version refuses the seed
+with HTTP 422.
 
 The Node runtime, Pi package, and private `PI_CODING_AGENT_DIR` are outside the task repository.
 Task HOME and XDG directories are preserved for tools and verification. Pi's
@@ -197,9 +199,11 @@ Saved trajectories record the user prompt's text but not its images.
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
 reasoning tokens. Under the default `output_token_policy: fixed`, an adapter-owned Pi extension applies it as
 `max_tokens`, preserving any smaller upstream cap; under `remaining_context` the extension removes the cap
-(see [Local CLI compatibility](#local-cli-compatibility)). Limits must be positive JavaScript-safe integers. Request-level
-`max_output_tokens` is rejected in sandbox sessions because a total-response budget is not implemented. Model Server
-configuration must not replace the agent's cap with a larger value.
+(see [Local CLI compatibility](#local-cli-compatibility)). Pi itself lowers its cap to fit the context window, keeping a
+margin for the input, so a call near a full context can stop with `length` below `max_output_tokens`. Limits must be
+positive JavaScript-safe integers. Request-level `max_output_tokens` is rejected in sandbox sessions because a
+total-response budget is not implemented. Model Server configuration must not replace the agent's cap with a larger
+value.
 
 ## Lifecycle and ownership
 
@@ -299,9 +303,8 @@ Response metadata includes `harness_execution: sandbox`, hostname, supervisor PI
 the pinned Pi version. When `timeout` stops a run that was still working and in which no call of a
 `finish_tool_names` tool had succeeded, the metadata also has `stop_reason: wall_time`, as Stirrup reports a timeout,
 so a benchmark can tell a timeout from a run that ended without a submission. A run has ended once a reply stops
-(`stop` or `length`) without a tool call, even if `timeout` then stops Pi's compaction call, unless it is an empty
-`length` reply at a full context window: Pi counts that as a context overflow and compacts to retry it (Pi 0.80.2 then
-exits with code 1, which fails the run). A timeout while Pi waits to retry a failed model call, or while
+(`stop` or `length`) without a tool call, even if `timeout` then stops Pi's compaction call, unless Pi compacts to
+retry a `length` reply that it counts as a context overflow. A timeout while Pi waits to retry a failed model call, or while
 the provider gives up on the supervisor after the deadline, is reported the same way. Model-call references and tool
 observations are returned by agent close.
 Tool timestamps are supervisor receipt times, not executor timestamps; unsupported evidence
@@ -317,7 +320,9 @@ evidence or failed release retains the handle for retry. Cleanup is cooperative,
 
 `auto_compaction` and `output_token_policy` apply to local runs and sandbox sessions alike. Under
 `output_token_policy`, `fixed` caps each request at `max_output_tokens`, and `remaining_context` drops the cap
-so the model server sizes the output from the context the request leaves. The optional per-call `bash_timeout`
+so the model server sizes the output from the context the request leaves. Both act on the Gym `model_server`
+provider. With an explicit Pi provider in `models_config`, Pi sends that model's `maxTokens` (16384 when unset) as the
+cap, fitted to its `contextWindow` (128000 when unset). The optional per-call `bash_timeout`
 is local only; sandbox sessions use `sandbox_bash_timeout_seconds`. The dedicated
 `pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
 `mcp_servers` for authenticated Gym tools. Sandbox sessions take Resources tools from MCP grants
@@ -332,7 +337,8 @@ request fields. On this compatibility path, the configured model and per-call to
 remain authoritative; forwarding request-level sampling fields or `max_output_tokens`
 does not add support for them or enforce a total-response budget.
 
-Local setup checks `pi --version` against the configured pin. It installs Pi on the first invocation if needed.
+Local setup installs Pi on the first invocation if needed. With an exact pin, it then runs the configured `command`
+with `--version` and the configured `env`, and fails setup when the reported version differs.
 To upgrade an existing installation, run `npm install -g @earendil-works/pi-coding-agent@1.5.2` with Node 22.19.0 or later.
 Put `policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
 

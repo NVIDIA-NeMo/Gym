@@ -220,7 +220,7 @@ class TestLocalRuntimeSetup:
         ):
 
             async def launch(*args, **kwargs):
-                install.assert_called_once_with("0.80.2")
+                install.assert_called_once_with("0.80.2", command=["pi"], env={})
                 return processes.pop()
 
             spawn.side_effect = launch
@@ -236,7 +236,7 @@ class TestLocalRuntimeSetup:
                     NeMoGymResponseCreateParamsNonStreaming(input="second"),
                 ),
             )
-            install.assert_called_once_with("0.80.2")
+            install.assert_called_once_with("0.80.2", command=["pi"], env={})
             assert spawn.await_count == 2
             assert all(response.output[0].content[0].text == "done" for response in responses)
 
@@ -260,7 +260,7 @@ class TestLocalRuntimeSetup:
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def install(*args):
+        async def install(*args, **kwargs):
             started.set()
             await release.wait()
 
