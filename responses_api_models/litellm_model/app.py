@@ -29,7 +29,7 @@ import asyncio
 import logging
 import re
 from contextlib import asynccontextmanager
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from fastapi import FastAPI
@@ -40,7 +40,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models import Body, ChatCompletionsConverter
-from nemo_gym.models.chat_completions_converter import _usage_detail
+from nemo_gym.models.chat_completions_converter import _cache_write_tokens, _usage_detail
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
@@ -61,6 +61,14 @@ def _sanitize_error(e: Exception) -> str:
     msg = _SENSITIVE_HEADER_RE.sub(r"\1[REDACTED]\2", msg)
     msg = _SENSITIVE_COOKIE_RE.sub(r"\1[REDACTED]\2", msg)
     return msg
+
+
+def _input_tokens_details(cached_tokens: Optional[int], cache_write_tokens: Optional[int]) -> Dict[str, Any]:
+    # A cache-write count is added only when reported, so other providers' usage stays as it was.
+    details: Dict[str, Any] = {"cached_tokens": cached_tokens}
+    if cache_write_tokens is not None:
+        details["cache_write_tokens"] = cache_write_tokens
+    return details
 
 
 def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -96,7 +104,7 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
                 "cached_input_tokens",
                 "cache_read_input_tokens",
             )
-            usage["input_tokens_details"] = {"cached_tokens": cached_tokens}
+            usage["input_tokens_details"] = _input_tokens_details(cached_tokens, _cache_write_tokens(usage))
         elif "cached_tokens" not in usage["input_tokens_details"]:
             usage["input_tokens_details"]["cached_tokens"] = None
 
@@ -184,7 +192,7 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "total_tokens": total_tokens,
-            "input_tokens_details": {"cached_tokens": cached_tokens},
+            "input_tokens_details": _input_tokens_details(cached_tokens, _cache_write_tokens(usage)),
             "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
         },
     }

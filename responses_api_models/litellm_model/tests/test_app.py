@@ -172,6 +172,24 @@ class TestNormalizeToResponse:
         assert validated.usage.input_tokens_details.cached_tokens is None
         assert validated.usage.output_tokens_details.reasoning_tokens is None
 
+    def test_chat_completion_cache_writes_reach_the_response_usage(self) -> None:
+        data = {
+            "object": "chat.completion",
+            "id": "c1",
+            "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 300,
+                "completion_tokens": 20,
+                "total_tokens": 320,
+                "prompt_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 60},
+            },
+        }
+
+        result = _normalize_to_response(data)
+
+        assert result["usage"]["input_tokens_details"] == {"cached_tokens": 100, "cache_write_tokens": 60}
+
     def test_native_response_reasoning_item_normalized(self) -> None:
         """Native response reasoning item missing summary and with output_text is normalized."""
         data = deepcopy(NATIVE_RESPONSE)

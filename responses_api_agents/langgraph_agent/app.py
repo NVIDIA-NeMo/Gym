@@ -66,8 +66,13 @@ def aggregate_response_usage(usages: list[NeMoGymResponseUsage | None]) -> NeMoG
     """Aggregate usage from all model calls represented by one agent response."""
     if not usages or any(usage is None for usage in usages):
         return None
-    usage = _aggregate_usage_values([item.model_dump(mode="python") for item in usages])
-    return NeMoGymResponseUsage.model_validate(usage)
+    aggregated = NeMoGymResponseUsage.model_validate(
+        _aggregate_usage_values([item.model_dump(mode="python") for item in usages])
+    )
+    # A count one call did not report leaves the total unknown, rather than summing the calls that did.
+    writes = [item.input_tokens_details.cache_write_tokens for item in usages]
+    aggregated.input_tokens_details.cache_write_tokens = None if None in writes else sum(writes)
+    return aggregated
 
 
 class LangGraphAgentConfig(BaseResponsesAPIAgentConfig):
