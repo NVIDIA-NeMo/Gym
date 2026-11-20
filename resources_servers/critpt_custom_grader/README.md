@@ -120,6 +120,11 @@ The recipe uses three kinds of sandbox, all created through Gym's sandbox API:
 - Stirrup orchestration can reach the model and resources servers. Its built-in `code_exec` is disabled.
 - The resources server's `/code_exec` runs commands in a separate Linux sandbox with denied network egress. Files
   persist during one episode; each command starts a fresh shell. No grading task data is uploaded to this sandbox.
+  A command that exceeds the sandbox's memory limit can end the whole sandbox: an OpenSandbox container is
+  OOM-killed as a unit. When the provider confirms that, the server reports `out_of_memory` to the model as the
+  command's result and continues the episode in a fresh sandbox, without the files from earlier commands. The
+  memory use is the candidate's own action, as a crashed notebook kernel would be. Other execution failures end the
+  episode as an infrastructure failure.
 - Verification retains separate reference, candidate and comparison sandboxes. It grades only the submitted
   `finish.answer`; working files and `finish.derivation` are not inputs to grading. The saved response can be
   verified again after the episode's agent session and resources session are closed.

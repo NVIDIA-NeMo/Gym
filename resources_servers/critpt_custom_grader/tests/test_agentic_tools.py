@@ -4,13 +4,22 @@
 
 import asyncio
 import shlex
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import SESSION_EXPIRED, EpisodeId, TaskId
+from nemo_gym.core import (
+    PROVIDER_OOM_KILLED,
+    PROVIDER_UNAVAILABLE,
+    SESSION_EXPIRED,
+    EpisodeId,
+    NgFailureEvent,
+    SandboxFailureDetails,
+    TaskId,
+)
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
@@ -34,6 +43,7 @@ class DirectoryProvider:
         self.stop_failures = 0
         self.create_failure = False
         self.exec_failure = None
+        self.exec_error = None
         self.active_commands = 0
         self.peak_commands = 0
         self.closed = False
@@ -51,6 +61,11 @@ class DirectoryProvider:
     async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
         if self.exec_failure is not None:
             return self.exec_failure
+        if self.exec_error is not None:
+            # One command fails; a provider that reports the sandbox ended has also ended it.
+            error, self.exec_error = self.exec_error, None
+            self.live.discard(handle.sandbox_id)
+            raise error
         self.active_commands += 1
         self.peak_commands = max(self.peak_commands, self.active_commands)
         try:
@@ -265,6 +280,59 @@ async def test_command_exit_timeout_and_provider_timeout_are_distinct(api, make_
         await sessions.execute("s1", "true")
     with pytest.raises(ResourcesSessionLostError):
         await sessions.execute("s1", "true")
+    await sessions.shutdown()
+
+
+def sandbox_ended(failure_kind):
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=failure_kind,
+        failure_reason="synthetic sandbox end",
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id="1"),
+    )
+
+
+async def test_command_that_exhausts_memory_is_reported_and_the_episode_continues_in_a_fresh_sandbox(make_sessions):
+    sessions, provider = make_sessions()
+    await sessions.seed(seed())
+    await sessions.execute("s1", "printf value > saved.txt")
+    provider.exec_error = sandbox_ended(PROVIDER_OOM_KILLED)
+    result = await sessions.execute("s1", "allocate more than the limit")
+    assert "<error_kind>out_of_memory</error_kind>" in result
+    assert "files and installed packages from earlier commands are gone" in result
+    assert len(provider.created) == 2 and provider.live == {"2"}
+    assert "<exit_code>1</exit_code>" in await sessions.execute("s1", "test -f saved.txt")
+    assert "<stdout>alive</stdout>" in await sessions.execute("s1", "printf alive")
+    await sessions.close(close())
+    assert not provider.live
+    await sessions.shutdown()
+
+
+async def test_memory_message_names_the_configured_limit(api, make_sessions):
+    sessions, provider = make_sessions()
+    sessions._spec = replace(sessions._spec, resources={"memory_mib": 8192})
+    await sessions.seed(seed())
+    provider.exec_error = sandbox_ended(PROVIDER_OOM_KILLED)
+    assert "memory limit (8192 MiB)" in await sessions.execute("s1", "allocate more than the limit")
+    await sessions.shutdown()
+
+
+async def test_other_sandbox_failures_and_a_failed_replacement_end_the_session(api, make_sessions):
+    sessions, provider = make_sessions()
+    await sessions.seed(seed())
+    provider.exec_error = sandbox_ended(PROVIDER_UNAVAILABLE)
+    with pytest.raises(api.AgenticExecutionError, match="provider"):
+        await sessions.execute("s1", "true")
+    with pytest.raises(ResourcesSessionLostError):
+        await sessions.execute("s1", "true")
+    await sessions.seed(seed("s2", episode="r2"))
+    provider.exec_error = sandbox_ended(PROVIDER_OOM_KILLED)
+    provider.create_failure = True
+    with pytest.raises(api.AgenticExecutionError, match="create"):
+        await sessions.execute("s2", "allocate more than the limit")
+    with pytest.raises(ResourcesSessionLostError):
+        await sessions.execute("s2", "true")
+    assert not provider.live
     await sessions.shutdown()
 
 
