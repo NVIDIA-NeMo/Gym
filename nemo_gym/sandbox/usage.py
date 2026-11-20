@@ -219,7 +219,13 @@ class SandboxUsageTracker:
         self.task = asyncio.create_task(self.poll(self.first))
 
     async def stop(self) -> None:
-        """Take the sample before close; call while the sandbox still runs."""
+        """Take the sample before close; call while the sandbox still runs.
+
+        Only the first call reads. A sandbox stop retried after its provider close failed calls this again, when
+        the sandbox may already be gone, and that read must not replace the one taken while it still ran.
+        """
+        if self.stopped:
+            return
         if self.task is not None:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
