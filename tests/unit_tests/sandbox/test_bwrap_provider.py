@@ -45,9 +45,16 @@ FAKE_BWRAP = """#!/bin/bash
 # bash, not sh: dash (Debian/Ubuntu /bin/sh) rejects the multi-digit --info-fd in `>&"$info"`.
 # Drop every bwrap option, then run the command after `--` on the host. Like bwrap, report the
 # pid of the namespace init (here: the command itself, after exec) on --info-fd.
+# Verify FD-bind sources reached the child, then close them as bwrap does before running guest code.
 info=
 while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
-  if [ "$1" = "--info-fd" ]; then info=$2; shift; fi
+  case "$1" in
+    --info-fd) info=$2; shift ;;
+    --bind-fd|--ro-bind-fd)
+      [ -e "/proc/self/fd/$2" ] || exit 98
+      eval "exec $2<&-"
+      shift 2 ;;
+  esac
   shift
 done
 shift
@@ -268,6 +275,80 @@ async def test_mounts_from_config_and_provider_options(system) -> None:
     ):
         with pytest.raises(BwrapCreateError, match=error):
             await start(provider, provider_options=options)
+
+
+@pytest.mark.parametrize("configured", [False, True], ids=["sandbox", "provider"])
+@pytest.mark.parametrize("ro", [False, True], ids=["rw", "ro"])
+async def test_replaced_mount_source_is_refused_before_another_exec(system, tmp_path, configured, ro) -> None:
+    source = tmp_path / "shared" / "data"
+    source.mkdir(parents=True)
+    mount = {"src": str(source), "dst": "/data", "ro": ro}
+    provider = make_provider(system, mounts=[mount] if configured else [])
+    sandbox = await start(provider, provider_options={} if configured else {"mounts": [mount]})
+    assert (await sandbox.exec("true")).return_code == 0
+    source.rename(source.with_name("original"))
+    source.symlink_to("/", target_is_directory=True)
+    marker = tmp_path / "must-not-run"
+    try:
+        result = await sandbox.exec(f"touch {marker}")
+        assert result.error_type == "sandbox" and result.return_code == 125
+        assert "symlink" in result.stderr
+        assert not marker.exists()
+        with pytest.raises(BwrapPathError, match="symlink"):
+            await sandbox.download("/data/etc/passwd", tmp_path / "leak")
+    finally:
+        await sandbox.stop()
+
+
+@pytest.mark.parametrize("parent_link", [False, True], ids=["source", "parent"])
+def test_bind_sources_reject_symlink_components(tmp_path, parent_link) -> None:
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    (directory / "data").write_text("original")
+    alias = tmp_path / "alias"
+    alias.symlink_to(directory if parent_link else directory / "data")
+    source = alias / "data" if parent_link else alias
+    with pytest.raises(BwrapPathError, match="symlink"):
+        with BwrapProvider._bind_sources(["bwrap", "--ro-bind", str(source), "/data", "--", "true"]):
+            pytest.fail("a symlink source was accepted")
+
+
+def test_bind_sources_pin_the_open_object_and_close_descriptors(tmp_path) -> None:
+    source = tmp_path / "data"
+    source.write_text("original")
+    original = source.stat()
+    argv = ["bwrap", "--ro-bind", str(source), "/data", "--", "echo", "--bind"]
+    with BwrapProvider._bind_sources(argv) as (pinned, descriptors):
+        assert len(descriptors) == 1
+        fd = descriptors[0]
+        assert pinned == ["bwrap", "--ro-bind-fd", str(fd), "/data", "--", "echo", "--bind"]
+        source.rename(tmp_path / "original")
+        source.symlink_to("/")
+        assert (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == (original.st_dev, original.st_ino)
+        assert subprocess.check_output(["cat", f"/proc/self/fd/{fd}"], pass_fds=descriptors, text=True) == "original"
+    with pytest.raises(OSError):
+        os.fstat(fd)
+
+
+def test_bind_sources_close_earlier_descriptors_when_a_later_source_fails(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "data"
+    source.write_text("original")
+    opened = []
+    original_open = BwrapProvider._open_bind_source
+
+    def record(path):
+        fd = original_open(path)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(BwrapProvider, "_open_bind_source", staticmethod(record))
+    argv = ["bwrap", "--bind", str(source), "/data", "--bind", str(tmp_path / "absent"), "/absent"]
+    with pytest.raises(FileNotFoundError):
+        with BwrapProvider._bind_sources(argv):
+            pytest.fail("an absent source was accepted")
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
 
 
 async def test_bwraps_own_setup_failure_is_a_sandbox_error(system, tmp_path) -> None:
