@@ -5,6 +5,7 @@
 import asyncio
 import importlib.metadata
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
@@ -14,6 +15,7 @@ from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRunt
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.utils import tool_recording_files
 
 
 # The sandbox runs the Stirrup version installed with this server, with its dependencies at this server's versions.
@@ -32,6 +34,8 @@ _PACKAGE_DIR = f"{RUNTIME_DIR}/harness/responses_api_agents/stirrup_agent"
 # The runner and the modules it imports; the rest of this package needs Gym, which the sandbox lacks.
 HARNESS_FILES = ("nemo_agent.py", "nemo_client.py", "stirrup_utils.py", "sandbox_runner.py")
 
+LOG = logging.getLogger(__name__)
+
 
 @dataclass
 class StirrupSessionState(AgentSessionState):
@@ -40,6 +44,8 @@ class StirrupSessionState(AgentSessionState):
     resources_cookies: dict[str, str]
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = field(default=None)
+    # The runner's tool events, collected even when it left no output; None when they could not be read.
+    tool_events: str | None = None
 
     async def install_runtime(self, *, timeout: float) -> None:
         """Reuse or install the Stirrup runtime and stage the harness files."""
@@ -53,6 +59,9 @@ class StirrupSessionState(AgentSessionState):
             await RUNTIME.install(sandbox, timeout_s=timeout)
         for name in HARNESS_FILES:
             await sandbox.upload(Path(__file__).with_name(name), f"{_PACKAGE_DIR}/{name}")
+        # The runner records its tool calls with these standard-library modules, imported from beside it.
+        for path, text in tool_recording_files(_PACKAGE_DIR).items():
+            await upload_text(sandbox, path=path, text=text)
         for package in (_PACKAGE_DIR, str(Path(_PACKAGE_DIR).parent)):
             await upload_text(sandbox, path=f"{package}/__init__.py", text="")
 
@@ -60,6 +69,8 @@ class StirrupSessionState(AgentSessionState):
         """Run the harness once and return its output, raising the runner's error."""
         input_path = f"{self.session.session_dir}/input.json"
         output_path = f"{self.session.session_dir}/output.json"
+        events_path = f"{self.session.session_dir}/tool_events.jsonl"
+        payload = {**payload, "tool_events_path": events_path}
 
         async def stage() -> SandboxCommand:
             await upload_text(self.session.sandbox, path=input_path, text=json.dumps(payload))
@@ -69,6 +80,12 @@ class StirrupSessionState(AgentSessionState):
             )
 
         async def collect() -> dict[str, Any]:
+            # Read first: the events keep the tool calls a runner that died without its output had started.
+            try:
+                self.tool_events = await read_text(self.session.sandbox, path=events_path)
+            except Exception:
+                LOG.debug("Stirrup tool events are unavailable", exc_info=True)
+                self.tool_events = None
             try:
                 return json.loads(await read_text(self.session.sandbox, path=output_path))
             except Exception as error:

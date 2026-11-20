@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,6 +32,8 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.trajectory import project_bundle_v1
+from nemo_gym.utils import ClockContext, ToolCallRecorder
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
@@ -515,20 +518,97 @@ class TestApp:
 
 class TestObservations:
     MODEL = ModelServerRef(type="responses_api_models", name="policy_model")
-    TOOL = {"kind": "tool_call", "invocation_id": "root", "tool_call_id": "c1", "status": "completed"}
+
+    @staticmethod
+    def _recorder(path: Path) -> ToolCallRecorder:
+        return ToolCallRecorder(
+            path=path,
+            producer_id="stirrup:test",
+            invocation_id="root",
+            agent_instance=None,
+            clock=ClockContext(location="sandbox", owner="test"),
+            boundary="lifecycle",
+            timing_source="stirrup.run_tool",
+        )
+
+    def _events(self, tmp_path: Path, *outcomes: str) -> tuple[str, list[str]]:
+        """Tool events as the runner records them: one call per outcome, all with native ID ``code_exec:0``."""
+        path = tmp_path / "tool_events.jsonl"
+        recorder, spans = self._recorder(path), []
+        for outcome in outcomes:
+            with recorder.call(
+                native_call_id="code_exec:0",
+                tool_call_id="code_exec:0",
+                tool_name="code_exec",
+                model_call_ref={"model_ref": self.MODEL.model_dump(mode="json"), "response_id": "r1"},
+            ) as observed:
+                observed.set_outcome(outcome)
+            spans.append(observed.span_id)
+        return path.read_text(), spans
 
     def _output(self, **observations):
-        raw = {"invocation_id": "root", "status": "completed", "model_response_ids": ["r1"], "tool_calls": [self.TOOL]}
+        raw = {
+            "invocation_id": "root",
+            "status": "completed",
+            "model_response_ids": ["r1"],
+            "tool_call_ids": {},
+            "tool_capture_failed_spans": [],
+        }
         raw |= observations
         return {"input_items": [{"role": "user", "content": "hi", "type": "message"}], "observations": raw}
 
-    def test_a_part_that_fails_validation_becomes_a_gap_and_the_rest_is_kept(self) -> None:
-        bundle = _observations(self._output(tool_calls=[self.TOOL, {**self.TOOL, "status": "exploded"}]), self.MODEL)
+    def test_recorded_tool_calls_take_the_conversations_call_ids(self, tmp_path) -> None:
+        events, spans = self._events(tmp_path, "completed", "failed")
+        call_ids = dict(zip(spans, ["code_exec:0-1", "code_exec:0-2"]))
 
-        assert [record.kind for record in bundle.records] == ["agent_invocation", "tool_call"]
-        assert [(gap.code, gap.detail) for gap in bundle.gaps] == [
-            ("observation_capture_failed", "tool_calls[1]: ValidationError")
+        bundle = _observations(self._output(tool_call_ids=call_ids), self.MODEL, events)
+
+        assert bundle.schema_version == "2.0"
+        tools = sorted((r for r in bundle.records if r.kind == "tool_call"), key=lambda t: t.timings[0].started_at)
+        assert [(t.tool_call_id, t.native_tool_call_id, t.status) for t in tools] == [
+            ("code_exec:0-1", "code_exec:0", "completed"),
+            ("code_exec:0-2", "code_exec:0", "failed"),
         ]
+        assert bundle.gaps == []
+
+    def test_the_v1_view_keeps_one_harness_timing_per_call(self, tmp_path) -> None:
+        events, spans = self._events(tmp_path, "completed", "timeout")
+        bundle = _observations(self._output(tool_call_ids=dict(zip(spans, ["c1", "c2"]))), self.MODEL, events)
+
+        v1 = project_bundle_v1(bundle.model_dump(mode="json"))
+
+        tools = [record for record in v1["records"] if record["kind"] == "tool_call"]
+        assert len(tools) == 2
+        for tool in tools:
+            assert tool["timing_source"] == "harness"
+            assert tool["completed_at"] >= tool["started_at"] > 1e9 and tool["duration_ms"] >= 0
+
+    def test_a_runner_without_output_keeps_the_calls_it_started(self, tmp_path) -> None:
+        path = tmp_path / "tool_events.jsonl"
+        self._recorder(path).start(native_call_id="c1", tool_call_id="c1", tool_name="code_exec")
+
+        bundle = _observations(None, self.MODEL, path.read_text())
+
+        (tool,) = bundle.records
+        assert (tool.tool_call_id, tool.status) == ("c1", "incomplete")
+        assert tool.timings[0].started_at is not None and tool.timings[0].completed_at is None
+        assert {"observation_capture_failed", "tool_completion_unavailable"} <= {gap.code for gap in bundle.gaps}
+
+    @pytest.mark.parametrize("ran_tools", [False, True])
+    def test_unreadable_events_are_a_gap_only_when_tools_ran(self, ran_tools) -> None:
+        output = self._output(tool_call_ids={"span-1": "c1"} if ran_tools else {})
+
+        bundle = _observations(output, self.MODEL, None)
+
+        assert [r.kind for r in bundle.records] == ["agent_invocation"]
+        assert [gap.code for gap in bundle.gaps] == (["tool_capture_unavailable"] if ran_tools else [])
+
+    def test_a_call_the_recorder_could_not_write_is_a_gap_on_its_span(self, tmp_path) -> None:
+        events, _ = self._events(tmp_path, "completed")
+
+        bundle = _observations(self._output(tool_capture_failed_spans=["lost"]), self.MODEL, events)
+
+        assert [(gap.code, gap.span_id) for gap in bundle.gaps] == [("tool_capture_unavailable", "lost")]
 
     def test_an_invalid_conversation_keeps_the_model_call_references(self) -> None:
         output = self._output()

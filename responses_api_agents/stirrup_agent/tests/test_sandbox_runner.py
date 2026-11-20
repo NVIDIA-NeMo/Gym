@@ -17,6 +17,8 @@ import pytest
 import stirrup.core.agent as stirrup_agent
 from stirrup.clients.utils import to_openai_tools
 
+from nemo_gym.trajectory import read_tool_events
+from nemo_gym.utils import ClockContext, ToolCallRecorder, tool_recording_files
 from responses_api_agents.stirrup_agent import nemo_agent as runner_agent
 from responses_api_agents.stirrup_agent import sandbox_runner
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
@@ -30,6 +32,56 @@ def restore_run_tool(monkeypatch):
     """The runner replaces ``run_tool`` on Stirrup's agent classes for its process; undo that after each test."""
     for cls in (stirrup_agent.Agent, NeMoAgent):
         monkeypatch.setattr(cls, "run_tool", cls.run_tool)
+
+
+@pytest.fixture(autouse=True)
+def staged_recorder(tmp_path_factory, monkeypatch):
+    """The recorder modules as the agent server stages them: importable by name, beside the runner, without Gym."""
+    staged = tmp_path_factory.mktemp("staged")
+    for path, text in tool_recording_files(staged).items():
+        Path(path).write_text(text)
+    monkeypatch.syspath_prepend(str(staged))
+    yield staged
+    for name in ("tool_recording", "jsonl_capture"):
+        sys.modules.pop(name, None)
+
+
+_MODEL_REF = {"type": "responses_api_models", "name": "policy_model"}
+
+
+def _observer(tmp_path: Path) -> Observer:
+    recorder = ToolCallRecorder(
+        path=tmp_path / "tool_events.jsonl",
+        producer_id="stirrup:test",
+        invocation_id="root",
+        agent_instance=None,
+        clock=ClockContext(location="sandbox", owner="test"),
+        boundary="lifecycle",
+        timing_source="stirrup.run_tool",
+    )
+    return Observer(recorder, model_ref=_MODEL_REF)
+
+
+def _tools(output: dict, tmp_path: Path) -> list[dict]:
+    """The recorded tool calls as the agent server reads them, in call order, under the conversation's call IDs."""
+    tools, _ = read_tool_events(tmp_path / "tool_events.jsonl")
+    call_ids = output["observations"]["tool_call_ids"]
+    flattened = []
+    for tool in tools:
+        (timing,) = tool.timings
+        flattened.append(
+            {
+                "tool_name": tool.tool_name,
+                "status": tool.status,
+                "tool_call_id": call_ids.get(tool.span_id, tool.tool_call_id),
+                "model_call_id": tool.model_call_id,
+                "started_at": timing.started_at,
+                "completed_at": timing.completed_at,
+                "duration_ms": timing.duration_ms,
+                "boundary": timing.boundary,
+            }
+        )
+    return sorted(flattened, key=lambda tool: tool["started_at"])
 
 
 @pytest.fixture
@@ -72,7 +124,7 @@ def test_a_conversation_runs_shell_commands_locally_and_task_tools_on_the_resour
         ]
     )
     try:
-        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, Observer()))
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, _observer(tmp_path)))
     finally:
         model.close()
 
@@ -104,7 +156,7 @@ def test_the_run_reports_its_model_calls_and_tool_executions(tmp_path, resources
         ]
     )
     try:
-        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, Observer()))
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, _observer(tmp_path)))
     finally:
         model.close()
 
@@ -112,7 +164,7 @@ def test_the_run_reports_its_model_calls_and_tool_executions(tmp_path, resources
     assert observations["status"] == "completed"
     assert observations["model_response_ids"] == ["chatcmpl-1", "chatcmpl-2", "chatcmpl-3", "chatcmpl-4"]
     assert model.session_ids == ["root"] * 4
-    tools = observations["tool_calls"]
+    tools = _tools(output, tmp_path)
     assert [(t["tool_name"], t["status"]) for t in tools] == [
         ("code_exec", "completed"),
         ("code_exec", "failed"),
@@ -122,12 +174,14 @@ def test_the_run_reports_its_model_calls_and_tool_executions(tmp_path, resources
     outputs = [item["call_id"] for item in output["output_items"] if item["type"] == "function_call_output"]
     assert [t["tool_call_id"] for t in tools] == outputs
     assert all(t["completed_at"] >= t["started_at"] > 1e9 and t["duration_ms"] >= 0 for t in tools)
+    # One lifecycle measurement per call, joined to the response that requested it.
+    assert {t["boundary"] for t in tools} == {"lifecycle"}
     counts = [(u["prompt_tokens"], u["completion_tokens"], u["total_tokens"]) for u in output["usages"]]
     assert counts == [(10, 5, 15)] * 4
 
 
 async def _cancelled_after_the_model_hangs(payload: dict, tmp_path: Path, model: _ModelServer) -> dict:
-    task = asyncio.ensure_future(run(payload, tmp_path, Observer()))
+    task = asyncio.ensure_future(run(payload, tmp_path, _observer(tmp_path)))
     assert await asyncio.to_thread(model.blocked.wait, 30), "the model was never called"
     task.cancel()
     return await task
@@ -150,22 +204,28 @@ def test_a_cancelled_run_reports_the_turns_it_completed(tmp_path, resources, mar
     assert output["stop_reason"] == stop_reason
     assert output["observations"]["status"] == "incomplete"
     assert [item["type"] for item in output["output_items"]].count("function_call") == 1
-    assert [t["tool_name"] for t in output["observations"]["tool_calls"]] == ["code_exec"]
+    assert [t["tool_name"] for t in _tools(output, tmp_path)] == ["code_exec"]
     assert (workdir / "report.txt").read_text() == "draft\n"
 
 
-def test_sigterm_makes_the_runner_write_its_partial_report(tmp_path, resources):
+def test_sigterm_makes_the_runner_write_its_partial_report(tmp_path, resources, staged_recorder):
     workdir = tmp_path / "root"
     workdir.mkdir()
     model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})), None])
     input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
-    input_path.write_text(json.dumps(_payload(model.base_url, resources.base_url, workdir)))
+    payload = {
+        **_payload(model.base_url, resources.base_url, workdir),
+        "tool_events_path": str(tmp_path / "tool_events.jsonl"),
+        "model_ref": _MODEL_REF,
+    }
+    input_path.write_text(json.dumps(payload))
     repo = Path(__file__).resolve().parents[3]
     runner = repo / "responses_api_agents/stirrup_agent/sandbox_runner.py"
     process = subprocess.Popen(
         [sys.executable, str(runner), str(input_path), str(output_path)],
         cwd=repo,
-        env={**os.environ, "PYTHONPATH": str(repo)},
+        # As in the sandbox, the recorder modules are importable by name only.
+        env={**os.environ, "PYTHONPATH": os.pathsep.join([str(staged_recorder), str(repo)])},
     )
     try:
         assert model.blocked.wait(60), "the model was never called"
@@ -179,10 +239,12 @@ def test_sigterm_makes_the_runner_write_its_partial_report(tmp_path, resources):
     assert (output["stop_reason"], output["observations"]["status"]) == ("wall_time", "incomplete")
     assert any(item["type"] == "function_call" for item in output["output_items"])
     assert (workdir / "report.txt").read_text() == "draft\n"
+    assert [(t["tool_name"], t["status"]) for t in _tools(output, tmp_path)] == [("code_exec", "completed")]
 
 
 def _run_main(tmp_path: Path, payload: dict) -> dict:
     input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
+    payload = {"tool_events_path": str(tmp_path / "tool_events.jsonl"), "model_ref": _MODEL_REF, **payload}
     input_path.write_text(json.dumps(payload))
     main(str(input_path), str(output_path))
     return json.loads(output_path.read_text())
@@ -199,7 +261,7 @@ def test_task_tool_calls_retry_the_connection_before_the_request_is_sent(tmp_pat
     monkeypatch.setattr(httpx, "AsyncHTTPTransport", recording_transport)
     model = _ModelServer([_call("finish", json.dumps({"reason": "done", "paths": []}))])
     try:
-        asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
+        asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, _observer(tmp_path)))
     finally:
         model.close()
 
@@ -220,14 +282,20 @@ def test_a_failed_run_still_reports_what_it_observed(tmp_path, resources):
     observations = output["observations"]
     assert observations["status"] == "failed"
     assert observations["model_response_ids"] == ["chatcmpl-1", "chatcmpl-2"]
-    assert [t["tool_name"] for t in observations["tool_calls"]] == ["code_exec"]
+    # The call that raised is kept as a failed attempt.
+    assert [(t["tool_name"], t["status"]) for t in _tools(output, tmp_path)] == [
+        ("code_exec", "completed"),
+        ("fetch_web_page", "failed"),
+    ]
 
 
 @pytest.mark.parametrize("status", [400, 413, 422])
 def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turns_so_far(tmp_path, resources, status):
     model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"})), status])
     try:
-        output = asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
+        output = asyncio.run(
+            run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, _observer(tmp_path))
+        )
     finally:
         model.close()
 
@@ -237,7 +305,7 @@ def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turn
     observations = output["observations"]
     assert observations["status"] == "failed"
     assert observations["model_response_ids"] == ["chatcmpl-1"]
-    assert [t["tool_name"] for t in observations["tool_calls"]] == ["code_exec"]
+    assert [t["tool_name"] for t in _tools(output, tmp_path)] == ["code_exec"]
     assert [item["type"] for item in output["output_items"]] == ["function_call", "function_call_output"]
     assert [u["total_tokens"] for u in output["usages"]] == [15]
 
@@ -314,7 +382,7 @@ def test_summary_exhaustion_preserves_the_just_completed_turn_and_model_observat
         "function_call",
         "function_call_output",
     ] * completed_tools
-    assert [(t["tool_name"], t["status"]) for t in output["observations"]["tool_calls"]] == [
+    assert [(t["tool_name"], t["status"]) for t in _tools(output, tmp_path)] == [
         ("code_exec", "completed")
     ] * completed_tools
     assert [usage["total_tokens"] for usage in output["usages"]] == [15] * request_count
@@ -343,9 +411,7 @@ def test_unrecoverable_context_overflow_is_a_model_rejection_with_partial_histor
     assert output["model_error_status"] == status
     assert output["observations"]["status"] == "failed"
     assert output["observations"]["model_response_ids"] == (["chatcmpl-1"] if completed_turn else [])
-    assert [tool["tool_name"] for tool in output["observations"]["tool_calls"]] == (
-        ["code_exec"] if completed_turn else []
-    )
+    assert [tool["tool_name"] for tool in _tools(output, tmp_path)] == (["code_exec"] if completed_turn else [])
     assert [item["type"] for item in output["output_items"]] == (
         ["function_call", "function_call_output"] if completed_turn else []
     )
@@ -383,7 +449,7 @@ def test_a_context_overflow_with_recovery_on_drops_the_latest_turn_and_the_run_c
     assert output["observations"]["model_response_ids"] == ["chatcmpl-1", "chatcmpl-2", "chatcmpl-4"]
     assert [usage["total_tokens"] for usage in output["usages"]] == [15] * 3
     # The dropped turn's command ran, so its execution stays in the observations; no output item refers to it.
-    assert [t["tool_name"] for t in output["observations"]["tool_calls"]] == ["code_exec", "code_exec", "finish"]
+    assert [t["tool_name"] for t in _tools(output, tmp_path)] == ["code_exec", "code_exec", "finish"]
     assert len(model.requests) == 4
 
 
@@ -418,11 +484,11 @@ def test_a_timed_out_command_is_a_timeout_observation_and_the_model_sees_the_fai
         ]
     )
     try:
-        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, Observer()))
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, _observer(tmp_path)))
     finally:
         model.close()
 
-    tools = output["observations"]["tool_calls"]
+    tools = _tools(output, tmp_path)
     assert [(t["tool_name"], t["status"]) for t in tools] == [
         ("code_exec", "timeout"),
         ("code_exec", "completed"),
@@ -439,7 +505,7 @@ def test_a_run_that_uses_all_its_turns_without_finishing_is_incomplete(tmp_path,
     model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"}))] * 2)
     payload = {**_payload(model.base_url, resources.base_url, workdir), "max_turns": 2}
     try:
-        output = asyncio.run(run(payload, tmp_path, Observer()))
+        output = asyncio.run(run(payload, tmp_path, _observer(tmp_path)))
     finally:
         model.close()
 
@@ -450,7 +516,7 @@ def test_a_run_that_uses_all_its_turns_without_finishing_is_incomplete(tmp_path,
 def test_the_model_sees_the_certified_tool_definitions(tmp_path, resources):
     model = _ModelServer([_call("finish", json.dumps({"reason": "done"}))])
     try:
-        asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
+        asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, _observer(tmp_path)))
     finally:
         model.close()
 
@@ -476,7 +542,7 @@ def test_without_code_exec_the_model_sees_only_the_request_tools(tmp_path, resou
     model = _ModelServer([_call("finish", json.dumps({"reason": "done"}))])
     payload = {**_payload(model.base_url, resources.base_url, tmp_path), "code_exec": False}
     try:
-        output = asyncio.run(run(payload, tmp_path, Observer()))
+        output = asyncio.run(run(payload, tmp_path, _observer(tmp_path)))
     finally:
         model.close()
 
@@ -526,7 +592,9 @@ def test_a_422_whose_detail_is_not_a_validation_error_list_reaches_the_model(tmp
         [_call("finish", json.dumps({"reason": "unprocessable"})), _call("finish", '{"reason": "ok"}')]
     )
     try:
-        output = asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
+        output = asyncio.run(
+            run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, _observer(tmp_path))
+        )
     finally:
         model.close()
 

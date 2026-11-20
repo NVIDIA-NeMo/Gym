@@ -33,6 +33,11 @@ supervisor. The runner builds Stirrup's messages from `responses_create_params.i
 The model server is reached directly from the sandbox, so its address must be reachable from there. The trajectory
 comes back as the response's output items; verification belongs to the resources server.
 
+Each tool call is recorded as it starts and finishes, with Gym's tool call recorder, to `tool_events.jsonl` in the
+session directory. The agent server reads the file when the session closes, so a runner that is killed keeps the calls
+it started. Each call has one lifecycle timing, from the start to the end of Stirrup's tool handling, joined to the
+model response that requested it, and keeps the call ID the conversation uses for it.
+
 If the model server rejects a request as invalid (HTTP 400, 413 or 422, such as a context overflow), the episode ends
 there. The response carries the turns completed so far, with `status: failed`, an `error` and
 `metadata.stop_reason: model_error`, and the resources server verifies it. Any other model server error fails the
