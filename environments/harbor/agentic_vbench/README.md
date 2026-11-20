@@ -38,7 +38,11 @@ gym eval run agentic_vbench --agent opencode_agent --sandbox docker \
 
 Each task folder is the upstream folder with three adjustments; the adjustments and the digests of the files they
 touch are recorded under `.records/<task>/` in this folder (`judge_protocol.json`, `assembly_judge_guard.json`,
-`materials.json`). A task none of them applies to is byte for byte the upstream folder.
+`materials.json`). A task none of them applies to is byte for byte the upstream folder, plus two additions every
+task gets: `task_data.json` naming its family, and the OpenCode compaction plugins under the step's
+`workdir/.opencode-plugins/` (`opencode_plugins.json`), which sit unused unless a run loads them (see
+[`benchmarks/agentic_vbench/opencode_plugins/`](../../../benchmarks/agentic_vbench/opencode_plugins/README.md) and the
+training entry [`agentic_vbench_train`](../agentic_vbench_train/README.md)).
 
 | Tasks | Change | Why |
 | --- | --- | --- |
@@ -72,8 +76,12 @@ time), so `gym eval run` and `gym dataset validate` build them once at prepare t
 (`tool`, `repository`); with `--sandbox docker` and no repository, `docker` builds them locally.
 
 Each task declares 1800 s for the agent and 1800 s for the verifier. The benchmark's published runs gave the
-verifiers a 3x allowance; `[gym.defaults] timeout_multiplier` scales the agent budget too, so a comparable run is not
-expressible yet, and runs through this entry use the task budgets as published.
+verifiers a 3x allowance, which `dataset.toml` declares as `[gym.defaults] verifier_timeout_multiplier = 3.0`: the
+verifiers get 5400 s and the agent budgets stay as published (`timeout_multiplier` would scale both).
+
+Every task also carries `task_data.json` naming its family (typed by `task_data.py` beside this README), so
+`python -m benchmarks.agentic_vbench.family_metrics <rollouts.jsonl>` computes the per-family means and the
+leaderboard's equal-family mean from a run's rows.
 
 ## Scoring and validation status
 

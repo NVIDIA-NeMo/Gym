@@ -1004,6 +1004,9 @@ _gym_end_own_chain() {{
         fi
     fi
     # The sentinel first: once its follow-up is gone, its afterany dependency is met and it could start.
+    # A chain that ends with nothing eligible for retry is not complete.
+    _why="the run is complete"
+    [[ $_ended != {no_eligible_retry} ]] || _why="no task is eligible for another attempt"
     for _role in sentinel follow_up; do
         _file="$OUTPUT_DIR/.gym_followup_queued.$SLURM_JOB_ID"
         [[ $_role == follow_up ]] || _file="$OUTPUT_DIR/.gym_followup_sentinel.$SLURM_JOB_ID"
@@ -1011,7 +1014,7 @@ _gym_end_own_chain() {{
         [[ "$_id" =~ ^[0-9]{{1,15}}$ ]] || continue
         if scancel "$_id"; then
             _result=cancelled
-            echo "Cancelled this chain's queued ${{_role/_/-}} $_id: the run is complete."
+            echo "Cancelled this chain's queued ${{_role/_/-}} $_id: $_why."
         else
             _result=scancel_failed
             echo "WARNING: could not cancel this chain's queued ${{_role/_/-}} $_id; if it starts, its prologue ends it."

@@ -14,3 +14,8 @@ collab_intel_agent:
       judge_base_url: ${oc.env:COLLAB_INTEL_JUDGE_BASE_URL}
       judge_model: ${oc.env:COLLAB_INTEL_JUDGE_MODEL}
       max_concurrent: 16
+      # where the policy's code runs: "sandbox" (the default, through the provider below) or "host" (unsandboxed, trusted
+      # models only). The sandbox must have no network: set it in sandbox_spec.provider_options, e.g. for OpenSandbox
+      # provider_options: {network_policy: {defaultAction: deny}}
+      code_execution: sandbox
+      sandbox_provider: sandbox
