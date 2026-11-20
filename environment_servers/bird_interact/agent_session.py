@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, PositiveInt
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
+    AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentContinuationRequirements,
@@ -138,13 +139,13 @@ class AgentSession:
         """Run the session's next turn on ``params``, and record it.
 
         ``deadline`` is in event loop time (``loop.time()``); the agent learns how long it has from
-        ``metadata.agent_timeout_sec``. Raises ``TurnDeadlineExpired`` when the deadline passes first.
+        the ``AGENT_TIMEOUT_METADATA_KEY`` metadata entry. Raises ``TurnDeadlineExpired`` when the deadline passes first.
         """
         turn = len(self.turns) + 1
         loop = asyncio.get_running_loop()
         started = loop.time()
         body = params.model_copy(
-            update={"metadata": {**(params.metadata or {}), "agent_timeout_sec": str(deadline - started)}}
+            update={"metadata": {**(params.metadata or {}), AGENT_TIMEOUT_METADATA_KEY: str(deadline - started)}}
         )
         try:
             async with asyncio.timeout_at(deadline) as timer:

@@ -22,8 +22,8 @@ grades them. Each episode holds one task:
 
 The first turn's request has the instructions and the user's ambiguous request. In c-Interact it also has the schema,
 the column meanings and the visible knowledge base. In a-Interact it leaves those out, because the tools charge for
-them. Over `direct_http` it declares the nine function tools; over `mcp` alone it declares none, because the agent
-lists them from the server and Codex refuses a request that declares tools.
+them. Over `direct_http` it declares the nine function tools. Over `mcp` alone it declares none, because the agent
+lists them from the server, and some harnesses refuse a request that also declares tools.
 
 **Tools.** The agent calls the tools with a signed episode token that its seed grants. Over `direct_http` it calls
 `POST /<tool name>` on this server; over `mcp`, `/mcp` lists only its episode's tools. The token works only on the
@@ -63,17 +63,18 @@ The prompts are written for Gym, not copied from the BIRD repository. Parity run
 the reference prompts and the reference simulator model (`gemini-2.0-flash-001`).
 
 If the user model fails during an a-Interact `ask`, the result masks the sample with
-`failure_kind: bird_interact:user_simulator_failed`. In c-Interact the failure fails the episode, which is retried.
+`failure_kind: bird_interact:user_simulator_failed`. In c-Interact the failure fails the episode: a transient failure
+is retried, and a client error, such as a 4xx from the user model, fails it for good.
 
 ## Database sandbox
 
 The episode starts a sandbox and stops it when the episode ends, on every path; at shutdown the server finishes
 the cleanups of episodes still running, and `sandbox_config.ttl_s` lets the provider reclaim a sandbox that a
 crashed server left. The server uploads `grading.py` and the database source and runs
-`python3 grading.py <setup|execute|grade> <request.json>` there, so the image needs only `python3` (default
-`python:3.12-slim`). The agent's SQL and the grading run in the sandbox, never in the server process, and the agent
-never gets the sandbox itself. `grading.py` deletes each request file once it has read it, so the solution SQL in a
-grade request does not stay in the sandbox.
+`python3 grading.py <setup|execute|grade> <request.json>` there, so the image needs only `python3` 3.10 or newer
+(default `python:3.12-slim`). The agent's SQL and the grading run in the sandbox, never in the server process, and the
+agent never gets the sandbox itself. `grading.py` deletes each request file once it has read it, so the solution SQL
+in a grade request does not stay in the sandbox.
 
 `sandbox_provider: sandbox` names the provider block that a provider config binds, such as
 `nemo_gym/sandbox/providers/docker/configs/docker.yaml`. The local provider
@@ -101,8 +102,9 @@ and Codex, in a-Interact over `mcp`, have run BIRD with a model; the other rows 
 | `simple_agent` | Yes | Yes, over `direct_http` |
 | Codex, Pi, Hermes | No: the adapter has no multi-turn sessions | Yes, over `mcp`, in the harness's own sandbox |
 | Stirrup | No: no multi-turn sessions | Yes, over `direct_http`, in its own sandbox. `code_exec: false` leaves out its shell. |
-| OpenCode | Yes, in its own sandbox. `opencode_config.tools` turns off its built-in tools. | No: it refuses required tool grants |
-| Claude Code, Kilo, OpenClaw | No: no multi-turn sessions | No: they refuse required tool grants, MCP included |
+| OpenCode | Yes, in its own sandbox. `opencode_config.tools` turns off its built-in tools. | Yes, over `mcp`, in its own sandbox |
+| Kilo, OpenClaw | No: no multi-turn sessions | Yes, over `mcp`, in its own sandbox |
+| Claude Code | No: no multi-turn sessions | No: it refuses required tool grants, MCP included |
 
 - **Neither mode grants a sandbox.** BIRD's sandbox holds the database and the ground truth. A sandboxed harness
   runs in its own sandbox, from the `sandbox_provider` in the agent's config. Turn off its built-in tools where the
@@ -144,7 +146,7 @@ after the ground truth is merged into the rows.
 - Rows with custom `test_cases` (BIRD-Interact's management tasks). The episode fails at seed, for good.
 - PostgreSQL (Lite and Full).
 - Database changes that carry over from phase 1 to phase 2. Each submission runs on a scratch copy.
-- The data and catalog checks that `gym env test` runs for a Resources Server (GYMINT-643).
+- The data and catalog checks that `gym env test` runs for a Resources Server.
 
 ## Running
 

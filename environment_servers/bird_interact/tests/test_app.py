@@ -29,8 +29,10 @@ from environment_servers.bird_interact.app import (
     USER_SIMULATOR_FAILED,
     BirdInteractEnvironmentServer,
     BirdInteractEnvironmentServerConfig,
+    BirdInteractEpisode,
     BirdInteractRequest,
     BirdInteractResponse,
+    SandboxCommandError,
     extract_sql,
 )
 from environment_servers.bird_interact.grading import grade, main, split_statements, strip_round_calls
@@ -232,7 +234,7 @@ def _server(
                 {
                     "sandbox_provider": LOCAL_SANDBOX,
                     "max_turns": 20 if mode == "c_interact" else 1,
-                    "turn_timeout_seconds": 60,
+                    "activation_timeout_seconds": 60,
                 }
                 | config
             ),
@@ -656,7 +658,7 @@ class TestAgentSession:
         assert client.agent_calls == [] and client.closes == 1
 
     async def test_a_turn_over_its_timeout_fails_the_episode_for_a_retry(self) -> None:
-        server, _ = _server(turns=[_hang], turn_timeout_seconds=0.05)
+        server, _ = _server(turns=[_hang], activation_timeout_seconds=0.05)
 
         response = await _run(server)
 
@@ -743,10 +745,13 @@ class TestDatabaseSandbox:
         self, sandbox_workspace: Path
     ) -> None:
         during: list[list[Path]] = []
+        both_running = asyncio.Barrier(2)
 
         def agent(sql: str) -> Callable[[_Tools], Awaitable[str]]:
             async def turn(tools: _Tools) -> str:
-                await asyncio.sleep(0.2)  # Both episodes are running.
+                await asyncio.wait_for(
+                    both_running.wait(), 30
+                )  # Both episodes are in a turn, so both sandboxes exist.
                 during.append([path for path in _sandboxes(sandbox_workspace) if (path / "episode.sqlite").exists()])
                 return _sql(sql)
 
@@ -803,6 +808,26 @@ class TestDatabaseSandbox:
 
         assert response.result.reward == 0.7
         assert not broken[0].parent.exists()
+        assert _sandboxes(sandbox_workspace) == []
+
+    async def test_an_ending_episode_starts_no_replacement_sandbox(
+        self, sandbox_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The episode's cleanup would never stop a sandbox started while it runs, for a tool call still in flight.
+        episodes: list[BirdInteractEpisode] = []
+        start = BirdInteractEnvironmentServer._start_episode
+
+        async def start_and_keep(self: BirdInteractEnvironmentServer, *args: Any) -> BirdInteractEpisode:
+            episodes.append(await start(self, *args))
+            return episodes[-1]
+
+        monkeypatch.setattr(BirdInteractEnvironmentServer, "_start_episode", start_and_keep)
+        server, _ = _server(turns=[_sql(CORRECT_1)])
+        await _run(server)
+
+        with pytest.raises(SandboxCommandError, match="The episode is ending"):
+            await server._replace_sandbox(episodes[0])
+        assert _sandboxes(sandbox_workspace) == []
 
     async def test_a_sandbox_that_keeps_failing_fails_a_c_interact_episode_for_a_retry(
         self, sandbox_workspace: Path

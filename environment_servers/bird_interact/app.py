@@ -159,7 +159,7 @@ class BirdInteractEnvironmentServerConfig(BaseEnvironmentServerWithToolsConfig):
     max_turns: PositiveInt = Field(
         description="Most agent turns in one episode. Above 1, the agent must resume its session across turns."
     )
-    turn_timeout_seconds: PositiveFloat
+    activation_timeout_seconds: PositiveFloat
     interaction_timeout_seconds: PositiveFloat | None = Field(
         default=None,
         description="Bound on all turns together. When it expires, the agent is closed and the episode is graded.",
@@ -290,6 +290,9 @@ class BirdInteractEpisode:
     failure_reason: str | None = None
     # a-Interact only.
     toolset: TypedToolset | None = None
+    # Set when ``run`` ends. A sandbox replaced after that would start during the episode's cleanup, which runs its
+    # entries in reverse and would never stop it.
+    ending: bool = False
 
     @property
     def coins_left(self) -> float:
@@ -500,6 +503,15 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
 
     async def run(self, request: BirdInteractRequest, cleanup: CleanupContext) -> BirdInteractResponse:
         episode = await self._start_episode(request, cleanup)
+        try:
+            return await self._run_started(episode, request, cleanup)
+        finally:
+            # Before the base class runs the cleanup: a tool call still in flight must not start a sandbox now.
+            episode.ending = True
+
+    async def _run_started(
+        self, episode: BirdInteractEpisode, request: BirdInteractRequest, cleanup: CleanupContext
+    ) -> BirdInteractResponse:
         served = await self.serve_tools(request, episode.toolset, cleanup) if episode.toolset is not None else None
         tool_calls = served.calls if served is not None else []
         agent = AgentSession(self.server_client, self.config.agent_server, request)
@@ -533,7 +545,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
     async def _converse(self, episode: BirdInteractEpisode, agent: AgentSession) -> str:
         """Run the agent's turns until the user side stops them or a limit does; return the stop reason.
 
-        A turn over ``turn_timeout_seconds`` fails the episode for a retry. The interaction deadline stops the turns,
+        A turn over ``activation_timeout_seconds`` fails the episode for a retry. The interaction deadline stops the turns,
         and the episode is still graded.
         """
         loop = asyncio.get_running_loop()
@@ -544,7 +556,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
             now = loop.time()
             if interaction_deadline is not None and now >= interaction_deadline:
                 return "interaction_timeout"
-            turn_deadline = now + self.config.turn_timeout_seconds
+            turn_deadline = now + self.config.activation_timeout_seconds
             deadline = turn_deadline if interaction_deadline is None else min(turn_deadline, interaction_deadline)
             try:
                 record = await agent.activate(params, deadline=deadline)
@@ -554,7 +566,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 raise handled_episode_failure(
                     stage="agent",
                     operation="episode",
-                    failure_reason=f"Agent turn {turn} timed out after {self.config.turn_timeout_seconds} seconds",
+                    failure_reason=f"Agent turn {turn} timed out after {self.config.activation_timeout_seconds} seconds",
                     terminal=False,
                 ) from error
             action = agent_outcome_policy(record.response, config=self.config.agent_outcome_policy)
@@ -840,6 +852,8 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
             raise SandboxCommandError(f"grading.py {command} printed no JSON result: {result.stdout!r}") from error
 
     async def _replace_sandbox(self, episode: BirdInteractEpisode) -> None:
+        if episode.ending:
+            raise SandboxCommandError("The episode is ending, so its sandbox is not replaced")
         try:
             fresh = await self._start_sandbox(
                 episode.request, episode.cleanup, episode.task, self._database_source(episode.task.selected_database)

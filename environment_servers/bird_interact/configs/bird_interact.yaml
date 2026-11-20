@@ -80,7 +80,9 @@ bird_interact_c_interact:
       cleanup_timeout_seconds: 120
       # Questions (ambiguities + patience), two SQL attempts for each of two phases, with room to spare.
       max_turns: 20
-      turn_timeout_seconds: 600
+      activation_timeout_seconds: 600
+      # Stops the turns and still grades them, before the episode deadline fails the episode.
+      interaction_timeout_seconds: 3000
 
 bird_interact_a_interact:
   environment_servers:
@@ -106,7 +108,7 @@ bird_interact_a_interact:
       default_episode_timeout_seconds: 3600
       cleanup_timeout_seconds: 120
       # simple_agent calls the tools over direct HTTP. Set [mcp] for an agent that takes only MCP grants (Codex, Pi,
-      # Hermes); the first request then declares no tools, which Codex would refuse.
+      # Hermes); the first request then declares no tools, because the agent lists them from the server.
       tool_transports: [direct_http]
       max_turns: 1
-      turn_timeout_seconds: 1800
+      activation_timeout_seconds: 1800
