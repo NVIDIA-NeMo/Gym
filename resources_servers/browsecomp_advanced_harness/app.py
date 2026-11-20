@@ -1154,11 +1154,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
         if self._search_cache.enabled:
             LOG.info(
-                "Search cache enabled at %s (fuzzy=%s, read_only=%s, index norms=%s)",
+                "Search cache enabled at %s (fuzzy=%s, read_only=%s, index norms=%s, pack=%s)",
                 cache_dir,
                 self.config.search_cache_fuzzy_threshold or "off",
                 self._search_cache.read_only,
                 self._search_cache.index_size,
+                self._search_cache.pack_generation or "off",
             )
 
         print(f"Excluded domains: {self._exclude_domains}")

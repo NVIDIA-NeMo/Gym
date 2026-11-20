@@ -36,6 +36,11 @@ shard, which build_cache_index.py merges into the master offline.
 Layout (under <root>):
     search/<ab>/<cd>/<sha256(norm_query)>.json -> {"query","norm","provider","results":[...], ...extra}
     browse/<ab>/<cd>/<sha256(norm_url)>.json   -> {"url","norm","provider","content": "...", "max_characters"?}
+    pack/                                      optional read-only pack of the same entries
+                                               (search_cache_pack.py, build_cache_pack.py)
+
+Reads go to the flat file first; only when it does not exist is the pack
+consulted (when pack/MANIFEST.json exists). Writes always go to flat files.
 
 Single key namespace across providers. Each entry is tagged with the provider
 that produced it ("tavily" | "exa"); entries written by the reference harness
@@ -79,6 +84,7 @@ from resources_servers.browsecomp_advanced_harness.rollout_context import (
     log_line,
     record_phase,
 )
+from resources_servers.browsecomp_advanced_harness.search_cache_pack import open_pack
 from resources_servers.browsecomp_advanced_harness.sqlite_fuzzy_index import (
     DEFAULT_CANDIDATE_LIMIT,
     DEFAULT_TOKENIZER,
@@ -182,7 +188,16 @@ class SearchCache:
             "browse_get_max_s": 0.0,
             "browse_get_slow": 0,
             "put_errors": 0,
+            # Hits the pack served because the flat file was absent (fuzzy
+            # included); subsets of search_hits / browse_hits. pack_errors is
+            # the reader's own counter, merged in by stats().
+            "search_pack_hits": 0,
+            "browse_pack_hits": 0,
         }
+        # On iff <root>/pack/MANIFEST.json exists. open_pack raises when the
+        # manifest lists a shard file that is missing or the wrong size: failing
+        # here beats serving silent misses that each become a paid provider call.
+        self._pack = open_pack(self.root) if self.enabled else None
         self._fuzzy_index = None
         self._shard_path = None
         # Read-only creates nothing: the dirs we need are the ones already
@@ -212,6 +227,11 @@ class SearchCache:
             # caches nothing has nothing for build_cache_index.py to merge.
             if not self.read_only:
                 self._shard_path = os.path.join(index_dir, f"search_norms_{os.uname().nodename}_{os.getpid()}.txt")
+
+    @property
+    def pack_generation(self):
+        """Generation id of the pack being served, or None when there is no pack."""
+        return self._pack.generation if self._pack is not None else None
 
     @property
     def index_size(self) -> int:
@@ -261,17 +281,30 @@ class SearchCache:
         d = os.path.join(self.root, kind, h[:2], h[2:4])
         return d, os.path.join(d, h + ".json")
 
-    def _read(self, kind, norm_key):
-        """The stored entry, or None when it is missing, unreadable or malformed."""
+    def _read(self, kind, norm_key, count_pack_hit=False):
+        """The stored entry, or None when it is missing, unreadable or malformed.
+
+        Flat file first; the pack only when the flat file does not exist. A flat file
+        that exists but is corrupt or unreadable stays a miss: the pack never masks it.
+        count_pack_hit bumps <kind>_pack_hits when the pack serves the entry -- the get
+        paths pass it, the prefer-exa check does not."""
         _, path = self._path(kind, norm_key)
+        from_pack = False
         try:
             with open(path, "r", encoding="utf-8") as f:
                 obj = json.load(f)
+        except FileNotFoundError:
+            if self._pack is None:
+                return None
+            obj = self._pack.load(kind, hashlib.sha256(norm_key.encode("utf-8")).digest())
+            from_pack = True
         except (OSError, ValueError):
-            return None  # missing, unreadable, invalid UTF-8 or invalid JSON -> miss
+            return None  # unreadable, invalid UTF-8 or invalid JSON -> miss
         value_key, value_type = ("results", list) if kind == "search" else ("content", str)
         if not isinstance(obj, dict) or not isinstance(obj.get(value_key), value_type):
-            return None  # an entry of another shape is a miss, never an empty hit
+            return None  # an entry of another shape (or absent from the pack) is a miss, never an empty hit
+        if from_pack and count_pack_hit:
+            self._bump(f"{kind}_pack_hits")
         return obj
 
     def _write(self, kind, norm_key, payload, *, create_only: bool = False) -> bool:
@@ -376,7 +409,7 @@ class SearchCache:
         # never show.
         record_phase("cache_fuzzy", _elapsed)
 
-        obj = None if matched_norm is None else self._read("search", matched_norm)
+        obj = None if matched_norm is None else self._read("search", matched_norm, count_pack_hit=True)
         if matched_norm is None:
             status = "miss"
         elif obj is None:
@@ -418,7 +451,7 @@ class SearchCache:
         _t0 = perf_counter()
         try:
             norm = self._norm_q(query)
-            obj = self._read("search", norm)
+            obj = self._read("search", norm, count_pack_hit=True)
             if obj is not None and accept is not None and not accept(obj):
                 obj = None
             if obj is None and self.fuzzy_threshold:
@@ -482,7 +515,7 @@ class SearchCache:
             return None
         _t0 = perf_counter()
         try:
-            obj = self._read("browse", normalize_url(url))
+            obj = self._read("browse", normalize_url(url), count_pack_hit=True)
             if obj is not None and min_characters is not None:
                 cap = obj.get("max_characters")
                 # An exa page written without its cap (the source branch stored none) may have been
@@ -514,7 +547,9 @@ class SearchCache:
     # ---- stats ------------------------------------------------------------
     def stats(self) -> dict[str, int | float]:
         with self._lock:
-            return dict(self._stats)
+            s = dict(self._stats)
+        s["pack_errors"] = self._pack.errors if self._pack is not None else 0
+        return s
 
     def stats_report(self) -> dict[str, int | float]:
         """Stats dict enriched with totals + hit percentages."""
@@ -545,6 +580,12 @@ class SearchCache:
                 f" max {r['browse_get_max_s']:.2f}s ({r['browse_get_slow']} >0.5s)"
             )
         errors = f" | put errors {r['put_errors']}" if r["put_errors"] else ""
+        pack = ""
+        if self._pack is not None:
+            pack = (
+                f" | pack hits search {r['search_pack_hits']}, browse {r['browse_pack_hits']},"
+                f" errors {r['pack_errors']}"
+            )
         return (
             (
                 "cache: search {search_hits}/{search_total} ({search_hit_pct:.0f}%)" + fuzzy + ", "
@@ -552,4 +593,5 @@ class SearchCache:
             ).format(**r)
             + lat
             + errors
+            + pack
         )
