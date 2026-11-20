@@ -682,7 +682,7 @@ def test_tb4_profile_leaves_the_shared_s3_bucket_out(tmp_path, monkeypatch, veri
     assert env.build_spec().metadata["nemo.nvidia.com/s3-hostpath"] == "false"
 
 
-def scripted_exec(box, *, default_user_can_write, can_switch=True, identity="1001\n1001\n"):
+def scripted_exec(box, *, default_user_can_write, can_switch=True, switch_raises=False, identity="1001\n1001\n"):
     """Answer the log setup commands as a sandbox whose default user cannot write to `/` would."""
     calls = []
 
@@ -691,6 +691,8 @@ def scripted_exec(box, *, default_user_can_write, can_switch=True, identity="100
         if "id -u" in command:
             return SimpleNamespace(return_code=0, stdout=identity, stderr="")
         if kwargs.get("user") == "root":
+            if switch_raises:
+                raise ValueError("explicit users are not supported")
             if not can_switch:
                 return SimpleNamespace(return_code=125, stdout="", stderr="user switch unavailable")
             return SimpleNamespace(return_code=0, stdout="", stderr="")
@@ -736,3 +738,18 @@ async def test_log_directory_failure_is_reported_when_the_image_user_is_unknown(
     with pytest.raises(RuntimeError, match="Permission denied"):
         await env.start()
     assert not any(user == "root" for _, user in calls)
+
+
+async def test_log_directory_failure_is_reported_when_the_identity_command_returns_no_output(tmp_path, monkeypatch):
+    env, box, _, _ = make_environment(tmp_path, monkeypatch)
+    calls = scripted_exec(box, default_user_can_write=False, identity=None)
+    with pytest.raises(RuntimeError, match="Failed to initialize task log directories.*Permission denied"):
+        await env.start()
+    assert not any(user == "root" for _, user in calls)
+
+
+async def test_log_directory_failure_is_reported_when_the_provider_rejects_the_root_user(tmp_path, monkeypatch):
+    env, box, _, _ = make_environment(tmp_path, monkeypatch)
+    scripted_exec(box, default_user_can_write=False, switch_raises=True)
+    with pytest.raises(RuntimeError, match="Failed to initialize task log directories.*Permission denied"):
+        await env.start()

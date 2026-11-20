@@ -429,15 +429,19 @@ class Environment:
     async def create_log_directories_as_root(self, command, failed):
         identity = await self.exec("id -u; id -g", timeout_sec=60)
         try:
-            uid, gid = (int(value) for value in identity.stdout.split())
+            uid, gid = (int(value) for value in (identity.stdout or "").split())
             if identity.return_code or min(uid, gid) < 0:
                 raise ValueError("Invalid workload identity")
         except (TypeError, ValueError):
             return failed
         owned = "/logs /logs/agent /logs/verifier /logs/artifacts"
-        root = await self.exec(
-            f"{command} && chown {uid}:{gid} {owned} && chmod 755 /logs", timeout_sec=60, user="root"
-        )
+        try:
+            root = await self.exec(
+                f"{command} && chown {uid}:{gid} {owned} && chmod 755 /logs", timeout_sec=60, user="root"
+            )
+        except ValueError:
+            # Some providers raise instead of reporting a failure when asked to switch users.
+            return failed
         # A sandbox that cannot switch users reports a failure here: keep the original error then.
         return root if not root.return_code else failed
 
