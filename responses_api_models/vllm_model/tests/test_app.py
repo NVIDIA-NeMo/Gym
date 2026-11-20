@@ -9304,6 +9304,34 @@ class TestCodexRequests:
         default, _ = self._server()
         assert not default.config.forward_unvalidated_reasoning_effort
 
+    def test_opencode_observation_images_reach_chat_completions(self) -> None:
+        server, client = self._server(**self.CODEX_FIELDS)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "Ready."})
+        )
+        image = "data:image/png;base64,YWJj"
+        observation = {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Observe the robot and its target."},
+                {"type": "input_image", "image_url": image},
+                {"type": "input_image", "image_url": image, "detail": "high"},
+            ],
+        }
+
+        reply = TestClient(server.setup_webserver()).post("/v1/responses", json=self._codex_body([observation]))
+
+        assert reply.status_code == 200
+        assert self._events(reply.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs["messages"][-1] == {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Observe the robot and its target."},
+                {"type": "image_url", "image_url": {"url": image, "detail": "auto"}},
+                {"type": "image_url", "image_url": {"url": image, "detail": "high"}},
+            ],
+        }
+
     def test_codex_turns_convert_to_the_expected_chat_requests(self) -> None:
         server, client = self._server(**self.CODEX_FIELDS, drop_custom_tools=True)
         call = {

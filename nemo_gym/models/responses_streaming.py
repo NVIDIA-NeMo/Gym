@@ -195,6 +195,13 @@ def sanitize_streaming_responses_body(
         kept_items = []
         carrier_tools: list[Any] = []
         for item in input_items:
+            if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") is not None:
+                content = item.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "input_image":
+                            # OpenCode omits the optional wire detail, which Gym's SDK schema requires.
+                            part.setdefault("detail", "auto")
             if isinstance(item, dict) and item.get("type") == "message":
                 content = item.get("content")
                 if (
