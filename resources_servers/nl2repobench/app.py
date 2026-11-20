@@ -24,8 +24,7 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.core.failure_kinds import SESSION_LOST, VERIFIER_ERROR
-from nemo_gym.core.typed_exceptions import NgFailureEvent
+from nemo_gym.core import SESSION_LOST, VERIFIER_ERROR, NgFailureEvent
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -1079,9 +1078,30 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
     def has_session_state(self, session_id: str) -> bool:
         return session_id in self._agent_sessions
 
-    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        # Unused: seed_session below is overridden and keeps the cookie-based seed this server's agents send.
-        raise NotImplementedError("NL2RepoBench seeds through its own seed_session")
+    async def initialize_session_state(self, session_id: str, body: NL2RepoBenchSeedSessionRequest) -> None:
+        """Start the session's agent sandbox. The base releases a previous run of this session before calling this,
+        and calls release_session_state again if this raises, so a sandbox created here must be reachable from
+        `_agent_sessions` before any further await, or be stopped here."""
+        task = _resolve_task(body, self._task_store, registry_template=self.config.task_image_registry_template)
+        sandbox: AsyncSandbox | None = None
+        try:
+            sandbox = await self._create_sandbox(task, phase="agent")
+            descriptor = await sandbox.serialize()
+            sandbox_handle = descriptor.get("sandbox_id") if isinstance(descriptor, dict) else None
+            if not isinstance(sandbox_handle, str) or not sandbox_handle:
+                raise RuntimeError("NL2RepoBench sandbox provider did not return a sandbox_id")
+            self._agent_sessions[session_id] = AgentSandboxSession(
+                task_id=task_id(task),
+                image=task_image(task, registry_template=self.config.task_image_registry_template),
+                sandbox=sandbox,
+                sandbox_handle=sandbox_handle,
+                sandbox_descriptor=dict(descriptor),
+                workdir=task.workdir,
+            )
+        except BaseException:
+            if sandbox is not None:
+                await asyncio.shield(self._stop_sandbox(sandbox, task_id=task_id(task), phase="failed-agent-seed"))
+            raise
 
     async def release_session_state(self, session_id: str) -> None:
         """Stop the session's live agent sandbox, so /close_session and a retire do not leave it to its TTL.
@@ -1103,52 +1123,18 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
     async def seed_session(
         self, request: Request, body: NL2RepoBenchSeedSessionRequest
     ) -> NL2RepoBenchSeedSessionResponse:
-        task = _resolve_task(body, self._task_store, registry_template=self.config.task_image_registry_template)
-        session_id = str(request.session[SESSION_ID_KEY])
-        previous_session = self._agent_sessions.pop(session_id, None)
-        if previous_session is not None:
-            await self._stop_sandbox(
-                previous_session.sandbox,
-                task_id=previous_session.task_id,
-                phase="replaced-agent",
-            )
-
-        sandbox: AsyncSandbox | None = None
-        try:
-            sandbox = await self._create_sandbox(task, phase="agent")
-            current_task_id = task_id(task)
-            current_task_image = task_image(task, registry_template=self.config.task_image_registry_template)
-            descriptor = await sandbox.serialize()
-            sandbox_handle = descriptor.get("sandbox_id") if isinstance(descriptor, dict) else None
-            if not isinstance(sandbox_handle, str) or not sandbox_handle:
-                raise RuntimeError("NL2RepoBench sandbox provider did not return a sandbox_id")
-            sandbox_descriptor = dict(descriptor)
-            self._agent_sessions[session_id] = AgentSandboxSession(
-                task_id=current_task_id,
-                image=current_task_image,
-                sandbox=sandbox,
-                sandbox_handle=sandbox_handle,
-                sandbox_descriptor=sandbox_descriptor,
-                workdir=task.workdir,
-            )
-            return NL2RepoBenchSeedSessionResponse(
-                sandbox_handle=sandbox_handle,
-                sandbox_descriptor=sandbox_descriptor,
-                # OpenCodeSandboxedAgent reconnects to this sandbox by sandbox_handle
-                # alone and otherwise defaults to the container's own image-baked
-                # WORKDIR (opencode_sandboxed_agent/app.py:496) when running opencode -
-                # which is /workspace for the per-task pinned images (their own
-                # Dockerfile WORKDIR) but NOT for the generic agent-sandbox image
-                # (_AGENT_SANDBOX_IMAGE), whose own WORKDIR is elsewhere. Return it
-                # explicitly so opencode actually runs from where start.md was written,
-                # regardless of what the booted image's default happens to be. This
-                # sandbox is always phase="agent" (see _create_sandbox call above).
-                workdir=task.workdir,
-            )
-        except Exception:
-            if sandbox is not None:
-                await self._stop_sandbox(sandbox, task_id=task_id(task), phase="failed-agent-seed")
-            raise
+        # The base binds the cookie session, releases a previous run and calls initialize_session_state.
+        await super().seed_session(body, request=request)
+        session = self._agent_sessions[str(request.session[SESSION_ID_KEY])]
+        return NL2RepoBenchSeedSessionResponse(
+            sandbox_handle=session.sandbox_handle,
+            sandbox_descriptor=session.sandbox_descriptor,
+            # OpenCodeSandboxedAgent reconnects to this sandbox by sandbox_handle alone and otherwise defaults to the
+            # container's own image-baked WORKDIR when running opencode, which is /workspace for the per-task pinned
+            # images (their own Dockerfile WORKDIR) but not for the generic agent-sandbox image (_AGENT_SANDBOX_IMAGE).
+            # Return it explicitly so opencode runs from where start.md was written.
+            workdir=session.workdir,
+        )
 
     async def _collect_workspace(
         self, sandbox: AsyncSandbox, workdir: str = "/workspace"

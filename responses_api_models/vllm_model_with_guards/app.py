@@ -11,7 +11,7 @@ from fastapi import Body, Request
 from pydantic import Field
 
 from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.models.model_call_capture import start_model_execution
+from nemo_gym.models import start_model_execution
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 

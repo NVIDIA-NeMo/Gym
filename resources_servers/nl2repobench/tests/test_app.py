@@ -852,3 +852,32 @@ async def test_agent_init_failure_or_cancellation_stops_the_sandbox(
 
         sandbox.stop.assert_awaited()  # stopped before the error left _create_sandbox, so nothing is leaked
         assert server._agent_sessions == {}
+
+
+def test_close_session_over_http_stops_the_sandbox_seeded_over_http(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """The routes an Environment Server uses: /seed_session answers with the handle, /close_session releases it."""
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.core import EpisodeId
+
+    server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+
+    with TestClient(server.setup_webserver()) as client:
+        seeded = client.post("/seed_session", json=_request())
+        assert seeded.status_code == 200, seeded.text
+        assert seeded.json()["sandbox_handle"] == "agent-sandbox"
+        assert seeded.json()["workdir"] == "/workspace"
+        [session_id] = server._agent_sessions
+        sandbox.stop.assert_not_awaited()
+
+        close = {"resources_session_id": session_id, "episode_id": EpisodeId(rollout_id="r").model_dump(mode="json")}
+        assert client.post("/close_session", json=close).status_code == 200
+        sandbox.stop.assert_awaited_once()
+        assert server._agent_sessions == {}
+        assert client.post("/close_session", json=close).status_code == 200  # a repeated close is harmless
+        sandbox.stop.assert_awaited_once()
