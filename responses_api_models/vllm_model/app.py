@@ -682,8 +682,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     refit_output_budget_to_prompt: bool = Field(
         default=False,
         description=(
-            "Opt in to the same single resend for the other length refusal: the requested output budget fits the "
-            "context window by itself, but the prompt and that budget together overflow it. The call is sent once "
+            "Opt in to the same single resend for the other length refusal: the requested output budget is strictly "
+            "below the context window, but the prompt and that budget together overflow it. The call is sent once "
             "more with the budget lowered to the window minus the prompt minus the same small margin, so the model "
             "answers with what the window leaves instead of the call ending on an empty `length` completion once the "
             "prompt passes the window minus the budget. The prompt length and the capture are those of "
@@ -1080,9 +1080,9 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. A budget that by
         itself fills the window, the refusal ``_length_refusal_category`` calls ``invalid_output_token_parameter``, is
-        lowered when ``refit_output_budget_to_window`` is on. A budget that fits the window while the prompt and the
-        budget together overflow it is lowered only when ``refit_output_budget_to_prompt`` is on; with it off the call
-        keeps the ``context_length_exceeded`` refusal, the cue for a harness to compact. Nothing changes when the
+        lowered when ``refit_output_budget_to_window`` is on. A budget below the window that overflows it together with
+        the prompt is lowered only when ``refit_output_budget_to_prompt`` is on; with it off the call keeps the
+        ``context_length_exceeded`` refusal, the cue for a harness to compact. Nothing changes when the
         setting for the refusal's case is off, when ``error`` is not a length refusal naming the window, when the call
         has no budget, when the window minus the prompt minus the margin leaves no output token (a prompt that alone
         fills the window), or when the lowered budget would not be lower. Calls admitted by an external capture worker

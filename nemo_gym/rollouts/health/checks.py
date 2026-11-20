@@ -342,7 +342,7 @@ def _is_successful(call: dict[str, Any]) -> bool:
 
 
 # The categories vllm_model records for an upstream refusal on length: the conversation outgrew the window, or the
-# request's own output budget exceeds all of it.
+# request's own output budget fills all of it.
 _LENGTH_REFUSAL_CATEGORIES = frozenset({"context_length_exceeded", "invalid_output_token_parameter"})
 
 
