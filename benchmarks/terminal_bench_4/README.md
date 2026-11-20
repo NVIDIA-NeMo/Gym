@@ -104,35 +104,29 @@ sandbox, and an episode that runs past its bound (`harbor:task_deadline`).
 
 ### Other harnesses
 
-`--agent-type` values that compose with `terminal_bench_4/miniswe` (checked offline by composing the run config; no
-model or sandbox was run). Each harness runs inside the task sandbox and calls Gym's model server from there. Their
-shipped limits are below the tasks' 8-hour agent budget, so pass the matching overlay with `--config`; it sets
-only the keys in the last column. The overlays are not AA settings, and scores are not comparable with mini-SWE's.
+Each preset below runs the same tasks and Harbor server settings as `terminal_bench_4/miniswe`, with another harness in
+the task sandbox calling Gym's model server. Each harness ships with limits below the tasks' 8-hour agent budget, so
+its preset raises them (last column). These are not AA settings, and the scores are not comparable with mini-SWE's.
+Each preset is checked offline: it composes, and its manifest matches; no model or sandbox was run.
 
-| `--agent-type` | Overlay (`benchmarks/terminal_bench_4/agents/`) | Shipped, then overlay |
+| `--benchmark` | Harness | Shipped, then preset |
 | --- | --- | --- |
-| `hermes_agent` | `hermes.yaml` | 30 turns, 6 h runner; 500 turns, 8 h |
-| `opencode_agent` | `opencode.yaml` | 3 h `timeout`; 8 h |
-| `nooa_agent/nooa_sandboxed` | `nooa.yaml` | 6 h worker ceiling; 8 h |
-| `codex_agent` | `codex.yaml` | 10 min `timeout`; 8 h, plus 5 min stream idle and close limits |
-| `claude_code_agent` | `claude_code.yaml` | calls Anthropic directly, 5 min, 30 turns, no CLI pin; policy model, CLI 2.1.108, 500 turns, 8 h |
+| `terminal_bench_4/hermes` | `hermes_agent` | 30 turns, 6 h runner; 500 turns, 8 h |
+| `terminal_bench_4/opencode` | `opencode_agent` | 3 h `timeout`; 8 h |
+| `terminal_bench_4/nooa` | `nooa_agent`, sandboxed | 6 h worker ceiling; 8 h |
+| `terminal_bench_4/codex` | `codex_agent` | 10 min `timeout`; 8 h, plus 5 min stream idle and close limits |
+| `terminal_bench_4/claude_code` | `claude_code_agent` | calls Anthropic directly, 5 min, 30 turns, no CLI pin; policy model, CLI 2.1.108, 500 turns, 8 h |
 
 ```sh
-gym eval run --benchmark terminal_bench_4/miniswe --agent-type hermes_agent --sandbox opensandbox \
+gym eval run --benchmark terminal_bench_4/hermes --sandbox opensandbox \
   --config environments/harbor/terminal_bench_4/harbor_sandbox.yaml \
-  --config benchmarks/terminal_bench_4/agents/hermes.yaml \
   --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 --model MODEL_NAME \
   --output results/tb4/rollouts.jsonl --concurrency 8
 ```
 
-These do not work:
-
-- `hermes` and `opencode` alone are ambiguous; use the full names above.
-- `hermes_sandboxed_agent` and `opencode_sandboxed_agent` (also `/benchmark`) are `/run` harnesses bound to a resources
-  server, not agent sessions, so the Harbor server cannot drive them.
-- `nooa_agent` alone is refused (its file defines a second server); use `nooa_agent/nooa_sandboxed`.
-- `hermes_agent` runs with `chat_template_kwargs_enabled: false`; set it back with
-  `++harbor_terminal_5fbench_5f4_agent.responses_api_agents.hermes_agent.chat_template_kwargs_enabled=true` for vLLM.
+`--benchmark terminal_bench_4/miniswe --agent-type <harness>` still swaps the harness, but it keeps the shipped limits.
+`hermes_agent` runs with `chat_template_kwargs_enabled: false`. For vLLM, set it back with
+`++hermes_agent.responses_api_agents.hermes_agent.chat_template_kwargs_enabled=true`.
 
 ### From the `/run` commands
 

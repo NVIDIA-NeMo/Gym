@@ -1,8 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-# Overlay for `--agent-type nooa_agent/nooa_sandboxed`: raises the 6 h worker ceiling to the 8 h task budget.
-harbor_terminal_5fbench_5f4_agent:
-  responses_api_agents:
-    nooa_agent:
-      sandbox_runner_timeout_seconds: 28800
