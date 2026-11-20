@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import pytest
 
 from nemo_gym.agents import DEFAULT_CLEANUP_TIMEOUT
@@ -368,8 +369,11 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
     if failed_endpoint == "/cleanup_timeout":
         agent.config.cleanup_timeout = 0.01
 
-        async def hung_stop():
-            await asyncio.Event().wait()
+        async def hung_stop(*, timeout_s: float | None = None):
+            # A hung provider: the sandbox's own stop gives up after timeout_s. Without a limit the hang still ends,
+            # so a caller that passes none fails this test instead of hanging it.
+            with anyio.fail_after(timeout_s if timeout_s is not None else 1):
+                await asyncio.Event().wait()
 
         sandbox.stop.side_effect = hung_stop
     connected = AsyncMock(return_value=sandbox)
@@ -396,14 +400,14 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
         ),
     )
     if failed_endpoint == "/verify":
-        result = await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
+        result = await asyncio.wait_for(agent.run(SimpleNamespace(cookies={"original": "cookie"}), body), timeout=5)
         wire = result.model_dump(mode="json")
         assert wire["_ng_failure_class"] == "agent_run_error"
         assert "verify unavailable" in wire["_ng_failure_message"]
         assert "reward" not in wire and "response" not in wire
         assert result.hermes_result_path == "artifact"
     else:
-        result = await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
+        result = await asyncio.wait_for(agent.run(SimpleNamespace(cookies={"original": "cookie"}), body), timeout=5)
         assert result.verifier_reward == verifier_reward
         wire = result.model_dump(mode="json")
         if failure:
@@ -420,6 +424,9 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
     connected.assert_awaited_once_with({"sandbox_id": "box"}, provider=provider)
     provider.aclose.assert_awaited_once()
     assert sandbox.stop.await_count == (1 if failed_endpoint in ("/close_session", "/cleanup_timeout") else 0)
+    if sandbox.stop.await_count:
+        # The fallback stop is bounded by the cleanup limit, not only by the sandbox's own default.
+        sandbox.stop.assert_awaited_once_with(timeout_s=agent.config.cleanup_timeout)
 
 
 @pytest.mark.asyncio
