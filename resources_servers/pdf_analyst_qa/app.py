@@ -319,8 +319,7 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
         if state is None:
             return
         if state.sandbox is not None:
-            async with asyncio.timeout(self.config.cleanup_timeout_s):
-                await state.sandbox.stop()
+            await state.sandbox.stop(timeout_s=self.config.cleanup_timeout_s)
             state.sandbox = None
         if state.owns_slot:
             self._sandbox_slots.release()

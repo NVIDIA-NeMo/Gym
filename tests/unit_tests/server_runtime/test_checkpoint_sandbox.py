@@ -1198,6 +1198,56 @@ async def test_aclose_stops_every_sandbox_and_every_fork_a_failed_restore_left(s
     assert provider.snapshots == snapshots_before, "a shutdown deletes no snapshot: the controller may restore them"
 
 
+async def test_discarded_keys_can_be_restored_again_while_their_stops_fail_and_aclose_stops_them(
+    state_dir: Path,
+) -> None:
+    """What an owner does with the forks of a restore it could not install."""
+    provider = FakeSnapshotProvider()
+    states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
+    fresh = make_checkpointer(state_dir, provider)
+    await fresh.restore(states)
+    await fresh.settle()
+    forks = [fresh._entries[key].sandbox.sandbox_id for key in ("s1", "s2")]
+    close, failing = provider.close, True
+
+    async def close_unless_failing(handle: Any) -> None:
+        if failing and handle.sandbox_id in forks:
+            raise RuntimeError("HTTP 503")
+        await close(handle)
+
+    provider.close = close_unless_failing  # type: ignore[method-assign]
+
+    await fresh.discard(["s1", "s2", "gone"])
+
+    assert fresh.keys == [], "every key can be restored again, although no stop succeeded"
+    assert [provider.boxes[sandbox_id]["state"] for sandbox_id in forks] == ["running", "running"]
+    await fresh.restore(states)
+    assert sorted(fresh.keys) == ["s1", "s2"]
+    assert [provider.boxes[sandbox_id]["state"] for sandbox_id in forks] == ["running", "running"]
+
+    failing = False
+    await fresh.aclose()
+    assert [provider.boxes[sandbox_id]["state"] for sandbox_id in forks] == ["stopped", "stopped"]
+    assert fresh.keys == [] and fresh._unstopped_forks == []
+
+
+async def test_a_stop_of_a_key_whose_sandbox_already_stopped_does_not_wait_for_a_turn(state_dir: Path) -> None:
+    """Its caller may be cancelled while it waits, and would then leave a key with nothing left to stop."""
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1", "s2", parallelism=1)
+    # The owner stopped the sandbox itself, as a server does before it drops the key.
+    await checkpointer._entries["s1"].sandbox.stop()
+
+    async with checkpointer._semaphore:  # every turn is taken, as while a commit submits its snapshots
+        await asyncio.wait_for(checkpointer.stop("s1"), timeout=5)
+        waiting = asyncio.create_task(checkpointer.stop("s2"))
+        await asyncio.sleep(0.05)
+        assert not waiting.done(), "a sandbox that is still running waits for its turn to be stopped"
+    await waiting
+
+    assert checkpointer.keys == [] and ops(provider, "close") == ["sb-1", "sb-2"]
+
+
 async def test_aclose_stops_the_rest_when_one_stop_fails_and_a_second_call_retries_it(
     state_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1865,6 +1915,25 @@ async def test_a_controller_that_releases_is_never_warned_and_one_that_stops_rel
         for number in range(21, 26):
             await checkpointer.export(["s1"], checkpoint_id=f"c{number}")
     assert len(unreleased_warnings(caplog)) == 1 and "holds 6 checkpoints" in unreleased_warnings(caplog)[0]
+
+
+async def test_the_index_is_listed_once_per_checkpoint_however_many_exports_it_takes(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An owner that exports each key on its own must not list the index, on a shared filesystem, once per key."""
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1", "s2", "s3")
+    listed: list[int] = []
+    count = checkpoint_sandbox._SnapshotIndex.checkpoint_count
+    monkeypatch.setattr(
+        checkpoint_sandbox._SnapshotIndex, "checkpoint_count", lambda index: listed.append(1) or count(index)
+    )
+
+    await asyncio.gather(*(checkpointer.export([key], checkpoint_id="c1") for key in ("s1", "s2", "s3")))
+    assert len(listed) == 1
+    await checkpointer.export(["s1"], checkpoint_id="c2")
+    await checkpointer.export(["s2", "s3"], checkpoint_id="c2")
+    assert len(listed) == 2
 
 
 async def test_a_checkpointer_without_a_state_dir_has_no_index_to_warn_of(caplog: pytest.LogCaptureFixture) -> None:

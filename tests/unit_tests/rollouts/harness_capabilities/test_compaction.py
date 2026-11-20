@@ -156,3 +156,47 @@ def test_compaction_checks_do_not_fall_back_to_duplicate_artifacts(compaction_ev
     record["ng_trajectory"]["invocations"][0]["conversation"] = []
     record["ng_agent_observations"]["records"][0]["model_calls"] = []
     assert {c["status"] for c in checks(record, witness).values()} == {"pass"}
+
+
+@pytest.mark.parametrize("truncate", [False, True])
+def test_compaction_preserves_complete_summary_inside_runtime_wrapper(compaction_evidence, truncate):
+    record, witness = compaction_evidence
+    summary = witness["compaction"]["summary"]
+    wrapped = "Continue from this summary:\n" + (summary[:-1] if truncate else summary) + "\nResume work."
+    record["ng_agent_observations"]["records"][-1]["summary"] = wrapped
+    record["ng_trajectory"]["model_calls"][2]["request"]["input"][-1]["content"] = wrapped
+    assert checks(record, witness)["compaction.summary_reuse"]["status"] == ("fail" if truncate else "pass")
+
+
+def test_compaction_usage_includes_messages_cache_reads_and_writes(compaction_evidence):
+    record, witness = compaction_evidence
+    witness["attempts"][1]["response"]["usage"].update(cache_read_input_tokens=3, cache_creation_input_tokens=2)
+    witness["attempts"][1]["response"]["usage"].pop("total_tokens")
+    record["response"]["usage"].update(input_tokens=32, total_tokens=44)
+    assert checks(record, witness)["compaction.usage_retained"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("mutation", [None, "missing_gap", "reported_usage"])
+def test_overflow_recovery_aggregates_measured_usage(compaction_evidence, mutation):
+    record, witness = compaction_evidence
+    error = {"error": {"code": "context_length_exceeded"}}
+    attempt = {"request": {"input": "too large"}, "status_code": 400, "response": error}
+    witness["attempts"].insert(1, attempt)
+    record["ng_agent_observations"]["gaps"] = [{"code": "model_call_usage_unavailable"}]
+    if mutation == "missing_gap":
+        record["ng_agent_observations"]["gaps"] = []
+    elif mutation == "reported_usage":
+        error["usage"] = {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}
+        record["response"]["usage"].update(input_tokens=30, output_tokens=13, total_tokens=43)
+    result = checks(record, witness)
+    if mutation in (None, "reported_usage"):
+        assert {c["status"] for c in result.values()} == {"pass"}
+    elif mutation == "missing_gap":
+        assert result["compaction.usage_retained"]["status"] == "fail"
+
+
+def test_successful_compaction_call_cannot_omit_usage(compaction_evidence):
+    record, witness = compaction_evidence
+    witness["attempts"][1]["response"].pop("usage")
+    record["ng_agent_observations"]["gaps"] = [{"code": "model_call_usage_unavailable"}]
+    assert checks(record, witness)["compaction.usage_retained"]["status"] == "fail"

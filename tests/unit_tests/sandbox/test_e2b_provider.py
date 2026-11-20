@@ -410,7 +410,7 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(
 def test_loader_reports_missing_optional_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "e2b", None)
 
-    with pytest.raises(ImportError, match=r"pip install 'e2b>=2\.46\.0,<3\.0\.0'"):
+    with pytest.raises(ImportError, match=r"pip install 'e2b>=2\.46\.0,<2\.51\.0'"):
         e2b_sdk.require_e2b_sdk("Testing the e2b provider")
 
 
