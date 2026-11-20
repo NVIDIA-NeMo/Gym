@@ -1119,7 +1119,7 @@ class TestApp:
         server = _server(
             reward_mode="comparison",
             reference_deliverables_dir=str(ref_root),
-            judge_reference_files_recursive=True,
+            # Nested task inputs reach the judges by default.
             strict_comparison_trials=True,
             judge_panel=[{"name": "video", "handles_video": True, "media_mode": media_mode}],
             **extra,

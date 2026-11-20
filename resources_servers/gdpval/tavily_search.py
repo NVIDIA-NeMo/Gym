@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import asyncio
 from html import escape
-from typing import List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 import httpx
+
+
+if TYPE_CHECKING:
+    from resources_servers.gdpval.web_guard import WebGuard
 
 
 MAX_LENGTH = 40_000
@@ -105,7 +109,7 @@ class TavilySearch:
         self._key_idx += 1
         return k
 
-    async def search(self, query: str, client: httpx.AsyncClient) -> str:
+    async def search(self, query: str, client: httpx.AsyncClient, guard: Optional["WebGuard"] = None) -> str:
         last_status: Optional[int] = None
         n_keys = len(self._api_keys)
         n_attempts = self._max_sweeps * n_keys
@@ -114,7 +118,13 @@ class TavilySearch:
             try:
                 resp = await client.post(
                     "https://api.tavily.com/search",
-                    json={"query": query, "max_results": 5, "include_answer": True},
+                    json={
+                        "query": query,
+                        "max_results": 5,
+                        "include_answer": True,
+                        # Tavily drops these sites before ranking, so the agent still gets five results.
+                        **({"exclude_domains": guard.domains} if guard is not None and guard.domains else {}),
+                    },
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 )
             except httpx.HTTPError as exc:
@@ -134,6 +144,8 @@ class TavilySearch:
                 data = resp.json()
             except ValueError:
                 return "<error>Tavily returned a response that is not JSON</error>"
+            if guard is not None:
+                data = guard.filter_search_reply(data)
             parts: list[str] = []
             if data.get("answer"):
                 parts.append(f"<answer>{escape(data['answer'])}</answer>")
