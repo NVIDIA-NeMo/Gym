@@ -17,14 +17,19 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional
+from typing import Dict, Iterable, Iterator, List, Literal, Optional
 
 import yaml
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from nemo_gym import PARENT_DIR, component_search_roots
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.environment.benchmarks import MANIFEST_FILENAME, _benchmark_config_name, _benchmark_config_paths
+from nemo_gym.environment.benchmarks import (
+    MANIFEST_FILENAME,
+    _benchmark_config_name,
+    _benchmark_config_paths,
+    _is_benchmark_config,
+)
 from nemo_gym.environment.discovery import iter_server_configs, read_config_metadata
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
@@ -91,30 +96,19 @@ def _enum_value(value: object) -> Optional[str]:
     return str(getattr(value, "value", value))
 
 
-def _path_identity(tree_dir: Path, manifest_path: Path) -> str:
-    relative = manifest_path.parent.relative_to(tree_dir)
-    if relative == Path("."):
-        raise RegistryError(f"Manifest '{manifest_path}' must be inside a named catalog directory.")
-    return relative.as_posix()
-
-
 def _manifest_entry(
     tree_dir: Path,
     manifest_path: Path,
+    manifest: EnvironmentManifest,
     expected_kind: CatalogKind,
 ) -> EnvironmentCatalogEntry:
-    expected_name = _path_identity(tree_dir, manifest_path)
-    manifest: EnvironmentManifest = load_manifest(manifest_path)
+    if manifest_path.parent == tree_dir:
+        raise RegistryError(f"Manifest '{manifest_path}' must be inside a named catalog directory.")
     actual_kind = _enum_value(manifest.kind)
     if actual_kind != expected_kind:
         raise RegistryError(
             f"Manifest '{manifest_path}' declares kind '{actual_kind}', "
             f"but its catalog path requires '{expected_kind}'."
-        )
-    if manifest.name != expected_name:
-        raise RegistryError(
-            f"Manifest '{manifest_path}' declares name '{manifest.name}', "
-            f"but its catalog path requires '{expected_name}'."
         )
 
     config_path = resolve_manifest_config_path(manifest_path, manifest)
@@ -256,6 +250,25 @@ def _legacy_config_paths(tree_dir: Path, kind: CatalogKind) -> Iterable[tuple[st
             yield child.name, config_path
 
 
+def _legacy_config_name(tree_dir: Path, config_path: Path, kind: CatalogKind) -> Optional[str]:
+    """The name :func:`_legacy_config_paths` lists ``config_path`` under, or None when it does not list it.
+
+    Reads only that one config instead of scanning the tree, so a selector can afford it on every launch. A config
+    outside ``tree_dir``, such as one an absolute ``--benchmark`` folder points to, is not listed.
+    """
+    if not config_path.is_relative_to(tree_dir):
+        return None
+    relative = config_path.relative_to(tree_dir)
+    if kind == "benchmark":
+        # The benchmark scan globs `**/*.yaml`, which skips hidden files and folders.
+        if any(part.startswith(".") for part in relative.parts) or not _is_benchmark_config(config_path):
+            return None
+        return _benchmark_config_name(relative)
+    if len(relative.parts) == 2 and relative.name == ENVIRONMENT_CONFIG_FILENAME:
+        return relative.parts[0]
+    return None
+
+
 def _manifest_paths(tree_dir: Path) -> List[Path]:
     """Every ``manifest.yaml`` under ``tree_dir``, without descending into Harbor datasets.
 
@@ -281,6 +294,26 @@ def _manifest_paths(tree_dir: Path) -> List[Path]:
     return sorted(found)
 
 
+def declared_manifests(tree_dir: Path) -> Iterator[tuple[Path, EnvironmentManifest]]:
+    """Every readable manifest under one catalog tree, with its path.
+
+    A manifest that fails to load is left out, as catalog discovery leaves it out.
+    """
+    for manifest_path in _manifest_paths(tree_dir):
+        try:
+            yield manifest_path, load_manifest(manifest_path)
+        except ManifestError:
+            continue
+
+
+def _manifest_config(manifest_path: Path, manifest: EnvironmentManifest) -> Optional[Path]:
+    """The config a manifest declares, or None when its path leaves the catalog tree; discovery refuses that manifest."""
+    try:
+        return resolve_manifest_config_path(manifest_path, manifest)
+    except ManifestError:
+        return None
+
+
 def _discover_registry_tree(
     tree_dir: Path,
     kind: CatalogKind,
@@ -293,12 +326,25 @@ def _discover_registry_tree(
 
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     manifest_configs: set[Path] = set()
-    for manifest_path in _manifest_paths(tree_dir):
-        key = (kind, _path_identity(tree_dir, manifest_path))
+    declared_by: Dict[str, Path] = {}
+    for manifest_path, manifest in declared_manifests(tree_dir):
+        # A name is an ID wherever its folder sits, so no two manifests in one tree declare the same one.
+        if manifest.name in declared_by:
+            raise RegistryError(
+                f"Manifests '{declared_by[manifest.name]}' and '{manifest_path}' both declare name '{manifest.name}'. "
+                f"A name is the ID of a manifest and must be unique within '{tree_dir}'."
+            )
+        declared_by[manifest.name] = manifest_path
+        key = (kind, manifest.name)
         if key in claimed:
+            # An earlier root shadows this entry, but its config is still this manifest's: listing it again under
+            # its folder path would give it a second, unrelated ID.
+            config_path = _manifest_config(manifest_path, manifest)
+            if config_path is not None:
+                manifest_configs.add(config_path)
             continue
         try:
-            entry = _manifest_entry(tree_dir, manifest_path, kind)
+            entry = _manifest_entry(tree_dir, manifest_path, manifest, kind)
         except ManifestError:
             continue
         entries[key] = entry
