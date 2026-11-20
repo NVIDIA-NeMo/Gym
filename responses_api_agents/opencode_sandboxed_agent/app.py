@@ -575,6 +575,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
     artifacts_dir: Optional[str] = None
+    # Resume early exits in the same session until this wall-clock budget is exhausted.
+    continue_until_s: Optional[int] = Field(default=None, ge=1)
+    continue_prompt: str = "Do not stop. Continue working on the implementation."
+    max_continues: int = Field(default=100, ge=0)
     opencode_model_call_timeout: Optional[int] = None
     opencode_provider_id: str = "nemo_gym"
     opencode_model_id: str = "dummy_model"
@@ -644,6 +648,56 @@ def _build_remote_opencode_install_command(
         f"bash {quote(install_script_path)} "
         f"--glibc-binary {quote(binary_path)} "
         f"--musl-binary {quote(musl_binary_path)}"
+    )
+
+
+def _query_parts(prompt: str, via_stdin: bool) -> tuple[str, str]:
+    if via_stdin:
+        return f"printf '%s' {quote(prompt)} | ", ""
+    return "", f"-- {quote(prompt)}"
+
+
+def _continue_until_command(
+    *,
+    env: str,
+    flags: str,
+    query: str,
+    budget_s: int,
+    continue_prompt: str,
+    max_continues: int,
+    attachments: str = "",
+    via_stdin: bool = False,
+) -> str:
+    """Shell that keeps OpenCode working in one session until ``budget_s`` seconds have passed.
+
+    Each run is killed when the budget is used (exit 124 is that, not a failure). A run that ends
+    earlier is resumed with ``opencode run --continue`` and ``continue_prompt``, as a harness
+    auto-resume does: at once after a clean exit, and after a backoff (5 s doubling to 300 s, never
+    past the deadline) after a failed one, so a crashing CLI or an unreachable model cannot spin.
+    The group fails when any run failed or when ``max_continues`` ended the loop before the budget,
+    so neither is hidden by a later timeout.
+    """
+    first_seed, first_arg = _query_parts(query, via_stdin)
+    next_seed, next_arg = _query_parts(continue_prompt, via_stdin)
+    record = (
+        'if [ "$code" -eq 0 ] || [ "$code" -eq 124 ]; then delay=5; else failed=$(( failed + 1 )); '
+        'rest=$(( deadline - $(date +%s) )); [ "$rest" -gt "$delay" ] || delay=$(( rest > 0 ? rest : 0 )); '
+        'sleep "$delay"; delay=$(( delay * 2 > 300 ? 300 : delay * 2 )); fi; '
+    )
+    return (
+        "{ deadline=$(( $(date +%s) + " + str(budget_s) + " )); failed=0; delay=5; "
+        f'{first_seed}timeout -k 30 {budget_s} env {env} opencode run --title "NG dummy title" {flags}{attachments} {first_arg}; '
+        "code=$?; " + record + "n=0; "
+        f'while [ "$n" -lt {max_continues} ] && [ "$(date +%s)" -lt "$deadline" ]; do '
+        "left=$(( deadline - $(date +%s) )); "
+        # A second boundary between the two date calls gives left=0, and timeout 0 would not time out at all.
+        '[ "$left" -gt 0 ] || break; '
+        f'{next_seed}timeout -k 30 "$left" env {env} opencode run --continue {flags} {next_arg}; '
+        "code=$?; " + record + "n=$(( n + 1 )); "
+        "done; "
+        '[ "$(date +%s)" -ge "$deadline" ] || { echo "OpenCode stopped before the budget"; failed=$(( failed + 1 )); }; '
+        'echo "OpenCode resumed $n times; $failed runs failed"; '
+        '[ "$failed" -eq 0 ]; }'
     )
 
 
@@ -1384,22 +1438,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # receives a space-bearing question double-quoted with its inner quotes backslash-escaped.
         # `resolveRunInput(message, piped)` returns the piped text verbatim only when that argv
         # message is empty, which is why stdin mode passes no positional message at all.
-        query_seed_str = ""
-        query_arg_str = f"-- {quote(query)}"
-        if self.config.opencode_query_via_stdin:
-            # Piped straight into the run rather than staged through a temp file: run.ts gates on
-            # `process.stdin.isTTY`, which is false for a pipe exactly as it is for a redirect, so
-            # the pipe is a drop-in that leaves nothing behind in the sandbox's /tmp. printf '%s'
-            # keeps the bytes exact -- no trailing newline, no shell expansion.
-            #
-            # Precedence: `|` binds tighter than `&&`, so the chain below reads as
-            # `... && (printf ... | ... opencode run ...) && echo "OpenCode run finished"`. The
-            # chain waits on the pipeline, whose status is opencode's, so the trailing `&&` still
-            # gates on the run and no subshell is needed. Kept on one line because the backslashes
-            # in `command` below are Python string continuations: the sandbox shell sees one
-            # physical line, and a real newline here would be the only one.
-            query_seed_str = f"printf '%s' {quote(query)} | "
-            query_arg_str = ""
+        query_seed_str, query_arg_str = _query_parts(query, self.config.opencode_query_via_stdin)
 
         # @bxyu-nvidia: Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
         # OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
@@ -1415,11 +1454,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error {STABLE_DATE_MARKER}
         """
-        agent_command = f"""
-        {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
-        && echo "OpenCode run finished"
-        """
+        opencode_env = (
+            f"NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} "
+            f"OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} "
+            f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str}"
+        )
+        opencode_flags = f"{opencode_debug_str} {opencode_thinking_str}"
+        if self.config.continue_until_s is None:
+            run_command = (
+                f'{query_seed_str}{opencode_env} opencode run --title "NG dummy title" '
+                f"{opencode_flags}{opencode_attachment_str} {query_arg_str}"
+            )
+        else:
+            run_command = _continue_until_command(
+                env=opencode_env,
+                flags=opencode_flags,
+                query=query,
+                budget_s=self.config.continue_until_s,
+                continue_prompt=self.config.continue_prompt,
+                max_continues=self.config.max_continues,
+                attachments=opencode_attachment_str,
+                via_stdin=self.config.opencode_query_via_stdin,
+            )
+        agent_command = f'{run_command} && echo "OpenCode run finished"'
         if self.config.report_agent_sandbox_oom:
             try:
                 setup_result = await sandbox.exec(command=setup_command, timeout_s=self.config.sandbox_timeout)

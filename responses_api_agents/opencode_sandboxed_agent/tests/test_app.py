@@ -23,6 +23,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -3171,3 +3172,177 @@ async def test_ripgrep_queue_shares_the_existing_setup_budget(tmp_path, monkeypa
     assert caught.value.operation == "opencode.setup"
     assert isinstance(caught.value.__cause__, TimeoutError)
     sandbox.upload.assert_not_awaited()
+
+
+@mark.skipif(
+    shutil.which("bash") is None or shutil.which("timeout") is None, reason="needs bash and coreutils timeout"
+)
+@mark.parametrize(
+    ("run_seconds", "budget_s", "min_resumes", "max_resumes"),
+    [
+        # Runs that end early are resumed until the budget is used (wide bounds: slow CI runners).
+        (1, 4, 1, 6),
+        # A run that outlasts the budget is killed; the timeout exit (124) still counts as success.
+        (30, 2, 0, 0),
+    ],
+)
+def test_continue_until_command_resumes_until_budget(
+    tmp_path: Path, run_seconds: int, budget_s: int, min_resumes: int, max_resumes: int
+) -> None:
+    log = tmp_path / "calls.log"
+    fake = tmp_path / "opencode"
+    fake.write_text(f'#!/bin/bash\necho "$A|$*" >> {shlex.quote(str(log))}\nsleep {run_seconds}\n')
+    fake.chmod(0o755)
+    command = app_module._continue_until_command(
+        env="A='x y'",
+        flags="--thinking",
+        query="solve it",
+        budget_s=budget_s,
+        continue_prompt="Do not stop.",
+        max_continues=100,
+    )
+    completed = subprocess.run(
+        ["bash", "-c", f"export PATH={shlex.quote(str(tmp_path))}:$PATH && {command} && echo FINISHED"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "FINISHED" in completed.stdout
+    calls = log.read_text().splitlines()
+    assert calls[0] == "x y|run --title NG dummy title --thinking -- solve it"
+    resumes = calls[1:]
+    assert min_resumes <= len(resumes) <= max_resumes
+    assert all(call == "x y|run --continue --thinking -- Do not stop." for call in resumes)
+    assert f"OpenCode resumed {len(resumes)} times; 0 runs failed" in completed.stdout
+
+
+@mark.skipif(
+    shutil.which("bash") is None or shutil.which("timeout") is None, reason="needs bash and coreutils timeout"
+)
+def test_continue_until_command_never_resumes_with_no_time_left(tmp_path: Path) -> None:
+    # The loop's check sees one second left and the budget computation sees none: timeout 0 must not run.
+    log = tmp_path / "calls.log"
+    (tmp_path / "opencode").write_text(f'#!/bin/bash\necho "$*" >> {shlex.quote(str(log))}\n')
+    clock = tmp_path / "clock"
+    clock.write_text("0")
+    (tmp_path / "date").write_text(
+        f"#!/bin/bash\nn=$(cat {shlex.quote(str(clock))}); echo $(( n + 1 )) > {shlex.quote(str(clock))}\n"
+        'case "$n" in 0) echo 1000;; 1) echo 1009;; *) echo 1010;; esac\n'
+    )
+    for name in ("opencode", "date"):
+        (tmp_path / name).chmod(0o755)
+    command = app_module._continue_until_command(
+        env="A=1", flags="", query="solve it", budget_s=10, continue_prompt="Do not stop.", max_continues=100
+    )
+    completed = subprocess.run(
+        ["bash", "-c", f"export PATH={shlex.quote(str(tmp_path))}:$PATH && {command}"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert log.read_text().splitlines() == ["run --title NG dummy title -- solve it"]
+    assert "OpenCode resumed 0 times; 0 runs failed" in completed.stdout
+
+
+@mark.skipif(
+    shutil.which("bash") is None or shutil.which("timeout") is None, reason="needs bash and coreutils timeout"
+)
+def test_continue_until_command_backs_off_a_crashing_cli(tmp_path: Path) -> None:
+    log = tmp_path / "calls.log"
+    fake = tmp_path / "opencode"
+    fake.write_text(f"#!/bin/bash\necho x >> {shlex.quote(str(log))}\nexit 3\n")
+    fake.chmod(0o755)
+    command = app_module._continue_until_command(
+        env="", flags="", query="q", budget_s=8, continue_prompt="go on", max_continues=100
+    )
+    started = time.monotonic()
+    completed = subprocess.run(
+        ["bash", "-c", f"export PATH={shlex.quote(str(tmp_path))}:$PATH && {command} && echo FINISHED"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    # Failed runs are retried after 5 s, then 10 s capped at the deadline: a few runs, not a spin,
+    # and the loop lasts until the budget; every failure is the command's status.
+    assert 7 <= time.monotonic() - started < 20
+    assert 2 <= len(log.read_text().splitlines()) <= 3
+    assert "runs failed" in completed.stdout and "0 runs failed" not in completed.stdout
+    assert completed.returncode != 0
+    assert "FINISHED" not in completed.stdout
+
+
+@mark.skipif(
+    shutil.which("bash") is None or shutil.which("timeout") is None, reason="needs bash and coreutils timeout"
+)
+def test_continue_until_command_fails_when_the_resume_count_ends_it_early(tmp_path: Path) -> None:
+    fake = tmp_path / "opencode"
+    fake.write_text("#!/bin/bash\nexit 0\n")
+    fake.chmod(0o755)
+    command = app_module._continue_until_command(
+        env="", flags="", query="q", budget_s=30, continue_prompt="go on", max_continues=2
+    )
+    completed = subprocess.run(
+        ["bash", "-c", f"export PATH={shlex.quote(str(tmp_path))}:$PATH && {command} && echo FINISHED"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "OpenCode stopped before the budget" in completed.stdout
+    assert "OpenCode resumed 2 times; 1 runs failed" in completed.stdout
+    assert completed.returncode != 0
+
+
+@mark.skipif(
+    shutil.which("bash") is None or shutil.which("timeout") is None, reason="needs bash and coreutils timeout"
+)
+def test_continue_until_command_reports_a_failed_resume_after_the_budget(tmp_path: Path) -> None:
+    # The first run fails after a second; the resume is then killed by the budget (exit 124).
+    marker = tmp_path / "ran"
+    fake = tmp_path / "opencode"
+    fake.write_text(
+        f"#!/bin/bash\nif [ -e {shlex.quote(str(marker))} ]; then sleep 30; fi\n"
+        f"touch {shlex.quote(str(marker))}\nsleep 1\nexit 3\n"
+    )
+    fake.chmod(0o755)
+    command = app_module._continue_until_command(
+        env="", flags="", query="q", budget_s=3, continue_prompt="go on", max_continues=100
+    )
+    completed = subprocess.run(
+        ["bash", "-c", f"export PATH={shlex.quote(str(tmp_path))}:$PATH && {command} && echo FINISHED"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "1 runs failed" in completed.stdout
+    assert completed.returncode != 0
+    assert "FINISHED" not in completed.stdout
+
+
+def test_continuation_preserves_piped_prompts_and_attaches_files_only_on_first_run(tmp_path: Path) -> None:
+    calls = tmp_path / "calls"
+    fake = tmp_path / "opencode"
+    fake.write_text(
+        f'#!/bin/sh\nprintf "%s|" "$*" >> {shlex.quote(str(calls))}\n'
+        f'cat >> {shlex.quote(str(calls))}\nprintf "\\n" >> {shlex.quote(str(calls))}\n'
+    )
+    fake.chmod(0o755)
+    cmd = app_module._continue_until_command(
+        env="",
+        flags="--thinking",
+        query="read $1",
+        budget_s=20,
+        continue_prompt='again "please"',
+        max_continues=1,
+        via_stdin=True,
+        attachments=" -f '/file with spaces'",
+    )
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    result = subprocess.run(["bash", "-c", cmd], env=env, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 1
+    assert "resumed 1 times" in result.stdout
+    assert calls.read_text().splitlines() == [
+        "run --title NG dummy title --thinking -f /file with spaces|read $1",
+        'run --continue --thinking|again "please"',
+    ]
