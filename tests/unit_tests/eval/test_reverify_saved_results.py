@@ -24,6 +24,7 @@ from nemo_gym.eval.recovery.decision import (
 )
 from nemo_gym.eval.recovery.evidence import (
     COLLECT_SCRIPT,
+    STORE_SKIP_KEYS,
     CollectedEvidence,
 )
 from nemo_gym.eval.recovery.grading import (
@@ -466,10 +467,130 @@ async def test_an_invalid_judge_response_inside_the_rubric_facts_is_graded_again
     assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
 
 
-async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_was(tmp_path, verifier) -> None:
+@pytest.mark.parametrize("has_trajectory", [False, True])
+async def test_rejudgment_persists_a_parsed_abstention_without_measuring_it(
+    tmp_path, verifier, monkeypatch, has_trajectory
+):
+    monkeypatch.setattr("nemo_gym.rollouts.rollout_records.PROJECTED_ROW_BYTES", 64)
+    original = ungraded(0) | {
+        "reward": 0.0,
+        "mask_sample": True,
+        "failure_kind": "judge_unparseable",
+        "grading_status": "judge_unparsed",
+        "evaluation_completed": False,
+        "correctness": None,
+    }
+    if not has_trajectory:
+        original.pop("ng_trajectory")
+    output = _run(tmp_path, [original])
+    if not has_trajectory:
+        # A valid unterminated last record acquires its separator when the settlement is appended.
+        unterminated = output.read_bytes().removesuffix(b"\n")
+        output.write_bytes(unterminated)
+        monkeypatch.setattr("nemo_gym.rollouts.rollout_records.PROJECTED_ROW_BYTES", len(unterminated))
+    (identity,) = due_judge_failures(output)
+    evaluation = {"verdict_label": "Judgement: unresolved"}
+    if has_trajectory:
+        evaluation["judgment"] = {
+            "verdict": "unresolved",
+            "reason_code": "conflicting_reference",
+            "evidence": "The reference contradicts the question.",
+        }
+    verifier["grade"] = lambda row: row | {
+        "reward": 0.0,
+        "mask_sample": True,
+        "failure_kind": None,
+        "evaluation_completed": True,
+        "correctness": None,
+        "verdict": "unresolved",
+        "grading_status": "judge_unresolved",
+        "judge_evaluations": [evaluation],
+    }
+    from nemo_gym.rollouts import rollout_records
+
+    manifest_path = rollout_records.manifest_path_for(output)
+    close = RolloutStore.close_rejudgment
+    admitted = []
+
+    def capture_before_close(store, *args):
+        admitted.append(manifest_path.read_bytes())
+        return close(store, *args)
+
+    monkeypatch.setattr(RolloutStore, "close_rejudgment", capture_before_close)
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+    selected, store = _selected(output)
+    saved = selected[identity]
+    assert saved["mask_sample"] and saved["verdict"] == "unresolved" and saved["correctness"] is None
+    assert saved["grading_status"] == "judge_unresolved" and saved["judge_evaluations"] == [evaluation]
+    assert saved["response"] == original["response"] and saved["_ng_attempt_index"] == 0
+    assert store.coverage()["masked"] == 1
+    projected = RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS)
+    (row,) = projected.selected("success")
+    assert row["verdict"] == "unresolved" and row["mask_sample"] and "ng_trajectory" not in row
+    assert not store.manifest.pending_rejudge and due_judge_failures(output) == []
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert verifier["posted"] == [("rs", "/verify")]
+    # Simulate a crash after the settlement was fsynced and before its admission was closed.
+    closed = manifest_path.read_bytes()
+    manifest_path.write_bytes(admitted[0])
+    scan = rollout_records._indexed_records
+
+    def projected_scan(path, **kwargs):
+        if path == output:
+            assert kwargs.get("skip_keys") == STORE_SKIP_KEYS
+        return scan(path, **kwargs)
+
+    with monkeypatch.context() as crash:
+        crash.setattr(rollout_records, "_indexed_records", projected_scan)
+        reopened = RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS)
+        assert reopened.unresolved_rejudgments() == []
+    manifest_path.write_bytes(closed)
+    # Both old and new deliveries may arrive again, in either order.
+    original_bytes = output.read_bytes().splitlines()[0]
+    with RolloutStore.open_for_rejudgment(output) as writer:
+        writer.record_outcome(dict(reversed(selected[identity].items())), sync=True)
+        writer.record_outcome(orjson.loads(original_bytes), sync=True)
+    assert len(set(output.read_bytes().splitlines()[-3:])) == 1
+    # Include a journal written in arrival order by an older writer.
+    with output.open("ab") as writer:
+        writer.write(original_bytes + b"\n")
+    for skipped in (frozenset(), STORE_SKIP_KEYS):
+        (replayed,) = RolloutStore.read(output, import_legacy=False, skip_keys=skipped).selected("success")
+        assert replayed["mask_sample"] and replayed["verdict"] == "unresolved"
+    assert not due_judge_failures(output)
+    # A changed byte in omitted trajectory data must still invalidate the predecessor.
+    before, separator, rest = output.read_bytes().partition(b"\n")
+    altered = (
+        before.replace(b'"task_id":"t0"', b'"task_id":"z0"')
+        if has_trajectory
+        else before[:-1] + b',"ng_agent_observations":{"history":"new"}}'
+    )
+    assert before != altered
+    output.write_bytes(altered + separator + rest)
+    with pytest.raises(ConfigError, match="Conflicting outcomes"):
+        RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {},
+        {
+            "grading_status": "judge_unparsed",
+            "verdict": "unresolved",
+            "correctness": None,
+            "failure_kind": "judge_unparseable",
+            "evaluation_completed": False,
+            "judge_evaluations": [{"verdict_label": None}],
+        },
+    ],
+)
+async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_was(
+    tmp_path, verifier, outcome
+) -> None:
     output = _run(tmp_path, [verify_transport_masked()])
     before = output.read_bytes()
-    verifier["grade"] = lambda json: json | {"reward": 0.0, "mask_sample": True}
+    verifier["grade"] = lambda json: json | {"reward": 0.0, "mask_sample": True} | outcome
 
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
 

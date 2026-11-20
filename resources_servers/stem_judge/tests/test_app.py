@@ -36,6 +36,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.server_runtime import ReverifyMode, verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
@@ -286,7 +287,8 @@ class TestAnswerOptions:
         )
         saved = json.loads(result.model_dump_json())
         assert saved["verdict"] == verdict and saved["grading_status"] == status
-        assert saved["evaluation_completed"] is known and saved["mask_sample"] is (not known)
+        assert saved["evaluation_completed"] is (status != "judge_unparsed")
+        assert saved["mask_sample"] is (not known)
         assert saved["correctness"] is (False if known else None)
         assert saved["reward"] == 0.0
         assert saved["judge_evaluations"][0]["verdict_label"] == (
@@ -978,6 +980,30 @@ class TestVerify:
 
 class TestGradingObservation:
     """The real verify and call_judge record the grading for the active verifier invocation."""
+
+    @mark.parametrize(
+        "fmt,reply,status",
+        [
+            ("line", "Judgement: 'unresolved'", "completed"),
+            (
+                "json",
+                '{"verdict":"unresolved","reason_code":"conflict","evidence":"References disagree."}',
+                "completed",
+            ),
+            ("line", "I cannot parse this.", "incomplete"),
+        ],
+    )
+    async def test_masked_verifier_evidence_distinguishes_abstentions(self, config, fmt, reply, status):
+        config.verdict_mode, config.verdict_format = "yes_no_unresolved", fmt
+        server = _server(config, reply)
+        verify = verifier_observability.observe_verifier(server.verify, enabled=True)
+        with rollout_context("rejudge"):
+            result = await verify(_request(_split(r"\boxed{3}")))
+        (observed,) = result.ng_verifier_invocations
+        assert result.correctness is None and result.mask_sample
+        assert observed.status == status
+        (operation,) = observed.grading_operations
+        assert operation.outcome == ("completed" if status == "completed" else "unknown")
 
     async def _observe(
         self, config: StemJudgeConfig, server: StemJudgeResourcesServer, request: StemJudgeVerifyRequest

@@ -38,6 +38,7 @@ from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.core.failure_kinds import ROLLOUT_ALLOCATION_ENDED
 from nemo_gym.rollouts.rollout_records import (
     REJUDGE_OPERATION_ID_KEY,
+    REJUDGE_RECORD_BINDING_KEY,
     REJUDGED_FAILURE_ID_KEY,
     REJUDGED_OBSERVATIONS_KEY,
     RESULT_PREDECESSOR_PREFIX,
@@ -478,6 +479,10 @@ class RolloutStore:
             except (TypeError, ValueError) as error:
                 raise ConfigError("Canonical rejudge requires fresh observed verifier invocation evidence.") from error
         saved = current.record.read()
+        # This journal binding is store-owned. A replay compares the verifier's settlement.
+        settled.pop(REJUDGE_RECORD_BINDING_KEY, None)
+        if saved.get(REJUDGE_OPERATION_ID_KEY) == result.get(REJUDGE_OPERATION_ID_KEY):
+            saved.pop(REJUDGE_RECORD_BINDING_KEY, None)
         if saved == settled:
             return None  # already saved: no new write, judge call or attempt
         pending = self.manifest.pending_rejudge.get(key[0])
@@ -514,6 +519,11 @@ class RolloutStore:
         settled = self.check_rejudgment(failure, result)
         if settled is None:
             return False
+        predecessor = self._state.payloads[self._state._key(failure)].record
+        admission = self.manifest.pending_rejudge[logical_rollout_id(failure)]
+        binding = predecessor.large_record_digest(RESULT_PREDECESSOR_PREFIX + admission.predecessor_sha256)
+        if binding is not None:
+            settled[REJUDGE_RECORD_BINDING_KEY] = binding
         self.record_outcome(settled, sync=True)
         return True
 
@@ -600,7 +610,7 @@ class RolloutStore:
     def record_outcome(self, result: dict, *, sync: bool = False) -> None:
         """Append the outcome once; a complete JSONL row is the recovery record."""
         self._require_open()
-        self._state.check_outcome(result)
+        _, result = self._state.validated_outcome(result)
         file = self._failures_file if result.get("_ng_failure_class") is not None else self._results_file
         raw = orjson.dumps(result) + b"\n"
         stat = os.fstat(file.fileno())

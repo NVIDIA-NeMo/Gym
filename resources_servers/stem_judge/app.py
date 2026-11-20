@@ -558,9 +558,9 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         evaluation.verdict_label = f"Judgement: {verdict}" if verdict is not None else None
         if evaluation.verdict_label is None:
             return await self._finish(body, expected, answer_format, "judge_unparsed", 0.0, solution, [evaluation])
+        record_parsed_judge_verdict()
         if verdict == "unresolved":
             return await self._finish(body, expected, answer_format, "judge_unresolved", 0.0, solution, [evaluation])
-        record_parsed_judge_verdict()
         reward = 1.0 if verdict == "yes" else 0.0
         return await self._finish(body, expected, answer_format, "judged", reward, solution, [evaluation])
 
@@ -651,17 +651,13 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             unknown = status in ("judge_unparsed", "judge_unresolved")
             payload.update(
                 verdict="unresolved" if unknown else ("yes" if reward else "no"),
-                evaluation_completed=not unknown,
+                evaluation_completed=status != "judge_unparsed",
                 correctness=None if unknown else bool(reward),
                 mask_sample=unknown,
             )
-            if unknown:
-                payload["failure_kind"] = (
-                    "stem_judge:unresolved" if status == "judge_unresolved" else JUDGE_UNPARSEABLE
-                )
-                payload["failure_reason"] = (
-                    "Judge abstained" if status == "judge_unresolved" else "Missing or incomplete final verdict"
-                )
+            if status == "judge_unparsed":
+                payload["failure_kind"] = JUDGE_UNPARSEABLE
+                payload["failure_reason"] = "Missing or incomplete final verdict"
         return StemJudgeVerifyResponse(
             **payload,
             reward=reward,

@@ -180,6 +180,10 @@ the answer. Route other sources to a STEM instance with `math_verify: null`.
 Free answers, whole-answer comparisons and rubric rows always use the judge. For NeMoRL SingleController with source scheduling, enable
 `grpo.exclude_failed_judge_groups` to keep a masked group out of the trainer and reward cache.
 
+If recovery rejudges a saved answer, a parsed `unresolved` verdict completes the
+regrade once. The saved answer stays masked with unknown correctness. A malformed
+judge reply leaves the original answer eligible for another grading attempt.
+
 With `math_verify: {}`, Math-Verify uses Gym's defaults of `units: true` and
 `precision: 6`. Here `units` controls whether LaTeX normalization strips recognized
 unit suffixes on both sides. Set it to `false` to preserve a variable such as the

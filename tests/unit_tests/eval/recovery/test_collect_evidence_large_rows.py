@@ -129,6 +129,22 @@ def test_a_row_far_above_the_memory_limit_is_read_in_bounded_memory(tmp_path: Pa
     ]
 
 
+def test_large_rejudged_history_is_read_in_bounded_memory(tmp_path: Path) -> None:
+    _write_store(tmp_path, small_rows=1)
+    path = tmp_path / "artifacts" / "rollouts.jsonl"
+    with path.open("ab") as journal:
+        journal.write(
+            b'{"_ng_task_index":1,"_ng_rollout_index":0,"reward":0,"mask_sample":true,'
+            b'"_ng_rejudged_failure_observations":{"ng_agent_observations":{"history":"'
+        )
+        chunk = b"x" * MIB
+        for _ in range(256):
+            journal.write(chunk)
+        journal.write(b'"}}}\n')
+    rows = _collect(tmp_path, address_limit=512 * MIB)["results"]
+    assert len(rows) == 2 and rows[1]["mask_sample"] is True
+
+
 def test_the_row_limit_does_not_change_what_the_collector_reports(tmp_path: Path) -> None:
     _write_store(tmp_path, big_row_calls=3)
     whole = _collect(tmp_path, script=COLLECT_SCRIPT.replace("BIG_LINE = 16 << 20", "BIG_LINE = 1 << 40"))

@@ -464,14 +464,14 @@ unreadable = set()
 # model call's whole request, so one row grows with the square of its conversation and reaches gigabytes.
 BIG_LINE = 16 << 20
 CHUNK = 4 << 20
-PRUNED_KEYS = (b"ng_trajectory", b"ng_agent_observations")
+PRUNED_KEYS = (b"ng_trajectory", b"ng_agent_observations", b"_ng_rejudged_failure_observations")
 # A string is elided only when it is longer than this and is not one the collector reads (KEPT_PATHS).
 ELIDE_ABOVE = 1024
 # Elided text is checked as JSON in pieces of about this size.
 VALIDATE = 1 << 20
 # A string the collector reads is never elided; one above this size is no identity or status, so the row fails loudly.
 KEPT_MAX = 1 << 20
-# A key is read up to this many bytes: a name the collector reads is at most 21 characters, 126 bytes with every one
+# A key is read up to this many bytes: a name the collector reads is at most 33 characters, 198 bytes with every one
 # escaped, so a longer key matches none of them.
 KEY_MAX = 256
 # The places in a pruned value whose string the collector projects (identities, statuses, kinds, names), as the keys
@@ -1541,7 +1541,7 @@ def _managed_trial_metadata(
 
 # Row values the Store selection never reads, and the largest ones in agent runs. The model-call capture is read: an
 # agent timeout's captured calls decide whether its window held a server-side fault (is_infrastructure_agent_timeout).
-STORE_SKIP_KEYS = frozenset({"ng_trajectory", "ng_agent_observations"})
+STORE_SKIP_KEYS = frozenset({"ng_trajectory", "ng_agent_observations", "_ng_rejudged_failure_observations"})
 
 
 def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> CollectedEvidence:

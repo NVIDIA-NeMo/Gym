@@ -15,7 +15,6 @@
 import asyncio
 import hashlib
 import json
-import math
 import os
 import re
 import time
@@ -83,6 +82,7 @@ from nemo_gym.rollouts.rollout_records import (
     rejudge_predecessor_id,
     resolve_rollout_owner,
     resolve_rollout_path,
+    settled_judge_result,
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, run_lock
 from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
@@ -1603,7 +1603,7 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
             raise ConfigError(f"Re-judged rollout {identity!r} is not a bound judge failure of {source}.")
         if binding["admitted"][identity].operation_id in done:
             continue  # this pass settled or withdrew it before an error
-        if _ungraded_reverification(result) and (
+        if not settled_judge_result(result) and (
             identity in saved_results or result.get(NG_FAILURE_CLASS_KEY) != "judge_failed"
         ):
             # The verifier answered without a grade or a judge failure: the bound row stays as it was, and nothing
@@ -1664,18 +1664,6 @@ def _validate_rescored_completion(result: object) -> None:
         scored = False
     if not isinstance(result.get("response"), dict) or not scored:
         raise ConfigError("A completed verifier reply requires a response object and a finite numeric reward.")
-
-
-def _ungraded_reverification(result: Dict[str, Any]) -> bool:
-    """Whether a re-verification answered without a usable grade: a failure, a mask or no finite reward."""
-    reward = result.get("reward")
-    return (
-        result.get(NG_FAILURE_CLASS_KEY) is not None
-        or bool(result.get("mask_sample"))
-        or result.get("evaluation_completed") is False
-        or type(reward) not in (int, float)
-        or not math.isfinite(reward)
-    )
 
 
 def _settle_what_a_failed_pass_judged(
