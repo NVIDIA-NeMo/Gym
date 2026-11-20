@@ -7,6 +7,7 @@ stem_judge:
     stem_judge:
       guideline_scope: cross_domain
       verdict_mode: yes_no_unresolved
+      verdict_format: line  # Set to json to also collect a reason code and supporting evidence.
       box_parser: last_command
       boxed_judge_input: box
       math_verify:

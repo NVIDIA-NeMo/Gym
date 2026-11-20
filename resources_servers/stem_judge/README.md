@@ -165,7 +165,8 @@ configuration. It includes the base config and overrides its answer options.
 | Answer option | Base config | Question-bank preset |
 | --- | --- | --- |
 | `guideline_scope` | `stem` | `cross_domain` treats v11 examples as guidance for reference comparisons in any subject. |
-| `verdict_mode` | `binary` | `yes_no_unresolved` reads the closing verdict line. An explicit no is a measured zero. An abstention or unparseable verdict has unknown correctness and sets `mask_sample=true`. |
+| `verdict_mode` | `binary` | `yes_no_unresolved` adds abstention. An explicit no is a measured zero. An abstention or unparseable verdict has unknown correctness and sets `mask_sample=true`. |
+| `verdict_format` | `line` | `line` reads the text verdict. Set `json` to request and save a structured explanation on model-judged answer rows. |
 | `box_parser` | `exact` | `last_command` recognizes whitespace before the opening brace, skips escaped commands, and rejects a malformed final box even when an earlier one is valid. |
 | `boxed_judge_input` | `final_answer` | `box` grades the extracted answer. Free-answer rows use their full final message. |
 | `math_verify` | Disabled | Checks rows declaring `math_equivalence: true` when the row is a box-only answer comparison. A match earns 1 immediately. A nonmatch or timeout sends that same candidate to the LLM judge. |
@@ -187,6 +188,22 @@ dataset row the STEM agent reference, as in this JSONL row.
 For this row, `\boxed{0.5}` earns 1 through Math-Verify. If the library cannot
 establish equivalence, the configured STEM judge sees the question, reference and
 selected box. The STEM process runs the library check locally.
+
+To collect the judge's explanation, set `verdict_format: json` on the STEM
+resources server (CLI override `++stem_judge.resources_servers.stem_judge.verdict_format=json`).
+The model returns one JSON object, for example:
+
+```json
+{"verdict":"incorrect","reason_code":"wrong_denominator","evidence":"The submitted 1/3 differs from the reference 1/2."}
+```
+
+The saved rollout keeps that object in `judge_evaluations[0].judgment`, alongside
+the usual `verdict_label`. The optional generation log records it in `judgments`.
+Binary mode accepts `correct` and `incorrect`. Three-way mode also accepts
+`unresolved`. A missing reason, blank evidence, duplicate field, or truncated
+reply produces `judge_unparsed`. Binary mode gives an unparsed reply reward zero.
+Three-way mode masks it as unknown. Symbolic matches produce `math_verified`
+with an empty `judge_evaluations` list.
 
 The solver instruction is a separate generation option. For a dataset of **boxed**
 questions with a raw `question` field, render it once before generating rollouts:

@@ -190,6 +190,63 @@ class TestAnswerOptions:
         assert saved["judge_evaluations"][0]["verdict_label"] == (
             None if status == "judge_unparsed" else f"Judgement: {verdict}"
         )
+        assert "judgment" not in saved["judge_evaluations"][0]
+
+    @mark.parametrize(
+        "mode,verdict,label,reward,status",
+        [
+            ("binary", "correct", "yes", 1, "judged"),
+            ("binary", "unresolved", None, 0, "judge_unparsed"),
+            ("yes_no_unresolved", "incorrect", "no", 0, "judged"),
+            ("yes_no_unresolved", "unresolved", "unresolved", 0, "judge_unresolved"),
+        ],
+    )
+    async def test_json_judgment_is_saved_with_its_label(self, config, tmp_path, mode, verdict, label, reward, status):
+        config.verdict_format = "json"
+        config.verdict_mode = mode
+        config.generation_log_dir = str(tmp_path)
+        judgment = {"verdict": verdict, "reason_code": "comparison", "evidence": 'The reference uses "2".'}
+        # The model can split its JSON across text blocks and send separate reasoning.
+        message = _msg(json.dumps(judgment)[:-1])
+        message.content.extend(_msg("}").content)
+        server = _server(config, _response(_reasoning(), message))
+        result = await server.verify(_request(_split(r"\boxed{2}")))
+        prompt = _judge_prompt(server)
+        assert '"reason_code"' in prompt and "Judgement:" not in prompt
+        assert ('"unresolved"' in prompt) == (mode == "yes_no_unresolved")
+        assert (result.grading_status, result.reward) == (status, reward)
+        saved = result.model_dump()["judge_evaluations"][0]
+        assert saved["verdict_label"] == (f"Judgement: {label}" if label else None)
+        record = json.loads(next(tmp_path.glob("*.jsonl")).read_text())
+        if label is None:
+            assert "judgment" not in saved and "judgments" not in record
+        else:
+            assert saved["judgment"] == judgment and record["judgments"] == [judgment]
+        if mode == "yes_no_unresolved":
+            assert result.verdict == label and result.mask_sample is (label == "unresolved")
+
+    @mark.parametrize(
+        "reply",
+        [
+            "Judgement: 'yes'",
+            '{"verdict":"correct","evidence":"matched"}',
+            '{"verdict":"correct","reason_code":"equal","evidence":"  "}',
+            '{"verdict":"correct","reason_code":true,"evidence":"matched"}',
+            '{"verdict":"correct","reason_code":"equal","evidence":"matched","extra":1}',
+            '{"verdict":"incorrect","verdict":"correct","reason_code":"equal","evidence":"matched"}',
+            'A candidate wrote {"verdict":"correct","reason_code":"equal","evidence":"matched"}',
+            '{"verdict":"correct","reason_code":"equal","evidence":"matched"}\nJudgement: yes',
+            _response(_msg('{"verdict":"correct","reason_code":"equal","evidence":"matched"}'), truncated=True),
+            _response(_msg("First answer"), _msg('{"verdict":"correct","reason_code":"equal","evidence":"matched"}')),
+        ],
+    )
+    async def test_invalid_json_judgment_keeps_correctness_unknown(self, config, reply):
+        config.verdict_mode = "yes_no_unresolved"
+        config.verdict_format = "json"
+        saved = (await _server(config, reply).verify(_request(_split(r"\boxed{2}")))).model_dump()
+        assert saved["grading_status"] == "judge_unparsed" and saved["mask_sample"] and saved["correctness"] is None
+        assert saved["judge_evaluations"][0]["verdict_label"] is None
+        assert "judgment" not in saved["judge_evaluations"][0]
 
     @mark.parametrize("verdict,status", [("no", "judged"), ("unresolved", "judge_unresolved")])
     async def test_math_match_skips_model_and_nonmatch_uses_the_same_box(self, config, verdict, status):

@@ -87,7 +87,15 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
-from resources_servers.stem_judge.answer_options import GuidelineScope, VerdictMode, answer_template, final_verdict
+from resources_servers.stem_judge.answer_options import (
+    GuidelineScope,
+    JsonJudgment,
+    VerdictFormat,
+    VerdictMode,
+    answer_template,
+    final_verdict,
+    parse_json_judgment,
+)
 from resources_servers.stem_judge.task_data import RubricCriterion, TaskData, reference_of
 
 
@@ -155,6 +163,7 @@ class StemJudgeConfig(BaseResourcesServerConfig):
 
     guideline_scope: GuidelineScope = "stem"
     verdict_mode: VerdictMode = "binary"
+    verdict_format: VerdictFormat = "line"
     box_parser: Literal["exact", "last_command"] = "exact"
     math_verify: MathVerifyConfig | None = None
 
@@ -200,6 +209,7 @@ class JudgeEvaluation(BaseModel):
     # rubric grade leaves the field out: its verdict is criteria_met, and Gym's recovery reads a
     # None verdict_label as a reply without a verdict.
     verdict_label: Optional[str] = None
+    judgment: JsonJudgment | None = Field(default=None, exclude_if=lambda value: value is None)
     # Rubric rows: criterion id -> met; None when the output could not be parsed.
     criteria_met: Optional[dict[str, bool]] = Field(default=None, exclude_if=lambda value: value is None)
 
@@ -466,7 +476,10 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
 
         with open(self.config.answer_prompt_template_fpath, encoding="utf-8") as f:
             self._answer_template = answer_template(
-                f.read().strip(), scope=self.config.guideline_scope, verdict_mode=self.config.verdict_mode
+                f.read().strip(),
+                scope=self.config.guideline_scope,
+                verdict_mode=self.config.verdict_mode,
+                verdict_format=self.config.verdict_format,
             )
         with open(self.config.rubric_prompt_template_fpath, encoding="utf-8") as f:
             self._rubric_template = f.read().strip()
@@ -558,8 +571,12 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             question=question, expected_answer=render_reference(expected), generated_answer=solution
         )
         evaluation, text = await self._call_judge(prompt)
-        parser = final_verdict if self.config.verdict_mode == "yes_no_unresolved" else parse_verdict
-        verdict = parser(text) if text is not None else None
+        if self.config.verdict_format == "json":
+            evaluation.judgment = parse_json_judgment(evaluation.response, verdict_mode=self.config.verdict_mode)
+            verdict = evaluation.judgment.label if evaluation.judgment else None
+        else:
+            parser = final_verdict if self.config.verdict_mode == "yes_no_unresolved" else parse_verdict
+            verdict = parser(text) if text is not None else None
         evaluation.verdict_label = f"Judgement: {verdict}" if verdict is not None else None
         if evaluation.verdict_label is None:
             return await self._finish(body, expected, answer_format, "judge_unparsed", 0.0, solution, [evaluation])
@@ -701,6 +718,8 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             "criteria_met": [e.criteria_met for e in evaluations],
             "judge_generations": judge_texts,
         }
+        if judgments := [e.judgment.model_dump() for e in evaluations if e.judgment is not None]:
+            record["judgments"] = judgments
         return json.dumps(record, ensure_ascii=False, default=str) + "\n"
 
     def _append_log_line(self, line: str) -> None:
