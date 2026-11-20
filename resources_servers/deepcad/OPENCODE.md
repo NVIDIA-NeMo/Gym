@@ -172,6 +172,44 @@ or real-model rollouts. Earlier internal CAD quality/training experiments
 used different runtime/protocol configurations and do not validate this public
 file-input recipe. No new cross-harness quality or training parity is claimed.
 
+## Real-model smoke
+
+One real policy checkpoint, served by NeMo RL's vLLM worker, ran the five original examples
+(`data/example.jsonl`) through each of the five harnesses on OpenSandbox, 25 episodes in all,
+at commit `a7706529e`. Rewards come from this server's verifier.
+
+| Harness | Episodes | Mean reward | Episodes where 3 or more distinct images reached the model |
+|---|---|---|---|
+| `claude_code` | 5 | 1.000 | 5 of 5 |
+| `openclaw` | 5 | 1.000 | 5 of 5 |
+| `codex` | 5 | 0.913 (one episode scored 0.562) | 5 of 5 |
+| `opencode` | 5 | 0.893 (one episode scored 0.466) | 4 of 5 |
+| `pi` | 5 | 1.000 | 3 of 5 |
+
+All 25 episodes ended with the final file collected and a verifier result. Over all 25,
+the mean reward is 0.961 (standard error 0.027).
+
+How to read this:
+
+- Rewards are close to 1.0 on these examples, so they do not separate the harnesses. A harness
+  that never saw an image can still score 1.0: two Pi episodes and one OpenCode episode never
+  showed an image to the model, and the two Pi episodes still scored 1.0.
+- File-input rows carry no image in the first model request. The images arrive when the harness
+  reads the workspace files, so "reached the model" is counted from every captured request of
+  the episode, not the first one.
+- No comparison with the original single-harness recipe was run, so no relative reward change is
+  claimed.
+- This is not training evidence. Of the 25 episodes, only 2 passed NeMo RL's token-capture
+  selection. The rest were rejected because an output item could not be matched to a captured
+  generation, or because a capture was attributed to another dispatched attempt. The verifier
+  results above were read from the results that NeMo RL retains when selection fails.
+- The cluster run differed from the defaults in this recipe in two ways. The verifier ran from a
+  copy of the CadQuery image whose default user is root, because OpenSandbox's executor cannot
+  switch users and the sealing step runs as root. The sandbox create timeout was raised to 600
+  seconds, because creating a sandbox took about three minutes when the image was not yet on a
+  node. The first pass left 5 episodes without a verifier result because their sandboxes stayed
+  Pending; those 5 were run again in a second job and all finished.
+
 ## Validation
 
 The following results validate the upstream standalone OpenCode recipe from #5950,
