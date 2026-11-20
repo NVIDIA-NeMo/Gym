@@ -141,7 +141,15 @@ def test_workspace_size_ceiling_covers_bash_redirection(world: Fixtures, schemas
     assert "/workspace/logs/new.txt" not in world.files
 
 
-@pytest.mark.parametrize("suffix", ["/workspace/logs/../escape", "/workspace/logs/answer.txt; curl example.invalid"])
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "/workspace/logs/../escape",
+        "/workspace/logs/answer.txt; curl example.invalid",
+        "/workspace/logs/answer.txt --output=/workspace/logs/other.txt",
+        "/workspace/logs/answer.txt --unsupported=value",
+    ],
+)
 def test_unsupported_probe_commands_do_not_partially_write(world: Fixtures, schemas: dict, suffix: str):
     before = dict(world.files)
     command = "python /agent/probe.py --uri example://sibling --output " + suffix
@@ -149,13 +157,46 @@ def test_unsupported_probe_commands_do_not_partially_write(world: Fixtures, sche
     assert world.files == before
 
 
-def test_valid_probe_retains_identity_and_exact_returned_fixture(world: Fixtures, schemas: dict):
-    tool = call("Bash", {"command": "python /agent/probe.py --uri example://sibling"})
+@pytest.mark.parametrize("option", ["", " --output ", " --output="])
+def test_valid_probe_retains_identity_and_exact_returned_fixture(world: Fixtures, schemas: dict, option: str):
+    path = "/workspace/logs/probe.json"
+    suffix = option + path if option else ""
+    tool = call("Bash", {"command": "python /agent/probe.py --uri=example://sibling" + suffix})
     result, kind = world.dispatch(tool, schemas)
     identity = probe_identity({"function": tool["function"], "result": result, "kind": kind}, world.bundle)
     assert kind == "sibling_probe"
     assert json.loads(result) == world.bundle["sibling"]
     assert identity == {"namespace": "sibling", "uri": "example://sibling", "returned_result": world.bundle["sibling"]}
+    if option:
+        assert world.files[path] == result
+    else:
+        assert path not in world.files
+
+
+@pytest.mark.parametrize("child_first", [False, True])
+def test_virtual_file_directory_collisions_leave_the_workspace_searchable(world, schemas, child_first):
+    parent = "/workspace/logs/node"
+    child = parent + "/child.txt"
+    first, second = (child, parent) if child_first else (parent, child)
+    assert world.dispatch(call("Write", {"file_path": first, "content": "needle"}), schemas)[1] == "file_write"
+    previous = dict(world.files), world.files._bytes
+    assert world.dispatch(call("Write", {"file_path": second, "content": "other"}), schemas)[1] == "fixture_gap"
+    assert (dict(world.files), world.files._bytes) == previous
+    result, kind = world.dispatch(call("Bash", {"command": "rg needle /workspace/logs"}), schemas)
+    assert kind == "readonly_tool_result" and "needle" in result
+
+
+def test_virtual_file_bulk_updates_are_atomic():
+    directory = "/workspace/logs/node"
+    child = directory + "/child.txt"
+    sibling = directory + "/sibling.txt"
+    files = limits.VirtualFiles({child: "original"})
+    with pytest.raises(limits.CoverageGap, match="cannot also act as directories"):
+        files.update({sibling: "new file", directory: "file at directory"})
+    assert files == {child: "original"} and files._bytes == len("original")
+    files.update({child: "replacement", sibling: "new file"})
+    assert files == {child: "replacement", sibling: "new file"}
+    assert files._bytes == len("replacement") + len("new file")
 
 
 def test_explore_tools_cannot_write_parent_answer(world: Fixtures, schemas: dict):

@@ -112,26 +112,47 @@ async def test_no_call_and_multiple_calls_fail(output):
 
 
 @pytest.mark.parametrize("invalid_registry", [False, True])
-def test_completed_empty_response_validates_registry_through_verify_endpoint(invalid_registry):
+@pytest.mark.parametrize("registry_check", ["if", "completion", "prerequisite"])
+def test_completed_empty_response_validates_registry_through_verify_endpoint(invalid_registry, registry_check):
     advertised = [tool()]
     if invalid_registry:
         advertised.append(tool("unused") | {"parameters": {"$ref": "https://example.invalid/missing.json"}})
+    task = contract().model_dump()
+    if registry_check != "if":
+        independent = {
+            "id": "contains_x",
+            "constraint": "Include X",
+            "verifier": {"id": "text_contains_v1", "params": {"source": "answer", "literal": "X"}},
+        }
+        check = task["rubrics"].pop()
+        task["rubrics"].append(independent)
+        if registry_check == "completion":
+            task["rubrics"].append(check | {"dimension": "completion"})
+        else:
+            task["prerequisites"] = [check]
+            independent["depends_on"] = [check["id"]]
     body = {
         "responses_create_params": {
             "input": [{"role": "user", "content": "Call an advertised function."}],
             "tools": advertised,
         },
-        "verifier_metadata": {"partner_if": contract().model_dump()},
+        "verifier_metadata": {"partner_if": task},
         "response": response(output=[]).model_dump(mode="json"),
     }
     with TestClient(server().setup_webserver(), raise_server_exceptions=False) as client:
         result = client.post("/verify", json=body)
     assert result.status_code == 200
     row = result.json()
-    assert row["mask_sample"] is invalid_registry
-    assert row["evaluation_completed"] is not invalid_registry
-    assert row["grading_result"]["reward"] == (None if invalid_registry else 0)
-    assert row["failure_kind"] == ("partner_if:unscorable" if invalid_registry else "partner_if:no_answer")
+    masked = invalid_registry and registry_check != "completion"
+    assert row["mask_sample"] is masked
+    assert row["evaluation_completed"] is not masked
+    grading = row["grading_result"]
+    assert grading["reward"] == (None if masked else 0)
+    assert row["failure_kind"] == ("partner_if:unscorable" if masked else "partner_if:no_answer")
+    verdicts = {item["id"]: item["raw_passed"] for item in grading["items"] + grading["prerequisites"]}
+    assert verdicts["advertised_tool_call"] is (None if invalid_registry else False)
+    if registry_check != "if":
+        assert verdicts["contains_x"] is False
 
 
 async def test_token_cutoff_fails_but_provider_and_capture_errors_are_masked():

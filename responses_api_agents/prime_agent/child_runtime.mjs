@@ -56,6 +56,10 @@ if (checking) {
   await ai.cleanupSessionResources();
 } else {
 mkdirSync(args.state, {recursive:true, mode:0o700});
+if (args.captureDirectory) mkdirSync(args.captureDirectory,{recursive:true,mode:0o700});
+for (const name of ['events.jsonl','parent-messages.jsonl']) {
+  writeFileSync(join(args.state,name),'',{mode:0o600,flag:'wx'});
+}
 const events = [];
 const deliveries = [];
 const log = (name, value) => appendFileSync(join(args.state, name), JSON.stringify(value)+'\n');
@@ -132,7 +136,6 @@ try {
   const capture={version:1,termination,assistantTurns:turns,events,deliveries};
   writeFileSync(join(args.state,'capture.json'),JSON.stringify(capture));
   if (args.captureDirectory) {
-    mkdirSync(args.captureDirectory,{recursive:true,mode:0o700});
     writeFileSync(join(args.captureDirectory,'capture.json'),JSON.stringify(capture),{mode:0o600});
   }
 }

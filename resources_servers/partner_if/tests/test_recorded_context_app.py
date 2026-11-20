@@ -175,6 +175,45 @@ async def test_step_retries_and_terminal_retries_do_not_repeat_tools_or_judge(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("output_option", ["--output ", "--output="])
+async def test_step_can_read_a_probe_output_in_the_same_response(monkeypatch, output_option):
+    resource, calls = server(monkeypatch)
+    await reset(resource)
+    path = "/workspace/logs/probe.json"
+    command = f"python3 -I {PROBE} --uri '{BUNDLE['sibling']['input_uri']}' {output_option}{path}"
+    reply = await step(
+        resource,
+        response(tool("Bash", {"command": command}, "probe"), tool("Read", {"file_path": path}, "read-probe")),
+    )
+    assert len(calls) == 1 and reply.terminated and not reply.mask_sample
+    outputs = reply.info[RESULT_KEY]["response"]["output"]
+    saved = next(
+        item["output"]
+        for item in outputs
+        if item["type"] == "function_call_output" and item["call_id"] == "read-probe"
+    )
+    contents = "\n".join(line.partition("\t")[2] for line in saved.splitlines())
+    assert json.loads(contents) == BUNDLE["sibling"]
+
+
+@pytest.mark.asyncio
+async def test_virtual_directory_collision_masks_the_step_instead_of_crashing(monkeypatch):
+    resource, _ = server(monkeypatch)
+    await reset(resource)
+    path = "/workspace/logs/node"
+    reply = await step(
+        resource,
+        response(
+            tool("Write", {"file_path": path, "content": "first"}, "write-parent"),
+            tool("Write", {"file_path": f"{path}/child.txt", "content": "needle"}, "write-child"),
+            tool("Bash", {"command": "rg needle /workspace/logs"}, "search"),
+        ),
+    )
+    assert reply.truncated and reply.mask_sample
+    assert reply.info[RESULT_KEY]["recorded_context"]["termination"] == "fixture_gap"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["input", "rubric", "extra", "model", "incomplete"])
 async def test_step_identity_faults_never_grade_unbound_evidence(monkeypatch, fault):
     resource, calls = server(monkeypatch)

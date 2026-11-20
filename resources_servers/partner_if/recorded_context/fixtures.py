@@ -37,6 +37,22 @@ def shell_tokens(command: str) -> list[str]:
     return list(lexer)
 
 
+def probe_options(tokens: list[str]) -> dict[str, str]:
+    """Read the pinned probe's options in either of its accepted spellings."""
+    options = {}
+    arguments = iter(tokens)
+    for token in arguments:
+        option, separator, value = token.partition("=")
+        if option not in {"--uri", "--output"} or option in options:
+            raise CoverageGap("Unsupported or duplicate probe option")
+        if not separator:
+            value = next(arguments, "")
+        if not value:
+            raise CoverageGap("Missing probe option value")
+        options[option] = value
+    return options
+
+
 def canonical_command(command: str, aliases: dict[str, str] | None = None) -> str:
     try:
         return json.dumps(shell_tokens(canonical_path(command, aliases)))
@@ -125,16 +141,14 @@ class Fixtures:
                 i += 1
             if i >= len(segment) or segment[i] != self.runtime.probe_script:
                 continue
-            options = segment[i + 1 :]
-            uri = next((v.partition("=")[2] for v in options if v.startswith("--uri=")), None)
-            if "--uri" in options:
-                uri = options[options.index("--uri") + 1]
+            options = probe_options(segment[i + 1 :])
+            uri = options.get("--uri")
             if uri not in {self.bundle[k]["input_uri"] for k in ["primary", "sibling"]}:
                 return "Fixture unavailable for requested probe; no external request made.", "fixture_gap"
             label = "sibling" if uri == self.bundle["sibling"]["input_uri"] else "primary"
             value = self.bundle[label]
             if "--output" in options:
-                output = self.path(options[options.index("--output") + 1])
+                output = self.path(options["--output"])
                 if not PurePosixPath(output).is_relative_to(self.runtime.workspace_prefix):
                     raise CoverageGap("Probe output escapes the modeled workspace")
                 writes[output] = json.dumps(value, indent=2)

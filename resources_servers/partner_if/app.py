@@ -107,9 +107,10 @@ AGENT_RELABELED_COMPLETIONS = frozenset({"incomplete_reasoning", "empty_output"}
 class NoAnswer(Exception):
     """The reply gives nothing to grade, which is the model's own failure rather than a capture gap."""
 
-    def __init__(self, failure_kind: str, reason: str):
+    def __init__(self, failure_kind: str, reason: str, *, unavailable_checks: dict[str, str] | None = None):
         super().__init__(reason)
         self.failure_kind = failure_kind
+        self.unavailable_checks = unavailable_checks
 
 
 def output_cap_cutoff(response: NeMoGymResponse) -> bool:
@@ -177,9 +178,16 @@ def tool_response_evidence(params: dict, response: NeMoGymResponse, contract: Gr
     events = visible_events([item.model_dump(exclude_none=True) for item in response.output])
     tools = params.get("tools") or []
     if not any(event.kind == "tool_call" or event.text.strip() for event in events):
-        if any(item.verifier.id == SINGLE_ADVERTISED_TOOL_CALL for item in contract.checks):
-            advertised_tool_validators(tools)
-        raise NoAnswer(NO_ANSWER, "The reply has neither a visible answer nor a tool call")
+        reason = "The reply has neither a visible answer nor a tool call"
+        registry_checks = [item.id for item in contract.checks if item.verifier.id == SINGLE_ADVERTISED_TOOL_CALL]
+        if registry_checks:
+            try:
+                advertised_tool_validators(tools)
+            except InvalidAdvertisedToolRegistry as invalid:
+                raise NoAnswer(
+                    NO_ANSWER, reason, unavailable_checks=dict.fromkeys(registry_checks, str(invalid))
+                ) from invalid
+        raise NoAnswer(NO_ANSWER, reason)
     return EvidenceBundle(
         context=params["input"],
         instructions=params.get("instructions"),
@@ -211,9 +219,9 @@ class PartnerIFGradingMixin:
         try:
             evidence = build_evidence()
         except NoAnswer as missing:
-            receipt = grade_without_evidence(contract, missing.failure_kind, str(missing), passed=False)
-        except InvalidAdvertisedToolRegistry as invalid:
-            receipt = grade_without_evidence(contract, UNSCORABLE, str(invalid), passed=None)
+            receipt = grade_without_evidence(
+                contract, missing.failure_kind, str(missing), unavailable_checks=missing.unavailable_checks
+            )
         except ValueError as error:
             return masked_fields(contract, UNSCORABLE, str(error))
         else:

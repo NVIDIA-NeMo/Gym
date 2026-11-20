@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from resources_servers.partner_if.native_evidence import LiveAgentCapture
-from resources_servers.partner_if.recorded_context.fixtures import canonical_path, shell_tokens
+from resources_servers.partner_if.recorded_context.fixtures import canonical_path, probe_options, shell_tokens
 from resources_servers.partner_if.recorded_context.runtime_contract import RuntimeContract, read_runtime_contract
 
 
@@ -153,18 +153,7 @@ def probe_identity(event: dict, bundle: dict) -> dict:
         tokens.pop(0)
     if not tokens or tokens.pop(0) != bundle["runtime"]["probe_script"]:
         raise ValueError("Probe script path is not the pinned script")
-    options = {}
-    while tokens:
-        option = tokens.pop(0)
-        if "=" in option:
-            option, value = option.split("=", 1)
-        elif tokens:
-            value = tokens.pop(0)
-        else:
-            raise ValueError("Missing probe option value")
-        if option not in {"--uri", "--output"} or option in options:
-            raise ValueError("Unsupported/duplicate probe options or compound command")
-        options[option] = value
+    options = probe_options(tokens)
     label = "sibling" if event["kind"] == "sibling_probe" else "primary"
     expected = bundle[label]
     if fn["name"] != "Bash" or options.get("--uri") != expected["input_uri"]:

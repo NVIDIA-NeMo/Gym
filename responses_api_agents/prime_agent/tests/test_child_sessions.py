@@ -4,6 +4,8 @@
 import asyncio
 import copy
 import json
+import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,7 +20,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.prime_agent.app import PrimeAgent
-from responses_api_agents.prime_agent.child_app import PrimeChildAgent, PrimeChildConfig
+from responses_api_agents.prime_agent.child_app import PrimeChildAgent, PrimeChildConfig, _journal_records
 from responses_api_agents.prime_agent.sandbox import PrimeSession
 
 
@@ -547,6 +549,149 @@ async def test_child_legacy_run_is_not_exposed():
         await agent().run(MagicMock(), {})
 
 
+def test_interrupted_capture_uses_only_complete_journal_records():
+    record = {"kind": "receipt", "message": "A separator \u2028 is part of the report."}
+    data = json.dumps(record, ensure_ascii=False).encode() + b'\n{"kind":"incomplete'
+    assert _journal_records(data) == [record]
+    assert _journal_records(b"") == []
+    with pytest.raises(ValueError):
+        _journal_records(data + b"\n")
+    with pytest.raises(ValueError, match="must be JSON objects"):
+        _journal_records(b"null\n")
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or shutil.which("node") is None, reason="Linux supervisor and Node required"
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired", [False, True], ids=["timeout", "rollout-stop"])
+@pytest.mark.parametrize("delivered", [False, True], ids=["no-report", "delivered-report"])
+async def test_supervisor_stop_retains_prime_delivery_for_verification(tmp_path, expired, delivered):
+    from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+    from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+    from resources_servers.partner_if.app import VerifyRequest
+    from resources_servers.partner_if.tests.test_prime_evidence import lend_for_test, sandbox_for_test
+    from resources_servers.partner_if.tests.test_prime_evidence import seed as resource_seed
+    from resources_servers.partner_if.tests.test_prime_evidence import server as resource_server
+    from responses_api_agents.prime_agent.tests.test_child_runtime import (
+        SDK_DOUBLE,
+        write_sdk_runtime,
+        write_sdk_skill,
+    )
+
+    source = 'import {writeFileSync} from "node:fs";\n' + SDK_DOUBLE
+    if delivered:
+        source = source.replace(
+            "if(turn===2) await options.agentMessageController.sendAgentMessage",
+            "let receipt; if(turn===1) receipt = await options.agentMessageController.sendAgentMessage",
+        ).replace(
+            "details:{status:'ok'}",
+            "details:{status:'ok',sentAgentMessages:receipt ? "
+            "[{id:receipt.id, receiverRole:'parent', deliveryStatus:'delivered'}] : []}",
+        )
+    source = source.replace(
+        "await session.agent.onPayload({max_completion_tokens:99}, {contextWindow:131072});",
+        "await session.agent.onPayload({max_completion_tokens:99}, {contextWindow:131072});"
+        "if (turn===2) {"
+        "process.on('SIGTERM', () => {});"
+        "writeFileSync(join(options.cwd,'model-blocked'),'ready');"
+        "await new Promise(() => setInterval(() => {}, 1000));"
+        "}",
+    )
+    runtime = tmp_path / "runtime"
+    write_sdk_skill(write_sdk_runtime(runtime, source))
+    (runtime / "bin").mkdir()
+    (runtime / "bin/node").symlink_to(shutil.which("node"))
+    (runtime / "kernel/bin").mkdir(parents=True)
+    (runtime / "kernel/bin/python3").symlink_to(sys.executable)
+
+    workdir = tmp_path / "task"
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    export = tmp_path / "export"
+    instance = agent(
+        capture_directory=str(export),
+        artifact_directory=str(tmp_path / "artifacts"),
+        timeout=60 if expired else 4,
+        session_close_timeout_seconds=6,
+    )
+    instance._build_models_config = MagicMock(return_value={"providers": {"nemo": {}}})
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Send findings"}])
+    async with AsyncSandbox({"local": {"workspace_root": str(tmp_path)}}) as sandbox:
+        await sandbox.start(SandboxSpec(workdir=str(workdir)))
+        # Local execution is real. Only releasing a borrowed connection needs a double.
+        sandbox.disconnect = AsyncMock()
+        await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{session_dir}/{HARNESS_RUNNER_FILE}")
+        session = SandboxSession(sandbox=sandbox, session_dir=str(session_dir), workdir=str(workdir), harness="test")
+        state = child_state(session=session, runtime=str(runtime))
+        activation = asyncio.create_task(instance._activate_session(state, params))
+        try:
+            if expired:
+                async with asyncio.timeout(15):
+                    while not (workdir / "model-blocked").exists():
+                        if activation.done():
+                            await activation
+                            pytest.fail("SDK finished before the simulated blocked model call")
+                        await asyncio.sleep(0.02)
+                assert not (export / "capture.json").exists()
+                assert await session.expire(timeout=5, reason="operator stop")
+            reply = await asyncio.wait_for(activation, 30)
+            assert (workdir / "model-blocked").exists()
+            assert session.cleanup["cleanup_confirmed"] and session.cleanup["timed_out"]
+            assert session.cleanup["return_code"] == 137
+            assert reply.status == "incomplete" and reply.error is None
+            assert reply.metadata["prime_child_termination"] == ("stopped" if expired else "timeout")
+            assert ("ng_rollout_stop" in reply.metadata) is expired
+            assert state.observations.records[0].status == "incomplete"
+            assert state.observations.records[0].stop_reason == ("stopped" if expired else "timeout")
+            assert json.loads((export / "capture.json").read_text())["assistantTurns"] == 1
+        finally:
+            if not activation.done():
+                activation.cancel()
+                await asyncio.gather(activation, return_exceptions=True)
+            closed = await instance._close_agent_session_state(state)
+        sandbox.disconnect.assert_awaited_once()
+    assert closed.agent_observations.records
+
+    resources = resource_server(capture_directory=str(export))
+    rubric = {
+        "partner_if": {
+            "task_id": "synthetic",
+            "origin": "synthetic",
+            "source": "authored test",
+            "rubric_version": "v1",
+            "audit_signoff": True,
+            "data_kind": "synthetic_smoke",
+            "evidence_mode": "live_agent",
+            "rubrics": [
+                {
+                    "id": "send",
+                    "constraint": "Deliver the report",
+                    "verifier": {
+                        "id": "text_contains_v1",
+                        "params": {"source": "artifact:parent_reports", "literal": "report on last allowed turn"},
+                    },
+                }
+            ],
+        }
+    }
+    seeded = resource_seed().model_copy(update={"task_data": {"verifier_metadata": rubric}})
+    await lend_for_test(resources, seeded, sandbox_for_test())
+
+    async def read_export(_sandbox, *, path):
+        return Path(path).read_text()
+
+    with patch("resources_servers.partner_if.prime_app.read_text", side_effect=read_export):
+        graded = await resources.verify(
+            Request({"type": "http", "session": {"session_id": seeded.resources_session_id}}),
+            VerifyRequest(responses_create_params=params, response=reply, verifier_metadata=rubric),
+        )
+    assert graded.mask_sample is not delivered
+    assert graded.evaluation_completed is delivered
+    if delivered:
+        assert graded.reward == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delivered,dispose_error", [(True, False), (True, True), (False, False)])
 @pytest.mark.parametrize("provider_error", [None, "503 Service Unavailable", "Connection error."])
@@ -554,7 +699,6 @@ async def test_sdk_error_capture_survives_export_close_and_shared_grading(
     tmp_path, delivered, dispose_error, provider_error
 ):
     import json
-    import shutil
 
     if shutil.which("node") is None:
         pytest.skip("Node is required for the actual SDK shim")

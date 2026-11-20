@@ -66,6 +66,18 @@ def write_sdk_runtime(runtime: Path, source: str) -> Path:
     return root
 
 
+def write_sdk_skill(root: Path) -> Path:
+    skill = root / "dist/skills/agent-message"
+    (skill / "src/agent_message").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("Bundled agent-message fixture")
+    (skill / "pyproject.toml").write_text('[project]\nname="agent-message"\nversion="0.1.0"\n')
+    (skill / "src/agent_message/__init__.py").write_text(
+        "async def send(*args, **kwargs): pass\nasync def list_agents(): pass\n"
+    )
+    (skill / "src/rlm.py").write_text("async def host_request(*args, **kwargs): pass\n")
+    return skill
+
+
 def sdk_error_capture(tmp_path, *, delivered: bool, dispose_error: bool = False, provider_error: str | None = None):
     """Have the actual checked-in shim catch an SDK error and write its real capture."""
     send = "if(turn===2) await options.agentMessageController.sendAgentMessage({target:'parent',message:'report on last allowed turn'});"
@@ -169,13 +181,8 @@ def test_runtime_probe_checks_imports_skill_and_kernel_without_model_calls(tmp_p
     if fault == "sdk_api":
         source = source.replace("export async function createAgentSession", "async function createAgentSession")
     root = write_sdk_runtime(runtime, source)
-    skill = root / "dist/skills/agent-message"
-    (skill / "src/agent_message").mkdir(parents=True)
-    (skill / "SKILL.md").write_text("Bundled agent-message fixture")
-    (skill / "pyproject.toml").write_text('[project]\nname="agent-message"\nversion="0.1.0"\n')
+    skill = write_sdk_skill(root)
     module = skill / "src/agent_message/__init__.py"
-    module.write_text("async def send(*args, **kwargs): pass\nasync def list_agents(): pass\n")
-    (skill / "src/rlm.py").write_text("async def host_request(*args, **kwargs): pass\n")
     if fault == "sdk_version":
         (root / "package.json").write_text('{"type":"module","version":"0.8.0"}')
     elif fault == "ai_path":

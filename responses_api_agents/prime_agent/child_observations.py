@@ -21,17 +21,14 @@ def child_observations(
 ) -> AgentObservationBundle:
     events = capture["events"]
     gaps = []
+    termination = capture["termination"]
     invocation = AgentInvocation(
         invocation_id=invocation_id,
         activation_id=1,
         in_session=True,
-        status="failed"
-        if capture["termination"] == "error"
-        else "incomplete"
-        if capture["termination"] == "turn_limit"
-        else "completed",
-        error_type="sdk_error" if capture["termination"] == "error" else None,
-        stop_reason="max_iterations" if capture["termination"] == "turn_limit" else None,
+        status="failed" if termination == "error" else "completed" if termination == "completed" else "incomplete",
+        error_type="sdk_error" if termination == "error" else None,
+        stop_reason={"turn_limit": "max_iterations", "timeout": "timeout", "stopped": "stopped"}.get(termination),
     )
     if system_prompt:
         invocation.conversation.append(NeMoGymEasyInputMessage(role="system", content=system_prompt))

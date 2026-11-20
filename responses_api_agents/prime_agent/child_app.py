@@ -30,7 +30,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.sandbox import download_bytes, read_text, upload_text
 from nemo_gym.trajectory import ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.prime_agent.app import (
@@ -43,6 +43,17 @@ from responses_api_agents.prime_agent.sandbox import PrimeSession
 
 
 HERE = Path(__file__).parent
+
+
+def _journal_records(data: bytes) -> list[dict]:
+    """Recover complete journal records after the supervisor has stopped the writer."""
+    end = data.rfind(b"\n")
+    if end == -1:
+        return []
+    records = [json.loads(line) for line in data[:end].split(b"\n")]
+    if not all(isinstance(record, dict) for record in records):
+        raise ValueError("Prime journal records must be JSON objects")
+    return records
 
 
 class PrimeChildConfig(PrimeAgentConfig):
@@ -103,6 +114,33 @@ class PrimeChildAgent(PrimeAgent):
         if session_id is None:
             raise AgentSessionConflictError("Prime child mode requires a seeded agent session")
         return await self._session_response(request, session_id, body)
+
+    async def _read_capture(self, state: PrimeSession) -> dict:
+        session = state.session
+        cleanup = session.cleanup
+        if not (cleanup and cleanup["cleanup_confirmed"] and cleanup["timed_out"]):
+            return json.loads(await read_text(session.sandbox, path=f"{state.agent_dir}/capture.json"))
+
+        # The supervisor may stop the process before the SDK writes its final capture.
+        events = _journal_records(await download_bytes(session.sandbox, path=f"{state.agent_dir}/events.jsonl"))
+        deliveries = _journal_records(
+            await download_bytes(session.sandbox, path=f"{state.agent_dir}/parent-messages.jsonl")
+        )
+        value = {
+            "version": 1,
+            "termination": "stopped" if session.expired else "timeout",
+            "assistantTurns": sum(
+                event.get("type") == "message_end" and (event.get("message") or {}).get("role") == "assistant"
+                for event in events
+            ),
+            "events": events,
+            "deliveries": deliveries,
+        }
+        if self.config.capture_directory:
+            await upload_text(
+                session.sandbox, path=f"{self.config.capture_directory}/capture.json", text=json.dumps(value)
+            )
+        return value
 
     async def _activate_session(
         self, state: PrimeSession, body: NeMoGymResponseCreateParamsNonStreaming
@@ -182,11 +220,11 @@ class PrimeChildAgent(PrimeAgent):
                     state, status="incomplete", error_type="stopped", output=[]
                 )
                 return {"version": 1, "termination": "stopped", "events": [], "deliveries": [], "assistantTurns": 0}
-            value = json.loads(await read_text(state.session.sandbox, path=f"{state.agent_dir}/capture.json"))
+            value = await self._read_capture(state)
             if (
                 not isinstance(value, dict)
                 or value.get("version") != 1
-                or value.get("termination") not in {"completed", "turn_limit", "error"}
+                or value.get("termination") not in {"completed", "turn_limit", "error", "timeout", "stopped"}
                 or not isinstance(value.get("events"), list)
                 or not isinstance(value.get("deliveries"), list)
                 or not all(isinstance(item, dict) for item in value["events"] + value["deliveries"])

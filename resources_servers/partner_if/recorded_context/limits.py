@@ -47,17 +47,19 @@ class VirtualFiles(dict[str, str]):
         return len(content.encode())
 
     def __setitem__(self, path: str, content: str) -> None:
-        size = self._size(path, content)
-        total = self._bytes - len(self.get(path, "").encode()) + size
-        if total > MAX_VIRTUAL_BYTES:
-            raise CoverageGap("Virtual workspace exceeds the recorded-context ceiling")
-        super().__setitem__(path, content)
-        self._bytes = total
+        self.update({path: content})
 
     def update(self, values: Mapping[str, str]) -> None:
         sizes = {path: self._size(path, content) for path, content in values.items()}
         total = self._bytes + sum(size - len(self.get(path, "").encode()) for path, size in sizes.items())
         if total > MAX_VIRTUAL_BYTES:
             raise CoverageGap("Virtual workspace exceeds the recorded-context ceiling")
+        # Search materializes keys below a temporary root, ignoring repeated slashes and ".".
+        keys = self.keys() | values.keys()
+        paths = {PurePosixPath("/", key.lstrip("/")) for key in keys}
+        if len(paths) != len(keys) or PurePosixPath("/") in paths:
+            raise CoverageGap("Virtual files must have distinct paths below the workspace root")
+        if any(parent in paths for path in paths for parent in path.parents):
+            raise CoverageGap("Virtual files cannot also act as directories")
         super().update(values)
         self._bytes = total
