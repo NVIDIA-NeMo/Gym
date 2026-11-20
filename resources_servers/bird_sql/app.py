@@ -163,7 +163,7 @@ class BirdSqlResourcesServerConfig(BaseResourcesServerConfig):
     postgres_admin_dsn: Optional[str] = None
     # ``dialect: snowflake``: ``fakesnow`` is a local stand-in, built in ``snowflake_db_dir`` on first start (no
     # account). ``snowflake`` is a real account, already loaded, reached through ``snowflake_connection_name`` in the
-    # connector's ``connections.toml`` (``None``: its default connection); not yet run against an account.
+    # connector's ``connections.toml`` (``None``: its default connection); see the README for its calibration.
     snowflake_engine: Literal["fakesnow", "snowflake"] = "fakesnow"
     snowflake_db_dir: str = "resources_servers/bird_sql/.bird_sql/snowflake"
     snowflake_connection_name: Optional[str] = None

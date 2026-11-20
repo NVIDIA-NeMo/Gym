@@ -85,20 +85,26 @@ DuckDB is more lenient than Snowflake in places, so before running the query the
 refuses, as Snowflake would, anything but a single query, identifiers that do not resolve
 under Snowflake's rules (an unquoted name means its upper-case spelling), and a few
 SQLite-only spellings (`IIF`, `INSTR`, `GROUP_CONCAT`, `STRFTIME`, `JULIANDAY`, `TOTAL`,
-`LIMIT offset, count`). This check is static and approximate, and the SQLite-only list has not
-been checked against an account. Known differences from Snowflake that the check does not
-cover:
+`LIMIT offset, count`), `SUM`/`AVG` of a boolean expression (including an `IFF`, `CASE` or
+`COALESCE` of booleans), and a `SELECT DISTINCT` ordered by something it doesn't select. This
+check is static and approximate; on a real account, Snowflake refused every query it refuses
+(see the calibration below). Known differences from Snowflake that the check does not cover,
+each checked on an account:
 
 - `DATEADD` and `DATE_TRUNC` on a date return a timestamp, so the result gains `00:00:00`;
-  `TO_CHAR` ignores its format when `sqlglot` cannot infer the column's type.
-- Date functions (`YEAR`, `EXTRACT`, `DATE_PART`, `DATEDIFF`) on BIRD's `VARCHAR` date
-  columns fail; an explicit `TO_DATE(...)` or `::DATE` works. Snowflake likely casts the
-  string implicitly (to confirm on a real account).
+  `TO_CHAR` ignores its format when `sqlglot` cannot infer the argument's type (a
+  subquery's column, a timestamp).
+- `DATEDIFF` and `DATEADD` on BIRD's `VARCHAR` date columns fail; Snowflake casts the string.
+  `YEAR`, `MONTH`, `EXTRACT` and `DATE_PART` on a `VARCHAR` fail on Snowflake too, and an
+  explicit `TO_DATE(...)` or `::DATE` works on both.
 - DuckDB refuses implicit text-to-number conversion (`'2026' - '1990'`, `varchar_col > 0`)
-  where Snowflake casts.
-- Division by zero returns `inf` instead of an error.
-- Functions DuckDB has and Snowflake doesn't (for example `regexp_matches`, `strptime`,
-  `epoch_ms`) run, so some wrong Snowflake SQL passes.
+  where Snowflake casts row by row and errors only on text that isn't a number (3 of 11 dev
+  golds that compare text with a number match on Snowflake).
+- Wrong Snowflake SQL that runs: functions DuckDB has and Snowflake doesn't (for example
+  `regexp_matches`, `strptime`, `epoch_ms`, `list_value`, `string_agg`), `TO_CHAR` of a
+  `VARCHAR` with a format, division by zero (it returns `inf` instead of an error), `SUM`/`AVG`
+  of another boolean-valued function, and a `SELECT DISTINCT` ordered by an aggregate. The
+  static check leaves the last two alone rather than risk refusing SQL Snowflake accepts.
 
 A query that fails on the stand-in scores as the model's error; a failure of the stand-in
 itself (a closed connection, an I/O error) is masked as a verifier error (`unknown_error`).
@@ -110,10 +116,19 @@ attributes; the default SQLite dialect never imports them.
 
 `snowflake_engine: snowflake` runs the same grader against a real account instead, through
 `snowflake_connection_name` in the connector's `connections.toml` (no credentials in this
-config), with the data already loaded in the same layout. It has not been run against an
-account yet; a calibration run is planned. Each connection runs `USE SECONDARY ROLES NONE`,
-so only the connection's own role applies: a user's default secondary roles are often `ALL`,
-which would let a session on a read-only role write through the user's other roles.
+config), with the data already loaded in the same layout. Each connection runs
+`USE SECONDARY ROLES NONE`, so only the connection's own role applies: a user's default
+secondary roles are often `ALL`, which would let a session on a read-only role write through
+the user's other roles.
+
+**Calibration on a real account** (BIRD dev, 2026-11-19, with
+`benchmarks/birdbench/snowflake_gold_check.py --snowflake-connection`). sqlglot's translations
+of the 1,534 dev golds match on 1,439 on Snowflake and on 1,413 on the stand-in. For the 1,532
+whose gold runs on SQLite, the two agree on pass or fail for 1,498 (97.8%). 30 pass only on
+Snowflake, mostly arithmetic on text that Snowflake casts (20). 4 pass only on the stand-in:
+ties under `LIMIT` (2), float precision (1) and a text value cast to a number (1). Snowflake
+refused every query the static check refuses, and the check refuses none of the 1,477
+distinct queries Snowflake ran in the calibration.
 
 ## Example usage
 

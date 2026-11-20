@@ -334,7 +334,7 @@ async def execute_postgres_async(
 
 
 # Functions SQLite has and Snowflake does not (Snowflake spells them LISTAGG, IFF, POSITION, ...) that DuckDB, under the
-# local Snowflake stand-in, still runs or rewrites. Not verified on a Snowflake account.
+# local Snowflake stand-in, still runs or rewrites. A Snowflake account refuses each of them (checked 2026-11-19).
 _SQLITE_ONLY_FUNCTIONS = frozenset({"GROUP_CONCAT", "IIF", "INSTR", "JULIANDAY", "STRFTIME", "TOTAL"})
 # Output columns of ``LATERAL FLATTEN(...)``.
 _FLATTEN_COLUMNS = frozenset({"SEQ", "KEY", "PATH", "INDEX", "VALUE", "THIS"})

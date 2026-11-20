@@ -99,20 +99,26 @@ export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bir
   their original case: a model that copies such a name inside double quotes names a column that doesn't exist (61 of
   1,534 dev questions quote one, or name one that needs quotes anyway). `postgres_gold_check.py` grades sqlglot transpiles of
   the golds: 91% match after three mechanical fixes (identifier case, double-quoted strings, `REAL`).
-- **Snowflake execution, on a local stand-in.** Nothing here has run on a real Snowflake account. One schema per
-  `db_id` in a read-only DuckDB file, queried through `fakesnow`, single-threaded (a parallel float `SUM` changes from
-  run to run), with DuckDB's file and network access off. Tables and columns keep BIRD's names, created quoted, so a
-  model must double-quote mixed- and lower-case names exactly, as it would on Snowflake. Before the query runs, a
-  static check refuses what Snowflake would refuse but DuckDB would run: more than one statement or a non-query,
-  identifiers that don't resolve under Snowflake's rules (unquoted means upper case), and a few SQLite-only spellings
-  (a list not yet checked against an account). Known stand-in differences: `DATEADD`/`DATE_TRUNC` on a date return a
-  timestamp, `TO_CHAR` can drop its format, date functions on the `VARCHAR` date columns fail without an explicit
-  `TO_DATE`, DuckDB refuses implicit text-to-number conversion where Snowflake casts, DuckDB-only functions run, and
-  division by zero returns `inf`. `snowflake_gold_check.py` grades sqlglot transpiles of the golds: 93% (1,430 of
-  1,534) match after one mechanical fix, identifier case (a second, double-quoted names to strings, fires on no dev
-  gold); its failure classes show where the stand-in, not the model, decides the score. The server's
-  `snowflake_engine: snowflake` points the same grader at a real, already-loaded account (`snowflake_connection_name`
-  in the connector's `connections.toml`); a calibration run against an account is planned.
+- **Snowflake execution, on a local stand-in.** One schema per `db_id` in a read-only DuckDB file, queried through
+  `fakesnow`, single-threaded (a parallel float `SUM` changes from run to run), with DuckDB's file and network access
+  off. Tables and columns keep BIRD's names, created quoted, so a model must double-quote mixed- and lower-case names
+  exactly, as it would on Snowflake. Before the query runs, a static check refuses what Snowflake would refuse but
+  DuckDB would run: more than one statement or a non-query, identifiers that don't resolve under Snowflake's rules
+  (unquoted means upper case), a few SQLite-only spellings, `SUM`/`AVG` of a boolean, and a `SELECT DISTINCT` ordered
+  by something it doesn't select. Known stand-in differences: `DATEADD`/`DATE_TRUNC` on a date return a timestamp,
+  `TO_CHAR` can drop its format, `DATEDIFF`/`DATEADD` on the `VARCHAR` date columns fail where Snowflake casts the
+  string, DuckDB refuses implicit text-to-number conversion where Snowflake casts row by row (erroring only on text
+  that isn't a number), and DuckDB-only functions and division by zero (`inf`) run where Snowflake errors. `snowflake_gold_check.py` grades sqlglot transpiles of the golds:
+  92% (1,413 of 1,534) match after one mechanical fix, identifier case (a second, double-quoted names to strings, fires
+  on no dev gold); its failure classes show where the stand-in, not the model, decides the score. The server's `snowflake_engine: snowflake` points the same grader at
+  a real, already-loaded account (`snowflake_connection_name` in the connector's `connections.toml`).
+- **Snowflake calibration on a real account** (dev, 2026-11-19, `snowflake_gold_check.py --snowflake-connection`).
+  The same translated golds match on 1,439 of 1,534 there. Of the 1,532 whose gold runs on SQLite, the stand-in and
+  Snowflake agree on pass or fail for 1,498 (97.8%). 30 pass only on Snowflake: string arithmetic 20 (Snowflake casts),
+  ties under `LIMIT` 4, text compared with a number 3, and 3 others. 4 pass only on the stand-in: ties under `LIMIT` 2,
+  float precision 1, and a text value cast to a number 1. Before the static check refused boolean `SUM`/`AVG` and
+  `DISTINCT` ordered by an unselected column, 17 more did. Snowflake refused every query the static check refuses,
+  including each SQLite-only spelling, and the check refuses none of the 1,477 distinct queries Snowflake ran.
 - **Caveat.** Because the gold is the answer under SQLite semantics, a correct Spark query can differ from it when the
   gold relies on SQLite behavior (bare `GROUP BY` columns, integer division, case-insensitive `LIKE`, loose
   text/number comparison). `spark_gold_check.py` estimates about 8% of dev (121 of 1534) are affected.
@@ -125,22 +131,25 @@ failure there as a filter with known holes, not as a label:
 - **Always go through the grader** (`bird_sql`'s verify, or `eval_utils.execute_and_compare_snowflake`), never fakesnow
   directly. The grader's static check is what refuses unquoted or miscased names, SQLite-only spellings and non-queries;
   DuckDB alone accepts them.
-- **Correct Snowflake SQL that can fail on the stand-in:**
-  - Date functions (`YEAR`, `EXTRACT`, `DATE_PART`, `DATEDIFF`) on BIRD's `VARCHAR` date columns fail; an explicit
-    `TO_DATE(...)` or `::DATE` works. Snowflake likely casts the string implicitly (to confirm on a real account).
-    Probably the largest class for model SQL: 181 of 1,534 dev golds use date functions. Filtering on the stand-in
-    keeps only date SQL with explicit casts, which also runs on Snowflake.
-  - `DATEADD`/`DATE_TRUNC` on a date return a timestamp (the value gains `00:00:00`), and `TO_CHAR` can drop its format.
-  - DuckDB refuses implicit text-to-number conversion (`'2026' - '1990'`, `varchar_col > 0`) where Snowflake casts.
-- **Wrong Snowflake SQL that can pass:** functions DuckDB has and Snowflake doesn't (for example `regexp_matches`,
-  `strptime`, `epoch_ms`, `list_value`) run, because only a short SQLite-only list is refused; division by zero
-  returns `inf` instead of failing.
-- **Leave out the questions the stand-in can't confirm.** Translated golds fail on 104 of 1,534 dev questions;
+- **Correct Snowflake SQL that can fail on the stand-in** (each checked on a real account):
+  - Arithmetic on, or comparison with, text that holds a number (`'2026' - '1990'`, `TO_CHAR(..) - TO_CHAR(..)`,
+    `varchar_col > 1995`): Snowflake casts, DuckDB refuses. The largest class: 20 of the 30 dev golds that pass only on
+    Snowflake.
+  - `DATEDIFF` and `DATEADD` on BIRD's `VARCHAR` date columns: Snowflake casts the string, the stand-in fails.
+    `YEAR`, `MONTH`, `DAY`, `EXTRACT` and `DATE_PART` on a `VARCHAR` fail on Snowflake too, and an explicit
+    `TO_DATE(...)` or `::DATE` works on both.
+  - `DATEADD`/`DATE_TRUNC` on a date return a timestamp (the value gains `00:00:00`), and `TO_CHAR` drops its format
+    when sqlglot can't infer the argument's type (a subquery's column, a timestamp).
+- **Wrong Snowflake SQL that can pass** (each checked on a real account): functions DuckDB has and Snowflake doesn't
+  (for example `regexp_matches`, `strptime`, `epoch_ms`, `list_value`, `string_agg`), because only a short SQLite-only
+  list is refused; a `SELECT DISTINCT` ordered by an aggregate, and `SUM`/`AVG` of a boolean-valued function other
+  than `IFF`, `CASE` or `COALESCE` (the static check leaves both alone rather than risk refusing SQL Snowflake
+  accepts); `TO_CHAR(varchar_col, 'YYYY')`; and division by zero, which returns `inf` instead of failing.
+- **Leave out the questions the stand-in can't confirm.** Translated golds fail on 121 of 1,534 dev questions;
   `snowflake_gold_check.py` writes their ids by class to `failures_by_class.json` (the `id` in the prepared file). That
-  count only covers the gold's own translation: sqlglot adds explicit date casts, so the date gaps above barely show in
-  it, although model SQL hits them often. For train, run `snowflake_gold_check.py --split train` first to get its
-  exclusion list; it has only been run on a small sample, so its build time and size for the full train split are not
-  yet measured.
+  count only covers the gold's own translation, so model SQL can still hit the gaps above. For train, run
+  `snowflake_gold_check.py --split train` first to get its exclusion list; it has only been run on a small sample, so
+  its build time and size for the full train split are not yet measured.
 
 ## Preparing data
 

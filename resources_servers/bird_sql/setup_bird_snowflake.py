@@ -9,8 +9,8 @@ Two engines sit behind one interface (``tables``, ``connect``, ``fetch_all``, ``
   and runs it on DuckDB. ``ensure_bird_snowflake`` builds ``<db_dir>/BIRD.db`` on first start and reopens it read-only,
   so a model's DDL or DML fails instead of changing the data other rollouts read.
 - ``snowflake``: a real account, through ``snowflake-connector-python`` with a named connection from the connector's
-  own ``connections.toml``. ``check_bird_snowflake_account`` expects the data already loaded in the same layout. This
-  engine has not been run against an account yet.
+  own ``connections.toml``. ``check_bird_snowflake_account`` expects the data already loaded in the same layout.
+  Calibrated against the stand-in on a real account (see the README).
 
 Every ``db_id`` becomes a schema of that name in one database, ``BIRD``. Column types follow ``setup_bird_spark``
 exactly (same ``_typed_tables``) and are shown to the model as Snowflake types: ``NUMBER(38,0)``, ``FLOAT`` or
@@ -135,7 +135,7 @@ class LocalSnowflake:
 
 @dataclass(frozen=True)
 class AccountSnowflake:
-    """The ``snowflake`` engine: a Snowflake account, one connection per query. Not yet run against an account.
+    """The ``snowflake`` engine: a Snowflake account, one connection per query.
 
     ``connection_name`` names a connection in the connector's ``connections.toml`` (``None``: its default), so no
     credential goes through this server's config. The server enforces ``timeout_s`` (``STATEMENT_TIMEOUT_IN_SECONDS``).

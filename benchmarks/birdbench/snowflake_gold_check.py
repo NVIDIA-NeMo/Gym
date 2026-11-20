@@ -25,10 +25,14 @@ Every fixed gold that doesn't match gets a ``failure_class`` (see ``FAILURE_CLAS
 ``data/birdbench_snowflake_<split>.jsonl``). These are the questions whose correct answer the stand-in can't confirm:
 leave them out when the stand-in validates generated SQL. ``--split train`` checks the train uberset instead of dev.
 
+``--snowflake-connection NAME`` grades on a loaded Snowflake account instead (the server's ``snowflake_engine:
+snowflake``, through ``NAME`` in the connector's ``connections.toml``), to measure the stand-in against Snowflake. The
+failure classes still read the stand-in's error messages, so most Snowflake errors fall under ``other_error``.
+
 Needs ``fakesnow``, ``snowflake-connector-python<5``, ``sqlglot`` and ``pandas``, which the ``bird_sql`` server's
 environment has: run it with ``resources_servers/bird_sql/.venv/bin/python``.
 Run: ``python -m benchmarks.birdbench.snowflake_gold_check <out_dir> [--split dev|train] [--train-dir DIR]
-[--db-dir DIR] [--limit N]``.
+[--db-dir DIR | --snowflake-connection NAME] [--limit N]``.
 """
 
 import argparse
@@ -38,7 +42,7 @@ import re
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import sqlglot
 from sqlglot import exp
@@ -50,19 +54,27 @@ from resources_servers.bird_sql.eval_utils import (
     result_sets_match,
     snowflake_rejection,
 )
-from resources_servers.bird_sql.setup_bird_snowflake import LocalSnowflake, ensure_bird_snowflake
+from resources_servers.bird_sql.setup_bird_snowflake import (
+    AccountSnowflake,
+    LocalSnowflake,
+    check_bird_snowflake_account,
+    ensure_bird_snowflake,
+)
 
 
 _TIMEOUT_S = 30.0
+Engine = Union[LocalSnowflake, AccountSnowflake]
 
-# Why a fixed gold doesn't match, and whether real Snowflake would likely accept the query. "Guess" means it hasn't been
-# checked on an account. ``stand_in`` classes are the stand-in's own errors: a correct Snowflake answer fails there.
+# Why a fixed gold doesn't match, and what real Snowflake does with the same query (measured on dev on an account,
+# 2026-11-19). ``stand_in`` classes are the stand-in's own errors: a correct Snowflake answer fails there.
 FAILURE_CLASSES = {
-    "bare_group_by_column": "a column outside GROUP BY; Snowflake errors too",
-    "string_arithmetic": "arithmetic on two strings, e.g. TO_CHAR(..) - TO_CHAR(..); stand_in: Snowflake casts (guess)",
-    "type_mismatch": "another operator or function type mismatch; unknown on Snowflake",
-    "text_number_comparison": "text compared with a number; stand_in: Snowflake casts row by row (guess)",
-    "text_to_number_cast": "non-numeric text cast to a number; Snowflake errors too (guess)",
+    "bare_group_by_column": "a column outside GROUP BY; Snowflake errors too (22 of 23 dev golds)",
+    "string_arithmetic": "arithmetic on two strings, e.g. TO_CHAR(..) - TO_CHAR(..); stand_in: Snowflake casts "
+    "(20 of 24 dev golds match there)",
+    "type_mismatch": "another operator or function type mismatch; on Snowflake, 1 of 2 dev golds match",
+    "text_number_comparison": "text compared with a number; partly stand_in: Snowflake casts row by row (3 of 11 dev "
+    "golds match there)",
+    "text_to_number_cast": "non-numeric text cast to a number; Snowflake errors too (10 of 10 dev golds)",
     "scalar_subquery_rows": "a scalar subquery returns several rows; Snowflake errors too",
     "stand_in_parser_error": "stand_in: fakesnow or sqlglot fails to parse its own translation",
     "other_error": "another stand-in error; read its message",
@@ -71,7 +83,8 @@ FAILURE_CLASSES = {
     "like_case": "LIKE is case-sensitive on Snowflake, not on SQLite; Snowflake differs too",
     "division": "/ returns decimals where SQLite truncates; Snowflake differs too",
     "other_mismatch": "another result difference; read the samples",
-    "refused": "refused by the server's static check (a SQLite-only function, unparsable); Snowflake refuses too",
+    "refused": "refused by the server's static check (a SQLite-only function, SUM/AVG of a boolean, DISTINCT ordered "
+    "by an unselected column, unparsable); Snowflake refuses too",
     "stand_in_timeout": "stand_in: timed out",
     "transpile_error": "sqlglot can't translate the gold",
     "gold_fails_on_sqlite": "the gold itself fails or times out on SQLite",
@@ -150,7 +163,7 @@ def fix_for_snowflake(tree: exp.Expression, names: Dict[str, Dict[str, str]]) ->
     return dict(counts)
 
 
-def _run_unguarded(sf: LocalSnowflake, db_id: str, query: str, connections: list) -> Tuple[Optional[list], str]:
+def _run_unguarded(sf: Engine, db_id: str, query: str, connections: list) -> Tuple[Optional[list], str]:
     """Run ``query`` on the stand-in without ``snowflake_rejection``; return ``(rows, "")`` or ``(None, error)``."""
     conn = sf.connect(db_id)
     connections.append(conn)
@@ -164,7 +177,7 @@ def _run_unguarded(sf: LocalSnowflake, db_id: str, query: str, connections: list
         conn.close()
 
 
-async def _unguarded(sf: LocalSnowflake, db_id: str, query: str, sem: asyncio.Semaphore) -> Tuple[Optional[list], str]:
+async def _unguarded(sf: Engine, db_id: str, query: str, sem: asyncio.Semaphore) -> Tuple[Optional[list], str]:
     async with sem:
         connections: list = []
         try:
@@ -178,7 +191,7 @@ async def _unguarded(sf: LocalSnowflake, db_id: str, query: str, sem: asyncio.Se
 
 
 async def _grade(
-    entry: Dict[str, Any], query: str, sf: LocalSnowflake, db_path: Path, sem: asyncio.Semaphore
+    entry: Dict[str, Any], query: str, sf: Engine, db_path: Path, sem: asyncio.Semaphore
 ) -> Dict[str, Any]:
     db_id = entry["db_id"]
     match, gold, pred, err = await execute_and_compare_snowflake(
@@ -213,9 +226,7 @@ async def _grade(
     }
 
 
-async def _check_one(
-    entry: Dict[str, Any], sf: LocalSnowflake, databases_dir: Path, sem: asyncio.Semaphore
-) -> Dict[str, Any]:
+async def _check_one(entry: Dict[str, Any], sf: Engine, databases_dir: Path, sem: asyncio.Semaphore) -> Dict[str, Any]:
     result = {"id": entry["id"], "db_id": entry["db_id"], "difficulty": entry.get("difficulty"), "gold": entry["SQL"]}
     db_path = databases_dir / entry["db_id"] / f"{entry['db_id']}.sqlite"
     try:
@@ -238,10 +249,13 @@ async def _check_one(
 
 async def _main(args: argparse.Namespace) -> None:
     databases_dir = databases_dir_for(args.split, args.train_dir)
-    db_dir = args.db_dir or Path(
-        f"resources_servers/bird_sql/.bird_sql/snowflake{'' if args.split == 'dev' else '_train'}"
-    )
-    sf = ensure_bird_snowflake(databases_dir, db_dir)
+    if args.snowflake_connection:
+        sf: Engine = check_bird_snowflake_account(databases_dir, args.snowflake_connection, _TIMEOUT_S)
+    else:
+        db_dir = args.db_dir or Path(
+            f"resources_servers/bird_sql/.bird_sql/snowflake{'' if args.split == 'dev' else '_train'}"
+        )
+        sf = ensure_bird_snowflake(databases_dir, db_dir)
     entries = load_entries(args.split, databases_dir)
     for i, entry in enumerate(entries):
         entry["id"] = i  # as prepare numbers the rows
@@ -291,6 +305,11 @@ def main() -> None:
         type=Path,
         help="Where the stand-in's BIRD.db is (built there if missing); the server's snowflake_db_dir. Default: "
         "resources_servers/bird_sql/.bird_sql/snowflake, or snowflake_train for train, as eval.sh sets it",
+    )
+    parser.add_argument(
+        "--snowflake-connection",
+        help="Grade on a loaded Snowflake account through this connection of the connector's connections.toml, "
+        "instead of the stand-in",
     )
     parser.add_argument("--limit", type=int, help="Only check the first N questions")
     parser.add_argument("--concurrency", type=int, default=8)
