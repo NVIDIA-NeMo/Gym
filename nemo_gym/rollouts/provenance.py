@@ -45,6 +45,15 @@ _SAMPLING_KEYS = frozenset(
         "n",
     }
 )
+# Rollout and server concurrency: often the only setting that differs between two otherwise identical runs.
+_CONCURRENCY_KEYS = frozenset(
+    {
+        "num_samples_in_parallel",
+        "max_concurrent_requests",
+        "max_concurrent_episodes",
+        "library_verifier_max_concurrency",
+    }
+)
 _MODEL_KEYS = frozenset(
     {
         "model",
@@ -93,7 +102,10 @@ class RunProvenance(BaseModel):
     prompt_config_paths: dict[str, str] = Field(default_factory=dict)
     template_sha256: dict[str, str] = Field(default_factory=dict)
     judge_prompt_versions: dict[str, str] = Field(default_factory=dict)
+    # An explicit null (for example `max_tokens: null`, no cap) is kept, so it reads differently from "not set".
     sampling_parameters: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
+    # Concurrency limits by config path; an explicit null (no limit) is kept like a sampling cap.
+    concurrency_limits: dict[str, dict[str, int | None]] = Field(default_factory=dict)
     input_sampling_parameters: list[dict[str, JsonValue]] = Field(default_factory=list)
     seed: int | None = None
     # What each model server's backends report serving, keyed by model server name, beside the configured `models`.
@@ -114,7 +126,16 @@ def _sampling(config: Mapping) -> dict[str, JsonValue]:
     return {
         key: value
         for key, value in config.items()
-        if key in _SAMPLING_KEYS and isinstance(value, (int, float)) and not isinstance(value, bool)
+        if key in _SAMPLING_KEYS
+        and (value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)))
+    }
+
+
+def _concurrency(config: Mapping) -> dict[str, int | None]:
+    return {
+        key: value
+        for key, value in config.items()
+        if key in _CONCURRENCY_KEYS and (value is None or (isinstance(value, int) and not isinstance(value, bool)))
     }
 
 
@@ -141,6 +162,9 @@ def build_provenance(
         sampling = _sampling(node)
         if sampling:
             record.sampling_parameters[path or TOP_LEVEL_PATH] = sampling
+        concurrency = _concurrency(node)
+        if concurrency:
+            record.concurrency_limits[path or TOP_LEVEL_PATH] = concurrency
         for key, value in node.items():
             location = f"{path}.{key}" if path else str(key)
             if key in {"input_jsonl_fpath", "dataset_name", "dataset_id"} and isinstance(value, str):
