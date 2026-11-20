@@ -12,6 +12,8 @@ from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
+from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
+from responses_api_agents.pi_agent.app import PiAgent
 from responses_api_agents.pi_agent.tests.test_sandbox import _pinned_pi_package
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
@@ -123,6 +125,7 @@ assert.ok(result.errorMessage.includes(wire.message), result.errorMessage);
 assert.deepEqual(result.content, []);
 assert.equal(result.usage.input + result.usage.output, 0);
 assert.equal(isContextOverflow(result, model.contextWindow), wire.context_overflow);
+process.stdout.write(JSON.stringify({stopReason: result.stopReason, errorMessage: result.errorMessage}));
 """
     result = subprocess.run(
         [node, "--input-type=module", "-e", script],
@@ -142,3 +145,6 @@ assert.equal(isContextOverflow(result, model.contextWindow), wire.context_overfl
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+    # The adapter types the pinned Pi's message by its status, which the episode outcome policy reads.
+    outcome = PiAgent.classify_outcome(MagicMock(spec=PiAgent), json.loads(result.stdout))
+    assert (outcome.failure_kind, outcome.status_code) == (MODEL_REQUEST_ERROR, status)
