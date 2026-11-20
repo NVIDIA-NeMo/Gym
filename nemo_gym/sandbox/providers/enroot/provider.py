@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from nemo_gym.sandbox.providers.base import (
+    EXEC_USAGE_SOURCE,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxExecResult,
@@ -1058,7 +1059,7 @@ class EnrootProvider:
             )
         if instance.exec_count and not instance.lent:
             exec_sample = SandboxUsageSample(
-                source="exec_rusage",
+                source=EXEC_USAGE_SOURCE,
                 scope="process_tree",
                 sampled_at=time.time(),
                 cpu_usage_usec_total=instance.exec_cpu_usec,
