@@ -77,6 +77,10 @@ response also returns per-object scores and a `parse_status` of `structured`, `s
 in some frames), generated with `python -m resources_servers.multi_object_tracking.tests.synthetic`. It contains no
 dataset imagery.
 
+`data/example_rollouts.jsonl` holds one rollout of each example row, collected with `simple_agent` through the
+`single_agent_turn_legacy` environment server, and `data/example_metrics.json` the dataset statistics written by
+`gym dataset collate --resources-server multi_object_tracking --mode example_validation`.
+
 ## Tests
 
 ```bash
