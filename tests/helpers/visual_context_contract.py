@@ -11,8 +11,8 @@ from aiohttp import ServerDisconnectedError
 from omegaconf import OmegaConf
 
 from nemo_gym.agents.context_management import ContextGuardRejected, ContextHistoryConfig
-from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.visual_context import visual_context_client
 
 
@@ -334,8 +334,8 @@ class VisualContextContract:
 
         from aiohttp import web
 
-        from nemo_gym.client import get_global_aiohttp_client
-        from nemo_gym.config import BaseServerConfig
+        from nemo_gym.client.http_client import get_global_aiohttp_client
+        from nemo_gym.config.config_types import BaseServerConfig
 
         episode = self.episode()
         counts = Counter()
