@@ -87,7 +87,7 @@ def test_an_unsupported_or_malformed_image_is_refused_for_every_harness() -> Non
     for image_url in ("data:image/bmp;base64,AAAA", "image/png;base64,AAAA", "not a data url", None):
         row = json.loads(json.dumps(ROW))
         row["responses_create_params"]["input"][0]["content"][0]["image_url"] = image_url
-        with pytest.raises(ValueError, match="PNG, JPEG, WebP or GIF"):
+        with pytest.raises(ValueError, match="data UR[IL]|media type"):
             prepare_row(row, harness="pi", file_input=False)
 
 
@@ -188,6 +188,14 @@ def test_the_recipe_has_one_environment_server_per_harness() -> None:
         key for key, value in config.items() if isinstance(value, type(config)) and "environment_servers" in value
     }
     assert names == {f"visual_coding_{h}_environment_server" for h in HARNESSES}
+
+
+def test_each_environment_server_admits_only_as_many_episodes_as_its_agent_runs() -> None:
+    config = _resolve()
+    for harness in HARNESSES:
+        env = config[f"visual_coding_{harness}_environment_server"].environment_servers.single_agent_turn_legacy
+        agent = config[f"visual_coding_{harness}_agent"].responses_api_agents[f"{harness}_agent"]
+        assert agent.concurrency == env.max_concurrent_episodes, harness
 
 
 def test_the_added_agents_use_an_alias_that_keeps_tool_output_images_inline() -> None:

@@ -49,8 +49,9 @@ Server opens an agent session, sends the task and closes the session.
 - The images that `read` returns come between model calls. On NeMo RL's single controller the vLLM worker stages
   them, so training sees them. Gym's local capture records them only with #5837. Saved rollouts keep the prompt image
   in `responses_create_params`, but not the images that `read` returns: their tool outputs keep only text.
-- The pairing is OpenCode-only: the instruction names OpenCode's tools, the benchmarks pair with `opencode_agent`, and
-  the sandbox image ships only OpenCode. A Pi pairing is a follow-up.
+- OpenCode is this server's own pairing: the instruction names OpenCode's tools, the benchmarks pair with
+  `opencode_agent`, and the sandbox image ships only OpenCode. `configs/multiharness.yaml` adds Pi, Codex, Claude
+  Code and OpenClaw (see "Other harnesses"), and their rows keep the same instruction.
 
 ## Run
 
@@ -126,7 +127,10 @@ python resources_servers/visual_coding_opencode/prepare_multiharness.py rows.jso
   shell can read the pixels.
 - OpenCode, Pi, Codex and OpenClaw keep the inline image in the prompt. Claude Code takes only text in its prompt, so
   `--file-input` replaces the image with those paths.
-- The lent sandbox reaches only the policy model (`sandbox_network_access: model_only`). Pi, Codex, OpenClaw and Claude
-  Code install their runtimes at start unless the image or a runtime directory already has them, so build the image
-  with them or open the network for the install.
-- Other benchmarks' agents are untouched; do not blend this recipe with a profile that edits a stock agent block.
+- The lent sandbox reaches only the policy model (`sandbox_network_access: model_only`), so it cannot download a
+  runtime. Build an image from `sandbox_image/Dockerfile` that also holds the Pi, Codex and OpenClaw runtimes. Lay
+  each one out with its agent's `install_<harness>_runtime.sh`, and set that agent's `sandbox_runtime_dir` to it.
+  Claude Code needs nothing in the image: the agent host downloads the pinned binary and uploads it to the sandbox.
+- Do not blend this recipe with a config that edits a stock agent block, such as `benchmarks/hle/pi.yaml`. In either
+  order, `visual_coding_pi_agent` takes HLE's Pi settings. Loaded after HLE, this recipe also resets the Pi version,
+  model and timeout of HLE's own agent.

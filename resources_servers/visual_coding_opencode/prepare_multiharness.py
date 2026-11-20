@@ -12,7 +12,8 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
-from resources_servers.visual_coding_opencode.app import MAX_INPUT_IMAGES, split_image_data_url
+from nemo_gym.core import MediaFile
+from resources_servers.visual_coding_opencode.app import MAX_INPUT_IMAGES
 
 
 HARNESSES = ("opencode", "pi", "codex", "claude_code", "openclaw")
@@ -34,7 +35,9 @@ def prepare_row(row: dict, *, harness: str, file_input: bool) -> dict:
     if len(images) > MAX_INPUT_IMAGES:
         raise ValueError(f"Visual-coding rows carry at most {MAX_INPUT_IMAGES} images")
     # The resources server seeds these as files for every harness, so check them whether or not the prompt keeps them.
-    extensions = [split_image_data_url(url)[0] for url in images]
+    if not all(isinstance(url, str) for url in images):
+        raise ValueError("Visual-coding images must be base64 data URLs")
+    extensions = [MediaFile.from_data_uri(url).extension for url in images]
     row["input_images"] = images
     if file_input:
         texts = [part["text"] for part in parts if part["type"] == "input_text"]

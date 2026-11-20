@@ -24,6 +24,7 @@ visual_coding_pi_agent:
       host: 127.0.0.1
       resources_server: null
       model_server: {type: responses_api_models, name: visual_coding_policy_model}
+      concurrency: 64
       timeout: 1800
       max_output_tokens: 32768
       context_window: 131072
@@ -43,6 +44,7 @@ visual_coding_codex_agent:
       host: 127.0.0.1
       resources_server: null
       model_server: {type: responses_api_models, name: visual_coding_policy_model}
+      concurrency: 64
       timeout: 1800
       model_context_window: 131072
       inherit_sandbox_environment: true
@@ -60,6 +62,7 @@ visual_coding_claude_code_agent:
       host: 127.0.0.1
       resources_server: null
       model_server: {type: responses_api_models, name: visual_coding_policy_model}
+      concurrency: 64
       timeout: 1800
       claude_code_version: 2.1.108
       anthropic_api_key: ""
@@ -78,6 +81,7 @@ visual_coding_openclaw_agent:
       host: 127.0.0.1
       resources_server: null
       model_server: {type: responses_api_models, name: visual_coding_policy_model}
+      concurrency: 64
       timeout: 1800
       context_window: 131072
       max_output_tokens: 32768

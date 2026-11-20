@@ -237,6 +237,9 @@ def test_sandbox_settings_that_cannot_work_are_refused_at_startup(fields, messag
         VisualCodingOpenCodeServer(config=_config(**fields), server_client=MagicMock(spec=ServerClient))
 
 
+PNG_HEAD = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+
+
 def _data_url(data: bytes, mime: str = "image/png") -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
@@ -245,13 +248,16 @@ def test_seed_writes_the_rows_images_as_files_in_the_lent_sandbox(root, stopped)
     server = _server(root)
     client = TestClient(server.setup_webserver())
     body = _seed().model_dump(mode="json")
-    body["task_data"]["input_images"] = [_data_url(b"first"), _data_url(b"second", "image/jpeg")]
+    body["task_data"]["input_images"] = [
+        _data_url(PNG_HEAD + b"first"),
+        _data_url(b"\xff\xd8\xffsecond", "image/jpeg"),
+    ]
 
     seeded = client.post("/seed_session", json=body)
 
     assert seeded.status_code == 200, seeded.text
-    assert (root / "input-0.png").read_bytes() == b"first"
-    assert (root / "input-1.jpg").read_bytes() == b"second"
+    assert (root / "input-0.png").read_bytes() == PNG_HEAD + b"first"
+    assert (root / "input-1.jpg").read_bytes() == b"\xff\xd8\xffsecond"
 
 
 @pytest.mark.parametrize(
@@ -279,9 +285,9 @@ def test_malformed_input_images_are_refused_and_start_no_sandbox(root, stopped, 
 
 
 def test_an_image_over_the_size_limit_is_refused(root, stopped) -> None:
-    server = _server(root, max_input_image_bytes=4)
+    server = _server(root, max_input_image_bytes=16)
     client = TestClient(server.setup_webserver())
     body = _seed().model_dump(mode="json")
-    body["task_data"]["input_images"] = [_data_url(b"12345")]
+    body["task_data"]["input_images"] = [_data_url(PNG_HEAD + b"1")]
 
     assert client.post("/seed_session", json=body).status_code == 422

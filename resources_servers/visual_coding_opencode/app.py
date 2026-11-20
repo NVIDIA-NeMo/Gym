@@ -19,8 +19,6 @@ cannot look answers up. Grading never reads the sandbox.
 """
 
 import asyncio
-import base64
-import binascii
 import json
 import re
 from contextlib import asynccontextmanager
@@ -32,7 +30,7 @@ from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import EpisodeId, NeMoGymChatCompletion, TaskId
+from nemo_gym.core import EpisodeId, MediaFile, NeMoGymChatCompletion, TaskId, UnsupportedContentError
 from nemo_gym.sandbox import SandboxConfig
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -161,21 +159,8 @@ def parse_verdict(content: str) -> dict[str, Any]:
     return {"verdict": verdict, "reason": str(data.get("reason", ""))[:200]}
 
 
-# The images a row can lend as files, and the file extension of each type.
+# The most images a row can lend as files.
 MAX_INPUT_IMAGES = 8
-INPUT_IMAGE_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
-
-
-def split_image_data_url(url: object) -> tuple[str, str]:
-    """The file extension and base64 payload of a PNG, JPEG, WebP or GIF data URL; ``ValueError`` for anything else."""
-    message = "Images must be base64 data URLs of a PNG, JPEG, WebP or GIF"
-    if not isinstance(url, str) or not url.startswith("data:"):
-        raise ValueError(message)
-    header, _, encoded = url.removeprefix("data:").partition(";base64,")
-    extension = INPUT_IMAGE_EXTENSIONS.get(header)
-    if extension is None or not encoded:
-        raise ValueError(message)
-    return extension, encoded
 
 
 class VisualCodingOpenCodeSandboxConfig(SandboxConfig):
@@ -276,20 +261,18 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
             raise ResourcesSeedRejectedError(f"input_images must be a list of at most {MAX_INPUT_IMAGES} data URLs")
         files: dict[str, bytes] = {}
         for index, url in enumerate(urls):
-            try:
-                extension, encoded = split_image_data_url(url)
-            except ValueError as error:
-                raise ResourcesSeedRejectedError(f"input_images[{index}]: {error}") from error
+            if not isinstance(url, str):
+                raise ResourcesSeedRejectedError(f"input_images[{index}] must be a base64 data URL")
             # Check the encoded length first, so an oversized payload is refused before it is decoded.
-            if len(encoded) > 4 * ((self.config.max_input_image_bytes + 2) // 3):
+            if len(url.partition(",")[2]) > 4 * ((self.config.max_input_image_bytes + 2) // 3):
                 raise ResourcesSeedRejectedError(f"input_images[{index}] exceeds max_input_image_bytes")
             try:
-                data = base64.b64decode(encoded, validate=True)
-            except binascii.Error as error:
-                raise ResourcesSeedRejectedError(f"input_images[{index}] is not valid base64") from error
-            if len(data) > self.config.max_input_image_bytes:
+                image = MediaFile.from_data_uri(url)
+            except UnsupportedContentError as error:
+                raise ResourcesSeedRejectedError(f"input_images[{index}]: {error}") from error
+            if len(image.data) > self.config.max_input_image_bytes:
                 raise ResourcesSeedRejectedError(f"input_images[{index}] exceeds max_input_image_bytes")
-            files[f"{self.config.sandbox_workdir}/input-{index}.{extension}"] = data
+            files[f"{self.config.sandbox_workdir}/input-{index}.{image.extension}"] = image.data
         return files
 
     async def seed_session(
