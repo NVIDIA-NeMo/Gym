@@ -14,10 +14,12 @@ import json
 import os
 import shlex
 import signal
+import socket
 import sys
 import tempfile
 import time
 import traceback
+import uuid
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -42,6 +44,7 @@ from stirrup.tools.code_backends.base import CodeExecToolProvider, CommandResult
 
 
 if TYPE_CHECKING:
+    from nemo_gym.utils import ToolCallRecorder
     from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
     from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
 
@@ -247,16 +250,19 @@ class ToolStatus(StrEnum):
 class Observer:
     """Record the model responses and tool executions the agent server reports as rollout evidence."""
 
-    def __init__(self) -> None:
+    def __init__(self, recorder: ToolCallRecorder | None = None, model_ref: dict[str, Any] | None = None) -> None:
         self.compactions: list[dict[str, Any]] = []
         self.response_ids: list[str] = []
         self.usages: list[dict[str, Any]] = []
         self.shell: LocalShell | None = None
-        # Keyed by the identity of the message Stirrup puts in the history for the call. ``_observed`` keeps each
-        # message alive, so that the identity of one in a turn Stirrup later drops is never given to another.
-        self._tools: dict[int, dict[str, Any]] = {}
+        # Tool calls are recorded as they start and finish, so a runner that dies keeps the starts it wrote.
+        self._recorder = recorder
+        self._model_ref = model_ref
+        # The recorded span of each call, keyed by the identity of the message Stirrup puts in the history for it.
+        # ``_observed`` keeps each message alive, so that the identity of one in a turn Stirrup later drops is never
+        # given to another.
+        self._spans: dict[int, str] = {}
         self._observed: list[Any] = []
-        self._clock_offset = time.time() - time.perf_counter()
 
     def watch_model_calls(self, client: DynamicMaxTokensChatCompletionsClient) -> None:
         # ``_client`` is the ``openai.AsyncOpenAI`` client Stirrup's ChatCompletionsClient sends every call with.
@@ -315,32 +321,36 @@ class Observer:
         async def observed_run_tool(agent: Any, tool_call: Any, run_metadata: Any) -> Any:
             shell = self.shell
             shell.last_exit_code, shell.last_timed_out = None, False
-            message = await run_tool(agent, tool_call, run_metadata)
-            if shell.last_timed_out:
-                status = ToolStatus.TIMEOUT
-            elif not message.success or shell.last_exit_code not in (None, 0):
-                status = ToolStatus.FAILED
-            else:
-                status = ToolStatus.COMPLETED
-            started, completed = message.tool_start_time, message.tool_end_time
-            self._tools[id(message)] = {
-                "kind": "tool_call",
-                "invocation_id": INVOCATION_ID,
-                "tool_call_id": tool_call.tool_call_id,
-                "tool_name": tool_call.name,
-                "started_at": started + self._clock_offset,
-                "completed_at": completed + self._clock_offset,
-                "duration_ms": (completed - started) * 1000,
-                "timing_source": "harness",
-                "status": status,
-            }
+            if self._recorder is None:
+                return await run_tool(agent, tool_call, run_metadata)
+            # Tool calls follow the response that requested them, before the next model call.
+            requesting = (
+                {"model_ref": self._model_ref, "response_id": self.response_ids[-1]}
+                if self._model_ref and self.response_ids
+                else None
+            )
+            with self._recorder.call(
+                native_call_id=tool_call.tool_call_id,
+                tool_call_id=tool_call.tool_call_id,
+                tool_name=tool_call.name,
+                model_call_ref=requesting,
+            ) as observed:
+                message = await run_tool(agent, tool_call, run_metadata)
+                if shell.last_timed_out:
+                    observed.set_outcome(ToolStatus.TIMEOUT.value)
+                elif not message.success or shell.last_exit_code not in (None, 0):
+                    observed.set_outcome(ToolStatus.FAILED.value)
+                else:
+                    observed.set_outcome(ToolStatus.COMPLETED.value)
+            self._spans[id(message)] = observed.span_id
             self._observed.append(message)
             return message
 
         agent_class.run_tool = observed_run_tool
 
-    def tool_calls(self, history: list[list[Any]] | None, output_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """The tool observations, under the call IDs the conversation uses for them."""
+    def tool_call_ids(self, history: list[list[Any]] | None, output_items: list[dict[str, Any]]) -> dict[str, str]:
+        """The call ID the conversation uses for each recorded span; serving layers can reuse a native ID."""
+        call_ids: dict[str, str] = {}
         if history is not None:
             from stirrup.core.models import ToolMessage
 
@@ -355,9 +365,9 @@ class Observer:
             ]
             outputs = [item for item in output_items if item["type"] == "function_call_output"]
             for message, item in zip(results, outputs):
-                if id(message) in self._tools:
-                    self._tools[id(message)]["tool_call_id"] = item["call_id"]
-        return list(self._tools.values())
+                if id(message) in self._spans:
+                    call_ids[self._spans[id(message)]] = item["call_id"]
+        return call_ids
 
     def report(
         self,
@@ -370,7 +380,8 @@ class Observer:
                 "invocation_id": INVOCATION_ID,
                 "status": status,
                 "model_response_ids": self.response_ids,
-                "tool_calls": self.tool_calls(history, list(output_items)),
+                "tool_call_ids": self.tool_call_ids(history, list(output_items)),
+                "tool_capture_failed_spans": list(self._recorder.failed_spans) if self._recorder else [],
                 "compactions": self.compactions,
             },
             "usages": self.usages,
@@ -504,7 +515,21 @@ async def _run_until_terminated(payload: dict[str, Any], scratch: Path, observer
 
 def main(input_path: str, output_path: str) -> None:
     payload = json.loads(Path(input_path).read_text())
-    observer = Observer()
+    recorder = None
+    if events_path := payload.get("tool_events_path"):
+        # The sandbox has no Gym: the agent server stages the recorder's standard-library modules beside this file.
+        from tool_recording import ClockContext, ToolCallRecorder
+
+        recorder = ToolCallRecorder(
+            path=Path(events_path),
+            producer_id=f"stirrup:{uuid.uuid4().hex}",
+            invocation_id=INVOCATION_ID,
+            agent_instance=None,
+            clock=ClockContext(location="sandbox", owner=socket.gethostname().replace("/", "_") or "stirrup"),
+            boundary="lifecycle",
+            timing_source="stirrup.run_tool",
+        )
+    observer = Observer(recorder, model_ref=payload.get("model_ref"))
     try:
         output = asyncio.run(_run_until_terminated(payload, Path(input_path).parent, observer))
     except BaseException as error:

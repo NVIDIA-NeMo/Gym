@@ -252,10 +252,13 @@ def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, mo
         resources.close()
 
     bundle = closed.json()["agent_observations"]
-    (invocation,) = bundle["records"]
+    invocation, tool = bundle["records"]
     assert invocation["status"] == "failed"
     assert [ref["response_id"] for ref in invocation["model_calls"]] == ["chatcmpl-1"]
     assert invocation["conversation"] == []
+    # The tool call that failed the episode is kept, joined to the response that requested it.
+    assert (tool["tool_name"], tool["status"]) == ("fetch_web_page", "failed")
+    assert tool["model_call_ref"]["response_id"] == "chatcmpl-1"
     assert bundle["gaps"] == []
 
 
