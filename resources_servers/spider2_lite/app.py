@@ -5,6 +5,7 @@
 import asyncio
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -17,6 +18,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.spider2_lite.eval_utils import (
     compare_multi_result_sets,
     execute_and_compare,
@@ -113,13 +115,16 @@ class Spider2LiteVerifyResponse(BaseVerifyResponse):
 
 
 class Spider2LiteResourcesServer(SimpleResourcesServer):
-    ray_enabled = True
     config: Spider2LiteResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._sqlite_dir: Path = ensure_spider2_lite(self._resolve_spider2_dir())
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
+        # Its own pool, as large as the semaphore, so an admitted query never waits in a pool shared with the server.
+        self._sql_executor = ThreadPoolExecutor(
+            max_workers=self.config.max_concurrency, thread_name_prefix="spider2_lite_sql"
+        )
 
     def _resolve_spider2_dir(self) -> Path:
         p = Path(self.config.spider2_lite_dir)
@@ -168,6 +173,7 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
                 gold_sql=body.gold_sql,
                 pred_sql=extracted_sql,
                 semaphore=self._semaphore,
+                executor=self._sql_executor,
                 condition_cols=body.condition_cols or [],
                 ignore_order=body.ignore_order,
                 timeout_s=self.config.sql_execution_timeout_s,
@@ -183,6 +189,7 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
                 db_path,
                 extracted_sql,
                 self._semaphore,
+                self._sql_executor,
                 timeout_s=self.config.sql_execution_timeout_s,
             )
             if pred_rows is None:
@@ -207,3 +214,6 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     Spider2LiteResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = Spider2LiteResourcesServer.run_webserver()  # noqa: F401

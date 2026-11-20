@@ -93,16 +93,19 @@ def test_task_env_prefixes_configured_gym_model_servers():
         model_server=ModelServerRef(type="responses_api_models", name="policy"),
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
     )
-    with patch.object(
-        PinchBenchAgent,
-        "resolve_model_base_url",
-        side_effect=lambda _self, name, rollout_id: f"http://{name}/ng-rollout/{rollout_id}/v1",
-        autospec=True,
-    ):
+    resolved = []
+
+    def resolve(_self, name, rollout_id, *, trained=True):
+        resolved.append((name, trained))
+        return f"http://{name}/ng-rollout/{rollout_id}/v1"
+
+    with patch.object(PinchBenchAgent, "resolve_model_base_url", side_effect=resolve, autospec=True):
         env = agent._task_env("task_x", "7-2")
 
     assert env["MODEL_BASE_URL"] == "http://policy/ng-rollout/7-2/v1"
     assert env["JUDGE_BASE_URL"] == "http://judge/ng-rollout/7-2/v1"
+    # The judge is not the agent a training framework trains, so it keeps its own sampling.
+    assert resolved == [("policy", True), ("judge", False)]
 
 
 def test_build_spec_from_config(tmp_path):
@@ -240,8 +243,58 @@ def test_response_from_transcript_common_output_items_and_usage(tmp_path):
     assert resp.output[3].content[0].text == "Done."
     assert resp.usage.input_tokens == 18
     assert resp.usage.output_tokens == 8
-    assert resp.usage.input_tokens_details.cached_tokens == 2
+    # The second call reported no cache details, so the rollout's cache reads are unknown, not 2.
+    assert resp.usage.input_tokens_details.cached_tokens is None
     assert resp.usage.total_tokens == 26
+
+
+def _assistant_usage_event(usage: dict) -> dict:
+    return {"type": "message", "message": {"role": "assistant", "content": [], "usage": usage}}
+
+
+@pytest.mark.parametrize(
+    ("usages", "expected_cached"),
+    [
+        ([{"input": 11, "output": 5, "cacheRead": 2}, {"input": 7, "output": 3, "cacheRead": 4}], 6),
+        ([{"input_tokens": 7, "output_tokens": 3, "input_tokens_details": {"cached_tokens": 0}}], 0),
+        # OpenClaw writes cacheRead=0 when the backend reported no cache details.
+        ([{"input": 11, "output": 5, "cacheRead": 2}, {"input": 7, "output": 3, "cacheRead": 0}], None),
+        ([{"input": 11, "output": 5, "cacheRead": 2}, {"input_tokens": 7, "output_tokens": 3}], None),
+        # An unmeasured cacheRead does not hide a measured nested detail.
+        ([{"input": 10, "output": 2, "cacheRead": 0, "input_tokens_details": {"cached_tokens": 5}}], 5),
+        ([{"input": 10, "output": 2, "cacheRead": None, "input_tokens_details": {"cached_tokens": 5}}], 5),
+        # A call reporting both counts its cache reads once.
+        ([{"input": 10, "output": 2, "cacheRead": 5, "input_tokens_details": {"cached_tokens": 5}}], 5),
+        ([], None),
+    ],
+)
+def test_usage_from_transcript_reports_cache_reads_only_when_every_call_measured_them(usages, expected_cached):
+    usage = PinchBenchAgent._usage_from_transcript([_assistant_usage_event(u) for u in usages])
+
+    assert usage.input_tokens_details.cached_tokens == expected_cached
+
+
+@pytest.mark.parametrize("missing_usage", [{}, {"usage": None}, {"usage": "invalid"}])
+@pytest.mark.parametrize("missing_first", [True, False])
+def test_an_assistant_call_without_usage_makes_cache_reads_unknown(missing_usage, missing_first):
+    measured = _assistant_usage_event({"input": 10, "output": 2, "cacheRead": 5})
+    unmeasured = {"type": "message", "message": {"role": "assistant", "content": [], **missing_usage}}
+    events = [unmeasured, measured] if missing_first else [measured, unmeasured]
+
+    usage = PinchBenchAgent._usage_from_transcript(events)
+
+    assert usage.input_tokens == 10
+    assert usage.input_tokens_details.cached_tokens is None
+
+
+def test_a_non_assistant_message_without_usage_keeps_measured_cache_reads():
+    events = [
+        {"type": "message", "message": {"role": "user", "content": "Find AAPL."}},
+        _assistant_usage_event({"input": 10, "output": 2, "cacheRead": 5}),
+        {"type": "message", "message": {"role": "toolResult", "content": "ok"}},
+    ]
+
+    assert PinchBenchAgent._usage_from_transcript(events).input_tokens_details.cached_tokens == 5
 
 
 def test_collect_transcript_archives(tmp_path):

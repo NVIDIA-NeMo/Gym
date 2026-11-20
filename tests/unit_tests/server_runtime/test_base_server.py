@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 import logging
 import os
 import pickle
+import signal
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
 import uvicorn
@@ -54,7 +57,11 @@ from nemo_gym.server_runtime.base_server import (
 from nemo_gym.server_runtime.ray_support import DictConfig, initialize_ray
 from nemo_gym.server_runtime.registry_server import HeadServer
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
-from nemo_gym.server_runtime.request_handling.errors import _log_validation_exception, _validation_exception_handler
+from nemo_gym.server_runtime.request_handling.errors import (
+    _log_validation_exception,
+    _validation_body_shape,
+    _validation_exception_handler,
+)
 from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 
 
@@ -83,6 +90,48 @@ class TestServerUtils:
         assert "" == actual_config.host
         assert 0 == actual_config.port
         assert "my entrypoint" == actual_config.entrypoint
+
+    @mark.parametrize("missing", ["base_url", "api_key", "model", "all", None])
+    def test_unset_model_settings_name_the_source_config(self, monkeypatch: MonkeyPatch, missing) -> None:
+        class EndpointConfig(BaseRunServerInstanceConfig):
+            base_url: str | list[str]
+            api_key: str
+            model: str
+
+        class EndpointServer(BaseServer):
+            config: EndpointConfig
+
+        aliases = {
+            "base_url": "support_model_base_url",
+            "api_key": "support_model_api_key",
+            "model": "support_model_name",
+        }
+        values = {"base_url": "https://extractor.example.invalid/v1", "api_key": "secret", "model": "extractor"}
+        config = OmegaConf.create(
+            {
+                **{alias: None if missing in (field, "all") else values[field] for field, alias in aliases.items()},
+                "support_model": {
+                    "responses_api_models": {
+                        "vllm_model": {
+                            "host": "127.0.0.1",
+                            "port": 12345,
+                            "entrypoint": "app.py",
+                            **{field: "${" + alias + "}" for field, alias in aliases.items()},
+                        }
+                    }
+                },
+            }
+        )
+        monkeypatch.setenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, "support_model")
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "get_global_config_dict", lambda: config)
+        if missing is None:
+            assert EndpointServer.load_config_from_global_config().model == "extractor"
+        else:
+            with raises(ValueError, match="Required settings for support_model are unset") as error:
+                EndpointServer.load_config_from_global_config()
+            for field, alias in aliases.items():
+                assert (f"++{alias}=<value>" in str(error.value)) == (missing in (field, "all"))
+            assert "secret" not in str(error.value)
 
     def test_HeadServer_setup_webserver_sanity(self) -> None:
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
@@ -146,6 +195,157 @@ class TestServerUtils:
         third = await head_server.global_config_dict_yaml()
         assert third == first
         assert to_yaml_mock.call_count == 2
+
+    def test_HeadServer_global_config_dict_yaml_masks_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        """Agent sandboxes that share the head server's loopback read this route: no credential in it, routing
+        intact, and a client that resolves the served config gets the mask, not the key."""
+        from fastapi.testclient import TestClient
+
+        global_config_dict = DictConfig(
+            {
+                "head_server": {"host": "127.0.0.1", "port": 11000},
+                "policy_api_key": "sk-live-sentinel",
+                "hf_token": "hf-live-sentinel",
+                "policy_model": {
+                    "responses_api_models": {
+                        "vllm_model": {"host": "127.0.0.1", "port": 1234, "api_key": "${policy_api_key}"}
+                    }
+                },
+                "max_tokens": 4096,
+                "openai_default_headers": {"x-litellm-key": "sk-litellm-sentinel"},
+                "mlflow_tracking_uri": "https://user:pw-sentinel@mlflow.example/api",  # pragma: allowlist secret
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200
+        assert "sentinel" not in response.text
+
+        served = OmegaConf.create(response.json())
+        assert served.policy_api_key == "****"
+        assert served.hf_token == "****"
+        assert served.policy_model.responses_api_models.vllm_model.api_key == "****"
+        assert served.policy_model.responses_api_models.vllm_model.port == 1234
+        assert served.max_tokens == 4096
+        assert served.openai_default_headers["x-litellm-key"] == "****"
+        assert served.mlflow_tracking_uri == "https://user:****@mlflow.example/api"
+        # The supervisor's own config (and so NEMO_GYM_CONFIG_DICT for the servers it launches) is untouched.
+        assert global_config_dict.policy_api_key == "sk-live-sentinel"
+
+    @mark.parametrize("opt_out", [None, False, "false", "true", 0, 1, "${oc.env:TEST_SERVE_CREDENTIALS}", True])
+    def test_HeadServer_serves_credentials_only_for_boolean_true(self, monkeypatch: MonkeyPatch, opt_out) -> None:
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setenv("TEST_SERVE_CREDENTIALS", "false")
+        global_config_dict = DictConfig({"policy_api_key": "sk-live-sentinel"})
+        if opt_out is not None:
+            global_config_dict.head_server_serve_credentials = opt_out
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200
+        served = OmegaConf.create(response.json())
+        assert served.policy_api_key == ("sk-live-sentinel" if opt_out is True else "****")
+        assert global_config_dict.policy_api_key == "sk-live-sentinel"
+
+    def test_HeadServer_masks_referenced_header_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        from fastapi.testclient import TestClient
+
+        global_config_dict = DictConfig(
+            {
+                "shared": {"x-litellm-key": "sk-shared-sentinel", "x-trace-id": "trace-id"},
+                "header_alias": "${shared}",
+                "policy_model": {
+                    "openai_default_headers": "${header_alias}",
+                    "port": 1234,
+                },
+                "opaque_value": "sk-scalar-sentinel",
+                "api_key": "${opaque_value}",
+                "cache_key": "cache-id",
+                "max_tokens": 4096,
+                "unrelated": "${oc.env:UNSET_UNRELATED_VARIABLE}",
+            }
+        )
+        monkeypatch.delenv("UNSET_UNRELATED_VARIABLE", raising=False)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200 and "sentinel" not in response.text
+        served = OmegaConf.create(response.json())
+        assert served.policy_model.openai_default_headers["x-litellm-key"] == "****"
+        assert served.policy_model.openai_default_headers["x-trace-id"] == "trace-id"
+        assert served.shared["x-litellm-key"] == "****"
+        assert served.opaque_value == served.api_key == "****"
+        assert served.cache_key == "cache-id" and served.max_tokens == 4096
+        assert served.policy_model.port == 1234
+        assert OmegaConf.to_container(served, resolve=False)["unrelated"] == "${oc.env:UNSET_UNRELATED_VARIABLE}"
+        assert global_config_dict.shared["x-litellm-key"] == "sk-shared-sentinel"
+        assert global_config_dict.opaque_value == "sk-scalar-sentinel"
+
+    async def test_HeadServer_global_config_dict_yaml_serves_credentials_when_asked(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        global_config_dict = DictConfig({"policy_api_key": "sk-live", "head_server_serve_credentials": True})
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        served = OmegaConf.create(await head_server.global_config_dict_yaml())
+
+        assert served.policy_api_key == "sk-live"
+
+    @mark.parametrize("model_api_key", ["sk-literal-sentinel", "${oc.env:TEST_MODEL_API_KEY_SENTINEL}"])
+    async def test_HeadServer_never_serves_the_model_api_key(
+        self, monkeypatch: MonkeyPatch, model_api_key: str
+    ) -> None:
+        """`--model-api-key` as a literal or as an env interpolation (an external-endpoint run), through the real parser
+        and a model server config: the served YAML holds neither the key nor anything resolving to it."""
+        from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+
+        monkeypatch.setenv("TEST_MODEL_API_KEY_SENTINEL", "env-sentinel")
+        initial = OmegaConf.load(nemo_gym.PARENT_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml")
+        initial.policy_api_key = model_api_key
+        initial.policy_base_url = "https://example.invalid/v1"
+        initial.policy_model_name = "test-model"
+        global_config_dict = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=initial, skip_load_from_cli=True, skip_load_from_dotenv=True, offline=True
+            )
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+
+        served_yaml = await HeadServer(config=BaseServerConfig(host="", port=0)).global_config_dict_yaml()
+
+        assert "sentinel" not in served_yaml
+        assert "TEST_MODEL_API_KEY_SENTINEL" not in served_yaml
+        served = OmegaConf.to_container(OmegaConf.create(served_yaml), resolve=True)
+        assert served["policy_api_key"] == "****"
+        assert served["policy_model"]["responses_api_models"]["vllm_model"]["api_key"] == "****"
+        assert served["policy_model"]["responses_api_models"]["vllm_model"]["base_url"] == "https://example.invalid/v1"
 
     def _mock_ray_return_value(self, monkeypatch: MonkeyPatch, return_value: bool) -> MagicMock:
         ray_mock = MagicMock()
@@ -552,18 +752,18 @@ class TestServerUtils:
         )
 
     @mark.parametrize(
-        ("body", "expected_truncated"),
+        "body",
         [
-            (b"", False),
-            (b'{"nested":{"value":"small"}}', False),
-            (b"not-json\nwith-control-\x00", False),
-            (b'{"credentials":{"password":"secret"}}', False),
-            (b"x" * 4094, False),
-            (b"x" * 4095, True),
-            (b"\x00" * 4096, True),
-            ("中文".encode() * 4096, True),
-            (b"\\" * 4096, True),
-            (b'{"payload":"' + b"x" * (2 * 1024 * 1024) + b'"}', True),
+            b"",
+            b'{"nested":{"value":"small"}}',
+            b"not-json\nwith-control-\x00",
+            b'{"credentials":{"password":"secret"}}',
+            b"x" * 4094,
+            b"x" * 4095,
+            b"\x00" * 4096,
+            "中文".encode() * 4096,
+            b"\\" * 4096,
+            b'{"payload":"' + b"x" * (2 * 1024 * 1024) + b'"}',
         ],
         ids=[
             "empty",
@@ -578,8 +778,8 @@ class TestServerUtils:
             "multi-megabyte",
         ],
     )
-    async def test_validation_exception_log_bounds_body_before_rendering(
-        self, body: bytes, expected_truncated: bool, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
+    async def test_validation_exception_log_renders_only_bounded_body_shape(
+        self, body: bytes, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
     ) -> None:
         request = MagicMock(spec=Request)
         request.body = AsyncMock(return_value=body)
@@ -591,7 +791,7 @@ class TestServerUtils:
                 "input": {"password": "value that must not be copied into the error log"},
             }
         ]
-        exc = RequestValidationError(errors, body={"original": "body"})
+        exc = RequestValidationError(errors, body={"payload": body})
         rendered_body_sizes = []
         escaped_log_prefix = nemo_gym.server_runtime.request_handling.errors._escaped_log_prefix
 
@@ -613,18 +813,20 @@ class TestServerUtils:
             rendered_body_sizes[0] <= nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_BODY_CHARS
         )
         assert (
-            len(record.request_body_prefix)
+            len(record.request_body_shape)
             <= nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_BODY_CHARS
         )
-        assert record.request_body_truncated is expected_truncated
-        decoded_prefix = nemo_gym.server_runtime.request_handling.errors.json.loads(record.request_body_prefix)
-        assert decoded_prefix.endswith("...[truncated]") is expected_truncated
-        assert ("...[truncated]" in record.getMessage()) is expected_truncated
-        if not expected_truncated:
-            assert decoded_prefix == body.decode("utf-8", errors="replace")
+        assert record.request_body_shape_truncated is False
+        assert json.loads(json.loads(record.request_body_shape)) == {
+            "type": "object",
+            "field_count": 1,
+            "fields": {"payload": {"type": "bytes", "length": len(body)}},
+        }
+        assert not hasattr(record, "request_body_prefix")
+        assert "password" not in record.getMessage()
+        assert "secret" not in record.getMessage()
         assert "request_body_size_bytes=" in record.getMessage()
-        assert "request_body_truncated=" in record.getMessage()
-        assert "request_body_prefix=" in record.getMessage()
+        assert "request_body_shape=" in record.getMessage()
         assert record.validation_error_count == 1
         assert record.validation_errors == [
             {
@@ -634,11 +836,8 @@ class TestServerUtils:
             }
         ]
         assert "value that must not be copied into the error log" not in str(record.validation_errors)
-        if body == b"not-json\nwith-control-\x00":
-            assert "\n" not in record.request_body_prefix
-            assert "\x00" not in record.request_body_prefix
-            assert "\\n" in record.request_body_prefix
-            assert "\\u0000" in record.request_body_prefix
+        assert "\n" not in record.request_body_shape
+        assert "\x00" not in record.request_body_shape
 
     @mark.parametrize(("location", "body_unavailable"), [("body", False), ("query", False), ("body", True)])
     async def test_validation_exception_log_bounds_error_count(
@@ -716,7 +915,8 @@ class TestServerUtils:
         request.body.assert_awaited_once()
         record = caplog.records[-1]
         assert record.request_body_size_bytes == len(body)
-        assert record.request_body_prefix == '"{\\"required\\":null}"'
+        assert json.loads(json.loads(record.request_body_shape)) == {"type": "NoneType"}
+        assert not hasattr(record, "request_body_prefix")
         assert (
             len(record.validation_errors)
             == nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_MAX_ERRORS
@@ -877,7 +1077,7 @@ class TestServerUtils:
         for summary in summaries:
             assert ("msg" in summary) is (summary["loc"][0] == "body")
         assert record.validation_error_count == (3 if invalid_body else 2)
-        assert hasattr(record, "request_body_prefix") is invalid_body
+        assert hasattr(record, "request_body_shape") is invalid_body
         assert record.validation_errors_truncated is False
         # Structured consumers keep the same bounded metadata, including custom messages.
         assert record.validation_errors == [
@@ -991,22 +1191,13 @@ class TestServerUtils:
         assert actual.body == expected.body
         assert actual.headers == expected.headers
 
-    async def test_exception_middleware_logs_upstream_error_without_debug(
+    def test_exception_middleware_logs_upstream_error_without_debug(
         self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
     ) -> None:
-        callbacks = []
-        app = MagicMock()
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
 
-        def register_middleware(middleware_type):
-            assert middleware_type == "http"
-
-            def register(callback):
-                callbacks.append(callback)
-                return callback
-
-            return register
-
-        app.middleware.side_effect = register_middleware
+        app = FastAPI()
         server = MagicMock()
         server.get_session_middleware_key.return_value = "TestSimpleServer___my_server"
         SimpleServer.setup_exception_middleware(server, app)
@@ -1020,11 +1211,12 @@ class TestServerUtils:
         error = ClientResponseError(request_info=request_info, history=(), status=500, message="policy failed")
         error.response_content = b"ValueError: actionable inner failure"
 
-        async def fail(_request):
+        @app.post("/fail")
+        async def fail():
             raise error
 
         monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
-        response = await callbacks[0](MagicMock(), fail)
+        response = TestClient(app).post("/fail")
 
         assert response.status_code == 500
         captured = capsys.readouterr().out
@@ -1234,9 +1426,12 @@ class TestRunWebserverProxyKwargs:
 
         captured: dict = {}
         self.uvicorn_kwargs = captured
-        monkeypatch.setattr(
-            nemo_gym.server_runtime.base_server.uvicorn, "run", lambda **kwargs: captured.update(kwargs)
-        )
+
+        def run(**kwargs) -> None:
+            captured.update(kwargs)
+            self.blocked_signals_at_run = signal.pthread_sigmask(signal.SIG_BLOCK, ())  # reads the mask, adds nothing
+
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.uvicorn, "run", run)
 
         server_config = BaseRunServerInstanceConfig(
             name="my_server",
@@ -1414,6 +1609,19 @@ class TestRunWebserverProxyKwargs:
         )
 
         assert "workers" not in kwargs
+
+    def test_uvicorn_starts_with_the_shutdown_signals_unblocked(self, monkeypatch: MonkeyPatch) -> None:
+        # A process starts with the signal mask of the thread that launched it, and Ray blocks SIGINT in every thread
+        # of its workers: a server that a Ray worker launched never got ServerSupervisor's interrupt.
+        # SIGTERM is blocked too, so the test fails if the helper unblocks only SIGINT.
+        def launch_from_a_ray_worker_thread() -> None:
+            signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT, signal.SIGTERM))
+            self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(launch_from_a_ray_worker_thread).result()
+
+        assert not {signal.SIGINT, signal.SIGTERM} & self.blocked_signals_at_run
 
     def test_server_without_a_reason_runs_several_workers(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=2)
@@ -1622,3 +1830,41 @@ class TestHeadServerProxyKwargs:
     def test_listen_backlog_follows_the_global_config(self, monkeypatch: MonkeyPatch) -> None:
         assert 16384 == self._capture_uvicorn_kwargs(monkeypatch, {})["backlog"]
         assert 4096 == self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 4096})["backlog"]
+
+    def test_validation_body_shape_reports_shape_without_payload(self) -> None:
+        secret_image = "data:image/png;base64," + ("A" * 10_000)
+
+        shape = _validation_body_shape({"screenshots": [secret_image, secret_image]})
+
+        serialized = json.dumps(shape)
+        assert secret_image not in serialized
+        assert "base64" not in serialized
+        assert shape["fields"]["screenshots"] == {"type": "array", "length": 2}
+
+        assert _validation_body_shape({"nested": {"opaque_value": "not logged"}}) == {
+            "type": "object",
+            "field_count": 1,
+            "fields": {"nested": {"type": "object", "field_count": 1, "fields": ["opaque_value"]}},
+        }
+        assert _validation_body_shape("opaque") == {"type": "string", "length": 6}
+        assert _validation_body_shape(b"opaque") == {"type": "bytes", "length": 6}
+        assert _validation_body_shape(42) == {"type": "int"}
+
+    async def test_validation_body_shape_remains_bounded_with_large_field_names(
+        self, caplog: LogCaptureFixture
+    ) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        body = {"large-field-" + "x" * 10_000: "do-not-log-this-value"}
+        error = RequestValidationError(
+            [{"type": "missing", "loc": ("body", "required"), "msg": "Field required"}], body=body
+        )
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
+            await _log_validation_exception(request, error)
+        record = caplog.records[-1]
+        assert (
+            len(record.request_body_shape)
+            <= nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_BODY_CHARS
+        )
+        assert record.request_body_shape_truncated is True
+        assert "do-not-log-this-value" not in record.getMessage()

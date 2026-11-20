@@ -15,7 +15,7 @@
 """Public sandbox API for NeMo Gym."""
 
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-from nemo_gym.sandbox.api import AsyncSandbox, AsyncSandboxSidecar, Sandbox, SandboxPty
+from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox, AsyncSandboxSidecar, Sandbox, SandboxPty
 from nemo_gym.sandbox.config import (
     resolve_provider_config,
     resolve_provider_metadata,
@@ -35,10 +35,18 @@ from nemo_gym.sandbox.providers import (
     SandboxPtySpec,
     SandboxResources,
     SandboxSidecarSpec,
+    SandboxSnapshotError,
+    SandboxSnapshotFailedError,
+    SandboxSnapshotInfo,
+    SandboxSnapshotInUseError,
+    SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
+    SupportsSandboxExecScopedProcesses,
     SupportsSandboxNetwork,
+    SupportsSandboxParkedPolling,
     SupportsSandboxPauseResume,
     SupportsSandboxPortForwarding,
     SupportsSandboxPty,
@@ -46,6 +54,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxRuntimeRequirements,
     SupportsSandboxSharedStorage,
     SupportsSandboxSidecars,
+    SupportsSandboxSnapshot,
     clamp_resource_requests,
     create_provider,
     get_provider_class,
@@ -58,6 +67,7 @@ from nemo_gym.sandbox.utils import rewrite_image
 __all__ = [
     "Sandbox",
     "AsyncSandbox",
+    "STOP_TIMEOUT_S",
     "AsyncSandboxCompose",
     "AsyncSandboxSidecar",
     "ConnectableProvider",
@@ -74,15 +84,24 @@ __all__ = [
     "SandboxPtySpec",
     "SandboxResources",
     "SandboxSidecarSpec",
+    "SandboxSnapshotError",
+    "SandboxSnapshotFailedError",
+    "SandboxSnapshotInfo",
+    "SandboxSnapshotInUseError",
+    "SandboxSnapshotNotFoundError",
     "SandboxSpec",
     "SandboxStatus",
+    "SupportsSandboxCheckpointPolling",
     "SupportsSandboxEndpoint",
+    "SupportsSandboxExecScopedProcesses",
     "SupportsSandboxNetwork",
+    "SupportsSandboxParkedPolling",
     "SupportsSandboxPauseResume",
     "SupportsSandboxPortForwarding",
     "SupportsSandboxRuntimeRequirements",
     "SupportsSandboxSharedStorage",
     "SupportsSandboxSidecars",
+    "SupportsSandboxSnapshot",
     "SupportsSandboxPty",
     "SupportsSandboxPtyAttach",
     "create_provider",
@@ -115,6 +134,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
     from nemo_gym.sandbox.config import SandboxConfig
+    from nemo_gym.sandbox.failures import sandbox_failure
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
     from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
@@ -133,7 +153,17 @@ if TYPE_CHECKING:
         upload_dir,
         upload_path,
     )
-    from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env, read_text, upload_text
+    from nemo_gym.sandbox.utils import (
+        CPU_CAP_ENV_VARS,
+        MEDIA_DIRECTORY,
+        cpu_cap_env,
+        download_bytes,
+        media_path,
+        read_text,
+        stage_media,
+        upload_bytes,
+        upload_text,
+    )
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -146,6 +176,7 @@ _PUBLIC_API = {
     "DockerCreateConfig": "providers.docker.provider",
     "DockerProvider": "providers.docker.provider",
     "LocalProvider": "providers.local.provider",
+    "MEDIA_DIRECTORY": "utils",
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
     "OpenSandboxProvider": "providers.opensandbox.provider",
     "SandboxAccess": "access",
@@ -158,18 +189,23 @@ _PUBLIC_API = {
     "cpu_cap_env": "utils",
     "deployment_platform": "compose_config",
     "document_volume_sources": "compose_config",
+    "download_bytes": "utils",
     "download_dir": "transfer",
     "download_path": "transfer",
     "exec_as_root": "transfer",
+    "media_path": "utils",
     "opensandbox_shm_labels": "compose_config",
     "read_text": "utils",
     "remote_kind": "transfer",
     "resolve_compose": "compose_config",
     "sandbox_credentials_rejected": "providers.base",
+    "sandbox_failure": "failures",
     "sandbox_platform": "compose_config",
     "service_gpus": "compose_fields",
     "service_resources": "compose_fields",
+    "stage_media": "utils",
     "upload_archive": "transfer",
+    "upload_bytes": "utils",
     "upload_dir": "transfer",
     "upload_path": "transfer",
     "upload_text": "utils",

@@ -251,9 +251,14 @@ async def test_run_job_rejects_failed_steps_and_invalidates_resume(tmp_path, mon
         with pytest.raises(RuntimeError, match="notebook unavailable"):
             await HarborAgent.run_job(config.model_dump(mode="json"), "task")
         assert not result_path.exists(), "Gym retries must not reuse a failed step's result"
+        archives = list(trial_dir.parent.glob(".failed-trial-result-*.json"))
+        assert len(archives) == 1
+        assert archives[0].read_bytes() == b"{}"
+        assert archives[0].stat().st_mode & 0o777 == 0o600
     else:
         assert Path(await HarborAgent.run_job(config.model_dump(mode="json"), "task")) == trial_dir
         assert result_path.exists()
+        assert not list(trial_dir.parent.glob(".failed-trial-result-*.json"))
 
 
 @pytest.mark.asyncio
@@ -628,3 +633,47 @@ async def test_a_failed_trial_names_the_phase_it_was_in(tmp_path, monkeypatch, r
     message = str(raised.value)
     assert message.startswith(f"[sandbox phase={phase} ")
     assert " reason=SandboxApiException] Harbor trial failed with SandboxApiException: sandbox ended" in message
+
+
+def test_startup_logs_the_deprecation_notice(agent: HarborAgent, caplog: pytest.LogCaptureFixture) -> None:
+    """The server says on startup that it is deprecated, where its replacement lives, and that users need not act yet."""
+    with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent_general.app"):
+        agent.model_post_init(None)
+    notices = {record.getMessage() for record in caplog.records if "deprecated" in record.getMessage()}
+    assert len(notices) == 1
+    (notice,) = notices
+    assert "responses_api_agents/harbor_agent_general is deprecated" in notice
+    assert "environment_servers/harbor" in notice
+    # The notice names the repo path, not a docs URL, so it does not break when the docs pages move.
+    assert "docs.nvidia.com" not in notice
+    # Users of the built-in benchmarks did not pick this agent, so the notice says no action is needed yet.
+    assert "no action is needed" in notice
+
+
+@pytest.mark.asyncio
+async def test_run_job_keeps_result_when_failed_result_archive_cannot_be_written(tmp_path, monkeypatch):
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    result_path = trial_dir / "result.json"
+    original = b'{"evidence": "original result"}\n'
+    result_path.write_bytes(original)
+    failure = SimpleNamespace(exception_type="ApiRateLimitError", exception_message="HTTP 429")
+    trial = SimpleNamespace(task_name="task", exception_info=failure, step_results=[])
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    original_open = app.os.open
+
+    def fail_archive_open(path, flags, mode=0o777, **kwargs):
+        if Path(path).name.startswith(".failed-trial-result-"):
+            raise PermissionError("archive unavailable")
+        return original_open(path, flags, mode, **kwargs)
+
+    monkeypatch.setattr(app.os, "open", fail_archive_open)
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+    with pytest.raises(PermissionError, match="archive unavailable"):
+        await HarborAgent.run_job(config.model_dump(mode="json"), "task")
+    assert result_path.read_bytes() == original

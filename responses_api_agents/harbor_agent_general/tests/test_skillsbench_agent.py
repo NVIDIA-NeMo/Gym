@@ -90,7 +90,7 @@ async def test_discarded_sandbox_stops_conversation_and_preserves_original_error
         assert observation.is_error
         assert control.cancelled.is_set()
 
-    agent = SimpleNamespace(_run_openhands=run_openhands)
+    agent = SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None)
     with pytest.raises(openhands_agent.SkillsBenchSandboxError, match="provider disconnected"):
         await SkillsBenchOpenHands.run(agent, "task", environment, None)
     assert _provider().closed_handles == ["sbx-123"]
@@ -257,24 +257,28 @@ async def test_terminal_model_feedback_reports_completion_and_updated_directory(
     environment = _make_environment(tmp_path)
     await environment.start(force_build=False)
     try:
-        # Extract the per-action cwd marker from the dispatched command, as a
-        # real shell does, rather than coupling the test to its random UUID.
-        async def exec_command(command, **kwargs):
-            import re
 
-            marker = re.search(r"__OPENHANDS_CWD_[0-9a-f]+__", command)[0]
+        async def exec_command(command, **kwargs):
             assert kwargs["cwd"] == "/"
-            assert "cd -- /tmp" in command
-            return SimpleNamespace(return_code=0, stdout=f"done\n{marker}/workspace\n", stderr="")
+            process = await asyncio.create_subprocess_exec(
+                "bash",
+                "-c",
+                command,
+                cwd=kwargs["cwd"],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            return SimpleNamespace(return_code=process.returncode, stdout=stdout.decode(), stderr=stderr.decode())
 
         environment.exec = exec_command
         executor = OpenSandboxTerminalExecutor(environment, asyncio.get_running_loop(), "/tmp", _RunControl())
-        observation = await asyncio.to_thread(executor, TerminalAction(command="cd /workspace; echo done"))
+        observation = await asyncio.to_thread(executor, TerminalAction(command=f"cd '{tmp_path}'; echo done"))
         content = "\n".join(part.text for part in observation.to_llm_content)
         assert "[Command finished with exit code 0]" in content
-        assert "[Current working directory: /workspace]" in content
+        assert f"[Current working directory: {tmp_path}]" in content
         assert "__OPENHANDS_CWD_" not in content
-        assert executor.cwd == "/workspace"
+        assert executor.cwd == str(tmp_path)
         assert not observation.is_error
     finally:
         await environment.stop(delete=True)
@@ -341,7 +345,7 @@ async def test_deadline_discards_completed_command_descendants_and_joins_worker(
             worker_finished.set()
 
     environment = SimpleNamespace(exec=sandbox_exec, stop=sandbox_stop)
-    agent = SimpleNamespace(_run_openhands=run_openhands)
+    agent = SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None)
     task = asyncio.create_task(SkillsBenchOpenHands.run(agent, "Task", environment, None))
     assert await asyncio.to_thread(waiting_for_model.wait, 5)
     assert [observation.exit_code for observation in observations] == [0, 0]
@@ -411,7 +415,7 @@ async def test_timeout_waits_for_worker_before_verifier_can_start() -> None:
         time.sleep(0.05)
         finished.set()
 
-    agent = SimpleNamespace(_run_openhands=run_openhands)
+    agent = SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None)
     environment = SimpleNamespace(exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/workspace\n")))
     task = asyncio.create_task(SkillsBenchOpenHands.run(agent, "Task", environment, None))
     assert await asyncio.to_thread(started.wait, 5)
@@ -438,7 +442,8 @@ async def test_frozen_terminal_tool_describes_stateless_shell_and_keeps_executor
         observation = await asyncio.to_thread(tool.executor, TerminalAction(command="echo regression"))
         assert observation.exit_code == 0
         environment.exec.assert_awaited_once()
-        assert "echo regression" in environment.exec.call_args.args[0]
+        assert observation.command == "echo regression"
+        assert "regression" in observation.text
     finally:
         _EXECUTORS.pop("test")
 
@@ -480,7 +485,7 @@ async def test_deadline_discards_active_command_and_joins_worker(detached):
             worker_finished.set()
 
     environment = SimpleNamespace(exec=sandbox_exec, stop=sandbox_stop)
-    agent = SimpleNamespace(_run_openhands=run_openhands)
+    agent = SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None)
     task = asyncio.create_task(SkillsBenchOpenHands.run(agent, "Task", environment, None))
     await asyncio.wait_for(started.wait(), timeout=5)
     task.cancel()
@@ -552,7 +557,9 @@ async def test_docker_deadline_discards_detached_processes(tmp_path, completed):
     try:
         await environment.start(force_build=False)
         task = asyncio.create_task(
-            SkillsBenchOpenHands.run(SimpleNamespace(_run_openhands=run_openhands), "Task", environment, None)
+            SkillsBenchOpenHands.run(
+                SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None), "Task", environment, None
+            )
         )
         for _ in range(20):
             probe = await environment.exec("test -f /tmp/service-ready && test ! -f /tmp/answer")
@@ -657,6 +664,26 @@ async def test_unknown_command_exit_discards_sandbox_before_return():
     assert "outcome is unknown" in control.sandbox_failure
 
 
+@pytest.mark.asyncio
+async def test_terminal_commands_outlast_the_trial_agent_deadline(tmp_path):
+    # The longest official budget is 7200 s; scaled by 1.5, Harbor's agent deadline is 10800 s.
+    deadline = 7200 * 1.5
+    agent = SkillsBenchOpenHands(
+        logs_dir=tmp_path, model_name="test-policy", api_base="http://unused.invalid/v1", agent_timeout_sec=deadline
+    )
+    environment = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/root\n", stderr="")), stop=AsyncMock()
+    )
+
+    def run_openhands(_instruction, _environment, _context, instance_id, _cwd, _control):
+        assert _EXECUTORS[instance_id](TerminalAction(command="python simulate.py")).exit_code == 0
+
+    agent._run_openhands = run_openhands
+    await agent.run("task", environment, None)
+    assert environment.exec.await_args_list[-1].kwargs["timeout_sec"] > deadline
+    environment.stop.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "settings,expected", [({}, (3600, 5)), ({"llm_timeout_s": 900, "llm_num_retries": 2}, (900, 2))]
 )
@@ -675,6 +702,62 @@ def test_the_llm_request_timeout_and_retries_reach_openhands(tmp_path, monkeypat
         agent._run_openhands("task", None, None, "id", "/root", _RunControl())
     # OpenHands' own default is a 300 s request timeout, shorter than a slow but healthy policy needs.
     assert (received["timeout"], received["num_retries"]) == expected
+
+
+@pytest.mark.asyncio
+async def test_terminal_process_cleanup_does_not_match_command_transport(tmp_path):
+    import shlex
+    import uuid
+
+    from harbor.environments.base import ExecResult
+
+    class ShellEnvironment:
+        stop = AsyncMock()
+
+        async def exec(self, command, *, cwd=None, timeout_sec=None):
+            process = await asyncio.create_subprocess_exec(
+                "bash",
+                "-c",
+                command,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_sec)
+            return ExecResult(return_code=process.returncode, stdout=stdout.decode(), stderr=stderr.decode())
+
+    # A unique process name confines pkill to this test's service and any shell
+    # that incorrectly exposes the action text in its command-line arguments.
+    name = f"skillsbench-service-{uuid.uuid4().hex}"
+    service = await asyncio.create_subprocess_exec(
+        "bash",
+        "-c",
+        'exec -a "$1" sleep 120',
+        "bash",
+        name,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    environment = ShellEnvironment()
+    executor = OpenSandboxTerminalExecutor(environment, asyncio.get_running_loop(), str(tmp_path), _RunControl())
+    try:
+        assert service.returncode is None
+        result = await asyncio.to_thread(
+            executor, TerminalAction(command=f"pkill -f {shlex.quote(name)}; echo cleanup-finished", timeout=5)
+        )
+        await asyncio.wait_for(service.wait(), timeout=5)
+        assert service.returncode != 0
+        assert result.exit_code == result.metadata.exit_code == 0
+        assert "cleanup-finished" in result.text
+        assert executor.cwd == str(tmp_path)
+        assert executor.control.sandbox_failure is None
+        environment.stop.assert_not_awaited()
+    finally:
+        if service.returncode is None:
+            service.kill()
+            await service.wait()
 
 
 @pytest.mark.asyncio
@@ -752,7 +835,7 @@ async def test_finished_conversation_drains_soft_wait_before_verification(cancel
         assert result.exit_code == -1
 
     environment = SimpleNamespace(exec=sandbox_exec, stop=sandbox_stop)
-    agent = SimpleNamespace(_run_openhands=run_openhands)
+    agent = SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None)
     task = asyncio.create_task(SkillsBenchOpenHands.run(agent, "Task", environment, None))
     await asyncio.wait_for(started.wait(), timeout=3)
     await asyncio.sleep(0.05)

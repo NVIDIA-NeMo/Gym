@@ -275,3 +275,36 @@ def test_collect_rollouts_preserves_incomplete_exit_and_shuts_down_telemetry(
     else:
         cli_eval.collect_rollouts()
     assert events == ["configure", "init", "collect", "shutdown"]
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_aggregate_rollouts_sets_up_telemetry_before_aggregating_and_shuts_it_down(monkeypatch, fails):
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper
+    from nemo_gym.telemetry import setup
+
+    config = DictConfig({"input_glob": "shards/*.jsonl", "output_jsonl_fpath": "merged.jsonl"})
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+    events = []
+    monkeypatch.setattr(setup, "configure_telemetry_env", lambda config: events.append("configure"))
+    monkeypatch.setattr(setup, "init_telemetry", lambda **kwargs: events.append(("init", kwargs)))
+    monkeypatch.setattr(setup, "shutdown_telemetry", lambda: events.append("shutdown"))
+
+    async def aggregate(self, config):
+        events.append("aggregate")
+        if fails:
+            raise RuntimeError("aggregation failed")
+
+    monkeypatch.setattr(RolloutAggregationHelper, "run_from_config", aggregate)
+    if fails:
+        with pytest.raises(RuntimeError):
+            cli_eval.aggregate_rollouts()
+    else:
+        cli_eval.aggregate_rollouts()
+
+    # Set up before the run summary is recorded, and shut down on every path so gauges are flushed.
+    assert events == [
+        "configure",
+        ("init", {"server_name": "driver", "server_type": "driver"}),
+        "aggregate",
+        "shutdown",
+    ]

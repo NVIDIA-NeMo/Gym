@@ -1,0 +1,117 @@
+# Chartography with tools: OpenCode answers each question in its own sandbox session, with a Python image toolkit
+# and OpenCode's own tools (bash, read, glob, grep, write, edit, todowrite; `read` returns images to the model).
+# The resources server lends the sandbox at each episode's seed and stops it at verify. The sandbox reaches only
+# the policy model server (model_only), so the model cannot look answers up. Grading is the same as in the
+# simple_agent setting (chartography.yaml): the benchmark's own judge over the final assistant message.
+#
+# Needs: CHARTOGRAPHY_OPENCODE_SANDBOX_IMAGE, an image built from resources_servers/visual_coding_opencode/sandbox_image
+# (OpenCode, its plugin dependencies and a Python image toolkit; the agent below pins the same OpenCode build),
+# OPENSANDBOX_DOMAIN and OPENSANDBOX_API_KEY, a host the sandbox can reach (use_absolute_ip), and a judge
+# (judge_model_openai.yaml, or your own judge_model with host: 127.0.0.1).
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
+
+chartography_opencode:
+  # The simple_agent setting's server (chartography.yaml), plus the lent sandbox. It is not chained: the lent sandbox
+  # may reach the policy model's host, so no no-tools server may listen there. The config test checks that the two
+  # settings grade the same way.
+  resources_servers:
+    chartography:
+      entrypoint: app.py
+      host: 127.0.0.1
+      domain: other
+      verified: false
+      description: 'Professional chart reading with tools: OpenCode answers one chart question in a sandbox session
+        with a Python image toolkit; graded against a golden answer by the Chartography benchmark''s own LLM judge'
+      value: Train and measure tool-assisted, precise reading of specialized charts
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_chat_create_params:
+        messages: []
+      judge_prompt_template_fpath: prompt_templates/judge.txt
+      judge_max_attempts: 5
+      judge_endpoint_max_concurrency: 64
+      # A run that does not complete (OpenCode's timeout, an output cap, a context limit or a failed run) scores 0,
+      # as in visual_coding_opencode, instead of being graded on whatever it last wrote.
+      score_unfinished_as_zero: true
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${oc.env:CHARTOGRAPHY_OPENCODE_SANDBOX_IMAGE,null}
+        # Above the episode deadline (default_episode_timeout_seconds below) plus grading and cleanup.
+        ttl_s: 7200
+        ready_timeout_s: 1200
+        resources: {cpu: 2, memory_mib: 8192}
+      sandbox_workdir: /workspace
+      sandbox_network_access: model_only
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+
+chartography_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      host: 127.0.0.1
+      description: Chartography with OpenCode in a sandbox session that has a Python image toolkit
+      resources_server:
+        type: resources_servers
+        name: chartography_opencode
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.17.11
+      concurrency: 64
+      # The model reasons on every turn, and its earlier reasoning stays in the history OpenCode sends back.
+      thinking: true
+      # The chart is a prompt image; image_input also lets `read` return crops and plots the model makes.
+      image_input: true
+      # 1800 s per task and no turn cap.
+      timeout: 1800
+      context_window: 131072
+      max_output_tokens: 32768
+      session_close_timeout_seconds: 90
+      sandbox_executable_path: /opt/opencode/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
+      sandbox_plugin_dependencies_path: /opt/opencode/opencode-1.17.11-plugin-dependencies.tar.gz
+      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret
+      opencode_config:
+        tools:
+          webfetch: false
+          websearch: false
+          task: false
+        permission:
+          bash: allow
+          edit: allow
+          external_directory: allow
+          doom_loop: allow
+        compaction:
+          auto: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/chartography/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+
+chartography_opencode_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      host: 127.0.0.1
+      resources_server:
+        type: resources_servers
+        name: chartography_opencode
+      agent_server:
+        type: responses_api_agents
+        name: chartography_opencode_agent
+      # OpenCode works in the lent sandbox with its own tools; the server serves none.
+      resources_tool_transports: []
+      # One sandbox per episode: admit as many episodes as the agent runs at once.
+      max_concurrent_episodes: 64
+      queue_timeout_seconds: 86400
+      default_episode_timeout_seconds: 5400

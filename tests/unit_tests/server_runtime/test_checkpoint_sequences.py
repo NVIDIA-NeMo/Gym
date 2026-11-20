@@ -151,8 +151,8 @@ class Deployment:
         participant = self.controller.participant
         export = participant.export
 
-        async def remembering(episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
-            records = await export(episode_ids)
+        async def remembering(episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
+            records = await export(episode_ids, checkpoint_id=checkpoint_id)
             self.first_exports.setdefault(self.exporting, [record.to_json_record() for record in records])
             return records
 
