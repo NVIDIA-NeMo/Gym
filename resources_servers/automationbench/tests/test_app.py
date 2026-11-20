@@ -3,6 +3,7 @@
 """The resources server's session lifecycle, tools and scoring, on a real AutomationBench example task."""
 
 import json
+from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -13,9 +14,11 @@ from fastapi.testclient import TestClient
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.server_runtime import (
+    NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
+    maybe_auto_expose,
 )
 from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.automationbench import app as app_module
@@ -299,3 +302,97 @@ def test_close_releases_the_world_and_the_session_follows_the_contract():
         holds_state=lambda session_id: session_id in server._episodes,
         verify_body=_verify_body(),
     )
+
+
+# The api tools over MCP, for the session harnesses (opencode.yaml, openclaw.yaml, hermes.yaml, pi.yaml, codex.yaml).
+
+RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+
+
+class _StatelessCookieJar(CookieJar):
+    def extract_cookies(self, response: object, request: object) -> None:
+        # Sessions come from explicit request cookies, as the Environment Server sends them.
+        pass
+
+
+class _MCPClient(TestClient):
+    """A test client whose lifespan starts the MCP session manager, then the MCP handshake."""
+
+    def __enter__(self) -> "_MCPClient":
+        super().__enter__()
+        params = {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}
+        self.post(
+            "/mcp", headers=RPC_HEADERS, json={"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": params}
+        )
+        self.post("/mcp", headers=RPC_HEADERS, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        return self
+
+
+def _mcp_client() -> _MCPClient:
+    server = _server(expose_tools_over_mcp=True)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    return _MCPClient(app, cookies=_StatelessCookieJar())
+
+
+def _rpc(client: TestClient, method: str, params: dict[str, Any], token: str) -> dict[str, Any]:
+    headers = RPC_HEADERS | {NEMO_GYM_MCP_SESSION_TOKEN_HEADER: token}
+    response = client.post(
+        "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    )
+    return response.json()["result"]
+
+
+def _toolless(task: dict[str, Any] = TASK) -> dict[str, Any]:
+    """The row as the session harness presets send it: without the tools, the output budget and the sampling."""
+    params = {key: value for key, value in task["responses_create_params"].items() if key != "max_output_tokens"}
+    return task | {"responses_create_params": params | {"tools": []}}
+
+
+def test_mcp_serves_the_tools_the_rows_send_and_their_calls_change_the_world_verify_scores() -> None:
+    with _mcp_client() as client:
+        # A row without tools is served: the agent gets them from its MCP grant.
+        seeded = _post_seed(client, _seed(task=_toolless()))
+        assert seeded.status_code == 200, seeded.text
+        token = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+
+        listed = {tool["name"]: tool for tool in _rpc(client, "tools/list", {}, token)["tools"]}
+        shown = {tool["name"]: tool for tool in TASK["responses_create_params"]["tools"]}
+        assert listed.keys() == shown.keys()
+        for name, tool in listed.items():
+            assert (tool["description"], tool["inputSchema"]) == (
+                shown[name]["description"],
+                shown[name]["parameters"],
+            )
+
+        found = _rpc(
+            client, "tools/call", {"name": "api_search", "arguments": {"query": "salesforce opportunity"}}, token
+        )
+        assert found["isError"] is False and "/sobjects/Opportunity/" in found["content"][0]["text"]
+        patch = {"method": "PATCH", "url": OPPORTUNITY_URL, "params": {}, "body": {"StageName": "Closed Won"}}
+        won = _rpc(client, "tools/call", {"name": "api_fetch", "arguments": patch}, token)
+        assert won["isError"] is False
+        # As over direct HTTP, a failing tool is text for the model, not a protocol error.
+        missing = _rpc(client, "tools/call", {"name": "base64_encode", "arguments": {}}, token)
+        assert missing["isError"] is False and "text" in missing["content"][0]["text"]
+
+        result = client.post("/verify", json=_verify_body(tools=[]), cookies=seeded.cookies).json()
+
+    assert (result["mask_sample"], result["objectives_passed"]) == (False, 1.0)
+    assert result["reward"] == result["aa_headline"] == pytest.approx(1 / 3)
+
+
+def test_without_mcp_a_toolless_row_is_still_refused(client):
+    response = _post_seed(client, _seed(task=_toolless()))
+
+    assert response.status_code == 422
+    assert "gym eval prepare --benchmark automationbench" in response.json()["detail"]
+
+
+def test_tool_arguments_that_are_not_json_are_refused(client):
+    _post_seed(client, _seed())
+
+    response = client.post("/api_search", content=b"{not json", headers={"Content-Type": "application/json"})
+
+    assert response.status_code == 422
+    assert client.post("/api_search").text.startswith("Expected tool arguments to be a dict, got NoneType")

@@ -94,6 +94,56 @@ If the rubric could not score a rollout (an assertion raised), the sample is
 masked as `verifier_error`; under `config_legacy_agent.yaml` the key is omitted
 and the agent logs a warning.
 
+## Session harnesses
+
+`opencode.yaml`, `openclaw.yaml`, `hermes.yaml`, `pi.yaml` and `codex.yaml` run that harness in place of
+`simple_agent`, with the same resources server, rows and `aa_headline` scoring as `config.yaml`. They have no
+manifest and are not AA-comparable runs: the harness's own loop, tools and limits replace `simple_agent`'s. For
+example, with Pi:
+
+```bash
+gym eval prepare --benchmark automationbench
+gym eval run \
+    --model-type vllm_model \
+    --benchmark automationbench/pi \
+    --split benchmark \
+    --output results/automationbench_pi.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name> \
+    '++policy_model.responses_api_models.vllm_model.sampling_overrides={temperature: 1.0, top_p: 1.0}'
+```
+
+- The tools reach the harness over MCP: these harnesses refuse a direct HTTP tool grant. Each preset sets
+  `expose_tools_over_mcp: true` on the resources server, which then lists `api_search`, `api_fetch` and
+  `base64_encode` with the names, descriptions and schemas the rows send, and the environment server grants them
+  with `resources_tool_transports: [mcp]`. Each harness shows them to the model under its own name, such as
+  `automationbench_resources_server_api_fetch` (OpenCode) or `mcp__automationbench_resources_server__api_fetch`
+  (Pi). A tool's text reaches the model as over direct HTTP, except that a JSON reply comes back without its
+  whitespace.
+- The rows are `config.yaml`'s; prepare them with `--benchmark automationbench`. The harnesses refuse a tool list,
+  an output budget and sampling in the request, so each preset clears the rows' `tools` and `max_output_tokens` and
+  `config.yaml`'s `temperature` and `top_p` for the run (`responses_create_params`). With `expose_tools_over_mcp`,
+  the resources server serves and scores a row without tools; without it, it still refuses one at seed.
+- Each harness runs in a sandbox it creates through the `sandbox` provider, as set up by the agent's
+  `configs/profiles/benchmark.yaml` (OpenSandbox). The task needs no files in it, so the presets use `python:3.12`;
+  any Linux glibc image with `bash`, `curl`, `tar`, `gzip` and CA certificates works, for example
+  `++automationbench_pi_agent.responses_api_agents.pi_agent.sandbox_config.image=<image>`. The sandbox calls the
+  model server and the resources server's `/mcp` by address, so the presets bind both to the address sandboxes
+  reach (`absolute_ip_server_types`).
+- OpenCode, OpenClaw, Pi and Codex download their runtime at the start of each episode, so their sandboxes keep the
+  provider's network (`network_access: inherit`). To restrict one to the model server and the MCP endpoint
+  (`model_and_tools`), supply the runtime in the image, as the agent's README describes. Hermes's runtime comes from
+  the agent server, so `hermes.yaml` uses `model_and_tools`.
+- Set sampling on the model server, as above. These harnesses send none of their own, except Hermes, whose
+  `temperature` setting defaults to 1.0. Each preset limits a model call to 32,768 output tokens, except Codex, which
+  sends no limit, and gives the harness a 262,144-token window; change `context_window` (Codex
+  `model_context_window`, Hermes `context_length`) for another model.
+- The step limits differ from `config.yaml`'s 49 tool rounds. Hermes stops at 50 turns (`max_turns`). OpenCode,
+  OpenClaw, Pi and Codex have no turn limit: a run that keeps calling tools ends at the harness's 3,600-second
+  `timeout` and is scored on the world as it stands then. The harnesses also keep their own tools (a shell, file
+  tools, OpenCode's subagents), which act only inside the sandbox and not on the task's world.
+
 ## Install
 
 The preparation package is not on PyPI. Its committed project lock pins the
