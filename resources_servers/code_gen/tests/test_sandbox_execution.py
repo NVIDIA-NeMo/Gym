@@ -363,6 +363,14 @@ _STATEFUL_SOLUTION = (
         ("while True:\n    pass", ["assert True"], [-3]),
         ("def f(:", ["assert True"], [-1]),
         ("x = bytearray(320 * 1024 * 1024)", ["assert True"], [-4]),
+        # Replacing the builtins the harness runs tests with cannot skip a failing test.
+        ("import builtins\nbuiltins.exec = lambda *args, **kwargs: None", ["assert False"], [-2]),
+        ("import builtins\nbuiltins.enumerate = lambda *args: ()", ["assert False"], [-2]),
+        (
+            "import builtins\n_noop = compile('pass', 'x', 'exec')\nbuiltins.compile = lambda *args, **kwargs: _noop",
+            ["assert False"],
+            [-2],
+        ),
         # Candidate code that emptied the suite or left a partial result still fails.
         ("import sys\nsys._getframe(1).f_locals['tests'].clear()", ["assert False"], [-4]),
         (

@@ -41,18 +41,21 @@ def _run_assertions(generation, tests, time_limit_s, memory_limit_mb, result, me
     sys.modules["__main__"] = module
     results: list[bool | int] = []
     metadata: dict[str, object] = {}
+    # Bound before the candidate runs, so replacing these builtins cannot skip or empty the suite.
+    execute, compile_source = exec, compile
+    indexed_tests = enumerate(tests)
     signal.signal(signal.SIGALRM, _timeout_handler)
     signal.setitimer(signal.ITIMER_REAL, time_limit_s)
     try:
         try:
-            candidate = compile(generation, "<candidate>", "exec")
+            candidate = compile_source(generation, "<candidate>", "exec")
         except (SyntaxError, ValueError) as error:
             results.append(_COMPILE_ERROR)
             metadata = _error_metadata(_COMPILE_ERROR, "Compilation Error", error)
         else:
-            exec(candidate, module.__dict__)
-            for index, test in enumerate(tests):
-                exec(compile(test, f"<test {index}>", "exec"), module.__dict__)
+            execute(candidate, module.__dict__)
+            for index, test in indexed_tests:
+                execute(compile_source(test, f"<test {index}>", "exec"), module.__dict__)
                 results.append(True)
     except _AssertionTimeout:
         results.append(_TIME_LIMIT)
