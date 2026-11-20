@@ -296,9 +296,15 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
             install_s = monotonic() - started
             stdout += f"[install rc={install.return_code}]\n{install.stdout or ''}"
             stderr += install.stderr or ""
-            if install.return_code != 0 or "OPENHANDS_INSTALLED" not in (install.stdout or ""):
+            install_error_type = getattr(install, "error_type", None)
+            if (
+                install.return_code != 0
+                or install_error_type is not None
+                or "OPENHANDS_INSTALLED" not in (install.stdout or "")
+            ):
                 raise RuntimeError(
-                    f"OpenHands SDK install failed (rc={install.return_code}): {(install.stderr or '')[-1500:]}"
+                    f"OpenHands SDK install failed (rc={install.return_code}, error_type={install_error_type}): "
+                    f"{(install.stderr or '')[-1500:]}"
                 )
             await sandbox.upload(local_request, remote_request)
             await sandbox.upload(RUNNER_V2_PATH if cfg.background_exec else RUNNER_PATH, remote_runner)

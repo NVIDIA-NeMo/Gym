@@ -96,6 +96,49 @@ async def test_install_failure_is_a_failed_setup_and_is_never_verified(world) ->
     assert world.agent._sandbox_id_to_sandbox == {}
 
 
+@pytest.mark.parametrize(
+    "install",
+    [
+        _exec(0, "pip finished but no marker"),  # no OPENHANDS_INSTALLED marker
+        SimpleNamespace(return_code=0, stdout="OPENHANDS_INSTALLED", stderr="", error_type="sandbox"),
+        SimpleNamespace(return_code=125, stdout="", stderr="", error_type="timeout"),
+    ],
+)
+async def test_every_kind_of_install_failure_is_a_failed_setup(world, install) -> None:
+    world.sandbox.exec.return_value = install
+
+    with pytest.raises(NgFailureEvent) as caught:
+        await world.agent.run(world.request, world.body)
+
+    assert caught.value.operation == "openhands.setup"
+    assert world.posts == ["/seed_session"]
+    world.sandbox.stop.assert_awaited_once()
+
+
+async def test_a_runner_that_started_and_failed_is_still_graded(world) -> None:
+    """Only setup failures skip grading: an agent that ran and hit an error or timeout is graded on its partial work."""
+    calls = []
+
+    async def exec_(command: str, **kwargs):
+        calls.append(command)
+        if "OPENHANDS_INSTALLED" in command or "pip install" in command or "tar -xzf" in command:
+            return _exec(0, "OPENHANDS_INSTALLED")
+        if "runner" in command:
+            raise TimeoutError("the agent ran past its budget")
+        return _exec(0)
+
+    world.sandbox.exec.side_effect = exec_
+    world.agent._sandbox_id_to_sandbox["session"] = world.sandbox
+    world.request._cookies = {"sandbox_id": "session"}
+
+    response = await world.agent.responses(world.request, world.body.responses_create_params)
+
+    assert response is not None  # reached the end: no setup failure, so run() goes on to /verify
+    run_result = world.agent._sandbox_id_to_run_result["session"]
+    assert "TimeoutError" in run_result["openhands_run_stderr"]
+    assert any("runner" in command for command in calls)
+
+
 async def test_install_exec_error_is_also_a_failed_setup(world) -> None:
     world.sandbox.exec.side_effect = TimeoutError("install timed out")
 
