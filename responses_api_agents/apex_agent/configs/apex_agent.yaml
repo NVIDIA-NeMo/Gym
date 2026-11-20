@@ -36,7 +36,7 @@ apex_agent:
       sandbox_provider: ${oc.select:apex_agent_sandbox_provider,apex_agent_apptainer_sandbox}
       sandbox_spec:
         resources: ${oc.select:apex_agent_sandbox_resources,{}}
-      edgar_user_agent: ${oc.select:apex_edgar_user_agent,"Mercor APEX-Agents apex@mercor.com"}
+      edgar_user_agent: ${oc.select:apex_edgar_user_agent,null}
       mcp_session_affinity: ${oc.select:apex_agent_mcp_session_affinity,false}
       max_turns: ${oc.select:apex_agent_max_turns,200}
       max_output_tokens: ${oc.select:apex_agent_max_output_tokens,32768}

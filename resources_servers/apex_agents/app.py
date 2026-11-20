@@ -32,11 +32,13 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.verification import VerifierFixture
 from resources_servers.apex_agents.artifacts import (
     safe_extract_snapshot,
     snapshot_changes,
 )
 from resources_servers.apex_agents.judge import grade_apex_output
+from resources_servers.apex_agents.verifier_fixture import create_fixture_server, invoke_fixture, reseed_fixture
 
 
 _WORLD_ID_RE = re.compile(r"^world_[0-9a-f]{32}$")
@@ -99,6 +101,15 @@ class ApexVerifyRequest(BaseVerifyRequest):
     artifact_snapshot_b64: str = Field(default="", exclude=True)
     artifact_manifest: List[str] = Field(default_factory=list)
     apex_trajectory: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ApexFixtureRequest(ApexVerifyRequest):
+    """Synthetic deliverables and fixed judge replies, provided only by the verifier fixture runner."""
+
+    # Files of the final snapshot by archive path; None leaves the final snapshot out.
+    fixture_files: Optional[Dict[str, str]] = Field(default=None, exclude=True)
+    # Raw judge reply for each criterion, keyed by the criterion text.
+    fixture_judge_replies: Dict[str, str] = Field(default_factory=dict, exclude=True)
 
 
 class ApexVerifyResponse(BaseVerifyResponse):
@@ -494,6 +505,15 @@ class ApexResourcesServer(SimpleResourcesServer):
             invalid_judge_response=False,
             verifier_error=None,
         )
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_fixture_server,
+    request_model=ApexFixtureRequest,
+    cases_path=Path(__file__).parent / "tests/verifier_cases.jsonl",
+    invoke=invoke_fixture,
+    reseed=reseed_fixture,
+)
 
 
 if __name__ == "__main__":

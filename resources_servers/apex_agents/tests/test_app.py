@@ -14,7 +14,9 @@ from starlette.requests import Request
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
+from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.apex_agents.app import (
+    VERIFIER_FIXTURE,
     ApexResourcesServer,
     ApexResourcesServerConfig,
     ApexSeedSessionRequest,
@@ -369,3 +371,23 @@ def test_persist_submission_writes_task_artifacts_without_rubric(tmp_path: Path)
     assert submission["response"]["output"][0]["content"][0]["text"] == "Done"
     assert "verifier_metadata" not in submission
     assert "artifact_snapshot_b64" not in submission
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("determinism", ["stochastic", "seeded"])
+async def test_verifier_fixture_cases_match_the_scorer(determinism: str) -> None:
+    results = await exercise_verifier_fixture(
+        VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism=determinism
+    )
+    observed = [(result.name, result.kind, result.observed_rewards) for result in results]
+    expected = [
+        ("every_criterion_passes", "full_reward", (1.0,)),
+        ("one_failed_criterion_fails_all_pass", "zero_reward", (0.0,)),
+        ("weighted_average_gives_partial_credit", "determinism", (0.25, 0.25)),
+        ("empty_rubric", "malformed", ()),
+        ("missing_final_snapshot", "malformed", ()),
+        ("unparseable_judge_reply", "malformed", ()),
+    ]
+    if determinism != "seeded":
+        expected = [row for row in expected if row[1] != "determinism"]
+    assert observed == expected
