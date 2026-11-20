@@ -29,12 +29,12 @@ from time import monotonic
 from typing import Annotated, Any, ClassVar
 
 import anyio
-import gym_v
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from gym_v import Observation
 from pydantic import BeforeValidator, ConfigDict, Field
 
+import gym_v
+from gym_v import Observation
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import EpisodeId
 from nemo_gym.server_runtime import (

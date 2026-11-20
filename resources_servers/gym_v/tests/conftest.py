@@ -19,8 +19,8 @@ nemo_gym schemas. The integration tests additionally need `gym_v` (and, for
 some envs, `reasoning_gym`). Until the resources-server container image
 pip-installs those extras, the integration tests must skip cleanly.
 
-The resources_servers package has an explicit namespace marker so pytest does
-not prepend resources_servers/ and shadow the upstream gym_v dependency.
+Component-local importlib collection keeps pytest from prepending
+resources_servers/ and shadowing the upstream gym_v dependency.
 """
 
 from __future__ import annotations
