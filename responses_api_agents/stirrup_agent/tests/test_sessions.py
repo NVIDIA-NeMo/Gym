@@ -212,7 +212,23 @@ def test_an_agent_that_runs_out_of_wall_time_answers_with_its_partial_run_as_inc
     resources = _Resources(_resources_app([]))
     model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})), None])
     monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
-    agent.config.sandbox_runner_timeout_seconds = 4
+    # Startup and the first tool call are not the behavior under test. Expire the real
+    # supervisor only once the next model request proves that the partial run exists.
+    agent.config.sandbox_runner_timeout_seconds = 120
+    execute = SandboxSession.execute
+
+    async def execute_until_model_blocks(session, **kwargs):
+        async def expire_after_partial_run():
+            assert await asyncio.to_thread(model.blocked.wait, 60), "the second model request never started"
+            assert await session.expire(timeout=agent.config.session_close_timeout_seconds)
+
+        async with asyncio.TaskGroup() as tasks:
+            execution = tasks.create_task(execute(session, **kwargs))
+            tasks.create_task(expire_after_partial_run())
+        assert session.cleanup["timed_out"] is True
+        return execution.result()
+
+    monkeypatch.setattr(SandboxSession, "execute", execute_until_model_blocks)
     tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
     try:
         _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
