@@ -41,6 +41,9 @@ from responses_api_agents.nooa_agent.invocation import (
 class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     """Gym server configuration for the NOOA adapter."""
 
+    nooa_version: str | None = None
+    harness_repo: str | None = None
+
     model_config = ConfigDict(extra="forbid")
 
     resources_server: ResourcesServerRef | None = Field(

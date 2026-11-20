@@ -125,6 +125,8 @@ class DeepAgentsSessionState(SimpleAgentSessionState):
 class DeepAgentsAgentConfig(SimpleAgentConfig):
     """Select the graph's tools while sharing model routing and agent-session configuration."""
 
+    deepagents_version: str | None = None
+
     tool_profile: Literal["builtin", "tavily_search"] = Field(
         default="builtin",
         description="Built-in file/shell tools in a task sandbox, or the existing Tavily search graph in process.",

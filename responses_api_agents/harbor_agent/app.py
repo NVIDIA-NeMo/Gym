@@ -59,6 +59,7 @@ class HarborDatasetSourceConfig(BaseModel):
 
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
+    harbor_version: str | None = None
     concurrency: int
 
     # CPUs Ray reserves per Harbor job. Jobs are I/O-bound, so a fractional

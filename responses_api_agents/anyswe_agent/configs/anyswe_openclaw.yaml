@@ -11,7 +11,7 @@ anyswe_openclaw:
       agent_config_class: OpenClawAgentConfig
       agent_kwargs:
         model: model
-        openclaw_version: 2026.11.5
+        openclaw_version: "2026.11.5"
         timeout: 1800
         setup_timeout: 300
         thinking: "off"

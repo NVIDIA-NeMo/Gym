@@ -73,10 +73,10 @@ Session install/close timeouts default to 600/60 seconds.
 - `extra_args`: extra flags appended to `openclaw agent`
 - `env`: extra env vars for the subprocess (e.g. provider API keys)
 - `openclaw_config`: deep-merged into the generated `openclaw.json`
-- `openclaw_version`: exact version to pin on install (npm ranges such as `^2026.9.0`
-  are rejected); overridden by the `OPENCLAW_VERSION` env var, and falls back to
-  `setup_openclaw.DEFAULT_OPENCLAW_VERSION`. An already-installed `openclaw` is only
-  reused when `openclaw --version` reports exactly the resolved version; anything else
+- `openclaw_version`: exact OpenClaw release, or `"latest"` to resolve npm's latest release once at Gym
+  startup. The shipped presets pin `"2026.11.5"`. In a wrapped preset, set this under `agent_kwargs`.
+  Gym passes the concrete pin to the installer, including in task containers running older Gym versions.
+  The host installer honors `OPENCLAW_VERSION`. An already-installed CLI is reused when its version matches. Anything else
   is reinstalled on first local use after a restart. After an install, the launcher
   selected on `PATH` must report the requested version, or that local request fails.
   Gym reads the pinned release's per-agent SQLite transcripts with OpenClaw's SDK after the worker stops.

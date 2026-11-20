@@ -181,6 +181,8 @@ def trajectory_to_output_items(messages: list[dict[str, Any]]) -> list[Any]:
 
 class SimpleStrandsAgentConfig(BaseResponsesAPIAgentConfig):
     # Set only for the host /run path; agent sessions get the benchmark from the Environment Server.
+    simple_strands_version: str | None = None
+    harness_repo: str | None = None
     resources_server: Optional[ResourcesServerRef] = None
     model_server: ModelServerRef
     model: Optional[str] = None

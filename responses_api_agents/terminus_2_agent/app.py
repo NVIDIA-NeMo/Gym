@@ -141,6 +141,7 @@ def _extract_instruction(body_input: Any) -> tuple[str, Optional[str]]:
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     # Only the /run path seeds and verifies through a resources server; agent sessions get their task, and
     # usually their sandbox, from the environment server that drives them.
+    harbor_version: str | None = None
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     concurrency: int = 1

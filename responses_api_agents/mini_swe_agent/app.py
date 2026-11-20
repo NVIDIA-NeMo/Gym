@@ -135,6 +135,7 @@ RUNNER_MCP_UNAVAILABLE_EXIT = 3
 
 
 class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
+    mini_swe_version: str | None = None
     model_server: ModelServerRef
     concurrency: int
     # Seconds a bash command may run, and the most model calls in one run (0: no limit); both paths.

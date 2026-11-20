@@ -27,7 +27,7 @@ RELEASE_SHA256: dict[str, dict[str, str]] = {
 }
 
 
-def install(root: Path, *, version: str, accept_eula: bool, published_checksums: bool = False) -> None:
+def install(root: Path, *, version: str, accept_eula: bool) -> None:
     """Verify the complete archive before extracting or executing its single Pool binary."""
     if not accept_eula:
         raise ValueError("Accept https://poolside.ai/eula with accept_pool_eula=true before installing Pool")
@@ -37,7 +37,7 @@ def install(root: Path, *, version: str, accept_eula: bool, published_checksums:
     target = f"{os_name}-{arch}"
     checksum = RELEASE_SHA256.get(version, {}).get(target)
     binary_name = f"pool-{target}"
-    if checksum is None and published_checksums and os_name in ("linux", "darwin") and arch:
+    if checksum is None and os_name in ("linux", "darwin") and arch:
         if not re.fullmatch(r"v\d+\.\d+\.\d+", version):
             raise ValueError(f"Invalid Pool release {version!r}")
         manifest = subprocess.check_output(
@@ -91,9 +91,4 @@ def install(root: Path, *, version: str, accept_eula: bool, published_checksums:
 
 
 if __name__ == "__main__":
-    install(
-        Path(sys.argv[1]),
-        version=sys.argv[2],
-        accept_eula=sys.argv[3] == "true",
-        published_checksums=sys.argv[4:] == ["true"],
-    )
+    install(Path(sys.argv[1]), version=sys.argv[2], accept_eula=sys.argv[3] == "true")

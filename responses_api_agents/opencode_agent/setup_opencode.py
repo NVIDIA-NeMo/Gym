@@ -87,7 +87,7 @@ def _download(url: str, target: Path) -> None:
                 raise TimeoutError(f"Downloading {url} took longer than {_DOWNLOAD_TIMEOUT_S} s")
 
 
-def ensure_opencode2(version: str, *, fetch_digests: bool = False) -> str:
+def ensure_opencode2(version: str) -> str:
     """Download the pinned OpenCode 2 release for this Linux host once, check it, and return the binary's path."""
     binary = _OPENCODE2_PREFIX / version / "opencode"
     if _reports_version(binary, version):
@@ -98,7 +98,7 @@ def ensure_opencode2(version: str, *, fetch_digests: bool = False) -> str:
             f"to an OpenCode {version} binary"
         )
     digests = OPENCODE_RELEASE_SHA256.get(version)
-    if not digests and fetch_digests:
+    if not digests:
         digests = published_release_digests(version)
     if not digests:
         raise RuntimeError(f"OpenCode {version} has no pinned release digest; set the agent's command to a binary")

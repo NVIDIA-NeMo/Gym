@@ -330,6 +330,8 @@ def _split_input_to_user_and_history(input_items) -> tuple[str | list[dict[str, 
 
 
 class HermesAgentConfig(BaseResponsesAPIAgentConfig):
+    hermes_version: str | None = None
+    hermes_repo: str | None = None
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     model: Optional[str] = None

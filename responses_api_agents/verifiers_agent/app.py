@@ -523,6 +523,7 @@ def _default_outcome_policy() -> StageOutcomePolicyConfig:
 
 
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
+    verifiers_version: str | None = None
     model_server: ModelServerRef
     outcome_policy: StageOutcomePolicyConfig = Field(default_factory=_default_outcome_policy)
     model_name: str = Field(default="", description="Model name")

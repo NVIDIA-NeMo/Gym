@@ -213,6 +213,8 @@ def _first_nested_exception(error: BaseException) -> BaseException:
 
 
 class Tau2Config(BaseResponsesAPIAgentConfig):
+    tau2_version: str | None = None
+    harness_repo: str | None = None
     model_server: ModelServerRef
     user_model_server: ModelServerRef
     user_llm_args: dict = Field(default_factory=dict)

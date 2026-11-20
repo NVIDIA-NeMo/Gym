@@ -118,6 +118,7 @@ SUPPORTED_LLM_SETTINGS = frozenset(
 
 class OpenHandsAgentConfig(BaseResponsesAPIAgentConfig):
     # Agent sessions take the benchmark from the Environment Server; there is no /run path.
+    openhands_version: str | None = None
     resources_server: Optional[ResourcesServerRef] = None
     model_server: ModelServerRef
     model: str = Field(description="Model name OpenHands sends to the Gym Model Server.")

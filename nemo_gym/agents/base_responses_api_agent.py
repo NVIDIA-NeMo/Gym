@@ -336,7 +336,6 @@ class ModelEndpoint:
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
-    harness_version: str | None = Field(default=None, description="Upstream harness version selected at startup.")
     session_close_timeout_seconds: float = Field(
         default=60,
         gt=0,

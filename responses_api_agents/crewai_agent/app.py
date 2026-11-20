@@ -100,6 +100,7 @@ _APPLIED_REQUEST_FIELDS = frozenset(
 
 
 class CrewAIAgentConfig(BaseResponsesAPIAgentConfig):
+    crewai_version: str | None = None
     resources_server: ResourcesServerRef | None = Field(
         default=None,
         description="Unused: the agent runs only in agent sessions, where the Environment Server binds the benchmark.",

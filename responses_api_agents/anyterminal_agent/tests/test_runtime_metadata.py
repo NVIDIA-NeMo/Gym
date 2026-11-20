@@ -26,7 +26,7 @@ def test_setup_rebuilds_after_dependency_metadata_changes(tmp_path: Path, metada
     path = component / metadata.removeprefix("component/") if metadata.startswith("component/") else root / metadata
     path.write_text("before")
     processor = app.GymAgentHarnessProcessor(
-        config=SimpleNamespace(agent_server_module="responses_api_agents.hermes_agent.app")
+        config=SimpleNamespace(agent_server_module="responses_api_agents.hermes_agent.app", agent_kwargs={})
     )
     process = MagicMock()
     process.wait.return_value = 0
@@ -44,3 +44,21 @@ def test_setup_rebuilds_after_dependency_metadata_changes(tmp_path: Path, metada
         assert processor.setup() == deps
         assert popen.call_count == 2
         assert (deps / ".installed").read_text() != before
+
+
+def test_selected_openclaw_pin_reaches_the_portable_installer(tmp_path: Path, monkeypatch) -> None:
+    component = tmp_path / "responses_api_agents/openclaw_agent/scripts"
+    component.mkdir(parents=True)
+    (component / "openclaw_agent_deps.sh").write_text('echo "$OPENCLAW_SPEC" >> "$DEPS_DIR/installs"')
+    monkeypatch.setattr(app, "PARENT_DIR", tmp_path)
+    config = SimpleNamespace(agent_server_module="responses_api_agents.openclaw_agent.app", agent_kwargs={})
+    processor = app.GymAgentHarnessProcessor(config=config)
+    with patch.object(type(processor), "_parent", new_callable=PropertyMock, return_value=tmp_path):
+        config.agent_kwargs["openclaw_version"] = "2026.11.5"
+        first = processor.setup()
+        config.agent_kwargs["openclaw_version"] = "2026.6.11"
+        second = processor.setup()
+        config.agent_kwargs["openclaw_version"] = "2026.11.5"
+        assert processor.setup() == first
+    assert (first / "installs").read_text().splitlines() == ["openclaw@2026.11.5"]
+    assert (second / "installs").read_text().splitlines() == ["openclaw@2026.6.11"]

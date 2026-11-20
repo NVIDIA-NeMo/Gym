@@ -5,7 +5,6 @@ set -eu
 root=$1
 version=$2
 accept_eula=${3:-false}
-published_checksums=${4:-false}
 [ "$accept_eula" = true ] || { echo "Accept https://poolside.ai/eula with accept_pool_eula=true before installing Pool" >&2; exit 1; }
 # The supervisor needs Python; install prerequisites inside the sandbox only.
 set --
@@ -25,4 +24,4 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 python3 -c 'import sys; assert sys.version_info >= (3, 8), "Pool requires Python >=3.8 in the sandbox"'
-python3 -I "$root/install_pool.py" "$root" "$version" "$accept_eula" "$published_checksums"
+python3 -I "$root/install_pool.py" "$root" "$version" "$accept_eula"

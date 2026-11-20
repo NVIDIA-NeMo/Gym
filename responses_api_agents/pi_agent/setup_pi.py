@@ -16,11 +16,14 @@
 import logging
 import os
 import platform
+import re
+import shlex
 import shutil
 import subprocess
 import tarfile
 import time
 import urllib.request
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from nemo_gym.utils.install_lock import adopt_recorded_install, ensure_selected_npm_cli, install_lock, record_install
@@ -81,10 +84,16 @@ def _install_node_locally() -> Path:
     return _LOCAL_PREFIX / "bin"
 
 
-def ensure_pi(version: str | None = None) -> None:
-    """Ensure ``pi`` is on PATH, installing it via npm if necessary."""
-    if ensure_selected_npm_cli(_PI_PKG, "pi", version, install_node=_install_node_locally):
-        return
+def ensure_pi(
+    version: str | None = None, *, command: Sequence[str] = ("pi",), env: Mapping[str, str] | None = None
+) -> None:
+    """Ensure ``pi`` is on PATH, installing it via npm if necessary, and check an exact ``version`` pin.
+
+    The check runs ``command --version`` with ``env`` over this process's environment, the launcher and environment
+    overrides that local runs use, so it sees the Pi that will run. A version that is not exact, such as ``latest``
+    or an npm range, is installed as given and not checked.
+    """
+    ensure_selected_npm_cli(_PI_PKG, "pi", version, install_node=_install_node_locally)
     local_bin = Path.home() / ".local" / "bin"
     if not shutil.which("pi"):
         if (local_bin / "pi").is_file():
@@ -96,14 +105,31 @@ def ensure_pi(version: str | None = None) -> None:
                     _install_pi(version, local_bin)
                     record_install(_INSTALL_RECORD, Path(shutil.which("pi")).parent, version=version)
 
-    if version:
-        result = subprocess.run(["pi", "--version"], capture_output=True, text=True, errors="replace", timeout=30)
-        if result.returncode or result.stdout.strip() != version:
-            raise RuntimeError(
-                f"Expected Pi {version} at {shutil.which('pi')}; install {_PI_PKG}@{version} with npm "
-                f"and check pi --version. Got: {(result.stderr or result.stdout).strip()}"
-            )
+    if version and re.fullmatch(r"\d+\.\d+\.\d+", version):
+        _check_pi_version(version, list(command), {**os.environ, **(env or {})})
     LOG.info("pi is ready at %s", shutil.which("pi"))
+
+
+def _check_pi_version(version: str, command: list[str], env: dict[str, str]) -> None:
+    try:
+        result = subprocess.run(
+            [*command, "--version"], capture_output=True, text=True, errors="replace", timeout=30, env=env
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        got = str(error)
+    else:
+        if result.returncode == 0 and result.stdout.strip() == version:
+            return
+        got = result.stdout.strip() or "no version"
+        if result.returncode:
+            got += f" (exit code {result.returncode})"
+        if result.stderr.strip():
+            got += f"; stderr: {result.stderr.strip()}"
+    where = shutil.which(command[0], path=env.get("PATH")) or command[0]
+    raise RuntimeError(
+        f"Expected Pi {version} from {shlex.join(command)} ({where}); install {_PI_PKG}@{version} with npm "
+        f"and check pi --version. Got: {got}"
+    )
 
 
 def _install_pi(version: str | None, local_bin: Path) -> None:

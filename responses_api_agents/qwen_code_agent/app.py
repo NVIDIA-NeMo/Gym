@@ -170,8 +170,6 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(
                 "Qwen Code sessions use Qwen Code's own tools; required tool grants are unsupported"
             )
-        if self.config.qwen_version != QWEN_VERSION and not self.config.harness_version:
-            raise AgentSeedRejectedError(f"Qwen Code sessions pin qwen_version {QWEN_VERSION}")
         access = body.sandbox_access
         owns_sandbox = access is None
         if self.config.subagent_model_server and self._token_id_capture_enabled():

@@ -522,8 +522,6 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.model_server is None:
             raise AgentSeedRejectedError("Prime Agent sessions require a sandbox-reachable Gym model_server")
-        if self.config.prime_agent_version not in (None, PRIME_AGENT_VERSION) and not self.config.harness_version:
-            raise AgentSeedRejectedError(f"Prime Agent sessions pin prime_agent_version {PRIME_AGENT_VERSION}")
         if self.config.command != "prime-agent" or self.config.extra_args or self.config.env:
             raise AgentSeedRejectedError("Prime Agent sessions do not support command, extra_args, or env overrides")
         access = body.sandbox_access

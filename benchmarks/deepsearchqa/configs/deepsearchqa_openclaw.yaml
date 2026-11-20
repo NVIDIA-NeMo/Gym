@@ -36,7 +36,7 @@ deepsearchqa_agent:
         system_prompt: You must call an Exa MCP search tool before answering. Research the request on the web and return a complete final answer.
         context_window: 262144
         max_output_tokens: 131072
-        openclaw_version: 2026.11.5
+        openclaw_version: "2026.11.5"
       image: nikolaik/python-nodejs:python3.13-nodejs22-slim
       setup_command: python3 -m pip install -q https://github.com/NVIDIA-NeMo/Gym/archive/621ecac6906f332c54ba4a588e3ce7b7005bbe98.zip
       sandbox_provider: sandbox

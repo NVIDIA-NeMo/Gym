@@ -12,6 +12,8 @@ import requests
 from omegaconf import DictConfig, OmegaConf, open_dict
 from packaging.version import InvalidVersion, Version
 
+from nemo_gym.config.harness_version import harness_version_target
+
 
 LOG = logging.getLogger(__name__)
 # OpenCode publishes two release lines. The release marked latest by its upstream
@@ -51,20 +53,20 @@ _SOURCE = {
     "tau2": ("bxyu-nvidia/tau2-bench", {"tau2": ""}),
 }
 _PYTHON = {
-    "crewai_agent": ("crewai",),
-    "harbor_agent": ("harbor",),
-    "harbor_agent_general": ("harbor",),
-    "langchain_deepagents_agent": ("deepagents",),
-    "langgraph_agent": ("langgraph",),
-    "mini_swe_agent": ("mini-swe-agent",),
-    "miniswe_sandboxed_agent": ("mini-swe-agent",),
-    "mini_swe_agent_2": ("mini-swe-agent",),
-    "nemo_fabric_agent": ("nemo-fabric",),
-    "openhands_agent": ("openhands-sdk", "openhands-tools"),
-    "stirrup_agent": ("stirrup",),
-    "terminus_2_agent": ("harbor",),
-    "terminus_2_sandboxed_agent": ("harbor",),
-    "verifiers_agent": ("verifiers",),
+    "crewai_agent": ("crewai_version", ("crewai",)),
+    "harbor_agent": ("harbor_version", ("harbor",)),
+    "harbor_agent_general": ("harbor_version", ("harbor",)),
+    "langchain_deepagents_agent": ("deepagents_version", ("deepagents",)),
+    "langgraph_agent": ("langgraph_version", ("langgraph",)),
+    "mini_swe_agent": ("mini_swe_version", ("mini-swe-agent",)),
+    "miniswe_sandboxed_agent": ("mini_swe_version", ("mini-swe-agent",)),
+    "mini_swe_agent_2": ("mini_swe_version", ("mini-swe-agent",)),
+    "nemo_fabric_agent": ("nemo_fabric_version", ("nemo-fabric",)),
+    "openhands_agent": ("openhands_version", ("openhands-sdk", "openhands-tools")),
+    "stirrup_agent": ("stirrup_version", ("stirrup",)),
+    "terminus_2_agent": ("harbor_version", ("harbor",)),
+    "terminus_2_sandboxed_agent": ("harbor_version", ("harbor",)),
+    "verifiers_agent": ("verifiers_version", ("verifiers",)),
 }
 _RELEASES["opencode_sandboxed_agent"] = _RELEASES["opencode_agent"]
 _NPM["pi_sandboxed_agent"] = _NPM["pi_agent"]
@@ -98,24 +100,26 @@ def _lookup(url: str, key: str) -> str:
     return value
 
 
-def resolve_harness_version(agent: str, config: DictConfig) -> str | None:
-    """Set the installer's concrete version. Return the source to pass to the Hermes worker, if selected."""
-    field = _RELEASES[agent][0] if agent in _RELEASES else None
+def _version_field(agent: str) -> str | None:
+    if agent in _NPM:
+        return _NPM[agent][0]
+    if agent in _RELEASES:
+        return _RELEASES[agent][0]
+    if agent in _PYTHON:
+        return _PYTHON[agent][0]
+    if agent in _SOURCE:
+        return f"{agent.removesuffix('_agent')}_version"
     if agent in ("hermes_agent", "hermes_sandboxed_agent"):
-        field = "hermes_version"
-    elif agent in _NPM:
-        field = _NPM[agent][0]
-    elif agent in _PYTHON or agent in _SOURCE:
-        field = "harness_version"
-    requested = config.get("harness_version")
-    if requested is None:
-        if not field:
-            return None
-        requested = config.get(field)
-        if requested is None or (agent not in ("hermes_agent", "hermes_sandboxed_agent") and requested != "latest"):
-            return None
-    if not field:
-        raise ValueError(f"{agent} does not support harness_version")
+        return "hermes_version"
+    return None
+
+
+def resolve_harness_version(agent: str, config: DictConfig) -> str | None:
+    """Resolve latest in the adapter's installer field before serializing worker configs."""
+    agent, config = harness_version_target(agent, config)
+    field = _version_field(agent)
+    if field is None or (requested := config.get(field)) is None:
+        return None
     if config.get("harness_repo") and agent not in _SOURCE and agent not in ("hermes_agent", "hermes_sandboxed_agent"):
         raise ValueError(f"{agent} installs published releases and does not support harness_repo")
     if not isinstance(requested, str):
@@ -124,7 +128,8 @@ def resolve_harness_version(agent: str, config: DictConfig) -> str | None:
     requirement = None
     if agent in ("hermes_agent", "hermes_sandboxed_agent") or agent in _SOURCE:
         default_repo = "https://github.com/" + _SOURCE[agent][0] if agent in _SOURCE else _HERMES_REPO
-        repo = config.get("harness_repo") or config.get("hermes_repo") or default_repo
+        repo_field = "harness_repo" if agent in _SOURCE else "hermes_repo"
+        repo = config.get(repo_field) or default_repo
         if not isinstance(repo, str) or not re.fullmatch(r"https://github\.com/[\w.-]+/[\w.-]+", repo):
             raise ValueError("Expected an HTTPS GitHub repository URL")
         repo = repo.removesuffix(".git")
@@ -148,16 +153,18 @@ def resolve_harness_version(agent: str, config: DictConfig) -> str | None:
         if agent == "hermes_agent":
             requirement = f"git+{repo}.git@{resolved}"
         with open_dict(config):
-            config["harness_repo"] = repo
+            config[repo_field] = repo
     elif agent in _PYTHON:
         resolved = requested
         if requested == "latest":
-            package = _PYTHON[agent][0]
+            package = _PYTHON[agent][1][0]
             resolved = _lookup(f"https://pypi.org/pypi/{package}/json", "info.version")
         try:
             resolved = str(Version(resolved))
         except InvalidVersion as error:
             raise ValueError(f"{agent}: expected an exact Python package version or latest") from error
+    elif agent in _NPM and requested != "latest" and not _VERSION.fullmatch(requested):
+        return None  # The native installer owns validation of exact pins and other supported npm specs.
     else:
         if agent in _NPM:
             registry = (
@@ -177,15 +184,14 @@ def resolve_harness_version(agent: str, config: DictConfig) -> str | None:
 
     with open_dict(config):
         config[field] = f"v{resolved}" if agent == "pool_agent" else resolved
-        config["harness_version"] = resolved
     LOG.info("%s harness version %s resolved to %s", agent, requested, requirement or resolved)
     return requirement
 
 
 def python_harness_setup(agent: str, config: DictConfig, global_config: DictConfig) -> DictConfig:
     """Give a selected Python harness its own component venv and resolver overrides."""
-    version = config.get("harness_version")
-    if not version or (agent not in _PYTHON and agent not in _SOURCE):
+    field = _version_field(agent)
+    if (agent not in _PYTHON and agent not in _SOURCE) or field is None or not (version := config.get(field)):
         return global_config
     if agent in _SOURCE:
         repo = config.harness_repo
@@ -195,7 +201,7 @@ def python_harness_setup(agent: str, config: DictConfig, global_config: DictConf
         ]
         key = hashlib.sha256("\n".join(requirements).encode()).hexdigest()
     else:
-        requirements = [f"{package}=={version}" for package in _PYTHON[agent]]
+        requirements = [f"{package}=={version}" for package in _PYTHON[agent][1]]
         key = version
     root = Path(global_config.uv_venv_dir).absolute() / ".harness-versions" / key
     return OmegaConf.merge(
@@ -210,15 +216,14 @@ def python_harness_setup(agent: str, config: DictConfig, global_config: DictConf
 
 def harness_environment(agent: str, config: DictConfig, *, hermes_source: str | None) -> dict[str, str]:
     """Set worker-local installer inputs for adapters whose runtime also has an environment interface."""
-    version = config.get("harness_version")
+    field = _version_field(agent)
+    version = config.get(field) if field else None
     if not version:
         return {}
     if hermes_source:
         return {"HERMES_SPEC": hermes_source}
-    if agent in _HOST_NPM_CLI:
+    if agent in _HOST_NPM_CLI and _VERSION.fullmatch(version):
         return {"NEMO_GYM_SELECTED_NPM_CLI": _HOST_NPM_CLI[agent]}
-    if agent == "openclaw_agent":
-        return {"OPENCLAW_VERSION": version}
     if agent == "mini_swe_agent":
         return {"NEMO_GYM_MINI_SWE_VERSION": version}
     if agent == "tau2":
