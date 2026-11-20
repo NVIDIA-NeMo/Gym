@@ -92,3 +92,70 @@ def test_a_refused_connection_raises_the_requests_error_unchanged():
 
     with pytest.raises(requests.exceptions.ConnectionError):
         get_within_deadline(f"http://127.0.0.1:{port}", timeout_s=5)
+
+
+def _dribbling_peer(head_first: bool) -> tuple[str, threading.Event, list[threading.Thread]]:
+    """A loopback server that, for every connection, sends one byte every 10 ms until the client goes away.
+
+    The event is set once every accepted connection has been seen closed by the client."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    handlers: list[threading.Thread] = []
+    all_closed = threading.Event()
+    open_connections = [0]
+    lock = threading.Lock()
+
+    def handle(connection: socket.socket) -> None:
+        with connection:
+            connection.settimeout(5)
+            try:
+                connection.recv(65536)
+                pieces = iter(b"HTTP/1.1 200 OK\r\nX-Pad: " + b"a" * 100000 if head_first else b"")
+                for byte in pieces:
+                    connection.sendall(bytes([byte]))
+                    time.sleep(0.01)
+            except OSError:
+                pass  # The client closed or shut down its end.
+        with lock:
+            open_connections[0] -= 1
+            if open_connections[0] == 0:
+                all_closed.set()
+
+    def accept() -> None:
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                return
+            with lock:
+                open_connections[0] += 1
+                all_closed.clear()
+            thread = threading.Thread(target=handle, args=(connection,), daemon=True)
+            handlers.append(thread)
+            thread.start()
+
+    threading.Thread(target=accept, daemon=True).start()
+    return f"http://127.0.0.1:{listener.getsockname()[1]}", all_closed, handlers
+
+
+def _request_threads() -> int:
+    return sum(thread.name == "get-within-deadline" for thread in threading.enumerate())
+
+
+def test_repeated_expired_requests_release_their_threads_and_connections_while_the_peer_keeps_sending() -> None:
+    url, all_closed, _ = _dribbling_peer(head_first=True)
+    baseline = _request_threads()
+
+    for _ in range(5):
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            get_within_deadline(url, timeout_s=0.1, read_body=False)
+        assert time.monotonic() - started < 1.0
+
+    # The peer is still sending, so nothing but the shutdown of the sockets can end these requests.
+    deadline = time.monotonic() + 3
+    while _request_threads() > baseline and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert _request_threads() == baseline
+    assert all_closed.wait(3)
