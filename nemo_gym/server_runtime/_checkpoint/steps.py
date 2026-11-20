@@ -43,6 +43,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal, Optional
+from urllib.parse import unquote
 
 from pydantic import JsonValue
 
@@ -57,6 +58,17 @@ _BLOCKING: frozenset[str] = frozenset({"running", "wait_step"})
 # A resources server reports on its /seed_session reply whether its /verify may be replayed.
 # Every episode seeds before it verifies, so the caller learns the step type without another request.
 CHECKPOINT_VERIFY_HEADER = "x-ng-checkpoint-verify"
+
+# Every successful seed reports the resources session ID bound to its cookie. An agent-run seed has no other way
+# to learn it, and its caller closes the session by that ID, also after restoring a boundary. The value is quoted
+# because session IDs need not be ASCII.
+CHECKPOINT_RESOURCES_SESSION_ID_HEADER = "x-ng-checkpoint-resources-session-id"
+
+
+def seed_resources_session_id(headers: Mapping[str, str] | None) -> str | None:
+    """The resources session ID reported by a seed reply, or ``None`` for an older server."""
+    value = (headers or {}).get(CHECKPOINT_RESOURCES_SESSION_ID_HEADER)
+    return unquote(value) if isinstance(value, str) and value else None
 
 
 def seed_verify_step_type(headers: Optional[Mapping[str, str]]) -> StepType:

@@ -282,15 +282,22 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 | Component | License | Vendored at | Upstream |
 |-----------|---------|-------------|---------|
+| VisualWebArena reference evaluator | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/webarena_browser/reference_evaluation/visualwebarena_evaluation.py`; original root license and notices in [SOURCE_LICENSE](resources_servers/webarena_browser/reference_evaluation/SOURCE_LICENSE), pinned revision, hash, file mapping and modifications in [PROVENANCE.md](resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md) | [Immutable original-source provenance](https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md#source-url-license-and-original-notices) |
 | Vision2Code | Apache-2.0 | `resources_servers/vision2code/` (adapted scoring, prompts, and image metrics; see [NOTICE](resources_servers/vision2code/NOTICE)) | https://github.com/image2code/vision2code |
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
 | AssayBench reference harness | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/assaybench/gene_parsing.py` (`parse_genes_from_output`, `extract_genes_from_raw_response` from `benchmarking/predictions_generation/collect_llm_predictions.py`; formatting and type hints only) | https://github.com/Genentech/AssayBench |
+| Open ASR Leaderboard English normalizer | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/asr_with_pc/open_asr_normalizer.py` (replacements, name, spelling and compound tables and acronym rule from `normalizer/normalizer.py` and `normalizer/english_abbreviations.py`), at commit `8d338ca0115a18f90d74e67b29efb480210bbd96` | https://github.com/huggingface/open_asr_leaderboard |
+| Open ASR Leaderboard multilingual scoring helpers | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/asr_with_pc/speech_metrics.py` (`normalize_compound_pairs` from `normalizer/eval_utils.py`; `MultilingualTextNormalizer._normalize_numbers` from `normalizer/data_utils.py`; `MultilingualTextNormalizer.__call__` after `BasicMultilingualTextNormalizer` in `normalizer/normalizer.py`), at commit `8d338ca0115a18f90d74e67b29efb480210bbd96` | https://github.com/huggingface/open_asr_leaderboard |
 | ReactionMechanismReasoning (FukuyamaBench) | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/fukuyamabench/` (pathway scorer ported into `metrics.py` from upstream `eval/eval_infer_pathway.py`; system prompt and user template copied into `scripts/prepare_fukuyamabench.py` from upstream `eval/prompts/infer_pathway_prompts.yaml` — the user template byte-identical, the system prompt content-preserving with trailing whitespace stripped) | https://github.com/HaCTang/ReactionMechanismReasoning |
 | ChemReason-Bench | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/chemreason_bench/` (primary metrics ported into `metrics.py` from upstream `eval/eval.py`; `canonicalize_slots`, the post-processors and the lm probability rules ported into `slot_canonicalization.py` and `response_parsing.py` from `predict/predict.py`) | https://github.com/Khadaz/ChemReason-Bench |
 | Harbor | Apache-2.0 (vendored unmodified) | `nemo_gym/data/tasks/harbor/harbor_compat.py` (`environment_content_hash` and `_CONTENT_HASH_IGNORE_NAMES` from `src/harbor/environments/definition.py`, `_sanitize_docker_image_name` from `src/harbor/environments/docker/docker.py`, at tag `v0.22.0`; bodies byte-for-byte, the private sanitiser exposed without its leading underscore) | https://github.com/harbor-framework/harbor |
+| VoiceBench evaluators | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/voicebench/vendor/` (the MCQ, BBH, refusal and IFEval rule parsers and the instruction checks, from `src/evaluator/`) at commit `0842845a532af34396b173f92f304aa9e2b3c4ab` | https://github.com/MatthewCYM/VoiceBench |
+| qa-metrics PEDANT classifier | MIT (derived inference-only export of the classifier and vectorizer) | `resources_servers/voicebench/vendor/pedant/` (coefficients, intercept, classes, vocabulary and IDF vector), exported from `qa_metrics/classifier/` at commit `26623c6ca3313e7a58c48fd6ce2b8579eb0c742e` | https://github.com/zli12321/qa_metrics |
 | NeMo Skills `generic/math` prompt | Apache-2.0 (vendored unmodified) | `resources_servers/ns_tools/prompts/generic/math.yaml` (upstream `nemo_skills/prompt/config/generic/math.yaml`, byte-for-byte below a provenance header) | https://github.com/NVIDIA-NeMo/Skills |
 | OpenCode max-steps prompt | MIT (vendored unmodified) | `nemo_gym/models/token_capture/harness_notes/opencode.py` (`OPENCODE_MAX_STEPS_PROMPT`, upstream `packages/core/src/session/runner/max-steps.ts`, verbatim) | https://github.com/anomalyco/opencode |
+| pycocotools (COCO API) | BSD-2-Clause (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/molmo2_videotrack/app.py` (`rle_runs`, a Python port of `rleFrString`) and `benchmarks/molmo2_videotrack/tests/synthetic.py` (`rle_string`, a Python port of `rleToString`), both from upstream `common/maskApi.c` | https://github.com/cocodataset/cocoapi |
+| Molmo2 | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/molmo2_videotrack/app.py` (`NATIVE_COORDS_PATTERN`, `NATIVE_ID_XY_PATTERN`, `NATIVE_FRAME_GROUP_PATTERN` and the frame-group branch of `_parse_native_markup`, from `coord_regex`, `points_regex`, `frame_regex` and `extract_multi_image_points` in upstream `olmo/preprocessing/point_formatter.py`) | https://github.com/allenai/molmo2 |
 | HLE with-tools blocklist | MIT (vendored unmodified) | `resources_servers/hle_web_tools/blocklist.json` (upstream `docs/blocklist.json` at revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`, byte-for-byte; its SHA-256 is pinned in `app.py` and verified at server start) | https://github.com/centerforaisafety/hle |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
@@ -298,11 +305,16 @@ upstream copyright header and adds an NVIDIA modifications block.
 - Provenance & list of NVIDIA modifications: `resources_servers/toolsandbox/tool_sandbox/VENDORING.md`
 - tau2-bench: original MIT notices preserved in each vendored file; NVIDIA modifications noted in-file and in `resources_servers/indian_banking/README.md`
 - AssayBench: original MIT notice preserved in the vendored file; the `assaybench` metric package itself is a pinned PyPI dependency of that server (`resources_servers/assaybench/requirements.txt`), not vendored
+- Open ASR Leaderboard (`open_asr_normalizer.py` and `speech_metrics.py`): pinned at upstream commit `8d338ca0115a18f90d74e67b29efb480210bbd96`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required; the upstream copyright notice (The OpenAI team and The HuggingFace Team, 2022) is retained in the file header, which also lists the NVIDIA modifications.
 - ReactionMechanismReasoning: pinned at upstream revision `63bb79f912f0b2de593996b80ffeea894f6f1a59`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. NVIDIA modifications to the ported scorer are documented at their call sites in `metrics.py` and summarised in `resources_servers/fukuyamabench/README.md`. Benchmark data is **not** vendored; it is downloaded at runtime by `scripts/prepare_fukuyamabench.py`.
 - Harbor: vendored, unmodified, from upstream tag `v0.22.0` (https://github.com/harbor-framework/harbor/tree/v0.22.0/src/harbor), so that Gym and Harbor compute the same environment content hash and image name for the same task. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The vendored section is marked in-file; Gym does not import or depend on the `harbor` package.
+- VoiceBench: pinned at upstream commit `0842845a532af34396b173f92f304aa9e2b3c4ab`. Upstream is Apache-2.0, the same license as this repository; the license text is `resources_servers/voicebench/vendor/LICENSE` and the Google Research notices stay in the instruction-following files. Source-file hashes, NVIDIA modifications and answer-format extensions are listed in `resources_servers/voicebench/vendor/PROVENANCE.json` and `vendor/README.md`. The benchmark data is not vendored.
+- qa-metrics: the MIT notice (Zongxia Li, 2024) is reproduced in `resources_servers/voicebench/vendor/pedant/LICENSE`; source-file hashes are in `vendor/pedant/README.md`. The `qa-metrics` package itself is a pinned dependency (`resources_servers/voicebench/pyproject.toml`), not vendored.
 - ChemReason-Bench: pinned at upstream revision `c0b9ac2933708fcca47b1795492952cbf280e194`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required; its `LICENSE` leaves the copyright holder unfilled, so no upstream notice exists to reproduce. NVIDIA modifications are noted in-file and in `resources_servers/chemreason_bench/README.md`. Benchmark rows committed as test fixtures are CC BY 4.0 (upstream `DATA_LICENSE`), attributed in that README.
 - NeMo Skills `generic/math` prompt: vendored, unmodified, from upstream revision `da85a881d972e6fec847b90cf553a0bf9bf10638` (https://github.com/NVIDIA-NeMo/Skills/blob/da85a881d972e6fec847b90cf553a0bf9bf10638/nemo_skills/prompt/config/generic/math.yaml), the revision `resources_servers/ns_tools/requirements.txt` pins, because the pinned `nemo-skills-tools` package ships no prompt YAMLs. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The file header records the same source, revision and license.
 - OpenCode max-steps prompt: copied verbatim from upstream revision `67aec2212010d67775c35e696d8b8b54902eb338` (OpenCode 1.17.11, https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts), because token capture must recognize the exact text OpenCode sends at its step limit. Upstream is MIT; its license is reproduced in full in the OpenCode MIT License section below. The file header records the same source, revision and license.
+- pycocotools: adapted from upstream revision `8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9` (https://github.com/cocodataset/cocoapi/blob/8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9/common/maskApi.c#L204-L231), so that the verifier reads the dataset's compressed COCO masks without a compiled dependency. Upstream is BSD-2-Clause; its license is reproduced in full in the pycocotools BSD-2-Clause License section below. Both file headers record the same source, revision, license and copyright notice.
+- Molmo2: adapted from upstream revision `f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a` (https://github.com/allenai/molmo2/blob/f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a/olmo/preprocessing/point_formatter.py#L131-L179), so that answers in Molmo2's own point markup parse as that model's code parses them. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. NVIDIA modifications (whitespace after a frame delimiter, the `<tracks>` forms, overflow handling) are noted in-file. The file header records the same source, revision and license.
 - HLE with-tools blocklist: vendored, unmodified, from upstream revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`. Upstream is MIT, Copyright (c) 2025 centerforaisafety. The JSON must stay byte-exact for its digest check, so it carries no notice itself; the upstream `LICENSE` at that revision is reproduced unchanged in `resources_servers/hle_web_tools/LICENSE-HLE`. The server that applies it (`resources_servers/hle_web_tools/app.py`) is NVIDIA code under Apache-2.0.
 
 ---
@@ -22627,6 +22639,42 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+---
+
+## pycocotools BSD-2-Clause License (COCO mask run-length code)
+
+Applies to `rle_runs` in `resources_servers/molmo2_videotrack/app.py` and `rle_string` in
+`benchmarks/molmo2_videotrack/tests/synthetic.py`.
+
+```text
+Copyright (c) 2014, Piotr Dollar and Tsung-Yi Lin
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The views and conclusions contained in the software and documentation are those
+of the authors and should not be interpreted as representing official policies,
+either expressed or implied, of the FreeBSD Project.
 ```
 
 ---

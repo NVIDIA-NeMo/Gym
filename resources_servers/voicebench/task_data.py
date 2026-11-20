@@ -8,11 +8,23 @@ from pydantic import BaseModel, ConfigDict, JsonValue, model_validator
 
 
 Subset = Literal[
-    "alpacaeval_full", "commoneval", "wildvoice", "openbookqa", "mmsu", "ifeval", "bbh", "advbench", "sd-qa"
+    "alpacaeval",
+    "alpacaeval_full",
+    "alpacaeval_speaker",
+    "commoneval",
+    "wildvoice",
+    "openbookqa",
+    "mmsu",
+    "ifeval",
+    "bbh",
+    "advbench",
+    "sd-qa",
 ]
 ScoringType = Literal["open", "mcq", "ifeval", "bbh", "refusal", "reference_qa"]
 SUBSET_SCORERS: dict[str, ScoringType] = {
+    "alpacaeval": "open",
     "alpacaeval_full": "open",
+    "alpacaeval_speaker": "open",
     "commoneval": "open",
     "wildvoice": "open",
     "openbookqa": "mcq",
@@ -33,6 +45,8 @@ class VoiceBenchMetadata(BaseModel):
     prompt: str
     reference: str | None = None
     id: str | int | None = None
+    # Optional dataset split (SD-QA region, AlpacaEval speaker voice, MMSU category): enables per-split metrics.
+    split: str | None = None
     instruction_id_list: list[str] | None = None
     kwargs: list[dict[str, JsonValue]] | None = None
 

@@ -18,6 +18,7 @@ packages=(
     libcups2t64 libdbus-1-3 libdrm2 libxkbcommon0 libx11-6
     libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1
     libpango-1.0-0 libcairo2 libasound2t64 fonts-liberation ffmpeg
+    bubblewrap
 )
 # Bound network operations separately so slow mirrors can be retried without
 # killing dpkg during configuration. Refresh indexes only until successful:
@@ -25,6 +26,14 @@ packages=(
 # The workflow timeout still bounds the complete installation.
 # Keep tools already supplied by the runner. Upgrading Git can select its
 # git-core PPA and make unrelated tests depend on that service being available.
+# The bwrap sandbox tests need unprivileged user namespaces, which Ubuntu 24.04's AppArmor default refuses
+# ("setting up uid map: Permission denied"). Lift that for the job; NEMO_GYM_REQUIRE_BWRAP makes a runner where
+# it cannot be lifted fail those tests instead of skipping them.
+if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+    sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 ||
+        echo "Could not allow unprivileged user namespaces; the bwrap tests will fail"
+fi
+
 indexes_updated=false
 for attempt in 1 2 3 4; do
     if [[ "$indexes_updated" == false ]]; then

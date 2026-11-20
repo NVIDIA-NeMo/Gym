@@ -392,6 +392,8 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
     assert not any("swebench_pro" in server.name for server in members)
     assert config.model_endpoint_readiness_timeout_seconds == 1800
     assert rollout.num_samples_in_parallel == (512 if batch == "core" else 1024)
+    # A run-level num_repeats replaces every dataset's own (#5042), so each member's count lives in its dataset only.
+    assert "num_repeats" not in config
     sampling = config.policy_model.responses_api_models.vllm_model.sampling_overrides
     assert sampling.temperature == 1.0 and sampling.top_p == 0.95
     if batch == "swe":
@@ -399,14 +401,13 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
             "swebench_verified_opencode_sandboxed_agent",
             "swebench_multilingual_opencode_sandboxed_agent",
         }
-        assert rollout.num_repeats == 1 and rollout.num_repeats_add_seed is False
+        assert rollout.num_repeats_add_seed is False
         assert all(dataset.num_repeats == 3 for server in members for dataset in server.datasets)
     else:
-        assert rollout.num_repeats == {
-            "apex_shortlist_math_with_judge_simple_agent": 16,
-            "lmarena_v2_benchmark_agent": 3,
-            "_default": 1,
-        }
+        # APEX and LMArena repeat only in the batch, which sets their datasets' counts.
+        counts = {server.name: {dataset.num_repeats for dataset in server.datasets} for server in members}
+        assert counts["apex_shortlist_math_with_judge_simple_agent"] == {16}
+        assert counts["lmarena_v2_benchmark_agent"] == {3}
         assert rollout.num_repeats_add_seed == {
             "apex_shortlist_math_with_judge_simple_agent": True,
             "lmarena_v2_benchmark_agent": True,
