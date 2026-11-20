@@ -22,7 +22,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, List, Optional
+from typing import Any, ClassVar, List, Literal, Optional
 from uuid import uuid4
 
 import aiohttp
@@ -199,6 +199,16 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     # stops, the response carries `timed_out`, and the harness scores the sample 0 without
     # a judge call. None keeps the loop bounded by max_steps only.
     rollout_timeout_s: Optional[float] = Field(default=None, ge=0)
+    # Legacy /run only. A rollout whose response ends with one of these `stop_reason` values comes back with
+    # mask_sample true and its reward kept, so a training framework leaves it out of the loss: for example a run
+    # cut by max_steps, rollout_timeout_s or a full context window, whose 0 says little about the answer. Empty
+    # masks none.
+    mask_stop_reasons: list[Literal["answered", "max_steps", "timeout", "max_output_tokens", "context_full"]] = Field(
+        default_factory=list
+    )
+    # Legacy /run only. When true, a rollout that ended in an agent error (scored 0 with `agent_error`, such as a
+    # judge or resources server that never answered) comes back with mask_sample true instead of an unmasked 0.
+    mask_agent_errors: bool = False
     keep_rounds: int = 9999
     nudge_steps: bool = True
     max_context_tokens: int = 196608
@@ -1241,8 +1251,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
         Answers 422 unless ``allow_host_execution`` is true and ``resources_server`` is set. Benchmark configs use
         agent sessions through ``single_agent_turn_legacy`` instead. An empty answer is retried up to
-        ``max_run_retries`` times, and a timed-out rollout scores 0 without the judge. Any error scores 0 with
-        ``agent_error``; an infrastructure error is also marked ``kill_shaped`` for resume.
+        ``max_run_retries`` times. A timed-out rollout is verified like any other, and the resources server scores it
+        0 without the judge; the verify also releases the session's tool sandbox and workspace, which this path never
+        closes. Any error scores 0 with ``agent_error``; an infrastructure error is also marked ``kill_shaped`` for
+        resume. ``mask_stop_reasons`` and ``mask_agent_errors`` set ``mask_sample`` on the returned row.
         """
         if not self.config.allow_host_execution or self.config.resources_server is None:
             raise HTTPException(
@@ -1314,19 +1326,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     )
                     continue
 
-                if response_json.get("timed_out"):
-                    # Past rollout_timeout_s: wrong by construction, so the judge is not called.
-                    last_verify_response = BrowsecompAgentVerifyResponse.model_validate(
-                        body.model_dump()
-                        | {
-                            "response": response_json,
-                            "reward": 0.0,
-                            "num_tool_calls": response_json.get("num_tool_calls", 0),
-                            "reset_count": response_json.get("reset_count", 0),
-                        }
-                    )
-                    break
-
+                # A timed-out rollout goes to /verify too: the resources server scores it 0 without the judge
+                # (wrong by construction) and releases the session's tool sandbox and workspace.
                 verify_request = BrowsecompAgentVerifyRequest.model_validate(
                     body.model_dump() | {"response": response_json}
                 )
@@ -1346,9 +1347,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             if last_verify_response is not None:
                 # Every row carries timed_out, so its mean is the share of samples stopped by the limit.
-                last_verify_response = last_verify_response.model_copy(
-                    update={"timed_out": int(bool((last_response_json or {}).get("timed_out")))}
-                )
+                update = {"timed_out": int(bool((last_response_json or {}).get("timed_out")))}
+                stop_reason = (last_response_json or {}).get("stop_reason")
+                if stop_reason is not None and stop_reason in self.config.mask_stop_reasons:
+                    update["mask_sample"] = True
+                last_verify_response = last_verify_response.model_copy(update=update)
             reward = getattr(last_verify_response, "reward", None) if last_verify_response is not None else None
             outcome = "success" if (reward is not None and reward > 0) else "failure"
             print(f"[browsecomp][end][{qid}] outcome={outcome} reward={reward} attempts={attempt + 1}", flush=True)
@@ -1387,6 +1390,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # for legacy consumers.
             # Merged LAST so a stale sentinel echoed from `body` cannot shadow the fresh value.
             routing = {NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: "kill_shaped"} if infra else {}
+            masked = {"mask_sample": True} if self.config.mask_agent_errors else {}
             return BrowsecompAgentVerifyResponse.model_validate(
                 body.model_dump()
                 | {
@@ -1395,6 +1399,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     "agent_error": f"{type(e).__name__}: {str(e)[:300]}",
                     "timed_out": 0,
                 }
+                | masked
                 | routing
             )
 

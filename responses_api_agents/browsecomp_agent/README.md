@@ -40,7 +40,11 @@ Each completed response carries `stop_reason`, the reason the loop ended:
 | `context_full` | The model response was cut with reason `max_output_tokens` before using that budget, or no budget was set. The model server reports a context overflow this way. |
 
 A training filter can mask `context_full` and still score `max_output_tokens`. A response built from a failed model
-request carries no `stop_reason`. Nothing in Gym reads the field.
+request carries no `stop_reason`. On the legacy `/run` path, `mask_stop_reasons` (default empty) names the values whose
+rows come back with `mask_sample: true` and their reward kept, and `mask_agent_errors: true` masks a row that ended in
+an agent error (scored 0 with `agent_error`, for example after a judge that never answered). `/run` verifies a
+timed-out rollout too: the resources server scores it 0 without the judge and releases the session's tool sandbox and
+workspace.
 
 Host `/v1/responses` and `/run` are disabled by default. Development-only compatibility requires `allow_host_execution: true`; `/run` also requires an explicit `resources_server`. The resources server independently requires its own host-execution opt-in if its tool sandbox is disabled. These options do not provide isolation.
 

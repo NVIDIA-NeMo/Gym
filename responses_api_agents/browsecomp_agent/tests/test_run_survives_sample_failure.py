@@ -207,6 +207,26 @@ class TestHappyPathUnaffected:
         assert not getattr(result, "agent_error", None)
 
 
+class TestAgentErrorMask:
+    """mask_agent_errors: an agent error (a judge that never answered makes /verify answer 500) is masked, so a
+    training run does not learn from a 0 the model did not earn. Off by default."""
+
+    @pytest.mark.parametrize("client_kwargs", [{"verify_status": 500}, {"responses_status": 500}])
+    async def test_masked_when_on(self, client_kwargs) -> None:
+        result = await _run(_make_agent(_RunServerClient(**client_kwargs), mask_agent_errors=True))
+        assert (result.reward, result.mask_sample) == (0.0, True)
+        assert result.agent_error
+
+    async def test_unmasked_by_default(self) -> None:
+        result = await _run(_make_agent(_RunServerClient(verify_status=500)))
+        assert (result.reward, result.mask_sample) == (0.0, False)
+
+    async def test_a_clean_run_is_not_masked(self) -> None:
+        result = await _run(_make_agent(_RunServerClient(reward=0.0), mask_agent_errors=True))
+        assert (result.reward, result.mask_sample) == (0.0, False)
+        assert not getattr(result, "agent_error", None)
+
+
 @pytest.mark.parametrize("status", [500, 502, 503])
 async def test_contained_for_any_server_error(status: int) -> None:
     agent = _make_agent(_RunServerClient(responses_status=status))

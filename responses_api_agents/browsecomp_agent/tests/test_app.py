@@ -93,6 +93,28 @@ def _make_model_response(outputs: list, response_id: str = "resp_001") -> dict:
     ).model_dump()
 
 
+def _http(read_bytes: bytes | None = None) -> MagicMock:
+    """A successful aiohttp response mock; `read_bytes` is its body."""
+    m = MagicMock()
+    m.ok = True
+    m.cookies = {}
+    if read_bytes is not None:
+        m.read = AsyncMock(return_value=read_bytes)
+    return m
+
+
+def _request() -> MagicMock:
+    request_mock = MagicMock()
+    request_mock.cookies = {}
+    return request_mock
+
+
+def _run_body() -> BrowsecompAgentRunRequest:
+    return BrowsecompAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}])
+    )
+
+
 def _make_model_response_with_usage(outputs: list, input_tokens: int, response_id: str = "resp_001") -> dict:
     """Like _make_model_response but carries usage.input_tokens (drives the post-call context reset)."""
     return NeMoGymResponse(
@@ -595,33 +617,85 @@ class TestRolloutTimeout:
         assert result.timed_out is False
         assert result.status == "completed"
 
-    async def test_run_scores_a_timed_out_rollout_without_the_judge(self) -> None:
+    async def test_run_verifies_a_timed_out_rollout(self) -> None:
+        """A timed-out rollout still goes to /verify, which scores it 0 without the judge and releases the
+        resources session (its tool sandbox and workspace): this path sends no close."""
         agent = BrowsecompAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
         timed_out = _make_model_response([_make_msg("still searching")])
         timed_out["timed_out"] = True
         timed_out["num_tool_calls"] = 7
-
-        def _http(read_bytes: bytes | None = None) -> MagicMock:
-            m = MagicMock()
-            m.ok = True
-            m.cookies = {}
-            if read_bytes is not None:
-                m.read = AsyncMock(return_value=read_bytes)
-            return m
-
-        # seed_session and /v1/responses only: no /verify call.
-        agent.server_client.post = AsyncMock(side_effect=[_http(), _http(json.dumps(timed_out).encode())])
-        request_mock = MagicMock()
-        request_mock.cookies = {}
-        body = BrowsecompAgentRunRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}])
+        timed_out["stop_reason"] = "timeout"
+        verify_json = {
+            "reward": 0.0,
+            "response": timed_out,
+            "responses_create_params": {"input": [{"role": "user", "content": "q"}]},
+            "num_tool_calls": 7,
+            "timed_out": 1,
+        }
+        agent.server_client.post = AsyncMock(
+            side_effect=[_http(), _http(json.dumps(timed_out).encode()), _http(json.dumps(verify_json).encode())]
         )
-        result = await agent.run(request_mock, body)
+        result = await agent.run(_request(), _run_body())
 
-        assert agent.server_client.post.call_count == 2
+        assert [c.kwargs["url_path"] for c in agent.server_client.post.call_args_list][-1] == "/verify"
+        assert agent.server_client.post.call_args_list[-1].kwargs["json"]["response"]["timed_out"] is True
         assert result.reward == 0.0
         assert result.timed_out == 1
         assert result.num_tool_calls == 7
+        assert result.mask_sample is False
+
+    @pytest.mark.parametrize(
+        ("stop_reason", "mask_stop_reasons", "masked"),
+        [
+            ("max_steps", ["max_steps", "timeout", "context_full"], True),
+            ("timeout", ["max_steps", "timeout", "context_full"], True),
+            ("context_full", ["max_steps", "timeout", "context_full"], True),
+            ("answered", ["max_steps", "timeout", "context_full"], False),
+            ("max_output_tokens", ["max_steps", "timeout", "context_full"], False),
+            ("max_steps", [], False),
+            (None, ["max_steps"], False),
+        ],
+    )
+    async def test_run_masks_configured_stop_reasons(self, stop_reason, mask_stop_reasons, masked) -> None:
+        agent = BrowsecompAgent(
+            config=_make_config(mask_stop_reasons=mask_stop_reasons), server_client=MagicMock(spec=ServerClient)
+        )
+        response = _make_model_response([_make_msg("Exact Answer: Paris")])
+        if stop_reason is not None:
+            response["stop_reason"] = stop_reason
+        verify_json = {
+            "reward": 1.0,
+            "response": response,
+            "responses_create_params": {"input": [{"role": "user", "content": "q"}]},
+        }
+        agent.server_client.post = AsyncMock(
+            side_effect=[_http(), _http(json.dumps(response).encode()), _http(json.dumps(verify_json).encode())]
+        )
+        result = await agent.run(_request(), _run_body())
+
+        assert result.mask_sample is masked
+        assert result.reward == 1.0  # the mask keeps the judged reward
+
+    async def test_run_keeps_a_mask_the_resources_server_set(self) -> None:
+        agent = BrowsecompAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
+        response = _make_model_response([_make_msg("Exact Answer: Paris")]) | {"stop_reason": "answered"}
+        verify_json = {
+            "reward": 0.0,
+            "response": response,
+            "responses_create_params": {"input": [{"role": "user", "content": "q"}]},
+            "mask_sample": True,
+            "failure_kind": "provider_unavailable",
+        }
+        agent.server_client.post = AsyncMock(
+            side_effect=[_http(), _http(json.dumps(response).encode()), _http(json.dumps(verify_json).encode())]
+        )
+        result = await agent.run(_request(), _run_body())
+
+        assert result.mask_sample is True
+
+    def test_mask_stop_reasons_rejects_an_unknown_reason(self) -> None:
+        with pytest.raises(ValueError):
+            _make_config(mask_stop_reasons=["max_step"])
 
     def test_default_has_no_timeout(self) -> None:
         assert _make_config().rollout_timeout_s is None
