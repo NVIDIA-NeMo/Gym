@@ -222,7 +222,7 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
         raw = await request.body()
         try:
             arguments = json.loads(raw) if raw else None
-        except json.JSONDecodeError as error:
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise HTTPException(status_code=422, detail=f"Tool arguments are not valid JSON: {error}") from error
         session_id = request.session[SESSION_ID_KEY]
         async with self.session_lock(session_id):

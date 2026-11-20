@@ -389,10 +389,17 @@ def test_without_mcp_a_toolless_row_is_still_refused(client):
     assert "gym eval prepare --benchmark automationbench" in response.json()["detail"]
 
 
-def test_tool_arguments_that_are_not_json_are_refused(client):
+@pytest.mark.parametrize("body", [b"{not json", b"\xff"], ids=["malformed", "not_utf8"])
+def test_tool_arguments_that_are_not_json_are_refused(client, body):
     _post_seed(client, _seed())
 
-    response = client.post("/api_search", content=b"{not json", headers={"Content-Type": "application/json"})
+    response = client.post("/api_search", content=body, headers={"Content-Type": "application/json"})
 
     assert response.status_code == 422
+    assert response.json()["detail"].startswith("Tool arguments are not valid JSON")
+
+
+def test_an_empty_body_reaches_the_tool_argument_check(client):
+    _post_seed(client, _seed())
+
     assert client.post("/api_search").text.startswith("Expected tool arguments to be a dict, got NoneType")
