@@ -7,10 +7,8 @@ stem_judge:
     stem_judge:
       guideline_scope: cross_domain
       verdict_mode: yes_no_unresolved
-      verdict_format: line  # Set to json to also collect a reason code and supporting evidence.
+      verdict_format: json
       box_parser: last_command
       boxed_judge_input: box
-      math_verify:
-        timeout_seconds: 10
-        max_concurrency: 8
+      math_verify: null  # Set to {} for math sources where equivalence is sufficient.
       verified: false

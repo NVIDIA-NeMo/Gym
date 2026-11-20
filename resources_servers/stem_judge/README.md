@@ -159,39 +159,40 @@ commands: the policy `nvidia/nemotron-3.5-lightning-30b-a3b` and the judge
 ## Question-bank grading options
 
 The question-bank preset uses the same resources server, agent and rubric grader.
-Load `resources_servers/stem_judge/configs/question_bank.yaml` as the resources
-configuration. It includes the base config and overrides its answer options.
+Select it with `gym env start --resources-server stem_judge/question_bank` and the
+usual model arguments. It includes the base config and overrides its answer options.
 
 | Answer option | Base config | Question-bank preset |
 | --- | --- | --- |
 | `guideline_scope` | `stem` | `cross_domain` treats v11 examples as guidance for reference comparisons in any subject. |
 | `extra_answer_rules` | `[]` | An inline list or a path to a YAML list of rules for model-judged answer rows. |
 | `verdict_mode` | `binary` | `yes_no_unresolved` adds abstention. An explicit no is a measured zero. An abstention or unparseable verdict has unknown correctness and sets `mask_sample=true`. |
-| `verdict_format` | `line` | `line` reads the text verdict. Set `json` to request and save a structured explanation on model-judged answer rows. |
+| `verdict_format` | `line` | `json` saves the verdict, reason code and supporting evidence on model-judged answer rows. |
 | `box_parser` | `exact` | `last_command` recognizes whitespace before the opening brace, skips escaped commands, and rejects a malformed final box even when an earlier one is valid. |
 | `boxed_judge_input` | `final_answer` | `box` grades the extracted answer. Free-answer rows use their full final message. |
-| `math_verify` | Disabled | Checks rows declaring `math_equivalence: true` when the row is a box-only answer comparison. A match earns 1 immediately. A nonmatch or timeout sends that same candidate to the LLM judge. |
+| `math_verify` | Disabled | Disabled. Set `math_verify: {}` on a math environment to check boxed answer comparisons. A match earns 1 immediately. A nonmatch or timeout sends the same extracted box to the LLM judge. |
 
 Set each option independently. The prompt options reuse the sections of the shipped
 `stem_v11.txt` template. Custom templates used with those options must retain its section
-markers. Mark a row `math_equivalence: true` only when equivalence alone establishes the
-answer. Leave proofs, explanations and rows with additional obligations on the judge
-or rubric path. For NeMoRL SingleController with source scheduling, enable
+markers. Enable Math-Verify only for sources where symbolic equivalence establishes
+the answer. The library uses approximate numeric equality and normalizes some units
+and expressions. For example, it can accept `3` against `3t`. Route other sources to a STEM instance with `math_verify: null`.
+Free answers, whole-answer comparisons and rubric rows always use the judge. For NeMoRL SingleController with source scheduling, enable
 `grpo.exclude_failed_judge_groups` to keep a masked group out of the trainer and reward cache.
 
-To route a math question through STEM, load the question-bank preset and give the
+To route a math question through STEM, enable Math-Verify on the question-bank preset and give the
 dataset row the STEM agent reference, as in this JSONL row.
 
 ```json
-{"agent_ref":{"type":"responses_api_agents","name":"stem_judge_simple_agent"},"answer_format":"boxed","math_equivalence":true,"expected_answer":"1/2","responses_create_params":{"input":[{"role":"user","content":"What is 2 divided by 4? Put only the final answer in \\boxed{}."}]}}
+{"agent_ref":{"type":"responses_api_agents","name":"stem_judge_simple_agent"},"answer_format":"boxed","expected_answer":"1/2","responses_create_params":{"input":[{"role":"user","content":"What is 2 divided by 4? Put only the final answer in \\boxed{}."}]}}
 ```
 
 For this row, `\boxed{0.5}` earns 1 through Math-Verify. If the library cannot
 establish equivalence, the configured STEM judge sees the question, reference and
 selected box. The STEM process runs the library check locally.
 
-To collect the judge's explanation, set `verdict_format: json` on the STEM
-resources server (CLI override `++stem_judge.resources_servers.stem_judge.verdict_format=json`).
+The question-bank preset requests a structured explanation. Select `verdict_format: line`
+to use the text verdict instead.
 The model returns one JSON object, for example:
 
 ```json
@@ -245,7 +246,7 @@ before the verdict instructions. Braces in LaTeX, JSON and examples are literal.
 Custom answer templates using this option need a closing `</rule>` marker.
 Rules apply to every model-judged answer on that instance. Rubric rows use their
 own criteria. When a rule must be checked even for a symbolically equivalent
-answer, leave the row's `math_equivalence` flag off so the model sees it.
+answer, use an environment with `math_verify: null` so the model sees it.
 
 ## Test
 

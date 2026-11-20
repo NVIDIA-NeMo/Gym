@@ -117,12 +117,21 @@ def parse_json_judgment(response: NeMoGymResponse, *, verdict_mode: VerdictMode)
     if response.status not in (None, "completed") or response.incomplete_details is not None or not response.output:
         return None
     *prefix, final = response.output
-    if final.type != "message" or final.status != "completed" or any(item.type != "reasoning" for item in prefix):
+    if (
+        final.type != "message"
+        or final.role != "assistant"
+        or getattr(final, "status", "completed") != "completed"
+        or final.phase == "commentary"
+        or any(item.type != "reasoning" for item in prefix)
+    ):
         return None
-    if any(block.type != "output_text" for block in final.content):
+    if isinstance(final.content, str):
+        text = final.content
+    elif all(getattr(block, "type", None) == "output_text" for block in final.content):
+        text = "".join(block.text for block in final.content)
+    else:
         return None
     try:
-        text = "".join(block.text for block in final.content)
         judgment = JsonJudgment.model_validate(json.loads(text, object_pairs_hook=_unique_fields))
     except (ValueError, RecursionError):
         return None

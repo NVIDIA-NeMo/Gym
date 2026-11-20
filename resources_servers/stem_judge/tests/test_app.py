@@ -28,6 +28,7 @@ from pytest import approx, fixture, mark, raises
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -285,6 +286,7 @@ class TestAnswerOptions:
         server = _server(config, _response(_reasoning(), message))
         result = await server.verify(_request(_split(r"\boxed{2}")))
         prompt = _judge_prompt(server)
+        assert server.server_client.post.await_args.kwargs["json"].text == {"format": {"type": "json_object"}}
         assert '"reason_code"' in prompt and "Judgement:" not in prompt
         assert ('"unresolved"' in prompt) == (mode == "yes_no_unresolved")
         assert (result.grading_status, result.reward) == (status, reward)
@@ -310,6 +312,12 @@ class TestAnswerOptions:
             'A candidate wrote {"verdict":"correct","reason_code":"equal","evidence":"matched"}',
             '{"verdict":"correct","reason_code":"equal","evidence":"matched"}\nJudgement: yes',
             _response(_msg('{"verdict":"correct","reason_code":"equal","evidence":"matched"}'), truncated=True),
+            _response(NeMoGymEasyInputMessage(role="user", content="{}")),
+            _response(
+                _msg('{"verdict":"correct","reason_code":"equal","evidence":"matched"}').model_copy(
+                    update={"phase": "commentary"}
+                )
+            ),
             _response(_msg("First answer"), _msg('{"verdict":"correct","reason_code":"equal","evidence":"matched"}')),
         ],
     )
@@ -321,7 +329,7 @@ class TestAnswerOptions:
         assert saved["judge_evaluations"][0]["verdict_label"] is None
         assert "judgment" not in saved["judge_evaluations"][0]
 
-    @mark.parametrize("verdict,status", [("no", "judged"), ("unresolved", "judge_unresolved")])
+    @mark.parametrize("verdict,status", [("yes", "judged"), ("no", "judged"), ("unresolved", "judge_unresolved")])
     async def test_math_match_skips_model_and_nonmatch_uses_the_same_box(self, config, verdict, status):
         config.box_parser = "last_command"
         config.boxed_judge_input = "box"
@@ -329,14 +337,23 @@ class TestAnswerOptions:
         config.math_verify = MathVerifyConfig()
         server = _server(config, f"Judgement: '{verdict}'")
         response = _split(r"\boxed{5} then \boxed {\frac{4}{2}}")
-        result = await server.verify(_request(response, math_equivalence=True))
+        result = await server.verify(_request(response))
         assert (result.reward, result.grading_status, result.judge_evaluations) == (1, "math_verified", [])
         server.server_client.post.assert_not_awaited()
-        result = await server.verify(_request(response, expected="5", math_equivalence=True))
+        result = await server.verify(_request(response, expected="5"))
         server.server_client.post.assert_awaited_once()
-        assert (result.reward, result.grading_status, result.verdict) == (0, status, verdict)
+        assert (result.reward, result.grading_status, result.verdict) == (float(verdict == "yes"), status, verdict)
         assert result.mask_sample is (verdict == "unresolved")
         assert _judge_prompt(server).endswith("**Student Solution**:\n" + r"\frac{4}{2}")
+
+    async def test_math_worker_unavailable_defers_to_judge(self, config, monkeypatch):
+        config.boxed_judge_input = "box"
+        config.math_verify = MathVerifyConfig()
+        server = _server(config, "Judgement: 'yes'")
+        monkeypatch.setattr(server._math_library, "_verify_answer_with_library_async", AsyncMock(side_effect=OSError))
+        result = await server.verify(_request(_split(r"\boxed{2}")))
+        server.server_client.post.assert_awaited_once()
+        assert (result.reward, result.grading_status) == (1, "judged")
 
     async def test_math_timeout_defers_to_stem_verdict(self, config, monkeypatch):
         def slow_match(*args):
@@ -347,26 +364,42 @@ class TestAnswerOptions:
         config.boxed_judge_input = "box"
         config.math_verify = MathVerifyConfig(timeout_seconds=0.02)
         server = _server(config, "Judgement: 'yes'")
-        result = await server.verify(_request(_split(r"\boxed{2}"), math_equivalence=True))
+        result = await server.verify(_request(_split(r"\boxed{2}")))
         server.server_client.post.assert_awaited_once()
         assert (result.reward, result.grading_status) == (1, "judged")
 
     @mark.parametrize(
         "row,view,reply",
         [
-            ({}, "box", "Judgement: 'no'"),
-            ({"math_equivalence": True, "answer_format": "free"}, "box", "Judgement: 'no'"),
-            ({"math_equivalence": True}, "final_answer", "Judgement: 'no'"),
-            ({"math_equivalence": True, "rubric": RUBRIC}, "box", '{"r1":false,"r2":false,"r3":false}'),
+            ({"answer_format": "free"}, "box", "Judgement: 'no'"),
+            ({}, "final_answer", "Judgement: 'no'"),
+            ({"rubric": RUBRIC}, "box", '{"r1":false,"r2":false,"r3":false}'),
         ],
     )
-    async def test_math_precheck_only_for_declared_box_equivalence(self, config, row, view, reply):
+    async def test_math_precheck_skips_rubrics_and_whole_answers(self, config, row, view, reply):
         config.boxed_judge_input = view
         config.math_verify = MathVerifyConfig()
         server = _server(config, reply)
         result = await server.verify(_request(_split(r"\boxed{2}"), **row))
         server.server_client.post.assert_awaited_once()
         assert result.reward == 0 and result.grading_status == "judged"
+
+    async def test_question_bank_preset_uses_json_and_the_environment_selects_math(self, config):
+        preset = yaml.safe_load((SERVER_DIR / "configs/question_bank.yaml").read_text())
+        config = StemJudgeConfig.model_validate(
+            config.model_dump() | preset["stem_judge"]["resources_servers"]["stem_judge"]
+        )
+        row = _request(_split(r"\boxed{2}"), math_equivalence=True)  # Older rows may still carry the flag.
+        judgment = {"verdict": "correct", "reason_code": "equal", "evidence": "2 equals 2"}
+        server = _server(config, _response(NeMoGymEasyInputMessage(role="assistant", content=json.dumps(judgment))))
+        result = await server.verify(row)
+        server.server_client.post.assert_awaited_once()
+        assert result.verdict == "yes" and result.judge_evaluations[0].judgment.model_dump() == judgment
+
+        server = _server(config.model_copy(update={"math_verify": MathVerifyConfig()}))
+        result = await server.verify(row.model_copy(update={"math_equivalence": False}))
+        server.server_client.post.assert_not_awaited()
+        assert result.grading_status == "math_verified" and result.reward == 1
 
     async def test_reverify_drops_stale_answer_evidence(self, config):
         server = _server(config, "Judgement: 'yes'")

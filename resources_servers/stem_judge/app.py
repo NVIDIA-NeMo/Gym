@@ -557,12 +557,16 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         if judges_whole_answer and cfg.max_answer_chars is not None and len(final) > cfg.max_answer_chars:
             return await zero("answer_too_long")
 
-        if self._math_library and body.math_equivalence and not body.rubric and not judges_whole_answer:
-            score, _ = await self._math_library._verify_answer_with_library_async(
-                expected, "\\boxed{" + solution + "}"
-            )
-            if score > 0.5:
-                return await self._finish(body, expected, answer_format, "math_verified", 1.0, solution, [])
+        if self._math_library and not body.rubric and not judges_whole_answer:
+            try:
+                score, _ = await self._math_library._verify_answer_with_library_async(
+                    expected, "\\boxed{" + solution + "}"
+                )
+            except OSError as exc:
+                logger.warning("Math-Verify unavailable, grading with the STEM judge: %s", exc)
+            else:
+                if score > 0.5:
+                    return await self._finish(body, expected, answer_format, "math_verified", 1.0, solution, [])
 
         question = _extract_question_text(body.responses_create_params, self._question_regex())
         grade = self._grade_rubric if body.rubric else self._grade_answer
@@ -574,8 +578,9 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         prompt = self._answer_template.format(
             question=question, expected_answer=render_reference(expected), generated_answer=solution
         )
-        evaluation, text = await self._call_judge(prompt)
-        if self.config.verdict_format == "json":
+        json_answer = self.config.verdict_format == "json"
+        evaluation, text = await self._call_judge(prompt, json_answer=json_answer)
+        if json_answer:
             evaluation.judgment = parse_json_judgment(evaluation.response, verdict_mode=self.config.verdict_mode)
             verdict = evaluation.judgment.label if evaluation.judgment else None
         else:
@@ -614,10 +619,14 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             body, expected, answer_format, "judged", reward, solution, [evaluation], rubric_score=score
         )
 
-    async def _call_judge(self, prompt: str) -> tuple[JudgeEvaluation, Optional[str]]:
+    async def _call_judge(self, prompt: str, *, json_answer: bool = False) -> tuple[JudgeEvaluation, Optional[str]]:
         """One judge call. Returns the evaluation and the text of the judge's last message, if any."""
         cfg = self.config
         params = cfg.judge_responses_create_params.model_copy(deep=True)
+        if json_answer:
+            text = params.text or {}
+            if (text.get("format") or {}).get("type") not in ("json_schema", "json_object"):
+                params.text = {**text, "format": {"type": "json_object"}}
         msgs: list[NeMoGymEasyInputMessage] = []
         if cfg.judge_system_message:
             msgs.append(NeMoGymEasyInputMessage(role="system", content=cfg.judge_system_message))

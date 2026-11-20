@@ -71,12 +71,6 @@ class TaskData(BaseModel):
         description="Open bucket; a scalar metadata.expected_answer is the reference when expected_answer is absent or null.",
         json_schema_extra={"consumed_by": ["verify"]},
     )
-    math_equivalence: bool = Field(
-        default=False,
-        exclude_if=lambda value: not value,
-        description="Mathematical equivalence to the reference fully answers this row. Allows an enabled Math-Verify precheck on box-only answer rows.",
-        json_schema_extra={"consumed_by": ["verify"]},
-    )
     answer_format: Optional[Literal["boxed", "free"]] = Field(
         default=None,
         description="boxed: the final answer needs a non-empty \\boxed{}; free: judged on the whole final answer. Defaults to the server's default_answer_format.",
