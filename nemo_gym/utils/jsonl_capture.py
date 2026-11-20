@@ -9,11 +9,21 @@ from collections.abc import Iterator
 from pathlib import Path
 
 
-def append_jsonl(path: Path, line: bytes, *, durable: bool = True) -> None:
-    """Flush one encoded record before returning, serialized across writers."""
-    with path.open("ab") as handle:
+def append_jsonl(path: Path, line: bytes, *, durable: bool = True, recover_tail: bool = False) -> None:
+    """Flush one encoded record before returning, serialized across writers.
+
+    With ``recover_tail``, an unterminated last line (a writer that died mid-append) is ended first, so it stays a
+    damaged record of its own instead of swallowing this one. That needs read access to the file.
+    """
+    with path.open("a+b" if recover_tail else "ab") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
+            if recover_tail:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell():
+                    handle.seek(-1, os.SEEK_END)
+                    if handle.read(1) != b"\n":
+                        handle.write(b"\n")
             handle.write(line)
             handle.flush()
             if durable:

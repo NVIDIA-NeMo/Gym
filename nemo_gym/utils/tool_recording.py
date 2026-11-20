@@ -248,7 +248,9 @@ class ToolCallRecorder:
             self._sequence += 1
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                append_jsonl(self.path, (json.dumps(event, allow_nan=False) + "\n").encode(), durable=False)
+                append_jsonl(
+                    self.path, (json.dumps(event, allow_nan=False) + "\n").encode(), durable=False, recover_tail=True
+                )
             except (OSError, TypeError, ValueError):
                 handle._capture_failed = True
                 self._failed_spans.add(handle.span_id)

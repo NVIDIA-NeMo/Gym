@@ -141,3 +141,10 @@ def test_runner_passes_timing_expectations_to_artifact_inspection(tmp_path, monk
     assert checks["tools.timing.executor"] == "fail"
     assert result["tool_timing_scope"]["runtime_version"] == "1.2.3"
     assert result["verdict"] == "not_fulfilled"
+
+
+@pytest.mark.parametrize("field", ["lifecycle_sources", "executor_sources"])
+@pytest.mark.parametrize("value", ["not-native", ["native", ""], [1]])
+def test_scope_sources_must_be_lists_of_nonempty_names(field, value):
+    with pytest.raises(ValueError, match=field):
+        ToolTimingScope(runtime_version="1", mode="local", tool_paths=("bash",), **{field: value})

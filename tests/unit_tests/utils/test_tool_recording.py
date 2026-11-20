@@ -181,3 +181,34 @@ def test_finish_can_attach_failure_details_without_overwriting_the_outcome(tmp_p
     capture.finish(call, failure_id="failure-1")
     assert events(path)[-1]["status"] == "failed"
     assert events(path)[-1]["failure_id"] == "failure-1"
+
+
+@pytest.mark.parametrize("tail", [b'{"schema_version":', None], ids=["malformed", "complete-without-newline"])
+def test_an_interrupted_append_does_not_swallow_the_next_producers_record(tmp_path, tail):
+    path = tmp_path / "events.jsonl"
+    if tail is None:
+        # A complete event that lost only its newline.
+        with recorder(path, producer_id="producer-0").call(native_call_id="call-0", tool_name="bash") as observed:
+            observed.set_outcome("completed")
+        path.write_bytes(path.read_bytes().rstrip(b"\n"))
+    else:
+        path.write_bytes(tail)
+    with recorder(path).call(native_call_id="call-1", tool_name="bash") as observed:
+        observed.set_outcome("completed")
+
+    lines = path.read_bytes().splitlines()
+    parsed = []
+    for line in lines:
+        try:
+            parsed.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    # The damaged tail stays a line of its own; the next producer's start and finish are both intact.
+    assert [(event["producer_id"], event["kind"]) for event in parsed if event["producer_id"] == "producer-1"] == [
+        ("producer-1", "start"),
+        ("producer-1", "finish"),
+    ]
+    if tail is None:
+        assert len(parsed) == 4
+    else:
+        assert lines[0] == tail and len(parsed) == 2
