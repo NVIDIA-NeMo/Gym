@@ -10,6 +10,7 @@ import json
 import re
 import shlex
 import subprocess
+from contextlib import nullcontext
 from pathlib import PurePosixPath
 
 from resources_servers.partner_if.recorded_context.limits import (
@@ -132,7 +133,6 @@ class Fixtures:
                 return temporal_show(tokens, self.files, self.bundle["temporal_world"])
             except CoverageGap as error:
                 return f"Temporal fixture unavailable: {error}", "fixture_gap"
-        probes, writes = [], {}
         for segment in segments:
             i = 1
             if not segment or segment[0] not in {"python", "python3", "/usr/bin/python3"}:
@@ -141,29 +141,21 @@ class Fixtures:
                 i += 1
             if i >= len(segment) or segment[i] != self.runtime.probe_script:
                 continue
+            # The evidence verifier accepts one probe invocation over the full command.
+            if segment != tokens:
+                return "Unsupported compound probe command; no command executed.", "fixture_gap"
             options = probe_options(segment[i + 1 :])
             uri = options.get("--uri")
             if uri not in {self.bundle[k]["input_uri"] for k in ["primary", "sibling"]}:
                 return "Fixture unavailable for requested probe; no external request made.", "fixture_gap"
             label = "sibling" if uri == self.bundle["sibling"]["input_uri"] else "primary"
-            value = self.bundle[label]
+            result = bounded_output(json.dumps(self.bundle[label], indent=2))
             if "--output" in options:
                 output = self.path(options["--output"])
                 if not PurePosixPath(output).is_relative_to(self.runtime.workspace_prefix):
                     raise CoverageGap("Probe output escapes the modeled workspace")
-                writes[output] = json.dumps(value, indent=2)
-            probes.append((value, label))
-        if probes and self.bundle.get("shell_control_flow") and any(t in {"&&", "||"} for t in tokens):
-            return "Conditional probe execution is outside readonly coverage.", "fixture_gap"
-        if probes:
-            # Reject extra active commands instead of silently pretending they ran.
-            allowed = {"python", "python3", "/usr/bin/python3", "echo", "cat", "true"}
-            if any(s[0] not in allowed for s in segments):
-                return "Unsupported compound command; no command executed.", "fixture_gap"
-            self.files.update(writes)
-            return "\n".join(json.dumps(v, indent=2) for v, _ in probes), "sibling_probe" if any(
-                k == "sibling" for _, k in probes
-            ) else "primary_probe"
+                self.files[output] = result
+            return result, f"{label}_probe"
         if len(segments) == 1 and tokens[0] in {"python", "python3", "/usr/bin/python3"}:
             script = tokens[1] if len(tokens) > 1 else ""
             if script == self.runtime.status_script:
@@ -177,7 +169,9 @@ class Fixtures:
         if self.readonly:
             try:
                 before = {path: self.files.get(path) for path in self.answer_paths}
-                result, kind = self.readonly.run(tokens)
+                can_write = self.readonly.capture_stdout and ">" in tokens
+                with self.files.rollback_on_error() if can_write else nullcontext():
+                    result, kind = self.readonly.run(tokens)
                 for path in self.answer_paths:
                     if path in self.files and (before[path] is None or self.files[path] != before[path]):
                         self.drafts[path] = self.files[path]

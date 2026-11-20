@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Bounds for the data-only tool workspace and model-visible results."""
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import PurePosixPath
 
 
@@ -48,6 +49,19 @@ class VirtualFiles(dict[str, str]):
 
     def __setitem__(self, path: str, content: str) -> None:
         self.update({path: content})
+
+    @contextmanager
+    def rollback_on_error(self) -> Iterator[None]:
+        """Make writes visible during a command and restore the workspace if it fails."""
+        before = dict(self)
+        byte_count = self._bytes
+        try:
+            yield
+        except Exception:
+            super().clear()
+            super().update(before)
+            self._bytes = byte_count
+            raise
 
     def update(self, values: Mapping[str, str]) -> None:
         sizes = {path: self._size(path, content) for path, content in values.items()}

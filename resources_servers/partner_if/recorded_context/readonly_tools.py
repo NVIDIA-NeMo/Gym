@@ -57,8 +57,13 @@ class ReadonlyTools:
         """Interpret a small shell grammar; never execute model command text."""
         if not tokens or any("$(" in t or "`" in t for t in tokens):
             raise CoverageGap("Unmodeled shell expansion")
-        result, kind = self._controlled(tokens) if self.shell_control_flow else self._plain(tokens)
-        return bounded_output(result), kind
+        previous_status = self.last_status
+        try:
+            result, kind = self._controlled(tokens) if self.shell_control_flow else self._plain(tokens)
+            return bounded_output(result), kind
+        except Exception:
+            self.last_status = previous_status
+            raise
 
     def _controlled(self, tokens: list[str]) -> tuple[str, str]:
         """Evaluate readonly and/or lists with shell exit-status short circuiting."""

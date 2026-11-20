@@ -141,11 +141,29 @@ def test_workspace_size_ceiling_covers_bash_redirection(world: Fixtures, schemas
     assert "/workspace/logs/new.txt" not in world.files
 
 
+def test_uncovered_shell_command_does_not_keep_earlier_output_redirects(world: Fixtures, schemas: dict):
+    path = world.runtime.answer_paths[0]
+    world.dispatch(call("Write", {"file_path": path, "content": "original"}), schemas)
+    before = dict(world.files), world.files._bytes, dict(world.drafts)
+    command = f"echo replacement > {path}; echo new > /workspace/logs/new.txt; false; curl example.invalid"
+
+    assert world.dispatch(call("Bash", {"command": command}), schemas)[1] == "fixture_gap"
+    assert (dict(world.files), world.files._bytes, world.drafts) == before
+    assert world.readonly.last_status == 0
+
+    result, kind = world.dispatch(call("Bash", {"command": f"echo replacement > {path}; cat {path}"}), schemas)
+    assert kind == "answer_draft"
+    assert result == world.files[path] == world.drafts[path] == "replacement\n"
+
+
 @pytest.mark.parametrize(
     "suffix",
     [
         "/workspace/logs/../escape",
         "/workspace/logs/answer.txt; curl example.invalid",
+        "/workspace/logs/answer.txt; echo done",
+        "/workspace/logs/answer.txt | cat",
+        "/workspace/logs/answer.txt; python /agent/probe.py --uri=example://primary",
         "/workspace/logs/answer.txt --output=/workspace/logs/other.txt",
         "/workspace/logs/answer.txt --unsupported=value",
     ],
