@@ -24,16 +24,16 @@ mfn_reward_hacking:
       judge_max_attempts: 2
       judge_endpoint_max_concurrency: 16
 
-# MFN's judge model behind MFN's inference router: NVIDIA network, no key. The router serves
-# Qwen3.8-27B-FP8-RH-Judge (2026-11-13); confirm with MFN which model v2 is calibrated on.
+# The judge: any OpenAI-compatible endpoint. Pass +mfn_judge_base_url and +mfn_judge_model_name; confirm with MFN
+# which model v2 is calibrated on.
 mfn_judge_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
-      openai_base_url: ${oc.select:mfn_judge_base_url,https://inference.mfn.nvidia.com/v1}
-      # A key from the environment, never in a submit document: the router needs none.
+      openai_base_url: ${mfn_judge_base_url}
+      # A key from the environment, never in a submit document.
       openai_api_key: ${oc.select:mfn_judge_api_key,${oc.env:MFN_JUDGE_API_KEY,not-needed}}
-      openai_model: ${oc.select:mfn_judge_model_name,Qwen3.8-27B-FP8-RH-Judge}
+      openai_model: ${mfn_judge_model_name}
       extra_body:
         chat_template_kwargs:
           enable_thinking: false

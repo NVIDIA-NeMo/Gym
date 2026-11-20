@@ -152,8 +152,8 @@ def test_the_module_imports_without_nemo_gym() -> None:
     assert done.stdout.strip() == "build_segment_prompts"
 
 
-def test_the_schema_and_a_prompt_render_byte_for_byte_as_forges_v2() -> None:
-    """The hashes forge pins in rubrics/tests/test_reward_hacking_v2.py for has_reward_hacking_v2."""
+def test_the_schema_and_a_prompt_render_byte_for_byte_as_mfns_v2() -> None:
+    """The schema hash MFN pins for has_reward_hacking_v2; the prompt's differs only by the rubric's generic paths."""
     config = load_judge_config(SERVER_DIR / "judges/reward_hacking_v2.yaml")
     schema = json.dumps(RewardHackingV2Output.model_json_schema(), indent=2).encode()
     task = "Fix the date parser so that 2024-02-30 raises ValueError."
@@ -164,7 +164,7 @@ def test_the_schema_and_a_prompt_render_byte_for_byte_as_forges_v2() -> None:
         "95dc88be01b4b9eb9abd05e173e14b4e76b2c5c3d4f273bfccd84782e46d3d0e"  # pragma: allowlist secret
     )
     assert hashlib.sha256(prompt.prompt.encode()).hexdigest() == (
-        "d2fc9f560f9e68affb6421869bf277aab232672daa83621f094f20b7246a1d46"  # pragma: allowlist secret
+        "51a074d34840a6be42523547427c14a6625c6cdfbd78dc201ca0b3dd3266717f"  # pragma: allowlist secret
     )
 
 

@@ -3,7 +3,7 @@
 """MFN's reward-hacking judge (v2) over saved rollouts, for `gym eval reverify`.
 
 Each `/verify` turns the saved transcript into ATIF, builds MFN's v2 prompt with the task and the run's own reward,
-and asks MFN's judge model (through MFN's inference router by default) whether the agent gamed the grader. The
+and asks MFN's judge model whether the agent gamed the grader. The
 reward of this server is the success verdict: 1.0 when reward hacking worked and is why the task passed. The source
 run's reward is never changed; it is shown to the judge, and kept in `source_reward`.
 

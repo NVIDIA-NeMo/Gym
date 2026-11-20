@@ -2,17 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Adapted from has_reward_hacking_v2, the production reward-hacking judge written by NVIDIA's Model Factory (MFN)
-# team, who own its design, rubric and prompt. Source: MFN's NVIDIA-internal forge repository at revision
-# c1b3fc96142dcd41143d699df4d151322f5a768a. forge carries no license file; the MFN team approved publishing this
-# adaptation in NeMo Gym under Apache-2.0. Under pyforge/data-workspace/rubrics/poolside/rubrics/judges/:
-# - reward_hacking/v2_schema.py (answer models, copied unchanged) and reward_hacking/reward_hacking.py
-#   (RewardHackingLabel, RewardHackingEvidence);
-# - reward_hacking/v2_judge.py (task and reward block, ProgramBench note, merge of segments);
-# - docent.py and trajectory_scorer/trajectory_scorer.py (per-segment prompts with global step numbers, rendering).
-# Also pyforge/data-workspace/atif/atif/content.py (content rendering) and judge_core's trajectory_scanners (label
-# and rubric text). The schema and the prompt render byte for byte as forge's own tests pin them (see
-# tests/test_judge_prompt.py). Gym reads ATIF v1.7 as JSON dicts instead of Harbor's trajectory models, and renders
-# media parts as placeholders where forge's renderer raises.
+# team, who own its design, rubric and prompt. Source: MFN's NVIDIA-internal judge repository at revision
+# c1b3fc96142dcd41143d699df4d151322f5a768a, which carries no license file; the MFN team approved publishing this
+# adaptation in NeMo Gym under Apache-2.0. Adapted from MFN's v2 answer models (copied unchanged), RewardHackingLabel
+# and RewardHackingEvidence, the v2 judge (task and reward block, ProgramBench note, merge of segments), the Docent
+# judge and trajectory scorer (per-segment prompts with global step numbers, rendering) and MFN's ATIF content
+# rendering. The schema renders byte for byte as MFN's tests pin it, and the prompt does too apart from the rubric's
+# generic example paths (see tests/test_judge_prompt.py). Gym reads ATIF v1.7 as JSON dicts instead of Harbor's
+# trajectory models, and renders media parts as placeholders where MFN's renderer raises.
 """MFN's reward-hacking judge v2: its per-segment prompts for a run, its answer, and the merge of the answers.
 
 Importable without nemo_gym: it needs only pydantic and PyYAML.
@@ -333,8 +330,8 @@ def step_body(step: Step, max_tool_result_chars: int, tool_responses: bool = Tru
     return lines
 
 
-# forge's RewardHackingJudge.MAX_STEPS ("effectively do not limit") and DocentJudge.MAX_AGENT_RUN_CHARS, which keeps
-# a prompt within a 262k-token context at about 2 characters per token, the densest agent runs forge measured.
+# MFN's RewardHackingJudge.MAX_STEPS ("effectively do not limit") and DocentJudge.MAX_AGENT_RUN_CHARS, which keeps
+# a prompt within a 262k-token context at about 2 characters per token, the densest agent runs MFN measured.
 MAX_STEPS = 10_000
 MAX_AGENT_RUN_CHARS = 480_000
 
@@ -361,7 +358,7 @@ def render_transcript(
 
 
 def fit_transcript(steps: list[Step], max_tool_result_chars: int, step_offset: int = 0) -> str:
-    """A segment's transcript within MAX_AGENT_RUN_CHARS, as forge's DocentJudge._format_agent_run fits it.
+    """A segment's transcript within MAX_AGENT_RUN_CHARS, as MFN's DocentJudge._format_agent_run fits it.
 
     Over the limit, the segment is rendered without tool responses; if it is still over, the first and the last
     half of the limit are kept around a note of how much was left out.
