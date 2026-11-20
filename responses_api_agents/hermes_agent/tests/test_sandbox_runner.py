@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import urllib.request
+from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
@@ -411,6 +412,10 @@ def test_interruption_uses_supplied_stop_request_path(tmp_path, monkeypatch, res
     dependency = ModuleType("run_agent")
     dependency.AIAgent = Agent
     monkeypatch.setitem(sys.modules, "run_agent", dependency)
+    delegation = ModuleType("tools.delegate_tool_config")
+    delegation.gateway_delegation_inline_scope = lambda inline: nullcontext()
+    monkeypatch.setitem(sys.modules, "tools", ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.delegate_tool_config", delegation)
     monkeypatch.setitem(sys.modules, "hermes_yaml", yaml)
     monkeypatch.setattr(model_kwargs, "configure_model_calls", lambda *_args, **_kwargs: None)
     instrument = sandbox_observer.SandboxHermesObserver.instrument
@@ -960,11 +965,7 @@ def test_configured_context_length_reaches_the_pinned_worker(tmp_path) -> None:
 
 
 def test_delegated_child_records_the_delegate_task_call_that_spawned_it(tmp_path) -> None:
-    """Hermes runs delegate_task on its sequential tool path; the child still names the call that spawned it.
-
-    Hermes 0.23.2 runs a top-level delegation in the background, so the child may not answer before the parent
-    finishes; it is registered when spawned.
-    """
+    """The child finishes inside the delegate_task call and names the call that spawned it."""
     delegate = {
         "id": "call-delegate",
         "type": "function",
@@ -979,6 +980,11 @@ def test_delegated_child_records_the_delegate_task_call_that_spawned_it(tmp_path
     with _ModelServer(answers) as model:
         output = _run(_payload(model.base_url, enabled_toolsets=["delegation"], max_turns=4), tmp_path)
 
+    # The parent's final request carries the child's answer in the delegate_task result.
+    assert len(model.requests) == 3
+    delegate_result = next(m for m in model.requests[2]["messages"] if m.get("tool_call_id") == "call-delegate")
+    assert "done" in delegate_result["content"]
+    assert "background" not in delegate_result["content"]
     children = [
         invocation
         for invocation in output["observations"]["invocations"]

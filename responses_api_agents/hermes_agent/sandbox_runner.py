@@ -85,28 +85,32 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
         from model_kwargs import configure_model_calls
         from sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
     from run_agent import AIAgent
+    from tools.delegate_tool_config import gateway_delegation_inline_scope
 
     if payload["mcp_servers"]:
         _connect_mcp_servers(payload["required_mcp_servers"])
 
-    agent = AIAgent(
-        base_url=payload["model_base_url"],
-        api_key=api_key,
-        model=payload["model"],
-        provider="custom",
-        api_mode="chat_completions",
-        request_overrides={"temperature": payload["temperature"]} if payload["temperature"] is not None else {},
-        reasoning_config={"enabled": True},
-        skip_background_review=True,
-        max_iterations=payload["max_turns"],
-        max_tokens=payload["max_tokens"],
-        enabled_toolsets=payload["enabled_toolsets"],
-        disabled_toolsets=payload["disabled_toolsets"],
-        quiet_mode=True,
-        skip_context_files=True,
-        skip_memory=True,
-        save_trajectories=False,
-    )
+    # Hermes runs top-level delegations in the background and delivers their results between turns, which a
+    # one-turn run never reaches. The joined delegate_task finishes its children inside the tool call.
+    with gateway_delegation_inline_scope(True):
+        agent = AIAgent(
+            base_url=payload["model_base_url"],
+            api_key=api_key,
+            model=payload["model"],
+            provider="custom",
+            api_mode="chat_completions",
+            request_overrides={"temperature": payload["temperature"]} if payload["temperature"] is not None else {},
+            reasoning_config={"enabled": True},
+            skip_background_review=True,
+            max_iterations=payload["max_turns"],
+            max_tokens=payload["max_tokens"],
+            enabled_toolsets=payload["enabled_toolsets"],
+            disabled_toolsets=payload["disabled_toolsets"],
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            save_trajectories=False,
+        )
     configure_model_calls(agent, preserve_reasoning_history=payload["chat_template_kwargs_enabled"])
     observer = SandboxHermesObserver().instrument(agent, capture_summaries=True)
     result = None
