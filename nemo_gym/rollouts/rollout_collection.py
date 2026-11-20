@@ -3413,6 +3413,31 @@ def refresh_agent_complete_files(output_fpath: Path, global_config_dict: DictCon
             _atomic_write_json(fpath, refreshed | {"completed_at": datetime.now(timezone.utc).isoformat()})
 
 
+def remove_agent_complete_files(
+    output_fpath: Path, rollout_ids: Iterable[str], global_config_dict: DictConfig
+) -> None:
+    """Remove the completion files of the environment servers that score the given rollouts.
+
+    A strict run that the saved-answer re-judge pass leaves incomplete gets no recomputed metrics, so the files of
+    the agents whose rollouts the pass graded again cannot be brought up to date. Every other agent's file still
+    matches its rows, so it stands. Rollouts are grouped as ``refresh_agent_complete_files`` groups them.
+    """
+    complete_dir = agent_complete_dir_for(output_fpath)
+    if not complete_dir.is_dir():
+        return
+    store = RolloutStore.read(output_fpath, import_legacy=False)
+    if store is None:
+        raise RuntimeError(f"{output_fpath} has no Store to group its rollouts by agent.")
+    servers_by_agent = _environment_servers_by_agent(global_config_dict)
+    groups = {
+        _metrics_group(row, lambda: servers_by_agent) or RolloutCollectionHelper._dispatch_name(row)
+        for row in store.inputs_for([{ROLLOUT_ID_KEY_NAME: identity} for identity in rollout_ids])
+    }
+    for fpath in complete_dir.glob("*.json"):
+        if orjson.loads(fpath.read_bytes()).get(NG_ENVIRONMENT_SERVER_KEY) in groups:
+            fpath.unlink()
+
+
 def _failure_export_metrics(
     failures_fpaths: List[Path],
     identity: Callable[[Mapping[str, Any]], Any],
