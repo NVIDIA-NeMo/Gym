@@ -205,6 +205,9 @@ the read-through Google mirror of Central that the SWE servers already use
 settings file from the task image or the provider is kept. Set the environment
 kwarg `maven_mirror: false` to turn this off.
 
+`fix-build-google-auto` keeps Maven Central: its OpenJDK 7 build cannot download
+from the mirror, so with it every build fails and scores a false zero.
+
 ### Run locally
 
 Docker and an OpenAI-compatible policy endpoint are required. Run one task first:

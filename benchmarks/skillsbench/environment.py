@@ -26,6 +26,8 @@ MAVEN_MIRROR_SETTINGS = (
     Path(__file__).resolve().parents[2] / "responses_api_agents" / "swe_agents" / "maven_mirror" / "settings.xml"
 )
 MAVEN_SETTINGS_PATH = "/root/.m2/settings.xml"
+# OpenJDK 7 in this task cannot download from the mirror at all; it keeps Maven Central.
+MAVEN_MIRROR_SKIPPED_TASKS = frozenset({"fix-build-google-auto"})
 
 
 class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
@@ -51,7 +53,7 @@ class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
     async def start(self, force_build: bool) -> None:
         await super().start(force_build)
         try:
-            if self._maven_mirror:
+            if self._maven_mirror and self.environment_name not in MAVEN_MIRROR_SKIPPED_TASKS:
                 await self._install_maven_mirror()
             await self._stage_skills()
         except BaseException:

@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock
 import pytest
 from harbor.models.task.config import NetworkMode, NetworkPolicy
 
-from benchmarks.skillsbench.environment import MAVEN_MIRROR_SETTINGS, SkillsBenchSandboxEnvironment
+from benchmarks.skillsbench.environment import (
+    MAVEN_MIRROR_SETTINGS,
+    MAVEN_MIRROR_SKIPPED_TASKS,
+    SkillsBenchSandboxEnvironment,
+)
 from responses_api_agents.harbor_agent.tests.test_environment import _make_environment, _provider
 from responses_api_agents.harbor_agent.tests.test_environment import _reset_fake_provider as _reset_fake_provider
 
@@ -108,6 +112,15 @@ class TestSkillsBenchMavenMirror:
         env = _make_environment(
             tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill", maven_mirror=False
         )
+        await env.start(force_build=False)
+        await env.stop(delete=True)
+        assert _maven_mirror_commands() == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("task", sorted(MAVEN_MIRROR_SKIPPED_TASKS))
+    async def test_skipped_task_keeps_maven_central(self, tmp_path, task):
+        env = _make_environment(tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill")
+        env.environment_name = task
         await env.start(force_build=False)
         await env.stop(delete=True)
         assert _maven_mirror_commands() == []
