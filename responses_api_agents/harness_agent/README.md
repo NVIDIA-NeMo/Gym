@@ -5,8 +5,11 @@
 > environment server, and will be removed after the environment-server migration. Do not build new benchmarks,
 > agents or configs on it. Use the harness's own agent with sandbox sessions under an environment server instead
 > (`claude_code_agent`, `codex_agent`, `hermes_agent`, `pi_agent`, `opencode_agent` and so on); the `job_bench` and
-> `workspace_bench` configs do this through `single_agent_turn_legacy`. The `swe_atlas_qa` and `rna_design` configs
-> still run on this agent until they move, and `harness_exa_search` still builds on its agent registry:
+> `workspace_bench` configs do this through `single_agent_turn_legacy`. Sandbox handling stays shared on that path:
+> the resources server starts, lends and stops the task sandbox (`SandboxSessionResourcesServer`), the environment
+> server orders seed, turn, verify and close, and each agent launches and stops its CLI in the lent sandbox through
+> the shared helpers in `nemo_gym/agents/utils/`. The `swe_atlas_qa` and `rna_design` configs still run on this agent
+> until they move, and `harness_exa_search` still builds on its agent registry:
 >
 > - Every `swe_atlas_qa` harness has a session agent that works in a sandbox the resources server lends (`deepagents`
 >   and `mini_swe` through `langchain_deepagents_agent` and `mini_swe_agent`, without the Fabric adapters), but the
