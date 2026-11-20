@@ -371,7 +371,7 @@ def _length_refusal_category(
     error: ClientResponseError, outbound: Dict[str, Any], *, completions_api: bool = False
 ) -> str:
     """``invalid_output_token_parameter`` when the engine names its context window and the request's own output budget
-    exceeds all of it, so that no prompt fits; otherwise ``context_length_exceeded``.
+    fills all of it, so that no prompt fits; otherwise ``context_length_exceeded``.
 
     The budget is the one the engine received: on chat, ``max_completion_tokens`` before ``max_tokens``. A message that
     names no window does not prove the budget wrong, so that refusal stays an overflow.
@@ -380,7 +380,8 @@ def _length_refusal_category(
     budget = None if key is None else outbound[key]
     message, _, _ = context_overflow_error_fields(error)
     window = _CONTEXT_WINDOW_SIZE.search(message)
-    if type(budget) is int and window is not None and budget > int(window.group(1)):
+    # A budget equal to the window is at fault too: it leaves no token for a prompt, however short.
+    if type(budget) is int and window is not None and budget >= int(window.group(1)):
         return "invalid_output_token_parameter"
     return "context_length_exceeded"
 
@@ -667,11 +668,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         default=True,
         description=(
             "When the engine refuses a call for length because the requested output budget (`max_completion_tokens` "
-            "or `max_tokens`, whichever the call used) alone exceeds the context window the refusal names, send the "
+            "or `max_tokens`, whichever the call used) alone fills the context window the refusal names, send the "
             "call once more with that budget lowered to the window minus the prompt minus a small margin. The prompt "
             "length is the one the refusal states, or else the engine's `/tokenize` count. The model call's capture "
             "records `requested_max_tokens` and `applied_max_tokens` and an `output_budget_refit` event with the "
-            "window, which the gate's facts count. A budget within the window is not changed by this setting: "
+            "window, which the gate's facts count. A budget below the window is not changed by this setting: "
             "when the prompt and that budget together overflow, the call keeps the `context_length_exceeded` refusal "
             "(or empty completion), so a harness that compacts its history still gets the cue; "
             "`refit_output_budget_to_prompt` opts in to lowering that budget too. A prompt that leaves "
@@ -1078,7 +1079,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         """Lower ``outbound``'s output budget, in place, to what the window the refusal names leaves after the prompt.
 
         Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. A budget that by
-        itself exceeds the window, the refusal ``_length_refusal_category`` calls ``invalid_output_token_parameter``, is
+        itself fills the window, the refusal ``_length_refusal_category`` calls ``invalid_output_token_parameter``, is
         lowered when ``refit_output_budget_to_window`` is on. A budget that fits the window while the prompt and the
         budget together overflow it is lowered only when ``refit_output_budget_to_prompt`` is on; with it off the call
         keeps the ``context_length_exceeded`` refusal, the cue for a harness to compact. Nothing changes when the
@@ -1104,7 +1105,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             return False
         if not (
             self.config.refit_output_budget_to_window
-            if budget > int(window.group(1))
+            if budget >= int(window.group(1))
             else self.config.refit_output_budget_to_prompt
         ):
             return False
