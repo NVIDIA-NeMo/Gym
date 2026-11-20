@@ -177,6 +177,14 @@ def _openclaw_output_items(envelope: dict[str, Any]) -> list[Any]:
 
 
 def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int | None]]:
+    """Parse the ``openclaw agent --json`` envelope at the end of *stdout*.
+
+    Returns the envelope's assistant text as output items and its aggregate usage: ``input_tokens`` (cache reads
+    included), ``output_tokens``, ``cached_tokens`` (None unless a positive cache read was reported) and
+    ``reasoning_tokens``, always None here: OpenClaw's envelope total counts a call without a reasoning count as zero
+    and omits a zero total, so only per-call transcript counts can establish it. Without an envelope it returns no
+    items and zero input and output counts.
+    """
     envelope = _decode_last_json_dict_suffix(stdout)
     if not envelope:
         return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
@@ -188,9 +196,8 @@ def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int | None]
     cache_read = int(usage.get("cacheRead") or 0)
     input_tokens = int(usage.get("input") or 0) + cache_read
     output_tokens = int(usage.get("output") or 0)
-    reasoning = usage.get("reasoningTokens")
     return output_items, {
-        "reasoning_tokens": reasoning if type(reasoning) is int and reasoning >= 0 else None,
+        "reasoning_tokens": None,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         # The pinned provider defaults unavailable backend cache details to zero, so only a positive
@@ -230,6 +237,32 @@ def _unique_usage_messages(
             )
         )
     return [message for key, message in identified.items() if key not in ambiguous] + unidentified, gaps
+
+
+def _model_call_messages(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the transcript's assistant messages that record a model call."""
+    return [
+        event["message"]
+        for event in events
+        if event.get("type") == "message"
+        and isinstance(event.get("message"), dict)
+        and event["message"].get("role") == "assistant"
+        # The pinned CLI can append a synthetic final-text mirror with
+        # aggregate run usage and stopReason="stop". It is neither another
+        # model call nor evidence that the underlying call succeeded.
+        and event["message"].get("api") != "cli"
+    ]
+
+
+def _reasoning_tokens(usage_messages: list[dict[str, Any]]) -> int | None:
+    """Sum the per-call reasoning token counts, or return None unless every call reported one."""
+    counts = [
+        message["usage"].get("reasoningTokens") if isinstance(message.get("usage"), dict) else None
+        for message in usage_messages
+    ]
+    if counts and all(type(count) is int and count >= 0 for count in counts):
+        return sum(counts)
+    return None
 
 
 def parse_openclaw_session_items(events: list[dict[str, Any]], *, include_input: bool = False) -> list[Any]:
@@ -553,6 +586,14 @@ def _runtime_matches(report: str, version: str) -> bool:
         return False
 
 
+# `openclaw agent` options that choose the session; when extra_args sets one, the adapter adds no --session-id.
+_SESSION_SELECTOR_ARGS = frozenset({"--session-id", "--session-key", "--to", "-t"})
+
+# OpenClaw moved agents.defaults.memorySearch to memory.search in 2026.8.1: its doctor migration
+# "memorySearch->memory.search" first ships in that tag, and 2026.11.5 rejects the old key.
+_MEMORY_SEARCH_MOVED_IN = (2026, 8, 1)
+
+
 class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     model_server: Optional[ModelServerRef] = None
@@ -691,7 +732,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             r"\d+\.\d+\.\d+(?:-\d+)?", self.config.openclaw_version
         ):
             raise HTTPException(
-                422, "OpenClaw sandbox execution requires an exact openclaw_version, for example 2026.6.11"
+                422, "OpenClaw sandbox execution requires an exact openclaw_version, for example 2026.11.5"
             )
         if self.config.openclaw_config or self.config.node_bin_dir:
             raise HTTPException(
@@ -927,15 +968,16 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "tools": {
                     "allow": ["read", "write", "edit", "exec", "process"],
                     "exec": {"host": "gateway", "security": "full", "ask": "off"},
+                    # Keep MCP grant tools directly callable (see _build_openclaw_config).
+                    "toolSearch": False,
                 },
                 "plugins": {"enabled": False},
             }
         )
-        # Current OpenClaw moved the memory search settings out of agents.defaults.
-        if tuple(map(int, self.config.openclaw_version.split("-")[0].split("."))) < (2026, 9, 1):
+        if tuple(map(int, self.config.openclaw_version.split("-")[0].split("."))) < _MEMORY_SEARCH_MOVED_IN:
             session_config["agents"]["defaults"]["memorySearch"] = {"enabled": False}
         else:
-            session_config["memory"] = {"search": {"enabled": False}}
+            session_config.setdefault("memory", {})["search"] = {"enabled": False}
         mcp_servers, required_grants = self._granted_mcp_servers(state.request)
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [
@@ -1027,8 +1069,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 if state.observations is not None and state.observations.records:
                     state.observations.records[0].status = "failed"
                 raise RuntimeError("OpenClaw retained fewer prompt images than supplied")
-        # A grant can pass the probe and still fail at agent startup: OpenClaw 2026.6.11 then logs
-        # `bundle-mcp: failed to start server "<name>"`, runs on without its tools and exits 0.
+        # A grant can pass the probe and still fail at agent startup: OpenClaw 2026.6.11 and 2026.11.5 then log
+        # `bundle-mcp: failed to start server "<name>"`, run on without its tools and exit 0.
         stderr = _ANSI.sub("", (state.session.artifacts or {}).get("stderr.log", ""))
         lost = sorted(name for name in mcp_servers if f'failed to start server "{name}"' in stderr)
         mcp_gaps += [
@@ -1078,9 +1120,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         OpenClaw leaves a server that fails to connect out of the tool list and keeps running. A required grant that
         does not connect fails the activation before any model call; an optional one is removed from ``servers`` and
-        reported as a gap. ``probe --json`` exits 0 when the connection fails (2026.6.11 prints the catalog without
-        the check ``doctor --probe`` makes), so a grant counts as connected only when the JSON lists it under
-        ``servers`` with no diagnostic for it.
+        reported as a gap. ``probe --json`` exits 0 when the connection fails on 2026.6.11 (it prints the catalog
+        without the check ``doctor --probe`` makes) and exits 1 on 2026.11.5, so a grant counts as connected only
+        when the probe exits 0 and its JSON lists the grant under ``servers`` with no diagnostic for it.
         """
         await state.upload_json(
             "home/.openclaw/openclaw.json", {"mcp": {"servers": servers}, "plugins": {"enabled": False}}
@@ -1223,17 +1265,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="agent_stdout_unparseable"))
         if not output:
             output = fallback
-        assistants = [
-            event["message"]
-            for event in events
-            if event.get("type") == "message"
-            and isinstance(event.get("message"), dict)
-            and event["message"].get("role") == "assistant"
-            # The pinned CLI can append a synthetic final-text mirror with
-            # aggregate run usage and stopReason="stop". It is neither another
-            # model call nor evidence that the underlying call succeeded.
-            and event["message"].get("api") != "cli"
-        ]
+        assistants = _model_call_messages(events)
         usage_messages, identity_gaps = _unique_usage_messages(assistants)
         gaps.extend(identity_gaps)
         # Auxiliary summarization can consume tokens and then abort before a
@@ -1290,14 +1322,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             gaps.append(
                 ObservationGap(code="model_call_usage_unavailable", detail="Only CLI envelope totals available")
             )
-        reasoning_counts = [
-            usage.get("reasoningTokens") if isinstance(usage, dict) else None
-            for usage in (message.get("usage") for message in usage_messages)
-        ] or [raw_usage.get("reasoningTokens")]
-        reasoning_tokens = None
-        if all(type(count) is int and count >= 0 for count in reasoning_counts):
-            reasoning_tokens = sum(reasoning_counts)
-        else:
+        # The envelope total counts a call without a reasoning count as zero, so it never stands in for them.
+        reasoning_tokens = _reasoning_tokens(usage_messages)
+        if reasoning_tokens is None:
             gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
         result = state.session.cleanup
         runtime = state.runtime_info
@@ -1443,6 +1470,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     def _build_openclaw_config(self, base: dict[str, Any], rollout_id: Optional[str] = None) -> dict[str, Any]:
         cfg = copy.deepcopy(base)
+        # OpenClaw 2026.11.5 enables tool search by default: it hides MCP and other non-coding tools behind
+        # tool_search/tool_describe/dispatch_action. Keep the tool list 2026.6.11 exposed; 2026.6.11 accepts the key.
+        cfg.setdefault("tools", {})["toolSearch"] = False
         self._deep_merge(cfg, copy.deepcopy(self.config.openclaw_config))
         if self.config.model_server:
             providers = cfg.setdefault("models", {}).setdefault("providers", {})
@@ -1501,6 +1531,30 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             env["PATH"] = f"{self.config.node_bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env.update({k: v for k, v in self.config.env.items() if v})
         return env
+
+    async def _export_sessions(
+        self, state_dir: Path, destination: Path, *, cwd: Path, env: dict[str, str], timeout: float
+    ) -> None:
+        """Export the CLI's SQLite session history as JSONL under *destination* with the installed OpenClaw SDK.
+
+        The run has already finished, so a failed export only loses the transcript: the caller then answers from
+        the CLI envelope and never turns the failure into an empty, scored response.
+        """
+        launcher = shutil.which(self.config.command_parts[0], path=env.get("PATH"))
+        node = shutil.which("node", path=env.get("PATH"))
+        if launcher is None or node is None:
+            LOG.warning("OpenClaw transcript export skipped: node or %s is not on PATH", self.config.command_parts[0])
+            return
+        script = str(Path(__file__).with_name("export_sessions.mjs"))
+        try:
+            code, _, diagnostic = await self._run_exec(
+                [node, script, launcher, str(state_dir), str(destination)], cwd=str(cwd), env=env, timeout=timeout
+            )
+        except (TimeoutError, OSError) as error:
+            LOG.warning("OpenClaw transcript export failed: %s", error)
+            return
+        if code:
+            LOG.warning("OpenClaw transcript export failed: %s", diagnostic)
 
     async def _run_exec(
         self, args: list[str], *, cwd: Optional[str], env: dict[str, str], timeout: float
@@ -1649,7 +1703,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             base_cfg = json.loads(config_path.read_text())
             config_path.write_text(json.dumps(self._build_openclaw_config(base_cfg, rollout_id), indent=2) + "\n")
 
+            # A known session id lets the SQLite export find a stopped run's history without an envelope.
             local_session_id = uuid4().hex
+            selects_session = any(arg.split("=", 1)[0] in _SESSION_SELECTOR_ARGS for arg in self.config.extra_args)
             cmd = [
                 *self.config.command_parts,
                 "agent",
@@ -1657,7 +1713,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "--json",
                 "--agent",
                 self.config.openclaw_agent_id,
-                *(["--session-id", local_session_id] if not self.config.extra_args else []),
+                *([] if selects_session else ["--session-id", local_session_id]),
                 "--thinking",
                 self.config.thinking,
                 "--model",
@@ -1709,40 +1765,30 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             agents_root = state_dir / "agents"
             if (agents_root / self.config.openclaw_agent_id / "agent/openclaw-agent.sqlite").is_file():
                 agents_root = work_dir / f"transcripts-{uuid4().hex}"
-                launcher = shutil.which("openclaw", path=env.get("PATH"))
-                node = shutil.which("node", path=env.get("PATH"))
-                if launcher is None or node is None:
-                    raise RuntimeError("Could not locate Node and the installed OpenClaw SDK for transcript export")
-                code, _, diagnostic = await self._run_exec(
-                    [
-                        node,
-                        str(Path(__file__).with_name("export_sessions.mjs")),
-                        launcher,
-                        str(state_dir),
-                        str(agents_root),
-                    ],
-                    cwd=str(work_dir),
-                    env=env,
-                    timeout=30,
+                # After a SIGTERM the response must still be written before the SIGKILL.
+                await self._export_sessions(
+                    state_dir, agents_root, cwd=work_dir, env=env, timeout=10 if sigterm_hit.is_set() else 30
                 )
-                if code:
-                    LOG.warning("OpenClaw transcript export failed: %s", diagnostic)
                 sessions = agents_root / self.config.openclaw_agent_id / "sessions"
                 meta = (envelope or {}).get("meta") or {}
                 reported_id = (meta.get("agentMeta") or {}).get("sessionId")
                 if isinstance(reported_id, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*", reported_id):
                     local_session_id = reported_id
                 session_path = sessions / f"{local_session_id}.jsonl"
-                if self.config.extra_args and not session_path.is_file():
+                if selects_session and not session_path.is_file():
                     session_path = self._find_partial_session(sessions)
             else:
                 session_path = self._session_file(envelope) or self._find_partial_session(home)
             if session_path and session_path.is_file():
                 session_text = session_path.read_text(errors="replace")
                 output_items = parse_openclaw_session(session_text)
+                session_events = parse_openclaw_session_events(session_text)
+                if envelope:
+                    # The envelope total counts a call without a reasoning count as zero; use per-call counts.
+                    usage_messages, _ = _unique_usage_messages(_model_call_messages(session_events))
+                    usage["reasoning_tokens"] = _reasoning_tokens(usage_messages)
                 if observation_collector is not None:
                     try:
-                        session_events = parse_openclaw_session_events(session_text)
                         openclaw_session_id = next(
                             (
                                 event.get("id")

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from responses_api_agents.openclaw_agent.setup_openclaw import DEFAULT_NODE_VERSION
+
 
 INSTALLER = Path(__file__).parents[1] / "install_openclaw_runtime.sh"
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="OpenClaw sandbox execution requires Linux")
@@ -290,3 +292,59 @@ esac
     assert (root / "npm.log").read_text().splitlines() == ["install"]
     assert (root / "runtime/ready").exists()
     assert not (root / "packages.log").exists()
+
+
+def test_installer_installs_the_default_node_release():
+    """The agent names the sandbox runtime directory after DEFAULT_NODE_VERSION; the installer must install it."""
+    assert f"node_version={DEFAULT_NODE_VERSION}\n" in INSTALLER.read_text()
+
+
+DEPS_SCRIPTS = (
+    "responses_api_agents/openclaw_agent/scripts/openclaw_agent_deps.sh",
+    "responses_api_agents/anyswe_agent/setup_scripts/openclaw_agent_deps.sh",
+)
+
+
+def _executable(path: Path, text: str) -> None:
+    path.write_text(text)
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize("script", DEPS_SCRIPTS)
+@pytest.mark.parametrize(
+    ("existing", "downloads"), [(None, True), ("v22.19.0", True), (f"v{DEFAULT_NODE_VERSION}", False), ("broken", True)]
+)
+def test_deps_script_replaces_a_node_that_is_not_the_pinned_release(tmp_path, script, existing, downloads):
+    run_dir = tmp_path / "script"
+    run_dir.mkdir()
+    target = run_dir / "openclaw_agent_deps.sh"
+    target.write_bytes((Path(__file__).resolve().parents[3] / script).read_bytes())
+    (run_dir / "_portable_python.sh").write_text("install_portable_python() { :; }\ninstall_nemo_gym_deps() { :; }\n")
+    deps = tmp_path / "deps"
+    (deps / "bin").mkdir(parents=True)
+    log = tmp_path / "calls.log"
+    if existing == "broken":
+        _executable(deps / "bin/node", "#!/bin/sh\nexit 1\n")
+    elif existing:
+        _executable(deps / "bin/node", f"#!/bin/sh\necho {existing}\n")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    _executable(tools / "curl", f'#!/bin/sh\necho "curl $*" >> {log}\n')
+    _executable(tools / "tar", f'#!/bin/sh\ncat >/dev/null\necho "tar $*" >> {log}\n')
+    _executable(deps / "bin/npm", f'#!/bin/sh\necho "npm $*" >> {log}\n')
+    _executable(deps / "bin/openclaw", "#!/bin/sh\necho 2026.11.5\n")
+    _executable(deps / "bin/python3", "#!/bin/sh\nexit 0\n")
+    env = {
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "DEPS_DIR": str(deps),
+        "NEMO_GYM_ROOT": str(tmp_path),
+        "NODE_ARCH": "linux-x64",
+        "PORTABLE_PYTHON_SH": str(run_dir / "_portable_python.sh"),
+    }
+    result = subprocess.run(["bash", str(target)], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines()
+    url = f"https://nodejs.org/dist/v{DEFAULT_NODE_VERSION}/node-v{DEFAULT_NODE_VERSION}-linux-x64.tar.xz"
+    assert (f"curl -fsSL {url}" in calls) is downloads
+    assert calls[-1] == f"npm install -g --prefix {deps} openclaw@2026.11.5"
+

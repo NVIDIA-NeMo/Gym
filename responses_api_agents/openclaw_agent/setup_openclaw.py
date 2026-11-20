@@ -85,7 +85,8 @@ _OPENCLAW_PKG = "openclaw"
 #: Version the agent installs when no override or config value is supplied.
 DEFAULT_OPENCLAW_VERSION = "2026.11.5"
 
-#: Pinned Node 24 LTS release for local provisioning and the sandbox installer.
+#: Pinned Node 24 LTS release for local provisioning. ``install_openclaw_runtime.sh``
+#: installs the same release in sandboxes and names its runtime directory after it.
 DEFAULT_NODE_VERSION = "24.22.3"
 
 OPENCLAW_VERSION_ENV = "OPENCLAW_VERSION"
@@ -172,15 +173,20 @@ _RANGE_PRIMITIVE = re.compile(r"^(>=|<=|>|<|=|\^|~)?v?(\d+(?:\.\d+){0,2})")
 def node_satisfies_range(node_version: str, node_range: str) -> bool:
     """Return whether *node_version* satisfies the npm *node_range*.
 
-    Supports the constructs ``openclaw`` actually publishes — ``||``,
-    whitespace-AND, and ``>=``/``<``/``=`` comparators with partial operands.
-    npm pads a partial operand differently by comparison: ``>=24`` means
-    ``>=24.0.0`` while ``<24`` means ``<24.0.0``, so both are padded to the full
-    triple; ``^``/``~``/``x`` wildcards keep only the precision the operand
-    states, which is all coarse ranges like ``>=22`` need.
+    Supports ``||``, whitespace-AND, ``>=``/``>``/``<=``/``<``/``=`` comparators
+    with partial operands, npm's caret and tilde ranges, and bare or ``x``
+    operands. npm pads a partial operand differently by comparison: ``>=24``
+    means ``>=24.0.0`` while ``<24`` means ``<24.0.0``, so both are padded to the
+    full triple; a bare or ``x`` operand keeps only the precision it states.
+
+    Raises:
+        ValueError: *node_version* has no numeric prefix, or *node_range* uses a
+            construct outside this subset, such as a hyphen range.
     """
     actual = _parse_version(node_version)
     for alternative in node_range.split("||"):
+        if " - " in alternative:
+            raise ValueError(f"unsupported npm hyphen range {alternative.strip()!r}")
         if all(_primitive_matches(primitive, actual) for primitive in alternative.split()):
             return True
     return False
@@ -199,9 +205,22 @@ def _primitive_matches(primitive: str, actual: tuple[int, int, int]) -> bool:
         return True
     parts = [int(piece) for piece in operand.split(".")]
 
-    if op in (None, "^", "~"):
-        # Wildcard-ish: only the stated precision constrains.
+    if op is None:
+        # A bare or x operand: only the stated precision constrains.
         return actual[: len(parts)] == tuple(parts)
+    if op in ("^", "~"):
+        lower = tuple((parts + [0, 0, 0])[:3])
+        # npm: ~ allows patch changes (minor too when only the major is given); ^ allows changes that keep
+        # the leftmost nonzero stated component.
+        if op == "~" and len(parts) >= 2:
+            upper = (parts[0], parts[1] + 1, 0)
+        elif op == "~" or parts[0] > 0 or len(parts) == 1:
+            upper = (parts[0] + 1, 0, 0)
+        elif parts[1] > 0 or len(parts) == 2:
+            upper = (0, parts[1] + 1, 0)
+        else:
+            upper = (0, 0, parts[2] + 1)
+        return lower <= actual < upper
     padded = (parts + [0, 0, 0])[:3]
     return _range_comparator(op, ".".join(map(str, padded)), actual)
 
@@ -528,7 +547,9 @@ def _openclaw_reported_version(openclaw_bin: str, node_bin_dir: str | None) -> s
 
     The launcher may be a shim whose ``node`` is unusable (the exact failure
     this module exists to fix), so a non-zero exit is treated the same as an
-    unknown version: not acceptable evidence of a compatible install.
+    unknown version: not acceptable evidence of a compatible install. A zero
+    exit is not enough either: 2026.11.5 prints its version on an unsupported
+    Node, so callers also check that Node against the release's engine range.
     """
     try:
         completed = _run([openclaw_bin, "--version"], node_bin_dir, capture_output=True, text=True, timeout=120)
@@ -601,8 +622,21 @@ def _requested_openclaw_installed(requested: str, node_bin_dir: str | None) -> b
     if existing:
         reported = _openclaw_reported_version(existing, node_bin_dir)
         if reported == requested:
-            LOG.info("openclaw %s already installed at %s", requested, existing)
-            return True
+            # 2026.11.5 prints its version on an unsupported Node and refuses only `onboard` and `agent`.
+            node = _which("node", node_bin_dir)
+            node_version = _node_reported_version(node) if node else None
+            engines = _engines_node(requested, node_bin_dir)
+            if node_version is not None and node_satisfies_range(node_version, engines):
+                LOG.info("openclaw %s already installed at %s", requested, existing)
+                return True
+            LOG.info(
+                "openclaw %s at %s would run on node %s, outside its engines.node %r; reinstalling",
+                requested,
+                existing,
+                node_version or "(missing)",
+                engines,
+            )
+            return False
         LOG.info("openclaw at %s reports %s, not %s; reinstalling", existing, reported or "nothing", requested)
     return False
 

@@ -4,12 +4,17 @@ Runs OpenClaw CLI (`openclaw agent --local --json`).
 OpenClaw runs its own tools internally.
 Resources server is used for verifier.
 
+Pinned release: OpenClaw 2026.11.5 on Node.js 24.22.3. Capability level: Observability; training capture, below,
+is opt-in.
+
 Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
 the rollout's prefix. Run-level `token_id_capture.enabled: true` and either the agent's `token_id_capture: true`
 or run-level `token_id_capture.all_agents: true` route those calls through capture. Capture also needs a capture
 store and a model backend that returns token IDs (see
 [Training on External Agent Harnesses](https://docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/external-agent-harnesses)).
-Token IDs and generation log probabilities are available in the Gym capture store when the backend returns them.
+Token IDs and generation log probabilities reach the Gym capture store when the backend returns them. This was
+checked for one single-turn call without tools; multi-turn tool episodes and compaction calls are not yet validated.
+Configs that call their own provider instead of `model_server`, such as `environments/openclaw_math`, do not capture.
 
 ## Quick start
 
@@ -52,13 +57,15 @@ Session install/close timeouts default to 600/60 seconds.
 - `context_window`: context limit for a generated model entry. Set it to the model server's maximum
   context length (`max_model_len` for vLLM). OpenClaw uses it to lower a call's requested output when
   the input is long, to decide when to compact (summarize) the conversation, and to cap long tool
-  results, so changing it can change rollouts. When unset, OpenClaw chooses a default. If the model server has a smaller limit, long
+  results, so changing it can change rollouts. When unset, OpenClaw 2026.11.5 assumes 128,000 tokens for the
+  generated entry (2026.6.11 assumed 200,000). If the model server has a smaller limit, long
   episodes can send requests the server rejects. Gym's
   `vllm_model` turns each rejection into an empty reply by default; OpenClaw does not see that as a
   context overflow, so it does not compact, and the run ends early.
 - `max_output_tokens`: most output tokens OpenClaw requests per call for a generated model entry; it
   requests less when its estimate of the input leaves less room in `context_window`. When unset,
-  OpenClaw chooses the model default.
+  OpenClaw 2026.11.5 requests half of `context_window`, at least 8,192 and at most 32,768 tokens (32,768 with
+  the assumed window); 2026.6.11 requested 8,192.
 - `image_input`: declare image support in sandbox sessions without prompt images (default `false`);
   prompt images declare it automatically.
 - `workspace_root`: where per-request workspaces are created and deleted
@@ -70,16 +77,20 @@ Session install/close timeouts default to 600/60 seconds.
 - `model_timeout_seconds`: request and stream-idle timeout for the generated Gym model provider
   (default: 600 seconds). OpenClaw still caps this by the overall agent deadline. Explicit provider
   `timeoutSeconds` settings in local-mode `openclaw_config` take precedence.
-- `extra_args`: extra flags appended to `openclaw agent`
+- `extra_args`: extra flags appended to `openclaw agent`. Unless they choose the session themselves
+  (`--session-id`, `--session-key` or `--to`), the adapter passes its own `--session-id`, which it uses to find
+  a stopped run's history.
 - `env`: extra env vars for the subprocess (e.g. provider API keys)
 - `openclaw_config`: deep-merged into the generated `openclaw.json`
 - `openclaw_version`: exact version to pin on install (npm ranges such as `^2026.9.0`
   are rejected); overridden by the `OPENCLAW_VERSION` env var, and falls back to
   `setup_openclaw.DEFAULT_OPENCLAW_VERSION`. An already-installed `openclaw` is only
   reused when `openclaw --version` reports exactly the resolved version; anything else
-  is reinstalled on first local use after a restart. After an install, the launcher
-  selected on `PATH` must report the requested version, or that local request fails.
-  Gym reads the pinned release's per-agent SQLite transcripts with OpenClaw's SDK after the worker stops.
+  is reinstalled on first local use after a restart. The `node` it would run must also satisfy the
+  release's `engines.node` range, since 2026.11.5 prints its version on an unsupported Node but refuses to run.
+  After an install, the launcher selected on `PATH` must report the requested version, or that local request fails.
+  Gym reads the pinned release's per-agent SQLite transcripts with OpenClaw's SDK after the worker stops
+  (`export_sessions.mjs`). If that export fails, the response keeps the CLI's final text without the tool calls.
   Older releases that write JSONL sessions remain readable.
 - `node_bin_dir`: directory put before `PATH` when running `openclaw`. Setup uses the
   same order for its version probes and for `npm`, so a bundled runtime is checked
@@ -195,11 +206,13 @@ or creating bootstrap files in the task repository. Task HOME, XDG directories, 
 dependencies are preserved for tools and verification.
 The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel/plugin
 execution and required direct-HTTP tool grants are unsupported. MCP tool grants become streamable-HTTP
-`mcp.servers` entries, and the model sees their tools as `<grant>__<tool>`; `mcp_tool_timeout_seconds` sets
+`mcp.servers` entries, and the model sees their tools as `<grant>__<tool>`: the adapter turns off OpenClaw's tool
+search, which 2026.11.5 enables by default to hide them behind `tool_search`. `mcp_tool_timeout_seconds` sets
 their per-request timeout. Before the agent runs, the adapter connects to each grant with
 `openclaw mcp probe <grant> --json`: a required grant that does not connect fails the activation, and an optional
-one is left out and reported as an `mcp_server_skipped` gap. The pinned `probe --json` exits 0 when a connection
-fails, so a grant counts as connected only when the JSON lists it under `servers` with no diagnostic for it.
+one is left out and reported as an `mcp_server_skipped` gap. `probe --json` exits 0 when a connection fails on
+2026.6.11 and 1 on 2026.11.5, so a grant counts as connected only when the probe exits 0 and its JSON lists the
+grant under `servers` with no diagnostic for it.
 Each probe runs under the same process supervisor as the agent, with its own directory and cleanup receipt, so a
 probe that exceeds its 120-second limit is stopped inside the sandbox (some providers stop only their local client on
 an exec timeout). The agent starts only after the probe's termination is confirmed, and session close stops a probe
@@ -223,10 +236,11 @@ Sandbox request support is deliberately explicit:
 - One user prompt, optionally preceded by one system message. Text-part arrays are accepted. Sandbox sessions
   also accept base64 data-URI `input_image` parts, with or without text; local execution rejects images with HTTP 422.
   Each image occurrence gets a separate file under `<session>/home/.openclaw/media/`, removed on close, so repeated
-  images remain repeated. The adapter appends one `[Image: source: <path>]` line per file after the prompt text.
+  images remain repeated. The adapter appends each file's absolute path on its own line after the prompt text;
+  OpenClaw attaches the images it names (2026.11.5 ignores the older `[Image: source: <path>]` marker).
   These session-specific paths remain visible to the model. Image order is preserved, but text/image interleaving
   and the requested `detail` are not. For image-capable sessions, the adapter disables OpenClaw's configurable
-  1200 px resize. OpenClaw 2026.6.11 can still resize or re-encode large images in its native file-loading and
+  1200 px resize. OpenClaw can still resize or re-encode large images in its native file-loading and
   byte-limit processing. Exported conversations retain images as data URIs. Completed and output-limit replies
   must retain every supplied image occurrence; wall-time limits keep their existing behavior.
   Configured `system_prompt`, request `instructions`, and the optional system message are joined
@@ -266,6 +280,8 @@ Auxiliary model calls, such as compaction, are absent from the transcript. A cov
 reported because interrupted compaction need not leave an event. Totals therefore need not equal
 all backend calls. Missing per-call usage and
 unavailable reasoning-token details are also reported as observation gaps; the full branch history is retained.
+Reasoning tokens are reported only when every counted call carries a count. The CLI envelope's total is never used
+for them, because it counts a call without one as zero.
 An explicit wall or model-output limit returns partial output as `incomplete`.
 Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.

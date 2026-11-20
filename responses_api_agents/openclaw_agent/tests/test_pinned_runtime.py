@@ -16,7 +16,8 @@ from fastapi import Request
 
 from nemo_gym.agents import HARNESS_RUNNER_SCRIPT, SUPERVISOR_SCRIPT, shell_assignments
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.openclaw_agent.app import parse_openclaw_session
+from responses_api_agents.openclaw_agent.app import parse_openclaw_session, parse_openclaw_session_events
+from responses_api_agents.openclaw_agent.observability import discover_openclaw_session_tree
 from responses_api_agents.openclaw_agent.setup_openclaw import DEFAULT_OPENCLAW_VERSION
 from responses_api_agents.openclaw_agent.tests.test_sandbox import seed, setup, staged  # noqa: F401
 
@@ -131,13 +132,41 @@ async def test_pinned_non_tty_cli_stays_in_supervised_group_and_stops(setup, tmp
                 str(tmp_path / "transcripts"),
                 directory.name,
             )
-            assert await asyncio.wait_for(export.wait(), 30) == 0
+            try:
+                assert await asyncio.wait_for(export.wait(), 30) == 0
+            finally:
+                if export.returncode is None:
+                    export.kill()
+                    await export.wait()
             transcript = tmp_path / "transcripts/main/sessions" / f"{directory.name}.jsonl"
             items = parse_openclaw_session(transcript.read_text())
             call, result = (item for item in items if item.type in {"function_call", "function_call_output"})
             assert call.name == "read" and call.call_id == result.call_id
             assert json.loads(call.arguments) == {"path": str(workdir / "input.txt")}
             assert "retained after stop" in result.output
+            # The host path exports every agent, without a selected id and with an unrelated HOME, then reads
+            # the session tree from the exported index by the transcript header id.
+            host_export = await asyncio.create_subprocess_exec(
+                node,
+                str(Path(__file__).resolve().parents[1] / "export_sessions.mjs"),
+                entrypoint,
+                str(directory / "home/.openclaw"),
+                str(tmp_path / "host-transcripts"),
+                env={"PATH": os.environ["PATH"], "HOME": str(tmp_path / "unrelated-home")},
+            )
+            try:
+                assert await asyncio.wait_for(host_export.wait(), 30) == 0
+            finally:
+                if host_export.returncode is None:
+                    host_export.kill()
+                    await host_export.wait()
+            exported = tmp_path / "host-transcripts/main/sessions" / f"{directory.name}.jsonl"
+            assert exported.read_text() == transcript.read_text()
+            header = next(e for e in parse_openclaw_session_events(exported.read_text()) if e.get("type") == "session")
+            assert header["id"] == directory.name
+            tree, tree_gaps = discover_openclaw_session_tree(tmp_path / "host-transcripts", header["id"])
+            assert [(key, parent) for key, parent, *_ in tree] == [(f"agent:main:explicit:{directory.name}", None)]
+            assert tree_gaps == []
             for item in observed:
                 stat = Path(f"/proc/{item['pid']}/stat")
                 assert not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"

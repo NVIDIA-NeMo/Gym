@@ -15,7 +15,9 @@
 
 import asyncio
 import json
+import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -1034,3 +1036,236 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
     assert [call.kwargs["timeout"] for call in wait.await_args_list] == [agent.config.setup_timeout, expected]
     assert response.metadata == {"agent_timeout_sec": str(float(expected))}
     assert agent.config.timeout == 1800
+
+
+def _sqlite_era_transcript(session_id: str, reasoning: tuple[int | None, int | None] = (None, None)) -> str:
+    def usage(count: int | None) -> dict:
+        return {"input": 3, "output": 2, **({} if count is None else {"reasoningTokens": count})}
+
+    events = [
+        {"type": "session", "id": session_id},
+        {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "solve"}]}},
+        {
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "responseId": "resp-1",
+                "usage": usage(reasoning[0]),
+                "content": [{"type": "toolCall", "id": "call-1", "name": "read", "arguments": {"path": "in"}}],
+            },
+        },
+        {
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "call-1",
+                "toolName": "read",
+                "content": [{"type": "text", "text": "42"}],
+            },
+        },
+        {
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "responseId": "resp-2",
+                "usage": usage(reasoning[1]),
+                "content": [{"type": "text", "text": "42"}],
+            },
+        },
+    ]
+    return "\n".join(json.dumps(event) for event in events)
+
+
+class _SQLiteHostRun:
+    """A host workspace whose OpenClaw state holds a per-agent SQLite store, as 2026.11.5 writes it."""
+
+    def __init__(self, tmp_path: Path, **config) -> None:
+        self.bin_dir = tmp_path / "bin"
+        self.bin_dir.mkdir()
+        for name in ("node", "openclaw"):
+            (self.bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
+            (self.bin_dir / name).chmod(0o755)
+        self.agent = _make_agent(workspace_root=str(tmp_path), node_bin_dir=str(self.bin_dir), **config)
+        self.work_dir = tmp_path / "run"
+        self.home = self.work_dir / ".openclaw-home"
+        config_path = self.home / ".openclaw" / "openclaw.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+        database = self.home / ".openclaw/agents/main/agent/openclaw-agent.sqlite"
+        database.parent.mkdir(parents=True)
+        database.write_bytes(b"")
+        self.agent_cmd: list[str] | None = None
+        self.export_call: tuple[list[str], dict] | None = None
+
+    def stub(self, *, agent_result, export_result=(0, "", ""), exported_id=None, reasoning=(None, None)):
+        async def run_exec(cmd, *, cwd, env, timeout):
+            if "onboard" in cmd:
+                return 0, "", ""
+            if cmd[1].endswith("export_sessions.mjs"):
+                self.export_call = (cmd, {"cwd": cwd, "env": env, "timeout": timeout})
+                if isinstance(export_result, BaseException):
+                    raise export_result
+                if export_result[0] == 0:
+                    session_id = exported_id or self.agent_cmd[self.agent_cmd.index("--session-id") + 1]
+                    sessions = Path(cmd[4]) / "main" / "sessions"
+                    sessions.mkdir(parents=True)
+                    (sessions / f"{session_id}.jsonl").write_text(_sqlite_era_transcript(session_id, reasoning))
+                    (sessions / "sessions.json").write_text(
+                        json.dumps({"agent:main:main": {"sessionId": session_id, "sessionFile": f"{session_id}.jsonl"}})
+                    )
+                return export_result
+            self.agent_cmd = cmd
+            if isinstance(agent_result, BaseException):
+                raise agent_result
+            return agent_result
+
+        return patch.object(self.agent, "_run_exec", run_exec)
+
+    def run(self, **kwargs):
+        with patch.object(self.agent, "_workspace_root", return_value=self.work_dir):
+            return asyncio.run(self.agent._run_openclaw("solve", None, **kwargs))
+
+
+@pytest.mark.parametrize("reported", [None, "reported-session", "../escape"])
+def test_sqlite_history_is_exported_and_read_by_session_id(tmp_path: Path, reported) -> None:
+    run = _SQLiteHostRun(tmp_path)
+    meta = {"agentMeta": {"sessionId": reported}} if reported else {}
+    stdout = json.dumps({"payloads": [{"text": "fallback"}], "meta": meta})
+    collector = MagicMock()
+    exported = reported if reported == "reported-session" else None
+    with run.stub(agent_result=(0, stdout, ""), exported_id=exported):
+        output, _, _ = run.run(observation_collector=collector)
+
+    forced = run.agent_cmd[run.agent_cmd.index("--session-id") + 1]
+    assert re.fullmatch(r"[0-9a-f]{32}", forced)
+    argv, kwargs = run.export_call
+    destination = Path(argv[4])
+    assert argv == [
+        str(run.bin_dir / "node"),
+        str(Path(__file__).resolve().parents[1] / "export_sessions.mjs"),
+        str(run.bin_dir / "openclaw"),
+        str(run.home / ".openclaw"),
+        str(destination),
+    ]
+    assert destination.parent == run.work_dir and destination.name.startswith("transcripts-")
+    assert kwargs["env"]["HOME"] == str(run.home) and kwargs["timeout"] == 30
+    assert [item.type for item in output] == ["function_call", "function_call_output", "message"]
+    assert output[0].call_id == output[1].call_id == "call-1"
+    assert output[2].content[0].text == "42"
+    # A reported id that could escape the export directory is ignored in favor of the forced one.
+    assert collector.call_args.args[0] == (exported or forced)
+    assert [(key, parent) for key, parent, *_ in collector.call_args.args[2]] == [("agent:main:main", None)]
+    assert collector.call_args.args[3] == []
+    assert not run.work_dir.exists()
+
+
+def test_timed_out_run_reads_partial_sqlite_history_by_forced_session_id(tmp_path: Path) -> None:
+    run = _SQLiteHostRun(tmp_path)
+    with run.stub(agent_result=TimeoutError("openclaw timed out")):
+        output, usage, _ = run.run()
+
+    # No envelope names the session, so the forced id is the only link to the stopped run's history.
+    assert [item.type for item in output] == ["function_call", "function_call_output", "message"]
+    assert usage["input_tokens"] == 0 and usage["reasoning_tokens"] is None
+    assert not run.work_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "export_result",
+    [(1, "", "sdk import failed"), TimeoutError("Timed out after 30s: node export_sessions.mjs")],
+    ids=["exit_1", "timeout"],
+)
+def test_failed_sqlite_export_keeps_the_envelope_answer(tmp_path: Path, export_result, caplog) -> None:
+    """An export failure after a finished run loses the tool calls, never the answer: it must not be scored empty."""
+    run = _SQLiteHostRun(tmp_path)
+    stdout = _envelope([{"text": "fallback"}], usage={"input": 3, "output": 2})
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(run.agent, "_workspace_root", return_value=run.work_dir),
+        run.stub(agent_result=(0, stdout, ""), export_result=export_result),
+    ):
+        response = asyncio.run(run.agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="solve")))
+
+    assert [item.content[0].text for item in response.output] == ["fallback"]
+    assert response.usage.input_tokens == 3 and response.usage.output_tokens == 2
+    assert "OpenClaw transcript export failed" in caplog.text
+    assert not run.work_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "forced"),
+    [(["--verbose", "on"], True), (["--session-key", "agent:main:custom"], False), (["--to=+15555550123"], False)],
+    ids=["unrelated_flags", "session_key", "recipient"],
+)
+def test_session_id_is_forced_unless_extra_args_choose_the_session(tmp_path: Path, extra_args, forced) -> None:
+    run = _SQLiteHostRun(tmp_path, extra_args=extra_args)
+    with run.stub(agent_result=TimeoutError("openclaw timed out"), exported_id=None if forced else "cli-chosen"):
+        output, _, _ = run.run()
+
+    assert ("--session-id" in run.agent_cmd) is forced
+    assert run.agent_cmd[-len(extra_args) :] == extra_args
+    # Without a forced id, the newest exported transcript is the stopped run's history.
+    assert [item.type for item in output] == ["function_call", "function_call_output", "message"]
+
+
+def test_export_uses_the_configured_command_as_its_launcher(tmp_path: Path) -> None:
+    run = _SQLiteHostRun(tmp_path)
+    (run.bin_dir / "openclaw").rename(run.bin_dir / "openclaw-pinned")
+    run.agent.config.command = str(run.bin_dir / "openclaw-pinned")
+    stdout = _envelope([{"text": "fallback"}], usage={"input": 3, "output": 2})
+    with run.stub(agent_result=(0, stdout, "")):
+        output, _, _ = run.run()
+
+    assert run.export_call[0][2] == str(run.bin_dir / "openclaw-pinned")
+    assert [item.type for item in output] == ["function_call", "function_call_output", "message"]
+
+
+def test_missing_node_skips_the_export_and_keeps_the_envelope_answer(tmp_path: Path, caplog) -> None:
+    run = _SQLiteHostRun(tmp_path)
+    (run.bin_dir / "node").unlink()
+    stdout = _envelope([{"text": "fallback"}], usage={"input": 3, "output": 2})
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.dict(os.environ, {"PATH": str(tmp_path / "empty")}),
+        run.stub(agent_result=(0, stdout, "")),
+    ):
+        output, _, _ = run.run()
+
+    assert run.export_call is None
+    assert [item.content[0].text for item in output] == ["fallback"]
+    assert "OpenClaw transcript export skipped" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "expected"),
+    [((7, 5), 12), ((0, 0), 0), ((7, None), None), ((None, None), None)],
+)
+def test_host_reasoning_tokens_come_from_per_call_transcript_counts(tmp_path: Path, reasoning, expected) -> None:
+    run = _SQLiteHostRun(tmp_path)
+    # The envelope total counts a call without a count as zero, so it is ignored.
+    stdout = _envelope([{"text": "42"}], usage={"input": 6, "output": 4, "reasoningTokens": 99})
+    with (
+        patch.object(run.agent, "_workspace_root", return_value=run.work_dir),
+        run.stub(agent_result=(0, stdout, ""), reasoning=reasoning),
+    ):
+        response = asyncio.run(run.agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="solve")))
+
+    assert response.usage.output_tokens_details.reasoning_tokens == expected
+
+
+def test_envelope_reasoning_total_is_not_reported() -> None:
+    _, usage = parse_openclaw_output(_envelope([{"text": "ok"}], usage={"input": 5, "output": 9, "reasoningTokens": 7}))
+    assert usage["reasoning_tokens"] is None
+
+
+def test_generated_config_requests_streaming_usage_and_keeps_tools_direct() -> None:
+    agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+    with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+        cfg = agent._build_openclaw_config({})
+    assert cfg["models"]["providers"]["nemo"]["models"][0]["compat"] == {"supportsUsageInStreaming": True}
+    # 2026.11.5 would otherwise hide MCP and other non-coding tools behind tool_search.
+    assert cfg["tools"]["toolSearch"] is False
+    agent.config.openclaw_config = {"tools": {"toolSearch": True}}
+    with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+        assert agent._build_openclaw_config({})["tools"]["toolSearch"] is True
+

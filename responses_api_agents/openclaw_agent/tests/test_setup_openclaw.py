@@ -348,6 +348,25 @@ class TestSatisfiesRange:
         assert setup_openclaw.node_satisfies_range("22.9.0", ">=22.x")
         assert not setup_openclaw.node_satisfies_range("21.9.0", ">=22.x")
 
+    @pytest.mark.parametrize(
+        ("node_range", "inside", "outside"),
+        [
+            ("^24.16.0", "24.22.3", "25.0.0"),
+            ("^24.16.0", "24.16.0", "24.15.9"),
+            ("~24.16.0", "24.16.9", "24.17.0"),
+            ("~24", "24.99.0", "25.0.0"),
+            ("^0.2.3", "0.2.9", "0.3.0"),
+            ("^0.0.3", "0.0.3", "0.0.4"),
+        ],
+    )
+    def test_caret_and_tilde_follow_npm(self, node_range, inside, outside):
+        assert setup_openclaw.node_satisfies_range(inside, node_range)
+        assert not setup_openclaw.node_satisfies_range(outside, node_range)
+
+    def test_hyphen_range_is_refused(self):
+        with pytest.raises(ValueError, match="hyphen"):
+            setup_openclaw.node_satisfies_range("24.22.3", "22 - 25")
+
 
 class _FakeExecutables:
     """Stands in for shutil.which plus version probes of the found binaries.
@@ -773,6 +792,26 @@ class TestRealPathSelection:
         setup_openclaw.ensure_openclaw("2026.6.11", node_bin_dir=str(deps))
 
         assert os.environ["PATH"] == path
+
+    @pytest.mark.parametrize(("node", "reinstalled"), [("v22.19.0", True), ("v24.22.3", False)])
+    def test_matching_launcher_is_kept_only_on_a_supported_node(self, monkeypatch, tmp_path, node, reinstalled):
+        """2026.11.5 prints its version on Node 22 but refuses `onboard` and `agent`, so the version alone is not enough."""
+        existing = tmp_path / "existing" / "bin"
+        _script(existing / "node", f"echo {node}")
+        _script(existing / "openclaw", "echo 2026.11.5")
+        monkeypatch.setenv("PATH", os.pathsep.join([str(existing), "/usr/bin:/bin"]))
+        installed = []
+
+        def install(requested, node_bin_dir):
+            installed.append(requested)
+            return str(existing / "openclaw")
+
+        monkeypatch.setattr(setup_openclaw, "_install_openclaw", install)
+        monkeypatch.setattr(setup_openclaw, "record_install", lambda *args, **kwargs: None)
+
+        setup_openclaw.ensure_openclaw("2026.11.5")
+
+        assert installed == (["2026.11.5"] if reinstalled else [])
 
 
 def _first_local_call(results) -> None:
