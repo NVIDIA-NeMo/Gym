@@ -213,7 +213,7 @@ with a model; the other rows are not results from runs.
 
 `data/example.jsonl` has five tasks on `data/example_databases/bookshop`, a synthetic database written for this
 server. `bookshop_3` and `bookshop_4` have a follow-up question. `bookshop_4` and `bookshop_5` have two critical
-ambiguities each, as most published tasks do, and `bookshop_5` hides no knowledge. `task_data.py` is the row schema.
+ambiguities each, as most published tasks do, and `bookshop_5` hides no knowledge. `task_input.py` is the row schema.
 
 The agent's config declares the file once for each mode's taskset, `bird_interact:c_interact_example` and
 `bird_interact:a_interact_example`, and `environment_server_routes` sends each to its mode's server.

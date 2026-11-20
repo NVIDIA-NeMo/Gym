@@ -70,7 +70,7 @@ from environment_servers.bird_interact.simulator import (
     response_generator_prompt,
     segment_sql,
 )
-from environment_servers.bird_interact.task_data import BirdInteractTask
+from environment_servers.bird_interact.task_input import BirdInteractTask
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ModelServerRef
 from nemo_gym.core import EpisodeId, MaterializedTask, NeMoGymResponse, TaskId

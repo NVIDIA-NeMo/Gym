@@ -83,7 +83,7 @@ from environment_servers.bird_interact.simulator import (
     read_reply,
     response_generator_prompt,
 )
-from environment_servers.bird_interact.task_data import BirdInteractTask, custom_test_cases
+from environment_servers.bird_interact.task_input import BirdInteractTask, custom_test_cases
 from nemo_gym import PARENT_DIR
 from nemo_gym.agents import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.client import get_response_json, raise_for_status
