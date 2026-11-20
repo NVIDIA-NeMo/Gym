@@ -25,9 +25,6 @@ from nemo_gym.utils.network_policy import restricted_network_policy
 LOGGER = logging.getLogger(__name__)
 # Provider label values stay within the common 63-character limit.
 _LABEL_LIMIT = 63
-# A start that hangs (a provider's create without a time limit of its own) must not hold a seed and its session's
-# lock: the default bound covers a remote provider's create that pulls a large image.
-START_TIMEOUT_S = 1800.0
 # The supervisor gives a server about a second to exit, so shutdown stops sandboxes concurrently, this many at a time.
 SHUTDOWN_STOP_CONCURRENCY = 64
 
@@ -52,13 +49,15 @@ class LentSandboxes:
     ones, and the session's next lend, its release or the shutdown tries the stop again.
 
     A lend may give the sandbox its own image, more environment variables and a setup to run against it before it is
-    lent, such as linking a task's commands. Its start runs to its end once begun, within ``start_timeout_s``, even
-    while the request that asked for it is being cancelled: a create cut in flight leaves a sandbox whose id the
-    provider never returned, which nothing here could stop. A lend cancelled meanwhile lends nothing; it stops the
-    sandbox it started. A start that ``start_timeout_s`` cuts before the provider returned the sandbox's id is logged
-    at ERROR with the session, the task, the provider, the image and the labels. A provider that deletes the sandbox
-    of a create its caller gave up on, as OpenSandbox's does, stops the sandbox the create may have left; with any
-    other, a reaper can find it by those. Once :meth:`release_all` has begun, no lend starts a sandbox.
+    lent, such as linking a task's commands. A lend cancelled while its sandbox starts lends nothing and stops the
+    sandbox it began. Without ``start_timeout_s`` the cancel cuts the start, as it cuts any await, and a create cut
+    in flight can leave a sandbox whose id the provider never returned, which nothing here could stop. With
+    ``start_timeout_s``, the start runs to its end once begun, within that many seconds, even while the request
+    that asked for it is being cancelled, and a start the limit cuts before the provider returned the sandbox's id
+    is logged at ERROR with the session, the task, the provider, the image and the labels. A provider that deletes
+    the sandbox of a create its caller gave up on, as OpenSandbox's does, stops the sandbox the create may have
+    left; with any other, a reaper can find it by those. Once :meth:`release_all` has begun, no lend starts a
+    sandbox.
 
     With ``network_access="model_only"``, each sandbox is created with an egress rule that allows only the host of
     ``model_server``, the model server that a harness in the sandbox calls. ``model_and_tools`` also allows the hosts
@@ -77,7 +76,7 @@ class LentSandboxes:
         network_access: LentSandboxNetworkAccess = "inherit",
         model_server: str | None = None,
         tool_servers: Sequence[str] = (),
-        start_timeout_s: float = START_TIMEOUT_S,
+        start_timeout_s: float | None = None,
     ) -> None:
         if network_access != "inherit":
             if not model_server:
@@ -124,10 +123,10 @@ class LentSandboxes:
         """Return the access a harness needs to the session's sandbox, and start the sandbox on the first call.
 
         ``files`` maps absolute paths in the sandbox to their contents; it can be empty. ``image`` replaces the
-        configured image for this sandbox, ``env`` adds environment variables to the configured ones, and ``setup``
-        runs against the started sandbox, its files delivered, before it is lent. A repeated call, as for a repeated
-        seed, returns the same sandbox. If the new sandbox cannot start, receive its files, be set up or be described
-        within ``start_timeout_s``, or the lend is cancelled meanwhile, it is stopped and the error is raised. If that
+        configured image for this sandbox, ``env`` adds environment variables to the configured ones, and ``setup`` runs
+        against the started sandbox, its files delivered, before it is lent. A repeated call, as for a repeated seed,
+        returns the same sandbox. If the new sandbox cannot start, receive its files, be set up or be described (within
+        ``start_timeout_s``, if set), or the lend is cancelled meanwhile, it is stopped and the error is raised. If that
         stop fails too, the sandbox is kept for a later stop: the session's next lend stops it before it starts another
         one, and a failed stop there fails the lend. Once :meth:`release_all` has begun, a lend starts nothing and
         answers 503, which a caller may retry against another server.
@@ -161,15 +160,16 @@ class LentSandboxes:
         started = self._starting[resources_session_id] = asyncio.Event()
         start_limit: anyio.CancelScope | None = None
         try:
-            # The start runs to its end once begun (the class docstring); start() and start_with_setup() stop the
-            # sandbox themselves, shielded like every stop, when delivering its files or its setup fails.
-            with anyio.CancelScope(shield=True), anyio.fail_after(self._start_timeout_s) as start_limit:
-                if setup is None:
-                    await sandbox.start(spec)
-                else:
-                    await sandbox.start_with_setup(spec, setup)
+            # start() and start_with_setup() stop the sandbox themselves, shielded like every stop, when delivering its
+            # files or its setup fails.
+            if self._start_timeout_s is None:  # a cancel cuts the start (the class docstring)
+                await (sandbox.start(spec) if setup is None else sandbox.start_with_setup(spec, setup))
                 access = await self._access(sandbox)
-            await anyio.lowlevel.checkpoint()  # a lend cancelled meanwhile lends nothing
+            else:  # the start runs to its end once begun (the class docstring)
+                with anyio.CancelScope(shield=True), anyio.fail_after(self._start_timeout_s) as start_limit:
+                    await (sandbox.start(spec) if setup is None else sandbox.start_with_setup(spec, setup))
+                    access = await self._access(sandbox)
+                await anyio.lowlevel.checkpoint()  # a lend cancelled meanwhile lends nothing
             self._refuse_after_release_all()  # release_all began during the start: it would not stop this sandbox
         except BaseException as error:
             if start_limit is not None and start_limit.cancel_called and sandbox.sandbox_id is None:
