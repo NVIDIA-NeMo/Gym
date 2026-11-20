@@ -16,8 +16,20 @@ async def test_a_raised_exec_is_retried_and_its_result_returned(caplog: pytest.L
     sandbox = AsyncMock()
     sandbox.exec.side_effect = [ConnectionError("502: The sandbox could not be reached"), OK]
     assert await exec_idempotent(sandbox, "git rev-parse HEAD", what="Reading HEAD", delay_s=0, cwd="/w") is OK
-    assert sandbox.exec.await_count == 2 and sandbox.exec.await_args.kwargs == {"cwd": "/w"}
+    assert sandbox.exec.await_count == 2
+    assert sandbox.exec.await_args.kwargs == {"cwd": "/w", "env": None, "timeout_s": None}
     assert "Reading HEAD failed (attempt 1/3)" in caplog.text
+
+
+async def test_the_working_directory_environment_and_timeout_reach_every_attempt() -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [ConnectionError("502: The sandbox could not be reached"), OK]
+    result = await exec_idempotent(
+        sandbox, "git status", what="Reading the status", delay_s=0, cwd="/w", env={"GIT_PAGER": "cat"}, timeout_s=7
+    )
+    assert result is OK
+    forwarded = {"cwd": "/w", "env": {"GIT_PAGER": "cat"}, "timeout_s": 7}
+    assert [(call.args, call.kwargs) for call in sandbox.exec.await_args_list] == [(("git status",), forwarded)] * 2
 
 
 async def test_a_non_zero_exit_is_returned_without_a_retry() -> None:
