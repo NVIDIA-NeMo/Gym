@@ -323,6 +323,37 @@ async def test_the_creating_sandbox_records_usage_and_its_final_sample_precedes_
     assert summaries["container"].sample_count == provider.reads >= 2
 
 
+async def test_a_retried_stop_keeps_the_final_read_taken_before_the_failed_close() -> None:
+    class CloseFailsOnce(UsageProvider):
+        close_calls = 0
+
+        async def usage(self, handle: SandboxHandle) -> tuple[SandboxUsageSample, ...]:
+            if self.close_calls:
+                # The failed close removed the container after all: any later read finds it gone.
+                self.reads += 1
+                raise SandboxUsageUnavailable("sandbox_gone")
+            return await super().usage(handle)
+
+        async def close(self, handle: SandboxHandle) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise TimeoutError("docker rm timed out")
+            await super().close(handle)
+
+    provider = CloseFailsOnce()
+    sandbox = await AsyncSandbox(provider).start(SandboxSpec(image="img"))
+    with pytest.raises(TimeoutError):
+        await sandbox.stop()
+    reads_before_retry = provider.reads
+    first = {summary.scope: summary for summary in sandbox.resource_usage}
+    await sandbox.stop()
+
+    assert provider.closed and provider.reads == reads_before_retry
+    assert {summary.scope: summary for summary in sandbox.resource_usage} == first
+    assert all(summary.final_read and summary.unavailable_reason is None for summary in first.values())
+    assert first["container"].cpu_usage_usec_total == 1000 * reads_before_retry
+
+
 async def test_usage_sampling_can_be_turned_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NEMO_GYM_SANDBOX_USAGE", "0")
     provider = UsageProvider()
