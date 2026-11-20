@@ -56,6 +56,7 @@ if TYPE_CHECKING:
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
         seed_rebinds_tool_accesses,
+        seed_resources_session_id,
         seed_restarts,
         seed_verify_step_type,
     )
@@ -271,6 +272,7 @@ _PUBLIC_API = {
     "require_rollout": "_checkpoint.agent",
     "seed_rebinds_tool_accesses": "_checkpoint.steps",
     "seed_restarts": "_checkpoint.steps",
+    "seed_resources_session_id": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",
     "write_participant_state": "_checkpoint.store",
