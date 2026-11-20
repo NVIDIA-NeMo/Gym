@@ -335,6 +335,14 @@ sandbox = [
     # License: Apache 2.0
     "opensandbox>=0.1.15",
 
+    # Luxor AI SDK (formerly published as `tenki`): used by the Luxor sandbox provider for
+    # create/exec/files/ports/terminate and by its image build helper for templates.
+    # Lower bound 1.5.3: the version this provider's async API usage is validated against.
+    # Upper bound <2: the SDK-conformance unit test guards raising this ceiling.
+    # Updated: Thu Nov 19, 2026 with luxor-ai>=1.5.3,<2
+    # License: MIT https://github.com/LuxorLabs/tenki-sdk-python/blob/main/LICENSE
+    "luxor-ai>=1.5.3,<2",
+
     # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
     # License: Apache 2.0 https://pypi.org/project/daytona/
     "daytona>=0.179.0",

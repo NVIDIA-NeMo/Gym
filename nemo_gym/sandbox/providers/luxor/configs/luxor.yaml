@@ -1,0 +1,27 @@
+# Luxor sandbox provider config.
+#
+# LUXOR_API_KEY is read by the SDK. Do not put credentials in this file.
+# LUXOR_API_URL and LUXOR_SANDBOX_GATEWAY_URL may be set to override the hosted service.
+#
+# Usage:
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/luxor/configs/luxor.yaml, $MODEL]"
+
+sandbox:
+  default_metadata:
+    sandbox-api: luxor-sdk
+  luxor:
+    connection:
+      timeout_s: 60
+    create:
+      ready_timeout_s: 300
+      # Bounds every sandbox even when SandboxSpec.ttl_s is omitted.
+      max_duration_s: 3600
+      probe_command: printf nemo-gym-luxor-ready
+      probe_expected_stdout: nemo-gym-luxor-ready
+      probe_timeout_s: 30
+      # SandboxSpec.image -> Luxor registry ref; generate it with nemo_gym.sandbox.providers.luxor.build.
+      image_map: {}
+    operations:
+      close_timeout_s: 120
+      close_poll_interval_s: 0.5
+      transfer_timeout_s: 300
