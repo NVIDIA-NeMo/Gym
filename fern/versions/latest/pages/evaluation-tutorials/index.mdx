@@ -36,6 +36,10 @@ See the benchmark README for WebVoyager prerequisites, end-to-end commands, and 
 Run the maintained 812-task population against self-hosted sites. See the benchmark README for deployment, reset, judge, and single-display requirements.
 </Card>
 
+<Card title="Evaluate DeepSWE with Other Harnesses" href="https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/deepswe/README.md#run-other-harnesses">
+Run DeepSWE with `deepswe/hermes`, `deepswe/nooa`, `deepswe/openclaw`, `deepswe/pi` or `deepswe/codex` in place of OpenCode. The agent sandbox has no network, so first build the offline runtime the README names: a wheelhouse for NOOA, or a Node runtime for OpenClaw, Pi and Codex (Hermes uploads its own).
+</Card>
+
 <Card title="Reverify Rollouts" href="/tutorials/evaluation-tutorials/reverify-rollouts">
 Recompute rewards from existing rollouts after changing a verifier parameter, without re-running model inference.
 </Card>

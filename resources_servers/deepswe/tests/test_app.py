@@ -14,11 +14,12 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
 import resources_servers.deepswe.app as app_module
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, ModelServerRef
 from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
     PROVIDER_IO_TIMEOUT,
@@ -2054,6 +2055,32 @@ def test_each_harness_recipe_binds_its_own_deepswe_instances(
     else:
         assert list(resources["agent_runtime_paths"]) == [harness]
         assert agent[runtime_setting] == f"{app_module.AGENT_RUNTIME_DIR}/{harness}"
+
+
+@pytest.mark.parametrize(
+    "harness,agent_type,concurrency",
+    [
+        ("opencode", "opencode_agent", 1024),
+        ("hermes", "hermes_agent", 1024),
+        ("openclaw", "openclaw_agent", 1024),
+        ("pi", "pi_agent", 1024),
+        ("codex", "codex_agent", 1024),
+        # NOOA's agent has no admission limit; if it gains one, set it in nooa.yaml and here.
+        ("nooa", "nooa_agent", None),
+    ],
+)
+def test_each_harness_recipe_admits_every_episode_at_once(
+    harness: str, agent_type: str, concurrency: int | None
+) -> None:
+    # A harness agent takes its concurrency slot once the episode's agent sandbox is up and its deadline is running,
+    # so an episode past a smaller inherited limit waits until it times out.
+    recipe = OmegaConf.load(_DEEPSWE_BENCHMARKS / f"{harness}.yaml")
+    initial = OmegaConf.merge(recipe, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT)
+    config = OmegaConf.to_container(
+        GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial), resolve=True
+    )
+
+    assert config[f"deepswe_{harness}_agent"]["responses_api_agents"][agent_type].get("concurrency") == concurrency
 
 
 @pytest.mark.parametrize("return_code,error_type", [(1, None), (0, "timeout")])
