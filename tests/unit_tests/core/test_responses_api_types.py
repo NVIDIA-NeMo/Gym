@@ -93,6 +93,9 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseComputerToolCall,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseCustomToolCall,
+    NeMoGymResponseCustomToolCallOutput,
+    NeMoGymResponseCustomToolCallOutputInputItem,
+    NeMoGymResponseCustomToolCallOutputItem,
     NeMoGymResponseFileSearchToolCall,
     NeMoGymResponseFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
@@ -769,6 +772,61 @@ class TestDiscriminatedResponseItems:
         assert type(local_output_item) is NeMoGymFunctionCallOutput
         assert type(provider_output_item) is NeMoGymResponseFunctionCallOutput
         assert provider_output_item.model_dump(mode="json", exclude_unset=True) == output_payload
+
+    @pytest.mark.parametrize("id_fields", [{}, {"id": None}, {"id": "provider-message"}])
+    @pytest.mark.parametrize("mode", ["python", "json"])
+    @pytest.mark.parametrize("token_metadata", [{}, _TOKEN_METADATA], ids=["plain", "training"])
+    @pytest.mark.parametrize("content", [[], [{"type": "input_text", "text": "literal <think>text</think>\n"}]])
+    def test_canonical_input_message_id_survives_wire_round_trip(
+        self, id_fields: dict, mode: str, token_metadata: dict, content: list
+    ) -> None:
+        payload = {
+            "type": "message",
+            "role": "assistant",
+            "content": content,
+            **id_fields,
+            **token_metadata,
+        }
+        request = NeMoGymResponseCreateParamsNonStreaming(input=[payload])
+        request_dump = request.model_dump(mode=mode)
+        item = request_dump["input"][0]
+        assert item.get("id") == id_fields.get("id")
+        assert ("id" in item) == (id_fields.get("id") is not None)
+        assert "status" not in item
+        reloaded = NeMoGymResponseCreateParamsNonStreaming.model_validate(request_dump)
+        assert reloaded.model_dump(mode=mode) == request_dump
+        response = NeMoGymResponse.model_validate(_response_with_output(reloaded.input))
+        response_dump = response.model_dump(mode=mode)
+        assert response_dump["output"][0] == item
+        assert NeMoGymResponse.model_validate(response_dump).model_dump(mode=mode) == response_dump
+        assert isinstance(response.output[0], TokenIDLogProbMixin) == bool(token_metadata)
+
+    @pytest.mark.parametrize("with_id", [False, True])
+    def test_custom_tool_output_input_round_trips_without_inventing_status(self, with_id: bool) -> None:
+        payload = {"type": "custom_tool_call_output", "call_id": "call_1", "output": "tool failed"}
+        if with_id:
+            payload["id"] = "provider-result"
+        request_item = NeMoGymResponseCreateParamsNonStreaming(input=[payload]).input[0]
+        response = NeMoGymResponse.model_validate(_response_with_output([payload]))
+        assert type(request_item) is NeMoGymResponseCustomToolCallOutput
+        assert type(response.output[0]) is NeMoGymResponseCustomToolCallOutputInputItem
+        assert request_item.model_dump(mode="json", exclude_unset=True) == payload
+        dumped = response.model_dump(mode="json", exclude_unset=True)
+        assert dumped["output"] == [payload]
+        assert NeMoGymResponse.model_validate(dumped).model_dump(mode="json", exclude_unset=True) == dumped
+        assert "status" not in dumped["output"][0]
+
+    def test_custom_tool_output_provider_envelope_preserves_status(self) -> None:
+        payload = {
+            "type": "custom_tool_call_output",
+            "call_id": "call_1",
+            "output": "tool failed",
+            "id": "provider-result",
+            "status": "incomplete",
+        }
+        response = NeMoGymResponse.model_validate(_response_with_output([payload]))
+        assert type(response.output[0]) is NeMoGymResponseCustomToolCallOutputItem
+        assert response.model_dump(mode="json", exclude_unset=True)["output"] == [payload]
 
     @pytest.mark.parametrize("token_metadata", [{}, _TOKEN_METADATA], ids=["plain", "training"])
     @pytest.mark.parametrize("mode", ["python", "json"])
@@ -1960,6 +2018,57 @@ def test_gym_input_literal_domains_match_sdk_input(tag: str) -> None:
         f"Gym input {tag!r} declares Literal fields absent from the SDK input model: "
         f"{gym_only_literals}. These are usually output-only fields leaking through a shared owner."
     )
+
+
+@pytest.mark.parametrize("status", ["completed", "in_progress", "incomplete"])
+@pytest.mark.parametrize("typed", [False, True])
+def test_custom_tool_provider_result_replays_without_output_only_status(status: str, typed: bool) -> None:
+    payload = {
+        "type": "custom_tool_call_output",
+        "id": "result_1",
+        "call_id": "call_1",
+        "output": "Exact tool output.\n",
+        "status": status,
+    }
+    original = deepcopy(payload)
+    item = (
+        responses_api_types_module.NeMoGymResponseCustomToolCallOutputItem.model_validate(payload)
+        if typed
+        else payload
+    )
+
+    request = NeMoGymResponseCreateParamsNonStreaming(input=[item])
+    expected = {key: value for key, value in original.items() if key != "status"}
+
+    assert request.model_dump(mode="json", exclude_unset=True)["input"] == [expected]
+    restored = NeMoGymResponseCreateParamsNonStreaming.model_validate_json(request.model_dump_json(exclude_unset=True))
+    assert restored.model_dump(mode="json", exclude_unset=True)["input"] == [expected]
+    assert payload == original
+    if typed:
+        assert item.model_dump(exclude_unset=True) == original
+
+
+def test_client_shaped_custom_tool_transcript_result_replays_its_explicit_type_tag() -> None:
+    payload = {"type": "custom_tool_call_output", "call_id": "call_1", "output": "kept"}
+    item = NeMoGymResponseCustomToolCallOutputInputItem.model_validate(payload)
+    response = NeMoGymResponse.model_validate(_response_with_output([item]))
+
+    request = NeMoGymResponseCreateParamsNonStreaming(input=response.output)
+
+    assert type(response.output[0]) is NeMoGymResponseCustomToolCallOutputInputItem
+    assert type(request.input[0]) is NeMoGymResponseCustomToolCallOutput
+    assert item.model_dump(mode="json", exclude_unset=True) == payload
+    assert response.model_dump(mode="json", exclude_unset=True)["output"] == [payload]
+    assert request.model_dump(mode="json", exclude_unset=True)["input"] == [payload]
+    restored = NeMoGymResponseCreateParamsNonStreaming.model_validate_json(request.model_dump_json(exclude_unset=True))
+    assert restored.model_dump(mode="json", exclude_unset=True)["input"] == [payload]
+
+
+def test_custom_tool_replay_rejects_unknown_provider_status() -> None:
+    with pytest.raises(ValidationError, match="Invalid provider custom-tool output status"):
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"type": "custom_tool_call_output", "call_id": "call_1", "output": "kept", "status": "unknown"}]
+        )
 
 
 def test_shared_gym_owners_do_not_hide_unreplayable_output_literals() -> None:
