@@ -4,6 +4,7 @@
 
 import asyncio
 import socket
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -140,101 +141,151 @@ def _never_accepting_listener() -> tuple[socket.socket, list[socket.socket], int
     return listener, queued, port
 
 
-@pytest.mark.parametrize(
-    ("phase", "connect_timeout", "waited_for_response"),
-    [
-        pytest.param("sent", None, True, id="sent-and-never-answered"),
-        pytest.param("uploading", None, False, id="upload-still-in-progress"),
-        pytest.param("sent", 5.0, True, id="sent-and-never-answered-with-a-connect-timeout"),
-        pytest.param("never-connected", None, False, id="never-connected"),
-        pytest.param("never-connected", 0.2, False, id="connect-timeout"),
-        pytest.param("pool", None, False, id="no-free-pooled-connection"),
-    ],
-)
-async def test_only_a_timeout_after_the_request_was_sent_is_a_response_timeout(
-    monkeypatch, phase: str, connect_timeout: float | None, waited_for_response: bool
-):
-    upload_received = asyncio.Event()
-    release_response = asyncio.Event()
+@pytest.fixture
+def timeout_transport(monkeypatch):
+    @asynccontextmanager
+    async def open_transport(*, connect_timeout=None, request_class=aiohttp.ClientRequest):
+        upload_received = asyncio.Event()
+        release_response = asyncio.Event()
+
+        async def never_answer(request):
+            await request.read()
+            upload_received.set()
+            await release_response.wait()
+            return web.json_response({})
+
+        app = web.Application()
+        app.router.add_post("/v1/responses", never_answer)
+        async with (
+            asyncio.timeout(30),  # Bound stuck I/O, not the timeout being asserted.
+            TestServer(app) as server,
+            aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit_per_host=1), request_class=request_class
+            ) as session,
+        ):
+            monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+            monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+            model = NeMoGymAsyncOpenAI(
+                api_key="test",
+                base_url=str(server.make_url("/v1")),
+                max_num_tries=1,
+                request_timeout_seconds=0.5,
+                connect_timeout_seconds=connect_timeout,
+            )
+            try:
+                yield SimpleNamespace(
+                    model=model,
+                    session=session,
+                    url=str(server.make_url("/v1/responses")),
+                    upload_received=upload_received,
+                )
+            finally:
+                release_response.set()
+
+    return open_transport
+
+
+@pytest.fixture
+def expire_total_timeout(monkeypatch):
     total_timer = None
 
-    class PhaseTimeout(aiohttp.client.TimeoutHandle):
+    class ControlledTotalTimeout(aiohttp.client.TimeoutHandle):
         def start(self):
             nonlocal total_timer
             total_timer = self
-            # The real aiohttp timeout still cancels the request, but only after the
-            # intended upload phase. Wall-clock deadlines can expire during setup in CI.
+            # Keep aiohttp's real cancellation, but expire only at the intended upload boundary.
             return None
 
-    class RequestWithTimeoutAfterUpload(aiohttp.ClientRequest):
-        async def write_bytes(self, writer, conn, content_length=None):
-            await super().write_bytes(writer, conn, content_length)
-            if waited_for_response:
-                asyncio.get_running_loop().call_soon(total_timer)
+    def expire():
+        assert total_timer is not None
+        asyncio.get_running_loop().call_soon(total_timer)
 
-    async def never_answer(request):
-        await request.read()
-        upload_received.set()
-        await release_response.wait()
-        return web.json_response({})
+    monkeypatch.setattr(aiohttp.client, "TimeoutHandle", ControlledTotalTimeout)
+    return expire
 
-    if phase in {"sent", "uploading"}:
-        monkeypatch.setattr(aiohttp.client, "TimeoutHandle", PhaseTimeout)
-    app = web.Application()
-    app.router.add_post("/v1/responses", never_answer)
-    server = TestServer(app)
-    await server.start_server()
-    listener = None
-    queued = []
-    url = str(server.make_url("/v1/responses"))
-    if phase == "never-connected":
-        listener, queued, port = _never_accepting_listener()
-        url = f"http://127.0.0.1:{port}/v1/responses"
-    session = aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit_per_host=1), request_class=RequestWithTimeoutAfterUpload
-    )
-    held = None
-    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
-    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
-    model = NeMoGymAsyncOpenAI(
-        api_key="test",
-        base_url=str(server.make_url("/v1")),
-        max_num_tries=1,
-        request_timeout_seconds=0.5,
-        connect_timeout_seconds=connect_timeout,
-    )
-    try:
-        async with asyncio.timeout(30):  # Bound stuck I/O, not the phase under test.
-            if phase == "pool":
-                held = asyncio.create_task(session.post(url, data=b"x"))
-                await upload_received.wait()  # Occupy the sole connection before the model call.
-            with RequestFailureLog.capture() as log:
-                with pytest.raises(TimeoutError) as caught:
 
-                    async def unfinished_body():
-                        yield b"started"
-                        asyncio.get_running_loop().call_soon(total_timer)
-                        await asyncio.Event().wait()
+async def _timeout_report(model, url, **payload):
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(TimeoutError) as caught:
+            await model._request(method="POST", url=url, **payload)
+        return log.reply_report(caught.value)
 
-                    payload = {"data": unfinished_body()} if phase == "uploading" else {"json": {"model": "m"}}
-                    await model._request(method="POST", url=url, **payload)
-                report = log.reply_report(caught.value)
-    finally:
-        if held is not None:
-            held.cancel()
-            await asyncio.gather(held, return_exceptions=True)
-        release_response.set()
-        await session.close()
-        await server.close()
-        if listener is not None:
-            listener.close()
-        for pending in queued:
-            pending.close()
 
+def _assert_timeout_observation(report, waited_for_response):
     [attempt] = report.events.values()
     assert report.failure_id == attempt.event_id
     assert (attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON) is waited_for_response
     assert (attempt.details.request_upload_complete is True) is waited_for_response
+
+
+@pytest.mark.parametrize(
+    "connect_timeout",
+    [
+        pytest.param(None, id="sent-and-never-answered"),
+        pytest.param(5.0, id="sent-and-never-answered-with-a-connect-timeout"),
+    ],
+)
+async def test_timeout_after_completed_upload_is_a_response_timeout(
+    timeout_transport, expire_total_timeout, connect_timeout
+):
+    class RequestWithTimeoutAfterUpload(aiohttp.ClientRequest):
+        async def write_bytes(self, writer, conn, content_length=None):
+            await super().write_bytes(writer, conn, content_length)
+            expire_total_timeout()
+
+    async with timeout_transport(
+        connect_timeout=connect_timeout, request_class=RequestWithTimeoutAfterUpload
+    ) as transport:
+        report = await _timeout_report(transport.model, transport.url, json={"model": "m"})
+
+    _assert_timeout_observation(report, True)
+
+
+async def test_timeout_during_upload_is_not_a_response_timeout(timeout_transport, expire_total_timeout):
+    async def unfinished_body():
+        yield b"started"
+        expire_total_timeout()
+        await asyncio.Event().wait()
+
+    async with timeout_transport() as transport:
+        report = await _timeout_report(transport.model, transport.url, data=unfinished_body())
+
+    _assert_timeout_observation(report, False)
+
+
+@pytest.mark.parametrize(
+    "connect_timeout",
+    [
+        pytest.param(None, id="never-connected"),
+        pytest.param(0.2, id="connect-timeout"),
+    ],
+)
+async def test_timeout_before_connection_is_not_a_response_timeout(timeout_transport, connect_timeout):
+    listener, queued, port = _never_accepting_listener()
+    try:
+        async with timeout_transport(connect_timeout=connect_timeout) as transport:
+            report = await _timeout_report(
+                transport.model, f"http://127.0.0.1:{port}/v1/responses", json={"model": "m"}
+            )
+    finally:
+        listener.close()
+        for pending in queued:
+            pending.close()
+
+    _assert_timeout_observation(report, False)
+
+
+async def test_timeout_waiting_for_pool_is_not_a_response_timeout(timeout_transport):
+    async with timeout_transport() as transport:
+        held = asyncio.create_task(transport.session.post(transport.url, data=b"x"))
+        try:
+            await transport.upload_received.wait()
+            report = await _timeout_report(transport.model, transport.url, json={"model": "m"})
+        finally:
+            held.cancel()
+            await asyncio.gather(held, return_exceptions=True)
+
+    _assert_timeout_observation(report, False)
 
 
 def _reply(status: int, *, headers: dict | None = None, body: bytes = b"") -> SimpleNamespace:
