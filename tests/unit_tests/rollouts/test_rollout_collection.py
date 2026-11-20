@@ -16747,6 +16747,328 @@ class TestRunRecordWriter:
         with pytest.raises(ValueError, match="shard label"):
             _RunRecordWriter(tmp_path, label)
 
+    @staticmethod
+    def _staged_rows(count: int) -> list[dict]:
+        return [
+            {TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "a"}}
+            for index in range(count)
+        ]
+
+    @staticmethod
+    def _shard_files(run_dir: Path) -> dict[str, bytes]:
+        return {path.name: path.read_bytes() for path in sorted(run_dir.iterdir()) if not path.name.endswith(".lock")}
+
+    def test_a_staged_shard_reaches_the_run_folder_whole_once_its_last_row_settles(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        status_rows = self._staged_rows(2)
+        # Rows that name no server, so the manifest's configuration identity needs no servers configured.
+        rows = [{key: row[key] for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME)} for row in status_rows]
+        staged = _RunRecordWriter(
+            tmp_path / "run", "step_1", rows=rows, status_rows=status_rows, run_id="r", staging_dir=tmp_path / "local"
+        )
+        staged.write({**rows[0], "reward": 1.0})
+        staged.row_settled()
+        # Nothing but the shard's lock touches the run folder before the shard is published.
+        assert self._shard_files(tmp_path / "run") == {}
+        staged.write({**rows[1], NG_FAILURE_CLASS_KEY: "agent_run_error"})
+        assert self._shard_files(tmp_path / "run") == {}
+        staged.row_settled()
+        assert list((tmp_path / "local").iterdir()) == []
+        published = self._shard_files(tmp_path / "run")
+        status = json.loads(published.pop("rollouts-step_1_batch_status.json"))
+        assert status["members"]["a"]["completed_rollout_count"] == 1
+
+        # The files a writer in the run folder itself writes, the manifest included: it names the run folder's
+        # files, not the staged ones, so resume computes the same one.
+        direct = _RunRecordWriter(tmp_path / "run", "step_1", rows=rows, status_rows=status_rows, run_id="r")
+        direct.write({**rows[0], "reward": 1.0})
+        direct.write({**rows[1], NG_FAILURE_CLASS_KEY: "agent_run_error"})
+        written = self._shard_files(tmp_path / "run")
+        del written["rollouts-step_1_batch_status.json"]
+        assert published == written
+        assert direct.manifest.config_digest == staged.manifest.config_digest != "unrecorded"
+
+    def test_a_row_that_raised_still_counts_toward_publishing(self, tmp_path: Path) -> None:
+        """A failed /run without route_failures_to_sidecar writes nothing, and the shard is still published."""
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        rows = self._staged_rows(2)
+        writer = _RunRecordWriter(tmp_path / "run", "s", rows=rows, status_rows=rows, staging_dir=tmp_path / "local")
+        writer.write({**rows[0], "reward": 1.0})
+        writer.row_settled()
+        writer.row_settled()  # the second row raised before writing a record
+
+        assert self._lines(writer.rollouts_fpath) == [{**rows[0], "reward": 1.0}]
+        status = json.loads(writer.status_fpath.read_text())
+        assert (
+            status["members"]["a"]["completed_rollout_count"],
+            status["members"]["a"]["remaining_rollout_count"],
+        ) == (
+            1,
+            1,
+        )
+        assert list((tmp_path / "local").iterdir()) == []
+
+    def test_rows_awaited_after_an_early_close_land_in_the_published_shard(self, tmp_path: Path) -> None:
+        """Three rows, one awaited, close, two awaited: the shard holds all three, as without staging."""
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        rows = self._staged_rows(3)
+        received: list[dict] = []
+        writer = _RunRecordWriter(
+            tmp_path / "run",
+            "s",
+            rows=rows,
+            status_rows=rows,
+            staging_dir=tmp_path / "local",
+            sink=lambda kind, record: received.append(record),
+        )
+        writer.write({**rows[0], "reward": 1.0})
+        writer.row_settled()
+        writer.close()
+        assert [row[TASK_INDEX_KEY_NAME] for row in self._lines(writer.rollouts_fpath)] == [0]
+        for row in rows[1:]:
+            writer.write({**row, "reward": 1.0})
+            writer.row_settled()
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in self._lines(writer.rollouts_fpath)] == [0, 1, 2]
+        assert received == self._lines(writer.rollouts_fpath)
+        status = json.loads(writer.status_fpath.read_text())
+        assert (
+            status["members"]["a"]["completed_rollout_count"],
+            status["members"]["a"]["remaining_rollout_count"],
+        ) == (
+            3,
+            0,
+        )
+        assert list((tmp_path / "local").iterdir()) == []
+
+    def test_the_sink_receives_a_staged_shard_when_it_is_published_in_write_order(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        received: list[tuple[str, dict]] = []
+        rows = self._staged_rows(3)
+        writer = _RunRecordWriter(
+            tmp_path / "run",
+            "s",
+            rows=rows,
+            record_omitted_rollouts=True,
+            staging_dir=tmp_path / "local",
+            sink=lambda kind, record: received.append((kind, record)),
+        )
+        writer.write({**rows[0], NG_FAILURE_CLASS_KEY: "agent_run_error", NG_FAILURE_MAX_ATTEMPTS_KEY: 3})
+        writer.write({**rows[1], "reward": 1.0})
+        writer.write({**rows[2], NG_FAILURE_CLASS_KEY: "kill_shaped", NG_NO_PERSIST_KEY: True})
+        assert received == []
+        writer.close()
+
+        assert [kind for kind, _ in received] == ["failure", "rollout", "omitted"]
+        failures = self._lines(writer.failures_fpath)
+        assert [record for _, record in received] == [failures[0], *self._lines(writer.rollouts_fpath), failures[1]]
+
+    def test_a_superseded_staged_writer_does_not_publish_or_reach_the_sink(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        received: list[float] = []
+
+        def sink(kind: str, record: dict) -> None:
+            received.append(record["reward"])
+
+        first = _RunRecordWriter(tmp_path / "run", "s", staging_dir=tmp_path / "node0", sink=sink)
+        second = _RunRecordWriter(tmp_path / "run", "s", staging_dir=tmp_path / "node1", sink=sink)
+        first.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0})
+        second.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+
+        with pytest.raises(RuntimeError, match="replaced by another writer.*stay in"):
+            first.close()
+        assert self._shard_files(tmp_path / "run") == {}
+        assert received == []
+        [kept] = (tmp_path / "node0").iterdir()
+        assert self._lines(kept / "rollouts-s.jsonl") == [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0}
+        ]
+        second.close()
+        assert [row["reward"] for row in self._lines(second.rollouts_fpath)] == [1.0]
+        assert received == [1.0]
+
+    def test_the_earlier_shard_under_the_label_stays_readable_until_the_staged_one_is_published(
+        self, tmp_path: Path
+    ) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+        from nemo_gym.rollouts.rollout_recovery import resume_drift_path_for
+
+        earlier = _RunRecordWriter(tmp_path, "step_1", rows=self._staged_rows(2), status_rows=self._staged_rows(2))
+        earlier.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0})
+        resume_drift_path_for(earlier.manifest_fpath).write_text("{}")
+        replayed = _RunRecordWriter(tmp_path, "step_1", staging_dir=tmp_path / "local")
+        assert [row["reward"] for row in self._lines(earlier.rollouts_fpath)] == [0.0]
+        assert earlier.status_fpath.exists()
+        # The staged writer owns the label from the moment it opens.
+        with pytest.raises(RuntimeError, match="replaced by another writer"):
+            earlier.write({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0})
+
+        replayed.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+        replayed.close()
+
+        assert [row["reward"] for row in self._lines(replayed.rollouts_fpath)] == [1.0]
+        # What the earlier writer left and this shard does not have is gone with it, its status included.
+        assert not replayed.materialized_fpath.exists() and not replayed.manifest_fpath.exists()
+        assert not replayed.status_fpath.exists()
+        assert not resume_drift_path_for(replayed.manifest_fpath).exists()
+
+    def test_publishing_places_the_rollouts_file_and_then_the_status_file_last(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Readers find a shard by its rollouts file (the Store, aggregation) or by its status (gym eval status)."""
+        from nemo_gym.rollouts import rollout_collection
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        rows = self._staged_rows(1)
+        writer = _RunRecordWriter(tmp_path / "run", "s", rows=rows, status_rows=rows, staging_dir=tmp_path / "local")
+        copied: list[str] = []
+        copyfile = shutil.copyfile
+
+        def recording_copyfile(source, target):
+            copied.append(Path(source).name)
+            return copyfile(source, target)
+
+        monkeypatch.setattr(rollout_collection.shutil, "copyfile", recording_copyfile)
+        writer.write({**rows[0], "reward": 1.0})
+        writer.row_settled()
+
+        assert copied[-2:] == ["rollouts-s.jsonl", "rollouts-s_batch_status.json"]
+        assert set(copied) == set(self._shard_files(tmp_path / "run"))
+
+    @pytest.mark.parametrize("failing", ["rollouts-s.jsonl", "rollouts-s_batch_status.json"])
+    def test_a_failed_copy_leaves_the_label_without_a_shard_and_keeps_the_staged_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+    ) -> None:
+        from nemo_gym.rollouts import rollout_collection
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        rows = self._staged_rows(1)
+        received: list[dict] = []
+        writer = _RunRecordWriter(
+            tmp_path / "run",
+            "s",
+            rows=rows,
+            status_rows=rows,
+            staging_dir=tmp_path / "local",
+            sink=lambda kind, record: received.append(record),
+        )
+        copyfile = shutil.copyfile
+
+        def failing_copyfile(source, target):
+            if Path(source).name == failing:
+                raise OSError(28, "No space left on device")
+            return copyfile(source, target)
+
+        monkeypatch.setattr(rollout_collection.shutil, "copyfile", failing_copyfile)
+        writer.write({**rows[0], "reward": 1.0})
+        with pytest.raises(OSError, match="publishing rollouts-s.jsonl failed.*No space left.*stay in"):
+            writer.row_settled()
+
+        # What this publish copied is removed again and no temporary copy is left: readers find no shard.
+        assert [path.name for path in (tmp_path / "run").iterdir()] == [".rollouts-s.jsonl.lock"]
+        assert received == []
+        [kept] = (tmp_path / "local").iterdir()
+        assert self._lines(kept / "rollouts-s.jsonl") == [{**rows[0], "reward": 1.0}]
+        monkeypatch.setattr(rollout_collection.shutil, "copyfile", copyfile)
+        writer.close()  # a retry publishes it
+        assert self._lines(writer.rollouts_fpath) == [{**rows[0], "reward": 1.0}]
+        assert received == [{**rows[0], "reward": 1.0}]
+
+    def test_a_staged_shard_of_no_rows_is_published_when_opened(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        writer = _RunRecordWriter(tmp_path / "run", "s", rows=[], staging_dir=tmp_path / "local")
+        assert writer.rollouts_fpath.read_bytes() == b""
+        assert list((tmp_path / "local").iterdir()) == []
+
+    async def test_the_iterator_reports_each_handed_out_row_as_settled_whether_it_returned_or_raised(self) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RowResultIterator
+
+        settled: list[int] = []
+        ok, failed = Future(), Future()
+        ok.set_result(_CompletedRollout(row={}, result={"reward": 1.0}, rollout_latency_ms=1.0))
+        failed.set_exception(RuntimeError("run failed"))
+        completions = _RowResultIterator(iter([ok, failed]), on_settled=lambda: settled.append(1))
+
+        first, second = list(completions)
+        await first
+        with pytest.raises(RuntimeError, match="run failed"):
+            await second
+        assert len(settled) == 2
+
+    @pytest.mark.parametrize("close", ["aclose", "aclose_and_drain"])
+    async def test_a_publish_that_fails_on_close_is_retried_by_the_next_close(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close: str
+    ) -> None:
+        from nemo_gym.rollouts import rollout_collection
+
+        rows = self._staged_rows(2)
+
+        class Completions:
+            def __init__(self, futures):
+                self._futures = iter(futures)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._futures)
+
+            async def aclose(self):
+                pass
+
+            async def aclose_and_drain(self):
+                return []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for row in examples:
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=row, result={"reward": 1.0}, rollout_latency_ms=1.0))
+                    futures.append(future)
+                return Completions(futures)
+
+        run_dir = tmp_path / "run"
+        completions = Helper().run_examples(
+            rows, record_output_dir=run_dir, record_shard="s", record_staging_dir=tmp_path / "local"
+        )
+        await next(completions)
+        copyfile = shutil.copyfile
+        copies: list[str] = []
+
+        def failing_copyfile(source, target):
+            raise OSError(28, "No space left on device")
+
+        def counting_copyfile(source, target):
+            copies.append(Path(source).name)
+            return copyfile(source, target)
+
+        monkeypatch.setattr(rollout_collection.shutil, "copyfile", failing_copyfile)
+        with pytest.raises(OSError, match="publishing .* failed.*No space left"):
+            await getattr(completions, close)()
+        assert [path.name for path in run_dir.iterdir()] == [".rollouts-s.jsonl.lock"]
+
+        monkeypatch.setattr(rollout_collection.shutil, "copyfile", counting_copyfile)
+        await getattr(completions, close)()
+        assert [row[TASK_INDEX_KEY_NAME] for row in self._lines(run_dir / "rollouts-s.jsonl")] == [0]
+        assert list((tmp_path / "local").iterdir()) == []
+        published = len(copies)
+        await getattr(completions, close)()
+        assert len(copies) == published
+
+    def test_run_examples_refuses_a_staging_dir_without_a_run_folder(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="record_staging_dir"):
+            RolloutCollectionHelper().run_examples([], record_staging_dir=tmp_path)
+
     async def test_run_examples_writes_each_enriched_record_to_its_shard(self, tmp_path: Path) -> None:
         capture_dir = tmp_path / "capture"
         global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
@@ -16975,7 +17297,8 @@ class TestRunRecordWriter:
             Helper().run_examples([TestEnrichRunResult._row()], record_output_dir=tmp_path, record_shard="s")
         assert [row["reward"] for row in self._lines(tmp_path / "rollouts-s.jsonl")] == [1.0]
 
-    async def test_the_store_reads_a_shard_like_an_eval_run(self, tmp_path: Path, monkeypatch) -> None:
+    @pytest.mark.parametrize("staged", [False, True], ids=["written in place", "staged node-locally"])
+    async def test_the_store_reads_a_shard_like_an_eval_run(self, tmp_path: Path, monkeypatch, staged: bool) -> None:
         """A failed /run lands as the typed failure row collection writes, and the Store recovers from the shard."""
         from nemo_gym.rollouts.rollout_collection import RUN_ID_KEY, RolloutStore, _failure_diagnostics
 
@@ -17021,11 +17344,15 @@ class TestRunRecordWriter:
                 record_output_dir=run_dir,
                 record_shard="step_1",
                 route_failures_to_sidecar=True,
+                record_staging_dir=tmp_path / "local" if staged else None,
             )
         )
         results = {
             row[TASK_INDEX_KEY_NAME]: result for row, result in [await completion for completion in completions]
         }
+        if staged:
+            # Published after the last record, and the staging folder is gone.
+            assert list((tmp_path / "local").iterdir()) == []
         # Dispatch ran on copies that name the shard's run; the caller's rows are untouched.
         assert all(RUN_ID_KEY in row for row in dispatched) and RUN_ID_KEY not in scored_row
         assert results[3]["reward"] == 1.0
