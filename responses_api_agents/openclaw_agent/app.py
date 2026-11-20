@@ -589,6 +589,24 @@ _EXEC_HELPER_CHECK = (
 _EXEC_TOOL_UNAVAILABLE = "cannot run its exec tool in this image"
 
 
+# Gym's model server already retries upstream rate limits and errors, so sandbox sessions keep the two same-model
+# retries 2026.6.11 made. 2026.11.5 reads them from the agent's session settings and otherwise retries a rate limit up
+# to 15 times; releases without the setting ignore it.
+_SESSION_SETTINGS = {"retry": {"provider": {"maxRetries": 2}}}
+
+
+def _envelope_reports_error(envelope: dict[str, Any]) -> bool:
+    """Whether a 2026.11.5 stdout envelope reports that the run failed.
+
+    A rejected model request prints ``{"ok": false, "error": {...}}``; a run that ends on a model idle timeout or a
+    context overflow prints its result envelope with ``meta.error``. Both exit 1.
+    """
+    meta = envelope.get("meta")
+    return (envelope.get("ok") is False and isinstance(envelope.get("error"), dict)) or (
+        isinstance(meta, dict) and isinstance(meta.get("error"), dict)
+    )
+
+
 def _runtime_matches(report: str, version: str) -> bool:
     try:
         package, node, engines = report.splitlines()
@@ -1027,6 +1045,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         ]
         payload = {
             "config": session_config,
+            "settings": _SESSION_SETTINGS,
             "command": command,
             "prompt": f"{system}\n\n{prompt}" if system else prompt,
             "cwd": state.session.workdir,
@@ -1450,7 +1469,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 result["return_code"] == 0
                 or (
                     result["return_code"] == 1
-                    and artifacts.get("stderr.log", "").strip().rsplit("\n", 1)[-1].startswith("FailoverError: ")
+                    and (
+                        artifacts.get("stderr.log", "").strip().rsplit("\n", 1)[-1].startswith("FailoverError: ")
+                        or _envelope_reports_error(envelope)
+                    )
                 )
             )
             and not result["timed_out"]
@@ -1465,8 +1487,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             )
         ):
             # 2026.6.11 can surface model errors by throwing FailoverError and
-            # exiting 1. Require its terminal diagnostic as well as the assistant
-            # error; an unrelated worker exit must still raise. The environment
+            # exiting 1; 2026.11.5 exits 1 after an envelope that reports the error.
+            # Require that terminal diagnostic as well as the assistant error; an
+            # unrelated worker exit must still raise. The environment
             # owns verify/retry/fail policy for the preserved model response.
             # An idle watchdog abort is a model failure; the supervisor's whole-run
             # deadline and unrelated aborts must not be classified as transport errors.

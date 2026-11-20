@@ -2418,6 +2418,7 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert closed.status_code == 200, closed.text
 
 
+@pytest.mark.parametrize("ending", ["failover_stderr", "error_envelope"])
 @pytest.mark.parametrize("exit_code", [0, 1])
 @pytest.mark.parametrize("partial", [False, True])
 @pytest.mark.parametrize(
@@ -2431,12 +2432,20 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         ("provider failed with 400 attempts", None),
     ],
 )
-def test_terminal_model_error_retains_response_and_cause(setup, partial, message, status, exit_code):
+def test_terminal_model_error_retains_response_and_cause(setup, partial, message, status, exit_code, ending):
     agent, sandbox = setup
     sandbox.result["return_code"] = exit_code
-    sandbox.stderr = (
-        "diagnostics\nFailoverError: LLM request failed: provider rejected the request schema or tool payload.\n"
-    )
+    if ending == "failover_stderr":
+        # 2026.6.11 throws FailoverError.
+        sandbox.stderr = (
+            "diagnostics\nFailoverError: LLM request failed: provider rejected the request schema or tool payload.\n"
+        )
+    else:
+        # 2026.11.5 prints an error envelope on stdout.
+        sandbox.stderr = "diagnostics\n[openclaw] For help, run `openclaw doctor`.\n"
+        sandbox.stdout = json.dumps(
+            {"ok": False, "error": {"type": "cli_error", "message": f"LLM request rejected: {message}"}}, indent=2
+        )
     transcript = [json.loads(line) for line in events(stop_reason="error").splitlines()]
     final = transcript[2]["message"]
     final.update(errorMessage=message, content=[], usage={"input": 0, "output": 0})
@@ -2508,8 +2517,9 @@ def test_terminal_model_error_retains_response_and_cause(setup, partial, message
     ],
 )
 @pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("exit_code", [0, 1])
 def test_model_transport_and_context_errors_reach_environment(
-    setup, stop_reason, message, envelope_error, expected, partial
+    setup, stop_reason, message, envelope_error, expected, partial, exit_code
 ):
     from nemo_gym.agents import AgentOutcomePolicyConfig, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
@@ -2522,7 +2532,14 @@ def test_model_transport_and_context_errors_reach_environment(
     elif not partial:
         transcript = [transcript[2]]
     sandbox.events = "\n".join(json.dumps(event) for event in transcript)
-    if envelope_error:
+    sandbox.result["return_code"] = exit_code
+    if exit_code:
+        # 2026.11.5 exits 1 after printing its result envelope with the run's error.
+        kind = envelope_error or "incomplete_turn"
+        sandbox.stdout = json.dumps(
+            {"payloads": [{"text": "failed", "isError": True}], "meta": {"error": {"kind": kind, "message": message}}}
+        )
+    elif envelope_error:
         sandbox.stdout = json.dumps({"meta": {"error": {"kind": envelope_error, "message": message}}})
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
@@ -2545,7 +2562,17 @@ def test_model_transport_and_context_errors_reach_environment(
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
 
 
-@pytest.mark.parametrize("failure", ["abort", "worker_exit", "cleanup", "untyped_envelope"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "abort",
+        "worker_exit",
+        "worker_exit_with_error_envelope",
+        "worker_exit_with_run_error",
+        "cleanup",
+        "untyped_envelope",
+    ],
+)
 def test_runtime_failures_do_not_become_model_outcomes(setup, failure):
     agent, sandbox = setup
     message = "Request was aborted." if failure == "abort" else "LLM idle timeout (2s): no response from model"
@@ -2555,6 +2582,20 @@ def test_runtime_failures_do_not_become_model_outcomes(setup, failure):
     if failure == "worker_exit":
         sandbox.result["return_code"] = 1
         sandbox.stderr = "unexpected worker exception"
+    elif failure == "worker_exit_with_error_envelope":
+        # An error envelope alone does not make an exit a model failure: the transcript must end in one.
+        transcript[2]["message"]["errorMessage"] = "Request was aborted."
+        sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+        sandbox.result["return_code"] = 1
+        sandbox.stdout = json.dumps({"ok": False, "error": {"type": "cli_error", "message": "worker failed"}})
+    elif failure == "worker_exit_with_run_error":
+        # Nor does a result envelope's error: an aborted request that is not an idle timeout is no model failure.
+        transcript[2]["message"]["errorMessage"] = "Request was aborted."
+        sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+        sandbox.result["return_code"] = 1
+        sandbox.stdout = json.dumps(
+            {"meta": {"error": {"kind": "incomplete_turn", "message": "Request was aborted."}}}
+        )
     elif failure == "cleanup":
         sandbox.result["error"] = "cleanup failed"
     elif failure == "untyped_envelope":
@@ -2828,3 +2869,15 @@ def test_memory_search_setting_and_tool_search_follow_the_pinned_release(setup, 
 )
 def test_runtime_report_matches_version_and_engine_range(report, accepted):
     assert _runtime_matches(report, "2026.6.11") is accepted
+
+
+def test_session_settings_keep_two_same_model_retries(setup):
+    """Gym's model server retries upstream failures itself; 2026.11.5 would otherwise retry a rate limit 15 times."""
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"}).raise_for_status()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    settings = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/agents/main/agent/settings.json"])
+    assert settings == {"retry": {"provider": {"maxRetries": 2}}}

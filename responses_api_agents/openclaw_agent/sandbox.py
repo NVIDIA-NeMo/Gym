@@ -177,6 +177,9 @@ class OpenClawSandboxSession(AgentSessionState):
         """Stage the invocation and return the OpenClaw worker command."""
         directory = self.session.session_dir
         await self.upload_json("home/.openclaw/openclaw.json", payload["config"])
+        # OpenClaw reads its session settings, such as retry limits, from the agent directory.
+        if payload.get("settings"):
+            await self.upload_json("home/.openclaw/agents/main/agent/settings.json", payload["settings"])
         prompt = payload["prompt"]
         # The CLI only loads local images under its media allowlist. Session-owned files are
         # removed on close; staging runs inside the shared close fence and activation deadline.
