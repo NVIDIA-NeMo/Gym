@@ -108,3 +108,27 @@ them and saving them as PNG keeps every pixel.
 last two are BabyVision tasks 4624 (Spatial Perception, Count 3D blocks) and 487 (Visual Pattern Recognition, Logic
 Patterns), taken from the same `UnipatAI/BabyVision` revision and written in `prepare.py`'s format.
 `data/example_rollouts.jsonl` holds one OpenCode rollout of each row.
+
+## Other harnesses
+
+`configs/multiharness.yaml` composes the same resources server with Pi, Codex, Claude Code and OpenClaw
+beside OpenCode, each with its own `single_agent_turn_legacy` Environment Server, as the CAD recipe does. It
+changes no shared code and no other task's agents.
+
+Prepare each row for its harness:
+
+```bash
+python resources_servers/visual_coding_opencode/prepare_multiharness.py rows.jsonl pi.jsonl --harness pi
+python resources_servers/visual_coding_opencode/prepare_multiharness.py rows.jsonl claude.jsonl --harness claude_code --file-input
+```
+
+- A row's images are written into the lent sandbox as `/workspace/input-<i>.<ext>` (`input_images`), so a harness's Python
+  shell can read the pixels.
+- OpenCode, Pi, Codex and OpenClaw keep the inline image in the prompt. Claude Code takes only text in its prompt, so
+  `--file-input` replaces the image with those paths.
+- The lent sandbox reaches only the policy model (`sandbox_network_access: model_only`). Pi, Codex, OpenClaw and Claude
+  Code install their runtimes at start unless the image or a runtime directory already has them, so build the image
+  with them or open the network for the install.
+- Other benchmarks' agents are untouched; do not blend this recipe with a profile that edits a stock agent block.
+
+This is configuration and input-boundary coverage. It is not a real-model result, and no cross-harness score is claimed.

@@ -27,6 +27,14 @@ class TaskData(BaseModel):
         description="Question text shown to the judge (the prompt without the visual-reasoning instruction).",
         json_schema_extra={"consumed_by": ["verify"]},
     )
+    input_images: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The prompt's images as base64 data URLs. The seed writes them into the lent sandbox as "
+            "/workspace/input-<i>.<ext>, for a harness that reads files instead of taking an image in its prompt."
+        ),
+        json_schema_extra={"consumed_by": ["seed"]},
+    )
     task_id: Optional[str] = Field(
         default=None,
         description="Stable task id for eval planning and task selection (BabyVision's taskId as a string).",
