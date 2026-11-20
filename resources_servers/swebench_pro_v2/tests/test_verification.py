@@ -254,7 +254,7 @@ async def test_verify_stages_v2_files_and_masks_only_a_missing_verdict(
         staged.append(files)
         sandbox = local_verifier(tmp_path / f"sandbox-{len(staged)}", request)
 
-        async def stop():
+        async def stop(**_: object):
             sandbox.stopped = True
 
         sandbox.stopped = False

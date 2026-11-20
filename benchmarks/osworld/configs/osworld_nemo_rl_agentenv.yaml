@@ -1,0 +1,23 @@
+# NeMo RL training profile for Nemotron Nano Omni on AgentENV microVMs.
+# The policy server is injected by NeMo RL at runtime.
+
+config_paths:
+  - benchmarks/osworld/configs/osworld_agent_nano_omni_agentenv.yaml
+  - benchmarks/osworld/configs/osworld_agentenv.yaml
+
+osworld_nano_omni_agent:
+  responses_api_agents:
+    osworld_agent:
+      concurrency: ${oc.decode:${oc.env:OSWORLD_MAX_PARALLEL_ROLLOUTS,8}}
+      setup_cache_dir: ${oc.env:OSWORLD_CACHE_ROOT}/osworld-assets
+      asset_input_jsonl: ${oc.env:OSWORLD_GRPO_TRAIN_DATA}
+      max_steps: ${oc.decode:${oc.env:OSWORLD_MAX_STEPS,150}}
+      max_tokens: ${oc.decode:${oc.env:OSWORLD_MAX_NEW_TOKENS,16384}}
+      temperature: ${oc.decode:${oc.env:OSWORLD_TEMPERATURE,1.0}}
+      top_p: ${oc.decode:${oc.env:OSWORLD_TOP_P,1.0}}
+      history_policy:
+        name: fixed
+        params:
+          keep_images: ${oc.decode:${oc.env:OSWORLD_HISTORY_KEEP_IMAGES,2}}
+      task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
+      exact_trace_transport_version: 3

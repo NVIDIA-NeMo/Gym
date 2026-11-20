@@ -10,8 +10,10 @@ so uvicorn can import it as ``environment_servers.tool_counter.app`` in each wor
 import asyncio
 import json
 import os
+from importlib.metadata import version
 from pathlib import Path
-from typing import Literal, Optional
+from types import ModuleType
+from typing import Any, Literal, Optional
 
 import aiohttp
 import httpx
@@ -110,14 +112,22 @@ class ToolCounterServer(BaseEnvironmentServerWithTools[CounterRequest, CounterRe
         return AggregateMetrics()
 
 
-def _new_connection_per_request(
-    headers: Optional[dict[str, str]] = None,
-    timeout: Optional[httpx.Timeout] = None,
-    auth: Optional[httpx.Auth] = None,
-) -> httpx.AsyncClient:
+def _mcp_http_client_module() -> ModuleType:
+    """The HTTP client package the installed MCP SDK takes: httpx2 for MCP 2, httpx for MCP 1."""
+    if version("mcp").startswith("2."):
+        import httpx2
+
+        return httpx2
+    return httpx
+
+
+def _new_connection_per_request(headers: dict[str, str]) -> Any:
     """The MCP SDK's client without keep-alive, so the kernel hands each MCP request to any worker."""
-    return httpx.AsyncClient(
-        headers=headers, timeout=timeout, auth=auth, limits=httpx.Limits(max_keepalive_connections=0)
+    http_client_module = _mcp_http_client_module()
+    return http_client_module.AsyncClient(
+        headers=headers,
+        timeout=http_client_module.Timeout(30, read=300),
+        limits=http_client_module.Limits(max_keepalive_connections=0),
     )
 
 
@@ -126,20 +136,18 @@ async def _call_over_mcp(
 ) -> list[str]:
     """List the episode's tools and call ``add`` over MCP, as an MCP-only harness does; return the listed names."""
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
 
-    async with streamablehttp_client(
-        str(grant.connection.url),
-        headers=dict(grant.connection.headers),
-        httpx_client_factory=_new_connection_per_request,
-    ) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            listed = [tool.name for tool in (await session.list_tools()).tools]
-            for _ in range(calls):
-                result = await session.call_tool("add", {"amount": 1})
-                statuses.append(500 if result.isError else 200)
-                ran_on.append(None if result.isError else json.loads(result.content[0].text).get("pid"))
+    async with _new_connection_per_request(dict(grant.connection.headers)) as client:
+        async with streamable_http_client(str(grant.connection.url), http_client=client) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                listed = [tool.name for tool in (await session.list_tools()).tools]
+                for _ in range(calls):
+                    # MCP 1 and 2 name the result's attributes differently but serialize the same wire fields.
+                    result = (await session.call_tool("add", {"amount": 1})).model_dump(by_alias=True)
+                    statuses.append(500 if result["isError"] else 200)
+                    ran_on.append(None if result["isError"] else json.loads(result["content"][0]["text"]).get("pid"))
     return listed
 
 
