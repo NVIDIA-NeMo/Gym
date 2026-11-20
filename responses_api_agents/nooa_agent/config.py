@@ -36,6 +36,7 @@ from responses_api_agents.nooa_agent.invocation import (
 from responses_api_agents.nooa_agent.invocation import (
     validate_invocation as validate_invocation,
 )
+from responses_api_agents.nooa_agent.policy_settings import MediaInput, PolicySettings, ReasoningEffort
 
 
 class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
@@ -63,8 +64,29 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     max_policy_calls: int | None = Field(
         default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
     )
-    context_window: int | None = Field(
-        default=None, gt=0, description="Known policy context window used by NOOA's context planner."
+    # The policy model as NOOA must know it. Every field is required and has no default: a run declares the model
+    # it evaluates (the Eval Factory fragment or the benchmark config sets them), or the config fails to load.
+    context_window: int = Field(
+        gt=0, description="The served context window in tokens; NOOA's context planner budget."
+    )
+    max_output_tokens: int = Field(
+        gt=0, description="Reply cap sent as max_output_tokens on every model call the request does not cap itself."
+    )
+    temperature: float = Field(
+        ge=0, description="Sampling temperature sent on every model call the request does not set."
+    )
+    top_p: float = Field(gt=0, le=1, description="Nucleus sampling sent on every model call the request does not set.")
+    reasoning_effort: ReasoningEffort = Field(
+        description=(
+            "Reasoning effort sent as reasoning.effort on every model call the request does not set; "
+            "`none` sends no reasoning setting."
+        )
+    )
+    media_inputs: tuple[MediaInput, ...] = Field(
+        description=(
+            "Media the policy model accepts, as NOOA's media_inputs; an empty list is text only and NOOA replaces "
+            "other media with a short note instead of sending it."
+        )
     )
     artifacts_dir: Path = Field(
         default=Path("nooa-artifacts"),
@@ -100,6 +122,18 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
                 "runtime_wheelhouse must be an absolute path (or ~/path); relative server paths are ambiguous"
             )
         return expanded.resolve()
+
+    @property
+    def policy_settings(self) -> PolicySettings:
+        """The declared policy model, as one value the runners and the sandbox worker receive."""
+        return PolicySettings(
+            context_window=self.context_window,
+            max_output_tokens=self.max_output_tokens,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            reasoning_effort=self.reasoning_effort,
+            media_inputs=self.media_inputs,
+        )
 
     @model_validator(mode="after")
     def require_prepared_runtime(self) -> NOOAAgentConfig:

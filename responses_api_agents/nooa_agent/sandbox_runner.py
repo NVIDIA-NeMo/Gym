@@ -15,6 +15,7 @@ from nemo_gym.agents import SandboxCommand, SandboxSession, resolve_agent_timeou
 from nemo_gym.sandbox import AsyncSandbox, read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
+from responses_api_agents.nooa_agent.policy_settings import PolicySettings
 from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error, set_response_lifecycle
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest, NOOARunResult
 from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxCheckpoint, SandboxInput, SandboxResult
@@ -37,7 +38,7 @@ class SandboxNOOARunner:
         model_base_url: str,
         model_server_name: str,
         max_policy_calls: int | None,
-        context_window: int | None = None,
+        policy: PolicySettings | None = None,
         timeout: float = 21600,
         close_timeout: float = 30,
         artifacts_dir: Path | None = None,
@@ -48,7 +49,7 @@ class SandboxNOOARunner:
         self.model_base_url = model_base_url
         self.model_server_name = model_server_name
         self.max_policy_calls = max_policy_calls
-        self.context_window = context_window
+        self.policy = policy
         self.timeout = timeout
         self.close_timeout = close_timeout
         self.artifacts_dir = artifacts_dir
@@ -86,7 +87,7 @@ class SandboxNOOARunner:
             model_base_url=self.model_base_url,
             model_server_name=self.model_server_name,
             max_policy_calls=self.max_policy_calls,
-            context_window=self.context_window,
+            policy=self.policy,
             trace_dir=f"{self.directory}/traces",
         )
         await upload_text(self.sandbox, path=f"{self.directory}/input.json", text=payload.model_dump_json())

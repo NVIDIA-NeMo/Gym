@@ -55,6 +55,26 @@ Atom's session wraps a strategy failure in `TurnFailedError`; the adapter re-rai
 termination policy sees the same CodeAct stops and model rejections it sees from any other NOOA agent. Gym resource
 tools are bound on the harness class, not on Atom's session agent.
 
+## Policy model settings
+
+The agent server declares the policy model as NOOA must know it, and refuses to start without every value: a run
+evaluates a model it has described, never one the adapter guesses at. The shipped configs leave these keys mandatory
+(`???`), so a benchmark config, an Eval Factory fragment or `++agent.responses_api_agents.nooa_agent.<key>=<value>`
+overrides must set them before the config resolves.
+
+| Key | Meaning | On every model call |
+| --- | --- | --- |
+| `context_window` | served context window in tokens | NOOA's context planner budget |
+| `max_output_tokens` | reply cap | `max_output_tokens`, unless the benchmark request caps the reply itself |
+| `temperature`, `top_p` | sampling | sent unless the benchmark request sets them |
+| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high` or `max` | `reasoning.effort`, unless the request sets `reasoning`; `none` sends nothing |
+| `media_inputs` | media the model accepts: `image`, `audio`, `video`, `pdf`; `[]` is text only | media the model does not accept is replaced with NOOA's short note before the request is built |
+
+A benchmark's own `responses_create_params` (temperature, top_p, max_output_tokens, reasoning) win over the declared
+values, so Gym's run settings keep their meaning. For GLM 5.3 served by vLLM that is, for example,
+`context_window: 1048576`, `max_output_tokens: 131072`, `temperature: 1.0`, `top_p: 0.95`, `reasoning_effort: none`
+(thinking is set on the model server) and `media_inputs: []`.
+
 ## Sandboxed execution
 
 `nooa.execution_mode: sandboxed` runs the complete NOOA agent in the task sandbox supplied by Resources.

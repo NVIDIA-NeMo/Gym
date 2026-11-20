@@ -22,6 +22,7 @@ from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest, NOOARunResult
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.tests.test_config import policy_settings
 from responses_api_agents.nooa_agent.tests.test_gym_llm import model_response
 
 
@@ -39,7 +40,7 @@ def payload() -> entrypoint.SandboxInput:
         model_base_url="http://model:8000",
         model_server_name="policy",
         max_policy_calls=3,
-        context_window=262144,
+        policy=policy_settings(context_window=262144),
     )
 
 
@@ -121,7 +122,7 @@ async def test_child_preserves_evidence_and_classifies_outcome(monkeypatch, outc
     monkeypatch.setattr(entrypoint, "InProcessNOOARunner", runner_factory)
     artifact = await entrypoint.execute(p)
     assert runner_factory.call_args.kwargs["max_policy_calls"] == limit
-    assert runner_factory.call_args.kwargs["context_window"] == 262144
+    assert runner_factory.call_args.kwargs["policy"].context_window == 262144
     assert artifact.observations.gaps[0].code == "test"
     assert artifact.model_cookies == {"model": "new"}
     assert artifact.resource_cookies == {"resource": "new"}
@@ -189,15 +190,18 @@ def test_launch_policy_call_limit_is_optional_and_survives_json() -> None:
             entrypoint.SandboxInput.model_validate(data | {"max_policy_calls": invalid})
 
 
-def test_sandbox_context_window_is_optional_positive_and_survives_json_boundary() -> None:
+def test_sandbox_policy_settings_are_optional_and_survive_the_json_boundary() -> None:
     p = payload()
-    assert entrypoint.SandboxInput.model_validate_json(p.model_dump_json()).context_window == 262144
+    restored = entrypoint.SandboxInput.model_validate_json(p.model_dump_json()).policy
+    assert restored == p.policy and restored.context_window == 262144
     data = p.model_dump(mode="json")
-    data.pop("context_window")
-    assert entrypoint.SandboxInput.model_validate(data).context_window is None
+    data.pop("policy")
+    assert entrypoint.SandboxInput.model_validate(data).policy is None
     for invalid in (0, -1):
         with pytest.raises(ValidationError, match="context_window"):
-            entrypoint.SandboxInput.model_validate(data | {"context_window": invalid})
+            entrypoint.SandboxInput.model_validate(
+                data | {"policy": p.policy.model_dump() | {"context_window": invalid}}
+            )
 
 
 @pytest.mark.asyncio

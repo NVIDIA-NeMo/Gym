@@ -11,9 +11,19 @@ import pytest
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.client import ServerClient
+from responses_api_agents.nooa_agent.tests.test_config import POLICY_FIELDS
 
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+from omegaconf import OmegaConf
+
+
+def agent_values(agent_node) -> dict:
+    """The agent server's values from a resolved recipe, with the policy model a run declares filled in."""
+    values = OmegaConf.to_container(agent_node, resolve=True, throw_on_missing=False)
+    return {**values, **POLICY_FIELDS}
 
 
 def test_swe_shared_preparation_preserves_grading_metadata_through_legacy_adapter(tmp_path: Path) -> None:
@@ -119,7 +129,7 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
         name=environment.agent_server.name,
         host="localhost",
         port=8001,
-        **OmegaConf.to_container(config[environment.agent_server.name].responses_api_agents.nooa_agent, resolve=True),
+        **agent_values(config[environment.agent_server.name].responses_api_agents.nooa_agent),
     )
     assert agent.nooa.execution_mode == "sandboxed"
     assert agent.num_workers == 1
@@ -235,7 +245,7 @@ def test_explicit_unrestricted_docker_config_needs_no_opensandbox_credentials(mo
     resources.task_network_policy = None
     agent = config.swebench_pro_nooa_agent.responses_api_agents.nooa_agent
     agent.runtime_wheelhouse_required = False
-    parsed = NOOAAgentConfig(name="agent", host="localhost", port=8001, **OmegaConf.to_container(agent, resolve=True))
+    parsed = NOOAAgentConfig(name="agent", host="localhost", port=8001, **agent_values(agent))
     assert parsed.runtime_wheelhouse is None
     assert resources.task_network_policy is None
     assert "docker" in OmegaConf.to_container(config.sandbox, resolve=True)

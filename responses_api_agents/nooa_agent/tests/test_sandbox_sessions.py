@@ -65,7 +65,7 @@ async def test_sandbox_session_forwards_configured_context_window(setup) -> None
     instance.config.session_close_timeout_seconds = 1.25
     await instance.seed_agent_session(request(), seed(sandbox_access=access()))
     state = instance._require_agent_session("session")
-    assert state.runner.context_window == 262144
+    assert state.runner.policy.context_window == 262144
     assert state.runner.timeout == 60.5
     assert state.runner.close_timeout == 1.25
     await close(instance)

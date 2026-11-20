@@ -106,7 +106,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 server_client=self.server_client,
                 model_server_name=self.config.model_server.name,
                 max_policy_calls=self.config.max_policy_calls,
-                context_window=self.config.context_window,
+                policy=self.config.policy_settings,
                 trace_dir=self.config.artifacts_dir / "embedded",
             )
         else:
@@ -135,7 +135,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 timeout=self.config.sandbox_runner_timeout_seconds,
                 close_timeout=self.config.session_close_timeout_seconds,
                 max_policy_calls=self.config.max_policy_calls,
-                context_window=self.config.context_window,
+                policy=self.config.policy_settings,
                 artifacts_dir=self.config.artifacts_dir,
             )
             state.runner = runner

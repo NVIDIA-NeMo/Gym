@@ -39,6 +39,7 @@ from responses_api_agents.nooa_agent.gym_llm import (
 )
 from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.observability import GymTraceHooks
+from responses_api_agents.nooa_agent.policy_settings import REQUEST_SAMPLING_FIELDS, PolicySettings
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
@@ -141,7 +142,7 @@ class InProcessNOOARunner:
         model_server_name: str,
         max_policy_calls: int | None,
         on_progress: Callable[[NOOARunResult], None] | None = None,
-        context_window: int | None = None,
+        policy: PolicySettings | None = None,
         trace_dir: Path | None = None,
     ) -> None:
         self._invocation = invocation
@@ -149,7 +150,7 @@ class InProcessNOOARunner:
         self._model_server_name = model_server_name
         self._max_policy_calls = max_policy_calls
         self._on_progress = on_progress
-        self._context_window = context_window
+        self._policy = policy
         self._trace_dir = trace_dir
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
         _validate_agent_llm_bindings(self._agent_class)
@@ -192,8 +193,12 @@ class InProcessNOOARunner:
                     logger.exception("Failed to persist NOOA partial checkpoint")
 
         trace = GymTraceHooks(on_progress=checkpoint)
-        sampling_overrides = request.responses_create_params.model_dump(
-            include={"temperature", "top_p", "max_output_tokens"}, exclude_unset=True, exclude_none=True
+        # The declared policy settings go on every call; a benchmark's own request settings win over them.
+        sampling_overrides = self._policy.request_defaults() if self._policy is not None else {}
+        sampling_overrides.update(
+            request.responses_create_params.model_dump(
+                include=set(REQUEST_SAMPLING_FIELDS), exclude_unset=True, exclude_none=True
+            )
         )
         llm = GymResponsesLLM(
             server_client=self._server_client,
@@ -204,7 +209,8 @@ class InProcessNOOARunner:
             on_call=trace.on_model_call,
             on_response=checkpoint,
             sampling_overrides=sampling_overrides,
-            context_window=self._context_window,
+            context_window=self._policy.context_window if self._policy is not None else None,
+            media_inputs=self._policy.media_inputs if self._policy is not None else (),
         )
         dispatcher = ResourceToolDispatcher(
             tool_access=request.tool_access,

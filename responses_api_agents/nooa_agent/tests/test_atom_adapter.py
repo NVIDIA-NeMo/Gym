@@ -18,6 +18,7 @@ from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocati
 from responses_api_agents.nooa_agent.invocation import validate_invocation
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
+from responses_api_agents.nooa_agent.tests.test_config import POLICY_FIELDS, policy_settings
 from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
 
 
@@ -34,7 +35,7 @@ def atom_config() -> NOOAAgentConfig:
         "responses_api_agents"
     ]["nooa_agent"]
     merged = {**base, **atom, "nooa": {**base["nooa"], **atom["nooa"]}}
-    return NOOAAgentConfig(name="nooa", host="127.0.0.1", port=9000, **merged)
+    return NOOAAgentConfig(name="nooa", host="127.0.0.1", port=9000, **{**merged, **POLICY_FIELDS})
 
 
 def test_atom_config_resolves_the_harness_and_adapter():
@@ -178,7 +179,7 @@ async def test_atom_root_and_child_sessions_route_through_gym(tmp_path: Path, mo
         server_client=SimpleNamespace(post=post),
         model_server_name="policy",
         max_policy_calls=2,
-        context_window=1048576,
+        policy=policy_settings(context_window=1048576),
     )
     result = await runner.run(
         NOOARunRequest(
@@ -234,7 +235,12 @@ def test_atom_benchmark_configs_route_every_benchmark_dataset_to_atom(
                 name=agent_name,
                 host="localhost",
                 port=8001,
-                **OmegaConf.to_container(config[agent_name].responses_api_agents.nooa_agent, resolve=True),
+                **{
+                    **OmegaConf.to_container(
+                        config[agent_name].responses_api_agents.nooa_agent, resolve=True, throw_on_missing=False
+                    ),
+                    **POLICY_FIELDS,
+                },
             )
             agent_class, adapter = validate_invocation(agent.nooa)
             assert agent_class is atom_gym.AtomHarness, (
