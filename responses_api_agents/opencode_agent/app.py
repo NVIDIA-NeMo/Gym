@@ -128,7 +128,6 @@ from responses_api_agents.opencode_agent.runtime import (
     ASSISTANT_MESSAGE_PLUGIN_SOURCE,
     IMAGE_INPUT_MODEL_OPTIONS,
     OPENCODE_RELEASE_SHA256,
-    OPENCODE_V2_VERSION,
     OPENCODE_VERSION,
     REQUIRED_MCP_PLUGIN_FILE,
     RUNTIME_INSTALLER_FILE,
@@ -261,11 +260,16 @@ case "$workdir/" in "${export_dir%/}"/*) overlap=1 ;; esac
 """
 
 
-# Built-in agents by OpenCode version. Each sets its own sampling (1.17.11's ``title`` fixes temperature 0.5) and none
-# inherits from ``build``, so request sampling goes to all of them. A name OpenCode does not define would add an
-# agent, so other versions refuse request sampling, as the adapter did before it applied any.
+# OpenCode 1's built-in agents. Each sets its own sampling (``title`` fixes temperature 0.5) and none inherits from
+# ``build``, so request sampling goes to all of them. A name OpenCode does not define would add an agent, so request
+# sampling is applied only on the releases checked to define exactly these (packages/opencode/src/agent/agent.ts).
 _OPENCODE_BUILTIN_AGENTS = ("build", "plan", "general", "explore", "compaction", "title", "summary")
-_TESTED_OPENCODE1_VERSIONS = ("1.17.11", "1.19.6")
+_SAMPLING_OPENCODE1_VERSIONS = ("1.17.11", "1.19.6")
+# Releases on which the error reports that `classify_outcome` and `_reported_model_error` read (OpenCode 2's after
+# opencode2.store translates them) were checked: their error types and fields are those of 1.17.11 (OpenCode 1,
+# packages/core/src/v1/session.ts) or 2.2.7 (OpenCode 2, packages/core/src/session/to-session-error.ts). Another
+# release logs a warning at seed.
+_CLASSIFIED_OPENCODE_VERSIONS = ("1.17.11", "1.19.6", "2.2.7", "2.3.2")
 # Isolation shared by every OpenCode process of a session: run, export and import.
 _OPENCODE_ISOLATION = {
     "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
@@ -438,7 +442,7 @@ def _compaction_buffer_name_error(opencode_version: Any, opencode_config: Mappin
 
     OpenCode 1 names the buffer ``compaction.reserved`` and OpenCode 2 ``compaction.buffer``. Each version is given only
     its own name: OpenCode 1.17 drops a compaction key it does not know, so a run given ``buffer`` would compact at the
-    default threshold without an error.
+    default threshold without an error (1.19.6 reads ``buffer`` as ``reserved``).
     """
     compaction = opencode_config.get("compaction")
     if not isinstance(compaction, Mapping):
@@ -666,7 +670,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _reported_model_error(native_result: Mapping[str, Any], cleanup: dict | None) -> bool:
-        """Recognize a completed API error or context limit; tested on OpenCode 1.17.11.
+        """Recognize a completed API error or context limit; checked on ``_CLASSIFIED_OPENCODE_VERSIONS``.
 
         Independent worker failures, cleanup errors and timeouts are not provider reports.
         """
@@ -683,7 +687,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read native APIError status or transport retry marker; tested on OpenCode 1.17.11.
+        """Read native APIError status or transport retry marker; checked on ``_CLASSIFIED_OPENCODE_VERSIONS``.
 
         OpenCode marks connection resets, header timeouts, decompression failures and
         interrupted streams retryable without an HTTP status. Preserve that evidence;
@@ -813,6 +817,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         calls when capture is on."""
         config = self._build_opencode_config(rollout_id)
         config["permission"] = opencode2_config.code_mode_off(config.get("permission"))
+        opencode2_config.background_compaction_off(config)
         for model in ((config.get("provider") or {}).get("nemo") or {}).get("models", {}).values():
             # OpenCode 2 assumes image input for a model it does not know; OpenCode 1 assumed text only.
             model.setdefault("modalities", {"input": ["text"], "output": ["text"]})
@@ -1168,7 +1173,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             r"\d+\.\d+\.\d+", self.config.opencode_version
         ):
             raise HTTPException(422, "OpenCode sandbox execution requires an exact opencode_version")
-        tested = ("2.2.7", OPENCODE_V2_VERSION) if self._opencode2 else _TESTED_OPENCODE1_VERSIONS
+        tested = [version for version in _CLASSIFIED_OPENCODE_VERSIONS if _is_opencode2(version) == self._opencode2]
         if self.config.opencode_version not in tested:
             LOG.warning(
                 "OpenCode %s is untested: error classification is validated on %s",
@@ -1598,11 +1603,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if not math.isfinite(getattr(body, name)):
                 raise HTTPException(422, f"OpenCode sandbox execution requires a finite {name}")
         # OpenCode 2 sessions apply request sampling to every model call through the Gym plugin.
-        if sampled and not self._opencode2 and self.config.opencode_version not in _TESTED_OPENCODE1_VERSIONS:
+        if sampled and not self._opencode2 and self.config.opencode_version not in _SAMPLING_OPENCODE1_VERSIONS:
             raise HTTPException(
                 422,
                 f"OpenCode sandbox execution applies request {' and '.join(sampled)} only with OpenCode "
-                f"{', '.join(_TESTED_OPENCODE1_VERSIONS)}, whose built-in agents it knows; configure Gym model sampling",
+                f"{', '.join(_SAMPLING_OPENCODE1_VERSIONS)}, whose built-in agents it knows; configure Gym model "
+                "sampling",
             )
         for key, field in type(body).model_fields.items():
             if key in supported:

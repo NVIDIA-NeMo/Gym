@@ -7,8 +7,8 @@
 //
 // - Tool shells get the task's HOME and XDG directories (shell `create.before`).
 // - Code Mode is off: the adapter denies its `execute` tool, and the plugin removes the tools that OpenCode offers
-//   only through Code Mode (`opencode_*`: sessions, worktrees, models, schedules, artifacts, MCP resources), which
-//   OpenCode would otherwise offer directly. The model gets OpenCode's own tools and the MCP grants, as in OpenCode 1.
+//   only through Code Mode (sessions, worktrees, models, automations or schedules, artifacts, MCP resources and
+//   events), which OpenCode would otherwise offer directly. The model gets OpenCode's own tools and the MCP grants, as in OpenCode 1.
 // - Request temperature and top_p reach every model call (session `context` and `compaction`); OpenCode 2
 //   accepts per-agent sampling in its config but does not apply it.
 // - Required MCP grants are checked when the prompt arrives, before the first model call; the statuses go to a

@@ -34,6 +34,16 @@ UNRESTRICTED_MEDIA = {
 }
 
 
+def background_compaction_off(config: dict[str, Any]) -> None:
+    """Turn off OpenCode 2's background compaction summaries in ``config``.
+
+    2.3.1 turned them on by default: as the context nears automatic compaction, OpenCode writes a summary in extra model
+    calls beside the session's and holds it in its process until compaction is due, and each Gym run of a session is
+    its own process. Off, OpenCode 2 compacts as 2.2.7 does; 2.2.7 ignores the key.
+    """
+    config.setdefault("compaction", {})["background"] = False
+
+
 def code_mode_off(permission: Mapping[str, Any] | str | None) -> dict[str, Any]:
     """``permission`` with Code Mode's ``execute`` tool denied, after every other rule so that none re-allows it.
 
@@ -127,6 +137,7 @@ def session_config(
     for key in ("tools", "compaction"):
         if opencode_config.get(key):
             config[key] = copy.deepcopy(opencode_config[key])
+    background_compaction_off(config)
     agent = copy.deepcopy(dict(opencode_config.get("agent") or {}))
     if replace_prompt is not None:
         agent.setdefault("build", {})["prompt"] = replace_prompt
