@@ -671,12 +671,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         """Recognize a completed API error or context limit; tested on OpenCode 1.17.11.
 
         Independent worker failures, cleanup errors and timeouts are not provider reports.
+        OpenCode 1.15.x exits 0 when compaction itself overflows, so a context limit accepts exit 0 too.
         """
         finishes = {_API_ERROR: None, _CONTEXT_OVERFLOW_ERROR: "error"}
         name = (native_result.get("error") or {}).get("name")
         return (
             cleanup is not None
-            and cleanup["return_code"] == 1
+            and (cleanup["return_code"] == 1 or (cleanup["return_code"] == 0 and name == _CONTEXT_OVERFLOW_ERROR))
             and not cleanup["timed_out"]
             and not cleanup["error"]
             and name in finishes
