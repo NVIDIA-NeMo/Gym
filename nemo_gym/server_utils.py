@@ -236,6 +236,11 @@ Response content: {content}""")
         except ClientResponseError as e:
             # Set the response content here so we have access to it down the line.
             e.response_content = content
+            # [CUSTOM-PICKLABLE-CLIENT-ERROR 2026-11-19] e.request_info.headers is a
+            # CIMultiDictProxy, which Ray cannot pickle when this exception crosses an
+            # actor/task boundary. Rebuild with a plain dict for headers so it is 
+            # picklable and produces more informative errors.
+            e.request_info = e.request_info._replace(headers=dict(e.request_info.headers))
             raise e
 
 
