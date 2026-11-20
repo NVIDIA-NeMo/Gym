@@ -15,6 +15,7 @@
 import importlib
 import importlib.metadata
 import sys
+from argparse import ArgumentParser
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
 from typing import Optional
@@ -3160,9 +3161,9 @@ class TestComposeUnboundAgent:
         return self._parse(DictConfig({"config_paths": list(paths)}))
 
     def test_shipped_terminus_template_replaces_a_benchmarks_agent(self) -> None:
-        """`--benchmark terminal_bench_2_1/opencode --agent-type terminus_2_sandboxed_agent` swaps the harness."""
+        """`--benchmark terminal_bench_2_1/opencode_legacy_agent --agent-type terminus_2_sandboxed_agent` swaps the harness."""
         config = self._parse_config_paths(
-            "benchmarks/terminal_bench_2_1/opencode.yaml",
+            "benchmarks/terminal_bench_2_1/opencode_legacy_agent.yaml",
             "responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml",
         )
         agents = {
@@ -4083,3 +4084,28 @@ def test_the_cli_parse_leaves_hydras_argument_parser_as_it_found_it(monkeypatch:
         GlobalConfigDictParser().parse_global_config_dict_from_cli()
 
     assert hydra_main_module.get_args_parser is original
+
+
+def test_the_cli_parse_survives_argparses_strict_help_check(monkeypatch: MonkeyPatch) -> None:
+    """Python 3.14 argparse rejects a help value that is not a str when the argument is added; hydra-core 1.3.x passes
+    one for `--shell-completion`. The check is installed here as 3.14 does, so the test runs on any Python."""
+
+    def strict_check_help(self, action) -> None:
+        if action.help is not None and not isinstance(action.help, str):
+            raise ValueError("badly formed help string")
+
+    original_add_argument = ArgumentParser.add_argument
+
+    def add_argument_with_help_check(self, *args, **kwargs):
+        action = original_add_argument(self, *args, **kwargs)
+        self._check_help(action)
+        return action
+
+    monkeypatch.setattr(ArgumentParser, "_check_help", strict_check_help, raising=False)
+    monkeypatch.setattr(ArgumentParser, "add_argument", add_argument_with_help_check)
+    monkeypatch.setattr(sys, "argv", ["gym", "+probe=1"])
+
+    config = GlobalConfigDictParser().parse_global_config_dict_from_cli()
+
+    assert config.probe == 1
+    assert ArgumentParser._check_help is strict_check_help

@@ -37,6 +37,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import MODEL_SAMPLING_PATH_SEGMENT
 from nemo_gym.core.correlation import CorrelationContext, CorrelationPathError, encode, parse_path
 
@@ -164,43 +165,5 @@ def with_model_sampling_segment(url_path: str, segment: Optional[str]) -> str:
     return f"{encode(dataclasses.replace(context, model_sampling=segment))}{api_path}{separator}{query}"
 
 
-class ModelCallSamplingConfig(BaseModel):
-    """The global ``model_call_sampling`` block. A training framework sets it when its rows carry values.
-
-    Its presence marks the run: resources servers then send ``null`` with the model calls they make through Gym's
-    server client while handling a request, so their judges keep their own sampling.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    # Model Servers of the agents the framework trains. A generation call without a segment fails on them, so a path
-    # that drops the values fails instead of sampling with others. They cannot also pin sampling with
-    # ``sampling_overrides``; they may pin only ``logprobs`` and ``top_logprobs``, which change what the engine reports.
-    required_model_servers: list[str] = Field(default_factory=list)
-
-
-def model_call_sampling_config(global_config_dict: Optional[Mapping[str, Any]]) -> Optional[ModelCallSamplingConfig]:
-    """Return the run's ``model_call_sampling`` block, or ``None`` when the run sets none.
-
-    Raises ``ValueError`` when ``required_model_servers`` names a server that is not a Model Server of the run: a
-    misspelled name would otherwise leave the trained agent's Model Server unenforced, without an error.
-    """
-    from nemo_gym.config.global_config import MODEL_CALL_SAMPLING_BLOCK, MODEL_SERVER_TYPE_KEY_NAME
-
-    if not isinstance(global_config_dict, Mapping):
-        return None
-    block = global_config_dict.get(MODEL_CALL_SAMPLING_BLOCK)
-    if block is None:
-        return None
-    config = ModelCallSamplingConfig.model_validate(block)
-    model_servers = {
-        name
-        for name, value in global_config_dict.items()
-        if isinstance(value, Mapping) and MODEL_SERVER_TYPE_KEY_NAME in value
-    }
-    if unknown := sorted(set(config.required_model_servers) - model_servers):
-        raise ValueError(
-            f"{MODEL_CALL_SAMPLING_BLOCK}.required_model_servers names servers that are not Model Servers in this "
-            f"run: {unknown}"
-        )
-    return config
+# The run's ``model_call_sampling`` block moved to ``nemo_gym.config.global_config``.
+__getattr__ = moved_names_getattr(__name__)

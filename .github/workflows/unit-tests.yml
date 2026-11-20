@@ -179,6 +179,8 @@ jobs:
       - name: Sandbox unit tests
         env:
           COVERAGE_FILE: results/.coverage.sandbox
+          # The real-bwrap tests fail here instead of skipping when bwrap or user namespaces are missing.
+          NEMO_GYM_REQUIRE_BWRAP: "1"
         run: |
           source ./scripts/ci/setup_dev.sh
           uv sync --extra dev --extra ray --extra sandbox --extra openshell --extra mlflow --extra wandb

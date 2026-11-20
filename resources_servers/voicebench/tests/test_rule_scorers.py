@@ -35,7 +35,7 @@ def test_mcq_legacy_extraction(answer: str, expected: str) -> None:
     result = mcq.score(answer, {"reference": expected}, rng=random.Random(7))
     assert result.reward == 1.0
     assert result.details["prediction"] == expected
-    assert result.metrics == {"correct": 1.0, "total": 1.0, "parse_failure": 0.0}
+    assert result.metrics == {"correct": 1.0, "correct_parsed": 1.0, "total": 1.0, "parse_failure": 0.0}
 
 
 @pytest.mark.parametrize("answer", ["", "E", "I do not know", "option five"])
@@ -47,6 +47,8 @@ def test_mcq_fallback_is_seeded_and_reported(answer: str) -> None:
     assert result.details["prediction"] == expected
     assert result.details["legacy_random_fallback"]
     assert result.metrics["parse_failure"] == 1.0
+    # A lucky guess counts for the legacy accuracy but never for the unparsed-is-wrong accuracy.
+    assert result.metrics["correct"] == 1.0 and result.metrics["correct_parsed"] == 0.0
 
 
 def test_mcq_wrong_and_reference_case_preserve_source_behavior() -> None:
@@ -83,6 +85,7 @@ def test_bbh_fallback_is_seeded_and_reported(category: str) -> None:
     assert result.reward == 1.0
     assert result.details["prediction"] == expected
     assert result.metrics["parse_failure"] == 1.0
+    assert result.metrics["correct"] == 1.0 and result.metrics["correct_parsed"] == 0.0
     assert result.details["legacy_random_fallback"]
 
 

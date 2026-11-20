@@ -17,6 +17,11 @@ from nemo_gym.models.token_capture.control_routes import (
 )
 from nemo_gym.models.token_capture.lineage import FileLineageStore
 from nemo_gym.models.token_capture.protocols import RolloutRetiredError
+from nemo_gym.models.token_capture.records import CallIdentity
+
+
+# An unnamed agent on a model server without a configured name: the lineage scope of these tests' calls.
+UNNAMED_IDENTITY = CallIdentity()
 
 
 TOKEN = "secret"
@@ -52,7 +57,7 @@ async def test_retire_route_removes_ledgers_and_fences_them(client, ledger, tmp_
     assert not (tmp_path / "r1.lineage.jsonl").exists()
     await _record_failure(ledger, "r1")
     with pytest.raises(RolloutRetiredError):
-        await ledger.has_rows("r1")
+        await ledger.has_rows("r1", identity=UNNAMED_IDENTITY)
 
 
 @pytest.mark.asyncio
@@ -64,7 +69,7 @@ async def test_delete_route_removes_the_fence(client, ledger):
 
     assert response.status_code == 200
     await _record_failure(ledger, "r1")
-    assert await ledger.has_rows("r1")
+    assert await ledger.has_rows("r1", identity=UNNAMED_IDENTITY)
 
 
 @pytest.mark.asyncio
@@ -103,7 +108,7 @@ async def test_ledger_routes_reject_an_invalid_rollout_id_without_changing_anyth
     await _record_failure(ledger, "r1")
     response = client.post(route, json={"capture_keys": ["r1", "a/b"]}, headers=AUTH)
     assert response.status_code == 400
-    assert await ledger.has_rows("r1")
+    assert await ledger.has_rows("r1", identity=UNNAMED_IDENTITY)
 
 
 class _Response:
@@ -175,7 +180,7 @@ async def test_client_rejects_a_bare_rollout_id_before_sending_anything(client, 
     # A string is a sequence of one-character IDs: "rollout-abc" would remove rollouts "r", "o", "l", ...
     with pytest.raises(TypeError, match="sequence of capture keys"):
         await getattr(control, action)("rollout-abc")
-    assert await ledger.has_rows("r")
+    assert await ledger.has_rows("r", identity=UNNAMED_IDENTITY)
 
 
 @pytest.mark.asyncio
@@ -186,7 +191,7 @@ async def test_client_validates_every_batch_before_changing_anything(client, led
 
     with pytest.raises(ValueError, match="Invalid rollout id"):
         await control.retire(["r1", "r2", "a/b"])
-    assert await ledger.has_rows("r1")
+    assert await ledger.has_rows("r1", identity=UNNAMED_IDENTITY)
 
 
 @pytest.mark.asyncio
