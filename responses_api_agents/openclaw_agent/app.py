@@ -49,12 +49,12 @@ from nemo_gym.agents import (
     AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
-    BaseResponsesAPIAgentConfig,
     Body,
     SandboxCommand,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    StrictResponsesAPIAgentConfig,
     resolve_agent_timeout,
     restrict_sandbox_network,
     shell_assignments,
@@ -540,7 +540,7 @@ _NODE_FLOOR_CHECK = (
 )
 
 
-class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
+class OpenClawAgentConfig(StrictResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 32

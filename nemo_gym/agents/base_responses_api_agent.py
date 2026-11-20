@@ -373,6 +373,21 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
         return tool_accesses
 
 
+class StrictResponsesAPIAgentConfig(BaseResponsesAPIAgentConfig):
+    """An agent config that rejects keys it does not declare, so a misspelled setting fails at startup.
+
+    A misspelled ``network_access`` would otherwise be ignored and leave a sandbox on the provider's open network.
+    The keys that other Gym components read from an agent's block stay accepted: ``datasets`` (rollout collection),
+    ``description``, and ``tool_servers`` (an Environment Server's fallback for the MCP servers it grants).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    datasets: Optional[list[Any]] = None
+    description: Optional[str] = None
+    tool_servers: Optional[list[Any]] = None
+
+
 class BaseResponsesAPIAgent(BaseServer):
     """An agent server: the harness Gym runs against the model for each task.
 
@@ -541,9 +556,10 @@ def assert_model_url_reachable_from_sandbox(url: str, *, provider_name: str | No
     host is the container itself, so every model call fails and the episode silently scores 0.
 
     Raises:
-        ValueError: when ``url`` is loopback and ``provider_name`` is not a host-network or local
-            Docker provider. Local Docker only logs a warning: loopback works there only when the
-            daemon shares the host network.
+        AgentSeedRejectedError: when ``url`` is loopback and ``provider_name`` is not a host-network or
+            local Docker provider. The same configuration fails every attempt, so a seed refuses it with a
+            final HTTP 422; it is still a ``ValueError``. Local Docker only logs a warning: loopback works
+            there only when the daemon shares the host network.
     """
     if not is_loopback_host(url):
         return
@@ -557,7 +573,7 @@ def assert_model_url_reachable_from_sandbox(url: str, *, provider_name: str | No
             provider_name,
         )
         return
-    raise ValueError(
+    raise AgentSeedRejectedError(
         f"Model Server URL {url} is a loopback address, which the {provider_name or 'remote'} sandbox cannot "
         "reach: inside the container, 127.0.0.1 is the container itself. Set ++use_absolute_ip=true so the "
         "agent advertises the host's network address, or configure a reachable model URL."

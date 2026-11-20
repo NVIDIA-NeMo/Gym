@@ -40,11 +40,11 @@ from nemo_gym.agents import (
     AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
-    BaseResponsesAPIAgentConfig,
     Body,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    StrictResponsesAPIAgentConfig,
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
     restrict_sandbox_network,
@@ -322,7 +322,7 @@ def _split_input_to_user_and_history(input_items) -> tuple[str | list[dict[str, 
     return user_message, history, system_message
 
 
-class HermesAgentConfig(BaseResponsesAPIAgentConfig):
+class HermesAgentConfig(StrictResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     model: Optional[str] = None
@@ -562,11 +562,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
         # without use_absolute_ip) would make every model call fail and the episode score 0 unmasked.
         model_base_url = self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key)
-        try:
-            assert_model_url_reachable_from_sandbox(model_base_url, provider_name=next(iter(provider_config), None))
-        except ValueError as error:
-            # A model URL the sandbox cannot reach fails the same way on every attempt: refuse the seed.
-            raise AgentSeedRejectedError(str(error)) from error
+        # A model URL the sandbox cannot reach fails the same way on every attempt, so this refuses the seed (422).
+        assert_model_url_reachable_from_sandbox(model_base_url, provider_name=next(iter(provider_config), None))
         provider = create_provider(provider_config)
         try:
             if owns_sandbox:

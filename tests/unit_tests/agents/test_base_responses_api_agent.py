@@ -20,13 +20,15 @@ import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from pydantic import ConfigDict
+from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.agents.base_responses_api_agent import (
+    AgentSeedRejectedError,
     BaseResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
     ModelEndpoint,
     SimpleResponsesAPIAgent,
+    StrictResponsesAPIAgentConfig,
     assert_model_url_reachable_from_sandbox,
     is_loopback_host,
 )
@@ -478,10 +480,13 @@ class TestAssertModelUrlReachableFromSandbox:
     )
     @pytest.mark.parametrize("provider_name", ["opensandbox", "e2b", "daytona", None])
     def test_loopback_on_remote_provider_raises_with_fix(self, url: str, provider_name: str | None) -> None:
-        with pytest.raises(ValueError, match=r"\+\+use_absolute_ip=true") as excinfo:
+        with pytest.raises(AgentSeedRejectedError, match=r"\+\+use_absolute_ip=true") as excinfo:
             assert_model_url_reachable_from_sandbox(url, provider_name=provider_name)
-        assert url in str(excinfo.value)
-        assert "reachable model URL" in str(excinfo.value)
+        # The same configuration fails every attempt, so a seed refuses it with a final 422.
+        assert excinfo.value.status_code == 422
+        assert isinstance(excinfo.value, ValueError)
+        assert url in excinfo.value.detail
+        assert "reachable model URL" in excinfo.value.detail
 
     def test_loopback_on_docker_warns_and_passes(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.agents.base_responses_api_agent"):
@@ -516,3 +521,24 @@ class TestAssertModelUrlReachableFromSandbox:
     def test_unparseable_hosts_are_not_loopback(self, url: str) -> None:
         assert is_loopback_host(url) is False
         assert_model_url_reachable_from_sandbox(url, provider_name="opensandbox")
+
+
+class TestStrictResponsesAPIAgentConfig:
+    BASE = {"name": "agent", "host": "127.0.0.1", "port": 8000, "entrypoint": "app.py"}
+
+    def test_an_undeclared_key_is_refused(self) -> None:
+        # A misspelled network_access would otherwise be dropped and leave the sandbox open.
+        with pytest.raises(ValidationError, match="network_acess"):
+            StrictResponsesAPIAgentConfig.model_validate({**self.BASE, "network_acess": "model_only"})
+
+    def test_keys_other_components_read_are_accepted(self) -> None:
+        config = StrictResponsesAPIAgentConfig.model_validate(
+            {
+                **self.BASE,
+                "datasets": [{"name": "train", "type": "train", "jsonl_fpath": "data/train.jsonl"}],
+                "description": "an agent",
+                "tool_servers": [{"type": "resources_servers", "name": "tavily"}],
+            }
+        )
+        assert config.description == "an agent"
+        assert config.tool_servers == [{"type": "resources_servers", "name": "tavily"}]

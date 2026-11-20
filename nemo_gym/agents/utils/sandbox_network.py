@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Egress policy for a sandbox that an agent creates for its own session."""
 
+import logging
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Literal
@@ -10,6 +11,8 @@ from nemo_gym.agents.agent_tools import restricted_network_policy
 from nemo_gym.agents.base_responses_api_agent import AgentSeedRejectedError
 from nemo_gym.sandbox.providers.base import SandboxProvider, SandboxSpec
 
+
+LOG = logging.getLogger(__name__)
 
 SandboxNetworkAccess = Literal["inherit", "model_only", "model_and_tools"]
 
@@ -54,4 +57,15 @@ def restrict_sandbox_network(
         policy = restricted_network_policy(provider.name, urls)
     except ValueError as error:
         raise AgentSeedRejectedError(str(error)) from error
+    # An operator can tell a restricted run from an open one only from this line, so it must not be filtered out.
+    # A Gym server process configures logging only with `verbose`; otherwise no handler takes INFO and only
+    # Python's last-resort handler, which prints WARNING and above, would print it.
+    level = logging.INFO if LOG.isEnabledFor(logging.INFO) and LOG.hasHandlers() else logging.WARNING
+    LOG.log(
+        level,
+        "Restricting a new %s sandbox to network_access=%s: egress allowed only to %s",
+        provider.name,
+        network_access,
+        ", ".join(rule["target"] for rule in policy["egress"]),
+    )
     return replace(spec, provider_options={**provider_options, "network_policy": policy})

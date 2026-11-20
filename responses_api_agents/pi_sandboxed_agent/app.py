@@ -88,7 +88,8 @@ _RUN: ContextVar[dict[str, Any] | None] = ContextVar("pi_sandboxed_run", default
 
 DEPRECATION_WARNING = (
     "DEPRECATED: pi_sandboxed_agent runs each episode through its own legacy /run path and will be removed after "
-    "the environment-server migration. Use pi_agent with sandbox sessions under an environment server instead. "
+    "the environment-server migration. Use pi_agent with sandbox sessions under an environment server instead; "
+    "it supports the same network_access values, and its benchmark profile defaults to model_only. "
     "The HLE search presets, which use tool_servers, have no session path yet and keep working here. "
     "See responses_api_agents/pi_agent/README.md#configure-and-run."
 )

@@ -139,7 +139,14 @@ def test_only_the_main_process_logs_the_deprecation_once(agent, caplog, monkeypa
 
     warnings = [r.getMessage() for r in caplog.records if r.name == app.__name__]
     assert warnings == ([] if worker else [app.DEPRECATION_WARNING])
-    for phrase in ("pi_sandboxed_agent", "legacy /run", "Use pi_agent", "tool_servers", "pi_agent/README.md"):
+    for phrase in (
+        "pi_sandboxed_agent",
+        "legacy /run",
+        "Use pi_agent",
+        "network_access",
+        "tool_servers",
+        "pi_agent/README.md",
+    ):
         assert phrase in app.DEPRECATION_WARNING
 
 
