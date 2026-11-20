@@ -524,7 +524,7 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
     """
     predecessor_id = rejudge_predecessor_id(failure)
     return (
-        failure.get("_ng_failure_class") in ("judge_failed", None)
+        (failure.get("_ng_failure_class") is None or matches_failure_class(failure, {"judge_failed"}))
         and _holds_saved_answer(failure)
         and predecessor_id is not None
         and result.get("_ng_failure_class") is None
@@ -542,10 +542,10 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
 def is_rejudgment_failure_of(failure: dict, row: dict) -> bool:
     """Whether ``row`` records that re-judging the saved answer of judge failure ``failure`` failed again."""
     return (
-        failure.get("_ng_failure_class") == "judge_failed"
+        matches_failure_class(failure, {"judge_failed"})
         and _holds_saved_answer(failure)
         and failure.get("_ng_failure_id") is not None
-        and row.get("_ng_failure_class") == "judge_failed"
+        and matches_failure_class(row, {"judge_failed"})
         and row.get("_ng_failure_id") not in (None, failure["_ng_failure_id"])
         and row.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)

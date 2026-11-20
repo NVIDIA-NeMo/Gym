@@ -202,6 +202,10 @@ def _names(new: str, since: str, names: str) -> dict[str, MovedPath]:
 
 # Old module path -> {old name -> new location}, for names split out of a module that still exists.
 MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
+    "nemo_gym.eval.eval_plan": {
+        # The planner's private id lookup, replaced by the shared row_task_id (which also reads materialized rows).
+        "_row_task_id": MovedPath(new="nemo_gym.data.task_selection:row_task_id", since="0.8.0"),
+    },
     "nemo_gym.server_utils": {
         # Moved, or imported before the split, and no longer used by server_utils:
         # served by its __getattr__ with a warning.
