@@ -29,6 +29,23 @@ def spark_table_name(table: str) -> str:
     return re.sub(r"\W", "_", table)
 
 
+def spark_table_names(db_id: str, tables: List[str]) -> Dict[str, str]:
+    """Map each table of ``db_id`` to its Spark name, refusing to load a database in which two tables would share
+    one (Spark's catalog folds case, so ``Sales Team`` and ``sales_team`` collide too). Silently registering only
+    the first would grade queries against the wrong table; no BIRD dev or train database has such a pair."""
+    names: Dict[str, str] = {}
+    by_key: Dict[str, str] = {}
+    for table in tables:
+        name = spark_table_name(table)
+        other = by_key.setdefault(name.lower(), table)
+        if other != table:
+            raise ValueError(
+                f"BIRD Spark table-name collision in {db_id!r}: {other!r} and {table!r} both load as {name!r}"
+            )
+        names[table] = name
+    return names
+
+
 def _is_null(value: object) -> bool:
     return value is None or (isinstance(value, float) and value != value)
 
@@ -144,10 +161,12 @@ def ensure_bird_spark(dev_databases_dir: Path, warehouse_dir: Path) -> Dict[str,
             for record in fallbacks:
                 logger.warning("BIRD Spark load: stored as string: %s", record)
             (db_dir / _LOADED_MARKER).touch()
+        table_dirs = sorted(p for p in db_dir.iterdir() if p.is_dir())
+        table_names = spark_table_names(db_id, [p.name for p in table_dirs])  # raises before anything is registered
         spark.sql(f"CREATE DATABASE IF NOT EXISTS `{db_id}`")
-        for table_dir in sorted(p for p in db_dir.iterdir() if p.is_dir()):
+        for table_dir in table_dirs:
             spark.sql(
-                f"CREATE TABLE IF NOT EXISTS `{db_id}`.`{spark_table_name(table_dir.name)}` "
+                f"CREATE TABLE IF NOT EXISTS `{db_id}`.`{table_names[table_dir.name]}` "
                 f"USING parquet LOCATION '{table_dir.resolve()}'"
             )
         session = spark.newSession()
