@@ -14,6 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS, materialize_task, require_row_in_taskset
@@ -155,3 +156,6 @@ def eval_plan_json_schema() -> str:
 def write_eval_plan(plan: EvalPlan, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(eval_plan_json(plan))
+
+
+__getattr__ = moved_names_getattr(__name__)
