@@ -301,6 +301,10 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
+    responses_stream_item_events: bool = Field(
+        default=False,
+        description="Replay item creation and content events when streaming a buffered Responses result.",
+    )
     stream_keepalive_s: Optional[float] = Field(
         default=None,
         gt=0,
@@ -733,7 +737,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         )
         response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
         streamed = await self._stream_served_response(
-            response_json, synthesize_responses_sse(response_json, include_created=include_created)
+            response_json,
+            synthesize_responses_sse(
+                response_json,
+                include_created=include_created,
+                include_item_events=self.config.responses_stream_item_events,
+            ),
         )
         if "usage" in response_json:
             # The SSE usage reports an unknown detail count as 0; capture records Gym's own usage instead.

@@ -195,6 +195,13 @@ def sanitize_streaming_responses_body(
         kept_items = []
         carrier_tools: list[Any] = []
         for item in input_items:
+            if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") is not None:
+                content = item.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "input_image":
+                            # OpenCode omits the optional wire detail, which Gym's SDK schema requires.
+                            part.setdefault("detail", "auto")
             if isinstance(item, dict) and item.get("type") == "message":
                 content = item.get("content")
                 if (
@@ -390,7 +397,11 @@ def _wire_usage(usage: Any) -> Any:
 
 
 def synthesize_responses_sse(
-    response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None, *, include_created: bool = True
+    response_json: dict[str, Any],
+    ns_map: Optional[NamespaceMap] = None,
+    *,
+    include_created: bool = True,
+    include_item_events: bool = False,
 ) -> Iterator[str]:
     """Re-emit a complete Responses API response object as an SSE event stream.
 
@@ -398,6 +409,7 @@ def synthesize_responses_sse(
     The terminal event reflects the response status, retaining partial output, usage and failure
     details; ``response.created`` is included for clients waiting for an acknowledgement, unless
     ``include_created`` is false because keepalive events already opened the stream.
+    ``include_item_events`` also opens each item and delivers its buffered content for clients that track deltas.
     """
     if "usage" in response_json:
         response_json = {**response_json, "usage": _wire_usage(response_json["usage"])}
@@ -407,12 +419,48 @@ def synthesize_responses_sse(
             {"type": "response.created", "response": {**response_json, "status": "in_progress", "output": []}}
         )
     for index, item in enumerate(output_items):
+        if include_item_events:
+            yield from _response_item_events(index, item)
         yield _sse_event({"type": "response.output_item.done", "output_index": index, "item": item})
     terminal_event = {
         "incomplete": "response.incomplete",
         "failed": "response.failed",
     }.get(response_json.get("status"), "response.completed")
     yield _sse_event({"type": terminal_event, "response": {**response_json, "output": output_items}})
+
+
+def _response_item_events(index: int, item: dict[str, Any]) -> Iterator[str]:
+    """Send the opening and content events for the items Gym's chat backend produces."""
+    kind = item["type"]
+    opening = dict(item)
+    if kind == "reasoning":
+        opening["summary"] = []
+    elif kind == "message":
+        opening.update(content=[], status="in_progress")
+    elif kind == "function_call":
+        opening.update(arguments="", status="in_progress")
+    yield _sse_event({"type": "response.output_item.added", "output_index": index, "item": opening})
+
+    item_fields = {"output_index": index, "item_id": item.get("id")}
+    if kind == "function_call":
+        arguments = item["arguments"]
+        yield _sse_event({"type": "response.function_call_arguments.delta", **item_fields, "delta": arguments})
+        yield _sse_event({"type": "response.function_call_arguments.done", **item_fields, "arguments": arguments})
+    elif kind in {"message", "reasoning"}:
+        is_reasoning = kind == "reasoning"
+        parts = item.get("summary" if is_reasoning else "content") or []
+        part_event = "reasoning_summary_part" if is_reasoning else "content_part"
+        index_key = "summary_index" if is_reasoning else "content_index"
+        for part_index, part in enumerate(parts):
+            fields = {**item_fields, index_key: part_index}
+            part_type = part["type"]
+            value_key = "refusal" if part_type == "refusal" else "text"
+            text_event = "reasoning_summary_text" if is_reasoning else part_type
+            opening_part = {**part, value_key: ""}
+            yield _sse_event({"type": f"response.{part_event}.added", **fields, "part": opening_part})
+            yield _sse_event({"type": f"response.{text_event}.delta", **fields, "delta": part[value_key]})
+            yield _sse_event({"type": f"response.{text_event}.done", **fields, value_key: part[value_key]})
+            yield _sse_event({"type": f"response.{part_event}.done", **fields, "part": part})
 
 
 def synthesize_responses_failure_sse(

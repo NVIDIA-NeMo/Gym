@@ -1282,6 +1282,27 @@ class TestResponsesDispatchRoute:
         assert first_item["namespace"] == "mcp__weather"
         assert first_item["name"] == "get_weather"
 
+    def test_streaming_item_events_link_reasoning_and_tool_arguments(self) -> None:
+        client, server = _client(_ReasoningReplayModel)
+        server.config.responses_stream_item_events = True
+        response = client.post("/v1/responses", json={"input": "hi", "stream": True})
+        assert response.status_code == 200
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert events[1]["type"] == "response.output_item.added"
+        assert events[1]["item"]["summary"] == []
+        reasoning = [event for event in events if event["type"] == "response.reasoning_summary_text.delta"]
+        assert [(event["item_id"], event["summary_index"], event["delta"]) for event in reasoning] == [
+            ("rs_readable", 0, "First."),
+            ("rs_readable", 1, "Second."),
+        ]
+        tool_start = next(
+            event for event in events if event["type"] == "response.output_item.added" and event["output_index"] == 1
+        )
+        tool_end = next(event for event in events if event["type"] == "response.function_call_arguments.done")
+        assert tool_start["item"]["arguments"] == ""
+        assert tool_end["item_id"] == tool_start["item"]["id"]
+        assert tool_end["arguments"] == events[-1]["response"]["output"][1]["arguments"]
+
     def test_streaming_request_aware_signature(self) -> None:
         client, server = _client(_RequestAwareEchoModel)
         resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
