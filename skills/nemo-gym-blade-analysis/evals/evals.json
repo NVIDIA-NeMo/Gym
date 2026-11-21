@@ -1,0 +1,49 @@
+[
+  {
+    "id": "blade-failure-report",
+    "question": "User prompt: Here are the rollouts and aggregate metrics of my finished Gym run. Write an analysis report that says which tasks fail and why.",
+    "expected_skill": "nemo-gym-blade-analysis",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Counts tasks and rows, computes pass@1 and pass@k, splits tasks into always-pass, sometimes-pass, never-pass and missing, and ties each failure mode to evidence.",
+    "expected_behavior": [
+      "Starts from the artifact inventory and says which claims cannot be supported when artifacts are missing.",
+      "Buckets tasks into always-pass, sometimes-pass, never-pass and missing.",
+      "Uses one primary root-cause label per failed task and maps each to an action."
+    ]
+  },
+  {
+    "id": "blade-benchmark-package",
+    "question": "User prompt: Does my benchmark have all the BLADE deliverables?",
+    "expected_skill": "nemo-gym-blade-analysis",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Loads the build guide and inventories the deliverables.",
+    "expected_behavior": [
+      "Loads references/blade-benchmark-build-guide.md.",
+      "Treats missing deliverables as blocking work items."
+    ]
+  },
+  {
+    "id": "blade-comparable-first",
+    "question": "User prompt: Model A scores 5 points higher than model B on my benchmark. Write the analysis.",
+    "expected_skill": "nemo-gym-blade-analysis",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Starts with the nemo-gym-score-triage skill to decide whether the numbers are comparable.",
+    "expected_behavior": [
+      "Checks comparability of the two scores before the failure analysis."
+    ]
+  },
+  {
+    "id": "blade-negative-profile",
+    "question": "User prompt: What does the pass@k key in my profiling file mean?",
+    "expected_skill": "nemo-gym-reward-profiling",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "This is a reward profiling question. The right skill is nemo-gym-reward-profiling.",
+    "expected_behavior": [
+      "Does not load nemo-gym-blade-analysis for this request."
+    ]
+  }
+]

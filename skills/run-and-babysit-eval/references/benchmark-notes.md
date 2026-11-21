@@ -69,9 +69,8 @@ with this template looks healthy and scores near 0. The same holds for the other
 such a score; it is a model-configuration result, not a tool-use measurement.
 
 A task may use its whole 8 h agent budget, so a chain cap of one or two hours leaves long tasks unfinished.
-Single tasks have needed more than 90 minutes and over 100 model calls, so a one-hour segment, or one of an
-hour and a half, cannot finish them: the task is cut, restarts from scratch in the next segment and is cut
-again. Give each segment more walltime than the longest task needs.
+A single task can need more time than a short segment gives it: the task is cut, restarts from scratch in the
+next segment and is cut again. Give each segment more walltime than the longest task needs.
 A row in flight when a segment ends is rerun from the start in the next segment, and after the first such
 end each one charges the row an attempt: a continuation can start and end with the same number of saved
 rows. Such a run stops at the walltime cap with `complete: false` in `artifacts/rollouts_coverage.json`,
@@ -81,9 +80,9 @@ budget per segment.
 
 ## DeepSWE and the SWE family (OpenCode)
 
-DeepSWE gives the agent 3 h per row (`sandbox_timeout: 10800`), so a segment needs a little more than that
-to hold one row plus setup and verification. A shorter `sandbox_timeout` changes the protocol: use it for a
-pipe-clean only, never for a score you compare.
+DeepSWE gives the agent 3 h per row (`timeout: 10800` in `benchmarks/deepswe/opencode.yaml`), so a segment
+needs a little more than that to hold one row plus setup and verification. A shorter agent `timeout` changes
+the protocol: use it for a pipe-clean only, never for a score you compare.
 
 A DeepSWE verification that gives no verdict (no `reward.json`, no test report, or no sandbox) is run again
 on a fresh sandbox with the same collected patch, up to `inconclusive_verification_retries` more times
@@ -102,15 +101,14 @@ When the Stirrup agent stops at its wall time, verification returns `agent_timeo
 `mask_sample: true`: the row is not scored, and under the default outcome policy it is retried with a fresh
 budget. `by_failure_kind: {agent_timeout: fail}` keeps it final instead. Rows that outlive the environment
 server's episode guard (`default_episode_timeout_seconds`, 18000 s in the benchmark config) come back as
-`environment_server_failed` and are retried too; in long runs this is common (tens of rows), and most of them
-finish on the retry. Report both counts beside the score.
+`environment_server_failed` and are retried too. Report both counts beside the score.
 
 ## OSWorld: task time limits and evaluator faults
 
 `task_timeout`, `action_timeout` and `evaluator_error` are runtime-admission reasons that OSWorld records as a
-retryable `infrastructure_error`. A row that ran out of task time (7200 s in the benchmark's agent config,
-1800 s in the agent default) is run again with a full budget, and an evaluator fault reruns the whole
-episode instead of re-judging the saved state. A long run usually retries a few such rows; count them from
+retryable `infrastructure_error`. A row that ran out of task time (1800 s in the agent's default config,
+and a benchmark config can set its own) is run again with a full budget, and an evaluator fault reruns the whole
+episode instead of re-judging the saved state. Count them from
 the failure records and report them with the score.
 
 ## Single-turn benchmarks and MRCR: the episode deadline
@@ -121,8 +119,7 @@ allocation ends first: a hung or runaway call is then cut as `rollout_allocation
 row is free, later ones are charged), not typed as a deadline.
 
 With segments longer than 6 h, as long-context MRCR runs use, the deadline fires: runaway generations run
-into the 6 h limit, end as `environment_server_failed`, and are retried. In one long run 63 rows ended there and 60 of them were rerun to
-a graded result, so a retried row is a second sample of a generation that ran away once. Count these rows
+into the 6 h limit, end as `environment_server_failed`, and are retried. A retried row is a second sample of a generation that ran away once. Count these rows
 from the failure records before you compare MRCR scores.
 
 ## Benchmarks on the legacy relay: six-hour episode deadline by default
@@ -139,15 +136,13 @@ Partner IF dispatcher, do), so that only the agent's limits apply.
 ## HLE: runaway generations
 
 A call that stops at the length limit with no usable output is the health finding
-`model_call_runaway_generation`. On a 100-task HLE run of a mid-size model, 6 rows carried it. These are
+`model_call_runaway_generation`. These are
 model faults: the rows are scored, they appear in `trial_counts.unhealthy`, and they do not count against
 the 2% evaluation-side limit. Report them as the model's behaviour, not as an evaluation problem.
 
 ## What a healthy small run looks like: GPQA
 
-GPQA with `--limit 20` and 8 repeats is 160 rows. Most rows arrive within a few minutes of the first
-request, then a tail of long generations (tens of thousands of output tokens) takes several more minutes;
-that tail is normal. At the end, `rollouts_coverage.json` reads `expected 160, successful 160, masked 0,
+GPQA with `--limit 20` and 8 repeats is 160 rows (20 tasks times 8 repeats). At the end, `rollouts_coverage.json` reads `expected 160, successful 160, masked 0,
 failed 0, missing 0, complete true`, and the inspect returns `noop` ("every identity is scored or a final
 model failure"), `SUCCESS`, evaluation health `PASS` with failure rate 0.0, and `trial_counts` 160 healthy,
 0 unhealthy, 0 unobserved.
@@ -159,5 +154,5 @@ over those tasks only: compare it with another run on the same tasks (same data,
 repeats), never with a full run's mean. Agentic proofs with one to three rows (DeepSWE, Terminal-Bench 4.0,
 SkillsBench) prove that the path works, not a rate; a 0.0 or 1.0 there says nothing about the model. A
 limited run of a long-task benchmark under a small chain cap often ends at the walltime cap with rows
-missing (for example 25 of 28 GDPVal rows, or 7 of 8 Terminal-Bench 4.0 rows); that is the cap, and
+missing. That is the cap, and
 `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"` continues it.
