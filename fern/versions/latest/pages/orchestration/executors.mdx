@@ -1,0 +1,47 @@
+---
+title: "Executors and Capabilities"
+description: "Which schedulers gym eval submit supports, and which gym job commands each executor can serve."
+position: 5
+---
+
+An **executor** is the part of NeMo Gym that talks to one scheduler. `compute.<name>.type` in the [submit config](/orchestration/configuration#compute) picks it, and the executor's `name` is stored in the [job record](/orchestration/job-records) so that later commands reach the same scheduler.
+
+| `compute` type | Executor | Page |
+| --- | --- | --- |
+| `slurm` | `slurm` | [Slurm Executor](/orchestration/slurm-executor) |
+| `kubernetes` | `kubernetes` | [Kubernetes Executor](/orchestration/kubernetes-executor) |
+
+## Capabilities
+
+Every executor can submit. Everything after that is a **capability** the executor opts into, so an executor supports exactly the commands it can serve. `gym job list` is the exception: it reads the local index of submissions, so it works for every executor.
+
+When you run a command the executor does not support, the command stops with an error that names both, for example `kubernetes executor does not support status`. Nothing is changed on the cluster.
+
+The table and the list below are generated from the executor classes, so they always match the code. Contributors regenerate them as described in [Add an Executor](/contribute/add-an-executor).
+
+{/* capability-matrix:start */}
+
+| Executor | `gym job status` | `gym job info` | `gym job cancel` | `gym job logs` | `gym job resubmit` | `resumable` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `kubernetes` | No | No | No | No | No | No |
+| `slurm` | Yes | Yes | Yes | Yes | Yes | Yes |
+
+- `Inspectable`: `gym job status`, `gym job info`. Implemented by `slurm`.
+- `Terminable`: `gym job cancel`. Implemented by `slurm`.
+- `LogReadable`: `gym job logs`. Implemented by `slurm`.
+- `Resubmittable`: `gym job resubmit`. Implemented by `slurm`.
+
+{/* capability-matrix:end */}
+
+| Capability | What the executor can do |
+| --- | --- |
+| `Inspectable` | Report what the scheduler says about each job, and read files and progress from the run directory. |
+| `Terminable` | Stop a job and anything that would start it again, such as a queued follow-up. It includes `Inspectable`. |
+| `LogReadable` | Read, tail or follow a job's logs. It includes `Inspectable`. |
+| `Resubmittable` | Queue a benchmark of an existing submission again, in place. It refuses while a job of that benchmark is still active. |
+
+`resumable` is not a command. It is a per-benchmark option that chains follow-up jobs after a time limit or a preemption, and only an executor that declares support accepts it. Setting it for another executor is a configuration error at submit time, not a silent no-op.
+
+## What to do when a command is unsupported
+
+Use the scheduler's own tools. They work on the same jobs, because a job record holds the identifiers they need: the job ID for Slurm, and the Kubernetes Job name for Kubernetes. [Kubernetes Executor](/orchestration/kubernetes-executor#managing-a-run) lists the `kubectl` commands that stand in for each missing one.

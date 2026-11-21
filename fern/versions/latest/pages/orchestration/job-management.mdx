@@ -1,10 +1,16 @@
 ---
 title: "Job Management"
 description: "List submitted runs, see what is happening to them, find where their parts are, stop them, read their logs, and queue them again."
-position: 6
+position: 9
 ---
 
 `gym eval submit` queues one job per benchmark and leaves a [job record](./job-records) behind. The `gym job` commands read that record, so you can look at a run without going to the scheduler yourself.
+
+<Note>
+
+Each command beyond `gym job list` needs a [capability](/orchestration/executors#capabilities) of the executor that queued the run. The Slurm executor has all of them. The [Kubernetes executor](/orchestration/kubernetes-executor#managing-a-run) has none yet, so there you use `kubectl`.
+
+</Note>
 
 | Command | Asks the scheduler? | What it does |
 | --- | --- | --- |

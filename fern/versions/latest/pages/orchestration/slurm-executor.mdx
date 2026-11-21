@@ -1,10 +1,10 @@
 ---
 title: "Slurm Executor"
 description: "How gym eval submit turns a config into Slurm jobs, and what each job and run directory contains."
-position: 4
+position: 6
 ---
 
-The Slurm executor is the only executor today. It targets clusters with [Pyxis](https://github.com/NVIDIA/pyxis): every service and the driver run in `srun --container-image` steps, so each one uses the container image in its own config.
+The Slurm executor supports every [`gym job` command and `resumable`](/orchestration/executors#capabilities). For a Kubernetes cluster, see the [Kubernetes Executor](/orchestration/kubernetes-executor). The Slurm executor targets clusters with [Pyxis](https://github.com/NVIDIA/pyxis): every service and the driver run in `srun --container-image` steps, so each one uses the container image in its own config.
 
 ## What the executor needs
 

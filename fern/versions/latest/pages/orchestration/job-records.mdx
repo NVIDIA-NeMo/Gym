@@ -1,7 +1,7 @@
 ---
 title: "Job Records"
 description: "The manifest, resolved config, and local index that gym eval submit leaves behind."
-position: 5
+position: 8
 ---
 
 `gym eval submit` describes what to submit; the job record describes what **was** submitted. It exists so a run can be found again, by a person, a collection script, or `gym job status`, without re-reading the original config.
@@ -42,11 +42,11 @@ A machine that loses its index (a recycled pod, a cleared cache) no longer finds
 | `submitted_at` | UTC time, ISO 8601 with a trailing `Z`. |
 | `run_dir` | Absolute path of the run directory. |
 | `cluster` | The name of the `compute` entry. |
-| `executor` | Which executor produced the record; `slurm` today. A plain string, so adding an executor does not change the schema. Branch on it before interpreting `job_id`. |
+| `executor` | Which executor produced the record: `slurm` or `kubernetes`. A plain string, so adding an executor does not change the schema. Branch on it before interpreting `job_id`. |
 | `hostname` | The host submitted through. `null` means the submission ran directly on the machine with the scheduler's client, not that the host is unknown. |
 | `submitted_by` | Local username that submitted. |
 | `benchmarks` | A list of per-benchmark entries; see below. |
-| `executor_metadata` | Free-form string map for whatever an executor needs to find the run again. Empty for Slurm. Read it only after checking `executor`. |
+| `executor_metadata` | Free-form string map for whatever an executor needs to find the run again. Empty for Slurm. For Kubernetes it holds the `namespace` and `context`. Read it only after checking `executor`. |
 | `schema_version` | Integer, currently `1`. |
 
 Each entry in `benchmarks`:
@@ -55,7 +55,7 @@ Each entry in `benchmarks`:
 | --- | --- |
 | `benchmark` | The benchmark's name. |
 | `job_dir` | The benchmark's directory inside the run directory. |
-| `job_id` | The Slurm job ID. `null` exactly when the executor failed to queue this benchmark. |
+| `job_id` | The Slurm job ID, or the Kubernetes Job name. `null` exactly when the executor failed to queue this benchmark. |
 | `error` | Why it failed, when `job_id` is `null`. |
 | `log_sources` | The logs the job was set up to write, planned at submit time by the same code that renders the job script's log flags. Each entry has a `name`, a `kind` (`driver` or `service`), an `instance` (`null` for a log that is not split by instance), and a `location`. For Slurm the location is a path relative to `job_dir` with a `{job_id}` placeholder, because the job id is not known at submit time and changes when a job is resumed; replace it with the id of the job you want. A planned log is not proof that the file exists, for example when a service never started. Empty for a record written before this field existed. |
 
