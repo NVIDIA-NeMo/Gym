@@ -241,6 +241,13 @@ Each `/run` call writes to **two** places, for two different audiences:
   Harbor's own raw trial artifacts and the actual source of truth: per-trial
   `result.json` (reward, token counts, timing), `agent/trajectory.json` (full
   ATIF conversation), and `verifier/{reward.txt,reward.json,test-stdout.txt}`.
+  After a context compaction the conversation goes on in
+  `agent/trajectory.cont-N.json`, linked by `continued_trajectory_ref`. The
+  output holds every segment's steps in order, and each continuation is a
+  `context_compaction` record (`trigger: harbor_continuation`) in
+  `ng_agent_observations` whose `first_kept_item_id` is its first output item.
+  Usage comes from the last segment's `final_metrics`, which holds the trial's
+  totals.
 
 When debugging a suspicious `results/runs/...` file, always cross-check the
 corresponding `harbor_jobs_dir/.../<trial_name>/result.json` and

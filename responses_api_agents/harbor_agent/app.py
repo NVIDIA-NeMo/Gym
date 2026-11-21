@@ -25,7 +25,7 @@ from uuid import uuid4
 
 import ray
 from fastapi import Body, FastAPI
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
@@ -44,6 +44,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.trajectory import AgentObservationBundle, ContextCompactionObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
 
@@ -129,6 +130,33 @@ class HarborRunRequest(BaseRunRequest):
 class HarborVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
+    # One context_compaction record per continuation segment, when the trial has any.
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+
+def _continuation_observations(
+    segments: list[dict[str, Any]], continuation_item_ids: list[str], instance_id: str
+) -> Optional[AgentObservationBundle]:
+    """A context_compaction record for each segment Harbor continued after a compaction, at its first output item."""
+    if not continuation_item_ids:
+        return None
+    invocation_id = str(segments[0].get("session_id") or instance_id)
+    return AgentObservationBundle(
+        source="harbor_agent",
+        records=[
+            ContextCompactionObservation(
+                invocation_id=invocation_id,
+                trigger="harbor_continuation",
+                outcome="completed",
+                first_kept_item_id=item_id,
+            )
+            for item_id in continuation_item_ids
+        ],
+    )
+
 
 class HarborVerifierSetupError(RuntimeError):
     """Harbor could not move the verifier's files to or from the sandbox, so the trial was never measured.
@@ -154,7 +182,11 @@ async def run_harbor_job(job_config_dict: dict) -> str:
     The trial directory contains:
     - result.json: Summary result with reward, agent_result, verifier_result, etc.
     - agent/trajectory.json: Full ATIF trajectory with per-step messages, tool
-      calls, observations, and per-token logprobs.
+      calls, observations, and per-token logprobs. After a context compaction
+      the trial goes on in agent/trajectory.cont-N.json, named by the previous
+      segment's continued_trajectory_ref; every segment's steps are in the
+      output, and each continuation is a context_compaction record in
+      ng_agent_observations.
 
     Harbor writes result.json and trajectory.json to disk even when the trial
     fails (e.g. verifier timeout, reward file not found, OOM).  We recover the
@@ -302,16 +334,17 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 trial_dir = Path(trial_dir_path)
 
                 def _read_trial_files():
-                    traj_path = trial_dir / "agent" / "trajectory.json"
                     flags_path = trial_dir / "agent" / "agent_error_flags.json"
                     return (
                         json.loads((trial_dir / "result.json").read_text()),
-                        json.loads(traj_path.read_text()) if traj_path.exists() else None,
+                        HarborAgentUtils.read_trajectory_segments(trial_dir / "agent"),
                         json.loads(flags_path.read_text()) if flags_path.exists() else {},
                     )
 
                 # Trajectories can be many MB; parse off the event loop.
-                trial_result, trajectory, agent_error_flags = await asyncio.to_thread(_read_trial_files)
+                trial_result, segments, agent_error_flags = await asyncio.to_thread(_read_trial_files)
+                # The first segment holds the task and the input; continuations follow compactions.
+                trajectory = segments[0] if segments else None
 
                 # Extract reward from verifier result
                 verifier_result = trial_result.get("verifier_result")
@@ -319,13 +352,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
                 # Convert Harbor outputs to NeMo Gym response items:
                 # keep rich trajectory details, then overlay rollout token details when present.
-                output_items = HarborAgentUtils.trial_result_to_responses(trial_result, trajectory)
+                output_items, continuation_item_ids = HarborAgentUtils.segments_to_responses(segments)
+                observations = _continuation_observations(segments, continuation_item_ids, instance_id)
 
                 # Extract the initial instruction from the trajectory as input messages
                 input_messages = HarborAgentUtils.extract_input_from_trajectory(trajectory)
 
-                # Populate usage from trajectory final_metrics or agent_result
-                usage = HarborAgentUtils.extract_usage(trial_result, trajectory)
+                # Populate usage from final_metrics or agent_result. Harbor's counters run on
+                # across a compaction, so the last segment holds the trial's totals.
+                usage = HarborAgentUtils.extract_usage(trial_result, segments[-1] if segments else None)
 
             except Exception as e:
                 print(f"Error running Harbor job: {e}")
@@ -333,6 +368,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 trajectory = None
                 agent_error_flags = {}
                 output_items = []
+                observations = None
                 input_messages = []
                 usage = None
                 reward = 0.0
@@ -365,6 +401,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 agent_timeout_error=int(
                     ((trial_result or {}).get("exception_info") or {}).get("exception_type") == "AgentTimeoutError"
                 ),
+                ng_agent_observations=observations,
             )
 
             # Save result to disk (folder = run_id, file = task name)
