@@ -16,39 +16,66 @@
 
 from argparse import Namespace
 from pathlib import Path
-from shutil import copy
+from shutil import copyfile
 
-from resources_servers.spider2_lite.scripts.prepare_dataset import _main, clone_spider2_repo, delete_spider2_repo
-from resources_servers.spider2_lite.setup_spider2 import _DEFAULT_DIR, ensure_spider2_lite
+from resources_servers.spider2_lite.scripts.prepare_dataset import (
+    _main,
+    clone_spider2_repo,
+)
+from resources_servers.spider2_lite.setup_spider2 import (
+    _DEFAULT_DIR,
+    delete_spider2_lite,
+)
 
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
+
+# Role-named target the Hydra config points at.
 OUTPUT_FPATH = DATA_DIR / "spider2_lite_benchmark.jsonl"
 
+# Per-engine sidecars written by prepare_dataset._main, cached across calls.
+_SIDECAR = {
+    "sqlite": DATA_DIR / "spider2_lite_sqlite_validation.jsonl",
+    "bigquery": DATA_DIR / "spider2_lite_bigquery_validation.jsonl",
+    "all": DATA_DIR / "spider2_lite_combined_validation.jsonl",
+}
 
-def prepare() -> Path:
+
+def prepare(engine: str = "sqlite", purge_cache: bool = False) -> Path:
+    """Copy the ``engine`` sidecar to OUTPUT_FPATH, generating it on first use.
+
+    ``engine`` is one of ``"sqlite"``, ``"bigquery"`` or ``"all"``.
+    ``purge_cache=True`` wipes all cached artifacts (Spider2 git clone, any
+    downloaded SQLite databases, generated sidecars, alias file) and rebuilds
+    from scratch.
+    """
+    if engine not in _SIDECAR:
+        raise ValueError(f"engine must be one of {sorted(_SIDECAR)}, got {engine!r}")
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Download SQL lite databases
-    ensure_spider2_lite()
+    if purge_cache:
+        delete_spider2_lite()
+        for path in [*_SIDECAR.values(), OUTPUT_FPATH]:
+            path.unlink(missing_ok=True)
 
-    clone_spider2_repo(parent_dir=_DEFAULT_DIR)
-
-    _main(
-        args=Namespace(
-            spider2_dir=_DEFAULT_DIR / "Spider2" / "spider2-lite",
-            sqlite_dir=None,
-            output_dir=str(OUTPUT_FPATH.parent),
+    sidecar = _SIDECAR[engine]
+    if not sidecar.exists():
+        # Clone the Spider 2.0-Lite task metadata once (schemas live under
+        # Spider2/spider2-lite/resource). SQLite databases download lazily at
+        # the server on the first SQLite verify, so prepare stays BigQuery safe.
+        clone_spider2_repo(parent_dir=_DEFAULT_DIR)
+        _main(
+            args=Namespace(
+                spider2_dir=_DEFAULT_DIR / "Spider2" / "spider2-lite",
+                sqlite_dir=None,
+                output_dir=str(DATA_DIR),
+                engine=engine,
+            )
         )
-    )
-    copy(
-        OUTPUT_FPATH.parent / "spider2_lite_sqlite_validation.jsonl",
-        OUTPUT_FPATH,
-    )
 
-    delete_spider2_repo(parent_dir=_DEFAULT_DIR)
-
+    copyfile(sidecar, OUTPUT_FPATH)
     return OUTPUT_FPATH
 
 
