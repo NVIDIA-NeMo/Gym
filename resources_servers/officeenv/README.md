@@ -14,12 +14,12 @@ says which release it runs and how that installs.
 
 ## The OfficeEnv version
 
-The server runs OfficeEnv 1.14.0. OfficeEnv is not published yet, so the server's `pyproject.toml`
+The server runs OfficeEnv 1.14.2. OfficeEnv is not published yet, so the server's `pyproject.toml`
 and `uv.lock` list only its public dependencies, and OfficeEnv installs apart, from NVIDIA's
 internal GitLab, into the venv Gym builds from them:
 
 ```bash
-uv pip install --python resources_servers/officeenv/.venv/bin/python "officeenv @ git+${OFFICEENV_GIT_URL}@v1.14.0"
+uv pip install --python resources_servers/officeenv/.venv/bin/python "officeenv @ git+${OFFICEENV_GIT_URL}@v1.14.2"
 ```
 
 `OFFICEENV_GIT_URL` is that repository's git URL: `ssh://...` with an SSH key, or `https://...`
@@ -53,7 +53,7 @@ every server, so that tree shadows the installed release, and `/verify` reports 
 ```json
 {"responses_create_params": {"input": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}], "tools": [...]},
  "officeenv": {"task_id": "...", "seed": 1, "actor": {...}, "apps": {...}, "exposure": {"mode": "api_search"}, "checks": [...]},
- "officeenv_version": "1.14.0",
+ "officeenv_version": "1.14.2",
  "task_id": "..."}
 ```
 
@@ -75,9 +75,9 @@ officeenv emit $E/renewal_escalation.json $E/schedule_kickoff.json $E/vendor_ter
   $E/ticket_triage.json $E/sprint_handover.json -o data/example.jsonl
 ```
 
-The example rows are emitted by OfficeEnv 1.14.0; against 1.13.0's, `sprint_handover` also lists
-`jira_list_priorities` (Jira's priority scheme, new in 1.14.0), and the rest changed only in their
-version stamp. The example rollouts were collected on 2026-11-13 with `azure/openai/gpt-5.5` against
+The example rows are emitted by OfficeEnv 1.14.2; against 1.14.0's they changed only in their version
+stamp, and against 1.13.0's `sprint_handover` also lists `jira_list_priorities` (Jira's priority scheme,
+new in 1.14.0). The example rollouts were collected on 2026-11-13 with `azure/openai/gpt-5.5` against
 OfficeEnv 1.14.0, through `single_agent_turn`'s step loop and the simple agent (two at a time). All
 five score 1.0: `sprint_handover`, whose task ends with `complete_task`, ended at the step that
 called it, and the other four when the model answered. Every error the metrics count is an
@@ -180,6 +180,13 @@ that episode's tools. MCP clients read the tool definitions from that endpoint r
 the row, so these episodes need rows in the `tools` exposure with the default tool-name
 separator; a seed whose tools differ from what the endpoint serves fails with 400
 (`unsupported_exposure`).
+
+## Sandboxed harnesses
+
+`resources_servers/officeenv_sandbox` runs these episodes for coding-agent harnesses (Pi, Codex CLI, mini-SWE,
+OpenCode, OpenClaw, Terminus 2): its server subclasses this one and lends each episode session a sandbox, with
+OfficeEnv's file content moved through the sandbox's workspace instead of the conversation. Its README covers the
+images, configs and options.
 
 ## Verification
 

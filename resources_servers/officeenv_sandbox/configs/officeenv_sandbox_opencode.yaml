@@ -1,0 +1,43 @@
+# OfficeEnv's sandboxed episodes (configs/officeenv_sandbox_episodes.yaml) for OpenCode, on rows whose apps are
+# commands (`cli`: sandbox/prepare_rows.py --exposure cli). OpenCode borrows each episode's sandbox, and these episodes
+# grant it no MCP tools. Compose and run as configs/officeenv_sandbox.yaml shows, with this config and
+# `--agent officeenv_sandbox_opencode_agent`. OpenCode installs its release in each sandbox at session start (from
+# GitHub) and its plugin dependencies at every start (from the npm registry), so its sandboxes need the internet.
+config_paths:
+  - resources_servers/officeenv_sandbox/configs/officeenv_sandbox_episodes.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# The episodes' server under OpenCode's own name, naming the MCP tools as OpenCode lists them, as
+# configs/officeenv_sandbox.yaml explains for Pi.
+officeenv_sandbox_opencode_resources_server:
+  _inherit_from: officeenv_sandbox_resources_server
+  resources_servers:
+    officeenv_sandbox:
+      verified: false
+      sandbox_config:
+        # How OpenCode names the MCP tools (`<mcp_server_name>_<tool>`), for the workspace guide of rows that take them
+        # over MCP
+        mcp_tool_prefix: company_
+
+# Gym's OpenCode (responses_api_agents/opencode_agent), under this config's own name.
+officeenv_sandbox_opencode_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      timeout: 1800
+      # OpenCode's default, set here for the admission cap below to follow.
+      concurrency: 8
+
+officeenv_sandbox_opencode_environment_server:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: officeenv_sandbox_opencode_resources_server
+      agent_server:
+        name: officeenv_sandbox_opencode_agent
+      resources_tool_transports: []
+      # No more episodes than OpenCode runs at once, as configs/officeenv_sandbox.yaml explains for Pi.
+      max_concurrent_episodes: ${officeenv_sandbox_opencode_agent.responses_api_agents.opencode_agent.concurrency}
+      queue_timeout_seconds: 86400

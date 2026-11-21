@@ -288,6 +288,7 @@ ROLLOUT_STOP_AGENT_TYPES = frozenset(
         "langchain_deepagents_agent",
         "mini_swe_agent",
         "openhands_agent",
+        "pi_agent",
         "prime_agent",
         "qwen_code_agent",
         "terminus_2_agent",

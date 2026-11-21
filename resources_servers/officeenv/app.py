@@ -10,7 +10,7 @@ and adds only Gym's own response fields.
 A row (one JSONL line, written by ``officeenv emit`` or ``officeenv.emit.gym_row``):
 
     {"responses_create_params": {"input": [...], "tools": [...]},
-     "officeenv": {<TaskSpec>}, "officeenv_version": "1.14.0", "task_id": "..."}
+     "officeenv": {<TaskSpec>}, "officeenv_version": "1.14.2", "task_id": "..."}
 
 An Agent's ``/run`` (the simple agent) POSTs the row to ``/seed_session``, each function call to
 ``POST /<tool_name>`` with the call's arguments as the body, and the row plus the model's response
@@ -38,6 +38,9 @@ row whose artifacts cannot be read (400).
 For training, ``length_penalty`` (off by default) deducts AutomationBench's training length
 penalty from the reward and reports the two terms as ``reward_components``, so a trainer can
 schedule the penalty on its own (NeMo RL ``grpo.phasic_reward_components``).
+
+Sandboxed harnesses run these episodes on ``resources_servers/officeenv_sandbox``, a subclass of this
+server that lends each episode session a sandbox.
 """
 
 import asyncio

@@ -34,9 +34,11 @@ from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    ROLLOUT_STOP_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    RolloutStopRequest,
     is_harness_termination_failure,
     parse_cleanup_receipt,
     raises_agent_failure,
@@ -1124,6 +1126,29 @@ async def test_timeout_reports_wall_time_for_a_run_that_was_still_working(setup,
     request, session_id, task = await activate(agent, sandbox, seed_with_tools(mcp_grant("resources")))
     response = await task
     assert (response.status, response.metadata.get("stop_reason")) == ("incomplete", stop_reason)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+async def test_a_run_stopped_once_its_task_has_ended_answers_as_completed(setup):
+    """POST /rollouts/{rollout_id}/stop with completed (the environment server's stop at the task's end) writes the
+    marker the supervisor watches; the run it ends answers as completed and marked, not as a wall-time timeout."""
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.uploads_independent_of_execs = True
+    sandbox.events = deadline_events("stop-with-tool-call")
+    request, session_id, task = await activate(agent, sandbox, seed_with_tools(mcp_grant("resources")))
+    rollout_id = seed().episode_id.capture_key
+
+    stop = await agent.stop_rollout(rollout_id, RolloutStopRequest(reason="task_ended", completed=True))
+
+    assert stop.stopped
+    assert f"{sandbox.directory}/expire.request" in sandbox.files  # the marker the supervisor watches
+    sandbox.result["timed_out"] = True  # the supervisor ended the harness as at its deadline
+    sandbox.exited.set()
+    response = await task
+    assert (response.status, response.incomplete_details) == ("completed", None)
+    assert json.loads(response.metadata[ROLLOUT_STOP_METADATA_KEY]) == {"reason": "task_ended", "completed": True}
+    assert "stop_reason" not in response.metadata
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 

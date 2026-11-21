@@ -4,11 +4,13 @@
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import anyio
 import pytest
+from fastapi import HTTPException
 
 from nemo_gym.core.episode_types import TaskId
 from nemo_gym.sandbox.api import AsyncSandbox
@@ -57,9 +59,9 @@ def stopped(monkeypatch) -> list[str]:
     return stopped
 
 
-def _lender(workdir: Path) -> LentSandboxes:
+def _lender(workdir: Path, **options: object) -> LentSandboxes:
     config = SandboxConfig(ttl_s=60, metadata={"team": "gym"})
-    return LentSandboxes("sandbox", config, image="unused-by-the-local-provider", workdir=str(workdir))
+    return LentSandboxes("sandbox", config, image="unused-by-the-local-provider", workdir=str(workdir), **options)
 
 
 async def test_lend_starts_one_sandbox_per_session_and_release_stops_it(workdir, started, stopped) -> None:
@@ -512,3 +514,193 @@ async def test_inherit_leaves_the_provider_network_alone(workdir, started) -> No
 
     assert "network_policy" not in started[0].provider_options
     await lender.release_all()
+
+
+async def test_a_lend_gives_its_sandbox_its_own_image_env_and_setup(workdir, started, stopped) -> None:
+    lender = _lender(workdir)
+    set_up: list[AsyncSandbox] = []
+
+    async def setup(sandbox: AsyncSandbox) -> None:
+        # Runs against the started sandbox, its files delivered, before it is lent.
+        assert (workdir / "guide.md").read_text() == "read me"
+        set_up.append(sandbox)
+
+    await lender.lend(
+        "session", TASK, files={str(workdir / "guide.md"): "read me"}, image="row-image", env={"API": "x"}, setup=setup
+    )
+
+    assert started[0].image == "row-image" and started[0].env["API"] == "x"
+    assert set_up == [lender.get("session")]
+
+
+async def test_a_setup_that_fails_stops_the_sandbox_and_fails_the_lend(workdir, started, stopped) -> None:
+    lender = _lender(workdir)
+
+    async def setup(sandbox: AsyncSandbox) -> None:
+        raise RuntimeError("setup failed")
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        await lender.lend("session", TASK, setup=setup)
+
+    # start_with_setup() stops it, and the lend's own stop then finds it stopped.
+    assert len({id(sandbox) for sandbox in stopped}) == 1 and lender.get("session") is None
+
+
+async def test_a_lend_cancelled_while_its_sandbox_starts_cuts_the_start_by_default(workdir, monkeypatch) -> None:
+    # Without start_timeout_s a cancel cuts the start as it cuts any await, and the lend stops the sandbox it began.
+    lender = _lender(workdir)
+    entered = anyio.Event()
+    stops: list[AsyncSandbox] = []
+
+    async def start(self: AsyncSandbox, *_: object, **__: object) -> None:
+        entered.set()
+        await anyio.sleep_forever()
+
+    async def stop(self: AsyncSandbox, **_: object) -> None:
+        stops.append(self)
+
+    monkeypatch.setattr(AsyncSandbox, "start", start)
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as group:
+            group.start_soon(lender.lend, "session", TASK)
+            await entered.wait()
+            group.cancel_scope.cancel()
+
+    assert len(stops) == 1 and lender.get("session") is None
+
+
+async def test_with_a_start_time_limit_a_lend_cancelled_while_its_sandbox_is_created_stops_it_once_it_returns(
+    workdir, monkeypatch, caplog
+) -> None:
+    # A create cut in flight would leave a sandbox whose id the provider never returned, so with start_timeout_s the
+    # create runs to its end.
+    lender = _lender(workdir, start_timeout_s=60)
+    seed = anyio.CancelScope()
+    created: list[object] = []
+    closed: list[object] = []
+    real_create, real_close = LocalProvider.create, LocalProvider.close
+
+    async def create(self: LocalProvider, spec):
+        seed.cancel()
+        await anyio.sleep(0)  # where an unshielded create is cancelled with the seed
+        handle = await real_create(self, spec)
+        created.append(handle)
+        return handle
+
+    async def close(self: LocalProvider, handle) -> None:
+        await real_close(self, handle)
+        closed.append(handle)
+
+    monkeypatch.setattr(LocalProvider, "create", create)
+    monkeypatch.setattr(LocalProvider, "close", close)
+    with caplog.at_level(logging.INFO, logger=sandbox_lending.__name__), seed:
+        await lender.lend("session", TASK)
+
+    assert len(created) == 1 and closed == created
+    assert lender.get("session") is None
+    assert "resources session session: its seed was cancelled while it started" in caplog.text
+
+
+def _lending_records(caplog) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.name == sandbox_lending.__name__]
+
+
+async def test_a_start_that_hangs_ends_at_the_start_time_limit_and_lends_nothing(
+    workdir, monkeypatch, stopped, caplog
+) -> None:
+    config = SandboxConfig(metadata={"team": "gym"})
+    lender = LentSandboxes("sandbox", config, image="task-image", workdir=str(workdir), start_timeout_s=0.05)
+
+    async def create(self: LocalProvider, spec):
+        await asyncio.Event().wait()  # a provider's create that never returns
+
+    monkeypatch.setattr(LocalProvider, "create", create)
+    with caplog.at_level(logging.ERROR, logger=sandbox_lending.__name__), pytest.raises(TimeoutError):
+        await lender.lend("session", TASK)
+
+    # The create was cut before the provider returned the sandbox's id, so the provider has nothing to close and the
+    # stop cannot reach what it created: the log names the session and the task, and what a reaper finds it by.
+    assert stopped == [] and lender.get("session") is None
+    (cut,) = _lending_records(caplog)
+    message = cut.getMessage()
+    assert cut.levelno == logging.ERROR
+    assert f"resources session session (task {TASK.task_id} of taskset lending:test)" in message
+    assert "within start_timeout_s (0.05 s)" in message and "the local provider's create was cut" in message
+    assert f"by image task-image and labels {{'team': 'gym', 'task_id': '{'t' * 63}'}}" in message
+
+
+async def test_a_start_cut_after_its_create_returned_stops_the_sandbox_it_knows(workdir, monkeypatch, caplog) -> None:
+    # The provider returned the sandbox's id before the limit cut the start, so the stop reaches the sandbox, and no
+    # reaper is asked for.
+    lender = LentSandboxes("sandbox", SandboxConfig(), image=None, workdir=str(workdir), start_timeout_s=0.05)
+    closed: list[object] = []
+    real_close = LocalProvider.close
+
+    async def upload_file(self: LocalProvider, handle, source_path, target_path) -> None:
+        await asyncio.Event().wait()  # a file delivery that never ends
+
+    async def close(self: LocalProvider, handle) -> None:
+        await real_close(self, handle)
+        closed.append(handle)
+
+    monkeypatch.setattr(LocalProvider, "upload_file", upload_file)
+    monkeypatch.setattr(LocalProvider, "close", close)
+    with caplog.at_level(logging.ERROR, logger=sandbox_lending.__name__), pytest.raises(TimeoutError):
+        await lender.lend("session", TASK, files={str(workdir / "0.png"): b"png"})
+
+    assert len(closed) == 1 and lender.get("session") is None
+    assert _lending_records(caplog) == []
+
+
+async def test_release_all_waits_for_a_lend_still_starting_and_lends_nothing_after(workdir, monkeypatch) -> None:
+    lender = _lender(workdir)
+    creating, go_on = asyncio.Event(), asyncio.Event()
+    closed: list[object] = []
+    real_create, real_close = LocalProvider.create, LocalProvider.close
+
+    async def create(self: LocalProvider, spec):
+        creating.set()
+        await go_on.wait()
+        return await real_create(self, spec)
+
+    async def close(self: LocalProvider, handle) -> None:
+        await real_close(self, handle)
+        closed.append(handle)
+
+    monkeypatch.setattr(LocalProvider, "create", create)
+    monkeypatch.setattr(LocalProvider, "close", close)
+    seed = asyncio.ensure_future(lender.lend("starting", TASK))
+    await creating.wait()
+    release = asyncio.ensure_future(lender.release_all(timeout_s=5))
+    await asyncio.sleep(0)
+    go_on.set()
+
+    assert await release == {"lent": [], "failed_seeds": [], "starting": []}
+    # The lend that was starting stopped its own sandbox: release_all would not have found it lent.
+    with pytest.raises(HTTPException) as refused:
+        await seed
+    assert refused.value.status_code == 503
+    assert len(closed) == 1 and lender.get("starting") is None
+    with pytest.raises(HTTPException):
+        await lender.lend("later", TASK)
+
+
+async def test_release_all_cuts_its_stops_at_its_time_limit_and_reports_what_may_still_run(
+    workdir, started, monkeypatch, caplog
+) -> None:
+    lender = _lender(workdir)
+    await lender.lend("hangs", TASK)
+
+    async def stop(self: AsyncSandbox) -> None:
+        await asyncio.Event().wait()  # a provider's delete that never returns
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    begun = time.monotonic()
+    with caplog.at_level(logging.ERROR, logger=sandbox_lending.__name__):
+        left = await lender.release_all(timeout_s=0.05)
+
+    # Cut at its own deadline, not at the stop's (STOP_TIMEOUT_S): a server's exit cannot wait for that.
+    assert time.monotonic() - begun < 5
+    assert left == {"lent": ["hangs"], "failed_seeds": [], "starting": []}
+    assert "a reaper must stop them" in caplog.text and "['hangs']" in caplog.text
