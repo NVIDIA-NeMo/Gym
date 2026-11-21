@@ -14,8 +14,12 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
+    ModelCallRef,
     ObservationGap,
+    TrajectoryModelCall,
     TrajectoryRecord,
+    TrajectoryResponseMetadata,
+    TrajectoryTokenStats,
     TrajectoryTurn,
 )
 
@@ -100,6 +104,7 @@ def append_opencode_turns(
     model_ref: ModelServerRef | None = None,
     gym_reasoning: bool = False,
     normalized_call_ids: dict[str, str] | None = None,
+    step_token_stats: bool = False,
 ) -> None:
     """Membership comes only from persisted IDs; row order numbers turns within a session.
 
@@ -109,6 +114,9 @@ def append_opencode_turns(
     step_count counts persisted step-finish events cumulatively within the session.
     With ``gym_reasoning``, the reasoning block a Gym Model Server reply's text
     starts with becomes the turn's reasoning rather than answer text.
+    With ``step_token_stats`` each step-finish part also becomes a model call on the trajectory
+    carrying the provider usage OpenCode saved for it (the prompt size of every call), referenced
+    from its turn. Leave it off when the model server captures calls itself, or they would double.
     """
     messages = {row["id"]: row for row in message_rows}
     parts = defaultdict(list)
@@ -213,6 +221,8 @@ def append_opencode_turns(
             }
             for part in text_parts
         ]
+        model_calls = _step_model_calls(message_id, session_id, message, message_parts) if step_token_stats else []
+        trajectory.model_calls.extend(model_calls)
         trajectory.turns.append(
             TrajectoryTurn(
                 invocation_id=session_id,
@@ -225,6 +235,7 @@ def append_opencode_turns(
                 answer=answer,
                 reasoning_content=reasoning or None,
                 step_count=step_counts[session_id],
+                model_calls=[ModelCallRef(model_call_id=call.model_call_id) for call in model_calls],
             )
         )
     if unavailable:
@@ -236,6 +247,58 @@ def append_opencode_turns(
                 + _native_gap_diagnostics(unavailable, message_rows, part_rows),
             )
         )
+
+
+def _count(value: Any) -> int:
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _step_model_calls(
+    message_id: str, session_id: str, message: dict[str, Any], message_parts: list[tuple[str, Any]]
+) -> list[TrajectoryModelCall]:
+    """One model call per persisted step-finish part, from the usage OpenCode saved with it.
+
+    OpenCode writes the provider's usage for every model call into that call's step-finish part
+    (``tokens.input/output/reasoning`` and ``tokens.cache.read/write``). Summed the way the
+    response usage is summed: prompt = input + cache read + cache write, completion = output +
+    reasoning. A part without usage yields a call with empty token stats rather than zeros.
+    """
+    opencode_time = message.get("time") if isinstance(message.get("time"), dict) else {}
+    model = message.get("modelID") if isinstance(message.get("modelID"), str) and message.get("modelID") else None
+    calls = []
+    for part_id, part in message_parts:
+        if part.get("type") != "step-finish":
+            continue
+        tokens = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+        cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+        if tokens:
+            prompt = _count(tokens.get("input")) + _count(cache.get("read")) + _count(cache.get("write"))
+            reasoning = _count(tokens.get("reasoning"))
+            completion = _count(tokens.get("output")) + reasoning
+            stats = TrajectoryTokenStats(
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                reasoning_tokens=reasoning,
+                total_tokens=prompt + completion,
+                cached_tokens=_count(cache.get("read")),
+            )
+        else:
+            stats = TrajectoryTokenStats()
+        reason = part.get("reason")
+        calls.append(
+            TrajectoryModelCall(
+                model_call_id=f"opencode-step:{part_id}",
+                client_session_id=session_id,
+                client_assistant_message_id=message_id,
+                started_at=_timestamp(opencode_time.get("created")),
+                completed_at=_timestamp(opencode_time.get("completed")),
+                response_metadata=TrajectoryResponseMetadata(
+                    model=model, finish_reason=reason if isinstance(reason, str) and reason else None
+                ),
+                token_stats=stats,
+            )
+        )
+    return calls
 
 
 def scope_opencode_trajectory(trajectory: TrajectoryRecord, body: Any, rollout_id: str) -> TrajectoryRecord:

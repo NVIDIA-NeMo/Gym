@@ -207,6 +207,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     opencode2: bool = False
     # Whether the OpenCode 2 plugin records model-call labels, which it does with model-call capture on.
     model_call_labels: bool = False
+    step_token_stats: bool = False
     _export_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
     # Gaps of the latest capture's store translation, added to that capture's observations.
     _capture_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
@@ -602,6 +603,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 trajectory,
                 require_terminal_finish=True,
                 observation_schema_version="2.0",
+                step_token_stats=self.step_token_stats,
                 model_ref=self.model_ref,
                 clock_domain=self.tool_clock_domain,
                 agent_instance=self.agent_instance,
