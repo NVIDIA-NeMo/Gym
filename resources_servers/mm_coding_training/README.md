@@ -104,6 +104,27 @@ selected environment protocol; use episode/sibling recovery otherwise.
 
 ## Data and licensing
 
+Single-answer flat rows need a top-level `problem_id` equal to
+`<task.benchmark>:<task.task_id>`. This is the stable task identity used by the
+environment server. The nested `task.task_id` remains the source identifier.
+NeMo RL supplies rollout identity, but does not supply Gym eval's positional
+`_ng_task_index`. Without the explicit task identity, `/run` returns HTTP 422
+before seeding or model execution. A rollout index is not a task identifier.
+
+For an existing prepared single-answer JSONL, run from the Gym repository root:
+
+```bash
+uv run python -m resources_servers.mm_coding_training.prepare_task_ids \
+  --input /path/to/single.jsonl --output /path/to/single-with-ids.jsonl
+```
+
+Point the training dataset configuration at the output file and use this Gym
+revision on the workers. The converter changes only `problem_id`; it preserves
+the original model input, image bytes, sampling parameters and verifier metadata.
+It refuses conflicting identities, duplicate tasks and existing output files.
+It never overwrites the input. Run it separately for each prepared split.
+OpenCode's materialized task rows already carry `task_id` and need no conversion.
+
 The five checked-in examples are hand-authored synthetic interface examples.
 They are not the official benchmark test sets or the training mixture. The
 component has no training data and no keys. The source datasets keep their own
