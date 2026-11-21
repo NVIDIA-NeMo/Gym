@@ -274,26 +274,43 @@ def _loads(text: str) -> Any:
     return json.loads(text, strict=False)
 
 
-def _generated_calls(raw: str, keep_complete: bool = False) -> Iterator[tuple[str, Dict[str, Any]]]:
+def _generated_calls(
+    raw: str, keep_complete: bool = False, truncated: bool = False
+) -> Iterator[tuple[str, Dict[str, Any]]]:
     """(name, arguments) for each call in the first JSON array of a generation.
 
     Accepts each call nested ({"function": {"name", "arguments"}}, the shape the
     transcript shows the model) or flat ({"name", "arguments"}), and arguments
     as a JSON object or a JSON-encoded string. Calls whose arguments are not an
-    object are skipped. With `keep_complete`, a generation cut off inside the
-    array still yields the calls written in full before the cut.
+    object are skipped.
+
+    With `keep_complete`, the calls written in full still count when the array
+    cannot be closed or parsed whole. With `truncated` too (the generation hit
+    max_tokens), only those count: the call the cut landed in is dropped even
+    where closing its brackets would parse, since its arguments may be partial
+    (a missing key, a number cut short).
     """
     start = raw.find("[")
     if start < 0:
         return
-    closed = close_json_prefix(raw[start:])
-    if closed is None and keep_complete:
-        closed = complete_elements_prefix(raw[start:])
-    if closed is None:
-        return
-    try:
-        calls = _loads(closed)
-    except json.JSONDecodeError:
+    text = raw[start:]
+    if keep_complete and truncated:
+        attempts = [complete_elements_prefix]
+    elif keep_complete:
+        attempts = [close_json_prefix, complete_elements_prefix]
+    else:
+        attempts = [close_json_prefix]
+    calls = None
+    for attempt in attempts:
+        closed = attempt(text)
+        if closed is None:
+            continue
+        try:
+            calls = _loads(closed)
+        except json.JSONDecodeError:
+            continue
+        break
+    if calls is None:
         return
     if isinstance(calls, dict):
         calls = [calls]
@@ -334,7 +351,9 @@ def parse_bash_tool_calls(raw: str, max_calls: int = 3) -> List[Dict[str, Any]]:
     return found
 
 
-def parse_tool_calls(raw: str, tool_names: Collection[str], max_calls: int = 3) -> List[Dict[str, Any]]:
+def parse_tool_calls(
+    raw: str, tool_names: Collection[str], max_calls: int = 3, truncated: bool = False
+) -> List[Dict[str, Any]]:
     """The calls in a base model's generation that name one of `tool_names`, at most `max_calls`.
 
     For tool sets other than mini-swe-agent's `bash` (e.g. AutomationBench's
@@ -342,14 +361,14 @@ def parse_tool_calls(raw: str, tool_names: Collection[str], max_calls: int = 3) 
     the model wrote them, since only the tool knows its own schema. Calls to
     other names are dropped. Empty list when none parse.
 
-    A generation cut off mid-call keeps the calls it completed before the cut;
-    the cut call is dropped, never completed. A base model batching many calls
+    A generation cut off mid-call (`truncated`: it hit max_tokens) keeps the
+    calls it completed before the cut; the cut call is dropped, never completed. A base model batching many calls
     otherwise loses the whole turn to its last one: on AutomationBench, Super
     3.5 base lost a fifth of its rollouts this way, mostly to runaway batches
     that ran past max_tokens after more calls than the cap keeps.
     """
     found: List[Dict[str, Any]] = []
-    for name, arguments in _generated_calls(raw, keep_complete=True):
+    for name, arguments in _generated_calls(raw, keep_complete=True, truncated=truncated):
         if name in tool_names:
             found.append({"name": name, "arguments": arguments})
             if len(found) >= max_calls:
@@ -431,11 +450,11 @@ class BaseModelServer(SimpleResponsesAPIModel):
         self._stop = list(defaults["stop"] if self.config.stop is None else self.config.stop)
         return super().model_post_init(context)
 
-    def _parse_calls(self, text: str) -> List[Dict[str, Any]]:
+    def _parse_calls(self, text: str, truncated: bool = False) -> List[Dict[str, Any]]:
         if self.config.wire != "function_calling":
             return []
         if self.config.tool_names is not None:
-            return parse_tool_calls(text, self.config.tool_names, self.config.max_tool_calls_per_turn)
+            return parse_tool_calls(text, self.config.tool_names, self.config.max_tool_calls_per_turn, truncated)
         return parse_bash_tool_calls(text, self.config.max_tool_calls_per_turn)
 
     def build_prompt(self, messages: List[Dict[str, Any]]) -> str:
@@ -503,7 +522,7 @@ class BaseModelServer(SimpleResponsesAPIModel):
         body_dict = body.model_dump(exclude_unset=True)
         text, usage, finish_reason = await self._complete(body_dict.get("input") or [], body_dict)
 
-        calls = self._parse_calls(text)
+        calls = self._parse_calls(text, truncated=finish_reason == "length")
         output_items: List[Dict[str, Any]]
         if calls:
             output_items = [
@@ -567,7 +586,7 @@ class BaseModelServer(SimpleResponsesAPIModel):
             body_dict.setdefault("max_output_tokens", body_dict["max_tokens"])
         text, usage, finish_reason = await self._complete(body_dict.get("messages") or [], body_dict)
         message: Dict[str, Any] = {"role": "assistant", "content": text}
-        calls = self._parse_calls(text)
+        calls = self._parse_calls(text, truncated=finish_reason == "length")
         if calls:
             message = {
                 "role": "assistant",

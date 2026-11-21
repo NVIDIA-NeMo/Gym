@@ -242,6 +242,37 @@ class TestParseToolCalls:
     def test_a_cut_inside_the_first_call_still_fails(self):
         assert BM.parse_tool_calls('[{"name": "api_fetch", "arguments": {"url": "tr', self.NAMES) == []
 
+    FIRST = '{"name": "api_search", "arguments": {"query": "a"}}'
+
+    @pytest.mark.parametrize(
+        "cut",
+        [
+            '{"name"',  # after a key
+            '{"name": "api_fetch", "arguments": ',  # after a colon
+            '{"name": "api_search", "arguments": {"query": "b", "exact": tr',  # inside a literal
+            '{"name": "api_search", "arguments": {"query": "b"',  # after a value: arguments may be partial
+            '{"name": "api_search", "arguments": {"query": "b", "limit": 10',  # inside a number
+        ],
+    )
+    def test_a_truncated_generation_keeps_only_its_completed_calls(self, cut):
+        raw = f"[{self.FIRST}, {cut}"
+        assert BM.parse_tool_calls(raw, self.NAMES, truncated=True) == [
+            {"name": "api_search", "arguments": {"query": "a"}}
+        ]
+
+    def test_an_unclosed_array_the_model_stopped_on_is_kept_whole(self):
+        # Not truncated: the model stopped, so brackets it left open are closed as before.
+        raw = f'[{self.FIRST}, {{"name": "api_search", "arguments": {{"query": "b"}}'
+        assert BM.parse_tool_calls(raw, self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "a"}},
+            {"name": "api_search", "arguments": {"query": "b"}},
+        ]
+
+    def test_an_unparseable_close_falls_back_to_the_completed_calls(self):
+        assert BM.parse_tool_calls(f'[{self.FIRST}, {{"name"', self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "a"}}
+        ]
+
     def test_bash_parser_stays_strict_about_cuts(self):
         raw = '[{"name": "bash", "arguments": {"command": "ls"}}, {"name": "bash", "arguments": {"command": "ca'
         assert BM.parse_bash_tool_calls(raw) == []
@@ -387,6 +418,12 @@ class TestFunctionCallingWire:
         # Unset, the wire stays mini-swe-agent's: bash only.
         bash_only = self._server(tool_names=None, max_tool_calls_per_turn=3)
         assert bash_only._parse_calls(raw) == [{"name": "bash", "arguments": {"command": "ls"}}]
+
+    def test_truncation_reaches_the_generic_parser(self):
+        raw = '[{"name": "api_search", "arguments": {"query": "a"}}, {"name": "api_search", "arguments": {"query": "b"'
+        server = self._server(tool_names=["api_search"], max_tool_calls_per_turn=8)
+        assert len(server._parse_calls(raw)) == 2
+        assert server._parse_calls(raw, truncated=True) == [{"name": "api_search", "arguments": {"query": "a"}}]
 
 
 @pytest.fixture
