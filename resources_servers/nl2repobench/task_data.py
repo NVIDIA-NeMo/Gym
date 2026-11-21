@@ -48,3 +48,27 @@ class TaskData(BaseModel):
         description="Source subset (e.g. 'nl2repobench-v1'); pass-through provenance via extra='allow', never read.",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
+    test_commands: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "The task's test commands, copied from the task store by prepare.py as provenance; verify() reads the "
+            "task store, never this field."
+        ),
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+    test_case_count: Optional[int] = Field(
+        default=None,
+        description=(
+            "The task's expected passing-test count, copied from the task store by prepare.py as provenance; "
+            "verify() reads the task store, never this field."
+        ),
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+    test_files: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "Paths of the task's held-out test files, copied from the task store by prepare.py as provenance; "
+            "verify() reads the task store, never this field."
+        ),
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )

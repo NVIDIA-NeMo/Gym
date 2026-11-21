@@ -4,7 +4,11 @@
 import json
 from pathlib import Path
 
+from pydantic import TypeAdapter
+
+from nemo_gym.data import validate_jsonl_rows
 from resources_servers.nl2repobench.prepare import FIXED_INSTRUCTION, _copy_task_assets, _write_jsonl
+from resources_servers.nl2repobench.task_data import TaskData
 from resources_servers.nl2repobench.task_store import REQUIRED_TASK_FILES, NL2RepoBenchTaskStore
 
 
@@ -55,3 +59,21 @@ def test_write_jsonl_produces_expected_row_shape(task_assets: Path, tmp_path: Pa
         "pytest --continue-on-collection-errors -n 0 tests -v -s",
     ]
     assert verifier_metadata["test_files"] == ["tests"]
+
+
+def test_the_prepared_prompt_is_mode_neutral_and_says_nothing_about_the_network() -> None:
+    """Rows are shared by every network mode, and only some modes have no network: the notice is the server's."""
+    assert "internet" not in FIXED_INSTRUCTION.lower() and "network" not in FIXED_INSTRUCTION.lower()
+    assert FIXED_INSTRUCTION.endswith("Please complete this task step by step.")
+
+
+def test_generated_rows_pass_the_real_validator_with_a_clean_report(task_assets: Path, tmp_path: Path) -> None:
+    store = NL2RepoBenchTaskStore(task_assets, expected_task_count=1)
+    output_path = tmp_path / "benchmark.jsonl"
+    _write_jsonl(store, output_path)
+
+    with output_path.open() as lines:
+        report = validate_jsonl_rows("nl2repobench", TypeAdapter(TaskData), str(output_path), lines)
+
+    assert report.rows == 1 and report.error_rows == 0
+    assert report.unknown_keys == {} and report.conflicting_keys == {} and report.misplaced_keys == {}

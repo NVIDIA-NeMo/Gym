@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.core import SESSION_LOST, VERIFIER_ERROR, NgFailureEvent
+from nemo_gym.core.failure_kinds import JUDGE_SKIPPED
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -424,7 +425,9 @@ def _upstream_restore_command(
     remove_tests = f"rm -rf {' '.join(shlex.quote(p) for p in test_paths)}; " if test_paths else ""
     return (
         f"set -e; rm -rf {stage}; mkdir -p {stage}; tar xzf {shlex.quote(tar_path)} -C {stage}; "
-        f"find {stage} -type f \\( {names} \\) -delete; {remove_tests}"
+        # `-type l` too: find does not follow links, so -delete removes the link itself. Left in, an agent's setup.py
+        # symlink would replace the image's real packaging file in the overlay below.
+        f"find {stage} \\( -type f -o -type l \\) \\( {names} \\) -delete; {remove_tests}"
         f"tar -C {stage} -cf - . | tar -C {shlex.quote(workspace)} -xf -"
     )
 
@@ -684,11 +687,28 @@ def _compute_reward(tests_passed: int, test_case_count: int) -> float:
     return max(reward, 0.0)
 
 
-def _raise_on_sandbox_error(result: Any, what: str) -> None:
-    """A command the provider could not run to an outcome is not a test result. A timeout is: the agent's code hung."""
+# Appended to the seeded start.md in no_internet_preinstalled only (the sandbox has no egress and the task image has the
+# dependencies installed); the wording is from the nl2repo-tasks grader code. The other modes have network access.
+OFFLINE_SPEC_NOTICE = (
+    "This training sandbox has no internet access. The required third-party dependencies are already installed in "
+    "the task image."
+)
+
+
+class WorkspaceCollectionInfrastructureError(RuntimeError):
+    """Collecting the agent's workspace failed in the sandbox provider, not in the agent's work."""
+
+
+def _raise_on_sandbox_error(result: Any, what: str, *, timeout_is_infrastructure: bool = False) -> None:
+    """A command the provider could not run to an outcome is not a test result.
+
+    A timeout of a test command is one (the agent's code hung); a timeout of a setup step the server runs itself
+    (creating the workspace, restoring it) is not, so those pass `timeout_is_infrastructure=True`.
+    """
     error_type = getattr(result, "error_type", None)
-    if error_type not in (None, "timeout"):
-        raise RuntimeError(f"{what}: the sandbox provider reported {error_type!r}")
+    if error_type is None or (error_type == "timeout" and not timeout_is_infrastructure):
+        return
+    raise RuntimeError(f"{what}: the sandbox provider reported {error_type!r}")
 
 
 class NL2RepoBenchResourcesServer(SimpleResourcesServer):
@@ -956,9 +976,16 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                     await self._install_pip_git_guard(sandbox, task)
                 elif mode == "block_target_v2":
                     await install_guard_v2(sandbox, task_id(task), task.test_commands.commands)
+                spec = task.start_md
+                if mode == "no_internet_preinstalled":
+                    # The prompt row is mode-neutral; only this mode really has no network, so only it says so.
+                    spec = f"{spec.rstrip()}\n\n{OFFLINE_SPEC_NOTICE}\n"
                 with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-                    f.write(task.start_md)
+                    f.write(spec)
                     local_start_md_path = Path(f.name)
+                # A temporary file is created 0600, and an upload keeps the host mode: a non-root agent could not
+                # read the spec. Only this model-visible file is opened up.
+                local_start_md_path.chmod(0o644)
                 try:
                     await sandbox.upload(local_start_md_path, f"{task.workdir}/start.md")
                 finally:
@@ -1142,6 +1169,11 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         """Tar up the task's project directory in the agent sandbox and download it. Returns (tar_bytes, error)."""
 
         result = await sandbox.exec(_collect_command(workdir), cwd="/", timeout_s=WORKSPACE_COLLECT_TIMEOUT_S)
+        error_type = getattr(result, "error_type", None)
+        if error_type not in (None, "timeout"):
+            raise WorkspaceCollectionInfrastructureError(
+                f"Workspace collection could not run: the sandbox provider reported {error_type!r}"
+            )
         if result.return_code != 0:
             details = ((result.stderr or "") + (result.stdout or "")).strip()
             return None, f"Workspace collection exited with code {result.return_code}: {details[-4000:]}"
@@ -1167,14 +1199,12 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         # there) - surfaced by verify_image_override pointing at a generic image instead
         # (confirmed via a real failed run, 100% of verifies failing on this exact error).
         mkdir_result = await sandbox.exec("mkdir -p /workspace", cwd="/", timeout_s=60)
-        _raise_on_sandbox_error(mkdir_result, "creating /workspace in the verifier sandbox")
+        _raise_on_sandbox_error(
+            mkdir_result, "creating /workspace in the verifier sandbox", timeout_is_infrastructure=True
+        )
         if mkdir_result.return_code != 0:
-            return VerifierResult(
-                evaluation_completed=False,
-                reward=0.0,
-                verifier_error=f"Failed to create /workspace: {mkdir_result.stderr or ''}",
-                test_case_count=task.test_case_count,
-            )
+            # The server's own setup step, not the agent's work: raise into the bounded retry-then-mask path.
+            raise RuntimeError(f"Failed to create /workspace in the verifier sandbox: {mkdir_result.stderr or ''}")
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-nl2repobench-restore-") as temporary_dir:
             local_tar_path = Path(temporary_dir) / "workspace.tar.gz"
@@ -1188,7 +1218,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             )
         else:
             extract_result = await sandbox.exec("tar xzf /tmp/workspace.tar.gz -C /workspace", timeout_s=300)
-        _raise_on_sandbox_error(extract_result, "restoring the workspace in the verifier sandbox")
+        _raise_on_sandbox_error(
+            extract_result, "restoring the workspace in the verifier sandbox", timeout_is_infrastructure=True
+        )
         if extract_result.return_code != 0:
             return VerifierResult(
                 evaluation_completed=False,
@@ -1272,38 +1304,63 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         workspace_tar = b""
         workspace_collection_time_s = 0.0
 
-        agent_session = self._agent_sessions.pop(session_id, None)
+        # Kept in the table until a stop succeeds, so a failed teardown stays reachable for a later close or shutdown.
+        agent_session = self._agent_sessions.get(session_id)
         if agent_session is None:
             workspace_error = f"no agent session found for session {session_id!r}"
             masked = lost_session_verification(workspace_error, failure_kind=SESSION_LOST)
         else:
             sandbox_handle = agent_session.sandbox_handle
-            started = monotonic()
-            try:
-                if agent_session.task_id != current_task_id:
-                    raise RuntimeError(
-                        f"NL2RepoBench session task {agent_session.task_id!r} does not match verify task "
-                        f"{current_task_id!r}"
+            # The same lock /close_session holds while it releases, so a close cannot interrupt the snapshot.
+            async with self.session_lock(session_id):
+                started = monotonic()
+                try:
+                    if agent_session.task_id != current_task_id:
+                        raise RuntimeError(
+                            f"NL2RepoBench session task {agent_session.task_id!r} does not match verify task "
+                            f"{current_task_id!r}"
+                        )
+                    if agent_session.image != current_task_image:
+                        raise RuntimeError(
+                            f"NL2RepoBench session image {agent_session.image!r} does not match verify image "
+                            f"{current_task_image!r}"
+                        )
+                    collected, collect_error = await self._collect_workspace(
+                        agent_session.sandbox, agent_session.workdir
                     )
-                if agent_session.image != current_task_image:
-                    raise RuntimeError(
-                        f"NL2RepoBench session image {agent_session.image!r} does not match verify image "
-                        f"{current_task_image!r}"
+                    if collect_error is not None:
+                        workspace_error = collect_error
+                    else:
+                        workspace_tar = collected or b""
+                except (NgFailureEvent, WorkspaceCollectionInfrastructureError) as error:
+                    # The provider failed, not the agent: an attributed masked row, and no verifier runs.
+                    print(
+                        f"NL2RepoBench workspace collection failed for {current_task_id}: {format_exc()}",
+                        file=sys.stderr,
                     )
-                collected, collect_error = await self._collect_workspace(agent_session.sandbox, agent_session.workdir)
-                if collect_error is not None:
-                    workspace_error = collect_error
-                else:
-                    workspace_tar = collected or b""
-            except Exception as error:
-                print(
-                    f"Failed to collect NL2RepoBench workspace for {current_task_id}: {format_exc()}",
-                    file=sys.stderr,
-                )
-                workspace_error = f"{type(error).__name__}: {error}"
-            finally:
-                workspace_collection_time_s = monotonic() - started
-                await self._stop_sandbox(agent_session.sandbox, task_id=current_task_id, phase="agent")
+                    workspace_error = f"{type(error).__name__}: {error}"
+                    masked = {
+                        "reward": 0.0,
+                        "mask_sample": True,
+                        "failure_kind": error.failure_kind if isinstance(error, NgFailureEvent) else VERIFIER_ERROR,
+                        "failure_reason": f"NL2RepoBench could not collect the agent's workspace: {workspace_error}",
+                    }
+                except Exception as error:
+                    print(
+                        f"Failed to collect NL2RepoBench workspace for {current_task_id}: {format_exc()}",
+                        file=sys.stderr,
+                    )
+                    workspace_error = f"{type(error).__name__}: {error}"
+                finally:
+                    workspace_collection_time_s = monotonic() - started
+                    try:
+                        await self.release_session_state(session_id)
+                    except Exception:
+                        print(
+                            f"Failed to stop the NL2RepoBench agent sandbox for {current_task_id}; a later "
+                            f"/close_session or shutdown retries: {format_exc()}",
+                            file=sys.stderr,
+                        )
 
         workspace_sha256 = hashlib.sha256(workspace_tar).hexdigest()
         workspace_bytes = len(workspace_tar)
@@ -1329,6 +1386,13 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         )
         if workspace_error is None and self.config.trace_only:
             result = VerifierResult(evaluation_completed=False, reward=0.0, test_case_count=task.test_case_count)
+            # Nothing was graded, so the 0 is not a measurement: masked, the row counts toward coverage only.
+            masked = {
+                "reward": 0.0,
+                "mask_sample": True,
+                "failure_kind": JUDGE_SKIPPED,
+                "failure_reason": "trace_only: the workspace was saved and not graded",
+            }
         elif workspace_error is None:
             attempts = 1 + self.config.inconclusive_verification_retries
             for attempt in range(1, attempts + 1):

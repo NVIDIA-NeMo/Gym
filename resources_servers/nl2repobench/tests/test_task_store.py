@@ -95,3 +95,44 @@ def test_two_task_store(two_task_assets: Path) -> None:
 
     assert len(store) == 2
     assert set(store.task_ids) == {"example-task-one", "example-task-two"}
+
+
+@pytest.mark.parametrize(
+    ("declared", "workdir"),
+    [
+        (None, "/workspace"),
+        ("/workspace", "/workspace"),
+        ("/workspace/repo", "/workspace/repo"),
+        ("/workspace/./repo//sub/", "/workspace/repo/sub"),
+        ("/workspace/a/../b", "/workspace/b"),
+    ],
+)
+def test_valid_workdirs_load_normalized(task_assets: Path, declared: str | None, workdir: str) -> None:
+    if declared is not None:
+        (task_assets / "example-task" / "workdir.txt").write_text(declared + "\n", encoding="utf-8")
+
+    assert Task(task_assets / "example-task").workdir == workdir
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        "/workspace-other",
+        "/workspace/..",
+        "/workspace/../etc",
+        "/",
+        "/work",
+        "workspace",
+        "workspace/repo",
+        "//workspace",
+    ],
+)
+def test_workdirs_outside_the_workspace_are_rejected_before_any_sandbox_exists(
+    task_assets: Path, declared: str
+) -> None:
+    (task_assets / "example-task" / "workdir.txt").write_text(declared, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="workdir must be /workspace or under it"):
+        Task(task_assets / "example-task")
+    with pytest.raises(ValueError, match="workdir must be /workspace or under it"):
+        NL2RepoBenchTaskStore(task_assets, expected_task_count=1)

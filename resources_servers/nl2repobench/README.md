@@ -18,7 +18,7 @@ python -m resources_servers.nl2repobench.prepare \
 The preparation step copies each task's four flat upstream files (`start.md`, `test_case_count.txt`,
 `test_commands.json`, `test_files.json`) from `test_files/<proName>/` into the resources server's gitignored
 control-plane cache, and writes one Gym JSONL row per task. The row's prompt is the fixed instruction
-`FIXED_INSTRUCTION` in `prepare.py` (NL2RepoBench's own task prompt, plus a line saying the task has no network), and
+`FIXED_INSTRUCTION` in `prepare.py` (NL2RepoBench's own task prompt, the same in every network mode), and
 it does **not** inline the spec: `start.md` is uploaded into the agent sandbox's `/workspace` at `seed_session`, and
 the agent reads it there. The row also carries `verifier_metadata` with the task's test commands and expected
 test-case count. The task's immutable per-task base image
@@ -78,18 +78,32 @@ A verdict that says nothing about the agent's code is returned with `mask_sample
 `failure_kind`, so it drops out of the scored denominator instead of counting as a 0:
 
 - no live agent session for the verify call (`session_lost`);
-- the verifier sandbox could not be started after the bounded retries, or the provider reported an error while
-  restoring the workspace or running a test command (`verifier_error`, or the provider's own failure kind).
+- the verifier sandbox could not be started, a server-side setup step failed (`mkdir -p /workspace` exiting non-zero or
+  timing out, restoring the workspace timing out), or the provider reported an error rather than a test result, on
+  every one of the bounded attempts (`verifier_error`, or the provider's own failure kind);
+- collecting the agent's workspace failed in the provider (a typed provider failure, or the collection command
+  reporting a provider `error_type`): no verifier runs;
+- `trace_only` rows (`judge_skipped`): nothing was graded, so the row counts toward coverage only.
 
-A test command that times out is a scored result: the agent's code hung. A failure to collect the workspace from the
-agent sandbox is not yet masked and still scores `reward=0.0` with `verifier_error` set.
+These stay scored, because they are the agent's work: a failing pytest run, a failed install in `gym_strict`, a test
+command that times out, a collection `tar` that exits non-zero, a workspace over `workspace_tar_max_bytes`, and a
+session whose task or image does not match the verify request.
 
 ### Sandbox lifecycle
 
 A sandbox is stopped when its session ends: by `verify`, by `/close_session` or a retire (`release_session_state`),
-when seeding replaces a session, or when post-start initialization fails (the directory, guard and `start.md` setup
-runs before the sandbox is returned, and a failure there stops it). Sessions abandoned before any of these still rely
-on the provider's `ttl_s`.
+when seeding replaces a session, at server shutdown, or when post-start initialization fails (the directory, guard and
+`start.md` setup runs before the sandbox is returned, and a failure there stops it). `verify` collects the workspace
+under the session lock, so a close cannot interrupt the snapshot, and the session stays in the table until a stop
+succeeds: a failed stop is retried by a later `/close_session` or at shutdown. Sessions abandoned before any of these
+still rely on the provider's `ttl_s`.
+
+### The seeded spec
+
+`start.md` is uploaded to the task's workdir with mode 0644, so a non-root agent can read it. `workdir.txt` is
+normalized and must be `/workspace` or a path under it (`/workspace-other` and `/workspace/..` are refused when the task
+loads). The network notice is not in the prompt row: in `no_internet_preinstalled` only, the server appends it to the
+seeded `start.md` (`OFFLINE_SPEC_NOTICE`), so the other modes never claim the sandbox is offline.
 
 ## Network posture
 

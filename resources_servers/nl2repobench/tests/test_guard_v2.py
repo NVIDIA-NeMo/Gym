@@ -130,6 +130,39 @@ def test_short_identifiers_need_an_exact_match(run_wrapper):
     assert run_wrapper("pip", "pip", ["install", "sixpack"], SIX)[0] is False
 
 
+@pytest.mark.parametrize(
+    "kind,tool,args,blocked",
+    [
+        # a short name is matched as a whole word, in URLs and in fetched files as well as in plain requirements
+        ("pip", "pip", ["install", "https://files.pythonhosted.org/packages/ab/cd/six-1.16.0.tar.gz"], True),
+        ("pip", "pip", ["install", "https://example.org/mirror/six/archive/main.zip"], True),
+        ("fetcher", "curl", ["-sL", "https://pypi.org/simple/six/"], True),
+        ("pip", "pip", ["install", "https://files.pythonhosted.org/packages/ab/cd/sixpack-0.1.tar.gz"], False),
+        ("pip", "pip", ["install", "https://example.org/mirror/pysix/archive/main.zip"], False),
+        ("fetcher", "curl", ["-sL", "https://pypi.org/simple/sixpack/"], False),
+        ("pip", "pip", ["install", "-e", "/workspace/six"], False),  # a local install is not a fetch
+        ("pip", "pip", ["install", "-e", "./six"], False),
+        (
+            "interp",
+            "python",
+            ["-c", "import urllib.request; urllib.request.urlopen('https://pypi.org/simple/six/')"],
+            True,
+        ),
+        (
+            "interp",
+            "python",
+            ["-c", "import urllib.request; urllib.request.urlopen('https://pypi.org/simple/sixpack/')"],
+            False,
+        ),
+    ],
+)
+def test_a_short_name_is_denied_in_urls_but_not_inside_longer_names(run_wrapper, kind, tool, args, blocked):
+    got, proc = run_wrapper(kind, tool, args, SIX)
+    assert got == blocked, (proc.stdout, proc.stderr)
+    if not blocked:
+        assert "REAL-RAN" in proc.stdout
+
+
 def test_python_heredoc_fetching_the_target_is_blocked(run_wrapper):
     code = "import urllib.request\nurllib.request.urlopen('https://codeload.github.com/pyca/bcrypt/tar.gz/main')\n"
     assert run_wrapper("interp", "python", ["-"], stdin=code)[0] is True

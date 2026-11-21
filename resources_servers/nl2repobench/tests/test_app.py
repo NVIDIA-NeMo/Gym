@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,8 @@ from pytest import MonkeyPatch
 
 import resources_servers.nl2repobench.app as app_module
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.core import PROVIDER_UNAVAILABLE, EpisodeId, NgFailureEvent
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.nl2repobench.app import (
     NL2RepoBenchResourcesServer,
@@ -881,3 +884,324 @@ def test_close_session_over_http_stops_the_sandbox_seeded_over_http(
         assert server._agent_sessions == {}
         assert client.post("/close_session", json=close).status_code == 200  # a repeated close is harmless
         sandbox.stop.assert_awaited_once()
+
+
+# --- server-side failures are masked; agent-side ones stay scored ---------------------------------
+
+
+def _grading_sandbox() -> AsyncMock:
+    """A verifier sandbox whose every command succeeds and prints a passing pytest summary."""
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = _exec_result(0, "===== 5 passed in 0.1s =====")
+    return sandbox
+
+
+def _setup_failure_sandbox(kind: str) -> AsyncMock:
+    sandbox = AsyncMock()
+    if kind == "mkdir_fails":
+        sandbox.exec.return_value = MagicMock(
+            return_code=1, stdout="", stderr="mkdir: read-only file system", error_type=None
+        )
+    else:
+        sandbox.exec.return_value = MagicMock(return_code=124, stdout="", stderr="", error_type="timeout")
+    return sandbox
+
+
+@pytest.mark.parametrize("kind", ["mkdir_fails", "mkdir_times_out"])
+async def test_verifier_setup_failure_on_every_fresh_sandbox_masks_the_row(
+    task_assets: Path, monkeypatch: MonkeyPatch, kind: str
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    attempts = 1 + server.config.inconclusive_verification_retries
+    sandboxes = [_setup_failure_sandbox(kind) for _ in range(attempts)]
+    create_sandbox.side_effect = sandboxes
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.mask_sample is True and response.reward == 0.0
+    assert response.failure_kind == "verifier_error"
+    assert f"{attempts} attempt" in response.failure_reason
+    assert create_sandbox.await_count == 1 + attempts  # the agent sandbox, then one fresh verifier per attempt
+    for sandbox in sandboxes:
+        sandbox.stop.assert_awaited_once()
+
+
+async def test_a_later_healthy_verifier_grades_normally_after_a_mkdir_failure(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    create_sandbox.side_effect = [_setup_failure_sandbox("mkdir_fails"), _grading_sandbox()]
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert not getattr(response, "mask_sample", False)
+    assert response.evaluation_completed is True and response.tests_passed == 5 and response.reward == 1.0
+
+
+async def test_a_test_command_timeout_is_scored_not_masked(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    calls = []
+
+    async def exec_(command: str, **kwargs: Any) -> MagicMock:
+        calls.append(command)
+        if len(calls) <= 2:  # mkdir and the workspace restore
+            return _exec_result(0)
+        return MagicMock(return_code=124, stdout="", stderr="", error_type="timeout")
+
+    verifier = AsyncMock()
+    verifier.exec.side_effect = exec_
+    create_sandbox.side_effect = [verifier]
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.evaluation_completed is True and not getattr(response, "mask_sample", False)
+    assert create_sandbox.await_count == 2  # no retry
+
+
+def _use_real_collection(server: NL2RepoBenchResourcesServer, monkeypatch: MonkeyPatch) -> None:
+    async def collect(sandbox: Any, workdir: str = "/workspace") -> tuple:
+        return await NL2RepoBenchResourcesServer._collect_workspace(server, sandbox, workdir)
+
+    monkeypatch.setattr(server, "_collect_workspace", collect)
+
+
+async def test_a_typed_provider_failure_during_collection_is_masked_and_no_verifier_runs(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    event = NgFailureEvent(boundary="sandbox", failure_kind=PROVIDER_UNAVAILABLE, failure_reason="provider down")
+    monkeypatch.setattr(server, "_collect_workspace", AsyncMock(side_effect=event))
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.mask_sample is True and response.reward == 0.0
+    assert response.failure_kind == PROVIDER_UNAVAILABLE
+    assert "could not collect" in response.failure_reason
+    assert create_sandbox.await_count == 1  # only the agent sandbox: no verifier ran
+    agent_sandbox.stop.assert_awaited_once()
+
+
+async def test_a_collection_exec_the_provider_could_not_run_is_masked(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    agent_sandbox.exec.return_value = MagicMock(return_code=125, stdout="", stderr="", error_type="sandbox")
+    _use_real_collection(server, monkeypatch)
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.mask_sample is True and response.failure_kind == "verifier_error"
+    assert create_sandbox.await_count == 1
+
+
+async def test_an_ordinary_tar_failure_during_collection_is_still_scored(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    agent_sandbox.exec.return_value = MagicMock(return_code=2, stdout="", stderr="tar: Cannot stat", error_type=None)
+    _use_real_collection(server, monkeypatch)
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.reward == 0.0 and not getattr(response, "mask_sample", False)
+    assert "exited with code 2" in response.verifier_error
+    assert create_sandbox.await_count == 1
+
+
+async def test_an_over_limit_archive_is_still_scored(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch, workspace_tar_max_bytes=3)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    agent_sandbox.exec.return_value = _exec_result(0)
+
+    async def download(remote: str, local: Path) -> None:
+        Path(local).write_bytes(b"x" * 10)
+
+    agent_sandbox.download.side_effect = download
+    _use_real_collection(server, monkeypatch)
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.reward == 0.0 and not getattr(response, "mask_sample", False)
+    assert "exceeds workspace_tar_max_bytes" in response.verifier_error
+
+
+# --- trace-only rows are masked ------------------------------------------------------------------
+
+
+async def test_trace_only_rows_are_masked_so_they_only_count_toward_coverage(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch, trace_only=True)
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.mask_sample is True and response.failure_kind == "judge_skipped"
+    assert response.reward == 0.0 and response.graded is False and response.evaluation_completed is False
+    assert create_sandbox.await_count == 1  # nothing was graded
+
+
+async def test_graded_rows_are_not_masked_when_trace_only_is_off(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    create_sandbox.side_effect = [_grading_sandbox()]
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.graded is True and response.reward == 1.0 and not getattr(response, "mask_sample", False)
+
+
+# --- a failed stop stays reachable --------------------------------------------------------------
+
+
+async def test_a_failed_stop_after_verify_keeps_the_session_for_a_later_close(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    agent_sandbox.stop.side_effect = [RuntimeError("provider down"), None]
+    create_sandbox.side_effect = [_grading_sandbox()]
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.reward == 1.0  # the grade is not lost to a failed teardown
+    assert server.has_session_state("test-session")  # kept: the handle is still reachable
+    close = ResourcesCloseSessionRequest(resources_session_id="test-session", episode_id=EpisodeId(rollout_id="r"))
+    await server.close_resources_session(close)
+    assert agent_sandbox.stop.await_count == 2
+    assert not server.has_session_state("test-session")
+
+
+async def test_a_failed_stop_after_verify_is_retried_at_shutdown(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    agent_sandbox.stop.side_effect = [RuntimeError("provider down"), None]
+    create_sandbox.side_effect = [_grading_sandbox()]
+    await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+    assert server.has_session_state("test-session")
+
+    await server.shutdown()
+
+    assert agent_sandbox.stop.await_count == 2
+    assert server._agent_sessions == {}
+
+
+async def test_a_close_cannot_interrupt_the_workspace_snapshot(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    create_sandbox.side_effect = [_grading_sandbox()]
+    collecting, finish = asyncio.Event(), asyncio.Event()
+    events: list[str] = []
+
+    async def collect(sandbox: Any, workdir: str = "/workspace") -> tuple:
+        collecting.set()
+        await finish.wait()
+        events.append("collected")
+        return b"tar-bytes", None
+
+    async def stop() -> None:
+        events.append("stopped")
+
+    monkeypatch.setattr(server, "_collect_workspace", collect)
+    agent_sandbox.stop.side_effect = stop
+
+    verifying = asyncio.create_task(server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request())))
+    await collecting.wait()
+    close = ResourcesCloseSessionRequest(resources_session_id="test-session", episode_id=EpisodeId(rollout_id="r"))
+    closing = asyncio.create_task(server.close_resources_session(close))
+    await asyncio.sleep(0.05)
+    assert not closing.done() and events == []  # the close waits: the sandbox is untouched mid-snapshot
+    finish.set()
+    await asyncio.gather(verifying, closing)
+
+    assert events == ["collected", "stopped"]  # collected first, then released exactly once
+
+
+# --- upstream restore: agent symlinks cannot replace the image's packaging --------------------------
+
+
+def test_upstream_restore_keeps_the_images_packaging_when_the_agent_symlinks_over_it(tmp_path: Path) -> None:
+    workspace, agent = tmp_path / "workspace", tmp_path / "agent"
+    workspace.mkdir()
+    agent.mkdir()
+    (workspace / "setup.py").write_text("image setup.py\n")
+    (workspace / "pyproject.toml").write_text("image pyproject.toml\n")
+    (workspace / "requirements.txt").write_text("image requirements\n")
+    (agent / "setup.py").write_text("agent setup.py\n")  # a regular packaging file: deleted, as upstream does
+    (agent / "evil.toml").write_text("agent pyproject\n")
+    (agent / "pyproject.toml").symlink_to("evil.toml")  # a packaging-named symlink must not replace the image's
+    (agent / "requirements.txt").symlink_to("/etc/hostname")  # nor one that points outside
+    (agent / "pkg").mkdir()
+    (agent / "pkg" / "setup.cfg").symlink_to("../evil.toml")  # nor a nested one
+    (agent / "data.txt").write_text("data\n")
+    (agent / "data_link").symlink_to("data.txt")  # a non-packaging symlink is kept
+    tar_path = tmp_path / "workspace.tar.gz"
+    subprocess.run(["tar", "czf", str(tar_path), "-C", str(agent), "."], check=True)
+
+    command = app_module._upstream_restore_command(
+        [], tar_path=str(tar_path), workspace=str(workspace), stage=str(tmp_path / "stage")
+    )
+    subprocess.run(["bash", "-c", command], check=True, capture_output=True)
+
+    for name, text in (("setup.py", "image setup.py"), ("pyproject.toml", "image pyproject.toml")):
+        assert not (workspace / name).is_symlink() and (workspace / name).read_text().strip() == text
+    assert not (workspace / "requirements.txt").is_symlink()
+    assert (workspace / "requirements.txt").read_text().strip() == "image requirements"
+    assert not (workspace / "pkg" / "setup.cfg").exists() and not (workspace / "pkg" / "setup.cfg").is_symlink()
+    assert (workspace / "data_link").is_symlink() and (workspace / "data.txt").read_text() == "data\n"
+
+
+# --- the seeded spec ---------------------------------------------------------------------------------
+
+
+async def _seed_and_capture_uploads(task_assets: Path, monkeypatch: MonkeyPatch, mode: str, workdir: str) -> dict:
+    (task_assets / "example-task" / "workdir.txt").write_text(workdir, encoding="utf-8")
+    config = _config(task_assets).model_copy(update={"agent_network_mode": mode})
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    uploads: dict[str, tuple[str, int]] = {}
+
+    async def upload(local: Path, remote: str) -> None:
+        uploads[remote] = (Path(local).read_text(), stat.S_IMODE(Path(local).stat().st_mode))
+
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = _exec_result(0)
+    sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    sandbox.upload.side_effect = upload
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+    await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
+    return uploads
+
+
+@pytest.mark.parametrize("workdir", ["/workspace", "/workspace/repo/nested"])
+async def test_the_seeded_spec_is_world_readable_and_exact_when_the_network_is_open(
+    task_assets: Path, monkeypatch: MonkeyPatch, workdir: str
+) -> None:
+    spec = (task_assets / "example-task" / "start.md").read_text()
+
+    uploads = await _seed_and_capture_uploads(task_assets, monkeypatch, "official", workdir)
+
+    text, mode = uploads[f"{workdir}/start.md"]
+    assert text == spec  # exactly the upstream spec, nothing added
+    assert mode & 0o044 == 0o044  # group and others can read it: a non-root agent can too
+    assert mode & 0o022 == 0  # and nobody else can write it
+
+
+async def test_only_the_no_internet_mode_tells_the_agent_there_is_no_internet(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    spec = (task_assets / "example-task" / "start.md").read_text()
+    for open_mode in ("official", "block_target", "block_target_v2"):
+        uploads = await _seed_and_capture_uploads(task_assets, monkeypatch, open_mode, "/workspace")
+        assert "no internet" not in uploads["/workspace/start.md"][0].lower()
+
+    uploads = await _seed_and_capture_uploads(task_assets, monkeypatch, "no_internet_preinstalled", "/workspace")
+
+    text, mode = uploads["/workspace/start.md"]
+    assert text.startswith(spec.rstrip()) and text.rstrip().endswith(app_module.OFFLINE_SPEC_NOTICE)
+    assert mode & 0o044 == 0o044

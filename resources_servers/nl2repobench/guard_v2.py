@@ -110,6 +110,15 @@ def derive_identifiers(task_name: str, commands: Iterable[str]) -> tuple[list[st
 _COMMON_FUNCS = r"""
 norm() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '_.[:space:]-'; }
 deny() { echo "nl2repobench guard v2: blocked '$TOOL $*' - $1" >&2; exit 1; }
+# word_hit TEXT ID -> 0 when ID is a whole word of TEXT (lowercase, with its separators): a short id such as "six"
+# must not match inside "sixpack" or "pysix", so it is matched at word boundaries instead of as a substring.
+word_hit() { local re="(^|[^a-z0-9])$2([^a-z0-9]|\$)"; [[ "$1" =~ $re ]]; }
+# ident_in_text TEXT NORMALIZED_TEXT ID -> 0 when ID names the target: a substring of the separator-stripped text for
+# ids of 4+ characters, a whole word of the raw text for shorter ones.
+ident_in_text() {
+  [ -n "$3" ] || return 1
+  if [ "${#3}" -ge 4 ]; then [[ "$2" == *"$3"* ]]; else word_hit "$1" "$3"; fi
+}
 # token_hit TOKEN -> returns 0 when the token names the guarded target
 token_hit() {
   local tok="$1" low n req nreq id slug
@@ -120,7 +129,7 @@ token_hit() {
   case "$low" in
     *://*|git@*|git+*)
       n=$(norm "$low")
-      for id in "${IDENTS[@]:-}"; do [ -n "$id" ] && [ "${#id}" -ge 4 ] && [[ "$n" == *"$id"* ]] && return 0; done
+      for id in "${IDENTS[@]:-}"; do ident_in_text "$low" "$n" "$id" && return 0; done
       return 1;;
     /*|./*|../*|~*|.) return 1;;
   esac
@@ -248,7 +257,7 @@ if printf '%s' "$low" | grep -E -q 'github\.com|githubusercontent|gitlab\.com|bi
   for slug in "${SLUGS[@]:-}"; do [ -n "$slug" ] && [[ "$low" == *"$slug"* ]] && hit=true; done
   if ! $hit; then
     n=$(printf '%s' "$low" | tr -d '_.[:space:]-')
-    for id in "${IDENTS[@]:-}"; do [ -n "$id" ] && [ "${#id}" -ge 4 ] && [[ "$n" == *"$id"* ]] && hit=true; done
+    for id in "${IDENTS[@]:-}"; do ident_in_text "$low" "$n" "$id" && hit=true; done
   fi
   $hit && deny "code references a source host together with the guarded task target"
 fi
