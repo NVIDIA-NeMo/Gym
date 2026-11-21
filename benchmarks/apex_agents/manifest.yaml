@@ -1,0 +1,30 @@
+name: apex_agents
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: APEX-Agents professional-services tasks (investment banking, consulting, law) run with a Stirrup
+  harness in sandboxed Archipelago worlds and scored by criterion-level LLM judging of the deliverables.
+modality: multimodal
+licensing: CC-BY-4.0
+authors:
+- Serge Panev
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: apex_agents
+agent_server: apex_agent
+datasets:
+- name: apex_agents
+  type: benchmark
+  jsonl_fpath: benchmarks/apex_agents/data/apex_agents_benchmark.jsonl
+  prepare_script: benchmarks/apex_agents/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active
