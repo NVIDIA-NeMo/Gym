@@ -195,8 +195,15 @@ async def _python_archive(platform: SandboxPlatform) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         partial = path.with_name(f".{path.name}.{uuid4().hex}")
         try:
+            # Allow larger response lines/fields only for release downloads and their redirects.
             async with await request(
-                "GET", url, _max_num_tries=3, proxy=_environment_proxy(url), timeout=ClientTimeout(total=600)
+                "GET",
+                url,
+                _max_num_tries=3,
+                proxy=_environment_proxy(url),
+                timeout=ClientTimeout(total=600),
+                max_line_size=65536,
+                max_field_size=65536,
             ) as response:
                 if not response.ok:
                     raise RuntimeError(f"Downloading {url} failed with HTTP {response.status}")

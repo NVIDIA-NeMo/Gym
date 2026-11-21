@@ -42,7 +42,10 @@ async def cached_download(url: str, *, sha256: str | None = None, timeout: float
             return path
         temporary = path.with_name(path.name + "." + uuid4().hex)
         try:
-            async with await request("GET", url, timeout=ClientTimeout(total=timeout)) as response:
+            # Allow larger response lines/fields only for release downloads and their redirects.
+            async with await request(
+                "GET", url, timeout=ClientTimeout(total=timeout), max_line_size=65536, max_field_size=65536
+            ) as response:
                 response.raise_for_status()
                 data = await response.read()
             if sha256 and hashlib.sha256(data).hexdigest() != sha256:
