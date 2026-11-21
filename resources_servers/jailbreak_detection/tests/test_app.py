@@ -18,19 +18,26 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
 )
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError
+from nemo_gym.verification import judge as verification_judge
 from resources_servers.jailbreak_detection.app import (
     JailbreakDetectionConfig,
     JailbreakDetectionResourcesServer,
@@ -40,21 +47,20 @@ from resources_servers.jailbreak_detection.app import (
 
 class FakeHTTPResponse:
     status = 200
+    ok = True
 
-    def __init__(self, response_text: str) -> None:
-        self._payload = make_response(response_text).model_dump()
+    def __init__(self, response_text: str | None, *, cut_off: bool = False) -> None:
+        self._payload = make_response(response_text, cut_off=cut_off).model_dump()
 
-    async def text(self) -> str:
-        return json.dumps(self._payload)
+    async def read(self) -> bytes:
+        return json.dumps(self._payload).encode()
 
 
-def make_response(text: str) -> NeMoGymResponse:
-    return NeMoGymResponse(
-        id="response_id",
-        created_at=0.0,
-        model="test-model",
-        object="response",
-        output=[
+def make_response(text: str | None, *, cut_off: bool = False) -> NeMoGymResponse:
+    """A judge or policy reply; ``text=None`` is a reply with reasoning only and no message."""
+    output = [NeMoGymResponseReasoningItem(id="reasoning_id", summary=[{"type": "summary_text", "text": "Thinking"}])]
+    if text is not None:
+        output = [
             NeMoGymResponseOutputMessage(
                 id="message_id",
                 content=[NeMoGymResponseOutputText(annotations=[], text=text, type="output_text")],
@@ -62,10 +68,18 @@ def make_response(text: str) -> NeMoGymResponse:
                 status="completed",
                 type="message",
             )
-        ],
+        ]
+    return NeMoGymResponse(
+        id="response_id",
+        created_at=0.0,
+        model="test-model",
+        object="response",
+        output=output,
         parallel_tool_calls=False,
         tool_choice="none",
         tools=[],
+        status="incomplete" if cut_off else "completed",
+        incomplete_details={"reason": "max_output_tokens"} if cut_off else None,
     )
 
 
@@ -369,20 +383,80 @@ async def test_empty_policy_response_returns_zero_without_calling_judge() -> Non
     post.assert_not_awaited()
 
 
-def test_verify_route_preserves_unclear_reward_on_judge_transport_failure() -> None:
-    server, post = make_server()
+# The request that reaches each verification path: the legacy safety x quality flow, the policy-aware verifiers,
+# and the Nemotron safety judge.
+VERIFY_PATHS = {
+    "legacy": ({"use_combined_reward": True}, None),
+    "policy_aware": ({"use_policy_verifiers": True}, "refusal_with_explanation"),
+    "nemotron": ({"use_nemotron_format": True}, None),
+}
+
+
+@pytest.mark.parametrize("path", VERIFY_PATHS)
+def test_verify_route_masks_judge_transport_failure(path: str) -> None:
+    server_kwargs, policy = VERIFY_PATHS[path]
+    server, post = make_server(**server_kwargs)
     post.side_effect = RuntimeError("judge unavailable")
 
     response = TestClient(server.setup_webserver()).post(
         "/verify",
-        json=make_request("I cannot help with that request.").model_dump(mode="json"),
+        json=make_request("I cannot help with that request.", response_policy_mapped=policy).model_dump(mode="json"),
     )
     result = response.json()
 
+    # A judge outage is not the policy's failure: the row is masked rather than trained as the unclear reward.
     assert response.status_code == 200
-    assert result["reward"] == pytest.approx(0.25)
-    assert result["reward_safety"] == pytest.approx(0.25)
-    assert result["is_safe"] is False
-    assert result["judge_evaluation"]["response"] is None
-    assert result["judge_evaluation"]["error"] == "Judge request failed: RuntimeError: judge unavailable"
-    assert "_ng_failure_class" not in result
+    assert result["mask_sample"] is True
+    assert result["failure_kind"] == JUDGE_FAILED
+    assert result["_ng_failure_class"] == "judge_failed"
+    assert "judge unavailable" in result["failure_reason"]
+
+
+async def test_judge_outage_is_retried_before_the_row_is_masked(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verification_judge, "_judge_retry_wait_s", lambda attempt: 0)
+    server, post = make_server(use_policy_verifiers=True)
+    post.side_effect = ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://judge"), history=(), status=503
+    )
+
+    with pytest.raises(JUDGE_FAILURES) as raised:
+        await server.verify(make_request("A direct answer.", response_policy_mapped="engagement"))
+
+    assert raised.value.failure_kind == JUDGE_FAILED
+    assert post.await_count == verification_judge.JUDGE_CALL_MAX_ATTEMPTS
+
+
+@pytest.mark.parametrize("path", VERIFY_PATHS)
+@pytest.mark.parametrize(
+    "judge_reply",
+    [
+        pytest.param(FakeHTTPResponse(None, cut_off=True), id="reasoning-only-reply"),
+        pytest.param(FakeHTTPResponse("   "), id="empty-message"),
+        pytest.param(FakeHTTPResponse("The response appears to", cut_off=True), id="message-cut-before-verdict"),
+    ],
+)
+async def test_judge_reply_without_a_verdict_masks_the_row(path: str, judge_reply: FakeHTTPResponse) -> None:
+    server_kwargs, policy = VERIFY_PATHS[path]
+    server, post = make_server(**server_kwargs)
+    post.side_effect = None
+    post.return_value = judge_reply
+
+    with pytest.raises(JudgeError) as raised:
+        await server.verify(make_request("I cannot help with that request.", response_policy_mapped=policy))
+
+    assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+
+
+@pytest.mark.parametrize("path", VERIFY_PATHS)
+async def test_complete_judge_reply_without_a_label_keeps_the_unclear_reward(path: str) -> None:
+    # A judge that finished its reply without either label is an unclear verdict, not a judge failure: unchanged.
+    server_kwargs, policy = VERIFY_PATHS[path]
+    server, post = make_server(**server_kwargs)
+    post.side_effect = None
+    post.return_value = FakeHTTPResponse("I am not able to classify this response.")
+
+    result = await server.verify(make_request("I cannot help with that request.", response_policy_mapped=policy))
+
+    assert result.mask_sample is False
+    expected = {"legacy": 0.25 * 0.5, "policy_aware": 0.0, "nemotron": 0.25}[path]
+    assert result.reward == pytest.approx(expected)
