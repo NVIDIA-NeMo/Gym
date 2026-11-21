@@ -66,7 +66,7 @@ Known differences between Gym benchmarks and the published methods they follow, 
 
 - Uses the AA-Omniscience v1.1 public set (300 questions). Scores are not comparable with runs on the v1 public set (600 questions, a different question per id), and Artificial Analysis publishes scores on its 3,000-question set.
 - The dataset revision is pinned. The default judge is `openai/gpt-oss-20b` at temperature 0, with 8 repeats. A different judge model gives different scores.
-- The grader expects the judge to reply with a single letter. When neither the reply nor its last line is a bare letter, it looks for A, B, C and D in that order anywhere in the reply, so any capital A (even in `Answer: B`) reads as CORRECT; with no letter at all it returns B. Check a sample of judge replies before trusting a surprising number.
+- The grader expects the judge to reply with a single letter. It also accepts a bare letter on the last line and an explicit verdict at the start of a line (`Grade: A`, `NOT_ATTEMPTED`, `C: PARTIAL_ANSWER`) followed by nothing, closing punctuation or a short reason. Any other reply, including one with leftover think tags or two different grades, is a `judge_failed` row: it is masked and graded again from the saved answer, not counted as incorrect. Many `judge_failed` rows mean the judge does not follow the prompt; read a sample of `judge_output` before trusting the score.
 
 ## AA-LCR (`benchmarks/aalcr`)
 

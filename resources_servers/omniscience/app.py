@@ -128,41 +128,44 @@ _EXPLICIT_GRADE_RE = re.compile(
     r"^[^\S\n]*(?:"
     # Closed lead-ins prevent gold answers, negations and other prose from becoming grades.
     r"(?i:(?:(?:the|final)[^\S\n]+)?"
-    r"(?:(?:grade|verdict)\b[^\S\n]*(?:is\b|:|=)?|answer\b[^\S\n]*(?:is\b|:|=)))[^\S\n]*"
+    r"(?:(?:grade|verdict|answer)\b[^\S\n]*(?:is\b|:|=)))[^\S\n]*"
     r"|(?P<letter>[ABCD])[^\S\n]*:[^\S\n]*"
     rf"|(?=[\"'*(\[`]*(?:{_GRADE_KEYWORD_PATTERN})(?![\w+-]))"
     r")[\"'*(\[`]*(?P<grades>"
     rf"{_GRADE_TOKEN_PATTERN}(?:[\"'*)\]`]*[^\S\n]*{_GRADE_CONNECTOR_PATTERN}"
     rf"[^\S\n]*[\"'*(\[`]*{_GRADE_TOKEN_PATTERN})*)"
 )
+# What may follow an explicit verdict on its line: closing wrappers or punctuation, then nothing or a short reason.
+_VERDICT_TAIL_RE = re.compile(r"[\"'*)\]`.!]*[^\S\n]*(?:$|(?i:because|since|based[^\S\n]+on)\b|-|\()")
 _UNSTRIPPED_THINK_RE = re.compile(r"</?think(?:ing)?\b", re.IGNORECASE)
-_LETTER_WRAPPER_CHARS = " \t*_`\"'()[].:"
+_LETTER_WRAPPER_CHARS = " \t*_`\"'()[]."
 
 
-def parse_judge_grade(judge_text: str) -> str:
+def parse_judge_grade(judge_text: str) -> str | None:
     """Parse the grade letter (A/B/C/D) from the judge's response.
 
     A grade is accepted only when it is unambiguous: the bare letter, the last
     line (ignoring markdown or punctuation wrappers), or explicit verdicts at
     the start of a line ("Grade: A", "NOT_ATTEMPTED", "C: PARTIAL_ANSWER").
+    An explicit verdict counts only when the rest of its line is empty, closing
+    punctuation or a short reason ("because", "since", "based on", "-", "(").
     Connected alternatives and conflicting semicolon-separated verdicts remain
-    ambiguous. Residual thinking tags prevent scanning prose for verdicts.
-    ``record_parsed_judge_verdict`` is called only for an unambiguous grade.
-    Otherwise the result is "B" without a recorded verdict, so grading stays
-    unknown and can be graded again.
+    ambiguous. Residual thinking tags make the whole reply ambiguous.
+    ``record_parsed_judge_verdict`` is called only for an unambiguous grade;
+    otherwise the result is None and the caller treats the reply as a judge failure.
     """
     cleaned = judge_text.strip()
     if cleaned in ("A", "B", "C", "D"):
         record_parsed_judge_verdict()
         return cleaned
 
+    if _UNSTRIPPED_THINK_RE.search(cleaned):
+        return None
+
     last_line = cleaned.rsplit("\n", 1)[-1].strip().strip(_LETTER_WRAPPER_CHARS)
     if last_line in ("A", "B", "C", "D"):
         record_parsed_judge_verdict()
         return last_line
-
-    if _UNSTRIPPED_THINK_RE.search(cleaned):
-        return "B"
 
     candidates: set[str] = set()
     for line in cleaned.splitlines():
@@ -174,12 +177,17 @@ def parse_judge_grade(judge_text: str) -> str:
         for clause in clauses[1:]:
             match = _EXPLICIT_GRADE_RE.match(clause)
             if match is None:
-                return "B"
+                return None
             matches.append(match)
+        rests = [match.string[match.end() :] for match in matches]
+        # A malformed alternative must not turn a matching prefix into a completed grade.
+        if any(_UNPARSED_ALTERNATIVE_RE.match(rest) for rest in rests):
+            return None
+        if not _VERDICT_TAIL_RE.match(rests[0]):
+            continue  # Prose that starts like a verdict ("CORRECT answer would be ...") is not one.
+        if not all(_VERDICT_TAIL_RE.match(rest) for rest in rests[1:]):
+            return None
         for match in matches:
-            # A malformed alternative must not turn a matching prefix into a completed grade.
-            if _UNPARSED_ALTERNATIVE_RE.match(match.string[match.end() :]):
-                return "B"
             if letter := match.group("letter"):
                 candidates.add(letter)
             candidates.update(
@@ -189,7 +197,7 @@ def parse_judge_grade(judge_text: str) -> str:
         record_parsed_judge_verdict()
         return candidates.pop()
 
-    return "B"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +332,7 @@ class OmniscienceServer(SimpleResourcesServer):
                 response_model=NeMoGymChatCompletion,
             )
             content = chat_response.choices[0].message.content if chat_response.choices else None
-            return content.strip() if content else ""
+            return _strip_thinking_traces(content) if content else ""
 
         msgs: List[NeMoGymEasyInputMessage] = [
             NeMoGymEasyInputMessage(role="user", content=judge_prompt),
@@ -368,6 +376,9 @@ class OmniscienceServer(SimpleResourcesServer):
                 raise JudgeError("empty judge response")
 
             grade = parse_judge_grade(judge_text)
+            if grade is None:
+                # Masked and graded again from the saved answer, rather than counted as incorrect.
+                raise JudgeError(f"no unambiguous grade in the judge response: {judge_text[:200]!r}")
 
             if grade == "A":
                 verdict = "correct"
