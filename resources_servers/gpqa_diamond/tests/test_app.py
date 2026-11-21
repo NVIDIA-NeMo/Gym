@@ -14,7 +14,8 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from app import GPQADiamondResourcesServer, GPQADiamondResourcesServerConfig
+import pytest
+from app import GPQADiamondResourcesServer, GPQADiamondResourcesServerConfig, extract_letter
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
@@ -186,3 +187,62 @@ class TestApp:
 
         assert result.reward == 0.0
         assert result.extracted_answer is None
+
+
+async def test_verify_an_intermediate_box_does_not_hide_the_answer_line() -> None:
+    server = GPQADiamondResourcesServer(
+        config=GPQADiamondResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    response = NeMoGymResponse(
+        id="resp_box",
+        created_at=0.0,
+        model="dummy",
+        object="response",
+        output=[
+            {
+                "id": "msg_box",
+                "content": [{"annotations": [], "text": "So \\boxed{q = 2 C}.\nAnswer: A", "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+    request = MCQAVerifyRequest(
+        responses_create_params={"input": [{"role": "user", "content": "Question?\nA: a\nB: b\nC: c\nD: d"}]},
+        response=response,
+        options=[{"A": "a"}, {"B": "b"}, {"C": "c"}, {"D": "d"}],
+        expected_answer="A",
+        grading_mode="strict_single_letter_boxed",
+    )
+    result = await server.verify(request)
+
+    assert result.extracted_answer == "A"
+    assert result.reward == 1.0
+
+
+ALLOWED = {"A", "B", "C", "D"}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # An intermediate quantity boxed while reasoning does not hide the final "Answer:" line.
+        ("At equilibrium \\boxed{T = 300 K}, so the rate halves.\nAnswer: B", "B"),
+        ("The charge is \\boxed{q = 2 C}.\nAnswer: A", "A"),
+        ("Step 1 gives \\boxed{4}.\nAnswer: D", "D"),
+        # Whichever valid choice comes last wins, boxed or not.
+        ("Answer: B\nOn reflection the answer is \\boxed{D}", "D"),
+        ("\\boxed{C}", "C"),
+        ("Final: \\boxed{\\text{B}}", "B"),
+        ("Reasoning...\nAnswer: C", "C"),
+        ("Answer: E", None),
+        ("\\boxed{T = 300 K}", None),
+    ],
+)
+def test_extract_letter_takes_the_last_valid_choice(text: str, expected: str | None) -> None:
+    assert extract_letter(text, ALLOWED) == expected

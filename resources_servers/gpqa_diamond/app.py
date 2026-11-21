@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import re
-from typing import ClassVar, Optional
+from typing import ClassVar, Collection, Optional
 
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -29,22 +29,32 @@ from resources_servers.mcqa.app import (
 )
 
 
-def extract_letter(text: str) -> Optional[str]:
-    """Extract the final GPQA answer letter from boxed or Answer: formats."""
-    boxed_match = re.findall(r"\\boxed\{([^}]*)\}", text, re.DOTALL)
-    if boxed_match:
-        extracted = boxed_match[-1].strip()
+_BOXED = re.compile(r"\\boxed\{([^}]*)\}", re.DOTALL)
+_ANSWER_LINE = re.compile(r"(?i)[\*\_]{0,2}Answer[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([A-Z])(?![a-zA-Z0-9])")
+
+
+def extract_letter(text: str, allowed_letters: Optional[Collection[str]] = None) -> Optional[str]:
+    """Extract the final GPQA answer letter from boxed or Answer: formats.
+
+    Every \\boxed{} and every "Answer: X" line offers a candidate; the one written last wins. A box that holds an
+    intermediate result (\\boxed{q = 2 C}, \\boxed{T = 300 K}) is only a candidate if its letter is a valid choice,
+    so it cannot hide the final "Answer:" line the prompt asks for.
+    """
+    candidates: list[tuple[int, str]] = []
+    for match in _BOXED.finditer(text):
+        extracted = match.group(1).strip()
         if len(extracted) == 1 and extracted.isupper():
-            return extracted
-        letter_match = re.findall(r"\b([A-Z])\b", extracted, re.DOTALL)
-        if letter_match:
-            return letter_match[-1].strip()
-
-    answer_match = re.findall(r"(?i)[\*\_]{0,2}Answer[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([A-Z])(?![a-zA-Z0-9])", text)
-    if answer_match:
-        return answer_match[-1].strip().upper()
-
-    return None
+            letter: Optional[str] = extracted
+        else:
+            letters = re.findall(r"\b([A-Z])\b", extracted, re.DOTALL)
+            letter = letters[-1] if letters else None
+        if letter is not None:
+            candidates.append((match.start(), letter))
+    for match in _ANSWER_LINE.finditer(text):
+        candidates.append((match.start(), match.group(1).upper()))
+    if allowed_letters:
+        candidates = [(at, letter) for at, letter in candidates if letter in allowed_letters]
+    return max(candidates)[1] if candidates else None
 
 
 class GPQADiamondResourcesServerConfig(MCQAResourcesServerConfig):
@@ -70,7 +80,7 @@ class GPQADiamondResourcesServer(MCQAResourcesServer):
             pred = _parse_answer_with_custom_regex(text, regex_pattern, allowed_letters, options)
 
         if pred is None:
-            pred = extract_letter(text)
+            pred = extract_letter(text, allowed_letters)
             if pred is not None:
                 pred = pred.upper()
                 if allowed_letters and pred not in allowed_letters:
