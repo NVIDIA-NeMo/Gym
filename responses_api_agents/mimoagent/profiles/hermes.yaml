@@ -1,0 +1,10 @@
+agent:
+  type: hermes
+  version: 2026.8.13
+  effort: xhigh
+  max_tokens: 65536
+model:
+  model_name: claude-opus-5
+  model_kwargs:
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}

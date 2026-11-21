@@ -1,0 +1,34 @@
+agent:
+  type: cc-agent
+  tools:
+  - tool: Bash
+    config:
+      timeout: 60
+      max_timeout: 300
+  - tool: Read
+  - tool: Write
+  - tool: Edit
+  - tool: Grep
+  - tool: Glob
+  - tool: Agent
+  - tool: Compact
+  compaction_context_window: 100000
+  compaction_buffer_tokens: 10000
+  show_context_usage: true
+  context_usage_warn_fraction: 0.8
+  system_template: |
+    You are an agent, your current working directory is {{cwd}}.
+
+    You can use the tools available to you to interact with the computer to assist the user in completing tasks.
+  instance_template: |
+    Fix the following issue:
+
+    {{task}}
+  step_limit: 500
+model:
+  model_name: ${MIMOAGENT_MODEL_NAME:-gpt-5}
+  protocol: chat
+  model_kwargs:
+    base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+    api_key: ${OPENAI_API_KEY:-}
+    temperature: 1.0
