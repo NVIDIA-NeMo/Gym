@@ -296,6 +296,22 @@ class SandboxSession[Artifacts]:
         """Whether ``expire`` kept the harness from starting, so it left no output to collect."""
         return self.expired and self.cleanup["return_code"] is None and self.cleanup["error"] is None
 
+    @property
+    def staging(self) -> bool:
+        """Whether this activation's staging is still running, and so may still write to the sandbox.
+
+        Also after ``execute`` ended: it stops waiting for a staging that does not end when cancelled.
+        """
+        task = self._stage_task
+        return task is not None and not task.done()
+
+    async def wait_staged(self, *, timeout: float) -> bool:
+        """Wait up to ``timeout`` for staging to end, however it ends; return whether it has ended."""
+        task = self._stage_task
+        if task is not None and not task.done():
+            await asyncio.wait({task}, timeout=timeout)
+        return not self.staging
+
     async def read_output_log(self) -> str:
         """Read combined supervisor/harness diagnostics without masking the original failure."""
         try:

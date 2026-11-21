@@ -33,21 +33,34 @@ async def exec_idempotent(
     """Run ``command``, retrying when ``sandbox.exec`` raises; a returned result, any exit code, ends the retries.
 
     ``cwd`` and ``env`` are passed to ``sandbox.exec``. ``timeout_s`` is the budget of all attempts and the waits
-    between them together: each attempt gets what is left of it, and once it is spent the last error is raised. The
-    wait doubles after each failed attempt (2 s, then 4 s). The last error is also raised once ``attempts`` run out.
+    between them together, including the time a provider waits for capacity before it runs the command, which its
+    own command timeout does not cover. Each attempt gets what is left of the budget. Once it is spent no attempt
+    is started, and one that is running is cancelled: the last error is raised, or, when no attempt raised, the
+    result a provider returns for a command that timed out (``error_type="timeout"``). The wait doubles after each
+    failed attempt (2 s, then 4 s). The last error is also raised once ``attempts`` run out.
 
     Use only for commands that are safe to run twice, and at the same time: the error can arrive after the command
     started, so a retry may begin while the first attempt is still running in the sandbox.
     """
     deadline = None if timeout_s is None else monotonic() + timeout_s
+    last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         remaining = None if deadline is None else deadline - monotonic()
+        if remaining is not None and remaining <= 0:
+            break
         try:
-            return await sandbox.exec(command, cwd=cwd, env=env, timeout_s=remaining)
+            async with asyncio.timeout(remaining) as budget:
+                return await sandbox.exec(command, cwd=cwd, env=env, timeout_s=remaining)
         except Exception as error:
+            if budget.expired():
+                break
+            last_error = error
             wait = delay_s * 2 ** (attempt - 1)
             if attempt == attempts or (deadline is not None and monotonic() + wait >= deadline):
                 raise
             LOG.warning("%s failed (attempt %d/%d): %r; retrying", what, attempt, attempts, error)
             await asyncio.sleep(wait)
-    raise AssertionError("unreachable")  # pragma: no cover
+    if last_error is not None:
+        raise last_error
+    LOG.warning("%s did not finish within its budget of %gs", what, timeout_s)
+    return SandboxExecResult(stdout=None, stderr=None, return_code=-1, error_type="timeout")

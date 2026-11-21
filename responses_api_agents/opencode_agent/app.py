@@ -56,6 +56,7 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    CleanupReceipt,
     LaunchFinished,
     LaunchStopped,
     SandboxNetworkAccess,
@@ -360,6 +361,46 @@ def _pinned_copy(target: str) -> str:
     """Where a pinned file is copied and checked before it becomes ``target``: a hidden file beside it."""
     path = PurePosixPath(target)
     return str(path.with_name(f".pinned-{path.name}"))
+
+
+@dataclass(frozen=True)
+class _StoppedLaunch:
+    """What a launch a checkpoint stopped left on its session, for the reply when it cannot be relaunched in time."""
+
+    receipt: CleanupReceipt
+    artifacts: str | None
+    state: dict[str, Any]
+
+    # What preparing a relaunch, or starting the task afresh, changes on the session state.
+    _STATE: ClassVar[tuple[str, ...]] = (
+        "reprompted_conversation",
+        "harness_session_id",
+        "message_ids",
+        "observations",
+        "trajectory",
+        "interrupted_tool_calls",
+        "interrupted_tool_call_ids",
+    )
+
+    @classmethod
+    def of(cls, state: "OpenCodeSandboxSession", receipt: CleanupReceipt) -> "_StoppedLaunch":
+        values = {name: getattr(state, name) for name in cls._STATE}
+        copies = {name: list(value) if isinstance(value, list) else value for name, value in values.items()}
+        return cls(receipt=receipt, artifacts=state.session.artifacts, state=copies)
+
+    def report_timeout(self, state: "OpenCodeSandboxSession", when: str) -> None:
+        """Put the stopped launch's output back, under a receipt that says the harness ran out of time."""
+        LOG.warning(
+            "OpenCode session %s ran out of budget %s, after launch %d was stopped; "
+            "reporting a timeout with that launch's output",
+            state.request.agent_session_id,
+            when,
+            state.launch_count,
+        )
+        state.session.cleanup = {**self.receipt, "timed_out": True}
+        state.session.artifacts = self.artifacts
+        for name, value in self.state.items():
+            setattr(state, name, value)
 
 
 class _PauseClock:
@@ -2404,52 +2445,72 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         A launch whose pause or continue failed was stopped; the next launch reprompts the saved conversation, and so
         does the first launch of a restored session that had started one. Each launch has what is left of the
         activation's budget, not counting time paused for checkpoints. A launch that reprompts the conversation
-        attaches no media: the saved user message already holds the prompt's files. When a launch was stopped and no
-        budget is left, nothing is relaunched: the reply is built from that launch, as for a harness at its deadline.
+        attaches no media: the saved user message already holds the prompt's files. When a launch was stopped and the
+        budget runs out before its relaunch has started its harness (before, while or after the relaunch is
+        prepared, or while it stages its files), the reply is built from the stopped launch, as for a harness at its
+        deadline.
         """
         close_timeout = self.config.session_close_timeout_seconds
         clock = _PauseClock(activation)
+
+        def budget_left() -> float:
+            return deadline + clock.paused_s - monotonic()
+
         while True:
             interrupted = 0
+            # What the stopped launch produced, kept until its relaunch has started its harness: preparing the
+            # relaunch clears it, and the reply is built from it if the budget runs out before then.
+            kept: _StoppedLaunch | None = None
             if state.launch_count > 0:
                 stopped = state.session.cleanup
-                if (
-                    stopped is not None
-                    and deadline is not None
-                    and deadline + clock.paused_s - monotonic() < _MIN_RELAUNCH_BUDGET_S
-                ):
-                    # The budget ran out between the stop and the relaunch. Preparing a relaunch would discard
-                    # what the stopped launch produced and then raise: end here as a harness at its deadline does.
-                    LOG.warning(
-                        "OpenCode session %s has no budget left to relaunch after launch %d was stopped; "
-                        "reporting a timeout with that launch's output",
-                        state.request.agent_session_id,
-                        state.launch_count,
-                    )
-                    state.session.cleanup = {**stopped, "timed_out": True}
+                if stopped is not None and deadline is not None:
+                    kept = _StoppedLaunch.of(state, stopped)
+                    if budget_left() < _MIN_RELAUNCH_BUDGET_S:
+                        kept.report_timeout(state, "before its relaunch was prepared")
+                        return
+                try:
+                    # Preparing and reading the saved conversation run commands in the sandbox: they spend the
+                    # activation's budget too.
+                    async with asyncio.timeout(None if kept is None else max(budget_left(), 0.0)) as budget:
+                        await state.prepare_launch(state.launch_count + 1, timeout=close_timeout)
+                        launch_payload, interrupted = await self._relaunch_payload(state, payload, prompt=prompt)
+                except TimeoutError:
+                    # Only the budget running out ends the activation as a timeout; a step's own timeout is a failure.
+                    if kept is None or not budget.expired():
+                        raise
+                    kept.report_timeout(state, "while its relaunch was prepared")
                     return
-                await state.prepare_launch(state.launch_count + 1, timeout=close_timeout)
-                launch_payload, interrupted = await self._relaunch_payload(state, payload, prompt=prompt)
+                if kept is not None and budget_left() < _MIN_RELAUNCH_BUDGET_S:
+                    kept.report_timeout(state, "once its relaunch was prepared")
+                    return
             else:
                 launch_payload = payload()
             state.reprompted_conversation = launch_payload.get("reprompt") is not None
             state.launch_count += 1
             launch = state.launch_count
             launch_deadline = None if deadline is None else deadline + clock.paused_s
-            outcome = await run_with_checkpoint_pauses(
-                state.require_session(),
-                clock,
-                launch=lambda: state.execute(
-                    launch_payload,
-                    media=() if launch_payload.get("reprompt") is not None else media,
-                    timeout=timeout,
-                    close_timeout=close_timeout,
-                    deadline=launch_deadline,
-                    pause_allowance_s=self.config.checkpoint_pause_allowance_seconds,
-                ),
-                on_parked=lambda: {"launch": launch, "harness_session_id": state.harness_session_id},
-                stop_timeout=close_timeout,
-            )
+            try:
+                outcome = await run_with_checkpoint_pauses(
+                    state.require_session(),
+                    clock,
+                    launch=lambda: state.execute(
+                        launch_payload,
+                        media=() if launch_payload.get("reprompt") is not None else media,
+                        timeout=timeout,
+                        close_timeout=close_timeout,
+                        deadline=launch_deadline,
+                        pause_allowance_s=self.config.checkpoint_pause_allowance_seconds,
+                    ),
+                    on_parked=lambda: {"launch": launch, "harness_session_id": state.harness_session_id},
+                    stop_timeout=close_timeout,
+                )
+            except TimeoutError:
+                if kept is None or state.session.launch_started:
+                    raise
+                # The budget ran out while the relaunch staged its files: its harness never started.
+                state.launch_count -= 1
+                kept.report_timeout(state, "before its relaunch started")
+                return
             receipt = state.session.cleanup or {}
             state.launch_records.append(
                 {

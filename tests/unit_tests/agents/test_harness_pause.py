@@ -44,9 +44,12 @@ from nemo_gym.agents.utils.supervisor_client import (
     request_pause,
     supervised_launch_command,
 )
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
+from nemo_gym.server_runtime._checkpoint.agent import AgentSessionParticipant
+from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest, ParticipantControlPlane
 from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
 
 
@@ -888,6 +891,7 @@ class FakeSession:
     harness = "fake"
     # Its harness is running: a stop ends it.
     launch_started = True
+    staging = False
 
     def __init__(self, *, pauses=(), continues=(), stopped_receipt: bool = True) -> None:
         self.events: list[str] = []
@@ -1192,19 +1196,149 @@ class UncancellableStagingSession(StagingSession):
         return "result"
 
 
-async def test_a_launch_still_staging_that_does_not_end_when_cancelled_raises_and_does_not_park() -> None:
+async def test_a_launch_still_staging_that_does_not_end_when_cancelled_fails_only_once_it_has_ended() -> None:
     session, activation = UncancellableStagingSession(pauses=[STILL_STAGING]), FakeActivation()
     running = _run(session, activation, stop_timeout=0.05)
     activation.park.set()
     try:
+        # While the staging can still write, the activation neither parks nor fails: either would let the checkpoint
+        # take its snapshot.
+        done, _ = await asyncio.wait({running}, timeout=0.5)
+        assert not done and activation.boundaries == [] and not activation.parked.is_set()
+        assert session.events[:3] == ["pause", "stop", "launch_cancelled"]
+        session.release.set()
         with pytest.raises(RuntimeError, match="did not end within 0.05s of being cancelled while staging"):
             await asyncio.wait_for(running, 5)
-        assert activation.boundaries == [] and not activation.parked.is_set()
-        assert session.events[:3] == ["pause", "stop", "launch_cancelled"]
+        assert activation.boundaries == []
     finally:
         session.release.set()
         activation.resume.set()
     assert session.task is not None and await asyncio.wait_for(session.task, 5) == "result"
+
+
+async def test_a_retire_ends_the_wait_for_a_staging_that_does_not_end() -> None:
+    session, activation = UncancellableStagingSession(pauses=[STILL_STAGING]), FakeActivation()
+    running = _run(session, activation, stop_timeout=0.05)
+    activation.park.set()
+    try:
+        done, _ = await asyncio.wait({running}, timeout=0.3)
+        assert not done
+        # A retire or a close cancels the activation: its session is then no longer part of the checkpoint.
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, 5)
+        assert activation.boundaries == []
+    finally:
+        session.release.set()
+    assert session.task is not None and await asyncio.wait_for(session.task, 5) == "result"
+
+
+class AbandonedStagingSession(StagingSession):
+    """Its launch ends when cancelled and leaves its staging running, as ``SandboxSession.execute`` does once it
+    has waited its close timeout for a staging that ignores the cancellation."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.staged = asyncio.Event()
+
+    @property
+    def staging(self) -> bool:
+        return not self.staged.is_set()
+
+    async def wait_staged(self, *, timeout: float) -> bool:
+        try:
+            await asyncio.wait_for(self.staged.wait(), timeout)
+        except TimeoutError:
+            pass
+        return not self.staging
+
+
+async def test_a_cancelled_launch_whose_staging_still_runs_is_not_reported_stopped() -> None:
+    session, activation = AbandonedStagingSession(pauses=[STILL_STAGING]), FakeActivation()
+    running = _run(session, activation, stop_timeout=0.05)
+    activation.park.set()
+    done, _ = await asyncio.wait({running}, timeout=0.5)
+    # The launch itself ended, cancelled; reporting it stopped would park the activation beside the staging.
+    assert not done and session.events == ["pause", "stop", "launch_cancelled"]
+    assert activation.boundaries == [] and not activation.parked.is_set()
+    session.staged.set()
+    with pytest.raises(RuntimeError, match="was cancelled while staging, and its staging has not ended"):
+        await asyncio.wait_for(running, 5)
+    assert activation.boundaries == []
+
+
+class _NoSessions:
+    async def export_agent_sessions(self, session_keys: list[str], *, checkpoint_id: str) -> dict[str, dict]:
+        return {key: {} for key in session_keys}
+
+
+@linux_only
+async def test_a_checkpoint_waits_for_a_staging_that_does_not_end_when_cancelled(tmp_path: Path) -> None:
+    """With the real session and the real checkpoint participant: no prepared checkpoint, and so no export and no
+    snapshot, while a staging that ignored its cancellation can still write to the sandbox."""
+    session = _session(tmp_path)
+    launch_dir = tmp_path / "launch-1"
+    staging, release = asyncio.Event(), asyncio.Event()
+
+    async def stage() -> SandboxCommand:
+        launch_dir.mkdir(parents=True, exist_ok=True)
+        staging.set()
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                pass  # as a stage callback that shields a write to the sandbox
+        (launch_dir / "staged").write_text("late")
+        return SandboxCommand(argv=["true"])
+
+    # The pause gives up on the staging quickly; the default waits most of a minute.
+    pause = session.pause_harness
+    session.pause_harness = lambda: pause(timeout=0.05)  # type: ignore[method-assign]
+    participant = AgentSessionParticipant(_NoSessions())
+    controller = ParticipantControlPlane(participant, instance_name="agent", lease_grace_seconds=60)
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    boundaries: list[dict] = []
+
+    async def activate() -> None:
+        async with participant.activation("s", episode_id) as activation:
+            await run_with_checkpoint_pauses(
+                session,
+                activation,
+                launch=lambda: session.execute(
+                    stage_activation=stage, collect=AsyncMock(return_value="artifacts"), timeout=30, close_timeout=0.1
+                ),
+                on_parked=lambda: boundaries.append({"launch": 1}) or boundaries[-1],
+                stop_timeout=2,
+            )
+
+    running = asyncio.create_task(activate())
+    request = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 60)
+    prepare: asyncio.Task | None = None
+    try:
+        await asyncio.wait_for(staging.wait(), 5)
+        prepare = asyncio.create_task(controller.prepare(request))
+        # Long enough for the pause to give up, the launch to be cancelled and to stop waiting for its staging.
+        done, _ = await asyncio.wait({prepare, running}, timeout=1.5)
+        assert not done, "the checkpoint is not prepared and the activation has not failed while staging still runs"
+        assert session.staging and boundaries == [] and not (launch_dir / "staged").exists()
+
+        release.set()
+        with pytest.raises(RuntimeError, match="cancelled while staging"):
+            await asyncio.wait_for(running, 10)
+        # Only now is the session ready, and the staging's last write is in the sandbox the snapshot would hold.
+        prepared = await asyncio.wait_for(prepare, 10)
+        assert prepared["phase"] == "prepared" and not session.staging
+        assert (launch_dir / "staged").read_text() == "late" and boundaries == []
+        records = await participant.export(None, checkpoint_id="c1")
+        assert [(record.session_key, record.boundary) for record in records] == [("s", None)]
+    finally:
+        release.set()
+        for task in (running, prepare):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(task for task in (running, prepare) if task is not None), return_exceptions=True)
+        await session.close(timeout=5)
 
 
 class DeadSandboxSession(FakeSession):
