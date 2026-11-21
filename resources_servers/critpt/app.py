@@ -28,7 +28,8 @@ from fastapi import FastAPI
 from pydantic import Field, field_validator
 
 from nemo_gym.client import request
-from nemo_gym.core.failure_kinds import JUDGE_SKIPPED, PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED
+from nemo_gym.core import PROVIDER_CREDENTIALS_REJECTED
+from nemo_gym.core.failure_kinds import JUDGE_SKIPPED, PROVIDER_QUOTA_EXHAUSTED
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -37,8 +38,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import judge_provider_stopped, reraise_judge_errors
-from nemo_gym.verification.judge import judge_call_failed
+from nemo_gym.verification import judge_call_failed, judge_provider_stopped, reraise_judge_errors
 
 
 # Repo root: resources_servers/critpt/app.py -> nemo-gym/

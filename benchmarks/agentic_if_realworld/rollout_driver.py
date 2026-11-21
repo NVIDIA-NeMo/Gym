@@ -14,8 +14,7 @@ from pathlib import Path
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core import JUDGE_FAILED
-from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
+from nemo_gym.core import JUDGE_FAILED, PROVIDER_CREDENTIALS_REJECTED
 from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
 from nemo_gym.verification import judge_provider_stopped
 from resources_servers.agentic_if_realworld.benchmark.core import (
@@ -49,7 +48,6 @@ class DeferredJudgeError(RetryableTransportError):
 
 
 async def run_rollout_collection(rollout_collection_config, global_config_dict) -> None:
-    from aiohttp import ClientResponseError
     from omegaconf import OmegaConf
 
     from nemo_gym.client import get_response_json, raise_for_status
@@ -311,20 +309,17 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     _max_num_tries=1,
                 )
                 try:
-                    try:
-                        await raise_for_status(response)
-                    except ClientResponseError as error:
-                        if error.status in (401, 403):
-                            raise judge_provider_stopped(
-                                f"Judge credentials rejected (HTTP {error.status}) for {identifier}",
-                                failure_kind=PROVIDER_CREDENTIALS_REJECTED,
-                                operation="/verify",
-                            ) from error
-                        if error.status != 503 or cached_only or validate_only:
-                            raise
-                        detail = (getattr(error, "response_content", None) or b"").decode(errors="replace")[:1000]
-                        raise DeferredJudgeError(f"/verify returned 503 for {identifier}: {detail}") from error
+                    await raise_for_status(response)
                     result = await get_response_json(response)
+                    kind = result.get("failure_kind")
+                    if kind == PROVIDER_CREDENTIALS_REJECTED:
+                        raise judge_provider_stopped(
+                            result.get("failure_reason", "Judge credentials rejected"),
+                            failure_kind=kind,
+                            operation="/verify",
+                        )
+                    if kind == JUDGE_FAILED and not (cached_only or validate_only):
+                        raise DeferredJudgeError(result.get("failure_reason", "Judge request failed"))
                     result.pop("cached_judge_only", None)
                     result.pop("validate_judge_cache", None)
                     return result
