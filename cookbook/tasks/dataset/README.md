@@ -1,6 +1,6 @@
-# Hello Dataset
+# Dataset
 
-Hello Dataset helps you organize related tasks so they can be selected and run together while each task keeps its own requirements.
+This recipe helps you organize related tasks so they can be selected and run together while each task keeps its own requirements.
 
 ## Concept
 
@@ -18,7 +18,7 @@ The two tasks are independent. Open either directory and you will find its instr
 ## Run it
 
 ```bash
-gym eval run environments/hello_dataset --agent opencode_agent --sandbox docker \
+gym eval run cookbook/tasks/dataset --agent opencode_agent --sandbox docker \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
@@ -30,7 +30,7 @@ Every task ships a `solution/` (a `solve.sh` here; the parameterized dataset shi
 row instead). The oracle plays it through the task's verifier and expects reward 1:
 
 ```bash
-gym dataset validate environments/hello_dataset --sandbox docker
+gym dataset validate cookbook/tasks/dataset --sandbox docker
 ```
 
 On a cluster, pass `--sandbox opensandbox` instead.
@@ -47,23 +47,23 @@ hello [repeat 0]	oracle solved	1.0	0.5	public
 
 Each task passed when its line reads `oracle solved` and reward `1.0`; the command then exits 0.
 
-Each command writes its results to its own folder: `results/harbor/validation/hello_dataset/` for validate and `results/harbor/hello_dataset/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show what each task's `tests/test.sh` wrote.
+Each command writes its results to its own folder: `results/harbor/validation/dataset/` for validate and `results/harbor/dataset/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show what each task's `tests/test.sh` wrote.
 
 ## Other examples
 
 ### Tasks and datasets
 
-- [Hello World](../hello_world/README.md): Define one self-contained task folder.
+- [Hello World](../hello_world/README.md): Write your first task, run an agent on it, and see its score.
 
 ### Add tools
 
-- [Hello MCP Tool](../hello_mcp_tool/README.md): Give an agent an additional tool over MCP.
+- [MCP Tool](../mcp_tool/README.md): Give the agent a tool it needs for the task.
 
 ### Python scoring
 
-- [Hello Python Verifier](../hello_python_verifier/README.md): Write task-specific scoring logic in Python.
-- [Hello Verifier Reuse](../hello_verifier_reuse/README.md): Reuse Python verifiers and shared helper functions.
+- [Python Verifier](../python_verifier/README.md): Check the agent's work with Python.
+- [Shared Verifier](../shared_verifier/README.md): Use the same checks in many tasks.
 
 ### Parameterized tasks
 
-- [Hello Parameterized Tasks](../hello_parameterized_tasks/README.md): Generate many tasks from shared files and JSONL records.
+- [Parameterized Tasks](../parameterized_tasks/README.md): Make many versions of one task that differ only in their inputs.

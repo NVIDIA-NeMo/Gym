@@ -1,6 +1,6 @@
-# Hello Python Verifier
+# Python Verifier
 
-Hello Python Verifier lets you score an agent's work with familiar Python code and libraries instead of translating the checks into shell commands.
+This recipe lets you score an agent's work with familiar Python code and libraries instead of translating the checks into shell commands.
 
 ## Concept
 
@@ -15,7 +15,7 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 ## Run it
 
 ```bash
-gym eval run environments/hello_python_verifier --agent opencode_agent --sandbox docker \
+gym eval run cookbook/tasks/python_verifier --agent opencode_agent --sandbox docker \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
@@ -27,7 +27,7 @@ Every task ships a `solution/` (a `solve.sh` here; the parameterized dataset shi
 row instead). The oracle plays it through the task's verifier and expects reward 1:
 
 ```bash
-gym dataset validate environments/hello_python_verifier --sandbox docker
+gym dataset validate cookbook/tasks/python_verifier --sandbox docker
 ```
 
 On a cluster, pass `--sandbox opensandbox` instead.
@@ -38,28 +38,28 @@ On a cluster, pass `--sandbox opensandbox` instead.
 
 ```text
 task_id	status	reward	verify_s	network
-hello_python_verifier [repeat 0]	oracle solved	1.0	0.9	public
+python_verifier [repeat 0]	oracle solved	1.0	0.9	public
 ```
 
 The task passed when its line reads `oracle solved` and reward `1.0`; the command then exits 0.
 
-Each command writes its results to its own folder: `results/harbor/validation/hello_python_verifier/` for validate and `results/harbor/hello_python_verifier/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show the reward `verify()` returned and the verifier's output.
+Each command writes its results to its own folder: `results/harbor/validation/python_verifier/` for validate and `results/harbor/python_verifier/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show the reward `verify()` returned and the verifier's output.
 
 ## Other examples
 
 ### Tasks and datasets
 
-- [Hello World](../hello_world/README.md): Define one self-contained task folder.
-- [Hello Dataset](../hello_dataset/README.md): Run multiple distinct tasks as one dataset.
+- [Hello World](../hello_world/README.md): Write your first task, run an agent on it, and see its score.
+- [Dataset](../dataset/README.md): Run several different tasks together.
 
 ### Add tools
 
-- [Hello MCP Tool](../hello_mcp_tool/README.md): Give an agent an additional tool over MCP.
+- [MCP Tool](../mcp_tool/README.md): Give the agent a tool it needs for the task.
 
 ### Python scoring
 
-- [Hello Verifier Reuse](../hello_verifier_reuse/README.md): Reuse Python verifiers and shared helper functions.
+- [Shared Verifier](../shared_verifier/README.md): Use the same checks in many tasks.
 
 ### Parameterized tasks
 
-- [Hello Parameterized Tasks](../hello_parameterized_tasks/README.md): Generate many tasks from shared files and JSONL records.
+- [Parameterized Tasks](../parameterized_tasks/README.md): Make many versions of one task that differ only in their inputs.

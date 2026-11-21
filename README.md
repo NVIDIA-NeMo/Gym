@@ -199,6 +199,7 @@ build. It is safe to run multiple times.
 - **[Agents](https://docs.nvidia.com/nemo/gym/main/agent-server)** — Explore available agent harnesses and learn how to integrate your own.
 - **[Training](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials)** — Improve your agent or model with RL or fine-tuning.
 - **[Build Custom Environments](https://docs.nvidia.com/nemo/gym/main/environment-tutorials)** — Create your own evaluation or training environments.
+- **[Cookbook](cookbook/README.md)**: Small, tested recipes, starting with writing and validating your first task.
 
 ## 🧭 Environment Tutorials
 

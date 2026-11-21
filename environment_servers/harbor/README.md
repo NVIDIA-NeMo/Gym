@@ -105,7 +105,7 @@ gym env test +entrypoint=environment_servers/harbor
 ```
 
 Unit tests are not enough for a behavior change: also run
-`gym dataset validate environments/hello_world --sandbox docker`, then a model run.
+`gym dataset validate cookbook/tasks/hello_world --sandbox docker`, then a model run.
 
 ## Code map
 
