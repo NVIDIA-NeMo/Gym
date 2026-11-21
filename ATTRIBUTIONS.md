@@ -19,6 +19,16 @@ revision `0c6551f798f8028bdfdd065f10d8d6b048a7fd06`, under MIT.
 The benchmark license and notice are in `benchmarks/wildclawbench/third-party-notices.md`.
 Native task execution is an external dependency, not vendored here.
 
+## MM-Lifelong grader prompt and agentic runner note
+
+`benchmarks/mm_lifelong_v1_1/grading.yaml` retains the grader's system prompt and user template from
+`v1.1/grading/prompts.json` of the Hugging Face dataset [MM-Lifelong/MM-Lifelong](https://huggingface.co/datasets/MM-Lifelong/MM-Lifelong),
+revision `efa197479b25fbcf4f7881f9218d703c57dfc9bb`, with two template fields renamed, and
+`benchmarks/mm_lifelong_v1_1_agentic/prepare.py` retains the `TIME COORDINATES` note of its agentic runner
+(`src/eval_codex_multivideo.py`, revision `b8a87afff4e24e76f6333937fb7b1c77dd5036fc`), both under MIT.
+The license and notice are in `benchmarks/mm_lifelong_v1_1/third-party-notices.md`.
+The annotations are downloaded at preparation time; no videos or files derived from them are included.
+
 ## MiMo music scorer
 
 `resources_servers/mimo_music/scorer/` vendors the music scorer and

@@ -4,7 +4,7 @@ video_mcqa:
       entrypoint: app.py
       domain: other
       verified: false
-      description: Single-turn video MCQA accuracy for a VideoMME-v1 or LVBench cohort; the cohort selects the benchmark.
+      description: Single-turn video MCQA accuracy for a VideoMME-v1, LVBench or question-set cohort; the cohort selects which.
       cohort_manifest: ${video_mcqa_cohort_manifest}
 
 video_mcqa_single_turn:
