@@ -1,0 +1,32 @@
+name: baxbench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: BaxBench (logic-star-ai/baxbench de885cd9) secure backend generation, 28 scenarios x 14 frameworks
+  from an OpenAPI spec, scored by upstream functional tests and exploits (sec_pass@1).
+modality: text
+licensing: MIT
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+dataset_owner: baxbench_benchmark_simple_agent
+resources_server: baxbench
+agent_server: simple_agent
+datasets:
+- name: baxbench
+  type: benchmark
+  jsonl_fpath: benchmarks/baxbench/data/baxbench_benchmark.jsonl
+  prepare_script: benchmarks/baxbench/prepare.py
+  prompt_config: benchmarks/prompts/eval/baxbench/default.yaml
+  num_repeats: 3
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/eval/baxbench/default.yaml
+lifecycle: active
