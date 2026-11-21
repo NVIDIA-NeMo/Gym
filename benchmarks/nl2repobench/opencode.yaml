@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/nl2repobench/configs/nl2repobench.yaml
+
+nl2repobench_opencode_resources_server:
+  _inherit_from: nl2repobench_resources_server
+  resources_servers:
+    nl2repobench:
+      # Upstream's agent sandbox is a generic, task-agnostic image with no
+      # pre-installed deps (see _AGENT_SANDBOX_IMAGE in app.py) - it needs
+      # real network access to pip install whatever the task requires, same
+      # as upstream. The verifier sandbox is unaffected by this flag; it
+      # always uses the real pinned per-task image with no network policy.
+      enforce_agent_no_network: false
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+      # Grade like NL2RepoBench itself: the agent's packaging files and its files at the held-out test paths are deleted,
+      # the image's real ones are used, and every command runs (see _UPSTREAM_PACKAGE_FILES in app.py). Runs started
+      # before 2026-10-27 used gym_strict; pass ...nl2repobench.grading_protocol=gym_strict to resume one of those.
+      grading_protocol: upstream
+      # agent_network_mode defaults to "official" (set in nl2repobench.yaml), which reproduces
+      # today's behavior exactly - needed to keep already-completed eval runs reproducible. To
+      # run a different network posture, override at the CLI instead of editing this file, e.g.:
+      #   ++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=no_internet_preinstalled
+      #   ++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=block_target
+      # See docs/PIPELINE.md "Network access and reference-lookup risk" for what each mode does.
+
+nl2repobench_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      sandbox_timeout: 21600
+
+      # The shared opencode_sandboxed_agent default (3600000ms = 1hr, see
+      # responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml)
+      # is a single-model-call HTTP client timeout (one `opencode run` request to
+      # policy_model, not the whole session) - if vLLM ever hangs/stalls generating a
+      # single response past that point, OpenCode hard-aborts the call and the run
+      # errors out. Empirically this produced a tight cluster of official/block_target
+      # rollouts landing at exactly ~60.0-60.4 minutes total duration with reward=0 (see
+      # docs/PIPELINE.md's duration-vs-reward analysis) - consistent with a single early
+      # call getting stuck and timing out rather than the agent genuinely giving up.
+      # Raised to 4hr here, scoped to nl2repobench only (not the shared default, so
+      # other opencode_sandboxed_agent benchmarks are unaffected). sandbox_timeout above
+      # is already 21600s (6hr), comfortably above this, so it's left as-is.
+      opencode_model_call_timeout: 14400000
+
+      # The shared default (262144, see opencode_sandboxed_agent.yaml) is reused verbatim as
+      # OpenCode's declared model.limit.context/input/output in the generated opencode.json
+      # (_create_opencode_config in app.py) - OpenCode computes its auto-compaction trigger as a
+      # fraction of that declared limit, not of the real served context window. Empirically,
+      # compaction was firing around ~240-246K single-turn input tokens, i.e. ~92-94% of 262144 -
+      # right where you'd expect a percentage-of-declared-limit trigger to land. Neither
+      # Lightning's nor dima's vLLM config sets --max-model-len, so the real served window is the
+      # checkpoint's native max_position_embeddings (1,048,576 for both - confirmed via
+      # config.json, same architecture/dims), far above either value below. Raised here to push
+      # the compaction trigger point out to ~500K and give the model roughly 2x more headroom
+      # before OpenCode starts summarizing/pruning older turns - scoped to nl2repobench only so
+      # other opencode_sandboxed_agent benchmarks keep today's 262144 behavior.
+      opencode_max_context_window: 524288
+
+      # Termination, faithful to NL2RepoBench's own harness (OpenHands 0.56, headless `openhands.core.main -t`):
+      # - a reply without an action is answered by OpenHands' auto_continue_response, every time, with no count;
+      #   `opencode run` instead exits on it, so idle_nudge continues the session with that same message;
+      # - the run ends when the agent calls the `finish` tool. OpenCode has none, so the message adds how to finish
+      #   here (reply TASK_COMPLETE), and that reply is the stop;
+      # - OpenHands' max_iterations default of 500 (NL2RepoBench never sets it; headless mode never raises it) is
+      #   OpenCode's agent.build.steps below, held as ONE budget across resumes;
+      # - max_nudges is only a safety bound (OpenHands has none; its 500-step cap bounds it there, and here too).
+      # Before 2026-11-03 this was ProgramBench's rule instead (3 nudges, its own wording): those runs differ.
+      # OpenHands' default max_iterations (500): OpenCode's cap on agentic steps, merged into the agent's own
+      # opencode_config (permissions etc. are kept). idle_nudge holds it as one budget across resumes.
+      # No compaction: OpenCode would otherwise summarise the conversation near its declared window (and then send its
+      # own "continue, or stop and ask for clarification" message). With auto off, an overflow ends the run with a
+      # context error (summ: CEX). prune (dropping old tool outputs) is off by default; set off explicitly.
+      # (OpenHands 0.56 does trim on overflow, by default with its ConversationWindowCondenser; we chose none.)
+      opencode_config:
+        agent:
+          build:
+            steps: 500
+        compaction:
+          auto: false
+          prune: false
+      # OpenHands' StuckDetector (it ends a run whose agent repeats itself: same action and result 4 times, same
+      # failing action 3 times, an A-B-A-B-A-B alternation, 3 identical replies, 10 compactions in a row).
+      stuck_detector: true
+      # The prompt goes to `opencode run` on stdin: as an argument OpenCode wraps any text containing a space in
+      # literal double quotes, so the model saw the task prompt quoted. Every nudge resume pipes its text the same way.
+      opencode_query_via_stdin: true
+      idle_nudge:
+        # How to finish, from the start: OpenCode's stand-in for OpenHands' `finish` tool, which the model sees in its
+        # tool list from turn 1 ("Use this tool when you have successfully completed the user's requested task ... or
+        # cannot proceed further"). Appended to the (official, verbatim) task prompt. Added 2026-11-04.
+        finish_instruction: >-
+          When you have completed the task, or cannot proceed further, reply with exactly TASK_COMPLETE to finish the
+          interaction.
+        max_nudges: 100
+        stop_on_text: TASK_COMPLETE
+        length_note: false
+        text: |-
+          Please continue on whatever approach you think is suitable.
+          If you think you have solved the task, please finish the interaction.
+          IMPORTANT: YOU SHOULD NEVER ASK FOR HUMAN RESPONSE.
+          To finish the interaction, reply with exactly TASK_COMPLETE.
+
+      # The OpenCode runtime. By default the agent downloads the installer from opencode.ai, which works in the modes
+      # with open egress (official, block_target, block_target_v2). The no_internet_preinstalled mode has no egress, so
+      # there the operator supplies a pinned runtime the sandbox can read, and asks the agent to refuse to start without
+      # it (nothing is downloaded, and a missing runtime fails here, not after the sandbox is seeded):
+      #   ++nl2repobench_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.require_opencode_runtime=true
+      #   ++...opencode_sandboxed_agent.remote_opencode_install_script_path=<path to install.sh in the sandbox>
+      #   ++...opencode_sandboxed_agent.remote_opencode_binary_path=<path to the opencode binary in the sandbox>
+      # (or preinstalled_opencode=true for an image that already has opencode on PATH). See benchmarks/nl2repobench/README.md.
+
+      resources_server:
+        type: resources_servers
+        name: nl2repobench_opencode_resources_server
+      datasets:
+        - name: nl2repobench_v1
+          type: benchmark
+          jsonl_fpath: benchmarks/nl2repobench/data/nl2repobench_benchmark.jsonl
+          prepare_script: benchmarks/nl2repobench/prepare.py
+          num_repeats: 1
+
+nl2repobench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      # The whole /run: the agent's 21600 s budget, then export, workspace collection, grading and cleanup. The server's
+      # 21600 s default equals the agent budget alone, so a full-length run was cut off before it could be graded.
+      default_episode_timeout_seconds: 28800
+      agent_server:
+        type: responses_api_agents
+        name: nl2repobench_opencode_sandboxed_agent

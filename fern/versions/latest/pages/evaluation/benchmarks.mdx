@@ -75,7 +75,7 @@ NeMo Gym includes 80+ benchmarks across six categories. Use `gym list benchmarks
 AIME, IMO, formal proofs (Lean4), physics (critpt, ugphysics), chemistry (ether0, BunsenBench), FrontierScience, and multilingual math. Verification ranges from exact match and math-verify to LLM judges for open-ended proofs.
 
 **Coding**
-Function completion (HumanEval, MBPP), competitive programming, text-to-SQL (BIRD, Spider2), SWE-style patch generation, and RTL design. Most use code execution against a test suite.
+Function completion (HumanEval, MBPP), competitive programming, text-to-SQL (BIRD, Spider2), SWE-style patch generation, whole-repository generation (NL2RepoBench), and RTL design. Most use code execution against a test suite.
 
 **Knowledge & Reasoning**
 Graduate-level science (GPQA Diamond), MMLU variants, HLE, multi-hop QA (HotPotQA), factual recall (SimpleQA, OmniScience), and abstract reasoning (ARC-AGI).
@@ -112,6 +112,57 @@ gym eval run --benchmark healthbench_professional \
 ```
 
 HealthBench Full is the default. Pass `--config benchmarks/healthbench/configs/consensus.yaml` or `--config benchmarks/healthbench/configs/hard.yaml` to both prepare and run for the corresponding subset. The headline aggregate metric is `overall_score` for HealthBench and `overall_score_length_adjusted` for Professional. `mean/reward` is a bounded Gym reward, not the published benchmark score. Judge failures are masked and reduce scored coverage; report that coverage with every score.
+
+## NL2RepoBench
+
+[NL2RepoBench](https://github.com/multimodal-art-projection/NL2RepoBench) is an experimental integration of a
+greenfield, "0-to-1" repository-generation benchmark: the agent starts from an empty workspace and one
+natural-language spec (`start.md`) and must write a complete, installable Python package. Grading runs the task's
+hidden pytest suite against the agent's workspace in a fresh sandbox; there is no reference solution and no
+golden-patch mode. The 104-task upstream set is the one Gym ships a config for.
+
+**Prepare the data.** Preparation downloads the pinned upstream task files into the resources server's gitignored
+cache and writes the model-visible rows. Each row carries a fixed instruction (NL2RepoBench's own task prompt) and
+the task's pinned image; the spec itself is not in the prompt, it is uploaded to `/workspace/start.md` when the
+sandbox is seeded.
+
+```bash
+# download the pinned upstream revision and prepare it
+python -m benchmarks.nl2repobench.prepare
+
+# or prepare from a local NL2RepoBench checkout, without downloading
+python -m resources_servers.nl2repobench.prepare --source-dir /path/to/NL2RepoBench --no-download
+```
+
+**Run it.** The OpenCode harness (`benchmarks/nl2repobench/opencode.yaml`) drives the resources server. A sandbox
+provider config is required (the sandbox provider must reach the per-task images on `ghcr.io`):
+
+```bash
+gym env start \
+  --config benchmarks/nl2repobench/opencode.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+  --config responses_api_models/<model>/configs/<model>.yaml
+```
+
+Three settings change what a score means; report them with the result. The shipped configs use
+`grading_protocol: upstream` and `agent_network_mode: official`:
+
+- **Network mode** (`agent_network_mode`): `official` gives the agent open egress, so treat its score as an upper bound.
+  `block_target_v2` denies source-hosting domains and wraps pip, git, curl and similar tools. `no_internet_preinstalled`
+  boots the agent from the task's pinned image with deny-all egress except the model host and removes the reference
+  implementation first; it needs `scrub_workspace_installs` and `scrub_target_installs` for a leak-free score, and four
+  targets whose implementation ships inside pip or setuptools cannot be scrubbed.
+- **Grading protocol** (`grading_protocol`): `upstream` follows NL2RepoBench's own post-processor and reports the
+  official `reward` together with a `clean_reward` that ignores nested pytest summaries; `gym_strict` grades the
+  agent's workspace as it is.
+- **Images**: the agent runs in a generic image in `official` and `block_target_v2`, and in the task's pinned
+  image in `no_internet_preinstalled`; the verifier uses the pinned per-task image unless overridden.
+
+A verdict that is not about the agent (a lost session, a verifier sandbox that never started, a sandbox-provider
+error) is retried on a fresh verifier sandbox and then returned as a masked sample rather than a score of 0. The [benchmark README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/nl2repobench/README.md) lists every
+dataset, harness and mode combination that has been run, and the
+[resources server README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/nl2repobench/README.md)
+describes the verification flow.
 
 ## Benchmarks Whose Data You Stage
 
