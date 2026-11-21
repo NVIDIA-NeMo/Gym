@@ -1,0 +1,19 @@
+{
+  "game_id": "ls20-9607627b",
+  "title": "LS20",
+  "default_fps": 30,
+  "tags": [
+    "keyboard"
+  ],
+  "baseline_actions": [
+    22,
+    123,
+    73,
+    84,
+    96,
+    192,
+    186
+  ],
+  "local_dir": "environment_files/ls20/9607627b",
+  "date_downloaded": "2026-07-01T05:55:39.337636+00:00"
+}
