@@ -96,17 +96,26 @@ def test_each_server_ships_its_schema(owner):
         video_id="shapes",
         video_source="https://example.invalid/shapes.mp4",
         video_sha256="b" * 64,
+        question="Which invented shape moves?",
+        options=("Circle", "Square", "Triangle"),
         level=2,
     )
     flat = {**dataclasses.asdict(metadata), "setting": "single_turn"}
     schema = load_task_data_schema(SERVERS / owner)
-    # Only VideoMME-v2 takes other option counts and levels; every schema takes four ungrouped choices.
-    assert schema.validate_python({**flat, "option_count": 4, "level": None}).option_count == 4
+    four = {**flat, "option_count": 4, "options": [*flat["options"], "Star"], "level": None}
+    # Every schema takes four ungrouped choices and only VideoMME-v2 takes levels. VideoMME-v1 and LVBench take
+    # four choices only; the shared verifier's rows (a question set's, for example) take any number.
+    assert schema.validate_python(four).option_count == 4
     if owner == "videomme_v2":
         assert schema.validate_python(flat).level == 2
+        return
+    with pytest.raises(ValidationError, match="no v2 group or level"):
+        schema.validate_python(flat)
+    if owner == "video_mcqa":
+        assert schema.validate_python({**flat, "level": None}).option_count == 3
     else:
         with pytest.raises(ValidationError, match="four choices"):
-            schema.validate_python(flat)
+            schema.validate_python({**flat, "level": None})
 
 
 @pytest.mark.parametrize("owner", ["video_mcqa", *OWNERS])
@@ -174,8 +183,20 @@ def _binding(**updates):
         _without("video_sha256"),
         lambda row: row.pop("setting"),
         lambda row: row["verifier_metadata"].update(expected_answer="Z"),
+        _without("question"),
+        _without("options"),
+        lambda row: row["verifier_metadata"]["options"].pop(),
     ],
-    ids=["no_expected_answer", "no_dataset_revision", "no_video_sha256", "no_setting", "unavailable_answer"],
+    ids=[
+        "no_expected_answer",
+        "no_dataset_revision",
+        "no_video_sha256",
+        "no_setting",
+        "unavailable_answer",
+        "no_question",
+        "no_options",
+        "an_option_short",
+    ],
 )
 def test_rows_the_runtime_refuses_fail_validation(tmp_path, owner, change):
     row = prepared_rows(tmp_path, owner, "agentic")[0]
@@ -230,3 +251,37 @@ def test_schema_fields_match_the_runtime_models():
     assert set(VideoBinding.model_fields) == {"source", "sandbox_path", "sha256"}
     for request in WIRE.values():
         assert {"task_id", "setting", "verifier_metadata"} <= set(request.model_fields)
+
+
+@pytest.mark.parametrize("owner", OWNERS)
+def test_agentic_examples_ask_the_single_turn_questions_about_the_bound_committed_clips(owner):
+    data = SERVERS / owner / "data"
+    path = data / "example_agentic.jsonl"
+    lines = path.read_text().splitlines()
+    result = validate_jsonl_rows(owner, load_task_data_schema(SERVERS / owner), str(path), lines)
+    assert result.rows == 5 and result.clean, result.summary()
+    cohort_type = CohortManifest if owner == "videomme_v2" else AccuracyCohort
+    cohort = cohort_type.model_validate_json((data / "example_agentic_cohort.json").read_text())
+    single = cohort_type.model_validate_json((data / "example_cohort.json").read_text())
+    assert cohort.setting == "agentic" and cohort.model_copy(update={"setting": "single_turn"}) == single
+    single_rows = {
+        json.loads(line)["task_id"]: json.loads(line) for line in (data / "example.jsonl").read_text().splitlines()
+    }
+    for row in map(json.loads, lines):
+        assert (
+            row["setting"] == "agentic"
+            and row["verifier_metadata"] == single_rows[row["task_id"]]["verifier_metadata"]
+        )
+        binding = VideoBinding.model_validate(row["video_binding"])
+        clip = SERVERS.parent / binding.source
+        assert (
+            hashlib.sha256(clip.read_bytes()).hexdigest() == binding.sha256 == row["verifier_metadata"]["video_sha256"]
+        )
+        (text,) = [part["text"] for part in row["responses_create_params"]["input"][0]["content"]]
+        assert f"Video: /testbed/{binding.sandbox_path}\n" in text
+        (single_text,) = [
+            part["text"]
+            for part in single_rows[row["task_id"]]["responses_create_params"]["input"][0]["content"]
+            if part["type"] == "input_text"
+        ]
+        assert text.replace(f"\n\nVideo: /testbed/{binding.sandbox_path}", "") == single_text
