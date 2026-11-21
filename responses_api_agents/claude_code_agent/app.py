@@ -51,6 +51,7 @@ from nemo_gym.agents import (
     resolve_agent_timeout,
     restrict_sandbox_network,
     stage_skills,
+    stage_task_skills,
 )
 from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
@@ -191,6 +192,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+
+    def supports_task_skills(self) -> bool:
+        """A sandbox session copies the task's ``skills_dir`` into ``<CLAUDE_CONFIG_DIR>/skills`` at seed."""
+        return True
 
     async def _ensure_local_runtime(self) -> None:
         if self._local_setup_task is None:
@@ -706,6 +711,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
                 self._check_sandbox_setup(result)
+                if not owns_sandbox:
+                    # A task sandbox seeded by an Environment Server names the task's skills in task.json. Claude Code
+                    # discovers skills in its config folder, which the activation runs with --bare off.
+                    state.task_skills = await stage_task_skills(sandbox, f"{directory}/config/skills")
                 await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
                 installer = "install_claude_runtime.sh"
                 await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
@@ -815,7 +824,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 mcp_config = directory + "/mcp.json" if self.config.mcp_config else None
                 skills_path = self._configured_skills_path()
                 command = self._build_command(
-                    model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
+                    model,
+                    prompt,
+                    system,
+                    mcp_config=mcp_config,
+                    skills_active=bool(skills_path) or state.task_skills is not None,
                 )
                 command[0] = state.runtime + "/claude"
                 artifacts = await state.execute(

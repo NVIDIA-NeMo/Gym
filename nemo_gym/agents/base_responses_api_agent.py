@@ -225,6 +225,9 @@ class AgentSeedSessionResponse(BaseModel):
     # and ``skills_dir``). An environment server refuses such a task to a harness that does not, instead of
     # running it without its tools.
     supports_task_tool_context: bool = False
+    # Whether the harness puts the task's ``skills_dir`` where its CLI discovers skills, at seed. It answers for the
+    # skills only: a task's MCP servers still need ``supports_task_tool_context`` or a grant.
+    supports_task_skills: bool = False
     capabilities: AgentContinuationCapabilities | None = Field(
         default=None,
         description=(
@@ -239,6 +242,9 @@ class AgentSeedSessionResponse(BaseModel):
         result = handler(self)
         if self.capabilities is None:
             result.pop("capabilities", None)
+        # Sent only when declared, so a harness that stages no task skills answers as it always did.
+        if not self.supports_task_skills:
+            result.pop("supports_task_skills", None)
         return result
 
 
@@ -253,6 +259,7 @@ class AgentSessionCapabilitiesResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     supports_task_tool_context: bool = False
+    supports_task_skills: bool = False
     continuation: AgentContinuationCapabilities | None = None
 
 
@@ -1000,11 +1007,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 await asyncio.sleep(0)
 
     async def agent_session_capabilities(self) -> AgentSessionCapabilitiesResponse:
-        """Declare the session capabilities a seed would confirm, without seeding: the task-tool context and the
-        multi-turn continuation this adapter supports (``None`` for one-activation adapters and for agents that
-        implement no sessions at all)."""
+        """Declare the session capabilities a seed would confirm, without seeding: the task-tool context, the task
+        skills and the multi-turn continuation this adapter supports (``None`` for one-activation adapters and for
+        agents that implement no sessions at all)."""
         return AgentSessionCapabilitiesResponse(
             supports_task_tool_context=self.supports_task_tool_context(),
+            supports_task_skills=self.supports_task_skills(),
             continuation=self._agent_continuation_capabilities(),
         )
 
@@ -1099,6 +1107,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 agent_session_id=body.agent_session_id,
                 capabilities=capabilities,
                 supports_task_tool_context=self.supports_task_tool_context(),
+                supports_task_skills=self.supports_task_skills(),
             )
 
     async def close_agent_session(
@@ -1356,6 +1365,17 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         Harbor tasks declare ``[[environment.mcp_servers]]`` and ``skills_dir``. A harness that drives them
         from inside the sandbox answers True, and the seed response carries the answer to the environment
         server, which refuses such a task to a harness that would run it without its tools.
+        """
+        return False
+
+    def supports_task_skills(self) -> bool:
+        """Whether this harness stages the task's own skills for its CLI at seed.
+
+        A Harbor task that declares ``skills_dir`` has its skills in the sandbox, and ``/tmp/.nemo-gym/task.json``
+        names the folder. A harness that copies it to where its CLI discovers skills, so the model finds them
+        through the CLI's own skill mechanism, answers True. The seed response carries the answer to the
+        environment server, which then admits a task whose only tool declaration is ``skills_dir``. MCP servers
+        stay with :meth:`supports_task_tool_context` and tool grants.
         """
         return False
 

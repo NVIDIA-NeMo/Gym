@@ -686,6 +686,107 @@ async def test_skills_are_staged_before_launch_and_disable_bare(monkeypatch, tmp
     assert "--bare" not in instance._build_command("model", "prompt", skills_active=True)
 
 
+def _task_sandbox(task_context, *, copy_code=0):
+    """A borrowed task sandbox that holds ``task_context`` as ``/tmp/.nemo-gym/task.json`` and answers the copy of the
+    task's skills with exit code ``copy_code``; ``commands`` records every command run in it."""
+    commands = []
+
+    async def run(command, **kwargs):
+        commands.append(command)
+        if "task.json" in command:
+            return result(task_context)
+        if " cp -R -- " in command:
+            return result(code=copy_code)
+        return result()
+
+    remote = SimpleNamespace(exec=AsyncMock(side_effect=run), upload=AsyncMock(), start=AsyncMock())
+    return remote, commands
+
+
+async def _seed_in(monkeypatch, remote):
+    monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: object())
+    monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
+    return await agent(anthropic_base_url="https://model.example")._seed_agent_session_state(seed())
+
+
+async def _first_activation(monkeypatch, state) -> dict:
+    """The payload a first activation of ``state`` hands the runner: the CLI argv, its environment and more."""
+    execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts("", None))
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    prompt = "Read the skill and reply with the magic word."
+    instance = agent(anthropic_base_url="https://model.example")
+    await instance._sandbox_response(
+        state, NeMoGymResponseCreateParamsNonStreaming(input=prompt), prompt=prompt, system=None
+    )
+    return execute.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_task_that_declares_skills_gets_them_in_the_cli_skills_folder_and_runs_without_bare(monkeypatch):
+    remote, commands = _task_sandbox(json.dumps({"mcp_servers": [], "skills_dir": "/workspace/skills"}))
+
+    state = await _seed_in(monkeypatch, remote)
+
+    config_dir = f"{state.session.session_dir}/config"
+    assert state.task_skills == "/workspace/skills"
+    (copy,) = [command for command in commands if " cp -R -- " in command]
+    assert f"mkdir -p -- {config_dir}/skills && cp -R -- /workspace/skills/. {config_dir}/skills/" in copy
+    payload = await _first_activation(monkeypatch, state)
+    # Claude Code finds skills in CLAUDE_CONFIG_DIR/skills, and --bare would hide them from it.
+    assert payload["env"]["CLAUDE_CONFIG_DIR"] == config_dir
+    assert "--bare" not in payload["command"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_context", ["", json.dumps({"mcp_servers": [{"name": "search"}], "skills_dir": None})])
+async def test_a_task_without_skills_keeps_bare_and_copies_nothing(monkeypatch, task_context):
+    remote, commands = _task_sandbox(task_context)
+
+    state = await _seed_in(monkeypatch, remote)
+
+    assert state.task_skills is None
+    assert not any(" cp -R -- " in command for command in commands)
+    assert "--bare" in (await _first_activation(monkeypatch, state))["command"]
+
+
+@pytest.mark.asyncio
+async def test_an_owned_sandbox_reads_no_task_context(monkeypatch):
+    remote, commands = _task_sandbox(json.dumps({"skills_dir": "/workspace/skills"}))
+    monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="local", aclose=AsyncMock()))
+    monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
+
+    state = await agent(sandbox_provider="sandbox", sandbox_config={"workdir": "/app"})._seed_agent_session_state(
+        seed(borrowed=False)
+    )
+
+    assert state.task_skills is None
+    assert not any("task.json" in command for command in commands)
+
+
+@pytest.mark.asyncio
+async def test_skills_that_cannot_be_staged_refuse_the_seed_and_release_the_sandbox(monkeypatch):
+    remote, _ = _task_sandbox(json.dumps({"skills_dir": "/workspace/skills"}), copy_code=2)
+    close = AsyncMock()
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "close", close)
+
+    with pytest.raises(AgentSeedRejectedError, match="Could not stage the task's skills_dir '/workspace/skills'"):
+        await _seed_in(monkeypatch, remote)
+
+    close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_harness_declares_that_it_stages_task_skills():
+    instance = agent()
+
+    assert instance.supports_task_skills() is True
+    assert (await instance.agent_session_capabilities()).supports_task_skills is True
+    # The MCP servers stay with grants: Claude uses native tools only.
+    assert instance.supports_task_tool_context() is False
+
+
 @pytest.mark.asyncio
 async def test_host_install_is_lazy_shared_and_retryable(monkeypatch):
     entered = threading.Event()

@@ -53,6 +53,7 @@ from nemo_gym.agents import (
     resolve_agent_timeout,
     restrict_sandbox_network,
     stage_skills,
+    stage_task_skills,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
@@ -790,6 +791,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
 
+    def supports_task_skills(self) -> bool:
+        """A sandbox session copies the task's ``skills_dir`` into ``<CODEX_HOME>/skills`` at seed."""
+        return True
+
     def _session_marker(self, request: Request) -> Optional[str]:
         marker = self._agent_session_id_from_request(request)
         # Cookies from the previous adapter must never fall back to host execution.
@@ -993,6 +998,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                         f"Codex installer exited {installed.return_code}, command={install_command}, "
                         f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
                     )
+            if not owns_sandbox:
+                # A task sandbox seeded by an Environment Server names the task's skills in task.json. Codex
+                # discovers skills in its CODEX_HOME, which the prepare command created.
+                await stage_task_skills(sandbox, f"{directory}/home/.codex/skills")
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
             await sandbox.upload(Path(__file__).with_name(LAUNCHER_FILE), f"{directory}/{LAUNCHER_FILE}")
             if tool_bwrap is not None:
