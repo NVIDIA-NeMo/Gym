@@ -171,13 +171,13 @@ For a standalone resources server, replace `--environment my_eval` with `--resou
 
 Document the commands and observed behavior in the PR. For a manifest-backed workload, saving the output under `data/example_rollouts.jsonl` is optional. A standalone legacy resources-server contribution must retain the five-row `data/example_rollouts.jsonl` artifact required by its data validator until that validator is migrated. Metadata-only catalog or manifest changes and docs-only changes do not require model compute.
 
-### 7. Reward Profiling (Optional for Training Environments)
+### 7. Reward Profiling (Required for Benchmarks)
 
-For benchmark fidelity checks, follow the reward-profiling guidance in [Add a benchmark](/main/contribute/environments/adding-a-benchmark). For training environments, profiling remains optional:
+A new benchmark must meet the baselining bar in [Add a benchmark](/main/contribute/environments/adding-a-benchmark#6-baseline-the-benchmark) and pass the [add-benchmark exit checks](https://github.com/NVIDIA-NeMo/Gym/blob/main/.agents/skills/add-benchmark/SKILL.md#step-7-exit-checks) before its author sets `verified: true`.
 
-Run inference to inspect reward distribution:
+A training environment needs only the real-model smoke rollout from step 6, with the agent and verifier behavior inspected. Reward profiling and a training run are optional, and the environment can merge with `verified: false`. If you profile a training environment, run inference to inspect its reward distribution:
 
-- Use a ~500 sample subset (minimum)
+- Use a subset of about 500 samples
 - Use Qwen3-4B, Qwen3 30B A3B, or equivalent model
 - Generate 16 responses per prompt
 - Report reward distribution

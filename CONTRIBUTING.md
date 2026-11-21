@@ -338,8 +338,16 @@ For behavior-changing environment or agent code, run a representative real
 smoke rollout with a model and inspect the agent and verifier behavior. Record
 the evidence in the PR. Saving rollout artifacts in the repository is optional,
 and a full evaluation, reward profile, or training run is not a merge gate for
-training environments. Fixed evaluation benchmarks must follow the reward-
-profiling requirements in the linked Environment Contribution Guide.
+training environments: a training environment can merge with `verified: false`.
+A new benchmark must also meet the baselining bar in
+[Add a benchmark](https://docs.nvidia.com/nemo/gym/main/contribute/environments/adding-a-benchmark#6-baseline-the-benchmark).
+
+New resources-server configs start with `verified: false`, which the scaffold
+and the `add-verified-flag` hook write. The author sets `verified: true` in
+their own PR once the benchmark passes the
+[add-benchmark exit checks](./.agents/skills/add-benchmark/SKILL.md#step-7-exit-checks),
+and links the run folder, its `quality_summary.json`, and the baselining numbers
+in the PR description. Reviewers check that evidence.
 
 Standalone resources-server configs without a workload manifest remain on the
 legacy validation path. Run:
@@ -353,8 +361,7 @@ That legacy data validator requires exactly five rows in `data/example.jsonl`,
 `data/example_metrics.json` with `"Number of examples": 5`, and exactly five
 rows in `data/example_rollouts.jsonl`. It also rejects `*conflict*` artifacts
 and requires dataset license fields and a config `domain`. New source files
-need the SPDX header, and the server needs at least one test. New legacy configs
-start with `verified: false`; maintainers change that only after baselining.
+need the SPDX header, and the server needs at least one test.
 
 A resources server that only manifest workloads use is validated through those
 manifests instead. The same command checks every manifest workload that names

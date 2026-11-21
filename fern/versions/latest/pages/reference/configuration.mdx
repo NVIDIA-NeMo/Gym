@@ -351,7 +351,7 @@ my_resource:                                  # Server ID (your choice — agent
     example_single_tool_call:                   # Implementation (must match a directory in resources_servers/)
       entrypoint: app.py                      # Python file to run
       domain: agent                           # Server category (see values below)
-      verified: false                         # Passed reward profiling and training checks (default: false)
+      verified: false                         # Baselined and reviewed; the author sets it after the add-benchmark exit checks pass (default: false)
       description: "Short description"        # Server description
       value: "What this improves"             # Training value provided
       allowed_agents: [my_agent]              # Optional: agents that score this task correctly
