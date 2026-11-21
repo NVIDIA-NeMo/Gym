@@ -10,11 +10,11 @@ it relays `/run` to an agent that has not been migrated, so the agent's own cont
 import asyncio
 import warnings
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import ConfigDict, PositiveFloat, PositiveInt, model_validator
+from pydantic import ConfigDict, Field, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
 from nemo_gym.client import get_response_json, raise_for_status
@@ -64,6 +64,10 @@ class LegacyAgentEnvironmentServerConfig(BaseEnvironmentServerConfig):
     model_config = ConfigDict(extra="forbid")
 
     agent_server: AgentServerRef
+    agent_server_max_num_tries: Literal[1] | None = Field(
+        default=None,
+        description="Set to 1 so the relayed /run makes one attempt and is never resent. None keeps the client default.",
+    )
 
     # The episode deadline bounds the relayed `/run` call, six hours by default like the other Environment Servers.
     # `null` removes it, leaving the agent's own limits as the only ones. A relay enforces none of the other limits.
@@ -129,6 +133,11 @@ class LegacyAgentEnvironmentServer(BaseEnvironmentServer):
                     data=data,
                     headers=dict(_relayed_headers(request.headers.items())),
                     cookies=request.cookies,
+                    **(
+                        {"_max_num_tries": 1, "_resend_after_disconnect": False}
+                        if self.config.agent_server_max_num_tries == 1
+                        else {}
+                    ),
                 )
                 body = await upstream.read()
         except TimeoutError as error:
