@@ -5,7 +5,7 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: knowledge
 description: Broad web research with official strict table and item matching using
-  the pi harness and Exa search.
+  the pi harness and Exa web search.
 modality: text
 licensing: MIT
 authors:
@@ -18,7 +18,7 @@ reward:
 determinism: unknown
 config_path: ../widesearch_pi.yaml
 resources_server: widesearch
-agent_server: harness_exa_search
+agent_server: pi_agent
 datasets:
 - name: widesearch
   type: benchmark
