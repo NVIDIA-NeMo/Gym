@@ -279,9 +279,9 @@ def test_committed_policy_loads_through_gym_parser_and_blocks_load_bearing_hosts
 
 def test_committed_policy_provider_subset_is_capped_priority_first_and_the_tail_stays_local(tavily_app):
     """Tavily's /search accepts at most 150 exclude_domains (HTTP 400 beyond; with-tools pilot P-T1). The server
-    sends the priority block then file order; the 70 domains it cannot send are enforced locally only."""
+    sends the priority block then file order; the 71 domains it cannot send are enforced locally only."""
     policy = tavily_app.URLExclusionPolicy(DIAMOND_POLICY)
-    assert len(policy.domains) == 220
+    assert len(policy.domains) == 221
     sent = tavily_app.select_provider_domains(
         policy.domains, tavily_app.TAVILY_EXCLUDE_DOMAINS_LIMIT, tavily_app.DEFAULT_EXCLUDE_DOMAINS_PRIORITY
     )
@@ -305,11 +305,21 @@ def test_committed_policy_provider_subset_is_capped_priority_first_and_the_tail_
     ]
     assert sent[15:] == [domain for domain in policy.domains if domain not in sent[:15]][:135]
     not_sent = [domain for domain in policy.domains if domain not in sent]
-    assert len(not_sent) == 70
+    assert len(not_sent) == 71
     # Every priority host sits inside the first 150 file entries, so on this list the priority block only
-    # reorders: the 70 local-only domains are upstream's last 70 entries (README, "Provider-side cap").
+    # reorders: the 71 local-only domains are upstream's last 70 entries and Gym's huggingface.tw, which the
+    # builder appends after upstream's domains (README, "Provider-side cap").
     assert not_sent == policy.domains[150:]
-    local_only = {"facebook.com", "x.com", "reddit.com", "stackexchange.com", "stackoverflow.com", "quora.com"}
+    assert not_sent[-1] == "huggingface.tw"
+    local_only = {
+        "facebook.com",
+        "x.com",
+        "reddit.com",
+        "stackexchange.com",
+        "stackoverflow.com",
+        "quora.com",
+        "huggingface.tw",
+    }
     assert local_only <= set(not_sent)
     for url in (
         "https://www.reddit.com/r/singularity/comments/abc/hle_answers/",
@@ -317,6 +327,24 @@ def test_committed_policy_provider_subset_is_capped_priority_first_and_the_tail_
         "https://math.stackexchange.com/questions/1",
     ):
         assert policy.blocked(url), url
+
+
+# HLE copies on a Hugging Face mirror that upstream's url_patterns would block on any host but Gym's two rule
+# types cannot express; the first two are from a 2026-11-20 with-tools canary, where an agent read a gold answer
+# from the first.
+MIRRORED_HLE_URLS = [
+    "https://huggingface.tw/datasets/skylenage-ai/HLE-Verified?row=700",
+    "https://huggingface.tw/datasets/LLMcompe-Team-Watanabe/hle",
+    "https://mirror.example/datasets/cais/hle/viewer/default/test",
+    "https://mirror.example/datasets/skylenage-ai/HLE-Verified/viewer/default/full",
+    "https://mirror.example/datasets/llmcompe-team-watanabe/hle",
+]
+
+
+@pytest.mark.parametrize("policy_path", [DIAMOND_POLICY, HLE_POLICY], ids=["hle_diamond", "hle"])
+@pytest.mark.parametrize("url", MIRRORED_HLE_URLS)
+def test_committed_policies_block_hle_copies_on_hugging_face_mirrors(policy_path, url, url_exclusion_policy):
+    assert url_exclusion_policy(policy_path).blocked(url)
 
 
 def test_committed_policy_is_at_least_as_strict_as_the_hle_policy(diamond_policy_json):

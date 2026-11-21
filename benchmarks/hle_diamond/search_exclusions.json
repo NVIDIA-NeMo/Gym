@@ -902,6 +902,10 @@
           "value": "jsdelivr.com"
         },
         {
+          "type": "domain",
+          "value": "huggingface.tw"
+        },
+        {
           "type": "url_substring",
           "value": "nature.com/articles/s41586-025-09962-4"
         },
@@ -1364,6 +1368,18 @@
         {
           "type": "url_substring",
           "value": "huggingface-com.translate.goog/datasets/skylenage-ai/hle-verified"
+        },
+        {
+          "type": "url_substring",
+          "value": "cais/hle"
+        },
+        {
+          "type": "url_substring",
+          "value": "skylenage-ai/hle-verified"
+        },
+        {
+          "type": "url_substring",
+          "value": "llmcompe-team-watanabe/hle"
         },
         {
           "type": "url_substring",

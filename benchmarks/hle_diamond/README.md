@@ -468,7 +468,7 @@ multipleChoice):
   queues.
 - The search presets' leakage policy binds only the Tavily tools: under the Docker provider (open
   egress) the agent can search and fetch from bash around it, and Tavily pre-filters at most 150 of
-  the 220 excluded domains, the rest being enforced locally (Sandboxed agents (with tools), Search
+  the 221 excluded domains, the rest being enforced locally (Sandboxed agents (with tools), Search
   exclusions). A reproduction-grade with-tools run needs the OpenSandbox provider with
   `network_access: model_and_tools`; `opencode_reference.yaml` requests exactly that and refuses the
   Docker override unless the run is acknowledged as egress-unrestricted (Reference preset), but no
@@ -849,7 +849,7 @@ support a **comparison, not a reproduction**, of that column:
   those two tools, with the residual differences listed under Upstream web tools.
 - Leakage policy (Tavily search presets): two of upstream's seven blocklist families are enforced in
   full and the search-engine result-page family approximately; the search provider pre-filters at
-  most 150 of the 220 excluded domains and the rest are enforced locally (see Search exclusions).
+  most 150 of the 221 excluded domains and the rest are enforced locally (see Search exclusions).
   `opencode_hle_tools` enforces all seven (Upstream web tools).
 - Rows: 728/1000 text rows on `opencode`, `opencode_search`, `opencode_hle_tools`, `pi` and
   `pi_search`; all 1000 on `opencode_full` and `opencode_search_full`, whose image rows go through
@@ -1139,8 +1139,8 @@ upstream `docs/blocklist.json` at the revision pinned in the script (`UPSTREAM_C
 snapshot's SHA-256 in `UPSTREAM_BLOCKLIST_SHA256`) onto Gym's format and unions it with
 `benchmarks/hle/search_exclusions.json`, so the Diamond list is at least as strict as Gym's HLE list.
 Gym's Tavily resource (`URLExclusionPolicy`) expresses two rule types, so two of upstream's seven rule
-families are enforced in full, one is approximated and four are not enforced; the file holds 220
-`domain` and 118 `url_substring` rules:
+families are enforced in full, one is approximated and four are not enforced; the file holds 221
+`domain` and 121 `url_substring` rules:
 
 | Upstream family | Rules | Gym rule | Enforced |
 | --- | --- | --- | --- |
@@ -1163,6 +1163,11 @@ the search presets a **weaker leakage policy than upstream's protocol**
   text matches `url_patterns` or `patterns_case_sensitive`, e.g. "Humanity's Last Exam" in several
   languages, `cais/hle`, specific arXiv ids and answer-key phrasing).
 - Answer-key style titles (`answer_title_patterns`) are not filtered.
+- Upstream's `url_patterns` block HLE dataset pages on any host (`cais/hle`, `hle-verified`, ...), so
+  mirrors of Hugging Face are covered there; here a mirror passes unless a rule names it. A with-tools
+  canary on 2026-11-20 found `huggingface.tw` (a mirror) serving `skylenage-ai/HLE-Verified`, and an
+  agent read a gold answer from it. Gym's HLE list therefore blocks `huggingface.tw` and the dataset
+  paths `cais/hle`, `skylenage-ai/hle-verified` and `llmcompe-team-watanabe/hle` on any host.
 - The parser percent-decodes a URL and re-checks it, so a `url_substring` embedded in a proxy or
   archive link is caught; a `domain` rule applies to the outer hostname only, so an archive or
   proxy page that wraps a blocked host in its path passes unless a substring rule matches.
@@ -1196,10 +1201,10 @@ engine" pattern) and a result page returned by `web_search` is dropped. Remainin
 #### Provider-side cap on excluded domains
 
 Tavily's `/search` accepts at most 150 `exclude_domains` and answers HTTP 400 ("Max 150 domains are
-allowed") beyond that; this list has 220. The first `opencode_search` pilot (2026-10-16) sent every
+allowed") beyond that; this list has 221. The first `opencode_search` pilot (2026-10-16) sent every
 domain, so all 14 `web_search` calls failed with `Tavily HTTP 400 after 1 attempts` (11 in the 9
 exported rows, 3 in the stopped row's model-call capture) while `find_in_page`/`scroll_page` (Tavily
-`/extract`, which takes no domain list) worked; Gym's HLE list has 9 domains and never reached the
+`/extract`, which takes no domain list) worked; Gym's HLE list has 10 domains and never reached the
 limit. The Tavily resource now sends a capped subset:
 
 - `tavily_exclude_domains_limit` (default 150, also the largest value the config accepts, since a
@@ -1212,13 +1217,14 @@ limit. The Tavily resource now sends a capped subset:
   `github.com`, `githubusercontent.com`, `archive.*`, in that order; matched case-insensitively
   against the normalised hostnames), then the rest in file order, cut at the limit. On this list that
   sends the 15 priority hosts and the next 135 in file order. Every priority host already sits inside
-  the first 150 entries, so here the priority block only reorders: the 70 not sent are upstream's
-  last 70 `domains` entries, namely 38 unlabelled hostnames (`mistraltms.it` ... `autoklarheit.de`;
-  upstream's list carries no annotation or reason for any entry), the social networks
-  (`instagram.com`, `facebook.com`, `x.com`, `reddit.com`, `tiktok.com`, `linkedin.com`, ...),
-  `quora.com`, the StackExchange family, `autobenchaudit.com` and the jsDelivr CDN. A result from one
-  of those is dropped locally, which costs the query a result slot but never shows the page.
-- The server logs one warning per start naming the number of domains not sent (70 here).
+  the first 150 entries, so here the priority block only reorders: the 71 not sent are upstream's
+  last 70 `domains` entries and `huggingface.tw` from Gym's HLE list. Upstream's 70 are 38 unlabelled
+  hostnames (`mistraltms.it` ... `autoklarheit.de`; upstream's list carries no annotation or reason
+  for any entry), the social networks (`instagram.com`, `facebook.com`, `x.com`, `reddit.com`,
+  `tiktok.com`, `linkedin.com`, ...), `quora.com`, the StackExchange family, `autobenchaudit.com` and
+  the jsDelivr CDN. A result from one of those is dropped locally, which costs the query a result slot
+  but never shows the page.
+- The server logs one warning per start naming the number of domains not sent (71 here).
 
 Two `url_substring` rules inherited from `benchmarks/hle/search_exclusions.json`
 (`openreview.net/pdf/<40 hex characters>.pdf`) carry OpenReview document ids. They are not secrets,

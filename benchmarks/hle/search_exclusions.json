@@ -12,6 +12,10 @@
         },
         {
           "type": "domain",
+          "value": "huggingface.tw"
+        },
+        {
+          "type": "domain",
           "value": "promptfoo.dev"
         },
         {
@@ -241,6 +245,18 @@
         {
           "type": "url_substring",
           "value": "huggingface-com.translate.goog/datasets/skylenage-ai/HLE-Verified"
+        },
+        {
+          "type": "url_substring",
+          "value": "cais/hle"
+        },
+        {
+          "type": "url_substring",
+          "value": "skylenage-ai/hle-verified"
+        },
+        {
+          "type": "url_substring",
+          "value": "llmcompe-team-watanabe/hle"
         },
         {
           "type": "url_substring",
