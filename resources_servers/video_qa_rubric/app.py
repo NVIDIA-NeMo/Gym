@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Open-ended (video) questions graded against each question's weighted-points rubric by a judge model.
+"""Open-ended (video) questions graded against each question's rubric by a judge model.
 
-The final answer goes to the judge with the question and the rubric (no video, reasoning or reference answer); the
-judge reports the points of every criterion and the contradictions it found, and the reward is the checked total /
-100 (rubric.py). The judge is any OpenAI-compatible chat model with JSON-schema structured output, reached through a
-judge ``ModelServerRef`` and Gym's ``call_judge``.
+Each row's ``grading`` names the protocol. ``weighted_points`` (the default): the final answer goes to the judge with
+the question and the rubric (no video, reasoning or reference answer); the judge reports the points of every criterion
+and the contradictions it found, and the reward is the checked total / 100 (rubric.py). ``reference_levels``: the
+judge also reads the row's reference answer and returns one integer level, with the prompt and scale of the server's
+``reference_levels`` settings; the reward is the level / its top level (reference_levels.py). The judge is any
+OpenAI-compatible chat model (with JSON-schema structured output for ``weighted_points``), reached through a judge
+``ModelServerRef`` and Gym's ``call_judge``.
 """
 
 import asyncio
@@ -14,10 +17,11 @@ import json
 import logging
 import math
 import random
-from collections import Counter
-from typing import Any, ClassVar, Literal
+from collections import Counter, defaultdict
+from collections.abc import Callable
+from typing import Annotated, Any, ClassVar, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, PrivateAttr, Tag
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -46,6 +50,8 @@ from resources_servers.video_mcqa.app import response_failure
 from resources_servers.video_mcqa.sandbox import VideoSandboxServer, VideoSandboxServerConfig
 from resources_servers.video_mcqa.scoring import final_answer_text
 from resources_servers.video_mcqa.task import Setting
+from resources_servers.video_qa_rubric import reference_levels
+from resources_servers.video_qa_rubric.reference_levels import ReferenceLevelsSettings
 from resources_servers.video_qa_rubric.rubric import (
     JUDGMENT_SCHEMA,
     JUDGMENT_SCHEMA_NAME,
@@ -71,6 +77,7 @@ VERIFICATION_FIELDS = frozenset(
         "outcome",
         "rubric_score",
         "rubric_points",
+        "rubric_level",
         "judgment",
         "judge_usage",
         "judge_attempts",
@@ -100,21 +107,51 @@ class VideoQARubricResourcesServerConfig(VideoSandboxServerConfig):
     # agents verify a failed run (execution_failure_reward_zero) as an empty response and require exactly 0. None
     # scores attempts without an answer 0.
     empty_answer_reward: float | None = Field(default=None, le=0, allow_inf_nan=False)
+    # The judge's prompt and scale for rows graded by reference_levels; a server without it refuses such rows.
+    reference_levels: ReferenceLevelsSettings | None = None
 
 
 class VideoQARubricMetadata(BaseModel):
-    """Verifier-only question data: the rubric never reaches the model."""
+    """Verifier-only question data of a weighted_points row (the default): the rubric never reaches the model. A
+    ``subset`` (an extra key) groups the row's scores in the metrics."""
 
     model_config = ConfigDict(extra="allow")
     question: Text
     rubric: RubricDict
 
 
+class ReferenceLevelsMetadata(BaseModel):
+    """Verifier-only question data of a reference_levels row: the reference answer and the grading rules (``rubric``,
+    any JSON object) never reach the model."""
+
+    model_config = ConfigDict(extra="allow")
+    grading: Literal["reference_levels"]
+    question: Text
+    reference_answer: Text
+    rubric: dict[str, Any]
+    subset: Text | None = None
+
+
+def _grading(metadata: object) -> str:
+    """The protocol a row's verifier metadata names; weighted_points when it names none."""
+    if isinstance(metadata, dict):
+        return metadata.get("grading", "weighted_points")
+    return getattr(metadata, "grading", "weighted_points")
+
+
+GradedMetadata = Annotated[
+    Annotated[VideoQARubricMetadata, Tag("weighted_points")]
+    | Annotated[ReferenceLevelsMetadata, Tag("reference_levels")],
+    Discriminator(_grading),
+]
+Parsed = TypeVar("Parsed")
+
+
 class VideoQARubricVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
     task_id: Text
     setting: Setting
-    verifier_metadata: VideoQARubricMetadata
+    verifier_metadata: GradedMetadata
 
 
 class VideoQARubricVerifyResponse(VideoQARubricVerifyRequest, BaseVerifyResponse):
@@ -124,7 +161,9 @@ class VideoQARubricVerifyResponse(VideoQARubricVerifyRequest, BaseVerifyResponse
     outcome: Outcome
     # The rubric score from 0 to 1; None when the attempt was not measured.
     rubric_score: float | None
+    # The judged points (weighted_points) or level (reference_levels) behind a graded score.
     rubric_points: float | None = None
+    rubric_level: int | None = None
     judgment: dict[str, Any] | None = None
     judge_usage: dict[str, Any] | None = None
     judge_attempts: int | None = None
@@ -167,6 +206,10 @@ class VideoQARubricResourcesServer(VideoSandboxServer):
         A judge that fails every attempt raises: Gym's judge failsafe masks the row and keeps it, answer included, for
         judge-only recovery. It is never scored as a wrong answer.
         """
+        metadata = body.verifier_metadata
+        settings = self.config.reference_levels
+        if isinstance(metadata, ReferenceLevelsMetadata) and settings is None:
+            raise ValueError("A reference_levels row needs the server's reference_levels settings")
         response = body.response
         # video_mcqa's rules, read from the response's own status so a replayed row scores the same: a failed
         # single-turn model call is not measured; a single-turn tool call and a failed or incomplete agent run score 0.
@@ -185,17 +228,49 @@ class VideoQARubricResourcesServer(VideoSandboxServer):
             reward = 0.0 if penalty is None or not response.output else penalty
             return self._respond(body, outcome="empty_answer", rubric_score=0.0, reward=reward)
 
-        async def grade() -> VideoQARubricVerifyResponse:
-            judgment, points, usage, attempts = await self._judge(body.verifier_metadata, answer)
-            return self._respond(
-                body,
-                outcome="graded",
-                rubric_score=points / 100,
-                rubric_points=float(points),
-                judgment=judgment,
-                judge_usage=usage,
-                judge_attempts=attempts,
-            )
+        if isinstance(metadata, ReferenceLevelsMetadata):
+
+            async def grade() -> VideoQARubricVerifyResponse:
+                messages = reference_levels.judge_messages(
+                    settings,
+                    question=metadata.question,
+                    reference_answer=metadata.reference_answer,
+                    rubric=metadata.rubric,
+                    answer=answer,
+                )
+                judgment, usage, attempts = await self._judge(
+                    messages, lambda text: reference_levels.parse_judgment(text, max_level=settings.max_level)
+                )
+                return self._respond(
+                    body,
+                    outcome="graded",
+                    rubric_score=judgment["score"] / settings.max_level,
+                    rubric_level=judgment["score"],
+                    judgment=judgment,
+                    judge_usage=usage,
+                    judge_attempts=attempts,
+                )
+
+        else:
+
+            async def grade() -> VideoQARubricVerifyResponse:
+                (judgment, points), usage, attempts = await self._judge(
+                    judge_messages(metadata.question, metadata.rubric, answer),
+                    lambda text: self._weighted_judgment(metadata.rubric, text),
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {"name": JUDGMENT_SCHEMA_NAME, "strict": True, "schema": JUDGMENT_SCHEMA},
+                    },
+                )
+                return self._respond(
+                    body,
+                    outcome="graded",
+                    rubric_score=points / 100,
+                    rubric_points=float(points),
+                    judgment=judgment,
+                    judge_usage=usage,
+                    judge_attempts=attempts,
+                )
 
         return await observe_llm_judge_grading(grade)
 
@@ -219,16 +294,24 @@ class VideoQARubricResourcesServer(VideoSandboxServer):
             **fields,
         )
 
+    @staticmethod
+    def _weighted_judgment(rubric: dict[str, Any], text: str) -> tuple[dict[str, Any], float]:
+        """(judgment, points from 0 to 100) of a weighted_points reply; ``ValueError`` if the rubric rejects it."""
+        judgment = json.loads(text)
+        return judgment, judgment_points(rubric, judgment)
+
     async def _judge(
-        self, metadata: VideoQARubricMetadata, answer: str
-    ) -> tuple[dict[str, Any], float, dict[str, Any] | None, int]:
-        """(judgment, points from 0 to 100, the judge's usage, attempts) of the first judgment the rubric accepts."""
+        self,
+        messages: list[dict[str, str]],
+        parse: Callable[[str], Parsed],
+        *,
+        response_format: dict[str, Any] | None = None,
+    ) -> tuple[Parsed, dict[str, Any] | None, int]:
+        """(the first reply PARSE accepts, the judge's usage, attempts); PARSE raises ``ValueError`` to reject one."""
         params = self.config.judge_chat_completion_create_params.model_copy(deep=True)
-        params.messages = judge_messages(metadata.question, metadata.rubric, answer)
-        params.response_format = {
-            "type": "json_schema",
-            "json_schema": {"name": JUDGMENT_SCHEMA_NAME, "strict": True, "schema": JUDGMENT_SCHEMA},
-        }
+        params.messages = messages
+        if response_format is not None:
+            params.response_format = response_format
         attempts = self.config.judge_max_attempts
         for attempt in range(1, attempts + 1):
             try:
@@ -245,8 +328,7 @@ class VideoQARubricResourcesServer(VideoSandboxServer):
                             max_attempts=1,
                         )
                 try:
-                    judgment = json.loads(self._reply_text(reply))
-                    points = judgment_points(metadata.rubric, judgment)
+                    parsed = parse(self._reply_text(reply))
                 except ValueError:
                     record_rejected_judge_reply()
                     raise
@@ -267,7 +349,7 @@ class VideoQARubricResourcesServer(VideoSandboxServer):
                 continue
             record_parsed_judge_verdict()
             usage = reply.usage.model_dump(mode="json") if reply.usage is not None else None
-            return judgment, points, usage, attempt
+            return parsed, usage, attempt
         raise AssertionError("judge_max_attempts must be positive")
 
     def _reply_text(self, reply: NeMoGymChatCompletion) -> str:
@@ -292,7 +374,11 @@ class VideoQARubricResourcesServer(VideoSandboxServer):
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         """The shares of measured attempts with full and with at least 0.8 of the points, and the outcomes; Gym adds
-        the mean, spread and range of ``rubric_score`` and ``reward`` (masked attempts are left out of all of them)."""
+        the mean, spread and range of ``rubric_score`` and ``reward`` (masked attempts are left out of all of them).
+
+        Rows that name a ``subset`` also give each subset's mean rubric score and attempt count
+        (``subsets/<subset>/rubric_score``, ``subsets/<subset>/count``) and the mean of those means, each subset
+        weighing the same (``mean_of_subsets/rubric_score``)."""
         rows = [row for task in tasks for row in task if "outcome" in row]
         scores = [row["rubric_score"] for row in rows]
         if any(not isinstance(score, (int, float)) or not math.isfinite(score) for score in scores):
@@ -302,10 +388,21 @@ class VideoQARubricResourcesServer(VideoSandboxServer):
         if scores:
             metrics["full_score_rate"] = sum(score >= 1 for score in scores) / len(scores)
             metrics["at_least_0.8_rate"] = sum(score >= 0.8 for score in scores) / len(scores)
+        by_subset: dict[str, list[float]] = defaultdict(list)
+        for row in rows:
+            subset = row["verifier_metadata"].get("subset")
+            if subset is not None:
+                by_subset[subset].append(row["rubric_score"])
+        for subset, subset_scores in sorted(by_subset.items()):
+            metrics[f"subsets/{subset}/rubric_score"] = sum(subset_scores) / len(subset_scores)
+            metrics[f"subsets/{subset}/count"] = len(subset_scores)
+        if by_subset:
+            means = [sum(subset_scores) / len(subset_scores) for subset_scores in by_subset.values()]
+            metrics["mean_of_subsets/rubric_score"] = sum(means) / len(means)
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
-        keys = ("mean/rubric_score", "mean/reward", "full_score_rate")
+        keys = ("mean/rubric_score", "mean/reward", "full_score_rate", "mean_of_subsets/rubric_score")
         return {key: agent_metrics[key] for key in keys if key in agent_metrics}
 
 

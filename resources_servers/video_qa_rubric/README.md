@@ -2,8 +2,10 @@
 
 A training environment for open-ended questions about a video. The policy sees the video and the question and writes
 a free-text answer. A judge model grades the final answer against the question's own rubric, and the reward is the
-rubric score from 0 to 1. The judge sees the question, the rubric and the final answer; it never sees the video, the
-policy's reasoning or a reference answer.
+rubric score from 0 to 1. The judge sees the question, the rubric and the final answer; it never sees the video or the
+policy's reasoning. Each row names its grading protocol: weighted points (the default, without a reference answer) or
+reference levels, for question sets graded with a reference answer and a score scale of their own
+([Reference levels](#reference-levels)).
 
 `configs/video_qa_rubric.yaml` runs single-turn rows (`simple_agent`, one model call). The same resources server
 grades agentic rows (`setting: agentic`) when an agent harness is bound to it; `configs/video_qa_rubric_agentic.yaml`
@@ -18,6 +20,9 @@ runs them with OpenCode in a sandbox that holds the video ([agentic setting](#ag
 | `responses_create_params` | The policy's input, for example the video as an `input_video` part and the question as text |
 | `verifier_metadata.question` | The question text the judge sees |
 | `verifier_metadata.rubric` | The rubric (below) |
+| `verifier_metadata.grading` | `weighted_points` (the default when absent) or `reference_levels` |
+| `verifier_metadata.reference_answer` | `reference_levels` only: the reference answer the judge sees |
+| `verifier_metadata.subset` | Optional: the part of the question set the row belongs to, for per-subset metrics |
 
 A rubric has `criteria` and optional `contradictions`:
 
@@ -35,7 +40,9 @@ Other keys reach the judge unchanged, for example per-criterion `full_credit`, `
 `acceptable_variants`, evidence from the video, or a rubric-wide `answer_policy`. `task_data.py` holds the schema, and
 `task.prepare_single_turn(task_id, question, rubric, video_url=...)` builds a single-turn row; the video can be any
 URL the policy's model server accepts: an http(s) or data URL, or a `file://` URL the server is allowed to read (vLLM's
-`--allowed-local-media-path`).
+`--allowed-local-media-path`). Its `prompt` (default `Watch the video and answer the question.\n\nQuestion:
+{question}`) is the text after the video; a question set that asks its questions as they are passes `"{question}"`.
+Its `grading`, `reference_answer` and `subset` arguments fill the fields above.
 
 ## Grading
 
@@ -49,8 +56,8 @@ URL the policy's model server accepts: an http(s) or data URL, or a `file://` UR
    of each contradiction it applies, and its score equals the sum of the points, minus the penalties, capped by the
    caps and clamped to [0, 100] (`rubric.judgment_points`). The reward is that score / 100.
 
-A judgment that fails this check, a timed-out call and a 408, 429 or 5xx reply are tried again, up to
-`judge_max_attempts` attempts in all. Other 4xx replies are not retried. When no attempt succeeds, Gym's judge
+A judgment that fails this check (or the [reference levels](#reference-levels) check), a timed-out call and a 408,
+429 or 5xx reply are tried again, up to `judge_max_attempts` attempts in all. Other 4xx replies are not retried. When no attempt succeeds, Gym's judge
 failsafe masks the row as `judge_failed` and keeps the answer, so a recovery run judges it again without sampling the
 policy.
 
@@ -71,8 +78,29 @@ A response with no output at all stays at 0, because Gym's agents verify a faile
 (`execution_failure_reward_zero`) as such a response and require exactly 0.
 
 Metrics: `mean/rubric_score` and `mean/reward` (they differ only when `empty_answer_reward` applies), with
-`full_score_rate`, `at_least_0.8_rate` and `outcomes/*` counts. Masked rows are left out of all of them and reported
-as coverage. Each verified row carries `rubric_points`, the `judgment`, `judge_usage` and `judge_attempts`.
+`full_score_rate`, `at_least_0.8_rate` and `outcomes/*` counts. Rows with a `subset` add each subset's mean rubric score
+and attempt count (`subsets/<subset>/rubric_score`, `subsets/<subset>/count`) and the mean of those means, each subset
+weighing the same (`mean_of_subsets/rubric_score`). Masked rows are left out of all of them and reported as coverage.
+Each verified row carries `rubric_points` (or `rubric_level`), the `judgment`, `judge_usage` and `judge_attempts`.
+
+### Reference levels
+
+A row with `grading: reference_levels` carries a `reference_answer`, and its `rubric` may be any JSON object of grading
+rules, such as the score rules, accepted phrasings and rejections of a published question set. The judge reads the
+question, the reference answer, the rubric and the final answer through the server's `reference_levels` settings, and
+returns an integer level; the reward is that level / `max_level`. A server without these settings refuses such rows.
+
+| Setting | Content |
+| --- | --- |
+| `reference_levels.system_prompt` | The judge's system message |
+| `reference_levels.user_template` | The judge's user message, with the row's `{question}`, `{reference_answer}`, `{rubric_json}` (the rubric as `json.dumps(rubric, ensure_ascii=False)`) and `{answer}`; other braces doubled |
+| `reference_levels.max_level` | The top of the integer scale (default 5) |
+
+The judge's reply must be exactly the JSON object `{"score": <integer from 0 to max_level>, "reason": <nonempty
+text>}`, with one choice that finished normally; no response format is requested, so the prompt asks for it. Anything
+else is a rejected judgment, retried as above. The settings are a question set's own, so they live in its config:
+`benchmarks/mm_lifelong_v1_1` (MM-Lifelong v1.1, the dataset's grader) is an example. Answers without a final answer
+score 0 without a judge call, as in the default protocol.
 
 ## Judge
 
@@ -113,6 +141,11 @@ question and that path, never the rubric), and the row adds the `video_binding` 
 The seed refuses a row whose video is not a regular file under `video_roots` or does not have that SHA-256, and puts
 the video at `/testbed/<sandbox_path>`. Set the sandbox image (`VIDEO_MCQA_SANDBOX_IMAGE`), the OpenSandbox provider
 settings (`OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`), the judge, and `video_qa_rubric_agentic_video_roots`.
+
+Videos too large to upload for every episode stay in the sandbox image instead: a row with `preloaded_media` names the
+image (through the server's `sandbox_preloaded_images`) and pins the image's catalog of them, and `prepare_agentic(...,
+text=...)` takes a prompt that describes them its own way (video_mcqa's README, "Media preloaded in the image";
+`benchmarks/mm_lifelong_v1_1_agentic` uses it).
 
 ## Use in RL training
 

@@ -18,6 +18,7 @@ from nemo_gym.config import DatasetConfig
 from nemo_gym.data import TaskDataValidator, load_task_data_schema
 from resources_servers.video_mcqa.tests.helpers import response
 from resources_servers.video_qa_rubric.app import (
+    ReferenceLevelsMetadata,
     VideoQARubricMetadata,
     VideoQARubricResourcesServerConfig,
     VideoQARubricVerifyRequest,
@@ -77,12 +78,17 @@ def test_the_schema_declares_the_fields_the_verifier_reads() -> None:
         name for name, field in TaskData.model_fields.items() if (field.json_schema_extra or {}).get("legacy_location")
     }
     top_level = set(TaskData.model_fields) - nested
-    assert nested == set(VideoQARubricMetadata.model_fields) == {"question", "rubric"}
-    assert top_level - {"video_binding"} == {"task_id", "setting"} <= set(VideoQARubricVerifyRequest.model_fields)
-    for model in (TaskData, VideoQARubricMetadata):
-        assert all(field.is_required() for name, field in model.model_fields.items() if name != "video_binding")
-    # An agentic row's video, which a lending server's seed reads (test_agentic.py); the verifier does not.
+    assert nested == set(ReferenceLevelsMetadata.model_fields)
+    assert nested == {"grading", "question", "reference_answer", "rubric", "subset"}
+    assert set(VideoQARubricMetadata.model_fields) == {"question", "rubric"}
+    assert top_level - {"video_binding", "preloaded_media"} == {"task_id", "setting"}
+    assert {"task_id", "setting"} <= set(VideoQARubricVerifyRequest.model_fields)
+    required = {name for name, field in TaskData.model_fields.items() if field.is_required()}
+    assert required == {"task_id", "setting", "question", "rubric"}
+    assert all(field.is_required() for field in VideoQARubricMetadata.model_fields.values())
+    # An agentic row's media, which a lending server's seed reads (test_agentic.py); the verifier does not.
     assert not TaskData.model_fields["video_binding"].is_required()
+    assert not TaskData.model_fields["preloaded_media"].is_required()
 
 
 def test_rows_the_verifier_refuses_are_invalid_task_data() -> None:

@@ -295,3 +295,160 @@ def test_without_a_sandbox_provider_the_server_stays_stateless_and_scales(host) 
 def test_sandbox_settings_that_cannot_work_are_refused_at_startup(host, fields, message) -> None:
     with pytest.raises(ValueError, match=message):
         _server(host, **fields)
+
+
+# Preloaded media: the "image" is the host directory that stands in for the sandbox, so its media root already holds
+# the videos and the catalog, as an image built with them would.
+def _preloaded(host: Path, *, catalog_entries: list[dict] | None = None) -> dict:
+    """Videos and a catalog under the media root, and the row's preloaded_media naming them."""
+    videos = host / "testbed" / "videos" / "set"
+    videos.mkdir(parents=True, exist_ok=True)
+    for name in ("a.mp4", "b.mp4"):
+        shutil.copy(CLIP, videos / name)
+    entries = catalog_entries or [
+        {"path": str(videos / name), "bytes": CLIP.stat().st_size, "sha256": CLIP_SHA256}
+        for name in ("a.mp4", "b.mp4")
+    ]
+    catalog = host / "testbed" / "videos" / "catalog.json"
+    catalog.write_text(json.dumps({"videos": entries}))
+    model_catalog = host / "videos" / "model_catalog.json"
+    model_catalog.write_text(json.dumps([{"path": entry["path"], "duration_seconds": 4.0} for entry in entries]))
+    return {
+        "image": "set",
+        "catalog": str(catalog),
+        "catalog_sha256": hashlib.sha256(catalog.read_bytes()).hexdigest(),
+        "files": [
+            {
+                "source": str(model_catalog),
+                "sandbox_path": "video_catalog.json",
+                "sha256": hashlib.sha256(model_catalog.read_bytes()).hexdigest(),
+            }
+        ],
+    }
+
+
+def _preloaded_seed(host: Path, media: dict, session_id: str = "session") -> ResourcesSeedSessionRequest:
+    seed = _seed(host, session_id)
+    task_data = {key: value for key, value in seed.task_data.items() if key != "video_binding"}
+    return seed.model_copy(update={"task_data": {**task_data, "preloaded_media": media}})
+
+
+def _preloaded_server(host: Path, **fields) -> VideoMMEV1ResourcesServer:
+    return _server(host, sandbox_config={}, sandbox_preloaded_images={"set": "unused-by-the-local-provider"}, **fields)
+
+
+def test_preloaded_media_is_checked_in_place_and_nothing_is_uploaded(host, stopped, monkeypatch) -> None:
+    media = _preloaded(host)
+    monkeypatch.setattr(video_sandbox, "upload_path", AsyncMock(side_effect=AssertionError("no upload")))
+    server = _preloaded_server(host)
+    client = TestClient(server.setup_webserver())
+    seeded = client.post("/seed_session", json=_preloaded_seed(host, media).model_dump(mode="json"))
+
+    assert seeded.status_code == 200, seeded.text
+    testbed = host / "testbed"
+    # The row's file is in the media root, checked and read-only; the videos are as the image holds them.
+    model_catalog = testbed / "video_catalog.json"
+    assert model_catalog.read_bytes() == (host / "videos" / "model_catalog.json").read_bytes()
+    assert stat.S_IMODE(model_catalog.stat().st_mode) == 0o444
+    assert (testbed / "videos" / "set" / "a.mp4").read_bytes() == CLIP.read_bytes()
+    # The image's catalog is the seed's: it leaves the media root that the model's paths name.
+    assert not (testbed / "videos" / "catalog.json").exists()
+    kept = video_sandbox.TOOLS_DIR / video_sandbox.PRELOADED_CATALOG
+    assert hashlib.sha256(kept.read_bytes()).hexdigest() == media["catalog_sha256"]
+    assert (
+        video_sandbox.TOOLS_DIR / "catalog.sha256"
+    ).read_text() == f"{media['catalog_sha256']}  {media['catalog']}\n"
+    assert json.loads((video_sandbox.TOOLS_DIR / "tools.json").read_text())["workspace_root"] == str(testbed)
+    assert "set" in server._preloaded_sandboxes and server._lent_sandboxes.get("session") is None
+
+    # A repeated seed returns the same sandbox; the close stops it.
+    again = client.post("/seed_session", json=_preloaded_seed(host, media).model_dump(mode="json"))
+    assert again.status_code == 200 and again.json() == seeded.json()
+    close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=_seed(host).episode_id)
+    assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 200
+    assert len(stopped) == 1 and server._preloaded_sandboxes["set"].get("session") is None
+
+
+def _preloaded_refused(server, seed: ResourcesSeedSessionRequest) -> str:
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    response = client.post("/seed_session", json=seed.model_dump(mode="json"))
+    assert response.status_code == 422, response.text
+    assert all(lender.get(seed.resources_session_id) is None for lender in server._preloaded_sandboxes.values())
+    return response.text
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"image": "other"}, "set it in sandbox_preloaded_images"),
+        ({"catalog": "videos/catalog.json"}, "absolute sandbox path"),
+        ({"files": [{"source": "/etc/hostname", "sandbox_path": "x.json", "sha256": "0" * 64}]}, "video_roots"),
+        ({"files": "file_sha256"}, "does not have its sha256"),
+    ],
+)
+def test_a_preloaded_row_the_server_cannot_serve_is_refused_before_a_sandbox_starts(
+    host, stopped, change, message
+) -> None:
+    media = _preloaded(host)
+    if change == {"files": "file_sha256"}:
+        change = {"files": [{**media["files"][0], "sha256": "0" * 64}]}
+    assert message in _preloaded_refused(_preloaded_server(host), _preloaded_seed(host, {**media, **change}))
+    assert stopped == []
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("catalog", "does not hold the row's catalog"),
+        ("missing", "does not hold every file"),
+        ("size", "does not hold every file"),
+        ("outside", "does not hold every file"),
+    ],
+)
+def test_an_image_without_the_rows_media_is_refused_and_its_sandbox_stopped(host, stopped, damage, message) -> None:
+    media = _preloaded(host)
+    videos = host / "testbed" / "videos" / "set"
+    if damage == "catalog":
+        media = {**media, "catalog_sha256": "0" * 64}
+    elif damage == "missing":
+        (videos / "b.mp4").unlink()
+    elif damage == "size":
+        with (videos / "a.mp4").open("ab") as stream:
+            stream.write(b"\0")
+    else:
+        outside = [{"path": str(host / "videos" / "shapes.mp4"), "bytes": CLIP.stat().st_size, "sha256": CLIP_SHA256}]
+        media = _preloaded(host, catalog_entries=outside)
+    text = _preloaded_refused(_preloaded_server(host), _preloaded_seed(host, media))
+    assert message in text
+    if damage in ("missing", "size", "outside"):
+        assert ("Cannot read" in text) or ("not a regular file of" in text) or ("not inside" in text)
+    assert len(stopped) == 1
+
+
+def test_a_row_names_its_video_one_way(host, stopped) -> None:
+    seed = _preloaded_seed(host, _preloaded(host))
+    both = seed.model_copy(
+        update={"task_data": {**seed.task_data, "video_binding": _seed(host).task_data["video_binding"]}}
+    )
+    assert "not both" in _preloaded_refused(_preloaded_server(host), both)
+    assert stopped == []
+
+
+def test_each_image_lends_its_own_sandboxes_and_shutdown_stops_all(host, stopped) -> None:
+    media = _preloaded(host)
+    server = _server(host, sandbox_preloaded_images={"set": "image-a", "other": "image-b", "unset": None})
+    assert set(server._preloaded_sandboxes) == {"set", "other"}
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=_seed(host, "upload").model_dump(mode="json")).status_code == 200
+        preloaded = _preloaded_seed(host, media, "preloaded")
+        assert client.post("/seed_session", json=preloaded.model_dump(mode="json")).status_code == 200
+        assert server._lent_sandboxes.get("upload") is not None
+        assert server._preloaded_sandboxes["set"].get("preloaded") is not None
+        assert stopped == []
+    assert len(stopped) == 2
+
+
+def test_a_server_of_preloaded_images_only_needs_no_upload_image(host) -> None:
+    assert _preloaded_server(host)._lent_sandboxes is not None
+    with pytest.raises(ValueError, match="Set sandbox_config.image"):
+        _server(host, sandbox_config={}, sandbox_preloaded_images={"set": None})

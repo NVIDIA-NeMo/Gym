@@ -223,6 +223,49 @@ streamed from disk
 ([NVIDIA-NeMo/Gym#5904](https://github.com/NVIDIA-NeMo/Gym/pull/5904)); until then
 their seeds fail, and the cohort counts those questions as missing.
 
+### Media preloaded in the image
+
+Some videos are too large to upload for every episode (tens of gigabytes of
+recordings per question). A row can then name media that its sandbox image
+already holds, with `preloaded_media` in place of `video_binding`
+(`task_data.PreloadedMedia`):
+
+```json
+"preloaded_media": {
+  "image": "<name in sandbox_preloaded_images>",
+  "catalog": "/testbed/videos/catalog.json",
+  "catalog_sha256": "<SHA-256 of that catalog>",
+  "files": [{"source": "<host file under video_roots>", "sandbox_path": "video_catalog.json", "sha256": "<its SHA-256>"}]
+}
+```
+
+The image is an image built from `sandbox_image/Dockerfile` with the media
+added, and its catalog is a JSON object whose `videos` list gives each file's
+absolute `path` inside `sandbox_media_root` and its size in `bytes` (other keys
+are ignored). The server's `sandbox_preloaded_images` maps each name a row gives
+to an image reference, so deployments keep their own registries; the rows pin
+only the catalog's SHA-256. At the seed the server:
+
+1. refuses (422) a row whose image name maps to no image, or whose `files` are
+   not regular files under `video_roots` or not of their SHA-256;
+2. starts the sandbox from that image with `tools.json`, the checksum lists and
+   the row's `files` (at `sandbox_media_root/sandbox_path`); nothing is
+   uploaded;
+3. in one sandbox command, checks the image's video tools (422 if they differ),
+   the catalog's SHA-256 (422 if it is not the row's) and every file the
+   catalog lists: a regular file of its size inside `sandbox_media_root` (422
+   otherwise; a size check costs no read, so a 100 GB image is checked in
+   seconds). It then makes the row's files read-only, moves a catalog that lies
+   inside `sandbox_media_root` next to the tools (it is the seed's, not the
+   model's) and runs the tools' own check.
+
+Each image's sandboxes are lent and stopped like those of uploaded videos; one
+server can serve both kinds of rows. The sandbox provider must be able to pull
+the images, and large images should be pulled onto its nodes before a run so
+that a sandbox starts within `sandbox_config.ready_timeout_s`.
+`benchmarks/mm_lifelong_v1_1_agentic` builds such images with its
+`sandbox_image/build.py`.
+
 ### Model settings
 
 OpenCode sessions send no `chat_template_kwargs`. For a model whose chat
