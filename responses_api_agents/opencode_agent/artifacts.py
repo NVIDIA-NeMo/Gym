@@ -113,6 +113,7 @@ def _parse_opencode_session(
     agent_instance: str | None = None,
     clock_domain: str | None = None,
     observation_schema_version: Literal["1.0", "2.0"] = "1.0",
+    step_token_stats: bool = False,
 ) -> AgentObservationBundle:
     """Read persisted sessions; opt into v2 for qualified timings and stable attempt IDs."""
     if observation_schema_version not in {"1.0", "2.0"}:
@@ -537,6 +538,7 @@ def _parse_opencode_session(
             model_ref=model_ref,
             gym_reasoning=model_ref is not None,
             normalized_call_ids=normalized_ids,
+            step_token_stats=step_token_stats,
         )
 
     return AgentObservationBundle(

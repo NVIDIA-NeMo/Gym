@@ -555,6 +555,10 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
     max_output_tokens: int = 131072
+    step_token_stats: bool = Field(
+        default=False,
+        description="Include per-call usage from OpenCode step records when model-call capture is disabled.",
+    )
     opencode_version: str = OPENCODE_VERSION
 
     # Optional verified, preinstalled runtime for sandboxes without download egress.
@@ -945,6 +949,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         clock_domain=f"opencode-wall:{uuid4().hex}",
                         agent_instance=f"opencode-agent:{uuid4().hex}",
                         observation_schema_version="2.0",
+                        step_token_stats=self.config.step_token_stats and not self._model_call_capture_enabled(),
                     )
                 except Exception:
                     LOG.exception("failed to read OpenCode session artifact")
@@ -1287,6 +1292,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             ),
             opencode2=self._opencode2,
             model_call_labels=self._opencode2 and self._model_call_capture_enabled(),
+            step_token_stats=self.config.step_token_stats and not self._model_call_capture_enabled(),
         )
         prepared_directory = False
         try:
