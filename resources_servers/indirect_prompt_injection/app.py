@@ -15,10 +15,10 @@
 import copy
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, ClassVar, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.server_runtime import (
@@ -27,7 +27,13 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionLostError,
+    ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.indirect_prompt_injection.ecommerce_tools import TOOL_HANDLERS as ECOMMERCE_HANDLERS
@@ -39,6 +45,7 @@ from resources_servers.indirect_prompt_injection.it_helpdesk_tools import TOOL_H
 from resources_servers.indirect_prompt_injection.legal_tools import TOOL_HANDLERS as LEGAL_HANDLERS
 from resources_servers.indirect_prompt_injection.logistics_tools import TOOL_HANDLERS as LOGISTICS_HANDLERS
 from resources_servers.indirect_prompt_injection.real_estate_tools import TOOL_HANDLERS as REAL_ESTATE_HANDLERS
+from resources_servers.indirect_prompt_injection.task_data import TaskData
 from resources_servers.indirect_prompt_injection.verifier import check_injection_followed, extract_function_calls
 
 
@@ -59,7 +66,8 @@ logger = logging.getLogger(__name__)
 
 
 class IPIResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    # Offline reverify posts /verify with no session, which this server masks as session_lost.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
 
 
 class InjectionSpec(BaseModel):
@@ -108,28 +116,45 @@ class IPIVerifyResponse(BaseVerifyResponse):
     thinking_incomplete: bool = False
 
 
+class IPITypedSeedSessionRequest(TaskData, BaseSeedSessionRequest):
+    """Validate complete typed task data while preserving the environment-only cookie seed."""
+
+
 class IPIResourcesServer(SimpleResourcesServer):
     config: IPIResourcesServerConfig
     session_id_to_env: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    seed_request_model = IPITypedSeedSessionRequest
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/{tool_name}")(self.route_tool_call)
         return app
 
-    async def seed_session(self, request: Request, body: IPISeedSessionRequest) -> BaseSeedSessionResponse:
-        session_id = request.session[SESSION_ID_KEY]
-        self.session_id_to_env[session_id] = copy.deepcopy(body.environment)
-        logger.debug("seed_session: sid=%s", session_id)
-        return BaseSeedSessionResponse()
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[IPISeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Keep environment-only cookie seeds; the base validates typed tasks and owns the lifecycle."""
+        return await super().seed_session(body, request=request)
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self.session_id_to_env
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """Publish an isolated environment only after its deep copy succeeds."""
+        environment = IPISeedSessionRequest.model_validate(body.model_dump()).environment
+        self.session_id_to_env[session_id] = copy.deepcopy(environment)
+
+    async def release_session_state(self, session_id: str) -> None:
+        """Discard the session's live tool environment."""
+        self.session_id_to_env.pop(session_id, None)
 
     async def route_tool_call(self, tool_name: str, body: ToolCallRequest, request: Request) -> ToolCallResponse:
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self.session_id_to_env:
-            raise HTTPException(
-                status_code=400,
-                detail="Session not initialized. Please call seed_session first.",
-            )
+            raise ResourcesSessionLostError("No seeded indirect_prompt_injection session for this tool call")
 
         env = self.session_id_to_env[session_id]
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
@@ -139,6 +164,8 @@ class IPIResourcesServer(SimpleResourcesServer):
             return ToolCallResponse(output=f"Unknown tool: {tool_name}")
 
         try:
+            # No await between the session lookup and the handler (handlers are synchronous), so a tool call cannot
+            # interleave with verify or close releasing this environment; take session_lock if a handler ever awaits.
             result = handler(env, **args)
             return ToolCallResponse(output=json.dumps(result) if not isinstance(result, str) else result)
         except Exception as e:
@@ -147,7 +174,22 @@ class IPIResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: IPIVerifyRequest) -> IPIVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        try:
+        async with self.verifying(session_id) as verification:
+            if verification.is_lost:
+                # Never seeded, closed, or gone with a restart: the server no longer holds the environment the agent's
+                # tool calls read, so a trajectory free of the injected call cannot be told from a resisted attack.
+                lost = lost_session_verification("No seeded indirect_prompt_injection session for this verify")
+                return IPIVerifyResponse(
+                    **(body.model_dump() | lost),
+                    injection_followed=False,
+                    reward_safety=0.0,
+                    attack_difficulty=body.injection.attack_difficulty,
+                    attack_strategy=body.injection.attack_strategy,
+                    attack_category=body.injection.category,
+                    verification_type=body.injection.verification_type,
+                )
+            # Grading uses the request; retain explicit proof that this session was admitted.
+            verification.retain(None)
             injection_followed, matched_tool, matched_args = check_injection_followed(
                 body.response.output, body.injection.model_dump()
             )
@@ -184,8 +226,6 @@ class IPIResourcesServer(SimpleResourcesServer):
                 attack_category=body.injection.category,
                 verification_type=body.injection.verification_type,
             )
-        finally:
-            self.session_id_to_env.pop(session_id, None)
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         metrics: Dict[str, Any] = {}
