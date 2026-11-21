@@ -21,7 +21,9 @@ SUPERVISOR = str(SUPERVISOR_SCRIPT)
 linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 
 
-def _supervise(tmp_path: Path, *command: str, timeout: str = "10", **kwargs) -> subprocess.CompletedProcess[str]:
+def _supervise(
+    tmp_path: Path, *command: str, timeout: str = "10", cleanup_timeout: str = "0.5", **kwargs
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             "bash",
@@ -29,7 +31,7 @@ def _supervise(tmp_path: Path, *command: str, timeout: str = "10", **kwargs) -> 
             "--timeout",
             timeout,
             "--cleanup-timeout",
-            "0.5",
+            cleanup_timeout,
             "--receipt",
             str(tmp_path / "cleanup.json"),
         ]
@@ -174,7 +176,12 @@ def test_forced_stop_reaches_processes_that_leave_the_harness_during_the_stop(tm
     }[escape]
     (tmp_path / "worker.sh").write_text(worker)
     try:
-        result = _supervise(tmp_path, "bash", "worker.sh", timeout="1", cwd=tmp_path)
+        # The worker must install its trap before the stop, then get time to record its spawned child.
+        for timeout in ("1", "4", "10"):
+            result = _supervise(tmp_path, "bash", "worker.sh", timeout=timeout, cleanup_timeout="5", cwd=tmp_path)
+            if (tmp_path / "ready").exists():
+                break
+        assert (tmp_path / "ready").exists(), "the worker never set its trap before the stop"
         assert result.returncode == 0, result.stderr
         receipt = _receipt(tmp_path)
         assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is True, receipt
@@ -323,6 +330,41 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_sca
 
 
 @linux_only
+def test_stop_signals_count_only_once_the_stop_file_exists(tmp_path: Path) -> None:
+    """A tool command (`pkill -f ...`, `killall bash`) can signal the supervisor; a controller writes the stop file."""
+    stop = tmp_path / "stop.request"
+    worker = "touch ready; while :; do sleep 0.05; done"
+    process = subprocess.Popen(
+        ["bash", SUPERVISOR, "--timeout", "30", "--cleanup-timeout", "2", "--receipt", str(tmp_path / "cleanup.json")]
+        + ["--stop-file", str(stop), "--", "bash", "-c", worker],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "ready").exists():
+            assert process.poll() is None and time.monotonic() < deadline
+            time.sleep(0.01)
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            process.send_signal(signum)
+            time.sleep(0.2)
+        assert process.poll() is None, "a stop signal without the stop file ended the supervisor"
+        assert not (tmp_path / "cleanup.json").exists()
+        stop.touch()
+        process.send_signal(signal.SIGTERM)
+        _, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr
+        receipt = _receipt(tmp_path)
+        assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is False, receipt
+        assert receipt["foreign_signals"] == 3, receipt
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+@linux_only
 @pytest.mark.parametrize("requested", ["before_launch", "while_running"])
 def test_expire_file_ends_the_harness_as_a_timeout(tmp_path: Path, requested: str) -> None:
     # A rollout stop moves the deadline to now through this file; the receipt then reads as a timeout.
@@ -444,6 +486,8 @@ try:
         if timed_out:
             (root / 'expire').touch()
         else:
+            # A stop signal counts only once the stop file exists, as a controller writes it.
+            (root / 'stop').touch()
             process.send_signal(signal.SIGTERM)
     stdout, stderr = process.communicate(timeout=30)
     receipt_path = root / "cleanup.json"
@@ -536,7 +580,9 @@ try:
     while not (root / 'writer.pid').exists():
         assert process.poll() is None and time.monotonic() < deadline
         time.sleep(.01)
-    if ending == 'cancel': process.send_signal(signal.SIGTERM)
+    if ending == 'cancel':
+        (root / 'stop').touch()
+        process.send_signal(signal.SIGTERM)
     stdout, stderr = process.communicate(timeout=10)
     assert process.returncode == 0, (stdout, stderr)
     receipt = json.loads((root / 'cleanup.json').read_text())

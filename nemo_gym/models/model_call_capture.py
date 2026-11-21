@@ -927,6 +927,7 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        request_state["nemo_gym_model_call_identity"] = {"rollout_id": rollout_id, "model_call_id": model_call_id}
         verifier_invocation_id = _unique_request_header(
             scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
         )
@@ -1034,7 +1035,7 @@ class _CaptureMiddleware:
                     defer_response = terminal is not None
                     if terminal is not None:
                         state["stream_terminal"] = terminal
-                if defer_response or not message.get("more_body", False):
+                if state["streaming"] and (defer_response or not message.get("more_body", False)):
                     deferred_response_messages.append(dict(message))
                     return
             await send(message)  # forward unchanged -> streaming is preserved

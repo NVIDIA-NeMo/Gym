@@ -1,0 +1,1 @@
+{"classes":["correct","incorrect"],"coef_shape":[1,94056],"idf_size":94053,"intercept_shape":[1],"model_type":"sklearn.linear_model._stochastic_gradient.SGDClassifier","vectorizer_type":"sklearn.feature_extraction.text.TfidfVectorizer","vocabulary_size":94053}

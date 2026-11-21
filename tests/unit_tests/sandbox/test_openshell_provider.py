@@ -22,6 +22,7 @@ import inspect
 import re
 import threading
 import time
+from collections.abc import Callable
 from os import getpid as os_getpid
 from pathlib import Path
 from types import SimpleNamespace
@@ -1494,3 +1495,73 @@ async def test_delete_uses_its_own_long_deadline(monkeypatch: pytest.MonkeyPatch
     )
     await provider.aclose()
     assert sorted(built) == [30, 90]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_preserves_workspace_without_serializing_credentials(
+    make_provider: Callable[..., OpenShellProvider], fake_client: FakeClient
+) -> None:
+    import json
+
+    from nemo_gym.sandbox.api import AsyncSandbox
+
+    workspace = "review-workspace"
+    provider = make_provider(connection={"workspace": workspace, "bearer_token": "test-only-secret"})
+    owner = AsyncSandbox(provider, SandboxSpec(image="img", env={"OMP_NUM_THREADS": "2"}, workdir="/workspace/output"))
+    connected = None
+    try:
+        await owner.start()
+        descriptor = json.loads(json.dumps(await owner.serialize()))
+        assert "test-only-secret" not in json.dumps(descriptor)
+        assert "env" not in descriptor
+        assert "OMP_NUM_THREADS" not in json.dumps(descriptor)
+        fake_client.get_results = [
+            make_ref(
+                openshell_pb2.SANDBOX_PHASE_READY,
+                sandbox_id=descriptor["sandbox_id"],
+                name=descriptor["name"],
+                workspace=workspace,
+            )
+        ]
+        receiver = make_provider(connection={"workspace": workspace, "bearer_token": "test-only-secret"})
+        connected = await AsyncSandbox.connect(descriptor, provider=receiver)
+        assert fake_client.get_calls[-1] == {"name": descriptor["name"], "workspace": workspace}
+        await connected.exec("pwd")
+        assert fake_client.exec_calls[-1]["workspace"] == workspace
+        assert fake_client.exec_calls[-1]["workdir"] == "/workspace/output"
+        assert fake_client.exec_calls[-1]["env"] is None
+        await connected.disconnect()
+        assert not fake_client.delete_calls
+        fake_client.exec_results = [make_exec_result(stdout="owner alive")]
+        result = await owner.exec("echo owner alive")
+        assert result.return_code == 0 and result.stdout == "owner alive"
+        assert fake_client.exec_calls[-1]["workspace"] == workspace
+        assert fake_client.close_calls == 0
+    finally:
+        if connected is not None:
+            await connected.disconnect()
+        fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "replacement, lookup_expected",
+    [
+        ({"provider": "other"}, False),
+        ({"endpoint": "other:8080"}, False),
+        ({"workspace": "other"}, False),
+        ({"sandbox_id": "replaced"}, True),
+        ({"name": "replaced"}, True),
+    ],
+)
+async def test_reconnect_rejects_changed_gateway_or_identity(make_provider, fake_client, replacement, lookup_expected):
+    provider = make_provider()
+    descriptor = await provider.serialize_handle(_make_handle())
+    try:
+        message = "sandbox identity changed" if lookup_expected else "same gateway and workspace"
+        with pytest.raises(ValueError, match=message):
+            await provider.connect({**descriptor, **replacement})
+        assert len(fake_client.get_calls) == int(lookup_expected)
+    finally:
+        await provider.aclose()
