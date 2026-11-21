@@ -365,6 +365,11 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Harbor fills them from its own environment. A secret no template names is passed nowhere. They never
     # enter a sandbox's creation environment, the agent's turn, a task folder or a row.
     secrets: dict[str, str] = Field(default_factory=dict)
+    # The run's verifier variables, as Harbor's job-level `verifier.env`: merged over the task's (and a step's)
+    # `[verifier].env`, these winning, then resolved as the task's are (`${NAME}`, written `\${NAME}` in YAML so
+    # that Hydra leaves it alone, is filled from `secrets`, then the process environment). Like the task's own, they
+    # reach the `test.sh` process only, never the agent's sandbox, the seed or the agent's turn.
+    verifier_env: dict[str, str] = Field(default_factory=dict)
     # Give every episode the time budget of its task instead of the run-wide `default_episode_timeout_seconds`
     # alone: once its sandbox is ready, `harness_setup_allowance_s`, `[agent].timeout_sec`, every
     # `[[verifier.collect]]` hook's `timeout_sec` with its grace, `[verifier].timeout_sec` and the verifier
@@ -401,7 +406,7 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # The job-level Compose overlay, as Harbor's `extra_docker_compose`, `agents[].mcp_servers` and
     # `prompt_template_path` together: Compose `files` merged onto every task's Compose group (a plain image task
     # becomes the one-service group `main` first), `mcp_servers` merged by name with the task's own and granted
-    # with them, and a `prompt_template` rendered around the instruction of the episode's first turn. Prepare
+    # with them, and a `prompt_template` rendered around the instruction of every turn of the episode. Prepare
     # reads the same block, so the overlay's images are recorded and its merge checked with the tasks'.
     compose_overlay: HarborComposeOverlay | None = None
 
@@ -873,9 +878,10 @@ class HarborEnvironmentServer(
         cleanup.register_cleanup("harbor episode key", release_key)
         cleanup.register_cleanup("harbor sandbox", close_sandbox)
         try:
-            # The job-level prompt template wraps the first turn's instruction before anything is provisioned: the
-            # harness, the transcript export and the result all see the rendered instruction, as Harbor's agent
-            # renders it before its first turn. A template that does not render is the configuration's fault.
+            # The job-level prompt template wraps every turn's instruction before anything is provisioned: the
+            # harness, each turn's transcript export and the result all see the rendered instruction, as Harbor's
+            # agent renders it around each instruction it is handed. A template that does not render is the
+            # configuration's fault.
             request = self._with_prompt_template(request)
         except ComposeOverlayError as error:
             raise self._failure(stage="seed", failure_reason=str(error), terminal=True)
@@ -966,18 +972,17 @@ class HarborEnvironmentServer(
         )
 
     def _with_prompt_template(self, request: HarborEpisodeRequest) -> HarborEpisodeRequest:
-        """``request`` with the overlay's prompt template rendered around the instruction of its first turn.
+        """``request`` with the overlay's prompt template rendered around the instruction of every turn.
 
-        Harbor's agent renders ``prompt_template_path`` around the instruction it is given
-        (``render_prompt_template``, ``{{ instruction }}`` with ``StrictUndefined``); here the environment
-        server does it once, on the first turn's user message, so every harness sees the same rendered
-        instruction and the first turn's ATIF transcript (the one its verifier reads) carries it. The template was
-        read and compiled when the block was read (``HarborComposeOverlay.compile_template``); each episode renders
-        that compiled template (``render_instruction``), with no file read or parse on the event loop. A single-turn
-        result's ``responses_create_params`` is the rendered request; a multi-step result records the last turn's
-        params, so its rendered first turn is in that turn's transcript only (recording each turn's params on the
-        turn result is a follow-up with M34). Later turns of a multi-step task are sent as written (wrapping each
-        turn is a parked follow-up). Without a template the request is returned as it is.
+        Harbor's agent renders ``prompt_template_path`` around every instruction it is given
+        (``render_prompt_template``, ``{{ instruction }}`` with ``StrictUndefined``), and a multi-step trial hands
+        its agent each step's instruction, so every step of a fresh-session run sees the template. Here the
+        environment server does it on each turn's user message, so every harness sees the same rendered instruction
+        and each turn's ATIF transcript (the one its verifier reads) carries it. The template was read and compiled
+        when the block was read (``HarborComposeOverlay.compile_template``); each episode renders that compiled
+        template (``render_instruction``), with no file read or parse on the event loop. A single-turn result's
+        ``responses_create_params`` is the rendered request; a multi-step result records the last turn's rendered
+        params. Without a template the request is returned as it is.
         """
         overlay = self.config.compose_overlay
         if overlay is None or overlay.prompt_template is None:
@@ -997,8 +1002,8 @@ class HarborEnvironmentServer(
         request = request.model_copy(deep=True)
         task_input = request.task.task_input
         if task_input.turns:
-            first = task_input.turns[0]
-            first.responses_create_params = wrapped(first.responses_create_params)
+            for turn in task_input.turns:
+                turn.responses_create_params = wrapped(turn.responses_create_params)
         else:
             task_input.responses_create_params = wrapped(task_input.responses_create_params)
         return request
@@ -1848,7 +1853,9 @@ class HarborEnvironmentServer(
         # Fail before provisioning; retain templates in the snapshot and resolve at use time. Only the task.toml
         # layers are templates: a Dockerfile ENV in task.env is the literal docker build left (`_task_sandbox_env`).
         resolve_env_templates(task.config.environment.env)
-        resolve_env_templates(task.config.verifier.env, self.config.secrets)
+        # The verifier's variables as `_verifier_env` resolves them: the run's `verifier_env` over the task's, so a
+        # task template the run overrides is never filled, as in Harbor.
+        resolve_env_templates(task.config.verifier.env | self.config.verifier_env, self.config.secrets)
         if task.config.verifier.environment is not None:
             resolve_env_templates(task.config.verifier.environment.env)
         # The separate verifier's user is as static as its image: a `name:group` the provider cannot run as fails
@@ -1871,8 +1878,9 @@ class HarborEnvironmentServer(
             )
         for turn in task.turns:
             # The sources the turn's verifier resolves its env from (`_verifier_env`: the server's secrets, then the
-            # process environment), so a judge key only `secrets` supplies passes here as it does at the task level.
-            resolve_env_templates(turn.config.verifier.env, self.config.secrets)
+            # process environment, under the run's `verifier_env`), so a judge key only `secrets` supplies passes here
+            # as it does at the task level.
+            resolve_env_templates(turn.config.verifier.env | self.config.verifier_env, self.config.secrets)
             # A step's own agent user is installed for its turn (`_apply_turn_user`); a pair the provider cannot
             # apply is refused before the earlier turns are paid for, as the task's own `[agent].user` is.
             self._refuse_unsupported_group(task, turn.config.agent.user, where=f" step {turn.name!r}")

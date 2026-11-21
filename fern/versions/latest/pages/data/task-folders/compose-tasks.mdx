@@ -206,7 +206,7 @@ harbor_environment_server:
 | --- | --- |
 | `files` | Merged in order onto each task's Compose document, as Compose merges `-f` files, `!reset` and `!override` included. An image-only task first becomes a one-service group, `main`. |
 | `mcp_servers` | Merged by name with the task's `[[environment.mcp_servers]]`. The overlay wins on a name. The entries count as the task's own, so a harness that does not start task tool servers is refused for every task unless they are granted (see [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool)). |
-| `prompt_template` | A Jinja2 file using `{{ instruction }}`, rendered around the first turn's instruction. |
+| `prompt_template` | A Jinja2 file using `{{ instruction }}`, rendered around every turn's instruction. |
 
 - Write absolute paths. Relative paths inside an overlay file resolve against the task's `environment/` folder.
 - In an overlay file, `compose_variables` win over the task's own sources, so a task cannot redirect an overlay

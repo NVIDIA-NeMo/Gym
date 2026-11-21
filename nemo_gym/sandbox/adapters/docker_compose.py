@@ -1056,6 +1056,9 @@ class AsyncSandboxCompose:
                     with tempfile.TemporaryDirectory() as temp:
                         path = Path(temp) / "run.sh"
                         path.write_text(script)
+                        # The upload keeps the file's mode, and the server's umask (0027, say) can leave it unreadable
+                        # to a service that runs as a user other than root.
+                        path.chmod(0o644)
                         await self.services[name].upload(path, runtime + "/run.sh")
                     # Keep the exec request alive: some providers reap background
                     # children as soon as their launching shell exits.

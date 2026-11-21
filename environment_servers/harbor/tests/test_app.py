@@ -4180,6 +4180,7 @@ def test_server_config_holds_only_deployment_settings():
         "verifier_grace_s",
         "artifacts_dir",
         "secrets",
+        "verifier_env",
         "enforce_task_timeouts",
         "harness_setup_allowance_s",
         "step_setup_timeout_s",
@@ -4698,6 +4699,64 @@ class TestGeneralization:
         # Nothing else saw them: the sandbox's own environment, the seed and the agent's turn.
         assert "sk-judge" not in str(server._sandbox_spec(task, "/app").env)
         assert "sk-judge" not in str([call[2] for call in server.server_client.calls])
+
+    async def test_the_runs_verifier_env_overrides_the_tasks_and_reaches_the_test_sh_process_only(
+        self, tmp_path, monkeypatch
+    ):
+        """Harbor's job-level `verifier.env`: merged over the task's `[verifier].env`, the run's values winning, its
+        `${NAME}` templates filled from the secrets block, and like the task's own seen by test.sh alone."""
+        monkeypatch.delenv("JUDGE_KEY", raising=False)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        server, task, sandbox, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            toml=SECRET_TOML,
+            secrets={"JUDGE_KEY": "sk-judge"},
+            verifier_env={"MODE": "operator-mode", "REWARDKIT_JUDGE": "openai/judge-model", "KEY": "${JUDGE_KEY}"},
+        )
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        verifier_exec = next(
+            call for call in sandbox.execs if "test.sh" in call["command"] and "timeout" in call["command"]
+        )
+        assert verifier_exec["env"] == {
+            "JUDGE": "sk-judge",
+            "MODE": "operator-mode",
+            "REWARDKIT_JUDGE": "openai/judge-model",
+            "KEY": "sk-judge",
+        }
+        # The task file is not changed, and nothing but test.sh saw the run's values.
+        assert task.config.verifier.env == {"JUDGE": "${JUDGE_KEY}", "MODE": "strict"}
+        for value in ("operator-mode", "openai/judge-model", "sk-judge"):
+            assert value not in str(server._sandbox_spec(task, "/app").env)
+            assert value not in str([call[2] for call in server.server_client.calls])
+        assert not any(
+            "openai/judge-model" in str(call.get("env")) for call in sandbox.execs if call is not verifier_exec
+        )
+
+    async def test_a_task_verifier_template_the_run_overrides_is_never_filled(self, tmp_path, monkeypatch):
+        """A task's `JUDGE = "${JUDGE_KEY}"` that the run's `verifier_env` replaces needs no `JUDGE_KEY`: as in Harbor,
+        the merged variables are resolved, so the seed check passes and test.sh gets the run's value."""
+        monkeypatch.delenv("JUDGE_KEY", raising=False)
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=SECRET_TOML)
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+        # Without the override the missing key fails the seed, before any sandbox.
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and "JUDGE_KEY" in response.failure.failure_reason
+
+        server.config.verifier_env = {"JUDGE": "run-judge"}
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        verifier_exec = next(
+            call for call in sandbox.execs if "test.sh" in call["command"] and "timeout" in call["command"]
+        )
+        assert verifier_exec["env"] == {"JUDGE": "run-judge", "MODE": "strict"}
 
     async def test_secret_templates_outside_the_verifier_are_not_filled(self, tmp_path, monkeypatch):
         monkeypatch.delenv("JUDGE_KEY", raising=False)

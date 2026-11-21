@@ -189,7 +189,8 @@ class HarborTask:
     ``docker_image`` (Harbor's prebuilt verifier). Every other separate-mode shape loads with a verifier image or not
     at all: a task whose effective verifier environment names no image and ships no ``tests/Dockerfile`` is refused as
     Harbor refuses it, and one whose ``tests/Dockerfile`` has no recorded build is refused like an unrecorded
-    ``environment/`` build (:func:`load_task`).
+    ``environment/`` build (:func:`load_task`). A multi-step task whose verifier environment names no image builds
+    its separate verifiers per step, onto its turns (:attr:`HarborTurn.verifier_image`), so this one is ``None`` for it.
 
     ``context_id`` is Harbor's environment id of ``environment/`` (:func:`~nemo_gym.data.tasks.harbor.digest.context_digest`,
     the key of ``built-images.json`` and the body of the ``hb__<hash>`` image names), computed once here for every
@@ -655,11 +656,13 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         recorded_builds()
 
     # The separate verifier's image, by Harbor's rules (effective_verifier_environment, verifier_build_context): a
-    # separate-mode task loads with an image for its verifier or not at all, as Harbor runs it or refuses it.
+    # separate-mode task loads with an image for its verifier or not at all, as Harbor runs it or refuses it. A
+    # multi-step task builds no verifier of its own: each separate step's image is built from the folder that step
+    # starts from and resolved below (_resolve_turn_verifiers), so only a declared image is read here for it.
     verifier_image: str | None = None
     verifier_image_config: BaseImageConfig | None = None
     verifier_environment = effective_verifier_environment(config)
-    if verifier_environment is not None:
+    if verifier_environment is not None and (not turns or verifier_environment.docker_image):
         # A file the two readers below cannot read as written (not YAML, not a mapping, or a top-level key other than
         # services, an include whose files Compose merges into Harbor's verifier project or a networks block that
         # reshapes its default network) is refused before they read the services mapping alone.
@@ -946,9 +949,9 @@ def _resolve_turn_verifiers(
     Harbor starts a step's separate verifier from ``steps/<name>/tests/`` when that folder exists, else from
     ``tests/`` (``_verifier_env_build_context``), with the step's effective environment
     (:func:`step_verifier_environment`): a declared ``docker_image`` is run as it is, otherwise the folder's
-    ``Dockerfile`` is built. Prepare builds ``tests/Dockerfile`` only, so a step whose verifier would be built from
-    its own ``steps/<name>/tests/`` is refused naming the image to declare; one built from ``tests/`` reads the
-    recorded build, as the task's does. The ``docker-compose.yaml`` of the folder the step starts from (the step's
+    ``Dockerfile`` is built. Prepare builds each such folder (:func:`verifier_build_contexts`) and records its image
+    under the folder's digest, which the step reads here; a folder without a ``Dockerfile`` and a build that was not
+    recorded are refused as the task's verifier is. The ``docker-compose.yaml`` of the folder the step starts from (the step's
     own ``tests/`` or the task's, which Harbor stacks on the step verifier's template, ``_docker_compose_paths``) is
     refused as the task's verifier's is: one that is not read as written (not valid YAML, not a mapping, or carrying a
     top-level key other than ``services``, ``name``, ``version`` and ``x-`` extensions, an ``include`` or a ``networks``
@@ -995,20 +998,15 @@ def _resolve_turn_verifiers(
             # with a docker_image runs the task's own image (verifier_image stays None), as for a single-step task.
             if turn.config.verifier.environment is not None or config.verifier.environment is not None:
                 verifier_image = environment.docker_image
-        elif context != path / TESTS_DOCKERFILE.parent:
-            raise HarborTaskError(
-                f"{where}: the step's separate verifier names no docker_image, so Harbor builds it from "
-                f"{context / TESTS_DOCKERFILE.name} (the step's own tests/ folder is its environment dir); this server "
-                "builds tests/Dockerfile only. Declare [steps.verifier.environment].docker_image (or "
-                "[verifier.environment].docker_image) with a prebuilt image"
-            )
         else:
-            if not (path / TESTS_DOCKERFILE).is_file():
-                raise _verifier_definition_required(path)
+            # The folder the step starts from, the step's own tests/ or the task's, is built (the two refusals name
+            # its Dockerfile: context is always a folder named tests/).
+            if not (context / TESTS_DOCKERFILE.name).is_file():
+                raise _verifier_definition_required(context.parent)
             verifier_record = read_built_images(root).get(context_digest(context))
             verifier_image = recorded_service_images(verifier_record).get(VERIFIER_SERVICE)
             if verifier_image is None:
-                raise _verifier_build_required(path, root)
+                raise _verifier_build_required(context.parent, root)
         verifier_image_config: BaseImageConfig | None = None
         if verifier_image is not None:
             if image_configs is None:
