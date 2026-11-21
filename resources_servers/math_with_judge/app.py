@@ -472,7 +472,10 @@ Example output: "My final verdict is different [[A!=B]]"."""
             verification_response = _prepare_format_tolerant_response(generated_answer)
 
         answer_candidate = _extract_last_boxed_answer(verification_response)
-        if answer_candidate is None and self.config.format_tolerant_answer_extraction:
+        if answer_candidate is not None:
+            # math-verify scores nearby earlier boxes as a set, so pass only the final one.
+            verification_response = "\\boxed{" + answer_candidate + "}"
+        elif self.config.format_tolerant_answer_extraction:
             answer_candidate = _extract_unboxed_answer_candidate(verification_response)
             # Grade only the selected final answer. Parsing the full response can
             # award credit for a conflicting intermediate number or earlier label.
