@@ -1,0 +1,51 @@
+---
+title: "Environment Reports"
+description: "Eval-first onboarding evidence for NeMo Gym environments: task inventories, curated eval tiers, metric contracts, and baseline reproduction plans"
+position: 1
+---
+
+# Environment Reports
+
+Environments in NeMo Gym start with `verified: false`. Before an environment is
+trusted for evaluation or training, it goes through **eval-first onboarding**:
+a code-level audit of the integration and its pinned upstream, a verified
+extraction of the canonical paper's protocol and baselines, curated eval task
+tiers with a defensible metric contract, a paper-reproduction (harness-parity)
+experiment plan, and a targeted expert-review package. The pages in this
+section are the durable evidence produced by that process.
+
+Every claim in these reports carries a provenance tag:
+
+| Tag | Meaning |
+|-----|---------|
+| `MEASURED` | Number produced by a run, citing the artifact on disk |
+| `STRUCTURAL` | Fact read from code, citing `file:line` |
+| `PRIOR` | Claim from a paper or external source fetched and verified during the engagement |
+| `PLACEHOLDER` | A role in the design with no data behind it yet |
+
+<Note>
+No statement about how a specific model performs on an environment is made
+without `MEASURED` or `PRIOR` backing.
+</Note>
+
+<Cards>
+  <Card title="TALES" href="/main/environment-reports/tales">
+    Text-adventure suite (TextWorld, TextWorldExpress, ALFWorld, ScienceWorld,
+    Jericho) — task inventory, eval tiers, metric contract, and reproduction
+    protocol.
+
+    <Badge minimal outlined>122 tasks</Badge> <Badge intent="warning" minimal outlined>verified: false</Badge>
+  </Card>
+  <Card title="TALES Onboarding Report" href="/main/environment-reports/tales-onboarding-report">
+    Full engagement report: integration-gap findings, required server fixes,
+    devil's-advocate verdicts, and the deferred baseline runbook.
+
+    <Badge minimal outlined>2026-07-09</Badge> <Badge intent="info" minimal outlined>design-only</Badge>
+  </Card>
+  <Card title="TALES Expert Review Package" href="/main/environment-reports/tales-expert-review">
+    Review rubric, stratified trajectory sampling plan, and anomaly triggers
+    that make manual expert review targeted instead of exhaustive.
+
+    <Badge intent="note" minimal outlined>awaiting sign-off</Badge>
+  </Card>
+</Cards>

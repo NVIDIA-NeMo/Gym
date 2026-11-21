@@ -59,6 +59,18 @@ Example row (`data/example.jsonl`):
  "agent_ref": {"type": "responses_api_agents", "name": "tales_gymnasium_agent"}}
 ```
 
+## Eval datasets & onboarding
+
+Curated eval tiers live in `data/`: `smoke.jsonl` (5 rows, wiring only),
+`eval_v0.jsonl` (64, provisional curated tier), `eval_full.jsonl` (95, test-clean
+universe), and `paper_parity.jsonl` (122, full paper populations incl. all 54
+jericho games — harness-parity runs only, pools jericho train+test). Regenerate
+deterministically with `scripts/generate_eval_datasets.py` (run inside this
+server's venv). Task inventory, metric contract (normalized running highscore —
+never the summed rollout `reward`), split-enforcement caveats, and the
+paper-reproduction protocol are documented in the docs site under
+**Environment Reports → TALES** (`fern/versions/latest/pages/environment-reports/`).
+
 ## Reward & walkthroughs
 
 Reward comes from the underlying Gymnasium env. For `textworld` the env reports a
