@@ -14,7 +14,7 @@ from typing import Any
 
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import ConfigDict, PositiveFloat, PositiveInt, model_validator
+from pydantic import ConfigDict, Field, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
 from nemo_gym.client import get_response_json, raise_for_status
@@ -64,6 +64,7 @@ class LegacyAgentEnvironmentServerConfig(BaseEnvironmentServerConfig):
     model_config = ConfigDict(extra="forbid")
 
     agent_server: AgentServerRef
+    agent_run_max_transport_attempts: int | None = Field(default=None, strict=True, ge=1, le=1)
 
     # The episode deadline bounds the relayed `/run` call, six hours by default like the other Environment Servers.
     # `null` removes it, leaving the agent's own limits as the only ones. A relay enforces none of the other limits.
@@ -129,6 +130,11 @@ class LegacyAgentEnvironmentServer(BaseEnvironmentServer):
                     data=data,
                     headers=dict(_relayed_headers(request.headers.items())),
                     cookies=request.cookies,
+                    **(
+                        {"_max_num_tries": 1, "_resend_after_disconnect": False}
+                        if self.config.agent_run_max_transport_attempts == 1
+                        else {}
+                    ),
                 )
                 body = await upstream.read()
         except TimeoutError as error:
