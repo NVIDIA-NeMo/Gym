@@ -58,6 +58,21 @@ def _messages(*commands: str) -> list[dict]:
     return messages
 
 
+def _custom_messages(*calls: tuple[str, str]) -> list[dict]:
+    """A conversation in which each assistant turn made one custom tool call, given as (name, input)."""
+    messages: list[dict] = [{"role": "user", "content": "go"}]
+    for i, (name, tool_input) in enumerate(calls):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": f"call-{i}", "type": "custom", "custom": {"name": name, "input": tool_input}}],
+            }
+        )
+        messages.append({"role": "tool", "tool_call_id": f"call-{i}", "content": "ok"})
+    return messages
+
+
 async def _chat(messages: list[dict], **guards: Any) -> tuple[NeMoGymChatCompletion, AsyncMock]:
     server = _make_model(**guards)
     upstream = NeMoGymChatCompletion(
@@ -134,3 +149,25 @@ async def test_other_conversations_pass_through(commands: tuple[str, ...], guard
     assert result.choices[0].message.content == "from the engine"
     upstream.assert_awaited_once()
     assert upstream.await_args.kwargs.get("tool_choice") != "none"
+
+
+async def test_differing_custom_tool_calls_reach_the_engine() -> None:
+    """Custom calls with other names or inputs are progress, not a loop."""
+    for calls in (
+        (("apply_patch", "a"), ("apply_patch", "b"), ("apply_patch", "c")),  # same tool, different inputs
+        (("apply_patch", "a"), ("run_tests", "a"), ("apply_patch", "a")),  # different tools, same input
+    ):
+        result, upstream = await _chat(_custom_messages(*calls), guard_identical_tool_calls=3)
+
+        assert result.choices[0].message.content == "from the engine", calls
+        upstream.assert_awaited_once()
+
+
+async def test_identical_custom_tool_calls_end_the_conversation() -> None:
+    result, upstream = await _chat(
+        _custom_messages(("apply_patch", "a"), ("apply_patch", "x"), ("apply_patch", "x"), ("apply_patch", "x")),
+        guard_identical_tool_calls=3,
+    )
+
+    assert "same tool call" in result.choices[0].message.content
+    upstream.assert_not_awaited()

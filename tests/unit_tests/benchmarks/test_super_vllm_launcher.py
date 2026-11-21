@@ -230,6 +230,66 @@ getent() { printf '10.0.0.1 node0\n'; }
                     else:
                         self.assertNotIn("mooncake_endpoint", metrics)
 
+    MULTINODE_ENV = {
+        "VLLM_MODE": "aggregated",
+        "VLLM_AGGREGATED_MULTINODE": "1",
+        "NUM_NODES": "4",
+        "NUM_PREFILL_NODES": "",
+        "NUM_DECODE_NODES": "",
+    }
+
+    def test_multinode_aggregated_metrics_scrape_only_the_api_node(self) -> None:
+        """One multi-node engine has one API server on node 0; the headless ranks expose nothing to scrape."""
+        for env, expected in ((self.MULTINODE_ENV, 1), ({"VLLM_MODE": "aggregated", "NUM_NODES": "4"}, 8)):
+            with self.subTest(env=env), TemporaryDirectory() as temporary_dir:
+                command, _ = self.generate_commands(env=env)
+                start = 'read -r -a nodes <<< "$ALL_NODES"'
+                setup = start + command.split(start, 1)[1].split("gym_config_args+=(--config", 1)[0]
+                config_path = Path(temporary_dir) / "metrics.yaml"
+                status, _, stderr = self.run_shell(
+                    setup, env={"inference_metrics_config": str(config_path), "ROUTER_NODE": "separate-router"}
+                )
+                self.assertEqual(status, 0, stderr)
+                endpoints = yaml.safe_load(config_path.read_text())["inference_metrics"]["endpoints"]
+                self.assertEqual(len(endpoints), expected)
+                if expected == 1:
+                    [endpoint] = endpoints.values()
+                    self.assertRegex(endpoint, r"^http://node0:\d+/metrics$")
+
+    def test_multinode_warmup_waits_for_node_zero_but_dumps_every_node(self) -> None:
+        """Readiness names only the API node; the headless ranks' compiled caches are still exported."""
+        env = self.MULTINODE_ENV | {"SAVE_WARMED_CONTAINER": f"{self.workdir}/new.sqsh"}
+        _, _, batch, _ = self.capture_submission(env=env)
+
+        wait_start = "    cache_urls=()"
+        discovery = wait_start + batch.split(wait_start, 1)[1].split('    python3 -c "$warm_cache_helper" wait', 1)[0]
+        status, stdout, stderr = self.run_shell(
+            "set -euo pipefail\nnodes=(node0 node1 node2 node3)\n"
+            + discovery
+            + "printf '%s\\n' \"${cache_urls[@]}\"\n"
+        )
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(len(stdout.split()), 1)
+        self.assertTrue(stdout.startswith("http://node0:"), stdout)
+
+        dump_start = "    cache_export_dir=$(mktemp -d "
+        transfer = (
+            dump_start + batch.split(dump_start, 1)[1].split('    test -s "$cache_export_dir/warmed.sqsh"', 1)[0]
+        )
+        status, _, stderr = self.run_shell(
+            "set -euo pipefail\nnodes=(node0 node1 node2 node3)\nworker_container=test\nserver_step=123\n"
+            "kill() { :; }\nwait() { :; }\n"
+            "srun() { printf '%s\\0' \"$@\" >&2; printf '\\0' >&2; }\n" + transfer,
+            env={"warm_cache_helper": "helper code"},
+        )
+        self.assertEqual(status, 0, stderr)
+        calls = [call.split("\0") for call in stderr.removesuffix("\0\0").split("\0\0")]
+        self.assertEqual(len(calls), 5)  # a dump on each of the four nodes, then the install
+        self.assertEqual(
+            [c[c.index("--nodelist=node%d" % n)] for n, c in enumerate(calls[:4])],
+            [f"--nodelist=node{n}" for n in range(4)],
+        )
+
     def test_mooncake_storage_modes_and_cleanup(self) -> None:
         """Execute generated setup with stub services; SSD work requires explicit opt-in."""
         cases = (

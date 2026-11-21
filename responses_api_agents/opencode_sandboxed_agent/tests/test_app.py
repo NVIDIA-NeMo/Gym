@@ -3639,3 +3639,117 @@ async def test_finish_instruction_is_appended_to_the_first_prompt(tmp_path: Path
         assert shlex.quote(expected) in first
         # on stdin, not as an argument: OpenCode would wrap an argument containing a space in literal double quotes
         assert f"printf '%s' {shlex.quote(expected)} |" in first and " -- " not in first
+
+
+def _resume_world(tmp_path: Path, monkeypatch: MonkeyPatch, resume_error: BaseException | None = None):
+    """A server with idle_nudge, opencode_env and a required tool server, and a sandbox that stops idle once."""
+    commands: List[str] = []
+    written: Dict[str, str] = {}
+    checks = [
+        _export([{"type": "text", "text": "Next I will write the tests."}], finish="stop"),
+        _export([{"type": "text", "text": "TASK_COMPLETE"}], finish="stop"),
+    ]
+
+    async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+        commands.append(command)
+        ok = lambda out="": SimpleNamespace(stdout=out, stderr="", return_code=0, error_type=None)  # noqa: E731
+        if "session list" in command:
+            return ok('[{"id": "ses_main"}]')
+        if "opencode export" in command:
+            remote = command.rsplit("> ", 1)[1].strip()
+            written[remote] = json.dumps(checks.pop(0) if "idle_check" in remote else _session("ses_main", [10], []))
+            return ok()
+        if "opencode run --session" in command and resume_error is not None:
+            raise resume_error
+        return ok("Shell: /bin/bash\nOpenCode run finished")
+
+    uploaded: Dict[str, bytes] = {}
+
+    async def upload(local: Path, remote: str) -> None:
+        uploaded[remote] = Path(local).read_bytes()  # the plugin uploads are read back and compared
+
+    async def download(remote: str, local: Path) -> None:
+        if remote in uploaded:
+            Path(local).write_bytes(uploaded[remote])
+        else:
+            Path(local).write_text(written[remote])
+
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(side_effect=exec_)
+    sandbox.upload = AsyncMock(side_effect=upload)
+    sandbox.download = AsyncMock(side_effect=download)
+    config = (
+        TestOpenCodeSandboxedAgent()
+        ._create_config()
+        .model_copy(
+            update={
+                "artifacts_dir": str(tmp_path),
+                "sandbox_timeout": 3600,  # a nudge needs a minute of budget left
+                "idle_nudge": app_module.IdleNudgeConfig(text="go on", stop_on_text="TASK_COMPLETE"),
+                "opencode_env": {"SEARCH_KEY": "a b"},
+                "tool_servers": [ResourcesServerRef(type="resources_servers", name="tools")],
+            }
+        )
+    )
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+    request = MagicMock(session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"})
+    request.state = SimpleNamespace(_ng_opencode_mcp={})
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "build it"}])
+    return server, request, body, commands
+
+
+async def test_resume_runs_with_the_environment_of_the_first_launch(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, body, commands = _resume_world(tmp_path, monkeypatch)
+
+    await server.responses(request=request, body=body)
+
+    [first] = [c for c in commands if "opencode run --title" in c]
+    [resume] = [c for c in commands if "opencode run --session" in c]
+    shared = (
+        "SEARCH_KEY='a b'",  # opencode_env
+        "NEMO_GYM_REQUIRED_MCP_SERVERS='[\"tools\"]'",  # the required-MCP list
+        "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000",
+    )
+    for value in shared:
+        assert value in first, value
+        assert value in resume, value
+
+
+@mark.parametrize(
+    "error",
+    [sandbox_unavailable("provider down"), OSError("connection reset")],
+    ids=["typed_provider_failure", "oserror"],
+)
+async def test_a_failed_resume_is_an_attributed_failure_not_a_short_attempt(
+    tmp_path: Path, monkeypatch: MonkeyPatch, error: BaseException
+) -> None:
+    server, request, body, commands = _resume_world(tmp_path, monkeypatch, resume_error=error)
+
+    with raises(NgFailureEvent) as caught:
+        await server.responses(request=request, body=body)
+
+    if isinstance(error, NgFailureEvent):
+        assert caught.value is error
+    else:
+        assert caught.value.operation == "opencode.execute" and caught.value.__cause__ is error
+    assert not any("TASK_COMPLETE" in c for c in commands)  # nothing after the failed resume ran
+    assert server._sandbox_id_to_run_result == {}  # no row was recorded, so there is nothing to send to /verify
+
+
+async def test_a_resume_that_times_out_keeps_its_partial_work_path() -> None:
+    nudge = TestIdleNudge()
+    sandbox = nudge._sandbox([_export([{"type": "reasoning", "text": "cut"}])])
+    inner = sandbox.exec.side_effect
+
+    async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+        if "opencode run --session" in command:
+            return SimpleNamespace(stdout="", stderr="", return_code=124, error_type="timeout")
+        return await inner(command, **kwargs)
+
+    sandbox.exec = AsyncMock(side_effect=exec_)
+
+    result, nudges = await nudge._run(nudge._server(1), sandbox, nudge.FIRST)
+
+    assert nudges == 1 and result.error_type == "timeout"  # returned as a result, not raised

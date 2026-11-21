@@ -47,14 +47,17 @@ def _tool_call_signature(message: Dict[str, Any]) -> Optional[tuple]:
         return None
     parts = []
     for call in calls:
-        function = call.get("function") or {}
-        arguments = function.get("arguments")
+        # A function call carries its name and JSON arguments; a custom tool call its name and free-form input.
+        # Reading only "function" would give every custom call the same (None, null) signature, and a conversation
+        # that is making progress with differing custom calls would be stopped as a loop.
+        payload = call.get("function") or call.get("custom") or {}
+        arguments = payload.get("arguments", payload.get("input"))
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
             except ValueError:
                 pass
-        parts.append((function.get("name"), json.dumps(arguments, sort_keys=True, default=str)))
+        parts.append((call.get("type"), payload.get("name"), json.dumps(arguments, sort_keys=True, default=str)))
     return tuple(parts)
 
 

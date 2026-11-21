@@ -266,6 +266,10 @@ read -r -a nodes <<< "\$ALL_NODES"
             (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
             continue
         fi
+        # One multi-node engine: node 0 serves the API; every other rank is headless and has no endpoint to scrape.
+        if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 ]] && (( node_index != 0 )); then
+            continue
+        fi
         for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
             replica_index=\$(( node_index * $VLLM_ENGINES_PER_NODE + engine_index ))
             worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
@@ -1157,6 +1161,11 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     for (( node_index = 0; node_index < \${#nodes[@]}; node_index++ )); do
         if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
             (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
+            continue
+        fi
+        # One multi-node engine: only node 0 serves the API, so only it is waited on. The caches of every node,
+        # headless ranks included, are still dumped below.
+        if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 ]] && (( node_index != 0 )); then
             continue
         fi
         for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do

@@ -9,7 +9,7 @@ One resources server (`resources_servers/nl2repobench`) serves every combination
 | Internal held-out sets (verified-50, legacy 75-task) | 50 / 75 | not in Gym: kept in the internal nl2repo repo (`benchmarks/`), linked into `Gym/benchmarks/` by its launchers | same resources server and configs layout |
 
 ## Harnesses (pick one config per dataset)
-- **opencode** (`responses_api_agents/opencode_sandboxed_agent`): auto-compacts its context near the declared window (524K here).
+- **opencode** (`responses_api_agents/opencode_sandboxed_agent`): no compaction and no pruning (`compaction.auto: false`, `prune: false` in `opencode.yaml`), so a conversation that outgrows the declared 524288-token window (`opencode_max_context_window`) ends the run with a context error instead of being summarised. It continues an idle session with `idle_nudge` (finish with `TASK_COMPLETE`), ends a looping one with `stuck_detector`, and holds OpenCode's 500-step cap as one budget across resumes.
 - **OpenHands SDK 1.50** (`responses_api_agents/openhands_sdk_sandboxed_agent`): native tool calls, no condenser (no compaction). Needs an offline bundle (`build_bundle.sh`, then
   `++nl2repobench_opencode_sandboxed_agent.responses_api_agents.openhands_sdk_sandboxed_agent.bundle_path=...`) for `block_target_v2` and `no_internet_preinstalled`.
 
