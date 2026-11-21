@@ -29,6 +29,10 @@ class AutomationBenchEnv(UpstreamAutomationBenchEnv):
         }
         for name, description in descriptions.items():
             properties[name] = {"type": "object", "description": description}
+        # Strict function calling requires every object to list all its keys and forbid others, so it cannot
+        # describe free-form query parameters or request bodies. api_fetch is sent non-strict; the other tools keep
+        # their strict schemas.
+        api_fetch.strict = False
 
     def update_tool_args(self, tool_name, tool_args, messages, state, **kwargs):
         updated = super().update_tool_args(tool_name, tool_args, messages, state, **kwargs)
