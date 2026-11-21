@@ -14,7 +14,7 @@ Top-level ``hash_id``/``dataset``/``source`` are provenance columns undeclared o
 request model (silently dropped in transit by pydantic's default extra='ignore').
 """
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,6 +24,7 @@ class UnitTests(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    type: Literal["unit-tests"] = Field(default="unit-tests", description="Test format; omitted means unit tests.")
     inputs: List[str] = Field(description="Stdin (or argument) payloads, one per test case.")
     outputs: List[str] = Field(description="Expected outputs, parallel to inputs.")
     fn_name: Optional[str] = Field(
@@ -32,6 +33,19 @@ class UnitTests(BaseModel):
             "Function name for call-based grading; absent/None means stdin/stdout grading. "
             "Absent from all committed example rows."
         ),
+    )
+
+
+class ResourceLimits(BaseModel):
+    """A task's own limits; app.py grades with this model too."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    time_limit_s: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False, description="Per test case; omitted uses the server's timeout."
+    )
+    memory_limit_mb: int | None = Field(
+        default=None, gt=0, description="Address space above the grading baseline; omitted keeps the 4 GB guard."
     )
 
 
@@ -45,6 +59,11 @@ class TaskData(BaseModel):
             "Optional[Dict]), but verify() hard-indexes it once the response is non-empty — a row "
             "without it crashes verify instead of scoring 0."
         ),
+        json_schema_extra={"consumed_by": ["verify"], "legacy_location": "verifier_metadata"},
+    )
+    resource_limits: ResourceLimits | None = Field(
+        default=None,
+        description="The task's own time and memory limits, applied independently instead of the server's.",
         json_schema_extra={"consumed_by": ["verify"], "legacy_location": "verifier_metadata"},
     )
     difficulty: Optional[str] = Field(

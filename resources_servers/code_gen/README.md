@@ -10,8 +10,13 @@ The dataset is in preparation and the example data can be found in `data/example
   - Use only a user message with the problem statement and instructions (e.g., "You are an expert competitive programmer...").
   - `verifier_metadata` (required):
     - `unit_tests` (required): dict with `inputs` and `outputs` arrays containing test cases.
+      - `type` (optional): `unit-tests`, the only format so far and the default when omitted.
       - `inputs`: list of strings representing stdin input for each test case
       - `outputs`: list of strings representing expected stdout output for each test case
+    - `resource_limits` (optional): the task's own limits. Each applies on its own; one left out keeps the server's.
+      - `time_limit_s`: seconds per test case, fractions allowed. Default: `unit_test_timeout_secs`.
+      - `memory_limit_mb`: memory for the candidate, see [Test execution](#test-execution). Default: none
+        beyond the fixed 4 GiB guard.
 
 **Notes**
 - All test cases must pass for a solution to receive a reward of 1.0
@@ -19,9 +24,13 @@ The dataset is in preparation and the example data can be found in `data/example
 
 ### Test execution
 Every candidate runs in a fresh provider sandbox using the LiveCodeBench harness: a per-test
-alarm of `unit_test_timeout_secs`, an overall deadline of
-`(unit_test_timeout_secs + 1) * num_tests + 5` seconds, 4 GiB `RLIMIT_DATA` and
-`RLIMIT_STACK`, and disabled destructive builtins. The stack limit cannot exceed the provider's hard limit.
+timer of the time limit, 4 GiB `RLIMIT_DATA` and `RLIMIT_STACK`, and disabled destructive builtins.
+The stack limit cannot exceed the provider's hard limit. The overall deadline is
+`(time_limit + 1) * num_tests + 5` seconds, plus one time limit for compilation when the task sets `time_limit_s`.
+
+A task's `memory_limit_mb` also caps address space (`RLIMIT_AS`) at the grading process's size before grading
+(harness, NumPy and test inputs) plus `memory_limit_mb`. The harness's per-test stdin copies, about 11 times the
+input, count against it. `metadata.memory` records the baseline and cap; without Linux's `/proc` the sample is masked.
 
 ### Running unit tests in a sandbox
 Configure a [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox)

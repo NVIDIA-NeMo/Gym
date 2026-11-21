@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from sandbox_execution import check_correctness_in_sandbox, exec_timeout_s
+from sandbox_execution import check_correctness_in_sandbox, exec_timeout_s, task_deadline_s
 
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
@@ -109,6 +109,19 @@ class TestSandboxLifecycle:
         assert spec.ttl_s > spec.ready_timeout_s + timeout_s
         assert provider.closed == 1
 
+    async def test_task_limits_reach_the_runner(self) -> None:
+        provider = _FakeProvider()
+        config = SandboxVerificationConfig(image="code-gen-verifier:test", resources={"cpu": 1, "memory_mib": 1024})
+        await _grade(provider, config=config, memory_limit_mb=512, deadline_s=task_deadline_s(3, 2))
+
+        (spec,) = provider.specs
+        request = json.loads(next(text for path, text in spec.files.items() if path.endswith("/request.json")))
+        assert (request["memory_limit_mb"], request["deadline_s"]) == (512, 3 + (3 + 1) * 2 + 5)
+        # The sandbox grows to hold the task's limit plus the runner and harness.
+        assert spec.resources.memory_mib == 512 + 2048
+        (_, timeout_s), *_ = provider.execs
+        assert timeout_s == request["deadline_s"] + 60
+
     async def test_malformed_result_is_verifier_error(self) -> None:
         provider = _FakeProvider(result_json='{"result": "not a list"}')
         with pytest.raises(SandboxVerificationError) as info:
@@ -140,6 +153,48 @@ class TestLocalProvider:
 
         timed_out, _ = await self._grade_locally(tmp_path, "while True:\n    pass")
         assert timed_out == [-3]
+
+    async def test_fractional_time_limits(self, tmp_path: Path) -> None:
+        slow = "import time\ntime.sleep(0.7)\nn=int(input())\nprint(n*n)"
+        for timeout, expected in [(0.5, [-3]), (1.5, [True, True])]:
+            result, _ = await check_correctness_in_sandbox(
+                _SAMPLE,
+                slow,
+                timeout,
+                False,
+                num_tests=2,
+                provider={"local": {}},
+                config=SandboxVerificationConfig(python=sys.executable),
+                metadata={},
+                work_dir=str(tmp_path / "work"),
+            )
+            assert result == expected
+
+    @pytest.mark.parametrize(
+        "deadline_s, expected",
+        # The task deadline leaves 8 s beyond the 2 s of work; a 1 s deadline stops it, where check_correctness's
+        # own (2 + 1) * 1 + 5 = 8 s would not.
+        [(task_deadline_s(2, 1), [True]), (1.0, [-1])],
+    )
+    async def test_a_task_deadline_covers_compilation_and_every_test(
+        self, tmp_path: Path, deadline_s: float, expected: list
+    ) -> None:
+        # Module-level code runs during compilation; it and the one call each take half the 2 s limit.
+        sample = {"input_output": json.dumps({"inputs": ["3"], "outputs": ["9"], "fn_name": "square"})}
+        generation = "import time\ntime.sleep(1)\n\n\ndef square(n):\n    time.sleep(1)\n    return n * n"
+        result, _ = await check_correctness_in_sandbox(
+            sample,
+            generation,
+            2,
+            False,
+            num_tests=1,
+            provider={"local": {}},
+            config=SandboxVerificationConfig(python=sys.executable),
+            metadata={},
+            work_dir=str(tmp_path / "work"),
+            deadline_s=deadline_s,
+        )
+        assert result == expected
 
     async def test_candidate_cannot_read_expected_outputs_from_the_request(self, tmp_path: Path) -> None:
         # The outputs have no relation to the inputs, so only a candidate that reads them can pass.
@@ -206,3 +261,21 @@ class TestDockerProvider:
         )
         assert result == [-4]
         assert metadata["error"] == "MemoryError()"
+
+    async def test_a_task_memory_limit_is_an_allowance_above_the_baseline(self) -> None:
+        docker_config = yaml.safe_load(
+            (_REPO_ROOT / "nemo_gym/sandbox/providers/docker/configs/docker.yaml").read_text()
+        )["sandbox"]["docker"]
+        allocate = "import numpy as np\nx = np.ones({} * 1024**2 // 8)\nn=int(input())\nprint(n*n)"
+        for megabytes, expected in [(192, [True, True]), (320, [-4])]:
+            result, metadata = await _grade(
+                {"docker": docker_config},
+                config=SandboxVerificationConfig(image=_DOCKER_IMAGE, resources={"cpu": 1, "memory_mib": 2048}),
+                generation=allocate.format(megabytes),
+                memory_limit_mb=256,
+            )
+            assert result == expected, metadata
+        assert "MemoryError" in metadata["error"]
+        memory = metadata["memory"]
+        assert memory["memory_policy"] == "address-space-above-baseline-v1"
+        assert memory["effective_address_space_limit_bytes"] - memory["baseline_address_space_bytes"] == 256 * 1024**2

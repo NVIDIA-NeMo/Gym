@@ -19,11 +19,12 @@ import logging
 import zlib
 from asyncio import Semaphore
 from time import time
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
-from sandbox_execution import check_correctness_in_sandbox
+from sandbox_execution import check_correctness_in_sandbox, task_deadline_s
+from task_data import ResourceLimits
 
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.metrics import (
@@ -79,6 +80,7 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
 
 # This is LiveCodeBench format
 class UnitTests(BaseModel):
+    type: Literal["unit-tests"] = "unit-tests"
     inputs: List[str]
     outputs: List[str]
     fn_name: Optional[str] = None
@@ -100,6 +102,8 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
     unit_tests_time_taken: Optional[float] = None
     reasoning_format_violation_rate: float = 0.0
     difficulty: Optional[str] = None
+    # The limits applied; a None memory limit is the fixed 4 GB guard.
+    limits: ResourceLimits | None = None
 
 
 # ----------------------------
@@ -216,6 +220,13 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 "fn_name": _raw_tests.get("fn_name"),
             }
         tests = UnitTests.model_validate(_raw_tests)
+        task_limits = ResourceLimits.model_validate(body.verifier_metadata.get("resource_limits") or {})
+        timeout = (
+            task_limits.time_limit_s if task_limits.time_limit_s is not None else self.config.unit_test_timeout_secs
+        )
+        # A task's own time limit also bounds compilation; otherwise check_correctness keeps its deadline.
+        deadline_s = task_deadline_s(timeout, len(tests.inputs)) if task_limits.time_limit_s is not None else None
+        limits = ResourceLimits(time_limit_s=timeout, memory_limit_mb=task_limits.memory_limit_mb)
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
@@ -260,7 +271,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             task_args = (
                 {"input_output": tests.model_dump_json()},  # sample
                 code,  # generation
-                self.config.unit_test_timeout_secs,  # timeout
+                timeout,
                 self.config.debug,  # debug
             )
 
@@ -272,6 +283,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                     provider=provider,
                     config=self.config.sandbox_config,
                     metadata=sandbox_metadata,
+                    memory_limit_mb=task_limits.memory_limit_mb,
+                    deadline_s=deadline_s,
                 )
             except SandboxVerificationError as e:
                 # The environment failed, not the policy: exclude the sample rather than score it.
@@ -285,6 +298,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                     extracted_model_output=model_out,
                     extracted_model_code=code,
                     difficulty=difficulty,
+                    limits=limits,
                 )
 
             unit_tests_time_taken = time() - start_time
@@ -305,6 +319,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 unit_tests_time_taken=unit_tests_time_taken,
                 reasoning_format_violation_rate=1.0 if has_violation else 0.0,
                 difficulty=difficulty,
+                limits=limits,
             )
 
         return observe_programmatic_grading(_grade)
