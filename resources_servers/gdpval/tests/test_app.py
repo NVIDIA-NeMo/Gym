@@ -2466,7 +2466,7 @@ class TestComparisonPayloadHardening:
     """Three protections against multi-hour /verify stalls observed on the
     multimodal-heavy long-tail tasks (task_a941b6d8 video, task_4b894ae3
     multi-stem audio): tmpdir zip extraction, per-file size cap, and
-    APITimeoutError treated as non-retryable."""
+    APITimeoutError retried within the existing request budget."""
 
     def test_maybe_unzip_extracts_to_tempdir_not_parent(self, tmp_path) -> None:
         """``_maybe_unzip`` must never write back into the zip's parent dir —
@@ -2568,10 +2568,8 @@ class TestComparisonPayloadHardening:
         clean_up_paths(clean_up_list)
         assert not tmp_extract.exists()
 
-    def test_is_retryable_treats_apitimeout_as_non_retryable(self) -> None:
-        """APITimeoutError must NOT be retried — multimodal payload timeouts
-        are deterministic, not transient, and retrying burns 5×120s = 10 min
-        per /verify with no chance of recovery."""
+    def test_is_retryable_treats_apitimeout_as_retryable(self) -> None:
+        """Typed API timeouts use the existing bounded retry loop."""
         from openai import APITimeoutError
 
         from resources_servers.gdpval.comparison import _is_retryable
@@ -2583,7 +2581,7 @@ class TestComparisonPayloadHardening:
         except TypeError:
             # Older SDKs allow positional/no-arg.
             err = APITimeoutError("Request timed out.")
-        assert _is_retryable(err) is False
+        assert _is_retryable(err) is True
 
     def test_is_retryable_still_retries_502_and_rate_limit(self) -> None:
         from resources_servers.gdpval.comparison import _is_retryable

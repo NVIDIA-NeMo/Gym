@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Comparison judge requests retry throttling with backoff and nothing else."""
+"""Comparison judge requests retry throttling and timeouts with backoff."""
 
 from unittest.mock import MagicMock
 
@@ -30,8 +30,15 @@ def _client(*outcomes) -> MagicMock:
     return client
 
 
-def test_throttling_is_retried_with_capped_exponential_backoff(sleeps):
-    client = _client(*(RuntimeError("Error code: 429 - rate limit") for _ in range(4)), _reply(" BOXED[A] "))
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("Error code: 429 - rate limit"),
+        APITimeoutError(request=httpx.Request("POST", "http://judge.invalid")),
+    ],
+)
+def test_transient_errors_are_retried_with_capped_exponential_backoff(sleeps, error):
+    client = _client(*([error] * 4), _reply(" BOXED[A] "))
 
     assert comparison.send_judge_request(client, "judge", [{"role": "user", "content": "x"}]) == "BOXED[A]"
 
@@ -39,10 +46,14 @@ def test_throttling_is_retried_with_capped_exponential_backoff(sleeps):
     assert sleeps == [5.0, 10.0, 20.0, 40.0]
 
 
-def test_throttling_gives_up_after_the_attempt_budget(sleeps):
-    client = _client(*(RuntimeError("503 Service Unavailable") for _ in range(comparison.REQUEST_MAX_ATTEMPTS)))
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("503 Service Unavailable"), APITimeoutError(request=httpx.Request("POST", "http://judge.invalid"))],
+)
+def test_transient_errors_give_up_after_the_attempt_budget(sleeps, error):
+    client = _client(*([error] * comparison.REQUEST_MAX_ATTEMPTS))
 
-    with pytest.raises(RuntimeError, match="503"):
+    with pytest.raises(type(error)):
         comparison.send_judge_request(client, "judge", [])
 
     assert client.chat.completions.create.call_count == comparison.REQUEST_MAX_ATTEMPTS
@@ -52,12 +63,11 @@ def test_throttling_gives_up_after_the_attempt_budget(sleeps):
 @pytest.mark.parametrize(
     "error",
     [
-        APITimeoutError(request=httpx.Request("POST", "http://judge.invalid/v1/chat/completions")),
         RuntimeError("Error code: 413 - request entity too large"),
         RuntimeError("Error code: 400 - maximum context length exceeded"),
         RuntimeError("Error code: 400 - invalid request"),
     ],
-    ids=["timeout", "payload-too-large", "context-overflow", "bad-request"],
+    ids=["payload-too-large", "context-overflow", "bad-request"],
 )
 def test_non_retryable_errors_fail_on_the_first_attempt(sleeps, error):
     client = _client(error)

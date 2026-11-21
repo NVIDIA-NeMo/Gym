@@ -95,9 +95,8 @@ REQUEST_MAX_BACKOFF_SECONDS = 60.0
 # before the first token, which for image-dense deliverables can exceed the
 # 120 s originally tuned for a flaky frontier proxy -- silently dropping
 # slow-but-healthy local judgements and biasing the ELO fit. Default 300 s;
-# override with ``GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS``. Kept non-retryable
-# (below) so a genuinely dead upstream still bounds wall-clock rather than
-# retrying N x timeout.
+# override with ``GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS``. Timeouts use the
+# existing bounded retry loop below.
 JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", "300"))
 
 
@@ -1387,11 +1386,8 @@ def construct_judge_messages(
 
 
 def _is_retryable(error: Exception) -> bool:
-    # Timeouts on multimodal payloads are deterministic — the payload is too
-    # large for the judge endpoint to digest in time, and retrying just burns
-    # another full timeout window per attempt. Fail the trial fast instead.
     if isinstance(error, APITimeoutError):
-        return False
+        return True
     if is_permanent_judge_error(error):
         return False
     error_text = str(error).lower()
