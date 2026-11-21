@@ -12,10 +12,13 @@ on Hugging Face.
 
 A task may supply `answer_format_regex` with a named `answer` capture, for example
 `"\\s*<answer>(?P<answer>[^<>\\r\\n]+)</answer>\\s*"`. The regex must match the entire
-final response text (reasoning items are excluded). Missing or empty captures
+text of the last assistant message (earlier messages and reasoning items are excluded). Missing or empty captures
 score zero without calling the mathematical verifier or judge. A passing match
 is graded using only the captured answer; the original response is retained.
-The result includes `answer_format_valid`. Without a contract, existing answer
+The result retains `answer_format_regex` and includes `answer_format_valid`.
+Nested boxes or unmatched braces bypass symbolic grading to avoid selecting a
+fragment; the judge receives the complete capture (or the reward is zero when
+the judge is disabled). Without a contract, existing answer
 extraction and result fields are unchanged. Regexes are authored task settings;
 use bounded, simple patterns appropriate to the template.
 

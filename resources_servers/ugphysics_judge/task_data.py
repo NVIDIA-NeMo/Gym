@@ -17,6 +17,10 @@ from resources_servers.math_with_judge.task_data import TaskData as MathWithJudg
 
 
 class TaskData(MathWithJudgeTaskData):
+    answer_format_regex: None = Field(
+        default=None, exclude=True, description="Answer-format contracts are not supported by this resources server."
+    )
+
     solution: str = Field(
         default="",
         description="Reference solution walkthrough; fills the judge prompt's {solution} placeholder.",

@@ -229,6 +229,111 @@ class TestApp:
         assert result.response == response
         server.server_client.post.assert_not_called()
 
+    @mark.parametrize("final_text, reward", [("<answer>4</answer>", 1.0), ("4", 0.0)])
+    async def test_format_contract_uses_last_assistant_message(self, config, final_text, reward):
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False}), server_client=MagicMock(spec=ServerClient)
+        )
+        final = self._create_response_output_message(final_text)
+        final.content = [
+            NeMoGymResponseOutputText(annotations=[], text=final_text[:5], type="output_text"),
+            NeMoGymResponseOutputText(annotations=[], text=final_text[5:], type="output_text"),
+        ]
+        response = NeMoGymResponse(**self._create_response("final", final))
+        response.output.insert(0, self._create_response_output_message("Earlier commentary: 9"))
+        request = LibraryJudgeMathVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=response,
+            question="2+2",
+            expected_answer="4",
+            answer_format_regex=r"<answer>(?P<answer>[^<>]+)</answer>",
+        )
+        result = await server.verify(request)
+        assert result.reward == reward
+        assert result.answer_format_valid is bool(reward)
+        assert result.response == response
+        assert result.answer_format_regex == request.answer_format_regex
+        assert (
+            await server.verify(LibraryJudgeMathVerifyRequest.model_validate(result.model_dump()))
+        ).reward == reward
+
+    @mark.parametrize("answer", [r"\frac{\boxed{1}}{2}", "1} trailing", "{1", " 4 "])
+    @mark.parametrize("judge_reward", [0.0, 1.0])
+    async def test_format_capture_reaches_judge_unchanged(self, config, answer, judge_reward):
+        server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        response = NeMoGymResponse(
+            **self._create_response("capture", self._create_response_output_message(f"<answer>{answer}</answer>"))
+        )
+        request = LibraryJudgeMathVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=response,
+            question="Compute",
+            expected_answer="0.5",
+            answer_format_regex=r"<answer>(?P<answer>[^<>]+)</answer>",
+        )
+        with (
+            patch.object(
+                LibraryJudgeMathResourcesServer,
+                "_verify_answer_with_library_async",
+                new_callable=AsyncMock,
+                return_value=(0.0, None),
+            ) as library,
+            patch.object(
+                LibraryJudgeMathResourcesServer,
+                "_verify_answer_with_judge",
+                new_callable=AsyncMock,
+                return_value=(judge_reward, []),
+            ) as judge,
+        ):
+            result = await server.verify(request)
+            assert result.answer_format_valid is True
+            assert result.reward == judge_reward
+            judge.assert_awaited_once_with("Compute", "0.5", answer)
+            if answer == " 4 ":
+                library.assert_awaited_once_with("0.5", r"\boxed{ 4 }")
+            else:
+                library.assert_not_awaited()
+
+    async def test_nested_capture_cannot_earn_symbolic_fragment_credit(self, config):
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False}), server_client=MagicMock(spec=ServerClient)
+        )
+        response = NeMoGymResponse(
+            **self._create_response(
+                "nested", self._create_response_output_message(r"<answer>\frac{\boxed{1}}{2}</answer>")
+            )
+        )
+        request = LibraryJudgeMathVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=response,
+            question="Compute",
+            expected_answer="1",
+            answer_format_regex=r"<answer>(?P<answer>[^<>]+)</answer>",
+        )
+        result = await server.verify(request)
+        assert result.reward == 0.0 and result.answer_format_valid is True
+        assert result.judge_evaluations is None
+
+    def test_unsupported_math_family_contracts_rejected(self):
+        from resources_servers.finance_sec_search.task_data import TaskData as FinanceTaskData
+        from resources_servers.polymath.app import PolyMathVerifyRequest
+        from resources_servers.polymath.task_data import TaskData as PolyMathTaskData
+        from resources_servers.ugphysics_judge.app import UGPhysicsJudgeVerifyRequest
+        from resources_servers.ugphysics_judge.task_data import TaskData as UGPhysicsTaskData
+
+        row = dict(question="2+2", expected_answer="4", answer_format_regex=r"(?P<answer>.*)")
+        for schema in (FinanceTaskData, PolyMathTaskData, UGPhysicsTaskData):
+            with raises(ValueError, match="answer_format_regex"):
+                schema.model_validate(row)
+            assert "answer_format_regex" not in schema(question="2+2", expected_answer="4").model_dump()
+        row.update(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._create_response("unsupported", self._create_response_output_message("4")),
+        )
+        for schema in (PolyMathVerifyRequest, UGPhysicsJudgeVerifyRequest):
+            with raises(ValueError, match="answer_format_regex"):
+                schema.model_validate(row)
+
     async def test_format_failure_cannot_be_overridden_by_judge(self, config):
         server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
         response = NeMoGymResponse(**self._create_response("wrong-format", self._create_response_output_message("4")))

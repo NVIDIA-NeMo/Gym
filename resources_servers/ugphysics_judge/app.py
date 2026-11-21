@@ -141,6 +141,7 @@ class UGPhysicsJudgeRunRequest(LibraryJudgeMathRunRequest):
     ``question`` / ``expected_answer`` fields."""
 
     model_config = ConfigDict(extra="allow")
+    answer_format_regex: None = Field(default=None, exclude=True)
 
     solution: str = ""
     subject: Optional[str] = None
