@@ -106,8 +106,9 @@ _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _DEFAULT_PROVIDER_COMPAT = {"supportsDeveloperRole": False, "supportsReasoningEffort": False}
 # Environment the sandbox adapter sets itself; sandbox_env may not replace it.
 _MANAGED_SANDBOX_ENV = frozenset({"PI_CODING_AGENT_DIR"})
-# Transient model-endpoint failures in Pi's terminal error message (after Pi's own retries), as
-# Pi's retry classifier names them: such a run is retried, never graded.
+# Transient model-endpoint failures in Pi's report of its last model call's error (after Pi's own retries), as
+# Pi's retry classifier names them: such a run is retried, never graded. Matched against the provider's message
+# only, never against the adapter's own process-exit text.
 _MODEL_ENDPOINT_ERROR = re.compile(
     r"\b(429|500|502|503|504|524)\b|overloaded|rate.?limit|too many requests|service.?unavailable|"
     r"server.?error|internal.?error|provider.?returned.?error|network.?error|connection.?(error|refused|"
@@ -773,9 +774,9 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox sessions: return a failed run (nonzero or signalled exit, a terminal error, no terminal
     # assistant result) as a gradable `failed` response, as Harbor grades after any agent exit, when
     # the supervisor confirmed cleanup, the runner started Pi, any granted Gym MCP tools loaded, Pi
-    # ended at least one assistant turn, the terminal error is not a transient model-endpoint failure,
-    # and the sandbox still runs and answers a command. A model error Pi reported itself keeps its classified cause for the outcome policy
-    # instead. Anything else stays an execution error.
+    # ended at least one assistant turn, Pi's error for its last model call (if any) is not a transient
+    # model-endpoint failure, and the sandbox still runs and answers a command. A model error Pi reported
+    # itself keeps its classified cause for the outcome policy instead. Anything else stays an execution error.
     verify_after_agent_error: bool = False
 
     @field_validator("sandbox_env", mode="before")
@@ -1165,15 +1166,23 @@ class PiAgent(SimpleResponsesAPIAgent):
         }
 
     async def _gradable_agent_error(
-        self, state: PiSandboxSession, error: str, *, cleanup: Any, mcp_failed: bool, answered: bool
+        self,
+        state: PiSandboxSession,
+        error: str,
+        *,
+        cleanup: Any,
+        mcp_failed: bool,
+        answered: bool,
+        provider_error: Optional[str],
     ) -> Optional[str]:
         """Describe a failed Pi run that Resources can still grade, or return None.
 
         The supervisor's confirmed cleanup means Pi ended and nothing it started still runs. A setup
         failure (the runner did not start Pi, Gym's MCP tools did not load, or Pi ended before its first
-        assistant turn, ``answered``, short of its time limit), a transient model-endpoint failure, or a
-        sandbox that no longer runs or answers keeps the run an execution error, so the episode is retried
-        rather than graded.
+        assistant turn, ``answered``, short of its time limit), a transient model-endpoint failure in
+        ``provider_error`` (Pi's message for its last model call's error, even when a process exit replaced it
+        in ``error``), or a sandbox that no longer runs or answers keeps the run an execution error, so the
+        episode is retried rather than graded.
         """
         if cleanup is None or cleanup["error"]:
             return None
@@ -1187,7 +1196,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         ):
             LOG.warning("Pi failed in setup; not grading it: %s", detail)
             return None
-        if _MODEL_ENDPOINT_ERROR.search(error):
+        if provider_error and _MODEL_ENDPOINT_ERROR.search(provider_error):
             LOG.warning("Pi failed on a model endpoint error; not grading it: %s", detail)
             return None
         sandbox = state.session.sandbox
@@ -1373,6 +1382,9 @@ class PiAgent(SimpleResponsesAPIAgent):
             # which classify_outcome leaves unknown: retryable by default, even if that call hit the context limit.
             model_limit, terminal_error = False, recovery_error
             compaction_failure = {"stopReason": "error", "errorMessage": recovery_error}
+        # Pi's report of how its last model call failed, kept apart from the process exit that may take its place in
+        # the error below (Pi exiting nonzero before its retry of a 503): the endpoint check reads this report only.
+        provider_error = terminal_error if stop_reasons and stop_reasons[-1] == "error" and not model_limit else None
         terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
         retrying = terminal.get("willRetry") is True
         if model_limit or (stop_reasons and stop_reasons[-1] == "aborted") or (cleanup["timed_out"] and retrying):
@@ -1410,7 +1422,12 @@ class PiAgent(SimpleResponsesAPIAgent):
         # A failure Pi reported from the model endpoint is classified below, not graded here.
         if error and not reported_error and self.config.verify_after_agent_error:
             graded_error = await self._gradable_agent_error(
-                state, error, cleanup=cleanup, mcp_failed=mcp_failed, answered=bool(stop_reasons)
+                state,
+                error,
+                cleanup=cleanup,
+                mcp_failed=mcp_failed,
+                answered=bool(stop_reasons),
+                provider_error=provider_error,
             )
             if graded_error is not None:
                 error = None

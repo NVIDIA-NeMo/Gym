@@ -3280,6 +3280,14 @@ def failed_events(error_message: str | None) -> str:
     [
         # Pi killed mid-turn (e.g. the OOM killer or an agent's pkill) while its sandbox still runs.
         ("killed", 200, "failed"),
+        # Pi exited 0 after a tool-use turn with no final answer: the adapter's own "ended without a terminal
+        # assistant result" is not an endpoint report, so the partial work is graded.
+        ("tool_use_exit_0", 200, "failed"),
+        # Pi exited 1 before retrying a provider error: the process exit replaces the provider's message in the
+        # error, but the endpoint check still reads the provider's message. A rejected request is graded; a 503 is
+        # retried.
+        ("rejected_then_exit", 200, "failed"),
+        ("endpoint_then_exit", 500, None),
         # Model errors Pi reported itself are never graded here; the response carries the classified cause for the
         # Environment Server's outcome policy, which grades a provider rejection (retrying would fail the same way)
         # and retries a transient endpoint failure.
@@ -3295,9 +3303,19 @@ async def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, case, sta
     agent, sandbox = setup
     configure_task_container(agent, verify_after_agent_error=case != "disabled")
     sandbox.status = AsyncMock(return_value=SandboxStatus.STOPPED if case == "sandbox_gone" else SandboxStatus.RUNNING)
-    if case in ("killed", "sandbox_gone", "disabled"):
+    if case in ("killed", "sandbox_gone", "disabled", "tool_use_exit_0"):
         sandbox.events = failed_events(None)
-        sandbox.result["return_code"] = 137
+        sandbox.result["return_code"] = 0 if case == "tool_use_exit_0" else 137
+    elif case in ("rejected_then_exit", "endpoint_then_exit"):
+        recorded = [
+            json.loads(line)
+            for line in failed_events(
+                "400 Invalid tool call format" if case == "rejected_then_exit" else "503 Service Unavailable"
+            ).splitlines()
+        ]
+        recorded[-1][1]["willRetry"] = True
+        sandbox.events = "\n".join(json.dumps(event) for event in recorded)
+        sandbox.result["return_code"] = 1
     else:
         message = {
             "bad_request": "400 Invalid tool call format",
@@ -3314,6 +3332,7 @@ async def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, case, sta
         assert response.status_code == status_code, response.text
         if expected is None:
             assert "Pi agent failed" in response.text
+            assert "graded_agent_error" not in response.text
         elif expected.startswith("{"):
             body = response.json()
             assert body["status"] == "failed"
@@ -3324,7 +3343,14 @@ async def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, case, sta
             body = response.json()
             assert body["status"] == expected
             assert body["error"] is None
-            assert "graded_agent_error" in body["metadata"]
+            assert (
+                body["metadata"]["graded_agent_error"]
+                == {
+                    "killed": "exit 137: Pi exited with code 137",
+                    "tool_use_exit_0": "exit 0: Pi ended without a terminal assistant result",
+                    "rejected_then_exit": "exit 1: Pi exited with code 1",
+                }[case]
+            )
             # The partial transcript reaches the verifier with the run's state.
             assert any(item["type"] == "function_call" for item in body["output"])
         closed = client.post("/v1/agent_sessions/close", json=close_body(seed().agent_session_id))
@@ -3333,7 +3359,7 @@ async def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, case, sta
         if expected is not None:
             assert record["status"] == ("failed" if expected.startswith("{") else expected)
     probed = [call.args[0] for call in sandbox.exec.await_args_list if call.args[0] == "true"]
-    assert len(probed) == int(case == "killed")
+    assert len(probed) == int(case in ("killed", "tool_use_exit_0", "rejected_then_exit"))
 
 
 @pytest.mark.parametrize(

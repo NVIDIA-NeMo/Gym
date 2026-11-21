@@ -309,8 +309,9 @@ benchmarks that grade such a harness:
   assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is in
   `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
   harness runner started Pi (not its own exit 125, 126 or 127), any granted Gym MCP tools loaded (not exit
-  78), Pi ended at least one assistant turn or ran until its time limit, the terminal error is not a transient model-endpoint failure (connection, timeout, 429 or 5xx, as
-  Pi's retry classifier names them) and the sandbox still runs and answers a command. A model error Pi
+  78), Pi ended at least one assistant turn or ran until its time limit, Pi's error for its last model call
+  (if any, even when Pi then exited nonzero) is not a transient model-endpoint failure (connection, timeout,
+  429 or 5xx, as Pi's retry classifier names them) and the sandbox still runs and answers a command. A model error Pi
   reported itself is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment
   Server's outcome policy. Anything else stays an execution error and the episode is retried.
 
