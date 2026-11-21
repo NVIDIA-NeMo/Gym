@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - benchmarks/indic_alpaca_eval/config.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+policy_model_name: google/gemma-4-31B-it
+policy_base_url: http://127.0.0.1:8000/v1
+policy_api_key: EMPTY
+agent_name: indic_alpaca_eval_simple_agent
+input_jsonl_fpath: benchmarks/indic_alpaca_eval/data/indic_alpaca_eval_benchmark.jsonl
+output_jsonl_fpath: results/indic_alpaca_eval/gemma31b-it/rollouts.jsonl
+num_repeats: 1
+num_repeats_add_seed: false
+num_samples_in_parallel: 8
+resume_from_cache: true
+require_complete: true
+responses_create_params:
+  temperature: 1.0
+  top_p: 0.95
+  max_output_tokens: 120000
+  metadata:
+    extra_body: '{"seed":42,"top_k":64}'
+    chat_template_kwargs: '{"enable_thinking":true}'
+policy_model:
+  responses_api_models:
+    vllm_model:
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: false
