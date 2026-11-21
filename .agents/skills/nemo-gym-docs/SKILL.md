@@ -9,39 +9,36 @@ description: >
 
 # NeMo Gym Docs Maintenance
 
-Unified skill for adding, updating, moving, and removing pages on the NeMo Gym Fern documentation site.
+How to add, update, move, and remove pages on the NeMo Gym docs site ([docs.nvidia.com/nemo/gym](https://docs.nvidia.com/nemo/gym)), and how to preview, check, and publish them. This file is the single source for docs conventions and commands. [`fern/README.md`](../../../fern/README.md) only covers the one-time account setup a person has to do.
 
 ## Scope Rule
 
-**ALL docs edits happen under `fern/`.** All new pages — including release notes and migration guides — belong under `fern/`.
+**All docs edits happen under `fern/`.** Ordinary edits land in `fern/versions/latest/pages/`, the bleeding-edge tree, published under the `main` slug. The folder name `latest/` is historical.
 
-**Bleeding-edge tree + GA snapshots.** Gym keeps one bleeding-edge content tree at `fern/versions/latest/` (the folder name is historical — it's mounted under the `main` slug via `main.yml`) and one frozen GA snapshot per shipped release (currently `fern/versions/v0.2.1/`). All new edits land in `fern/versions/latest/`. The `latest.yml` file is a GA *alias* — a symlink to the current GA's yml — so `/latest/...` and `/<current-ga>/...` serve the same pages. Back-ports into a frozen GA snapshot are deliberate and rare; default to editing `fern/versions/latest/` only.
+Each `fern/versions/v<release>/` folder is a frozen copy of a shipped release. Change one only when the user explicitly asks for a back-port. `fern/docs.yml` `versions:` is the source of truth for which releases are published. There is no `latest` Fern version: legacy `/latest/...` URLs are redirects in `docs.yml`.
 
-## Layout at a Glance
+## Layout
 
 ```
 fern/
-├── fern.config.json          # Org + Fern CLI version (currently 4.80.3)
-├── package.json              # `npm run dev|check|generate` — wraps `npx -y fern-api@latest`
-├── docs.yml                  # Site config: instances, versions, tabs, redirects, libraries
+├── fern.config.json          # Fern org slug + CLI version
+├── package.json              # `npm run check|dev|generate|generate:library`
+├── docs.yml                  # Site config: instances, versions, redirects, libraries (`global-theme: nvidia`)
+├── assets/                   # Page images
+├── components/               # Custom TSX components (NavButton.tsx)
 ├── versions/
-│   ├── latest.yml            # GA alias — symlink to the current GA's yml (currently v0.2.1.yml)
-│   ├── main.yml              # Nav tree for the bleeding-edge train (mounts ./latest/pages)
-│   ├── latest/pages/         # MDX content for the bleeding-edge train (slug: main)
-│   ├── v0.2.1.yml            # Nav tree for the 0.2.1 GA snapshot
-│   └── v0.2.1/pages/         # MDX content for the 0.2.1 GA snapshot
-├── components/               # Custom TSX (CTAButtons, NavButton, CustomFooter)
-├── assets/                   # Images, SVGs, favicon
-├── main.css                  # Global theme overrides (NVIDIA green, badge spacing, etc.)
-└── product-docs/             # GENERATED library reference (gitignored)
+│   ├── main.yml              # Nav for the bleeding-edge tree; paths point at ./latest/pages/
+│   ├── latest/pages/         # Bleeding-edge MDX (published at /main/...)
+│   ├── v<release>.yml        # Nav for each frozen release; paths point at ./v<release>/pages/
+│   └── v<release>/pages/     # Frozen release MDX (back-ports only)
+└── product-docs/             # GENERATED Python API reference (gitignored)
 ```
 
 ```
-File system                                            Published URL
-─────────────────────────────────────────────────────  ──────────────────────────────────
+File path                                              Published URL
 fern/versions/latest/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/main/get-started/quickstart
-fern/versions/v0.2.1/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/v0.2.1/get-started/quickstart
-                                                       docs.nvidia.com/nemo/gym/latest/get-started/quickstart  (GA alias)
+fern/versions/v<release>/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/v<release>/get-started/quickstart
+docs.nvidia.com/nemo/gym/latest/get-started/quickstart      redirects to /main/get-started/quickstart
 ```
 
 ## Operations
@@ -61,68 +58,66 @@ fern/versions/v0.2.1/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/
    <content>
    ```
 
-3. If the parent folder is mounted in `main.yml` with `title-source: frontmatter`, the page is auto-discovered — no nav edit needed. Otherwise add a `- page:` entry under the right `section:` in `fern/versions/main.yml`.
-4. Do **not** mirror into the current GA snapshot folder (e.g., `v0.2.1/`) — frozen GA snapshots only get back-ports on explicit request.
+3. If the parent folder is mounted in `main.yml` with `title-source: frontmatter`, the page is auto-discovered and needs no nav edit. Otherwise add a `- page:` entry under the right `section:` in `fern/versions/main.yml`. `position:` orders pages in an auto-discovered folder; without it, pages sort alphabetically by filename.
+4. Run `make docs-check` and preview the page at `/main/<subdirectory>/<filename>`.
+5. Do not copy the page into a `v<release>/` folder unless the user asks for a back-port.
 
 ### Update a Page
 
-1. Locate by path, title, or keyword (`grep -rn` in `fern/versions/latest/pages/`).
-2. **Content only** — edit the MDX in `fern/versions/latest/pages/`. Don't touch `v0.2.1/` unless this is an explicit back-port.
-3. **Title change** — update the frontmatter `title:` and (if the parent uses `title-source: frontmatter`) nothing else; otherwise update the nav `- page:` entry too.
-4. **Section move** — `git mv` the file, update its `path:` in `main.yml`, fix all incoming links inside `fern/versions/latest/pages/`.
-5. **Slug change** — folders use the page filename for the slug. Renaming the file changes the URL; add a redirect in `fern/docs.yml` so the old URL keeps working.
+1. Locate it by path, title, or keyword (`grep -rn` in `fern/versions/latest/pages/`).
+2. Content change: edit the MDX in `fern/versions/latest/pages/` only.
+3. Title change: update the frontmatter `title:`. If the parent folder does not use `title-source: frontmatter`, update the nav `- page:` entry too. Update link text that names the page.
+4. Section move: `git mv` the file, update its `path:` in `main.yml` if it has a manual entry, fix incoming links, and add a redirect.
+5. Slug change: the filename sets the slug, so renaming the file changes the URL. Add a redirect in `fern/docs.yml` so the old URL keeps working.
 
 ### Remove a Page
 
 1. Find incoming links: `grep -rn "<filename>" fern/versions/latest/pages --include="*.mdx"`.
-2. `git rm` the file from `fern/versions/latest/pages/`.
-3. Remove the matching `- page:` block from `main.yml` if it was a manual entry.
-4. Fix or remove all incoming links.
-5. Add a redirect in `fern/docs.yml` if the URL was public.
+2. `git rm` the file.
+3. Remove its `- page:` entry from `main.yml` if it had one.
+4. Fix or remove the incoming links.
+5. Add a redirect in `fern/docs.yml` if the URL was published.
 
-### Back-port to a GA Snapshot
+### Back-port to a Release
 
-Only back-port when the user explicitly asks ("back-port to v0.2.1"). Apply the same change inside the GA snapshot's `pages/` folder (e.g., `fern/versions/v0.2.1/pages/`) and update its yml if needed. `latest.yml` is a symlink to the current GA's yml, so nav changes propagate automatically.
+Only when the user asks. Apply the same change under `fern/versions/v<release>/pages/` and update `fern/versions/v<release>.yml` if the nav changes.
 
-### Worked Example: Adding a Page
-
-Request: *"Add a how-to for collecting rollouts under Get Started."*
-
-1. Create `fern/versions/latest/pages/get-started/rollout-collection.mdx`:
-
-   ```mdx
-   ---
-   title: "Collect Rollouts"
-   description: "Run the agent against your dataset and write results to JSONL"
-   position: 4
-   ---
-
-   <content>
-   ```
-
-2. The `get-started` folder in `main.yml` uses `title-source: frontmatter`, so the page appears automatically. `position: 4` controls ordering — it's optional; without it, pages sort alphabetically by filename.
-3. `cd fern && npm run check && npm run dev`, verify `/main/get-started/rollout-collection` renders.
-
-### Worked Example: Renaming a Slug (with Redirect)
+### Worked Example: Renaming a Slug
 
 Request: *"Rename `/main/get-started/setup` to `/main/get-started/detailed-setup`."*
 
-1. `git mv fern/versions/latest/pages/get-started/setup.mdx fern/versions/latest/pages/get-started/detailed-setup.mdx`.
-2. Add a redirect in `fern/docs.yml`:
+1. `git mv fern/versions/latest/pages/get-started/setup.mdx fern/versions/latest/pages/get-started/detailed-setup.mdx`, and update its `path:` in `main.yml` if it has a manual entry.
+2. Add a redirect in `fern/docs.yml`. Both `source` and `destination` need the full `/nemo/gym/` basepath with a leading slash:
 
    ```yaml
    redirects:
-     - source: "/main/get-started/setup"
-       destination: "/main/get-started/detailed-setup"
+     - source: "/nemo/gym/main/get-started/setup"
+       destination: "/nemo/gym/main/get-started/detailed-setup"
    ```
 
-3. `grep -rn "/get-started/setup" fern/versions/latest/` and update any incoming links.
+3. `grep -rn "/get-started/setup" fern/versions/latest/` and update incoming links.
 
+## Content Conventions
+
+### Frontmatter
+
+```yaml
 ---
+title: "<Page Title>"        # required: the page heading, breadcrumb, and (with title-source: frontmatter) nav label
+description: ""              # required (may be empty): SEO
+position: 1                  # optional: orders auto-discovered pages within a folder
+---
+```
 
-## Content Guidelines
+Fern renders `title:` as the page heading, so do not repeat it as a `# <Page Title>` line in the body; the page would show the title twice. `tests/unit_tests/test_fern_docs_links.py` fails on a repeated title.
 
-NeMo Gym uses **Fern-native MDX components directly**. Do not use GitHub `> [!NOTE]` syntax — it will not render.
+### Product Name
+
+Call the product NeMo Gym in prose, not Gym. Commands, package names and other identifiers, such as `gym eval run` or `nemo_gym`, stay as written.
+
+### Components
+
+Use Fern's MDX components. GitHub `> [!NOTE]` syntax does not render.
 
 | Purpose | Component |
 |---|---|
@@ -132,21 +127,10 @@ NeMo Gym uses **Fern-native MDX components directly**. Do not use GitHub `> [!NO
 | Warning | `<Warning>...</Warning>` |
 | Error / danger | `<Error>...</Error>` |
 | Card grid on index pages | `<Cards>` with `<Card title="..." href="...">` children |
-| Status/scope tag inside a Card | `<Badge minimal outlined>tag</Badge>` (see below) |
+| Status/scope tag inside a Card | `<Badge minimal outlined>tag</Badge>` |
+| Tutorial back/next links | `<NavButton ... />` (custom, in `fern/components/`) |
 
-Images live in `fern/assets/` (shared) or under a version's `pages/` (version-scoped). Reference with root-relative paths.
-
-### Product Name
-
-Call the product NeMo Gym in prose, not Gym. Commands, package names and other identifiers, such as `gym eval run` or `nemo_gym`, stay as written.
-
-### Cards and Badges
-
-Index pages use a `<Cards>` grid. Each `<Card>` can carry one or more `<Badge>` tags to indicate scope, status, or read-time.
-
-Valid intents: `success`, `note`, `tip`, `warning`, `error`, `info`, `launch`, `check`. Use `<Badge minimal outlined>...</Badge>` (no intent) for neutral tags.
-
-Place badges as the last line inside the `<Card>`, separated by a blank line from the body text. The CSS in `main.css` (`.fern-card .fern-docs-badge`) handles spacing — do not add inline `style=` props.
+Badges go on the last line inside a `<Card>`, separated from the body by a blank line. Valid intents: `success`, `note`, `tip`, `warning`, `error`, `info`, `launch`, `check`; omit the intent for a neutral tag. Do not add inline `style=` props; the `nvidia` global theme handles spacing.
 
 ```mdx
 <Cards>
@@ -158,123 +142,89 @@ Place badges as the last line inside the `<Card>`, separated by a blank line fro
 </Cards>
 ```
 
-## Frontmatter Fields
+A new custom component goes in `fern/components/`. Put its styles in a `<style>` block inside the TSX, as `NavButton.tsx` does: Fern's bundler does not load `import "./*.css"`, and the global theme owns `docs.yml` `css:`.
 
-```yaml
----
-title: "<Page Title>"        # required — used for nav and <h1>
-description: ""              # required (may be empty string) — SEO
-position: 1                  # optional — orders auto-discovered pages within a folder
----
+The footer, logos, favicon, fonts, colors, base CSS and OneTrust JS come from the `nvidia` global theme (`global-theme: nvidia` in `docs.yml`). Do not add `footer:`, `logo:`, `favicon:`, `css:`, `js:`, `colors:`, `layout:`, `theme:`, or `navbar-links:` to `docs.yml`; change them upstream in NVIDIA/fern-components. The one exception is the `logo.right-text: NeMo Gym` override.
+
+### Images
+
+Put shared images in `fern/assets/`, or version-scoped images under that version's `pages/`, and reference them with root-relative paths.
+
+### Links
+
+Link inside the docs with version-prefixed paths that match the tree the page lives in:
+
+```mdx
+[Quickstart](/main/get-started/quickstart)        // pages in versions/latest/pages/
+[Quickstart](/v<release>/get-started/quickstart)  // pages in versions/v<release>/pages/
 ```
 
-Fern renders `title:` as the page heading, so do not repeat it as a `# <Page Title>` line in the body; the page would show the title twice. `tests/unit_tests/test_fern_docs_links.py` fails on a repeated title. Folders using `title-source: frontmatter` in the version YAML pull the nav label from `title:`.
+Link text names the target page's title, not its slug.
 
-## Validate
+Link to repository files (configs, source) with absolute GitHub URLs; they are not part of the docs site:
 
-First-time setup: authenticate the CLI against the `nvidia` Fern org via Google SSO (one-time, browser flow):
-
-```bash
-npx -y fern-api@latest login    # opens browser → sign in with your @nvidia.com Google account
+```mdx
+[example_single_tool_call.yaml](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml)
 ```
 
-Run from `fern/` (no install step — scripts shell out to `npx -y fern-api@latest`):
+## Preview and Check
+
+From the repo root:
 
 ```bash
-npm run check       # `fern check` — YAML + frontmatter validation
-npm run dev         # `fern docs dev` — localhost:3000 hot-reload preview
+make docs                   # generate the library reference, then `fern docs dev` at http://localhost:3000
+make docs-check             # `fern check`: config + MDX validation
+make docs-preview           # shared preview URL on *.docs.buildwithfern.com (needs DOCS_FERN_TOKEN)
+make docs-generate-library  # regenerate the library reference only
+make docs-publish           # trigger the publish workflow on main (only when the user asks)
 ```
 
-`fern check` must pass before commit. The dev server's broken-link warnings for cross-version links like `/latest/about` are **false positives** — Fern's local validator does not resolve the version slug from `docs.yml` against `latest.yml`. The published site renders them correctly.
+Or from `fern/`: `npm run check`, `npm run dev`, `npm run generate:library`.
 
-To regenerate the autodoc library reference (gitignored under `product-docs/`):
+`make docs` runs `fern docs md generate` first, which fills `fern/product-docs/` from the `libraries:` block in `docs.yml`. After that, `cd fern && npm run dev` is enough for prose edits. Library generation needs Fern `nvidia` org access; see [`fern/README.md`](../../../fern/README.md). Without it, preview through CI instead.
 
-```bash
-npm run generate:library    # `fern docs md generate`
-```
+Before committing, run `make docs-check` and `pytest tests/unit_tests/test_fern_docs_links.py`.
 
-## Commit & Preview
+## Commit, CI and Publishing
 
 ```bash
-git add fern/
 git commit -s -m "docs: <add|update|remove> <page-title>"
 ```
 
-Approved upstream PR mirrors that touch `fern/**` get a preview URL comment from `.github/workflows/fern-docs-preview.yml`. Fork-origin PRs require mirror approval first.
+DCO sign-off is required. PR titles follow Conventional Commits (for example, `docs(fern): add rollout collection guide`).
 
-```
-Approved PR mirror (touches fern/) -> fern-docs-ci.yml      -> fern check
-                                  -> fern-docs-preview.yml -> verified preview URL comment
+| Workflow | Trigger | Purpose |
+|---|---|---|
+| `fern-docs-ci.yml` | PR mirror push touching `fern/**` or the docs test | `fern check` and `tests/unit_tests/test_fern_docs_links.py` |
+| `fern-docs-preview.yml` | Approved PR mirror push touching `fern/**` | Publishes a preview and comments its URL on the PR. Fork PRs need mirror approval first. |
+| `publish-fern-docs.yml` | Push to `main` touching `fern/**`, a `docs/v*` tag, or manual dispatch | Publishes to docs.nvidia.com/nemo/gym |
 
-Push to main (touches fern/**)          → publish-fern-docs.yml → docs.nvidia.com/nemo/gym
-Tag push (docs/v*)                        → publish-fern-docs.yml → docs.nvidia.com/nemo/gym
-Manual dispatch                           → publish-fern-docs.yml → docs.nvidia.com/nemo/gym
-```
+Preview and publish use the `DOCS_FERN_TOKEN` secret (setup in [`fern/README.md`](../../../fern/README.md)). Release tags use the form `docs/v<MAJOR>.<MINOR>.<PATCH>`, for example `git tag docs/v0.8.0 && git push origin docs/v0.8.0`. Do not push a tag or run `make docs-publish` unless the user asks.
 
-The preview and publish jobs require the `DOCS_FERN_TOKEN` repository or organization secret (from `fern token`).
+## Cutting a New Release
 
-## Publishing to Production
+When a release ships (for example, `v0.8.0`):
 
-Production publishes on three triggers (see `.github/workflows/publish-fern-docs.yml`):
+1. `cp -r fern/versions/latest fern/versions/v0.8.0`
+2. `cp fern/versions/main.yml fern/versions/v0.8.0.yml`, then rewrite the `./latest/` path prefixes to `./v0.8.0/`.
+3. Add the release to `fern/docs.yml` `versions:` (`display-name: "0.8.0"`, `slug: v0.8.0`, `availability: stable`), and demote or remove older releases per the support policy.
+4. Keep the `/latest` redirects in `docs.yml` pointed at their intended target, currently `/main`.
+5. `fern/versions/latest/pages/` keeps moving forward as the bleeding-edge tree.
 
-1. **Push to `main`** when `fern/**` changes — continuous staging.
-2. **Tag push** matching `docs/v*` — versioned release.
-3. **Manual dispatch** from the Actions tab.
-
-Tag format must be `docs/v<MAJOR>.<MINOR>.<PATCH>`. Do not push a tag unless the user asks.
-
-```bash
-git tag docs/v0.3.0
-git push origin docs/v0.3.0
-```
-
-URL → version mapping:
-
-```
-docs.nvidia.com/nemo/gym/latest/...   → GA alias (currently mirrors v0.2.1)
-docs.nvidia.com/nemo/gym/main/...     → bleeding-edge train (folder: ./latest/pages)
-docs.nvidia.com/nemo/gym/v0.2.1/...   → 0.2.1 GA snapshot
-```
-
-## Cutting a New Version Train
-
-When the user ships a new version (e.g. `v0.3.0`):
-
-1. `cp -r fern/versions/latest fern/versions/v0.3.0` — frozen snapshot of the bleeding-edge folder.
-2. `cp fern/versions/main.yml fern/versions/v0.3.0.yml` and rewrite `./latest/` path prefixes to `./v0.3.0/`.
-3. Retarget the `fern/versions/latest.yml` symlink at the new GA's yml: `cd fern/versions && ln -sfn v0.3.0.yml latest.yml`.
-4. In `fern/docs.yml` `versions:`, add the new GA snapshot entry (`display-name: "0.3.0"`, `slug: v0.3.0`, `availability: stable`) and demote/remove the previous GA snapshot per the support policy.
-5. `fern/versions/latest/pages/` keeps moving forward as the bleeding-edge tree. `main.yml` is unchanged.
-6. Tag `docs/v0.3.0` and push to publish.
-
-## Debugging
+## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `fern check` YAML error | 2-space indent; `- page:` inside `contents:`; `path:` is relative to the version YAML file |
-| Page 404 in preview | `slug:` missing/duplicated in the same section; or `position:` collision in an auto-discovered folder |
-| Broken-link warning for `/latest/...` cross-version link | False positive in `fern docs dev`; works on published site |
-| `JSX expressions must have one parent element` | Wrap multi-element MDX content in `<>...</>` or a `<div>` |
-| Old URL breaks (page renamed/moved) | Add a `redirects:` entry in `fern/docs.yml` |
-| Library reference missing | `npm run generate:library` in `fern/` |
-| Broken image | Path is relative to the MDX file; check `fern/assets/` exists |
-| Card badges have no spacing | Don't add inline styles — `main.css` `.fern-card .fern-docs-badge` rules handle it |
-| `/latest/<page>` and `/<current-ga>/<page>` show different content | They shouldn't — `latest.yml` should mirror the current GA version's yml and point at the same `./<current-ga>/pages/...` content. Sync them. |
+| `HTTP 403: User does not belong to organization` on `fern docs md generate` | The account setup in [`fern/README.md`](../../../fern/README.md) is incomplete; ask the user to run `make docs-login` |
+| `Folder not found: ./product-docs/...` in `fern docs dev` | Run `make docs-generate-library` once |
+| `fern check` YAML error | 2-space indent; `- page:` inside `contents:`; `path:` is relative to the version YAML |
+| Page 404 in preview | `slug:` missing or duplicated in the same section, or a `position:` collision in an auto-discovered folder |
+| Broken-link warning for a cross-version link | False positive in `fern docs dev`; the published site resolves it |
+| `JSX expressions must have one parent element` | Wrap multi-element MDX in `<>...</>` or a `<div>` |
+| Card badges have no spacing | Remove inline styles; the global theme handles it |
+| Old URL breaks | Add a `redirects:` entry in `fern/docs.yml` |
+| Library reference missing after generation | Re-run `make docs-generate-library`; check the `libraries:` block in `docs.yml` |
 
-## Key References
+## References
 
-| File | Purpose |
-|---|---|
-| `fern/docs.yml` | Site config, versions, redirects, libraries |
-| `fern/versions/latest.yml` | GA alias — symlink to the current GA's yml |
-| `fern/versions/main.yml` | Nav tree for the bleeding-edge train (mounts `./latest/pages`) |
-| `fern/versions/v0.2.1.yml` | Nav tree for the 0.2.1 GA snapshot |
-| `fern/versions/<ver>/pages/` | MDX content for a version |
-| `fern/components/` | Custom TSX (CTAButtons, NavButton, CustomFooter) |
-| `fern/assets/` | Shared images, SVGs, favicon |
-| `fern/main.css` | Global theme overrides — NVIDIA green, card/badge spacing |
-| `fern/package.json` | `npm run check|dev|generate|generate:library` — each wraps `npx -y fern-api@latest` |
-| `.github/workflows/fern-docs-*.yml` | CI: check, preview build, preview comment |
-| `.github/workflows/publish-fern-docs.yml` | CI: publish to docs.nvidia.com/nemo/gym |
-
----
+- [Fern docs](https://buildwithfern.com/learn/docs/getting-started/overview), [CLI reference](https://buildwithfern.com/learn/cli-api-reference/cli-reference/overview), [components](https://buildwithfern.com/learn/docs/content/components/overview), [frontmatter](https://buildwithfern.com/learn/docs/content/frontmatter), [versions](https://buildwithfern.com/learn/docs/configuration/versions), [redirects](https://buildwithfern.com/learn/docs/seo/redirects)

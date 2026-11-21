@@ -18,7 +18,7 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
 - Follow [Terminology](#terminology) in code, docs, and PR text.
-- Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
+- Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See the `nemo-gym-docs` skill (one-time local setup: `fern/README.md`).
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 
 ## Terminology
