@@ -35,10 +35,14 @@ from pydantic import ValidationError
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
+    VERIFIER_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_runtime import ReverifyMode
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.finance_agent_v2.app import (
     FinanceAgentV2ResourcesServer,
     FinanceAgentV2ResourcesServerConfig,
@@ -1069,27 +1073,45 @@ class TestVerifyRubricJudge:
 
     @pytest.mark.asyncio
     async def test_exhausted_attempts_leave_criterion_unresolved(self, no_sleep) -> None:
-        """Never reaching 3 verdicts is a judge failure, not a miss: score stays
-        null and judge_error is set so the row can be filtered out rather than
-        read as a genuine zero."""
+        """Never reaching 3 verdicts is a judge failure, not a miss: the judge
+        answered every time without a verdict, so verify raises an unparseable
+        JudgeError for judge_failsafe to mask, rather than scoring the row."""
         server, stub = _rubric_server({_C1: [1, 1] + ["garbage"] * 20, _C2: [1, 1, 1]})
-        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+        with pytest.raises(JudgeError) as raised:
+            await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
 
         assert stub.calls[_C1] == 10  # judge_max_attempts, then gives up
-        by_criterion = {j.criteria: j for j in res.rubric_judgements}
-        assert by_criterion[_C1].score is None
-        assert by_criterion[_C1].votes == [1, 1]  # kept for debugging, not voted on
-        assert by_criterion[_C1].unanimous is None
-        assert by_criterion[_C1].error is not None
-        assert res.rubric_unresolved == 1
-        assert res.rubric_all_pass is False
-        # Weighed as a miss, so the resolved criterion still earns its half. The
-        # score is only meaningful once judge_error has been used to filter the row.
-        assert res.reward == 0.5
-        assert res.judge_error is not None and "unresolved" in res.judge_error
+        assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+        assert "1/2 criteria unresolved" in str(raised.value)
+        assert "no integer 0/1 score" in str(raised.value)
 
     @pytest.mark.asyncio
-    async def test_unresolved_dealbreaker_zeroes_the_reward(self, no_sleep) -> None:
+    @pytest.mark.parametrize(
+        "replies",
+        [
+            [RuntimeError("connection reset")] * 20,  # judge transport down
+            [TimeoutError()] * 20,
+            [_Starved()] * 20,  # judge output cut at its own max_output_tokens
+        ],
+    )
+    async def test_judge_outage_is_a_judge_failure(self, no_sleep, replies) -> None:
+        server, _ = _rubric_server({_C1: replies, _C2: [1, 1, 1]})
+        with pytest.raises(JudgeError) as raised:
+            await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+
+        assert raised.value.failure_kind == JUDGE_FAILED
+
+    @pytest.mark.asyncio
+    async def test_judge_reply_truncated_mid_verdict_is_unparseable(self, no_sleep) -> None:
+        """A partial reply cut at the judge's token limit carries no verdict."""
+        server, _ = _rubric_server({_C1: ['{"extracted_evidence": "x", "score": 1'] * 20})
+        with pytest.raises(JudgeError) as raised:
+            await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+
+    @pytest.mark.asyncio
+    async def test_unresolved_dealbreaker_is_masked_not_zeroed(self, no_sleep) -> None:
         rubric = json.dumps(
             [
                 {"criteria": _C1, "modifiers": {"category": "must_pass"}},
@@ -1097,11 +1119,31 @@ class TestVerifyRubricJudge:
             ]
         )
         server, _ = _rubric_server({_C1: ["garbage"] * 20, _C2: [1, 1, 1]})
-        res = await server.verify(_mock_request(), _submitted_request(rubric))
+        with pytest.raises(JudgeError):
+            await server.verify(_mock_request(), _submitted_request(rubric))
 
-        assert res.reward == 0.0
-        assert res.rubric_dealbreakers_failed == 1
-        assert res.judge_error is not None
+    @pytest.mark.asyncio
+    async def test_judge_failsafe_masks_an_unresolved_row(self, no_sleep) -> None:
+        """The served verify (wrapped in judge_failsafe) returns the row masked, out of training."""
+        server, _ = _rubric_server({_C1: [RuntimeError("judge down")] * 20})
+        wrapped = judge_failsafe(server.verify, placeholder_reward=server.judge_failure_reward())
+        res = await wrapped(request=_mock_request(), body=_submitted_request(_rubric(_C1)))
+
+        row = json.loads(res.body)
+        assert row["mask_sample"] is True
+        assert row["failure_kind"] == JUDGE_FAILED
+        assert row["reward"] == 0.0
+        assert "criteria unresolved" in row["failure_reason"]
+
+    @pytest.mark.asyncio
+    async def test_judged_failure_is_trained_not_masked(self, no_sleep) -> None:
+        """A criterion the judge resolved as not met is the model's miss: scored, never masked."""
+        server, _ = _rubric_server({_C1: [0, 0, 0], _C2: [1, 1, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+
+        assert res.reward == 0.5
+        assert res.mask_sample is False
+        assert res.judge_error is None
 
     @pytest.mark.asyncio
     async def test_evidence_and_reason_recorded_per_vote(self) -> None:
@@ -1141,6 +1183,7 @@ class TestVerifyRubricJudge:
 
         assert res.reward == 0.0
         assert res.judge_error is None  # a real failure, not a judge problem
+        assert res.mask_sample is False  # the model's fault, so it is trained
         assert res.rubric_judgements is None
         assert sum(stub.calls.values()) == 0
         # Scored zero rather than left unset, so every mean sees this rollout the
@@ -1190,6 +1233,7 @@ class TestVerifyRubricJudge:
 
         assert res.reward == 0.0
         assert res.judge_error is None
+        assert res.mask_sample is False
         assert res.rubric_partial_credit == 0.0
         assert res.rubric_total == 0
         assert sum(stub.calls.values()) == 0
@@ -1213,6 +1257,9 @@ class TestVerifyRubricJudge:
 
         assert res.reward == 0.0
         assert res.judge_error is not None
+        # Missing task data is not the model's fault.
+        assert res.mask_sample is True
+        assert res.failure_kind == VERIFIER_ERROR
         assert sum(stub.calls.values()) == 0
 
     @pytest.mark.asyncio
@@ -1223,6 +1270,8 @@ class TestVerifyRubricJudge:
         assert res.reward == 0.0
         assert res.rubric_total == 1
         assert res.judge_error is not None
+        assert res.mask_sample is True
+        assert res.failure_kind == VERIFIER_ERROR
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("concurrency", [1, 2, 4])

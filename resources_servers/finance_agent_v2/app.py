@@ -67,6 +67,9 @@ from starlette.requests import Request
 from nemo_gym.client import SESSION_ID_KEY, get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
+    VERIFIER_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -82,6 +85,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError
 from resources_servers.finance_agent_v2.frontier_finance_grading import (
     FrontierFinanceGrader,
     FrontierFinanceGraderConfig,
@@ -364,8 +368,7 @@ class RubricJudgement(BaseModel):
     """Per-criterion verdict plus everything needed to audit it.
 
     ``score`` is None when the judge never produced enough parsable verdicts. That is
-    a judge failure, not a "not met": reward drops to 0.0 but ``judge_error`` is set
-    so those rows stay filterable.
+    a judge failure, not a "not met": verify() masks the row instead of scoring it.
     """
 
     criteria: str
@@ -410,8 +413,8 @@ def aggregate_rubric_scores(judgements: Sequence[RubricJudgement]) -> Dict[str, 
 
     Partial Credit is the severity-weighted pass fraction, forced to 0.0 when any
     ``must_pass`` criterion failed. Only an affirmative pass counts, so an unresolved
-    criterion weighs as a miss and gates like one; verify() flags those rows with
-    ``judge_error`` rather than dropping them, which would inflate broken runs.
+    criterion weighs as a miss and gates like one here; verify() never returns such a
+    score, it masks the row as a judge failure.
 
     Kept module-level and free of server state so stored verdicts can be rescored
     offline through this exact code rather than a second implementation that drifts.
@@ -482,8 +485,8 @@ class FinanceAgentV2VerifyResponse(BaseVerifyResponse):
     rubric_weight_passed: Optional[float] = None
     rubric_dealbreakers_total: Optional[int] = None
     rubric_dealbreakers_failed: Optional[int] = None
-    # Set when scoring could not complete (no rubric, or an unresolved criterion), so
-    # a judge failure is filterable rather than read as a genuine miss.
+    # Set when scoring could not complete (no rubric, no judge); such rows are also
+    # masked, so they never read as a genuine miss.
     judge_error: Optional[str] = None
 
 
@@ -1219,10 +1222,11 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         """Score the agent's answer against the dataset's rubric criteria.
 
         Each criterion is judged independently by majority vote, then aggregated into
-        Partial Credit, which becomes the reward. An unresolved criterion counts as
-        not passed and gates like one, but also sets ``judge_error`` so a judge outage
-        never reads as a model failure. With ``frontier_finance_grader`` set, the
-        FrontierFinance grader scores ``rubrics`` instead.
+        Partial Credit, which becomes the reward. A criterion the judge never resolved
+        (call failures, no parseable verdict, or a reply cut at its token limit) raises
+        JudgeError, so judge_failsafe masks the row: a judge outage is not the model's
+        fault. A missing submission is, and scores 0. With ``frontier_finance_grader``
+        set, the FrontierFinance grader scores ``rubrics`` instead.
         """
         session_id = request.session.get(SESSION_ID_KEY)
         tool_usage = self._tool_usage(session_id) if session_id else {}
@@ -1271,19 +1275,28 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                 rubric_total=len(criteria),
             )
 
+        # Missing task data or judge configuration is not the model's fault: mask.
         if not criteria:
+            reason = "no usable rubric criteria — unlabeled dry run, not scorable"
             return FinanceAgentV2VerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
-                judge_error="no usable rubric criteria — unlabeled dry run, not scorable",
+                judge_error=reason,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=reason,
             )
 
         if not self.config.judge_model_server:
+            reason = "no judge_model_server configured — cannot score the rubric"
             return FinanceAgentV2VerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 rubric_total=len(criteria),
-                judge_error="no judge_model_server configured — cannot score the rubric",
+                judge_error=reason,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=reason,
             )
 
         # Criteria are independent; a question is ~9 criteria x 3-10 calls, so judge
@@ -1296,20 +1309,21 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
 
         judgements = await asyncio.gather(*(judge_one(c) for c in criteria))
 
-        scores = aggregate_rubric_scores(judgements)
-
-        judge_error = None
-        if scores["rubric_unresolved"]:
-            first = next(j for j in judgements if j.score is None)
-            judge_error = (
-                f"{scores['rubric_unresolved']}/{scores['rubric_total']} criteria unresolved (e.g. {first.error})"
+        # An unresolved criterion is a judge failure, so the row has no valid reward.
+        # judge_failsafe masks it; unparseable when every failed call got a reply.
+        unresolved = [j for j in judgements if j.score is None]
+        if unresolved:
+            raise JudgeError(
+                f"{len(unresolved)}/{len(judgements)} criteria unresolved (e.g. {unresolved[0].error})",
+                failure_kind=JUDGE_UNPARSEABLE if all(j.api_failures == 0 for j in unresolved) else JUDGE_FAILED,
             )
 
+        scores = aggregate_rubric_scores(judgements)
+
         logger.info(
-            "Rubric verdict: %d/%d passed, %d unresolved, %d/%d dealbreakers failed, partial_credit=%.3f",
+            "Rubric verdict: %d/%d passed, %d/%d dealbreakers failed, partial_credit=%.3f",
             scores["rubric_passed"],
             scores["rubric_total"],
-            scores["rubric_unresolved"],
             scores["rubric_dealbreakers_failed"],
             scores["rubric_dealbreakers_total"],
             scores["rubric_partial_credit"],
@@ -1320,7 +1334,6 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             reward=scores["rubric_partial_credit"],
             rubric_judgements=list(judgements),
             **scores,
-            judge_error=judge_error,
         )
 
     # ------------------------------------------------------------------

@@ -375,15 +375,19 @@ unweighted dataset scores as a plain pass fraction.
 | `rubric_all_pass` | `true` only when every criterion resolved and passed — Vals's All-Pass |
 | `rubric_fraction` | criteria passed / total, unweighted |
 | `rubric_dealbreakers_failed` / `rubric_dealbreakers_total` | how many `must_pass` criteria there were, and how many failed |
-| `rubric_unresolved` | criteria that never got enough parsable verdicts |
+| `rubric_unresolved` | criteria that never got enough parsable verdicts (always 0 on a scored row) |
 | `rubric_judgements[]` | per-criterion votes, evidence, weights used, and sampled failed replies |
-| `judge_error` | set when scoring could not complete — **filter these out rather than reading them as zeros** |
+| `judge_error` | set when scoring could not complete; such rows are masked |
 
-A criterion the judge never resolved is a judge failure, not a miss, so it scores
-`null` rather than `0` and flags the row via `judge_error`. It still weighs as
-not-passed, because treating an absent verdict as a pass would inflate exactly the
-runs whose judging broke. A row with no rubric at all scores 0 with `judge_error`
-set, so the agent and tools can be validated before labels exist.
+A criterion the judge never resolved (failed calls, no parseable verdict, or a
+reply cut at the judge's own output limit) is a judge failure, not a miss. The
+whole row is then masked (`mask_sample: true`, `failure_kind: judge_failed`, or
+`judge_unparseable` when every failed call got a reply), so it leaves training and
+the score means and lands in the failures sidecar. A row with no rubric at all, or
+a server with no judge configured, is masked with `failure_kind: verifier_error`
+and `judge_error` set, so the agent and tools can still be validated before labels
+exist. A rollout that never called `submit_final_result` is the model's failure
+and scores 0, unmasked.
 
 The agent records why its loop ended in `response.metadata.stop_reason`
 (`done_tool`, `max_turns`, `max_time`, `max_output_tokens`, `error`). Under
