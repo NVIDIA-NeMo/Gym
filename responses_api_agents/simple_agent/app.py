@@ -573,7 +573,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 collect_trajectory=True,
             )
         except BaseException as error:
-            # The turn the activation started is the one to debug, so it stays in the trajectory.
+            # Record a failed invocation and a gap. The activation's finished turns and tool calls are not kept.
             failed = AgentInvocation(
                 invocation_id=invocation_id,
                 activation_id=activation_id,
@@ -595,7 +595,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             )
             raise
         duration_ms = (perf_counter() - started) * 1000
-        state.history = [*state.history, *new_input, *(_to_json(item) for item in model_response.output)]
+        output = [_to_json(item) for item in model_response.output]
+        if self.config.execute_tools:
+            # A reply cut off after a function call stops the turn before its tools run. Without its output the call
+            # is not valid input for the next activation, so it is dropped. With execute_tools off, the Environment
+            # Server sends the outputs in the next activation, so every call stays.
+            answered = {item.get("call_id") for item in output if item.get("type") == "function_call_output"}
+            output = [
+                item for item in output if item.get("type") != "function_call" or item.get("call_id") in answered
+            ]
+        state.history = [*state.history, *new_input, *output]
         state.model_server_cookies = _cookie_values(model_server_cookies) or state.model_server_cookies
         if state.tool_access is not None:
             state.resources_cookies = dict(resources_server_cookies or {})
@@ -910,7 +919,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             all_fn_calls = [o for o in model_response.output if o.type == "function_call"]
             tool_images: list[ToolOutputImage] = []
-            # A tool's server ends the activation after this step's tool calls (END_ACTIVATION_HEADER).
+            # The environment server ends the activation after this step's tool calls (END_ACTIVATION_HEADER).
             ends_activation = False
             for output_function_call in all_fn_calls:
                 if collect_trajectory:

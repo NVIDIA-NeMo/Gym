@@ -108,6 +108,11 @@ class _Counter:
         return ToolResult(output=await self.add(arguments), ends_activation=True)
 
     @episode_tool
+    async def submit_nan(self, arguments: _Nothing) -> ToolResult:
+        """End the activation with a result JSON cannot carry, as a broken submission tool does."""
+        return ToolResult(output=float("nan"), ends_activation=True)
+
+    @episode_tool
     async def rollout(self, arguments: _Nothing) -> str | None:
         """Return the rollout the call runs under, as a tool that calls a model would send it."""
         return current_rollout_id()
@@ -339,10 +344,12 @@ def test_a_reply_says_whether_the_call_was_an_error(path: str, body: Any, status
         pytest.param("/add", {"amount": 2}, False, id="result"),
         pytest.param("/submit", {"amount": 2}, True, id="ends-activation"),
         pytest.param("/submit", {"amount": "two"}, False, id="failed-call"),
+        pytest.param("/submit_nan", {}, False, id="not-json"),
     ],
 )
 def test_a_reply_says_whether_the_call_ends_the_activation(path: str, body: Any, ends: bool) -> None:
-    """Only a result the tool marks with ``ends_activation`` carries the header; a call that never ran does not."""
+    """Only a result the tool marks with ``ends_activation`` carries the header; a call that never ran, or whose result
+    is replaced by an error, does not, so the agent shows the model the error."""
     replies: list[httpx.Response] = []
 
     async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:

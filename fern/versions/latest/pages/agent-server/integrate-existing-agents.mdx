@@ -332,8 +332,8 @@ queueing and staging. Setup and cleanup retain their separate bounds.
 `simple_agent` also resumes its session, without a sandbox: it keeps the conversation in the
 session and sends each activation's input after it. The first activation's settings (tools,
 tool choice, sampling and the rest) hold for the session, and a later activation that changes
-one gets HTTP 422. `max_steps` bounds each activation. Under checkpointing, the session
-restarts. A subclass of `simple_agent` supports continuation only when it sets
+one gets HTTP 422. `max_steps` bounds each activation. The close returns the trajectory of
+every activation. Under checkpointing, the session restarts. A subclass of `simple_agent` supports continuation only when it sets
 `continuation_supported` itself.
 
 Adapters that support continuation override `_agent_continuation_capabilities()` to return
