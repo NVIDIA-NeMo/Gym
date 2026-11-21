@@ -20,6 +20,7 @@ from nemo_gym.agents import (
     SandboxPythonRuntime,
     SandboxSession,
     agent_tools,
+    check_agent_seed_rejected,
     raises_agent_failure,
 )
 from nemo_gym.agents.utils import sandbox_python
@@ -416,6 +417,45 @@ def test_a_session_requiring_mcp_tools_is_rejected(client):
 
     assert response.status_code == 422
     assert "Stirrup does not support required MCP tool access: gdpval.mcp" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "probe, reason",
+    [
+        ("printf 'Darwin\\narm64\\nunknown\\n'", "Darwin on arm64"),
+        ("printf 'Linux\\nx86_64\\nglibc 2.12\\n'", "glibc 2.12"),
+    ],
+)
+def test_a_sandbox_platform_without_a_runtime_refuses_the_seed(agent, root, monkeypatch, probe, reason):
+    # The real install probes the sandbox; this sandbox reports a platform no runtime is built for.
+    monkeypatch.setattr(SandboxPythonRuntime, "is_installed", AsyncMock(return_value=False))
+    monkeypatch.setattr(sandbox_python, "_PLATFORM_PROBE", probe)
+    download = AsyncMock(side_effect=RuntimeError("Python download unavailable"))
+    monkeypatch.setattr(sandbox_python, "_python_archive", download)
+    seed = AgentSeedSessionRequest(
+        agent_session_id="agent-session",
+        episode_id=_EPISODE,
+        task_id=TaskId(taskset="gdpval", task_id="t"),
+        sandbox_access=_sandbox_access(str(root)),
+        tool_accesses=[_TOOL_ACCESS],
+    )
+
+    detail = check_agent_seed_rejected(agent.setup_webserver(), seed)
+
+    assert reason in detail
+    download.assert_not_awaited()
+    assert all(record.state is None for record in agent._session_records.values()), "the seed released its session"
+
+
+def test_a_platform_probe_that_fails_leaves_the_seed_retryable(client, root, monkeypatch):
+    # Unlike an unsupported platform, a probe that gave no answer may succeed on a new sandbox.
+    monkeypatch.setattr(SandboxPythonRuntime, "is_installed", AsyncMock(return_value=False))
+    monkeypatch.setattr(sandbox_python, "_PLATFORM_PROBE", "exit 3")
+    client = TestClient(client.app, raise_server_exceptions=False)
+
+    response = _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[_TOOL_ACCESS])
+
+    assert response.status_code == 500, response.text
 
 
 async def test_a_missing_runtime_is_installed_with_the_seed_timeout(monkeypatch):

@@ -31,6 +31,7 @@ from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
     AgentSessionSetupError,
@@ -39,6 +40,7 @@ from nemo_gym.agents import (
     Body,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    UnsupportedSandboxPlatformError,
     resolve_agent_timeout,
     sandbox_server_url,
 )
@@ -370,6 +372,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 await state.close(self.config.session_close_timeout_seconds)
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
+            if isinstance(error, UnsupportedSandboxPlatformError):
+                # The platform comes from the sandbox image, so a new sandbox would fail the same way.
+                raise AgentSeedRejectedError(str(error)) from error
             raise
         return state
 
