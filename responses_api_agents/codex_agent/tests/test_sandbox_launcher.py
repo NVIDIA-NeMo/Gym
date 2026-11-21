@@ -33,10 +33,28 @@ process.stdin.on("end", () => process.exit(0)).resume();
 """
 
 
+def _timeout_after_headers_driver(timeout: float) -> str:
+    # Isolate a body deadline from scheduling before headers without replacing the HTTP exchange or timeout handler.
+    return f"""
+import assert from "node:assert/strict";
+import http from "node:http";
+import {{ syncBuiltinESMExports }} from "node:module";
+const realRequest = http.request.bind(http);
+http.request = (url, options, onResponse) => {{
+  assert.equal(options.timeout, {timeout * 1000});
+  const request = realRequest(url, {{ ...options, timeout: 0 }}, onResponse);
+  request.once("response", (response) => queueMicrotask(() => response.emit("timeout")));
+  return request;
+}};
+syncBuiltinESMExports();
+"""
+
+
 @contextmanager
-def rate_limit_proxy(base_url, attempts_path, *, timeout):
+def rate_limit_proxy(base_url, attempts_path, *, timeout, timeout_after_headers: bool = False):
+    source = (_timeout_after_headers_driver(timeout) if timeout_after_headers else "") + _PROXY_DRIVER
     process = subprocess.Popen(
-        ["node", "--input-type=module", "-e", _PROXY_DRIVER, LAUNCHER.as_uri(), base_url, str(attempts_path)]
+        ["node", "--input-type=module", "-e", source, LAUNCHER.as_uri(), base_url, str(attempts_path)]
         + [str(timeout * 1000)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -366,7 +384,12 @@ def test_body_failure_retains_http_status_and_transport_error(tmp_path, fault):
     attempts_path = tmp_path / "attempts.jsonl"
     with upstream_server(Upstream) as upstream:
         try:
-            with rate_limit_proxy(upstream, attempts_path, timeout=0.1) as proxy:
+            with rate_limit_proxy(
+                upstream,
+                attempts_path,
+                timeout=0.1 if fault == "timeout" else 5,
+                timeout_after_headers=fault == "timeout",
+            ) as proxy:
                 with urlopen(Request(f"{proxy}/responses", data=b"{}"), timeout=5) as response:
                     assert response.status == 200
                     body = response.read()
