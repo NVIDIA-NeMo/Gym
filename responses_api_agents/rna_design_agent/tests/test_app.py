@@ -195,7 +195,9 @@ def test_servers_starting_together_build_eternafold_once(tmp_path: Path, monkeyp
         else:
             builds.append(command)
             time.sleep(0.2)
-            (tmp_path / "EternaFold" / "src" / "contrafold").write_text("")
+            # Like real make: `make Defaults.ipp` writes only that file, and only the build writes the binary.
+            target = "Defaults.ipp" if command[-1] == "Defaults.ipp" else "contrafold"
+            (tmp_path / "EternaFold" / "src" / target).write_text("")
 
     errors = []
 
