@@ -29,6 +29,52 @@ sandbox protection. Only injected resource methods are Gym/verifier-observable a
 side effects belong to NOOA and are not reliably visible to verification or replay. The trajectory distinguishes
 the outer `execute_python` call from nested resource calls.
 
+## Atom
+
+Atom (`nooa_atom.gym:AtomHarness`, installed from the same NOOA revision) runs through this adapter in place of the
+bench agent. Three settings on the agent instance select it: the agent class, the invocation adapter
+(`atom_adapter.invoke_atom`, which hands the latest user message to Atom's session and returns its `TaskResult`), and
+Atom's root turn method, `handle_batch` (one agent, unattended) or `handle_orchestrate` (the root may delegate to child
+sessions). `configs/nooa_atom_agent.yaml` sets the three on an agent instance, and `benchmarks/<bench>/atom.yaml`
+(Terminal-Bench 2.1, SWE-bench Pro, GDPval) applies them to that benchmark's NOOA binding, so a run is one config:
+
+```bash
+gym eval run --config benchmarks/terminal_bench_2_1/atom.yaml
+```
+
+The same three settings as command-line overrides, on a binding whose agent instance is named `agent`:
+
+```bash
+gym eval run --config benchmarks/terminal_bench_2_1/nooa.yaml \
+  ++agent.responses_api_agents.nooa_agent.nooa.agent_class=nooa_atom.gym:AtomHarness \
+  ++agent.responses_api_agents.nooa_agent.nooa.invocation_adapter=responses_api_agents.nooa_agent.atom_adapter:invoke_atom \
+  ++agent.responses_api_agents.nooa_agent.nooa.init_kwargs.turn_method=handle_batch
+```
+
+Atom's session wraps a strategy failure in `TurnFailedError`; the adapter re-raises the wrapped error so the runner's
+termination policy sees the same CodeAct stops and model rejections it sees from any other NOOA agent. Gym resource
+tools are bound on the harness class, not on Atom's session agent.
+
+## Policy model settings
+
+The agent server declares the policy model as NOOA must know it, and refuses to start without every value: a run
+evaluates a model it has described, never one the adapter guesses at. The shipped configs leave these keys mandatory
+(`???`), so a benchmark config, an Eval Factory fragment or `++agent.responses_api_agents.nooa_agent.<key>=<value>`
+overrides must set them before the config resolves.
+
+| Key | Meaning | On every model call |
+| --- | --- | --- |
+| `context_window` | served context window in tokens | NOOA's context planner budget |
+| `max_output_tokens` | reply cap | `max_output_tokens`, unless the benchmark request caps the reply itself |
+| `temperature`, `top_p` | sampling | sent unless the benchmark request sets them |
+| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high` or `max` | `reasoning.effort`, unless the request sets `reasoning`; `none` sends nothing |
+| `media_inputs` | media the model accepts: `image`, `audio`, `video`, `pdf`; `[]` is text only | media the model does not accept is replaced with NOOA's short note before the request is built |
+
+A benchmark's own `responses_create_params` (temperature, top_p, max_output_tokens, reasoning) win over the declared
+values, so Gym's run settings keep their meaning. For GLM 5.3 served by vLLM that is, for example,
+`context_window: 1048576`, `max_output_tokens: 131072`, `temperature: 1.0`, `top_p: 0.95`, `reasoning_effort: none`
+(thinking is set on the model server) and `media_inputs: []`.
+
 ## Sandboxed execution
 
 `nooa.execution_mode: sandboxed` runs the complete NOOA agent in the task sandbox supplied by Resources.
@@ -62,6 +108,20 @@ other agent requests.
 Close raises if the worker stop is unconfirmed or the remaining activation cannot be joined within its budget;
 the session stays available for a close retry. The bounded join also applies to embedded mode. An activation
 interrupted by session close returns HTTP 409 to a caller whose request was not itself cancelled.
+
+### NOOA trace files
+
+Every rollout keeps a NOOA trace: the worker routes NOOA's OpenTelemetry spans and message journal to one JSONL
+file per NOOA session (an Atom root and its children are separate sessions) and joins them into `traces.jsonl`
+beside `result.json` before the result is published. The runner copies that file to
+`<artifacts_dir>/<rollout_id>/traces.jsonl` on the agent server host (`artifacts_dir` defaults to
+`nooa-artifacts/`, gitignored). The journal records, for each model call, the exact messages sent and the reply
+received as content-addressed blocks, plus the Gym response id, so any call in the rollout record can be
+reconstructed from the trace of the rollout named by its `rollout_id`; `nooa import-traces` loads the file into
+NOOA's viewer as is. Gym's rollout record remains the evidence that grading, export and training use. A worker
+that dies before flushing leaves no file: the rollout is collected as usual and its observations carry a
+`trace_unavailable` gap. Embedded runs enable the same exporter once in the agent server process and write under
+`<artifacts_dir>/embedded/`.
 
 
 ## Sandbox worker supervision

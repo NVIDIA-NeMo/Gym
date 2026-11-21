@@ -340,6 +340,13 @@ HARNESSES = {
             "inherit_adapter_fields": ["nooa"],
             "harness_overrides": {
                 "sandbox_runner_timeout_seconds": timeout,
+                # The probe model as NOOA must know it: the agent server refuses an undescribed policy model.
+                "context_window": 32768,
+                "max_output_tokens": 8192,
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "reasoning_effort": "none",
+                "media_inputs": [],
                 "nooa": {
                     "execution_mode": "sandboxed",
                     "invocation_adapter": "${harness_conformance.nooa_observer:}:invoke_with_witness",

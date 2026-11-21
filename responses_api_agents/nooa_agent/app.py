@@ -106,12 +106,16 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 server_client=self.server_client,
                 model_server_name=self.config.model_server.name,
                 max_policy_calls=self.config.max_policy_calls,
-                context_window=self.config.context_window,
+                policy=self.config.policy_settings,
+                trace_dir=self.config.artifacts_dir / "embedded",
             )
         else:
             if body.sandbox_access is None:
                 raise HTTPException(422, "Sandboxed NOOA requires Resources-provided sandbox_access")
-            model_base_url = self.resolve_model_base_url(self.config.model_server.name).removesuffix("/v1")
+            # The runner prefixes every call path with its rollout segment, so the base URL carries no trace segment.
+            model_base_url = self.resolve_model_base_url(
+                self.config.model_server.name, trace_context=False
+            ).removesuffix("/v1")
             connection = body.sandbox_access.connection
             provider = create_provider(
                 resolve_provider_config(connection.provider_config_ref, self.server_client.global_config_dict)
@@ -131,7 +135,8 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 timeout=self.config.sandbox_runner_timeout_seconds,
                 close_timeout=self.config.session_close_timeout_seconds,
                 max_policy_calls=self.config.max_policy_calls,
-                context_window=self.config.context_window,
+                policy=self.config.policy_settings,
+                artifacts_dir=self.config.artifacts_dir,
             )
             state.runner = runner
             try:

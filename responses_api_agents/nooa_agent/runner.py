@@ -21,6 +21,7 @@ import inspect
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import Lock
 from typing import Any, Protocol
 from uuid import uuid4
@@ -38,6 +39,7 @@ from responses_api_agents.nooa_agent.gym_llm import (
 )
 from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.observability import GymTraceHooks
+from responses_api_agents.nooa_agent.policy_settings import REQUEST_SAMPLING_FIELDS, PolicySettings
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
@@ -108,6 +110,27 @@ def _validate_agent_llm_bindings(agent_class: type) -> None:
         )
 
 
+_PROCESS_TRACE_DIR: Path | None = None
+
+
+def _enable_process_trace_export(trace_dir: Path) -> None:
+    """Route this process's NOOA spans and message journal to ``trace_dir``, one file per NOOA session.
+
+    Embedded NOOA runs in the agent server process, so the exporter is process-wide and enabled once; a sandboxed
+    run enables it in its worker instead (``sandbox_entrypoint``). Failure to enable is logged, not raised.
+    """
+    global _PROCESS_TRACE_DIR
+    if _PROCESS_TRACE_DIR is not None:
+        return
+    try:
+        from responses_api_agents.nooa_agent.sandbox_entrypoint import enable_trace_export
+
+        enable_trace_export(str(trace_dir))
+    except Exception:  # noqa: BLE001 - the trace is evidence for later reading; the rollout must still run
+        logger.warning("NOOA trace export could not be enabled in %s", trace_dir, exc_info=True)
+    _PROCESS_TRACE_DIR = trace_dir
+
+
 class InProcessNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
@@ -119,18 +142,22 @@ class InProcessNOOARunner:
         model_server_name: str,
         max_policy_calls: int | None,
         on_progress: Callable[[NOOARunResult], None] | None = None,
-        context_window: int | None = None,
+        policy: PolicySettings | None = None,
+        trace_dir: Path | None = None,
     ) -> None:
         self._invocation = invocation
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._max_policy_calls = max_policy_calls
         self._on_progress = on_progress
-        self._context_window = context_window
+        self._policy = policy
+        self._trace_dir = trace_dir
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
         _validate_agent_llm_bindings(self._agent_class)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
+        if self._trace_dir is not None:
+            _enable_process_trace_export(self._trace_dir)
         state = RolloutLLMState(max_policy_calls=self._max_policy_calls)
         progress_lock = Lock()
 
@@ -166,8 +193,12 @@ class InProcessNOOARunner:
                     logger.exception("Failed to persist NOOA partial checkpoint")
 
         trace = GymTraceHooks(on_progress=checkpoint)
-        sampling_overrides = request.responses_create_params.model_dump(
-            include={"temperature", "top_p", "max_output_tokens"}, exclude_unset=True, exclude_none=True
+        # The declared policy settings go on every call; a benchmark's own request settings win over them.
+        sampling_overrides = self._policy.request_defaults() if self._policy is not None else {}
+        sampling_overrides.update(
+            request.responses_create_params.model_dump(
+                include=set(REQUEST_SAMPLING_FIELDS), exclude_unset=True, exclude_none=True
+            )
         )
         llm = GymResponsesLLM(
             server_client=self._server_client,
@@ -178,7 +209,8 @@ class InProcessNOOARunner:
             on_call=trace.on_model_call,
             on_response=checkpoint,
             sampling_overrides=sampling_overrides,
-            context_window=self._context_window,
+            context_window=self._policy.context_window if self._policy is not None else None,
+            media_inputs=self._policy.media_inputs if self._policy is not None else (),
         )
         dispatcher = ResourceToolDispatcher(
             tool_access=request.tool_access,

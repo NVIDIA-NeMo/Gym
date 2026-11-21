@@ -19,6 +19,7 @@ from nooa.tools.shell_tools import ShellTools
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from responses_api_agents.nooa_agent.bench_agent_adapter import invoke_bench_agent
+from responses_api_agents.nooa_agent.tests.test_config import policy_settings
 
 
 @pytest.mark.asyncio
@@ -331,7 +332,7 @@ async def test_real_benchagent_delegation_uses_gym_trace_and_shared_call_budget(
         server_client=client,
         model_server_name="policy",
         max_policy_calls=limit,
-        context_window=262144,
+        policy=policy_settings(context_window=262144),
     )
     result = await runner.run(
         NOOARunRequest(

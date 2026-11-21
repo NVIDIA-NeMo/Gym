@@ -37,6 +37,7 @@ from responses_api_agents.nooa_agent.runner import (
 )
 from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxCheckpoint, write_checkpoint
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.tests.test_config import policy_settings
 from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
 from responses_api_agents.nooa_agent.tests.test_resource_tools import FakeResponse as FakeResourceResponse
 
@@ -165,7 +166,7 @@ def make_runner(
         server_client=client,
         model_server_name="policy_model",
         max_policy_calls=3,
-        context_window=context_window,
+        policy=policy_settings(context_window=context_window) if context_window is not None else None,
     )
     runner._agent_class = FakeAgent
     return runner, client
@@ -1018,3 +1019,81 @@ async def test_fatal_transport_then_policy_stop_finalizes_root_as_failed(source:
     assert root.error_type == ("PolicyCallBudgetExceeded" if source == "model" else "ConnectionError")
     assert isinstance(caught.value.__cause__, PolicyCallBudgetExceeded if source == "model" else ConnectionError)
     assert runner._server_client.post.await_count == 1
+
+
+def test_embedded_trace_export_is_enabled_once_per_process(monkeypatch, tmp_path) -> None:
+    from responses_api_agents.nooa_agent import runner as runner_module
+    from responses_api_agents.nooa_agent import sandbox_entrypoint
+
+    enabled = []
+    monkeypatch.setattr(runner_module, "_PROCESS_TRACE_DIR", None)
+    monkeypatch.setattr(sandbox_entrypoint, "enable_trace_export", lambda trace_dir: enabled.append(trace_dir))
+    runner_module._enable_process_trace_export(tmp_path / "embedded")
+    runner_module._enable_process_trace_export(tmp_path / "other")
+    assert enabled == [str(tmp_path / "embedded")]
+
+
+def test_embedded_trace_export_failure_is_logged_not_raised(monkeypatch, tmp_path) -> None:
+    from responses_api_agents.nooa_agent import runner as runner_module
+    from responses_api_agents.nooa_agent import sandbox_entrypoint
+
+    def broken(trace_dir: str) -> None:
+        raise RuntimeError("no exporter")
+
+    monkeypatch.setattr(runner_module, "_PROCESS_TRACE_DIR", None)
+    monkeypatch.setattr(sandbox_entrypoint, "enable_trace_export", broken)
+    runner_module._enable_process_trace_export(tmp_path / "embedded")
+    assert runner_module._PROCESS_TRACE_DIR == tmp_path / "embedded"
+
+
+async def _captured_request(runner: InProcessNOOARunner, params: NeMoGymResponseCreateParamsNonStreaming) -> dict:
+    """Run one policy call through the runner and return the Responses request body the model server received."""
+    posted: list[dict] = []
+
+    async def post(*, json: Any, **_: Any) -> FakeHTTPResponse:
+        posted.append(json.model_dump(mode="json", exclude_none=True))
+        return FakeHTTPResponse(model_response())
+
+    runner._server_client.post = AsyncMock(side_effect=post)
+
+    async def one_call(agent, request):
+        await agent.llm.acall([{"role": "user", "content": "hi"}])
+        return "called"
+
+    runner._invocation_adapter = one_call
+    await runner.run(NOOARunRequest(responses_create_params=params, model_url_path="/v1/responses"))
+    assert len(posted) == 1
+    return posted[0]
+
+
+@pytest.mark.asyncio
+async def test_declared_policy_settings_go_on_every_model_call() -> None:
+    runner, _ = make_runner()
+    runner._policy = policy_settings(temperature=0.7, top_p=0.9, max_output_tokens=4096, reasoning_effort="low")
+    request = await _captured_request(runner, NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    assert request["temperature"] == 0.7
+    assert request["top_p"] == 0.9
+    assert request["max_output_tokens"] == 4096
+    assert request["reasoning"] == {"effort": "low"}
+
+
+@pytest.mark.asyncio
+async def test_the_benchmark_request_settings_win_over_the_declared_policy_settings() -> None:
+    runner, _ = make_runner()
+    runner._policy = policy_settings(temperature=0.7, top_p=0.9, max_output_tokens=4096, reasoning_effort="low")
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hello", temperature=1.0, max_output_tokens=2048, reasoning={"effort": "high"}
+    )
+    request = await _captured_request(runner, params)
+    assert request["temperature"] == 1.0
+    assert request["top_p"] == 0.9  # not set by the request: the declared value stands
+    assert request["max_output_tokens"] == 2048
+    assert request["reasoning"] == {"effort": "high"}
+
+
+@pytest.mark.asyncio
+async def test_a_policy_without_a_reasoning_setting_sends_none() -> None:
+    runner, _ = make_runner()
+    runner._policy = policy_settings(reasoning_effort="none")
+    request = await _captured_request(runner, NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    assert "reasoning" not in request

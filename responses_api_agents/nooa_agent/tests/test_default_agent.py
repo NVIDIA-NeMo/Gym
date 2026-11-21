@@ -14,6 +14,7 @@ from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
+from responses_api_agents.nooa_agent.tests.test_config import POLICY_FIELDS
 from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
 
 
@@ -26,7 +27,7 @@ def default_config() -> NOOAAgentConfig:
         name="nooa",
         host="127.0.0.1",
         port=9000,
-        **config["nooa_agent"]["responses_api_agents"]["nooa_agent"],
+        **{**config["nooa_agent"]["responses_api_agents"]["nooa_agent"], **POLICY_FIELDS},
     )
 
 

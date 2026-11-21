@@ -5,6 +5,7 @@
 import asyncio
 import logging
 from dataclasses import replace
+from pathlib import Path
 from shlex import quote
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from nemo_gym.agents import SandboxCommand, SandboxSession, resolve_agent_timeou
 from nemo_gym.sandbox import AsyncSandbox, read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
+from responses_api_agents.nooa_agent.policy_settings import PolicySettings
 from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error, set_response_lifecycle
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest, NOOARunResult
 from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxCheckpoint, SandboxInput, SandboxResult
@@ -36,9 +38,10 @@ class SandboxNOOARunner:
         model_base_url: str,
         model_server_name: str,
         max_policy_calls: int | None,
-        context_window: int | None = None,
+        policy: PolicySettings | None = None,
         timeout: float = 21600,
         close_timeout: float = 30,
+        artifacts_dir: Path | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.python = python
@@ -46,9 +49,12 @@ class SandboxNOOARunner:
         self.model_base_url = model_base_url
         self.model_server_name = model_server_name
         self.max_policy_calls = max_policy_calls
-        self.context_window = context_window
+        self.policy = policy
         self.timeout = timeout
         self.close_timeout = close_timeout
+        self.artifacts_dir = artifacts_dir
+        self.rollout_id: str | None = None
+        self.trace_file: Path | None = None
         # Construct before prepare so failed setup can release the borrowed client.
         self.session = SandboxSession[None](
             sandbox=sandbox,
@@ -74,13 +80,15 @@ class SandboxNOOARunner:
             raise RuntimeError("Could not prepare NOOA session directory")
 
     async def _stage_activation(self, request: NOOARunRequest) -> SandboxCommand:
+        self.rollout_id = request.rollout_id
         payload = SandboxInput(
             invocation=self.invocation,
             request=request,
             model_base_url=self.model_base_url,
             model_server_name=self.model_server_name,
             max_policy_calls=self.max_policy_calls,
-            context_window=self.context_window,
+            policy=self.policy,
+            trace_dir=f"{self.directory}/traces",
         )
         await upload_text(self.sandbox, path=f"{self.directory}/input.json", text=payload.model_dump_json())
         return SandboxCommand(
@@ -195,7 +203,36 @@ class SandboxNOOARunner:
             LOGGER.warning("Retrying NOOA %s capture after %s", name, type(error).__name__)
         return await read_text(self.sandbox, path=f"{self.directory}/{name}")
 
+    async def _collect_trace(self) -> ObservationGap | None:
+        """Copy the worker's trace (spans plus the message journal) to the host.
+
+        The trace is how a model call is reconstructed after the run, so every rollout keeps one. It never fails the
+        rollout: a missing or unreadable trace is returned as the gap the rollout's observations will carry.
+        """
+        if self.artifacts_dir is None or self.rollout_id is None:
+            return None
+        try:
+            text = await self._read_artifact("traces.jsonl")
+        except FileNotFoundError:
+            LOGGER.info("NOOA rollout %s left no trace file", self.rollout_id)
+            return ObservationGap(code="trace_unavailable", detail="NOOA worker left no traces.jsonl")
+        except Exception as error:  # noqa: BLE001 - a trace is never allowed to fail the rollout
+            LOGGER.warning("NOOA rollout %s trace capture failed", self.rollout_id, exc_info=True)
+            return ObservationGap(code="trace_unavailable", detail=f"trace capture failed ({type(error).__name__})")
+        target = self.artifacts_dir / self.rollout_id / "traces.jsonl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        self.trace_file = target
+        return None
+
     async def _collect_artifacts(self) -> None:
+        """Collect the trace and the result; a trace that could not be kept is a gap on the result's observations."""
+        trace_gap = await self._collect_trace()
+        await self._collect_result()
+        if trace_gap is not None and self.observations is not None:
+            self.observations = self.observations.model_copy(update={"gaps": [*self.observations.gaps, trace_gap]})
+
+    async def _collect_result(self) -> None:
         """Prefer terminal evidence; recovered checkpoints can never establish completion."""
         capture_error: Exception | None = None
         try:

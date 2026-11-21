@@ -16,6 +16,22 @@ from responses_api_agents.nooa_agent.config import (
     load_invocation_adapter,
     validate_invocation,
 )
+from responses_api_agents.nooa_agent.policy_settings import PolicySettings
+
+
+# A fully declared policy model, as every Gym run must provide one.
+POLICY_FIELDS: dict[str, Any] = {
+    "context_window": 262144,
+    "max_output_tokens": 32768,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "reasoning_effort": "high",
+    "media_inputs": [],
+}
+
+
+def policy_settings(**overrides: Any) -> PolicySettings:
+    return PolicySettings.model_validate({**POLICY_FIELDS, **overrides})
 
 
 class ExampleAgent(Agent):
@@ -64,6 +80,7 @@ def agent_config(**overrides: Any) -> NOOAAgentConfig:
         "entrypoint": "app.py",
         "model_server": {"type": "responses_api_models", "name": "policy"},
         "nooa": invocation_config().model_dump(),
+        **POLICY_FIELDS,
     }
     values.update(overrides)
     return NOOAAgentConfig.model_validate(values)
@@ -125,12 +142,51 @@ def test_agent_config_rejects_nonpositive_policy_call_limits(limit: int) -> None
         agent_config(max_policy_calls=limit)
 
 
-def test_context_window_defaults_to_unknown_and_accepts_known_positive_limit() -> None:
-    assert agent_config().context_window is None
-    assert agent_config(context_window=262144).context_window == 262144
-    for invalid in (0, -1):
-        with pytest.raises(ValidationError, match="context_window"):
-            agent_config(context_window=invalid)
+@pytest.mark.parametrize("field", sorted(POLICY_FIELDS))
+def test_every_policy_model_setting_is_required(field: str) -> None:
+    values = {
+        "name": "nooa",
+        "host": "127.0.0.1",
+        "port": 9000,
+        "entrypoint": "app.py",
+        "model_server": {"type": "responses_api_models", "name": "policy"},
+        "nooa": invocation_config().model_dump(),
+        **{name: value for name, value in POLICY_FIELDS.items() if name != field},
+    }
+    with pytest.raises(ValidationError, match=field):
+        NOOAAgentConfig.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("context_window", 0),
+        ("max_output_tokens", -1),
+        ("temperature", -0.1),
+        ("top_p", 0.0),
+        ("top_p", 1.5),
+        ("reasoning_effort", "ultra"),
+        ("media_inputs", ["file"]),
+    ],
+)
+def test_policy_model_settings_reject_values_the_model_cannot_take(field: str, invalid: Any) -> None:
+    with pytest.raises(ValidationError, match=field):
+        agent_config(**{field: invalid})
+
+
+def test_policy_settings_carry_the_declared_model_and_its_request_defaults() -> None:
+    config = agent_config(media_inputs=["image", "pdf"], reasoning_effort="low")
+    settings = config.policy_settings
+    assert settings.context_window == 262144
+    assert settings.media_inputs == ("image", "pdf")
+    assert settings.request_defaults() == {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "max_output_tokens": 32768,
+        "reasoning": {"effort": "low"},
+    }
+    # `none` declares a model or route without a reasoning setting: nothing is sent for it.
+    assert "reasoning" not in agent_config(reasoning_effort="none").policy_settings.request_defaults()
 
 
 def test_sandboxed_execution_mode_is_reserved_for_a_future_runner() -> None:

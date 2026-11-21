@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig, PredictConfig
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, IterationLimitExceeded
 from nooa.strategies.predict import PredictStrategy
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
@@ -65,15 +65,15 @@ def _request() -> NOOARunRequest:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("scenario", "reason", "cause_type"),
+    ("scenario", "reason", "error_type", "cause_type"),
     [
-        ("iterations", NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, type(None)),
-        ("output_tokens", NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED, OutputTokenLimitExceeded),
-        ("policy_calls", NOOATerminationReason.POLICY_BUDGET_EXCEEDED, PolicyCallBudgetExceeded),
+        ("iterations", NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, IterationLimitExceeded, type(None)),
+        ("output_tokens", NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED, GenerationError, OutputTokenLimitExceeded),
+        ("policy_calls", NOOATerminationReason.POLICY_BUDGET_EXCEEDED, GenerationError, PolicyCallBudgetExceeded),
     ],
 )
 async def test_actual_codeact_limit_wrappers_remain_gradable(
-    scenario: str, reason: NOOATerminationReason, cause_type: type
+    scenario: str, reason: NOOATerminationReason, error_type: type[GenerationError], cause_type: type
 ) -> None:
     runner = _limit_runner(scenario)
     raised: list[GenerationError] = []
@@ -89,7 +89,7 @@ async def test_actual_codeact_limit_wrappers_remain_gradable(
     result = await runner.run(_request())
 
     assert len(raised) == 1
-    assert type(raised[0]) is GenerationError
+    assert type(raised[0]) is error_type
     assert type(raised[0].__cause__) is cause_type
     assert result.termination_reason is reason
     if reason is NOOATerminationReason.POLICY_BUDGET_EXCEEDED:
