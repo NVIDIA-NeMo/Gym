@@ -500,6 +500,7 @@ async def test_math_judge_records_final_shaped_grade(verdict, base, calls, reply
     from nemo_gym.core import rollout_context
     from nemo_gym.server_runtime import observe_verifier
     from nemo_gym.trajectory import grading_result_binding
+    from nemo_gym.verification import judge_failsafe
     from resources_servers.math_tool_rewards.app import (
         ToolRewardConfig,
         ToolRewardServer,
@@ -545,7 +546,15 @@ async def test_math_judge_records_final_shaped_grade(verdict, base, calls, reply
         ng_trajectory=trajectory(),
     )
     with rollout_context("math-judge-tool-rewards"):
-        result = await observe_verifier(server.verify, enabled=True, verifier_name="math")(body)
+        # The /verify route's own chain: judge_failsafe turns a judge failure into a masked row.
+        result = await observe_verifier(judge_failsafe(server.verify), enabled=True, verifier_name="math")(body)
+    # A judge reply cut off at its own limit, or without a verdict, masks the row (math_with_judge's judge_failsafe
+    # path); only a usable verdict is graded.
+    if verdict == "unclear" or reply_state == "incomplete" or (reply_state == "second_incomplete" and calls == 2):
+        masked = json.loads(result.body)
+        assert masked["mask_sample"] is True
+        assert (masked["_ng_failure_class"], masked["failure_kind"]) == ("judge_failed", "judge_unparseable")
+        return
     saved = result.model_dump(mode="json")
     assert saved["reward"] == pytest.approx(base + (0.1 if base else 0.02))
     assert saved["response"] == body.response.model_dump(mode="json")
