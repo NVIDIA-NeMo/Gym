@@ -1649,7 +1649,7 @@ async def test_a_restored_session_closed_before_its_re_bind_without_evidence_rep
 async def test_a_launch_directory_is_prepared_again_when_the_sandbox_refuses_the_first_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("nemo_gym.agents.utils.setup_retry.asyncio", SimpleNamespace(sleep=AsyncMock()))
+    monkeypatch.setattr("nemo_gym.agents.utils.setup_retry.asyncio", SimpleNamespace(sleep=AsyncMock(), timeout=asyncio.timeout))
     _, state, _ = _stopped_session(monkeypatch)
     made = SandboxExecResult(stdout="", stderr="", return_code=0)
     state.session.begin_activation = AsyncMock()
@@ -1662,23 +1662,58 @@ async def test_a_launch_directory_is_prepared_again_when_the_sandbox_refuses_the
     assert [call.args for call in calls] == [("mkdir -p -- /sessions/s/launch-2",)] * 2
 
 
-async def test_a_stopped_launch_with_no_budget_left_is_reported_as_timed_out_and_not_relaunched() -> None:
+_STOPPED_RECEIPT = {"cleanup_confirmed": True, "return_code": 143, "error": None, "timed_out": False, "stopped": True}
+
+
+def _agent_and_stopped_launch(**state: Any) -> tuple[OpenCodeAgent, SimpleNamespace, SimpleNamespace]:
+    """An agent and a session whose first launch a checkpoint stopped, with that launch's output still on it."""
     agent = OpenCodeAgent.model_construct(
         config=OpenCodeAgentConfig.model_construct(
             session_close_timeout_seconds=1, checkpoint_pause_allowance_seconds=0
         )
     )
-    stopped = {"cleanup_confirmed": True, "return_code": 143, "error": None, "timed_out": False, "stopped": True}
-    session = SimpleNamespace(cleanup=stopped, artifacts='{"messages": []}', session_dir="/s/launch-1")
-    state = SimpleNamespace(
-        launch_count=1,
-        launch_records=[],
-        session=session,
-        request=SimpleNamespace(agent_session_id="a"),
-        prepare_launch=AsyncMock(),
-        inspect_conversation=AsyncMock(),
-        execute=AsyncMock(),
+    session = SimpleNamespace(
+        cleanup=dict(_STOPPED_RECEIPT), artifacts='{"messages": []}', session_dir="/s/launch-1", launch_started=True
     )
+
+    async def prepare_launch(launch: int, *, timeout: float) -> None:
+        # As ``SandboxSession.begin_activation`` does: the previous launch's result is cleared.
+        session.cleanup = session.artifacts = None
+        session.launch_started = False
+
+    values = {
+        "launch_count": 1,
+        "launch_records": [],
+        "session": session,
+        "request": SimpleNamespace(agent_session_id="a"),
+        "prepare_launch": AsyncMock(side_effect=prepare_launch),
+        "inspect_conversation": AsyncMock(return_value=None),
+        "set_conversation_aside": AsyncMock(),
+        "execute": AsyncMock(),
+        "require_session": lambda: session,
+        "reprompted_conversation": True,
+        "harness_session_id": "ses_1",
+        "message_ids": ["msg_1"],
+        "observations": "observations of launch 1",
+        "trajectory": "trajectory of launch 1",
+        "interrupted_tool_calls": 1,
+        "interrupted_tool_call_ids": ["call_1"],
+    }
+    return agent, SimpleNamespace(**values | state), session
+
+
+def _assert_reported_as_a_timeout_of_the_stopped_launch(state: SimpleNamespace, session: SimpleNamespace) -> None:
+    assert session.cleanup == {**_STOPPED_RECEIPT, "timed_out": True}
+    assert session.artifacts == '{"messages": []}' and state.launch_count == 1 and state.launch_records == []
+    # What starting the task afresh cleared is back too: the reply is the stopped launch's.
+    assert (state.reprompted_conversation, state.harness_session_id, state.message_ids) == (True, "ses_1", ["msg_1"])
+    assert (state.observations, state.trajectory) == ("observations of launch 1", "trajectory of launch 1")
+    assert (state.interrupted_tool_calls, state.interrupted_tool_call_ids) == (1, ["call_1"])
+    state.execute.assert_not_awaited()
+
+
+async def test_a_stopped_launch_with_no_budget_left_is_reported_as_timed_out_and_not_relaunched() -> None:
+    agent, state, session = _agent_and_stopped_launch()
 
     # The activation's deadline passed while the launch was being stopped.
     await agent._run_launches(
@@ -1688,6 +1723,94 @@ async def test_a_stopped_launch_with_no_budget_left_is_reported_as_timed_out_and
     # Preparing a relaunch would discard the stopped launch's output: it stays, under a receipt that says timeout.
     state.prepare_launch.assert_not_awaited()
     state.inspect_conversation.assert_not_awaited()
+    _assert_reported_as_a_timeout_of_the_stopped_launch(state, session)
+
+
+async def test_a_budget_that_runs_out_while_the_saved_conversation_is_read_reports_the_stopped_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app._MIN_RELAUNCH_BUDGET_S", 0.01)
+
+    async def slow_read(*, timeout: float) -> None:
+        await asyncio.sleep(30)
+
+    agent, state, session = _agent_and_stopped_launch(inspect_conversation=AsyncMock(side_effect=slow_read))
+
+    # The budget check before the preparation passes; reading the conversation then takes the rest.
+    await asyncio.wait_for(
+        agent._run_launches(
+            state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 0.2
+        ),
+        10,
+    )
+
+    state.prepare_launch.assert_awaited_once()
+    state.inspect_conversation.assert_awaited_once()
+    _assert_reported_as_a_timeout_of_the_stopped_launch(state, session)
+
+
+async def test_a_budget_spent_by_the_time_the_relaunch_is_prepared_reports_the_stopped_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: now[0])
+    agent, state, session = _agent_and_stopped_launch()
+
+    async def aside(*, timeout: float) -> None:
+        now[0] += 5  # the commands of the preparation took the budget, each within its own timeout
+
+    state.set_conversation_aside.side_effect = aside
+
+    await agent._run_launches(state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=103.0)
+
+    # The fresh start had already set the conversation aside and cleared its evidence.
+    state.set_conversation_aside.assert_awaited_once()
+    _assert_reported_as_a_timeout_of_the_stopped_launch(state, session)
+
+
+async def test_a_relaunch_that_times_out_before_its_harness_starts_reports_the_stopped_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def staging_passes_the_deadline(session: Any, activation: Any, **kwargs: Any) -> None:
+        raise TimeoutError("OpenCode activation deadline expired before launch")
+
+    monkeypatch.setattr(
+        "responses_api_agents.opencode_agent.app.run_with_checkpoint_pauses", staging_passes_the_deadline
+    )
+    agent, state, session = _agent_and_stopped_launch()
+
+    await agent._run_launches(
+        state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 60
+    )
+
+    _assert_reported_as_a_timeout_of_the_stopped_launch(state, session)
+
+
+async def test_a_relaunch_whose_harness_started_keeps_its_own_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent, state, session = _agent_and_stopped_launch()
+
+    async def supervisor_passes_its_deadline(running: Any, activation: Any, **kwargs: Any) -> None:
+        session.launch_started = True
+        raise TimeoutError("OpenCode sandbox supervisor exceeded its execution deadline")
+
+    monkeypatch.setattr(
+        "responses_api_agents.opencode_agent.app.run_with_checkpoint_pauses", supervisor_passes_its_deadline
+    )
+
+    with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+        await agent._run_launches(
+            state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 60
+        )
+    # The relaunch ran: the stopped launch's output is not put back in place of its own.
+    assert session.cleanup is None and state.launch_count == 2
+
+
+@pytest.mark.parametrize("error", [TimeoutError("OpenCode launch directory preparation timed out"), RuntimeError("x")])
+async def test_a_preparation_that_fails_within_the_budget_still_fails_the_activation(error: Exception) -> None:
+    agent, state, session = _agent_and_stopped_launch(prepare_launch=AsyncMock(side_effect=error))
+
+    with pytest.raises(type(error), match=str(error)):
+        await agent._run_launches(
+            state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 60
+        )
     state.execute.assert_not_awaited()
-    assert session.cleanup == {**stopped, "timed_out": True}
-    assert session.artifacts == '{"messages": []}' and state.launch_count == 1

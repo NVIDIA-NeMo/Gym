@@ -50,7 +50,7 @@ async def test_attempts_and_the_waits_between_them_share_one_budget(monkeypatch:
         now += seconds
 
     monkeypatch.setattr(setup_retry, "monotonic", lambda: now)
-    monkeypatch.setattr(setup_retry, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(setup_retry, "asyncio", SimpleNamespace(sleep=sleep, timeout=asyncio.timeout))
     sandbox = AsyncMock()
     sandbox.exec.side_effect = exec_that_times_out
     with pytest.raises(TimeoutError, match="the provider gave up"):
@@ -80,3 +80,51 @@ async def test_cancellation_is_never_retried() -> None:
     with pytest.raises(asyncio.CancelledError):
         await exec_idempotent(sandbox, "true", what="Probe", delay_s=0)
     assert sandbox.exec.await_count == 1
+
+
+async def test_a_wait_for_provider_capacity_is_bounded_by_the_budget() -> None:
+    capacity = asyncio.Semaphore(1)
+    ran: list[str] = []
+
+    async def exec_after_admission(command: str, *, timeout_s: float, **kwargs: object) -> SandboxExecResult:
+        # As a provider does: its command timeout starts only once it has capacity for the command.
+        async with capacity:
+            ran.append(command)
+            return OK
+
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = exec_after_admission
+    await capacity.acquire()
+    started = asyncio.get_running_loop().time()
+    result = await asyncio.wait_for(exec_idempotent(sandbox, "mkdir -p /w", what="Setup", timeout_s=0.05), 5)
+    elapsed = asyncio.get_running_loop().time() - started
+    capacity.release()
+    await asyncio.sleep(0)
+
+    # The provider's answer for a command that timed out, within the budget; the command never ran, also afterwards.
+    assert (result.return_code, result.error_type) == (-1, "timeout")
+    assert elapsed < 1 and ran == [] and sandbox.exec.await_count == 1
+
+
+async def test_a_spent_budget_starts_no_further_attempt_and_raises_the_last_error() -> None:
+    capacity = asyncio.Semaphore(0)
+
+    async def refused_then_held(command: str, **kwargs: object) -> SandboxExecResult:
+        if sandbox.exec.await_count == 1:
+            raise ConnectionError("502: The sandbox could not be reached")
+        async with capacity:
+            return OK
+
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = refused_then_held
+    with pytest.raises(ConnectionError, match="502"):
+        await asyncio.wait_for(exec_idempotent(sandbox, "true", what="Setup", delay_s=0.01, timeout_s=0.2), 5)
+    # The second attempt was cut off at the budget, and no third one was started.
+    assert sandbox.exec.await_count == 2
+
+
+async def test_no_attempt_is_started_without_budget() -> None:
+    sandbox = AsyncMock()
+    result = await exec_idempotent(sandbox, "true", what="Setup", timeout_s=0)
+    assert result.error_type == "timeout"
+    sandbox.exec.assert_not_awaited()

@@ -85,7 +85,9 @@ async def run_with_checkpoint_pauses[T](
     during this stop, leaving a receipt the provider had to prove (``receipt_missing``), counts as stopped too. A
     launch that ends on its own, also as a park arrives, returns ``LaunchFinished``. An error of ``launch``
     propagates, and a launch that is still staging and does not end when cancelled raises: the activation must not
-    park while anything of it can still write to the sandbox.
+    park while anything of it can still write to the sandbox. Nor may it fail meanwhile, since a failed activation
+    no longer holds up the checkpoint: any error is raised only once the launch has ended and its staging no longer
+    runs, however long that takes. Until then the checkpoint waits for the session, up to its own deadline.
 
     Cancelled, for example when its session is retired or closed, it stops the harness, shielded and bounded by
     ``stop_timeout``, before it re-raises.
@@ -119,7 +121,7 @@ async def run_with_checkpoint_pauses[T](
             if isinstance(stopped, LaunchStopped):
                 await activation.boundary(on_parked)
             return stopped
-    except BaseException:
+    except BaseException as error:
         if not launched.done():
             # Cancelling the launch stops the harness and collects its artifacts (SandboxSession.execute).
             launched.cancel()
@@ -130,10 +132,34 @@ async def run_with_checkpoint_pauses[T](
                 await asyncio.shield(waiter)
             except asyncio.CancelledError:
                 pass
+        if isinstance(error, Exception):
+            # The activation is about to fail, and its session then no longer holds up a checkpoint. A staging
+            # that did not end when cancelled may still be writing to the sandbox: fail only once it has ended.
+            await _wait_for_staging(session, launched, stop_timeout=stop_timeout)
         raise
     finally:
         if parking is not None and not parking.done():
             parking.cancel()
+
+
+async def _wait_for_staging(
+    session: SandboxSession[Any], launched: asyncio.Future[Any], *, stop_timeout: float
+) -> None:
+    """Return once the launch has ended and its staging no longer runs; warn every ``stop_timeout`` until then.
+
+    Not bounded: while the caller waits here its activation is unfinished, so a checkpoint waits for the session
+    and fails at its own deadline instead of taking a snapshot beside the staging's writes. A retire or a close of
+    the session cancels the wait.
+    """
+    while not launched.done() or session.staging:
+        LOG.warning(
+            "%s launch is still staging after it was cancelled; its activation holds up checkpoints until it ends",
+            session.harness,
+        )
+        if not launched.done():
+            await asyncio.wait({launched}, timeout=stop_timeout)
+        else:
+            await session.wait_staged(timeout=stop_timeout)
 
 
 def _retrieve_exception(task: asyncio.Future[Any]) -> None:
@@ -211,6 +237,9 @@ async def _stop[T](
             raise RuntimeError(
                 f"{session.harness} launch did not end within {stop_timeout:g}s of being cancelled while staging"
             )
+        if session.staging:
+            # The launch gave up waiting for its staging (SandboxSession.execute), which is still running.
+            raise RuntimeError(f"{session.harness} launch was cancelled while staging, and its staging has not ended")
         if launched.cancelled():
             return LaunchStopped(receipt=None)
     try:
