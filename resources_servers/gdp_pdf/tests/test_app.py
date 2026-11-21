@@ -31,6 +31,7 @@ from benchmarks.gdp_pdf.prepare import (
     build_gym_row,
     extract_criteria,
     fetch_example_media,
+    is_prepared_data_current,
     restore_original_prompt,
     write_example,
 )
@@ -48,6 +49,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NgFailureEvent,
 )
+from nemo_gym.server_runtime import AgentContext, SingleAgentTurnTaskInput
 from nemo_gym.verification import JudgeError, is_judge_failure
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,
@@ -282,6 +284,10 @@ class TestBuildGymRow:
         # the content-block layout the agent rewrites at rollout time.
         assert meta["prompt"] == PROMPT
         assert len(meta["criteria"]) == 1
+        # single_agent_turn seeds its `agent` role's session with the same manifest.
+        assert SingleAgentTurnTaskInput.model_validate(row).agent_seed_context == AgentContext(
+            artifacts={"document_manifest": {"path": "documents/t1/manifest.json"}}
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +492,66 @@ class TestVerify:
         result = await server.verify(_verify_request("answer"))
 
         assert result.reward == 1.0
+
+
+class TestSessionDeliveryRecord:
+    """In an agent session gdp_pdf_agent leaves its delivery record in the response metadata, and verify() gives the
+    row the fields the agent's run() writes on /run."""
+
+    @staticmethod
+    def _session_request(answer: str, **record: Any) -> GdpPdfVerifyRequest:
+        body = _verify_request(answer)
+        record = {"limit": None, "input_limit_rejections": 0, "output_truncation_regenerations": 0} | record
+        body.response.metadata = {"document_delivery": json.dumps(record)}
+        return body
+
+    @pytest.mark.asyncio
+    async def test_a_document_that_never_fit_is_masked_only_when_the_agent_marked_it(
+        self, server: GdpPdfResourcesServer
+    ) -> None:
+        mock = _mock_judge(server, _scored_content("1"))
+        record = {"limit": "context", "input_limit_rejections": 6, "pages_truncated": 3}
+
+        scored = await server.verify(self._session_request("", **record))
+        masked = await server.verify(
+            self._session_request("", **record, mask_failed_attempt=True, failure_kind="model_context_limit")
+        )
+
+        mock.assert_not_called()
+        assert scored.reward == masked.reward == 0.0
+        for result in (scored, masked):
+            assert result.failure_reason == "GDP.pdf terminal input limit: context"
+            assert result.model_extra["document_delivery"]["input_limit_rejections"] == 6
+            assert result.model_extra["agent_adaptations"] == {
+                "input_limit_rejections": 6,
+                "output_truncation_regenerations": 0,
+            }
+            assert result.verifier_metadata["pages_truncated"] == 3
+        assert (scored.mask_sample, scored.failure_kind) == (False, None)
+        assert "instance_config" not in scored.model_extra
+        assert (masked.mask_sample, masked.failure_kind) == (True, "model_context_limit")
+        assert masked.model_extra["instance_config"] == {"mask_sample": True}
+
+    @pytest.mark.asyncio
+    async def test_a_delivered_answer_keeps_its_grade_and_gains_the_record(
+        self, server: GdpPdfResourcesServer
+    ) -> None:
+        _mock_judge(server, _scored_content("1"))
+
+        result = await server.verify(self._session_request("The cap is $5M.", input_limit_rejections=1, image_dpi=120))
+
+        assert result.reward == 1.0
+        assert result.model_extra["document_delivery"]["image_dpi"] == 120
+        assert result.model_extra["agent_adaptations"]["input_limit_rejections"] == 1
+        assert (result.failure_reason, result.mask_sample) == (None, False)
+
+    @pytest.mark.asyncio
+    async def test_a_response_without_a_record_is_unchanged(self, server: GdpPdfResourcesServer) -> None:
+        _mock_judge(server, _scored_content("1"))
+
+        result = await server.verify(_verify_request("The cap is $5M."))
+
+        assert "document_delivery" not in result.model_extra and "agent_adaptations" not in result.model_extra
 
 
 class TestRewardMode:
@@ -847,6 +913,21 @@ class TestPrepare:
         assert row["verifier_metadata"]["prompt"] == PROMPT
         assert row["verifier_metadata"]["criteria"][0]["criterion"] == "Says the thing."
         assert rendered == []
+        # OpenCode reads source_pdf and takes no agent context, so its row has none and is a valid task input.
+        assert "agent_context" not in row
+        assert SingleAgentTurnTaskInput.model_validate(row).agent_seed_context is None
+
+    def test_a_cached_file_without_agent_context_is_prepared_again(self, tmp_path: Path) -> None:
+        current = build_gym_row(self._source_row("t1", "a.pdf"), "documents/t1/manifest.json", "media/pdfs/a.pdf")
+        stale = {key: value for key, value in current.items() if key != "agent_context"}
+        cached = tmp_path / "gdp_pdf.jsonl"
+        cached.write_text(json.dumps(current) + "\n")
+        assert is_prepared_data_current(cached)
+        cached.write_text(json.dumps(current) + "\n" + json.dumps(stale) + "\n")
+        assert not is_prepared_data_current(cached)
+        cached.write_text("not json\n")
+        assert not is_prepared_data_current(cached)
+        assert not is_prepared_data_current(tmp_path / "missing.jsonl")
 
     def test_limit_truncates_the_task_list(self, monkeypatch, tmp_path: Path) -> None:
         downloaded: list = []

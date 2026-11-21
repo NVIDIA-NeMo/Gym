@@ -9,8 +9,9 @@ verifier_metadata``. ``criteria`` is what ``extract_criteria`` in
 judges each entry independently. ``document_manifest`` points at a manifest.json (page text +
 pre-rendered 150 DPI page images) produced once at prepare time by
 ``benchmarks/gdp_pdf/prepare.py``'s ``prepare_document()``; ``gdp_pdf_agent``
-(``responses_api_agents/gdp_pdf_agent/app.py``) reads it at rollout time -- it is not read by
-``verify()`` itself.
+(``responses_api_agents/gdp_pdf_agent/app.py``) reads it at rollout time -- on ``/run`` from here, in an agent
+session from the row's ``agent_context`` (the same path, written by ``prepare.py``) -- and ``verify()`` never
+reads it.
 
 The judge is shown the model's response, the task ``prompt``, and one criterion's ``criterion``
 text -- never ``type``, ``severity``, ``implicitness``, or ``subjectiveness``. Including the task
