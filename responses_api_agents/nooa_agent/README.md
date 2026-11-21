@@ -39,16 +39,25 @@ sessions). `configs/nooa_atom_agent.yaml` sets the three on an agent instance, a
 (Terminal-Bench 2.1, SWE-bench Pro, GDPval) applies them to that benchmark's NOOA binding, so a run is one config:
 
 ```bash
-gym eval run --config benchmarks/terminal_bench_2_1/atom.yaml
+gym eval run --config benchmarks/terminal_bench_2_1/atom.yaml \
+  ++agent.responses_api_agents.nooa_agent.context_window=1048576 \
+  ++agent.responses_api_agents.nooa_agent.max_output_tokens=131072 \
+  ++agent.responses_api_agents.nooa_agent.temperature=1.0 \
+  ++agent.responses_api_agents.nooa_agent.top_p=0.95 \
+  ++agent.responses_api_agents.nooa_agent.reasoning_effort=none \
+  '++agent.responses_api_agents.nooa_agent.media_inputs=[]'
 ```
 
-The same three settings as command-line overrides, on a binding whose agent instance is named `agent`:
+The six `++agent...` overrides describe the policy model (see [Policy model settings](#policy-model-settings)); the
+values shown are GLM 5.3's. The same three Atom settings as command-line overrides, on a binding whose agent instance
+is named `agent`:
 
 ```bash
 gym eval run --config benchmarks/terminal_bench_2_1/nooa.yaml \
   ++agent.responses_api_agents.nooa_agent.nooa.agent_class=nooa_atom.gym:AtomHarness \
   ++agent.responses_api_agents.nooa_agent.nooa.invocation_adapter=responses_api_agents.nooa_agent.atom_adapter:invoke_atom \
-  ++agent.responses_api_agents.nooa_agent.nooa.init_kwargs.turn_method=handle_batch
+  ++agent.responses_api_agents.nooa_agent.nooa.init_kwargs.turn_method=handle_batch \
+  <the six policy model settings as above>
 ```
 
 Atom's session wraps a strategy failure in `TurnFailedError`; the adapter re-raises the wrapped error so the runner's
@@ -60,7 +69,9 @@ tools are bound on the harness class, not on Atom's session agent.
 The agent server declares the policy model as NOOA must know it, and refuses to start without every value: a run
 evaluates a model it has described, never one the adapter guesses at. The shipped configs leave these keys mandatory
 (`???`), so a benchmark config, an Eval Factory fragment or `++agent.responses_api_agents.nooa_agent.<key>=<value>`
-overrides must set them before the config resolves.
+overrides must set them before the config resolves. Every command that resolves the config needs them, not only
+`gym eval run`: `gym eval prepare` and `gym eval plan` refuse the same unset values, so a submitted job passes the
+six overrides to its prepare step as well.
 
 | Key | Meaning | On every model call |
 | --- | --- | --- |
