@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -50,7 +51,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import call_judge
+from nemo_gym.verification import JudgeError, call_judge
 
 
 class AggregationMode(str, Enum):
@@ -216,21 +217,24 @@ def _build_context_from_messages(messages: List[dict], exclude_thinking: bool = 
     return "\n\n".join(context_parts)
 
 
-def _extract_verdict(response_text: str, yes_label: str, no_label: str) -> str:
-    """Extract YES/NO verdict from judge response."""
+# A last line that is only the verdict, optionally bracketed, emphasised or labelled: "YES", "[NO]", "**Yes**",
+# "Verdict: NO". A substring test would read "NOT", "CANNOT" or "UNKNOWN" in a prose line as a NO verdict.
+_BARE_VERDICT_LINE = re.compile(
+    r"^(?:(?:final\s+)?(?:answer|verdict)\s*[:\-]\s*)?[\[(*_`\s]*(YES|NO)[\])*_`\s.!]*$", re.IGNORECASE
+)
+
+
+def _extract_verdict(response_text: str, yes_label: str, no_label: str) -> Optional[str]:
+    """Extract the YES/NO verdict from a judge response; None when the response has no verdict."""
     # Look for the labels in the response
     yes_pos = response_text.rfind(yes_label)
     no_pos = response_text.rfind(no_label)
 
     if yes_pos < 0 and no_pos < 0:
-        # Fallback: look for plain YES/NO at end of response
+        # Fallback: a plain YES/NO as the last line of the response
         lines = response_text.strip().split("\n")
-        last_line = lines[-1].strip().upper() if lines else ""
-        if "YES" in last_line:
-            return "YES"
-        elif "NO" in last_line:
-            return "NO"
-        return "NO"  # Default to NO if unclear
+        match = _BARE_VERDICT_LINE.match(lines[-1].strip()) if lines else None
+        return match.group(1).upper() if match else None
     # Return whichever appears last (most authoritative)
     if yes_pos > no_pos:
         return "YES"
@@ -270,7 +274,9 @@ class MultiChallengeServer(SimpleResourcesServer):
         payload.pop("context", None)
         payload.pop("rubric", None)
 
-        evaluations = await self._evaluate_rubric(rubric, context, generated_response)
+        # An empty final answer scores 0 without a judge call: judged, it would pass rubric items whose pass
+        # criterion is NO.
+        evaluations = await self._evaluate_rubric(rubric, context, generated_response) if generated_response else []
 
         # Aggregate scores
         reward = self._aggregate_scores(evaluations)
@@ -332,8 +338,14 @@ class MultiChallengeServer(SimpleResourcesServer):
         )
         judge_text = _extract_text_from_response(judge_response, exclude_thinking=True)
 
-        # Extract verdict
+        # Extract verdict. A reply without one is the judge's failure, not the policy's: defaulting it to NO would
+        # pass every rubric item whose pass criterion is NO, so it masks the row instead.
         verdict = _extract_verdict(judge_text, self.config.yes_label, self.config.no_label)
+        if verdict is None:
+            raise JudgeError(
+                f"judge reply has no {self.config.yes_label}/{self.config.no_label} verdict: {judge_text[-500:]!r}",
+                failure_kind=JUDGE_UNPARSEABLE,
+            )
 
         # Score based on whether verdict matches expected criteria
         if pass_criteria.upper() == "YES":
