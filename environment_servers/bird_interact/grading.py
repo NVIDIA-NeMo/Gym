@@ -26,8 +26,11 @@ once it passes, so phase 2 sees what it changed.
 On PostgreSQL, the task's SQL, the agent's and grading run as the role the image names in ``BIRD_INTERACT_AGENT_ROLE``:
 not a superuser, it owns the task's tables and what the task's setup creates, so a management task can change them,
 but it cannot read the server's files, run programs or change the server's settings, through which agent SQL could
-reach the solution SQL. Only the copies' creation runs as the image's superuser. An image without the role runs
-everything as the superuser.
+reach the solution SQL. The superuser owns the databases, the episode's and its copies, and grants the role only
+``CREATE`` and ``TEMPORARY`` on them, so agent SQL cannot change a database's comment or settings, which every copy
+shares. The role's own settings (``ALTER ROLE ... SET``) are shared too, so the superuser resets them before each
+copy is made and before the episode's database is written. Only these steps run as the image's superuser. An image
+without the role runs everything as the superuser.
 
 The Environment Server uploads this file to the episode's sandbox and runs ``python3 grading.py <command> <request>``
 (see ``main``), so it imports only the standard library, and ``psycopg2`` for PostgreSQL, which the image provides.
@@ -69,8 +72,9 @@ MAX_PREVIEW_VALUE_CHARACTERS = 100
 TEST_CASE_DATABASE = "bird_interact_test_cases"
 # PostgreSQL: agent SQL never runs on the episode's database itself, which only setup and an applied phase 1 change.
 # Exploratory queries run on a working copy, and each submission is graded on a fresh copy, as the ADK resets its task
-# database before each submission. A COMMIT in agent SQL can then change only a copy, as the agent role cannot reach
-# another database.
+# database before each submission. A COMMIT in agent SQL can then change only a copy's objects: the agent role cannot
+# reach another database, and state that the copies share (a database's comment and settings, the role's settings) is
+# the superuser's (see the module's docstring).
 WORK_DATABASE = "bird_interact_work"
 GRADE_DATABASE = "bird_interact_grade"
 # Where a solution that failed after the submission runs again alone: a COMMIT in it must not reach the episode's
@@ -99,10 +103,12 @@ class Grade:
     # Set when the submitted SQL did not run; the agent sees it in the debug message.
     execution_error: str | None = None
     timed_out: bool = False
+    # The exception of the test case that failed a management phase, for the rollout; the agent does not see it.
+    test_case_error: str | None = None
 
 
 class SolutionFailedError(RuntimeError):
-    """The ground-truth SQL did not run: the task data is wrong, not the submission."""
+    """The solution SQL did not run: the task data is wrong, not the submission."""
 
 
 def split_statements(sql: str) -> list[str]:
@@ -211,7 +217,7 @@ def _display_value(value: object) -> object:
 def _preview_value(value: object) -> object:
     """A value as a preview shows it: ``_display_value``'s, cut to ``MAX_PREVIEW_VALUE_CHARACTERS`` when longer."""
     shown = _display_value(value)
-    if len(text := repr(shown)) > MAX_PREVIEW_VALUE_CHARACTERS:
+    if len(text := str(shown)) > MAX_PREVIEW_VALUE_CHARACTERS:
         return text[:MAX_PREVIEW_VALUE_CHARACTERS] + "..."
     return shown
 
@@ -297,11 +303,15 @@ class PostgresDatabase:
     def create(self, request: dict[str, Any]) -> None:
         start_postgres()
         _apply_setup(self, request)
-        self.refresh(WORK_DATABASE)
+        if request.get("explore", True):
+            self.fresh_copy(WORK_DATABASE)
 
     def run(self, scripts: Sequence[str], *, timeout_seconds: float, commit: bool = False) -> list[QueryResult]:
         import psycopg2
 
+        if commit:
+            # A write to the episode's database runs with none of the role settings that agent SQL left.
+            _reset_agent_role_settings()
         connection = _connect(self.name)
         results: list[QueryResult] = []
         try:
@@ -335,7 +345,7 @@ class PostgresDatabase:
             connection.close()
         return results
 
-    def refresh(self, name: str) -> "PostgresDatabase":
+    def fresh_copy(self, name: str) -> "PostgresDatabase":
         """Make ``name`` a fresh copy of this database, replacing any earlier one, and return it."""
         self._administer(name, create=True)
         return PostgresDatabase(name)
@@ -344,7 +354,7 @@ class PostgresDatabase:
     def copy(self, name: str) -> Iterator["PostgresDatabase"]:
         """A copy of this database, named ``name``, that the caller may change. It is dropped on exit."""
         try:
-            yield self.refresh(name)
+            yield self.fresh_copy(name)
         finally:
             self._administer(name, create=False)
 
@@ -360,15 +370,69 @@ class PostgresDatabase:
                 # Also drops a copy that a crashed command left.
                 cursor.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
                 if create:
-                    # The agent role owns the copy, as it owns the episode's database, so its SQL can create schemas.
-                    owner = sql.SQL(" OWNER {}").format(sql.Identifier(AGENT_ROLE)) if AGENT_ROLE else sql.SQL("")
                     cursor.execute(
-                        sql.SQL("CREATE DATABASE {} TEMPLATE {}{}").format(
-                            sql.Identifier(name), sql.Identifier(self.name), owner
+                        sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
+                            sql.Identifier(name), sql.Identifier(self.name)
                         )
                     )
+                    if AGENT_ROLE:
+                        # The superuser owns the copy, so agent SQL cannot change its comment or settings; the role
+                        # may still create schemas and temporary tables in it, as in the episode's database.
+                        cursor.execute(
+                            sql.SQL("GRANT CREATE, TEMPORARY ON DATABASE {} TO {}").format(
+                                sql.Identifier(name), sql.Identifier(AGENT_ROLE)
+                            )
+                        )
+                        _reset_agent_role_settings(cursor)
         finally:
             connection.close()
+
+
+def _reset_agent_role_settings(cursor: Any = None) -> None:
+    """As the superuser, remove the settings that the agent role set for itself (``ALTER ROLE ... SET``, also ``IN
+    DATABASE``). Every database shares them, so agent SQL could carry the solution SQL to its next query through them,
+    or break the next grade's solution."""
+    if not AGENT_ROLE:
+        return
+    import psycopg2
+    from psycopg2 import sql
+
+    if cursor is None:
+        connection = psycopg2.connect(dbname="postgres")
+        connection.autocommit = True
+        try:
+            with connection.cursor() as own:
+                _reset_agent_role_settings(own)
+        finally:
+            connection.close()
+        return
+    role = sql.Identifier(AGENT_ROLE)
+    cursor.execute(sql.SQL("ALTER ROLE {} RESET ALL").format(role))
+    cursor.execute(
+        "SELECT d.datname FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase "
+        "WHERE s.setrole = (SELECT oid FROM pg_roles WHERE rolname = %s)",
+        (AGENT_ROLE,),
+    )
+    for (database,) in cursor.fetchall():
+        cursor.execute(sql.SQL("ALTER ROLE {} IN DATABASE {} RESET ALL").format(role, sql.Identifier(database)))
+
+
+@contextlib.contextmanager
+def _as_agent_role() -> Iterator[None]:
+    """Make the agent role libpq's default user, so a connection that a test case opens itself is not the
+    superuser's."""
+    if not AGENT_ROLE:
+        yield
+        return
+    previous = os.environ.get("PGUSER")
+    os.environ["PGUSER"] = AGENT_ROLE
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("PGUSER", None)
+        else:
+            os.environ["PGUSER"] = previous
 
 
 def _connect(database: str) -> Any:
@@ -481,23 +545,24 @@ class TestCaseHelpers:
         }
 
 
-def passes_test_cases(
+def failed_test_case(
     test_cases: Sequence[str],
     namespace: dict[str, Any],
     pred_sqls: list[str],
     sol_sqls: list[str],
     db_name: str,
     conn: Any,
-) -> bool:
-    """Run each test case's ``test_case(pred_sqls, sol_sqls, db_name, conn)`` in order, as the ADK runs them.
+) -> str | None:
+    """Run each test case's ``test_case(pred_sqls, sol_sqls, db_name, conn)`` in order, as the ADK runs them; return
+    ``None`` when all pass, or the exception of the first that failed, as ``<type>: <message>``.
 
     A test case that raises anything, an ``AssertionError`` or another error, fails the phase, and the rest do not
     run. As in the ADK, the code runs with ``namespace`` as its globals and its own dictionary as its locals, so its
     functions see the helpers but not the code's other top-level names, such as an import. Code that defines no
     ``test_case`` passes. Whatever the code prints goes to standard error, so the command's JSON result stays alone
-    on standard output.
+    on standard output. A connection the code opens itself is the agent role's.
     """
-    with contextlib.redirect_stdout(sys.stderr):
+    with contextlib.redirect_stdout(sys.stderr), _as_agent_role():
         for code in test_cases:
             if not isinstance(code, str):
                 continue
@@ -507,9 +572,9 @@ def passes_test_cases(
                 test_case = names.get("test_case")
                 if callable(test_case):
                     test_case(pred_sqls, sol_sqls, db_name, conn)
-            except Exception:
-                return False
-    return True
+            except Exception as error:
+                return f"{type(error).__name__}: {error}"[:2000]
+    return None
 
 
 def _apply_setup(database: Database, request: dict[str, Any]) -> None:
@@ -553,14 +618,14 @@ def grade(
     ordered: bool,
     timeout_seconds: float,
     apply_if_passed: bool = False,
-    baseline: Database | None = None,
+    episode_database: Database | None = None,
 ) -> Grade:
     """Grade ``predicted_sql`` against the solution's scripts by BIRD-Interact's default test case.
 
-    ``baseline`` is the episode's database when ``database`` is a copy of it (PostgreSQL); a passing submission is
-    applied to it with ``apply_if_passed``.
+    ``episode_database`` is the episode's database when ``database`` is a copy of it (PostgreSQL); a passing
+    submission is applied to it with ``apply_if_passed``.
     """
-    baseline = baseline or database
+    episode_database = episode_database or database
     solution = [script for script in map(normalize_sql, solution_sql) if script.strip()]
     results = database.run([predicted_sql, normalize_sql(predicted_sql), *solution], timeout_seconds=timeout_seconds)
     submitted = results[0]
@@ -572,13 +637,13 @@ def grade(
         # The solution runs on the state the submission left, as in the ADK, which grades a submission that breaks it
         # as wrong. Only a solution that also fails on the episode's own state is bad task data. It runs on a copy, so a
         # COMMIT in it cannot reach the episode's database; SQLite's run already uses a scratch copy.
-        if isinstance(baseline, PostgresDatabase):
-            with baseline.copy(SOLUTION_DATABASE) as clean:
+        if isinstance(episode_database, PostgresDatabase):
+            with episode_database.copy(SOLUTION_DATABASE) as clean:
                 alone = clean.run(solution, timeout_seconds=timeout_seconds)[-1]
         else:
-            alone = baseline.run(solution, timeout_seconds=timeout_seconds)[-1]
+            alone = episode_database.run(solution, timeout_seconds=timeout_seconds)[-1]
         if not alone.ok:
-            raise SolutionFailedError(f"The ground-truth SQL failed: {alone.error}")
+            raise SolutionFailedError(f"The solution SQL failed: {alone.error}")
         return Grade(passed=False)
     predicted_rows = results[1].rows
     solution_rows = results[-1].rows if solution else None
@@ -592,7 +657,7 @@ def grade(
         # fails on both too.
         passed = False
     if passed and apply_if_passed:
-        (applied,) = baseline.run([predicted_sql], timeout_seconds=timeout_seconds, commit=True)
+        (applied,) = episode_database.run([predicted_sql], timeout_seconds=timeout_seconds, commit=True)
         if not applied.ok:
             # The same SQL just ran on the same state, so the sandbox failed, not the submission: the command fails,
             # and the server retries it on a fresh sandbox.
@@ -612,7 +677,7 @@ def grade_by_test_cases(
     """Grade a management phase by its test cases, as the ADK does, on a copy of ``database``.
 
     The submission runs first, and its writes stay, so the test cases see them; then each test case runs (see
-    ``passes_test_cases``). The copy is dropped afterwards, so ``database`` changes only when a passing submission is
+    ``failed_test_case``). The copy is dropped afterwards, so ``database`` changes only when a passing submission is
     applied, with ``apply_if_passed``.
     """
     with database.copy(TEST_CASE_DATABASE) as scratch:
@@ -626,16 +691,17 @@ def grade_by_test_cases(
             if timed_out:
                 return Grade(passed=False, timed_out=True)
             namespace = helpers.namespace(rows)
-            passed = passes_test_cases(test_cases, namespace, predicted, list(solution_sql), scratch.name, connection)
+            failure = failed_test_case(test_cases, namespace, predicted, list(solution_sql), scratch.name, connection)
         finally:
             helpers.close()
+    passed = failure is None
     if passed and apply_if_passed:
         (applied,) = database.run([predicted_sql], timeout_seconds=timeout_seconds, commit=True)
         if not applied.ok:
             # The same SQL just passed on a copy of this state, so the command fails, as grade's does, and the server
             # retries it on a fresh sandbox, which holds the episode's database without this attempt's writes.
             raise RuntimeError(f"Applying the passing phase 1 SQL failed: {applied.error}")
-    return Grade(passed=passed)
+    return Grade(passed=passed, test_case_error=failure)
 
 
 def main(argv: list[str]) -> None:
@@ -694,18 +760,20 @@ def main(argv: list[str]) -> None:
                         ordered=request["ordered"],
                         timeout_seconds=request["timeout_seconds"],
                         apply_if_passed=request.get("apply_if_passed", False),
-                        baseline=database,
+                        episode_database=database,
                     )
             result = {
                 "passed": outcome.passed,
                 "execution_error": outcome.execution_error,
                 "timed_out": outcome.timed_out,
+                "test_case_error": outcome.test_case_error,
             }
         except SolutionFailedError as error:
             result = {"solution_error": str(error)}
-        if isinstance(database, PostgresDatabase):
-            # Exploration starts again from the episode's database, as the ADK's does after each submission.
-            database.refresh(WORK_DATABASE)
+        if isinstance(database, PostgresDatabase) and request.get("explore", True):
+            # Exploration starts again from the episode's database, as the ADK's does after each submission. An
+            # episode without the execute tool (c-Interact) has no working copy.
+            database.fresh_copy(WORK_DATABASE)
     else:
         raise SystemExit(f"Unknown command {command!r}; expected setup, execute or grade")
     print(json.dumps(result))

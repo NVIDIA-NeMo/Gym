@@ -78,8 +78,8 @@ gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark
 
 - **Simulator.** The server runs the ADK's simulator. For scores comparable with auto-ontology-eval's, set
   `user_model_name` to the ADK's default simulator model, `anthropic/claude-haiku-4-5-20251001` (BIRD-Interact's own
-  harness uses `gemini-2.0-flash-001`). An endpoint that returns a reasoning field with the reply, as some serve
-  Claude Haiku 5.5, also needs `user_model_uses_reasoning_parser=true`: with the parser off, the model server refuses
+  harness uses `gemini-2.0-flash-001`). An endpoint that returns a reasoning field with the reply also needs
+  `user_model_uses_reasoning_parser=true`: with the parser off, the model server refuses
   the reply. The simulator reads only the reply's text, and its token limits (500 and 1024) were set for a model that
   does not think, so turn thinking off where the endpoint allows it, for example
   `'++user_model.responses_api_models.vllm_model.extra_body={thinking:{type:disabled}}'`. Run the policy at
@@ -98,7 +98,9 @@ None published yet.
 
 In 24 Lite tasks, a solution SQL does not run when a submission is graded. The server grades that submission as wrong,
 as the ADK's `ex_base` returns 0 when the solution fails, and lists the error in the rollout's `solution_errors`. No
-agent can pass that phase, so leave these tasks out when you compare against a score that excludes them.
+agent can pass that phase, so leave these tasks out when you compare against a score that excludes them. The
+aggregate metrics count the samples that hold one (`solution_errors`), and `mask_solution_errors: true` masks them,
+for training, where a constant 0 is not a learning signal.
 
 | Cause | Tasks (phase) |
 |---|---|

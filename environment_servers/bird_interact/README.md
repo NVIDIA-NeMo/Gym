@@ -141,8 +141,12 @@ again on a fresh sandbox.
 On PostgreSQL, the task's setup, the agent's SQL and grading run as the role the image names in
 `BIRD_INTERACT_AGENT_ROLE` (`bird_agent` in `benchmarks/bird_interact`'s image). It is not a superuser. It owns the
 task's tables and what the setup creates, so a management task can change them. It cannot read the server's files or
-logs, run programs, change the server's settings or reach another database, so agent SQL cannot read the solution SQL
-that grading runs, or change anything but its copy. Only the copies are made by the image's superuser. The ADK runs
+logs, run programs, change the server's settings or reach another database. The superuser owns the episode's database
+and its copies and grants the role only `CREATE` and `TEMPORARY` on them, so agent SQL cannot change a database's
+comment or settings, which every copy shares. A role can change its own settings (`ALTER ROLE ... SET`), which every
+database shares too, so the superuser resets them before it makes each copy and before it writes the episode's
+database. Agent SQL therefore cannot carry the solution SQL that grading runs to its next query, or break the next
+grade, through state that the copies share. The copies and these resets are the superuser's only work. The ADK runs
 everything as a superuser, so a task whose solution needs a superuser (`session_replication_role`, `CREATE ROLE`) differs;
 the benchmark's README lists them. An image without the role runs everything as the superuser.
 
@@ -167,8 +171,10 @@ such a task at seed.
   comparison, 1 or 0), `remove_comments`, `remove_distinct` and `remove_round` (on lists of SQL), and
   `pred_query_result` (the rows the submission returned).
 - The test cases run in order. The first that raises anything fails the phase. As in the ADK, the code's globals
-  are those six names and its locals its own, so a function in it does not see the code's top-level imports.
-- A sandbox command has time for the submission, two queries for each test case and the application of a passing
+  are those six names and its locals its own, so a function in it does not see the code's top-level imports. The
+  exception goes to the rollout's `test_case_errors`, not to the agent, so a failing submission can be told apart from
+  a test case that breaks on Gym's helpers. A connection that the code opens itself is the agent role's.
+- A sandbox command has time for the submission, ten queries for each test case and the application of a passing
   phase 1, each `sql_timeout_seconds`. A submission that passes the test cases but cannot be applied to the episode's
   database fails, with its error.
 
@@ -274,7 +280,16 @@ ADK's scores with these differences in mind:
 - **A failed simulator or grader masks the sample.** When the ADK's simulator model fails, the agent gets `I'm not sure
   I understand your question.` and the task is scored; when its grader fails, the agent gets `Error: ...` and the
   submission counts as failed. Gym masks the sample instead (`user_simulator_failed`, `sandbox_failed`), so an
-  infrastructure failure does not count as the agent's.
+  infrastructure failure does not count as the agent's. A call cut off by its tool-call deadline
+  (`tool_call_timeout_seconds`) or by the interaction deadline is not masked: the call fails, and a submission cut
+  off so counts as a failed attempt.
+- **One deadline for the whole query.** The ADK sets `statement_timeout` for each statement; Gym cancels the whole
+  query at one deadline, `sql_timeout_seconds`. A script whose statements each finish in time, but not all together,
+  passes in the ADK and times out in Gym.
+- **A passing phase 1 that cannot be applied.** The ADK ignores the result of applying phase 1's SQL for phase 2 and
+  pays the reward. Gym fails the command, runs it again on a fresh sandbox, and then masks the sample
+  (`sandbox_failed`). SQL can pass on the grading copy and fail on the episode's database when it depends on the
+  database's name (the copy is not `<db>_template`), `random()` or `now()`.
 - **The agent's request.** The ADK's agent adds a line that names it (`You are an agent. Your internal name is
   "bird_interact_agent".`) to the instruction; Gym does not. Gym's tools have parameter descriptions and
   `strict: true`; the ADK's have neither.

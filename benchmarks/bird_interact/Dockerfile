@@ -21,7 +21,8 @@ FROM ${BIRD_INTERACT_IMAGE}
 # libpq reads PGHOST and PGUSER, so grading.py connects over the local socket as the release's superuser, root, to
 # set up the task and copy its database. It runs the agent's SQL and grading as BIRD_INTERACT_AGENT_ROLE, a role that
 # is not a superuser and owns each <db>_template's objects (agent_role.sql), so agent SQL cannot read the server's files
-# or logs, run programs or change its settings.
+# or logs, run programs or change its settings. The superuser keeps owning the databases themselves and grants the role
+# CREATE and TEMPORARY on them, so agent SQL cannot change a database's comment or settings, which its copies share.
 ENV PGDATA=/var/lib/postgresql/bird_interact \
     PGHOST=/var/run/postgresql \
     PGUSER=root \
@@ -50,7 +51,8 @@ RUN set -eu; \
     for database in $(gosu postgres psql --dbname=postgres --tuples-only --no-align \
         --command="SELECT datname FROM pg_database WHERE datname LIKE '%\_template' AND datname <> 'sql_test_template'"); do \
         gosu postgres psql --dbname="$database" --quiet --set=ON_ERROR_STOP=1 --file=/tmp/agent_role.sql; \
-        gosu postgres psql --dbname=postgres --quiet --command="ALTER DATABASE \"$database\" OWNER TO bird_agent"; \
+        gosu postgres psql --dbname=postgres --quiet \
+            --command="GRANT CREATE, TEMPORARY ON DATABASE \"$database\" TO bird_agent"; \
     done; \
     restored="$(gosu postgres psql --dbname=postgres --tuples-only --no-align \
         --command="SELECT count(*) FROM pg_database WHERE datname LIKE '%\_template' AND datname <> 'sql_test_template'")"; \
