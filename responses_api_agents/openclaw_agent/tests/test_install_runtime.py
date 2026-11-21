@@ -9,6 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from responses_api_agents.openclaw_agent.app import _EXEC_HELPER_CHECK
+from responses_api_agents.openclaw_agent.setup_openclaw import DEFAULT_NODE_VERSION
+
 
 INSTALLER = Path(__file__).parents[1] / "install_openclaw_runtime.sh"
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="OpenClaw sandbox execution requires Linux")
@@ -63,7 +66,7 @@ def test_missing_curl_is_installed_before_downloading_node(sandbox: tuple[Path, 
         "update",
         "install -y --no-install-recommends curl ca-certificates tar gzip coreutils gawk",
     ]
-    assert "https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-" in (root / "download.log").read_text()
+    assert "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-" in (root / "download.log").read_text()
     assert not (root / "runtime/ready").exists()
 
 
@@ -153,7 +156,10 @@ def test_concurrent_installs_share_one_verified_runtime(sandbox):
     node.write_text("""#!/bin/bash
 case "$1" in
   */npm-cli.js) echo install >> "$TEST_ROOT/npm-installs"; sleep 0.3 ;;
-  -e) echo version-check >> "$TEST_ROOT/version-checks" ;;
+  -e) case "$2" in
+        *proc-safe*) echo helper-check >> "$TEST_ROOT/helper-checks" ;;
+        *) echo version-check >> "$TEST_ROOT/version-checks" ;;
+      esac ;;
   *) echo 2026.6.11 ;;
 esac
 """)
@@ -172,7 +178,44 @@ esac
     assert (root / "npm-installs").read_text().splitlines() == ["install"]
     assert len((root / "downloads").read_text().splitlines()) == 2
     assert len((root / "version-checks").read_text().splitlines()) == 2
+    # Both the installer and the process that reuses its runtime check the exec tool's compiled process helper.
+    assert len((root / "helper-checks").read_text().splitlines()) == 2
     assert (root / "runtime/ready").read_text().strip() == "2026.6.11"
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["fresh_install", "cached_runtime"])
+def test_runtime_whose_exec_helper_does_not_load_is_refused(sandbox, cached):
+    """OpenClaw 2026.11.5's exec tool needs a compiled helper that needs glibc 2.33; an older image fails setup."""
+    root, env = sandbox
+    bindir = root / "bin"
+    replacements = {
+        "curl": '#!/bin/bash\nfor last; do :; done\n: > "$last"\n',
+        "sha256sum": "#!/bin/bash\nwhile read -r line; do :; done\n",
+        "tar": "#!/bin/bash\nexit 0\n",
+    }
+    for name, script in replacements.items():
+        path = bindir / name
+        path.unlink(missing_ok=True)
+        path.write_text(script)
+        path.chmod(0o755)
+    node = root / "runtime/node/bin/node"
+    node.parent.mkdir(parents=True)
+    node.write_text("""#!/bin/bash
+case "$1" in
+  */npm-cli.js) ;;
+  -e) case "$2" in *proc-safe*) exit 4 ;; esac ;;
+  *) echo 2026.6.11 ;;
+esac
+""")
+    node.chmod(0o755)
+    if cached:
+        (root / "runtime/ready").write_text("2026.6.11")
+
+    result = run_installer(root, env)
+
+    assert result.returncode == 3, result.stderr
+    assert "OpenClaw 2026.6.11 cannot run its exec tool in this image" in result.stderr
+    assert "glibc 2.33" in result.stderr
 
 
 def test_missing_awk_explains_prerequisite_before_download(sandbox):
@@ -215,7 +258,7 @@ def test_musl_uses_pinned_x64_archive_and_apk(sandbox: tuple[Path, dict[str, str
     result = run_installer(root, env)
     assert result.returncode == 19, result.stderr
     assert (
-        "https://unofficial-builds.nodejs.org/download/release/v22.19.0/node-v22.19.0-linux-x64-musl.tar.gz"
+        "https://unofficial-builds.nodejs.org/download/release/v24.22.3/node-v24.22.3-linux-x64-musl.tar.gz"
         in (root / "download.log").read_text()
     )
     if bootstrap:
@@ -247,7 +290,7 @@ def test_old_musl_cpp_repair_is_private_and_checksum_gated(
         "curl": """for last; do :; done
 echo "$*" >> "$TEST_ROOT/download.log"
 if [[ "$*" == *SHASUMS256* ]]; then
-  echo 'stub  node-v22.19.0-linux-x64-musl.tar.gz' > "$last"
+  echo 'stub  node-v24.22.3-linux-x64-musl.tar.gz' > "$last"
 else
   echo fixture > "$last"
 fi
@@ -266,7 +309,7 @@ done
     node.parent.mkdir(parents=True)
     node.write_text("""#!/bin/bash
 case "$1" in
-  --version) [ -f "$TEST_ROOT/patched" ] || exit 1; echo v22.19.0;;
+  --version) [ -f "$TEST_ROOT/patched" ] || exit 1; echo v24.22.3;;
   */npm-cli.js) echo install >> "$TEST_ROOT/npm.log";;
   *) echo '2026.6.11';;
 esac
@@ -290,3 +333,63 @@ esac
     assert (root / "npm.log").read_text().splitlines() == ["install"]
     assert (root / "runtime/ready").exists()
     assert not (root / "packages.log").exists()
+
+
+def test_installer_checks_the_exec_helper_like_a_preinstalled_runtime():
+    assert _EXEC_HELPER_CHECK in INSTALLER.read_text()
+
+
+def test_installer_installs_the_default_node_release():
+    """The agent names the sandbox runtime directory after DEFAULT_NODE_VERSION; the installer must install it."""
+    assert f"node_version={DEFAULT_NODE_VERSION}\n" in INSTALLER.read_text()
+
+
+DEPS_SCRIPTS = (
+    "responses_api_agents/openclaw_agent/scripts/openclaw_agent_deps.sh",
+    "responses_api_agents/anyswe_agent/setup_scripts/openclaw_agent_deps.sh",
+)
+
+
+def _executable(path: Path, text: str) -> None:
+    path.write_text(text)
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize("script", DEPS_SCRIPTS)
+@pytest.mark.parametrize(
+    ("existing", "downloads"),
+    [(None, True), ("v22.19.0", True), (f"v{DEFAULT_NODE_VERSION}", False), ("broken", True)],
+)
+def test_deps_script_replaces_a_node_that_is_not_the_pinned_release(tmp_path, script, existing, downloads):
+    run_dir = tmp_path / "script"
+    run_dir.mkdir()
+    target = run_dir / "openclaw_agent_deps.sh"
+    target.write_bytes((Path(__file__).resolve().parents[3] / script).read_bytes())
+    (run_dir / "_portable_python.sh").write_text("install_portable_python() { :; }\ninstall_nemo_gym_deps() { :; }\n")
+    deps = tmp_path / "deps"
+    (deps / "bin").mkdir(parents=True)
+    log = tmp_path / "calls.log"
+    if existing == "broken":
+        _executable(deps / "bin/node", "#!/bin/sh\nexit 1\n")
+    elif existing:
+        _executable(deps / "bin/node", f"#!/bin/sh\necho {existing}\n")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    _executable(tools / "curl", f'#!/bin/sh\necho "curl $*" >> {log}\n')
+    _executable(tools / "tar", f'#!/bin/sh\ncat >/dev/null\necho "tar $*" >> {log}\n')
+    _executable(deps / "bin/npm", f'#!/bin/sh\necho "npm $*" >> {log}\n')
+    _executable(deps / "bin/openclaw", "#!/bin/sh\necho 2026.11.5\n")
+    _executable(deps / "bin/python3", "#!/bin/sh\nexit 0\n")
+    env = {
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "DEPS_DIR": str(deps),
+        "NEMO_GYM_ROOT": str(tmp_path),
+        "NODE_ARCH": "linux-x64",
+        "PORTABLE_PYTHON_SH": str(run_dir / "_portable_python.sh"),
+    }
+    result = subprocess.run(["bash", str(target)], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines()
+    url = f"https://nodejs.org/dist/v{DEFAULT_NODE_VERSION}/node-v{DEFAULT_NODE_VERSION}-linux-x64.tar.xz"
+    assert (f"curl -fsSL {url}" in calls) is downloads
+    assert calls[-1] == f"npm install -g --prefix {deps} openclaw@2026.11.5"
