@@ -174,3 +174,124 @@ Both benchmark configs use Gym's shipped `legacy_agent` Environment Server, whic
 This is evaluation support for two harnesses. It does not implement interchangeable session harnesses or qualify multi-harness RL training. The follow-up in `benchmark/VENDORING.md` moves apps, browser tools and grading to a Resources Server under `single_agent_turn_legacy`, with stock `opencode_agent` and browser-use as the baseline. Protocol and browser-tool differences mean scores are not claimed equivalent across harnesses.
 
 Enroot app networks disable host-loopback access. Docker-compatible exec uses only host PATH and explicit `-e`/runtime flags; it does not pass judge keys or Gym configuration into app commands. Cancellation reaps detached Enroot app processes even during readiness startup. Deployment platform roots are explicit absolute paths, rather than a single cluster-specific hardcoded root.
+
+### Native scoring invariant
+
+Both harnesses publish `scoring_policy: native_weighted_final_state_v1`. A task's
+unchanged verifier checks and point weights determine the reward, including zero
+and partial credit. Model step/output/context limits do not replace a conclusive
+final-state grade. Conflicting outcome-policy overrides are rejected at startup.
+
+A grade requires exactly one complete SCORE summary whose points, check weights,
+pass flags and fraction agree. Missing, malformed or contradictory summaries,
+nonfinite/out-of-range scores, unavailable app readback and judge faults are
+unscorable evaluation results. Bounded verification retries read the same live
+app state before teardown; they never rerun the actor. Masked results are excluded
+from the mean, while valid zeros remain in the denominator. Response publication
+and aggregation validate the native grade independently of cached worker rewards.
+Existing result files remain immutable; historical corrections belong in a
+separate versioned score view with source hashes.
+
+### Focused editor and terminal input
+
+OpenCode exposes 18 SaaS MCP tools, including `saas_browser_insert_text` and
+`saas_browser_press_key`. After clicking an editor or terminal, pass the latest
+returned `observation_id` to the focused keyboard tool. Neither tool selects or
+refocuses a DOM element. Both retain app-origin, tab, viewport and fresh-screenshot
+checks, serialized execution and post-action observations. Multi-app sessions
+require `expected_url`.
+
+`insert_text(text, observation_id, mode="insert")` inserts text at the cursor or
+replaces the current selection. The default uses Playwright keyboard text input
+without per-character key events, which avoids the xterm duplication path. Use
+`mode="key_events"` only for a widget that needs character key events. `press_key`
+sends one key or chord, such as Enter, Control+A or Control+S; arbitrary prose and
+shell command text belong in `insert_text`. Host shell tools remain unavailable;
+an assigned application's visible terminal UI can be used for tasks requiring it.
+See the [Playwright keyboard API](https://playwright.dev/python/docs/api/class-keyboard).
+
+Stale coordinates and ambiguous selectors still fail explicitly. Refresh evidence
+and inspect/narrow the target instead of choosing the first match or bypassing
+freshness checks. Double-click, drag/drop, modifier-click and horizontal-wheel
+controls remain unexposed; they are not claimed to match every possible app
+interaction. The baseline browser-use click/scroll schemas also lack these
+explicit gestures. Tool names alone do not establish app-level parity.
+
+Validation covers real Chromium focus/selection, Unicode, canvas-to-hidden-input,
+iframe input, cross-tab rejection, stale evidence and invalid chords. Run
+`tests/test_browser_keyboard.py` in the provisioned worker runtime with pytest
+and Chromium; the thin Gym controller environment intentionally lacks browser
+runtime dependencies. Live validation also saved/reopened a Monaco file and ran
+an xterm command using Kimi, and saved/downloaded an OnlyOffice DOCX whose XML
+contained the inserted Unicode text. These are input capability checks, not a
+full benchmark evaluation. Start fresh pinned campaigns to compare the changed
+action space; existing frozen runs are unchanged.
+
+
+### Browser process faults
+
+OpenCode's browser MCP records Chromium renderer crashes, unexpected browser
+shutdown and target-creation crashes in `browser/browser_fault.json`. The episode
+owner watches this trusted runtime artifact, stops the CLI promptly, preserves
+native events and masks the attempt as an evaluation failure. The normal outer
+retry/continuation path must use a new rollout ID and fresh app/browser state.
+No mutating action is automatically replayed, and no browser session is silently
+reset mid-task. Ordinary selector errors, deliberate tab closure and orderly
+teardown do not trigger this path. Real model timeouts/context/output limits keep
+their existing live-state grading policy.
+
+The crash receipt retains resource limits and available temporary/shared-memory
+storage for diagnosis. It does not establish the cause of historical crashes or
+guarantee they cannot recur. Historical scores are not rewritten by this change.
+
+
+Validation: 202 SaaS tests pass in the controller environment (the browser module
+requires the worker runtime); all eight real Chromium tests pass in that runtime.
+A Kimi API smoke on `media_012` completed nine browser actions before an external
+test driver deliberately killed its own renderer. The exact candidate worker
+persisted the crash receipt and returned a masked evaluation fault within 3.3
+seconds, without running verification; app cleanup completed. An independent
+receipt/source/outcome checker qualifies this result: the smoke driver's final
+bookkeeping assertion expected an in-process injection record and failed after
+external injection. These tests establish handling, not task success or prevention
+of the five historical Chromium failures.
+
+
+### Latest browser screenshot in model requests
+
+SaaS OpenCode evaluations send only the latest browser screenshot to each actor
+decision. Immediately before request conversion, the native message-transform
+hook obtains a fresh screenshot and matching observation through the episode's
+read-only browser socket. It removes image attachments from earlier browser
+observation tools and appends one current-state user message at the end of the
+outgoing history. Action arguments must use that current observation ID.
+
+This is a SaaS input policy layered on OpenCode's native history, not its default
+image-retention behavior. Textual history, tool arguments/results and compaction
+summaries remain. `inspect_input` images/PDF pages, native file-read images and
+non-image attachments are retained. Saved screenshots and native trajectory
+objects are not deleted or rewritten: only the request-local message array is
+changed. Consumers building per-decision SFT data must use the transformed model
+requests/current-state observations rather than assume the entire saved image
+history was sent.
+
+The same refresh occurs after failed actions, file/todo-only decisions and
+compaction. If fresh evidence is unavailable, the hook fails instead of sending
+an older browser image as current. Browser-use behavior and native verification
+are unchanged. Automatic compaction remains enabled; tool-output pruning is not
+enabled by this change. Start fresh, consistently pinned campaigns to compare
+this policy; existing frozen evaluations retain their original behavior.
+
+Run `tests/test_visual_refresh.py` with Node (or the worker's Playwright Node
+binary) to test request filtering, task-image/PDF preservation, repeated and
+post-compaction transforms, source-object preservation and failed-capture refusal.
+
+
+Live validation: the actual CLI with Chromium sent three actor requests with one
+fresh, hash-matched browser image each; a missing capture socket produced zero
+actor requests and a native error. A bounded Kimi API `media_012` smoke sent eight
+actor requests, each with exactly one image matching its fresh PNG, and executed
+eight tools with no tool errors. All 15 saved PNGs remained. An independent
+request/source/outcome checker passes; the driver's extra last-role assertion
+failed on OpenCode's final-step assistant prefill, which does not change the image
+policy. This validates request handling, not completion of the benchmark task.

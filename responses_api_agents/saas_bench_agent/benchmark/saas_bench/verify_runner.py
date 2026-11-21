@@ -23,6 +23,9 @@ import tempfile
 import time
 from pathlib import Path
 
+from saas_bench.scoring import score_validation_errors
+
+
 # -- SITE_CONFIG --------------------------------------------------------------
 # Per-app env-var configuration.
 #
@@ -34,168 +37,168 @@ from pathlib import Path
 
 SITE_CONFIG: dict[str, dict] = {
     "code-server": {
-        "port_var":          "CODE_SERVER_PORT",
-        "container_var":     "CODE_SERVER_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            None,
-        "db_suffix":         None,
+        "port_var": "CODE_SERVER_PORT",
+        "container_var": "CODE_SERVER_CONTAINER",
+        "container_suffix": "",
+        "db_var": None,
+        "db_suffix": None,
     },
     "openproject": {
-        "port_var":          "OPENPROJECT_PORT",
-        "container_var":     "OPENPROJECT_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "OPENPROJECT_DB_CONTAINER",
-        "db_suffix":         "",
+        "port_var": "OPENPROJECT_PORT",
+        "container_var": "OPENPROJECT_CONTAINER",
+        "container_suffix": "",
+        "db_var": "OPENPROJECT_DB_CONTAINER",
+        "db_suffix": "",
     },
     "metabase": {
-        "port_var":          "METABASE_PORT",
-        "container_var":     "METABASE_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "METABASE_DB_CONTAINER",
-        "db_suffix":         "",
+        "port_var": "METABASE_PORT",
+        "container_var": "METABASE_CONTAINER",
+        "container_suffix": "",
+        "db_var": "METABASE_DB_CONTAINER",
+        "db_suffix": "",
     },
     "baserow": {
-        "port_var":          "BASEROW_PORT",
-        "container_var":     "BASEROW_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "BASEROW_DB_CONTAINER",
-        "db_suffix":         "",
+        "port_var": "BASEROW_PORT",
+        "container_var": "BASEROW_CONTAINER",
+        "container_suffix": "",
+        "db_var": "BASEROW_DB_CONTAINER",
+        "db_suffix": "",
     },
     "twenty": {
-        "port_var":          "TWENTY_PORT",
-        "container_var":     "TWENTY_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "TWENTY_DB_CONTAINER",
-        "db_suffix":         "",
+        "port_var": "TWENTY_PORT",
+        "container_var": "TWENTY_CONTAINER",
+        "container_suffix": "",
+        "db_var": "TWENTY_DB_CONTAINER",
+        "db_suffix": "",
     },
     "bigcapital": {
-        "port_var":          "BIGCAPITAL_PORT",
-        "container_var":     "BIGCAPITAL_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "BIGCAPITAL_DB_CONTAINER",
-        "db_suffix":         "",
+        "port_var": "BIGCAPITAL_PORT",
+        "container_var": "BIGCAPITAL_CONTAINER",
+        "container_suffix": "",
+        "db_var": "BIGCAPITAL_DB_CONTAINER",
+        "db_suffix": "",
     },
     "hrms": {
-        "port_var":          "HRMS_PORT",
-        "container_var":     "HRMS_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "HRMS_DB_CONTAINER",
-        "db_suffix":         "",
+        "port_var": "HRMS_PORT",
+        "container_var": "HRMS_CONTAINER",
+        "container_suffix": "",
+        "db_var": "HRMS_DB_CONTAINER",
+        "db_suffix": "",
     },
     "pretix": {
-        "port_var":          "PRETIX_PORT",
-        "container_var":     "PRETIX_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "PRETIX_DB_CONTAINER",
+        "port_var": "PRETIX_PORT",
+        "container_var": "PRETIX_CONTAINER",
+        "container_suffix": "",
+        "db_var": "PRETIX_DB_CONTAINER",
         # compose service `$prefix-db` / container_name `$prefix-db`
-        "db_suffix":         "-db",
+        "db_suffix": "-db",
     },
     "openemr": {
-        "port_var":          "OPENEMR_PORT",
-        "container_var":     "OPENEMR_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "OPENEMR_DB_CONTAINER",
-        "db_suffix":         "",
+        "port_var": "OPENEMR_PORT",
+        "container_var": "OPENEMR_CONTAINER",
+        "container_suffix": "",
+        "db_var": "OPENEMR_DB_CONTAINER",
+        "db_suffix": "",
     },
     "opnform": {
-        "port_var":          "OPNFORM_PORT",
-        "container_var":     "OPNFORM_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            None,
-        "db_suffix":         None,
+        "port_var": "OPNFORM_PORT",
+        "container_var": "OPNFORM_CONTAINER",
+        "container_suffix": "",
+        "db_var": None,
+        "db_suffix": None,
     },
     # compose-based apps — app/db container names carry suffixes
     "onlyoffice": {
-        "port_var":          "ONLYOFFICE_PORT",
-        "container_var":     "ONLYOFFICE_CONTAINER",
-        "container_suffix":  "-community",
-        "db_var":            "ONLYOFFICE_DB_CONTAINER",
-        "db_suffix":         "-mysql",
+        "port_var": "ONLYOFFICE_PORT",
+        "container_var": "ONLYOFFICE_CONTAINER",
+        "container_suffix": "-community",
+        "db_var": "ONLYOFFICE_DB_CONTAINER",
+        "db_suffix": "-mysql",
     },
     "mattermost": {
-        "port_var":          "MATTERMOST_PORT",
-        "container_var":     "MATTERMOST_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "MATTERMOST_DB_CONTAINER",
-        "db_suffix":         "-postgres",
+        "port_var": "MATTERMOST_PORT",
+        "container_var": "MATTERMOST_CONTAINER",
+        "container_suffix": "",
+        "db_var": "MATTERMOST_DB_CONTAINER",
+        "db_suffix": "-postgres",
     },
     "owncloud": {
-        "port_var":          "OWNCLOUD_PORT",
-        "container_var":     "OWNCLOUD_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "OWNCLOUD_DB_CONTAINER",
-        "db_suffix":         "-mariadb",
+        "port_var": "OWNCLOUD_PORT",
+        "container_var": "OWNCLOUD_CONTAINER",
+        "container_suffix": "",
+        "db_var": "OWNCLOUD_DB_CONTAINER",
+        "db_suffix": "-mariadb",
     },
     "roundcubemail": {
-        "port_var":          "ROUNDCUBEMAIL_PORT",
-        "container_var":     "ROUNDCUBEMAIL_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "ROUNDCUBEMAIL_DB_CONTAINER",
-        "db_suffix":         "",
+        "port_var": "ROUNDCUBEMAIL_PORT",
+        "container_var": "ROUNDCUBEMAIL_CONTAINER",
+        "container_suffix": "",
+        "db_var": "ROUNDCUBEMAIL_DB_CONTAINER",
+        "db_suffix": "",
     },
     # -- Agriculture / Media New Apps --------------------------------------------------
     "grocy": {
-        "port_var":          "GROCY_PORT",
-        "container_var":     "GROCY_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            None,
-        "db_suffix":         None,
+        "port_var": "GROCY_PORT",
+        "container_var": "GROCY_CONTAINER",
+        "container_suffix": "",
+        "db_var": None,
+        "db_suffix": None,
     },
     "recipya": {
-        "port_var":          "RECIPYA_PORT",
-        "container_var":     "RECIPYA_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            None,
-        "db_suffix":         None,
+        "port_var": "RECIPYA_PORT",
+        "container_var": "RECIPYA_CONTAINER",
+        "container_suffix": "",
+        "db_var": None,
+        "db_suffix": None,
     },
     "farmos": {
-        "port_var":          "FARMOS_PORT",
-        "container_var":     "FARMOS_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            None,
-        "db_suffix":         None,
+        "port_var": "FARMOS_PORT",
+        "container_var": "FARMOS_CONTAINER",
+        "container_suffix": "",
+        "db_var": None,
+        "db_suffix": None,
     },
     "e-label": {
-        "port_var":          "E_LABEL_PORT",
-        "container_var":     "E_LABEL_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            "E_LABEL_DB_CONTAINER",
-        "db_suffix":         "",
+        "port_var": "E_LABEL_PORT",
+        "container_var": "E_LABEL_CONTAINER",
+        "container_suffix": "",
+        "db_var": "E_LABEL_DB_CONTAINER",
+        "db_suffix": "",
     },
     "siyuan": {
-        "port_var":          "SIYUAN_PORT",
-        "container_var":     "SIYUAN_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            None,
-        "db_suffix":         None,
+        "port_var": "SIYUAN_PORT",
+        "container_var": "SIYUAN_CONTAINER",
+        "container_suffix": "",
+        "db_var": None,
+        "db_suffix": None,
     },
     "watcharr": {
-        "port_var":          "WATCHARR_PORT",
-        "container_var":     "WATCHARR_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            None,
-        "db_suffix":         None,
+        "port_var": "WATCHARR_PORT",
+        "container_var": "WATCHARR_CONTAINER",
+        "container_suffix": "",
+        "db_var": None,
+        "db_suffix": None,
     },
     "booklore": {
-        "port_var":          "BOOKLORE_PORT",
-        "container_var":     "BOOKLORE_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            None,
-        "db_suffix":         None,
+        "port_var": "BOOKLORE_PORT",
+        "container_var": "BOOKLORE_CONTAINER",
+        "container_suffix": "",
+        "db_var": None,
+        "db_suffix": None,
     },
     "mediacms": {
-        "port_var":          "MEDIACMS_PORT",
-        "container_var":     "MEDIACMS_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            None,
-        "db_suffix":         None,
+        "port_var": "MEDIACMS_PORT",
+        "container_var": "MEDIACMS_CONTAINER",
+        "container_suffix": "",
+        "db_var": None,
+        "db_suffix": None,
     },
     "photoprism": {
-        "port_var":          "PHOTOPRISM_PORT",
-        "container_var":     "PHOTOPRISM_CONTAINER",
-        "container_suffix":  "",
-        "db_var":            None,
-        "db_suffix":         None,
+        "port_var": "PHOTOPRISM_PORT",
+        "container_var": "PHOTOPRISM_CONTAINER",
+        "container_suffix": "",
+        "db_var": None,
+        "db_suffix": None,
     },
 }
 
@@ -223,10 +226,7 @@ def build_verify_env(
     # Critical: do NOT leave the hard-coded verify.py default
     # (gemini-3.0-flash-preview on Mindra) — that 403s on NVIDIA Inference.
     if not env.get("MINDRA_MODEL"):
-        env["MINDRA_MODEL"] = (
-            env.get("LLM_JUDGE_MODEL")
-            or "gcp/google/gemini-3-flash-preview"
-        )
+        env["MINDRA_MODEL"] = env.get("LLM_JUDGE_MODEL") or "gcp/google/gemini-3-flash-preview"
 
     sites: list[str] = task.get("meta", {}).get("meta_data", {}).get("sites", [])
 
@@ -259,72 +259,70 @@ _CHECK_RE = re.compile(
     r"^\[(PASS|FAIL)\]\s+\((\d+)pt\)\s+(.+?)(?:\s{2,}\((.+)\))?\s*$",
     re.DOTALL,
 )
-_SCORE_RE = re.compile(
-    r"^SCORE:\s*([\d.]+)\s+PASS:\s*(True|False)\s+\((\d+)/(\d+)\)"
-)
+_SCORE_RE = re.compile(r"^SCORE:\s*([\d.]+)\s+PASS:\s*(True|False)\s+\((\d+)/(\d+)\)")
 
 
 def _parse_verify_output(stderr_text: str) -> dict:
     checks = []
-    score = 0.0
-    earned = 0
-    total = 0
-    all_pass = False
+    score, earned, total, all_pass = 0.0, 0, 0, False
+    score_count = 0
     score_found = False
     errors = []
-
     lines = stderr_text.splitlines()
     index = 0
+    boundaries = ("[PASS]", "[FAIL]", "SCORE:", "VERIFIER_ERROR:", "WARNING: context load failed:", "FATAL:")
     while index < len(lines):
         line = lines[index].strip()
         if line.startswith(("[PASS]", "[FAIL]")):
             record = [line]
             index += 1
-            while index < len(lines):
-                next_line = lines[index].strip()
-                if next_line.startswith(("[PASS]", "[FAIL]", "SCORE:", "VERIFIER_ERROR:", "WARNING: context load failed:", "FATAL:")):
-                    break
-                record.append(next_line)
+            while index < len(lines) and not lines[index].strip().startswith(boundaries):
+                record.append(lines[index].strip())
                 index += 1
-            line = "\n".join(record).strip()
-
-        m = _CHECK_RE.match(line)
-        if m:
-            status, weight, label, detail = m.groups()
-            checks.append({
-                "label":  label.strip(),
-                "weight": int(weight),
-                "passed": status == "PASS",
-                "detail": detail.strip() if detail else "",
-            })
+            match = _CHECK_RE.fullmatch("\n".join(record).strip())
+            if match:
+                status, weight, label, detail = match.groups()
+                checks.append(
+                    {
+                        "label": label.strip(),
+                        "weight": int(weight),
+                        "passed": status == "PASS",
+                        "detail": detail.strip() if detail else "",
+                    }
+                )
+            else:
+                errors.append("malformed native check result")
             continue
         if line.startswith(("WARNING: context load failed:", "FATAL:")):
             errors.append(line)
-        if line.startswith("VERIFIER_ERROR:"):
+        elif line.startswith("VERIFIER_ERROR:"):
             errors.append(line.partition(":")[2].strip() or "unspecified verifier error")
-        m = _SCORE_RE.match(line)
-        if m:
-            score      = float(m.group(1))
-            all_pass   = m.group(2) == "True"
-            earned     = int(m.group(3))
-            total      = int(m.group(4))
-            score_found = True
+        elif line.startswith("SCORE:"):
+            score_count += 1
+            match = _SCORE_RE.fullmatch(line)
+            if match:
+                try:
+                    score = float(match.group(1))
+                    all_pass = match.group(2) == "True"
+                    earned, total = int(match.group(3)), int(match.group(4))
+                    score_found = True
+                except ValueError:
+                    errors.append("malformed native SCORE number")
+            else:
+                errors.append("malformed native SCORE summary")
         index += 1
-
     if not score_found:
         errors.append("verifier stopped before its SCORE line")
-
-    return {
-        "checks":   checks,
-        "score":    score,
-        "earned":   earned,
-        "total":    total,
-        "all_pass": all_pass,
-        "errors": errors,
-    }
+    if score_count != 1:
+        errors.append("verifier must emit exactly one SCORE summary")
+    parsed = {"checks": checks, "score": score, "earned": earned, "total": total, "all_pass": all_pass}
+    if score_found:
+        errors.extend(score_validation_errors(parsed, require_summary=True))
+    return {**parsed, "errors": errors}
 
 
 # -- Main entry point ---------------------------------------------------------
+
 
 def _run_verify_once(
     task: dict,
@@ -339,17 +337,16 @@ def _run_verify_once(
     The path to verify.py is taken from task["verify_py_path"].
     Returns status=SKIP when verify.py is missing.
     """
-    task_id      = task["task_id"]
-    verify_path  = task.get("verify_py_path")
-    out_path     = Path(result_dir) / f"{task_id}{run_suffix}_verify.json"
+    task_id = task["task_id"]
+    verify_path = task.get("verify_py_path")
+    out_path = Path(result_dir) / f"{task_id}{run_suffix}_verify.json"
 
     def _save(result: dict) -> dict:
         out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2))
         return result
 
     if not verify_path or not Path(verify_path).exists():
-        return _save({"task_id": task_id, "status": "SKIP", "score": 0.0,
-                      "checks": [], "error": "no verify.py"})
+        return _save({"task_id": task_id, "status": "SKIP", "score": 0.0, "checks": [], "error": "no verify.py"})
 
     env = build_verify_env(task, slot_id, port_map, hostname)
 
@@ -369,11 +366,11 @@ def _run_verify_once(
             )
             judge_failures = [json.loads(line) for line in faults.read_text().splitlines()] if faults.exists() else []
     except subprocess.TimeoutExpired:
-        return _save({"task_id": task_id, "status": "ERROR", "score": 0.0,
-                      "checks": [], "error": f"timeout after {budget}s"})
+        return _save(
+            {"task_id": task_id, "status": "ERROR", "score": 0.0, "checks": [], "error": f"timeout after {budget}s"}
+        )
     except Exception as e:
-        return _save({"task_id": task_id, "status": "ERROR", "score": 0.0,
-                      "checks": [], "error": str(e)})
+        return _save({"task_id": task_id, "status": "ERROR", "score": 0.0, "checks": [], "error": str(e)})
 
     parsed = _parse_verify_output(proc.stderr)
     status = "PASS" if parsed["all_pass"] else ("FAIL" if parsed["checks"] else "ERROR")
@@ -388,17 +385,17 @@ def _run_verify_once(
     else:
         error = None
     result = {
-        "task_id":  task_id,
+        "task_id": task_id,
         "judge_failures": judge_failures,
-        "status":   status,
-        "score":    parsed["score"] if status != "ERROR" else 0.0,
-        "earned":   parsed["earned"],
-        "total":    parsed["total"],
+        "status": status,
+        "score": parsed["score"] if status != "ERROR" else 0.0,
+        "earned": parsed["earned"],
+        "total": parsed["total"],
         "all_pass": parsed["all_pass"] if status != "ERROR" else False,
-        "checks":   parsed["checks"],
+        "checks": parsed["checks"],
         "returncode": proc.returncode,
         "diagnostics_stderr": proc.stderr,
-        "error":    error,
+        "error": error,
     }
     if status == "ERROR":
         result["raw_score"] = parsed["score"]
@@ -409,7 +406,9 @@ def _run_verify_once(
 def _stopped_apps(task: dict, port_map: dict[str, int], hostname: str) -> list[str]:
     """Only score live app state: a stopped app makes the result inconclusive."""
     import yaml
+
     from saas_bench.slot import _wait_ready
+
     apps = yaml.safe_load(Path(__file__).with_name("apps.yaml").read_text())["apps"]
     errors = []
     for site in task.get("meta", {}).get("meta_data", {}).get("sites", []):
@@ -423,22 +422,40 @@ def _stopped_apps(task: dict, port_map: dict[str, int], hostname: str) -> list[s
     return errors
 
 
-def run_verify(task: dict, slot_id: int, port_map: dict[str, int], hostname: str,
-               result_dir: str, run_suffix: str = "", inconclusive_verification_retries: int = 0) -> dict:
+def run_verify(
+    task: dict,
+    slot_id: int,
+    port_map: dict[str, int],
+    hostname: str,
+    result_dir: str,
+    run_suffix: str = "",
+    inconclusive_verification_retries: int = 0,
+) -> dict:
     """Bounded re-verification of unchanged live state, before application teardown."""
-    if not 0 <= inconclusive_verification_retries <= 3:
+    if type(inconclusive_verification_retries) is not int or not 0 <= inconclusive_verification_retries <= 3:
         raise ValueError("inconclusive_verification_retries must be in 0..3")
     attempts = []
     started = time.monotonic()
     for attempt in range(inconclusive_verification_retries + 1):
         attempt_started = time.monotonic()
-        result = _run_verify_once(task, slot_id, port_map, hostname, result_dir,
-                                 run_suffix=f"{run_suffix}_verify_attempt{attempt}")
+        result = _run_verify_once(
+            task, slot_id, port_map, hostname, result_dir, run_suffix=f"{run_suffix}_verify_attempt{attempt}"
+        )
         result["verification_wall_time_seconds"] = time.monotonic() - attempt_started
-        (Path(result_dir) / f"{task['task_id']}{run_suffix}_verify_attempt{attempt}_verify.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        (Path(result_dir) / f"{task['task_id']}{run_suffix}_verify_attempt{attempt}_verify.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2)
+        )
         attempts.append(result)
-        if result["status"] in {"PASS", "FAIL"}:
+        from saas_bench.opencode.verifier import verifier_diagnostics
+
+        if not verifier_diagnostics(result)["unavailable"]:
             break
-    result = {**result, "verification_attempts": attempts, "verification_wall_time_seconds": time.monotonic() - started}
-    (Path(result_dir) / f"{task['task_id']}{run_suffix}_verify.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    result = {
+        **result,
+        "verification_attempts": attempts,
+        "verification_wall_time_seconds": time.monotonic() - started,
+    }
+    (Path(result_dir) / f"{task['task_id']}{run_suffix}_verify.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2)
+    )
     return result

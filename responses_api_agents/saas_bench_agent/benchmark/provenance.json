@@ -53,7 +53,7 @@
     },
     {
       "source_path": "saas_bench/verify_runner.py",
-      "vendored_sha256": "9b18a7b494cb588d298af89caa3d3b1f126ed53e3fa4a20dac53b614da1cbb91",
+      "vendored_sha256": "181d57fdfb90f0176479a315e4dd37eafea5e8cfb9a7cb31c8812b5846b5bda9",
       "license": "Apache-2.0",
       "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/verify_runner.py",
       "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
@@ -151,13 +151,13 @@
     },
     {
       "source_path": "saas_bench/opencode/browser.py",
-      "vendored_sha256": "e09884ab62407b5c2cc98d8616329cd53fca696aa69aca901e4c67e03b79fcbc",
+      "vendored_sha256": "36b9d4bec3817001676c997d24302e05cb81c0d91213e3de66860bfba5c7191f",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/core.py",
-      "vendored_sha256": "c951f983457b09d884c89a05cd78e8d3a37494acc73892cfc860ee330d76c059",
+      "vendored_sha256": "fa85776d7d2bc26bbbb197406bcd2f8970282a3dd39c24d1102fbc41e20f31e2",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },
@@ -169,7 +169,7 @@
     },
     {
       "source_path": "saas_bench/opencode/prompts.py",
-      "vendored_sha256": "29f6f6e227d8419d14da6782e75364342b56ae2e9539e297c4cc5884367a786a",
+      "vendored_sha256": "9c82c17c67c0b525d6580a10429c3616ead666ef6ddcb194eed98ee4a04d5852",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },
@@ -187,19 +187,19 @@
     },
     {
       "source_path": "saas_bench/opencode/verifier.py",
-      "vendored_sha256": "c35a57fa0466978d2890f14923b91f09281c3737adc169d29b31c12ac7bf48fe",
+      "vendored_sha256": "4b5924036b4c6ed7fc356eff89c140e470016b48f8d20bfda2f359f20382c5a8",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/visual_refresh.mjs",
-      "vendored_sha256": "92fbaddd6b8e326621679056db33e1a166583f08d034e4b5553c39186369945c",
+      "vendored_sha256": "8f08ea1b9501b56063c18745d37e3116f15327e6873892954443e85b4e9df10a",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/worker.py",
-      "vendored_sha256": "8107d225bda31c4d9125421b8625f16a94e20e5b0260d11109b16f24d4174e97",
+      "vendored_sha256": "9d92f8b21e82a289b0b9729aaca90e7eb2dcdf3c704e7505cc788d656b37ee40",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },
@@ -405,6 +405,12 @@
     {
       "source_path": "scripts/nrt/load_images_from_tars.sh",
       "vendored_sha256": "e88824caa45d9a34481d7570524f5875099760c38869472a8c45a9dc3a198b97",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/scoring.py",
+      "vendored_sha256": "2e3c311ea2b2a389d696697e4a5b2149e9a66e79fcbc53438b0fbcfc8615f19a",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     }

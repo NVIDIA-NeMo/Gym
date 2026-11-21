@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 from pathlib import Path
@@ -14,6 +13,7 @@ from urllib.parse import urlsplit
 
 from saas_bench.loader import load_tasks
 from saas_bench.opencode.prompts import SAAS_SYSTEM_PROMPT
+
 
 HARNESS_VERSION = "2.1.1"
 
@@ -35,11 +35,7 @@ def inventory(
     tasks = {}
     for task in load_tasks(str(directory)):
         task_id = task["task_id"]
-        if (
-            task_id in tasks
-            or not isinstance(task_id, str)
-            or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id)
-        ):
+        if task_id in tasks or not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
             raise ValueError(f"Duplicate or unsafe task ID: {task_id!r}")
         sites = task.get("meta", {}).get("meta_data", {}).get("sites", [])
         if not sites or set(sites) - set(apps):
@@ -59,9 +55,7 @@ def inventory(
         digest = hashlib.sha256()
         for value in [task["description_md"], json.dumps(task["meta"], sort_keys=True)]:
             digest.update(value.encode())
-        for path in (
-            [Path(task["verify_py_path"])] if task["verify_py_path"] else []
-        ) + [root / p for p in inputs]:
+        for path in ([Path(task["verify_py_path"])] if task["verify_py_path"] else []) + [root / p for p in inputs]:
             with path.open("rb") as stream:
                 for block in iter(lambda: stream.read(1024 * 1024), b""):
                     digest.update(block)
@@ -73,11 +67,7 @@ def inventory(
         return tasks
     selected = {}
     for token in selector.split():
-        matches = {
-            k: v
-            for k, v in tasks.items()
-            if k == token or v["category_id"].lower() == token.lower()
-        }
+        matches = {k: v for k, v in tasks.items() if k == token or v["category_id"].lower() == token.lower()}
         if not matches or set(matches) & set(selected):
             raise ValueError(f"Unknown or overlapping task selector: {token}")
         selected.update(matches)
@@ -90,9 +80,7 @@ def dataset_rows(tasks: dict[str, dict]) -> list[dict]:
     """Export portable Gym rows; execution rebuilds URLs after app startup."""
     return [
         {
-            "responses_create_params": {
-                "input": [{"role": "user", "content": task["description_md"]}]
-            },
+            "responses_create_params": {"input": [{"role": "user", "content": task["description_md"]}]},
             "verifier_metadata": {
                 "task_id": task_id,
                 "category_id": task["category_id"],
@@ -120,12 +108,7 @@ def opencode_config(
 ) -> dict:
     """Enable browser MCP and scoped native file/todo tools; route inference through Gym."""
     parsed = urlsplit(endpoint)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-    ):
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("Model endpoint must be HTTP(S), without embedded credentials")
     if not 0 < output_tokens < context_tokens or max_steps < 1 or mcp_timeout_ms < 1000:
         raise ValueError("Invalid context/output limits or step budget")
@@ -137,9 +120,7 @@ def opencode_config(
         for path in (input_files or [])
         if Path(path).suffix.lower() != ".pdf"
     }
-    external = {
-        str(Path(path).resolve().parent / "*"): "allow" for path in (input_files or [])
-    }
+    external = {str(Path(path).resolve().parent / "*"): "allow" for path in (input_files or [])}
     config = {
         "$schema": "https://opencode.ai/config.json",
         "model": f"nemo/{model}",
@@ -276,16 +257,10 @@ def context_overflow_recovered(events: list[dict]) -> bool:
     The original events and process exit code are never rewritten.
     """
     errors = [(i, e) for i, e in enumerate(events) if e.get("type") == "error"]
-    if not errors or any(
-        e.get("error", {}).get("name") != "ContextOverflowError" for _, e in errors
-    ):
+    if not errors or any(e.get("error", {}).get("name") != "ContextOverflowError" for _, e in errors):
         return False
     last_error = errors[-1][0]
-    finishes = [
-        i
-        for i, e in enumerate(events)
-        if i > last_error and e.get("type") == "step_finish"
-    ]
+    finishes = [i for i, e in enumerate(events) if i > last_error and e.get("type") == "step_finish"]
     if len(finishes) < 2 or events[finishes[-1]].get("part", {}).get("reason") not in {
         "stop",
         "length",
@@ -294,9 +269,7 @@ def context_overflow_recovered(events: list[dict]) -> bool:
         return False
     if events[finishes[0]].get("part", {}).get("reason") != "stop":
         return False
-    return any(
-        e.get("type") == "step_start" for e in events[finishes[0] + 1 : finishes[-1]]
-    )
+    return any(e.get("type") == "step_start" for e in events[finishes[0] + 1 : finishes[-1]])
 
 
 def response_items(events: list[dict]) -> list[dict]:
@@ -312,9 +285,7 @@ def response_items(events: list[dict]) -> list[dict]:
                     "type": "message",
                     "role": "assistant",
                     "status": "completed",
-                    "content": [
-                        {"type": "output_text", "text": part["text"], "annotations": []}
-                    ],
+                    "content": [{"type": "output_text", "text": part["text"], "annotations": []}],
                 }
             )
         elif event_type == "reasoning" and part.get("text"):
@@ -335,9 +306,7 @@ def response_items(events: list[dict]) -> list[dict]:
                     "call_id": call_id,
                     "name": part.get("tool", "unknown"),
                     "arguments": json.dumps(state.get("input", {})),
-                    "status": "completed"
-                    if state.get("status") == "completed"
-                    else "incomplete",
+                    "status": "completed" if state.get("status") == "completed" else "incomplete",
                 }
             )
             items.append(
@@ -351,15 +320,10 @@ def response_items(events: list[dict]) -> list[dict]:
 
 
 def measured_score(verify: dict) -> float:
-    """Never promote missing or failed verification to a measured zero."""
-    score = verify.get("score")
-    if verify.get("status") not in {"PASS", "FAIL"}:
-        raise ValueError(f"Unscored verifier status: {verify.get('status')}")
-    if (
-        isinstance(score, bool)
-        or not isinstance(score, (float, int))
-        or not math.isfinite(score)
-        or not 0 <= score <= 1
-    ):
-        raise ValueError(f"Invalid native score: {score!r}")
-    return float(score)
+    """Return only an available native grade, including legitimate zero/partial credit."""
+    from saas_bench.opencode.verifier import native_verification_outcome
+
+    outcome = native_verification_outcome(verify)
+    if outcome["mask_sample"]:
+        raise ValueError(f"Unscorable native verification: {outcome['verifier_diagnostics']}")
+    return outcome["reward"]
