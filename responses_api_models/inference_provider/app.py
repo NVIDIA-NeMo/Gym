@@ -49,6 +49,27 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     num_concurrent_requests: int = 1000
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
+    upstream_max_num_tries: int | None = Field(
+        default=None,
+        strict=True,
+        ge=1,
+        le=1,
+        description="Opt in to one upstream HTTP attempt, disabling inner transport and status retries.",
+    )
+    upstream_max_connection_retries: int | None = Field(
+        default=None,
+        strict=True,
+        ge=1,
+        description="Optional connection-error retry limit; None preserves the client's existing default.",
+    )
+    upstream_request_timeout_seconds: float | None = Field(
+        default=None,
+        strict=True,
+        gt=0,
+        allow_inf_nan=False,
+        description="Optional total seconds per upstream HTTP attempt; not a generation limit.",
+    )
+
     correlate_via_user_field: bool = False
     """Forward the current rollout id (see ``nemo_gym.core.episode_context``) as
     the outbound request's standard OpenAI ``user`` field, so a downstream
@@ -61,11 +82,19 @@ class InferenceProvider(SimpleResponsesAPIModel):
     config: InferenceProviderConfig
 
     def model_post_init(self, context):
+        client_options: dict[str, int | float] = {}
+        if self.config.upstream_max_num_tries is not None:
+            client_options["max_num_tries"] = self.config.upstream_max_num_tries
+        if self.config.upstream_max_connection_retries is not None:
+            client_options["max_connection_retries"] = self.config.upstream_max_connection_retries
+        if self.config.upstream_request_timeout_seconds is not None:
+            client_options["request_timeout_seconds"] = self.config.upstream_request_timeout_seconds
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
             # An outside provider, never a NeMo Gym server: its busy answers are waited out on a time budget.
             internal=False,
+            **client_options,
         )
         self._converter = ChatCompletionsConverter(
             return_token_id_information=False,
