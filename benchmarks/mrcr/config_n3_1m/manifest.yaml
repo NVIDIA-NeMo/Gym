@@ -17,8 +17,6 @@ capabilities:
 - retrieval_and_grounding/long_context_learning
 - context_management
 - context_management/reference_resolution
-- reasoning
-- reasoning/spatial_temporal_reasoning
 - instruction_and_format_following
 - instruction_and_format_following/instruction_following
 domains:

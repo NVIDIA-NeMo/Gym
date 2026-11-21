@@ -13,14 +13,14 @@ authors:
 maintainers:
 - cmunley1
 capabilities:
-- retrieval_and_grounding
-- retrieval_and_grounding/open_retrieval
-- retrieval_and_grounding/multi_source_synthesis
 - tool_and_computer_use
 - tool_and_computer_use/web_search
 - tool_and_computer_use/multi_step_tool_use
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/multi_source_synthesis
 - planning_and_autonomy
-- planning_and_autonomy/long_horizon_execution
+- planning_and_autonomy/strategy_and_search
 - knowledge
 - knowledge/factual_knowledge
 domains:

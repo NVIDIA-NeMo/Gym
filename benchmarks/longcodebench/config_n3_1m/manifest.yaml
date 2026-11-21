@@ -18,7 +18,8 @@ capabilities:
 - coding/repository_coding
 - retrieval_and_grounding
 - retrieval_and_grounding/long_context_learning
-- coding/debugging_and_testing
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
 domains:
 - computer_science
 primary_metric: pass@1[avg-of-1]/accuracy

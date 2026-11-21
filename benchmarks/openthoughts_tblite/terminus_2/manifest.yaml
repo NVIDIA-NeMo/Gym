@@ -15,11 +15,11 @@ maintainers:
 capabilities:
 - tool_and_computer_use
 - tool_and_computer_use/terminal_and_cli_use
-- tool_and_computer_use/multi_step_tool_use
 - tool_and_computer_use/env_feedback_interpretation
+- tool_and_computer_use/multi_step_tool_use
 - coding
 - coding/code_generation
-- coding/debugging_and_testing
+- coding/systems_coding
 - planning_and_autonomy
 - planning_and_autonomy/long_horizon_execution
 domains:

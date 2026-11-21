@@ -20,8 +20,9 @@ capabilities:
 - retrieval_and_grounding/open_retrieval
 - retrieval_and_grounding/multi_source_synthesis
 - planning_and_autonomy
-- planning_and_autonomy/task_planning
-- planning_and_autonomy/self_verification
+- planning_and_autonomy/strategy_and_search
+- knowledge
+- knowledge/factual_knowledge
 domains:
 - general
 primary_metric: mean/reward

@@ -16,14 +16,14 @@ maintainers:
 capabilities:
 - knowledge
 - knowledge/expert_knowledge
-- knowledge/factual_knowledge
+- knowledge/knowledge_uncertainty
 - reasoning
-- reasoning/deductive_reasoning
 - reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
 domains:
 - mathematics
 - physics
-- computer_science
+- humanities
 primary_metric: mean/reward
 requirements:
   gpu: false

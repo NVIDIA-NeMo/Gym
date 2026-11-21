@@ -18,13 +18,15 @@ capabilities:
 - reasoning
 - reasoning/quantitative_reasoning
 - reasoning/deductive_reasoning
+- writing_and_editing
+- writing_and_editing/general_qa
 - multimodal_input_understanding
 - multimodal_input_understanding/structured_visual_artifact_understanding
 - multimodal_input_understanding/cross_modal_understanding
 domains:
 - mathematics
 - physics
-- computer_science
+- humanities
 primary_metric: mean/reward
 requirements:
   gpu: false

@@ -22,6 +22,9 @@ capabilities:
 - instruction_and_format_following
 - instruction_and_format_following/structured_output
 - planning_and_autonomy
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- multimodal_input_understanding/cross_modal_understanding
 domains:
 - mathematics
 - physics

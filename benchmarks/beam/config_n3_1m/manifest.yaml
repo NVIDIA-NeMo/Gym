@@ -21,12 +21,7 @@ capabilities:
 - memory_and_state/memory_application
 - reasoning
 - reasoning/spatial_temporal_reasoning
-- knowledge
-- knowledge/knowledge_uncertainty
-- writing_and_editing
-- writing_and_editing/summarization
-- instruction_and_format_following
-- instruction_and_format_following/instruction_following
+- retrieval_and_grounding/multi_source_synthesis
 domains:
 - general
 primary_metric: pass@1[avg-of-4]/overall

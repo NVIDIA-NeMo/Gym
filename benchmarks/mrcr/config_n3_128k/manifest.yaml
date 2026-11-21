@@ -19,8 +19,6 @@ capabilities:
 - context_management/reference_resolution
 - instruction_and_format_following
 - instruction_and_format_following/instruction_following
-- reasoning
-- reasoning/spatial_temporal_reasoning
 domains:
 - general
 primary_metric: pass@1[avg-of-1]/accuracy
