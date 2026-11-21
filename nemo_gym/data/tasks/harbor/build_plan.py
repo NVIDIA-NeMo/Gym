@@ -37,7 +37,14 @@ from nemo_gym.data.tasks.harbor.dockerfile import (
 from nemo_gym.data.tasks.harbor.models import HarborEnvironment
 from nemo_gym.data.tasks.harbor.records import MAIN_SERVICE, VERIFIER_SERVICE, read_image_configs
 from nemo_gym.data.tasks.harbor.registry import PLATFORM
-from nemo_gym.data.tasks.harbor.task import DOCKERFILE, TASK_FILE, HarborTaskConfig, is_task_folder, iter_task_folders
+from nemo_gym.data.tasks.harbor.task import (
+    DOCKERFILE,
+    TASK_FILE,
+    HarborTaskConfig,
+    is_task_folder,
+    iter_task_folders,
+    read_task_toml,
+)
 from nemo_gym.data.tasks.harbor.verifier_env import verifier_build_context, verifier_build_environment
 
 
@@ -297,7 +304,7 @@ def plan_builds(
         dockerfile = child / DOCKERFILE
         context = dockerfile.parent
         try:
-            config = HarborTaskConfig.model_validate(tomllib.loads((child / TASK_FILE).read_text()))
+            config = HarborTaskConfig.model_validate(read_task_toml(child / TASK_FILE)[0])
             config = apply_dataset_config(config, child.name, dataset)
             text = dockerfile.read_text() if dockerfile.is_file() else None
         except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):

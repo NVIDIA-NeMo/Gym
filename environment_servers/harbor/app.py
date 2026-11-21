@@ -31,10 +31,11 @@ rows were materialized (see ``nemo_gym.data.tasks.harbor``).
 Every episode runs under its task's own time budget unless ``enforce_task_timeouts`` is off, and
 the sandbox lives for that budget. Operator secrets reach the ``test.sh`` process only.
 
-Reward rule: when ``test.sh`` ran, the sample is measured. In ``reward.json`` a ``reward``
-key is the score and the other keys are metrics; without one every key is a component of the
-score, which is their sum, and the result names them as ``reward_components`` (keys that sum to
-``reward``, the contract a trainer asserts). A missing or invalid reward file scores 0 with a
+Reward rule: when ``test.sh`` ran, the sample is measured. The dataset's ``reward_key``, when
+set, names the score in ``reward.json`` and the other keys are metrics. Unset, a ``reward`` key is
+the score and the other keys are metrics; without one every key is a component of the score,
+which is their sum, and only then does the result name them as ``reward_components`` (keys that
+sum to ``reward``, the contract a trainer asserts). A missing or invalid reward file scores 0 with a
 ``failure_kind``. Only a Gym-side failure (sandbox lost, transfer failed) masks the sample. A
 failed agent response whose harness classified the cause (``ng_agent_outcome``) goes through
 ``agent_outcome_policy`` before verification, as on ``single_agent_turn``: by default a
@@ -185,7 +186,8 @@ class HarborTurnResult(BaseModel):
     name: str
     reward: float
     verifier_rewards: dict[str, float] | None = None
-    # The keys of reward.json that sum to `reward`, when the file names no `reward` key (see verifier.py).
+    # The keys of reward.json that sum to `reward`, when `reward_key` is unset and the file names no `reward` key
+    # (see verifier.py).
     reward_components: dict[str, float] | None = Field(default=None, exclude_if=lambda value: value is None)
     mask_sample: bool = False
     failure_kind: str | None = None
@@ -236,19 +238,20 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     """The episode's verify response plus what the Harbor verifier produced.
 
     ``verifier_rewards`` is the parsed ``reward.json`` (``reward.txt`` becomes ``{"reward": value}``).
-    ``reward_components`` names the keys that sum to ``reward``, present only when the file named no
-    ``reward`` key (every key is then a component); with a ``reward`` key the other keys are metrics and
-    stay in ``verifier_rewards`` alone. The ``verifier_*`` fields are ``None`` when ``test.sh`` never ran.
+    ``reward_components`` names the keys that sum to ``reward``, present only when ``reward_key`` is unset and
+    the file named no ``reward`` key (every key is then a component); with a ``reward`` key, or with the dataset's
+    ``reward_key`` (that key is then the reward), the other keys are metrics and stay in ``verifier_rewards``
+    alone. The ``verifier_*`` fields are ``None`` when ``test.sh`` never ran.
 
     That mapping is Harbor's optional, task-specific reading of ``reward.json``, not the shared multi-reward
     contract of :class:`~nemo_gym.server_runtime.base_resources_server.BaseMultiRewardVerifyResponse` (a required mapping whose
     objective keys are the same on every task of an environment): a task names whatever keys its ``test.sh``
-    wrote, two tasks of one dataset may name different ones, and a measured episode names none when the file
-    had a ``reward`` key, was missing or invalid (a measured 0), or its components did not sum to the roll-up.
-    Its consumers are per-row inspection and a trainer that reads the mapping row by row and takes the scalar
-    ``reward`` alone where it is absent. Gym pads no missing component and renames no key: a dataset meant for
-    a fixed-objective trainer (GDPO and the like) must have every task write the same keys without a ``reward``
-    key, which is the dataset's contract to keep, not this server's.
+    wrote, two tasks of one dataset may name different ones, and a measured episode names none when
+    ``reward_key`` was set, the file had a ``reward`` key, was missing or invalid (a measured 0), or its components
+    did not sum to the roll-up. Its consumers are per-row inspection and a trainer that reads the mapping row by row
+    and takes the scalar ``reward`` alone where it is absent. Gym pads no missing component and renames no key: a
+    dataset meant for a fixed-objective trainer (GDPO and the like) must leave ``reward_key`` unset and have every
+    task write the same keys without a ``reward`` key, which is the dataset's contract to keep, not this server's.
 
     A multi-step task fills ``turns`` in order. The top-level reward follows
     ``turn_reward_strategy`` over them (Harbor's ``multi_step_reward_strategy``), and ``response`` and
@@ -406,15 +409,21 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     compose_overlay: HarborComposeOverlay | None = None
 
 
-def min_reward_failure(rewards: dict[str, float] | None, min_reward: float | dict[str, float] | None) -> str | None:
+def min_reward_failure(
+    rewards: dict[str, float] | None, min_reward: float | dict[str, float] | None, *, reward_key: str | None = None
+) -> str | None:
     """Why a turn misses its step's ``min_reward``, or ``None`` when it passes or sets none.
 
     As in Harbor, a number gates the ``reward`` key, a mapping gates each key it names, and a key the
-    rewards lack (or a turn without a verifier result) counts as negative infinity.
+    rewards lack (or a turn without a verifier result) counts as negative infinity. A dataset's ``reward_key``
+    names the score, so a number gates that key instead.
     """
     if min_reward is None:
         return None
-    thresholds = {"reward": float(min_reward)} if isinstance(min_reward, (int, float)) else min_reward
+    if isinstance(min_reward, (int, float)):
+        thresholds = {reward_key or "reward": float(min_reward)}
+    else:
+        thresholds = min_reward
     for key, threshold in thresholds.items():
         actual = (rewards or {}).get(key, float("-inf"))
         if actual < threshold:
@@ -1572,7 +1581,10 @@ class HarborEnvironmentServer(
             if (
                 result.mask_sample
                 or result.verifier_rewards is None
-                or min_reward_failure(result.verifier_rewards, turn.config.min_reward) is not None
+                or min_reward_failure(
+                    result.verifier_rewards, turn.config.min_reward, reward_key=task.config.verifier.reward_key
+                )
+                is not None
             ):
                 stopped_after = turn.name if len(results) < len(task.turns) else None
                 break

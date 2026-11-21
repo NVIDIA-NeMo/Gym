@@ -78,6 +78,7 @@ from nemo_gym.data.tasks.harbor.task import (
     dockerfile_base_image,
     is_task_folder,
     iter_task_folders,
+    read_task_toml,
 )
 from nemo_gym.sandbox.compose_config import check_sidecar_extra_hosts, plan_compose_volumes
 from nemo_gym.sandbox.compose_fields import (
@@ -703,7 +704,7 @@ def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None
         if select is not None and not select(child.name):
             continue
         try:
-            config = HarborTaskConfig.model_validate(tomllib.loads((child / TASK_FILE).read_text()))
+            config = HarborTaskConfig.model_validate(read_task_toml(child / TASK_FILE)[0])
             config = apply_dataset_config(config, child.name, dataset)
         except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):
             continue

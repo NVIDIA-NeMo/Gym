@@ -176,9 +176,10 @@ The result lists each turn under `turns`. The episode's `response` comes from th
 ## Early stop
 
 The episode stops after a turn that is masked, writes no valid reward file, or misses `min_reward`. A number gates
-the reward file's `reward` key, so a `reward.json` with only component keys always misses it. A table such as
-`{ core_pass_rate = 0.5 }` gates each key it names. An agent failure that `agent_outcome_policy` retries or fails
-ends the episode ungraded.
+the reward file's `reward` key, so a `reward.json` with only component keys always misses it. When the dataset sets
+[`reward_key`](/main/data/task-folders/task-folder-verifiers#reward-files), a number gates that key instead. A table
+such as `{ core_pass_rate = 0.5 }` gates each key it names. An agent failure that `agent_outcome_policy` retries or
+fails ends the episode ungraded.
 
 ## Reference solutions per step
 

@@ -54,6 +54,9 @@ timeout_multiplier = 1.0
 resource_multiplier = 1.0
 # Scale the verifier budgets alone, on top of timeout_multiplier.
 # verifier_timeout_multiplier = 1.0
+# The reward.json key that is the score, for a verifier that writes several metrics and no `reward` key; the
+# other keys stay metrics. Unset, a `reward` key is the score, else the keys are summed.
+# reward_key = "overall"
 
 # Per-task overrides use Harbor's own [environment] fields; `env` merges over the task's own.
 # [gym.tasks."{task}".environment]

@@ -133,6 +133,7 @@ None of these keys enters a task digest.
 | `timeout_multiplier` | `1.0` | Scales every `[agent]` and `[verifier]` `timeout_sec`, including a step's own. Collect hooks, health checks and build timeouts do not scale. |
 | `verifier_timeout_multiplier` | `1.0` | Scales the verifier budgets alone, on top of `timeout_multiplier`: `[verifier].timeout_sec`, a step's `[steps.verifier].timeout_sec` and the step default a step inherits. The agent budgets keep `timeout_multiplier`. |
 | `resource_multiplier` | `1.0` | Scales `cpus`, `memory_mb` and `storage_mb` of `[environment]` and `[verifier.environment]`, rounded up. GPUs, `[steps.verifier.environment]` and Compose sidecars do not scale. |
+| `reward_key` | none | The `reward.json` key that is the score of every task, such as `"overall"` for a verifier that writes several metrics and no `reward` key. The other keys stay metrics, a scalar `min_reward` gates this key, and a file without it scores 0 with `harbor:invalid_reward`. Unset, a `reward` key is the score, else the sum of all keys. NeMo Gym ignores the key in a `task.toml`, with a warning, as Harbor does. A task graded by a Python verifier takes only `"reward"`. See [Reward files](/main/data/task-folders/task-folder-verifiers#reward-files). |
 
 ### [gym.tasks."task-id"]
 
@@ -140,9 +141,11 @@ Per-task overrides, keyed by folder name and applied before the multipliers. `en
 key of the task's table: `env` merges over the task's own, `verifier.environment` merges field by field like
 `[environment]` (or, on a task without one, creates it and so selects separate mode), and every other key replaces
 it. `verifier` also takes the Gym-only `inputs` list (see
-[Sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs)). `artifacts` adds entries after the task's own.
-Once `dataset.toml` sets a multiplier other than `1.0` or any override, every task's digest includes the defaults
-and its own (possibly empty) override, so adding the first such key, or removing the last, changes every digest.
+[Sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs)) and `reward_key`, which replaces the
+default for that task. `artifacts` adds entries after the task's own.
+Once `dataset.toml` sets a multiplier other than `1.0`, a `reward_key` or any override, every task's digest includes
+the defaults and its own (possibly empty) override, so adding the first such key, or removing the last, changes every
+digest.
 
 <Note>
 `harbor add`, `harbor remove` and `harbor sync` rewrite `dataset.toml` without the `[gym]` table. Keep the
@@ -192,9 +195,9 @@ and trial runtime are not used. See [Harbor Environment Server](/main/agent-inte
   from the sidecar inputs. Ship verifier helpers in the task's `tests/` folder. See
   [How the verifier runs](/main/data/task-folders/task-folder-verifiers#how-the-verifier-runs).
 
-`gym dataset publish --harbor` writes a copy that Harbor can run. The copy leaves out the `[gym]` table, and
-publishing refuses Python verifiers that read `response` or grade in separate mode, and tasks that share a
-`[task].name`.
+`gym dataset publish --harbor` writes a copy that Harbor can run. The copy leaves out the `[gym]` table, so Harbor
+reads `reward.json` by its own rule whatever `reward_key` said. Publishing refuses Python verifiers that read
+`response` or grade in separate mode, and tasks that share a `[task].name`.
 
 ### Current limitations
 

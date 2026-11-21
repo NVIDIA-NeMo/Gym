@@ -4,8 +4,9 @@
 """Grade an episode: the test.sh wrapper protocol, the reward files and the verifier sandbox.
 
 The verifier runs Harbor's tests/test.sh under a timeout wrapper that writes an exit record,
-reads reward.json or reward.txt, applies the reward rule (``reward`` key, else the keys summed as
-``reward_components``) and turns the exit into a measured or masked sample. Module level are the
+reads reward.json or reward.txt, applies the reward rule (the dataset's ``reward_key`` when set,
+else the ``reward`` key, else the keys summed as ``reward_components``) and turns the exit into a
+measured or masked sample. Module level are the
 in-sandbox paths the protocol uses, the failure kinds, the wrapper command, the reward and exit
 record parsers, the timeout rule, and the choice of image and user the verifier runs as in shared
 and separate mode. The mixin holds the shared and separate verification choreography unchanged,
@@ -101,15 +102,24 @@ VERIFIER_UNAVAILABLE_EXIT_CODE = 75
 VERIFIER_UNAVAILABLE_KIND = "harbor:verifier_unavailable"
 
 
-def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | None]:
-    """Read reward.json when present; only a missing JSON file falls back to reward.txt."""
+# The problem `parse_reward_file` names when the verifier wrote neither reward file.
+NO_REWARD_FILE = "no reward.json or reward.txt was written"
+
+
+def parse_reward_file(directory: Path, *, score_key: str | None = None) -> tuple[dict[str, float] | None, str | None]:
+    """Read reward.json when present; only a missing JSON file falls back to reward.txt.
+
+    ``score_key`` is the dataset's ``reward_key``. When set, a file without that key holds no valid reward and reads
+    as ``None`` with the problem named, like any other invalid file; reward.txt names ``reward``. When unset, a
+    ``reward`` key is the score and otherwise every key is a component whose values are summed.
+    """
     for path in (directory / "reward.json", directory / "reward.txt"):
         if path.is_file():
-            return _parse_one_reward_file(path)
-    return None, "no reward.json or reward.txt was written"
+            return _parse_one_reward_file(path, score_key)
+    return None, NO_REWARD_FILE
 
 
-def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | None]:
+def _parse_one_reward_file(path: Path, score_key: str | None) -> tuple[dict[str, float] | None, str | None]:
     # The verifier wrote these bytes; never let a stray non-UTF-8 byte escape as an exception.
     text = path.read_text(errors="replace").strip()
     if not text:
@@ -120,11 +130,15 @@ def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | N
         return None, f"{path.name} is not valid: {exc}"
     if not isinstance(raw, dict) or not raw:
         return None, f"{path.name} must hold a non-empty JSON object"
+    if score_key is not None and score_key not in raw:
+        return None, f"{path.name} has no {score_key!r} key (the dataset's reward_key): {sorted(raw)}"
     rewards: dict[str, float] = {}
-    # With a numeric `reward`, the other keys are metrics: a verifier that writes a nested object or a string beside
-    # it (a `details` block, a `reason`) keeps its score, as Harbor keeps the file as written and reads `reward`.
-    # Without one, every key is a component of the score, so every key has to be a number.
-    scored = isinstance(raw.get("reward"), (int, float)) and not isinstance(raw.get("reward"), bool)
+    # With a numeric score key (`reward`, or the dataset's `reward_key`), the other keys are metrics: a verifier that
+    # writes a nested object or a string beside it (a `details` block, a `reason`) keeps its score, as Harbor keeps
+    # the file as written and reads `reward`. Without one, every key is a component of the score, so every key has to
+    # be a number.
+    score = raw.get(score_key or "reward")
+    scored = isinstance(score, (int, float)) and not isinstance(score, bool)
     for key, value in raw.items():
         if not isinstance(value, (int, float)):
             if scored:
@@ -206,13 +220,16 @@ def verifier_timed_out(result: SandboxExecResult, exit_record: tuple[int, int | 
     return elapsed is None or elapsed >= budget
 
 
-def select_reward(rewards: dict[str, float]) -> float | None:
+def select_reward(rewards: dict[str, float], *, key: str | None = None) -> float | None:
     """The score a parsed reward file gives: the ``reward`` key when present, else the sum of every key.
 
     Gym's reading of ``reward.json``: a ``reward`` key is the score and the other keys are metrics; without
     one every key is a component of the reward (:func:`reward_components`), which is their sum. One key
     without ``reward`` is Harbor's own rule too. ``None`` when the components do not sum to a finite number.
+    ``key`` is the dataset's ``reward_key``: that key alone is the score, and ``None`` when the file lacks it.
     """
+    if key is not None:
+        return rewards.get(key)
     if "reward" in rewards:
         return rewards["reward"]
     try:
@@ -222,13 +239,13 @@ def select_reward(rewards: dict[str, float]) -> float | None:
     return total if math.isfinite(total) else None
 
 
-def reward_components(rewards: dict[str, float]) -> dict[str, float] | None:
+def reward_components(rewards: dict[str, float], *, key: str | None = None) -> dict[str, float] | None:
     """The keys that sum to the reward, or ``None`` when the file names the reward itself.
 
-    With a ``reward`` key the other keys are metrics, not parts of the score, so there are no components to
-    name; without one every key is a component and :func:`select_reward` is their sum.
+    With a ``reward`` key, or a dataset ``reward_key``, the other keys are metrics, not parts of the score, so
+    there are no components to name; without one every key is a component and :func:`select_reward` is their sum.
     """
-    if "reward" in rewards:
+    if key is not None or "reward" in rewards:
         return None
     return dict(rewards)
 
@@ -451,14 +468,17 @@ class VerifierSettings:
     collect: list[Any] = field(default_factory=list)
     # The task's `[verifier].network_mode` (a step's over it), reported as `verifier_network`.
     network_mode: str | None = None
+    # The task's `[verifier].reward_key` from dataset.toml; a step has none of its own.
+    reward_key: str | None = None
 
 
 class HarborVerificationMixin:
     """Grade an episode: the test.sh wrapper protocol, the reward files and the verifier sandbox.
 
     The verifier runs Harbor's tests/test.sh under a timeout wrapper that writes an exit record,
-    reads reward.json or reward.txt, applies the reward rule (``reward`` key, else the keys summed as
-    ``reward_components``) and turns the exit into a measured or masked sample. Module level are the
+    reads reward.json or reward.txt, applies the reward rule (the dataset's ``reward_key`` when set, else
+    the ``reward`` key, else the keys summed as ``reward_components``) and turns the exit into a measured
+    or masked sample. Module level are the
     in-sandbox paths the protocol uses, the failure kinds, the wrapper command, the reward and exit
     record parsers, the timeout rule, and the choice of image and user the verifier runs as in shared
     and separate mode. The mixin holds the shared and separate verification choreography unchanged,
@@ -594,6 +614,7 @@ class HarborVerificationMixin:
         task: HarborTask,
         logs_dir: Path,
         *,
+        reward_key: str | None,
         entrypoint_log: str | None = None,
     ) -> tuple[tuple[int, int | None] | None, dict[str, float] | None, str | None]:
         """Download the reward files and the wrapper's exit record, then whatever else the verifier wrote.
@@ -601,8 +622,9 @@ class HarborVerificationMixin:
         The reward and the exit record are the required transfer, whatever the exit code: a grader may
         have written its reward before a late exit, and a timed-out run's partial logs are still worth
         keeping. Optional diagnostics cannot invalidate a measured score. With ``entrypoint_log``, the
-        sandbox's entrypoint output lands under that name too. Returns the exit record (None when the
-        wrapper never reached its end), the rewards and the reward problem.
+        sandbox's entrypoint output lands under that name too. ``reward_key`` is the turn's score key, which
+        decides whether the file holds a valid reward (:func:`parse_reward_file`). Returns the exit record (None
+        when the wrapper never reached its end), the rewards and the reward problem.
         """
         await download_dir(
             sandbox,
@@ -611,7 +633,7 @@ class HarborVerificationMixin:
             names=("reward.json", "reward.txt", EXIT_RECORD_NAME),
         )
         exit_record = parse_exit_record(logs_dir)
-        rewards, problem = parse_reward_file(logs_dir)
+        rewards, problem = parse_reward_file(logs_dir, score_key=reward_key)
         try:
             await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, skip_unsafe=True, protect=SERVER_OWNED_LOG_NAMES)
         except Exception:
@@ -821,6 +843,7 @@ class HarborVerificationMixin:
                 verifier,
                 task,
                 logs_dir,
+                reward_key=settings.reward_key,
                 entrypoint_log=VERIFIER_ENTRYPOINT_LOG_NAME if verifier_entrypoint is not None else None,
             )
             if exit_record is None and result.error_type != "timeout":
@@ -1112,6 +1135,7 @@ class HarborVerificationMixin:
                 user=verifier.user,
                 collect=verifier.collect,
                 network_mode=verifier.network_mode,
+                reward_key=verifier.reward_key,
             )
         # A step's tests/ (and a multi-step task's top-level tests/) may be absent; a single-turn task's tests/ is
         # uploaded whatever the host says, so a snapshot removed under the episode fails the upload and masks.
@@ -1167,6 +1191,7 @@ class HarborVerificationMixin:
                 sandbox,
                 task,
                 logs_dir,
+                reward_key=settings.reward_key,
                 entrypoint_log=ENTRYPOINT_LOG_NAME if session.entrypoint is not None else None,
             )
             if exit_record is None and result.error_type != "timeout":
@@ -1253,7 +1278,8 @@ class HarborVerificationMixin:
                     )
                     | extras
                 )
-            kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND
+            # Only an absent file is a missing reward: a key name in the problem must not decide the kind.
+            kind = MISSING_REWARD_KIND if problem == NO_REWARD_FILE else INVALID_REWARD_KIND
             ignored = (
                 f" (test.sh exited {VERIFIER_UNAVAILABLE_EXIT_CODE} in the agent's sandbox, where the code is not "
                 "trusted; measured as on any other exit)"
@@ -1261,7 +1287,8 @@ class HarborVerificationMixin:
                 else ""
             )
             return self._measured(0.0, kind, f"{problem}{ignored}; tail: {_stdout_tail(logs_dir)}") | extras
-        reward = select_reward(rewards)
+        # A file without the dataset's `reward_key` already parsed as no valid reward (`parse_reward_file`).
+        reward = select_reward(rewards, key=settings.reward_key)
         if reward is None:
             # Finite components whose sum overflows: a reward file no trainer can use, measured like any other
             # invalid reward file.
@@ -1270,7 +1297,7 @@ class HarborVerificationMixin:
             )
             return self._measured(0.0, INVALID_REWARD_KIND, reason) | extras
         outcome = {"reward": reward, "verifier_rewards": rewards}
-        components = summing_components(reward, reward_components(rewards))
+        components = summing_components(reward, reward_components(rewards, key=settings.reward_key))
         if components is not None:
             outcome["reward_components"] = components
         return outcome | extras
@@ -1444,4 +1471,5 @@ class HarborVerificationMixin:
             user=step.user if step.user is not None else task.config.verifier.user,
             collect=[*task.config.verifier.collect, *step.collect],
             network_mode=step.network_mode if step.network_mode is not None else task.config.verifier.network_mode,
+            reward_key=task.config.verifier.reward_key,
         )
