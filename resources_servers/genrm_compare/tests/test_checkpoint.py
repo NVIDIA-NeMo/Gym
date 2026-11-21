@@ -14,6 +14,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from omegaconf import DictConfig
+from pytest import approx
 
 import resources_servers.genrm_compare.app as genrm
 from nemo_gym.client import ServerClient
@@ -252,6 +253,57 @@ async def test_a_member_that_has_not_recorded_its_judge_failure_gets_it_back_aft
     restored, _ = await restore(config, records)
     with pytest.raises(JudgeError, match="judge is down"):
         await asyncio.wait_for(verify_as(restored, SESSIONS[1], member(1)), timeout=0.5)
+    restored._run_single_comparison.assert_not_awaited()
+    await restored.aclose()
+
+
+async def test_members_masked_alone_get_their_judge_failure_back_after_a_restore(config):
+    """A failed comparison masks its two members; a restore keeps them masked, with its cause, and their siblings
+    scored."""
+    from nemo_gym.core import NgFailureEvent, RequestFailureLog
+
+    config.num_rollouts_per_prompt = 4
+    sessions = [f"session-{index}" for index in range(4)]
+    event = NgFailureEvent(boundary="model", failure_kind="provider_unavailable", failure_reason="synthetic")
+
+    def judge(*_args, pair_idx, **_kwargs):
+        if pair_idx == (0, 1):
+            raise JudgeError("judge is down for one pair") from event
+        return comparison_result(5.0, 1.0)
+
+    async def observed(target, index):
+        with RequestFailureLog.capture() as log:
+            try:
+                return await verify_as(target, sessions[index], member(index)), log.reply_report(None)
+            except JudgeError as error:
+                return error, log.reply_report(error)
+
+    server, participant = participant_server(config, judge=AsyncMock(side_effect=judge))
+    for index, session_id in enumerate(sessions):
+        participant.seeded(session_id, EpisodeId(rollout_id=f"group_g{index}"))
+    outcomes, reports = zip(*await asyncio.gather(*(observed(server, index) for index in range(4))))
+    assert [isinstance(outcome, JudgeError) for outcome in outcomes] == [True, True, False, False]
+    assert all(outcome.genrm_failed_comparison_rate_per_group == approx(1 / 4) for outcome in outcomes[2:])
+    # The masked members fail with the judge failure as their cause; their scored siblings only observed it.
+    assert [report.failure_id for report in reports] == [event.event_id, event.event_id, None, None]
+    assert all(event.event_id in report.events for report in reports)
+    participant.ended(sessions[0])
+    records = await participant.export(None, checkpoint_id="c")
+    states = {record.session_id: record.state for record in records}
+    assert states[sessions[1]]["masked_alone"] is True
+    assert states[sessions[1]]["judge_failure"] == str(outcomes[1])
+    for index in (2, 3):
+        assert "masked_alone" not in states[sessions[index]]
+        assert states[sessions[index]]["result"]["reward"] == outcomes[index].reward
+    await server.aclose()
+
+    restored, _ = await restore(config, records)
+    replayed, report = await asyncio.wait_for(observed(restored, 1), timeout=0.5)
+    assert isinstance(replayed, JudgeError) and "rollout_index=1 lost a comparison" in str(replayed)
+    assert report.model_dump(mode="json") == reports[1].model_dump(mode="json")
+    for index in (2, 3):
+        replayed = await asyncio.wait_for(verify_as(restored, sessions[index], member(index)), timeout=0.5)
+        assert replayed.reward == outcomes[index].reward
     restored._run_single_comparison.assert_not_awaited()
     await restored.aclose()
 

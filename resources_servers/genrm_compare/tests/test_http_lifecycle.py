@@ -39,6 +39,7 @@ from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.metrics import RewardProfiler
 from nemo_gym.rollouts import RolloutFailureRecord
 from nemo_gym.server_runtime import BaseVerifyResponse, RolloutContextMiddleware
+from nemo_gym.verification import JudgeError
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
 from resources_servers.genrm_compare.tests.test_cohort_storage import training_member
@@ -307,6 +308,35 @@ async def test_judge_failure_preserves_answer_and_diagnostics_through_run(servic
         assert "judge /v1/responses pair=" in error and "500" in error and "deadline=" in error
     assert len({body["response"]["id"] for _, body in results}) == 4
     assert all(c.phase == "failed" and not c.results for c in services.resource._verify_cohorts.values())
+
+
+@pytest.mark.parametrize("failing_pairs", [{(0, 1)}, {(0, 1), (1, 2)}], ids=["one_failure", "adjacent_failures"])
+async def test_failed_comparisons_through_run(services, monkeypatch, failing_pairs):
+    services.resource.config.num_rollouts_per_prompt = 16
+    judge = services.resource._run_single_comparison
+
+    async def judge_fails_for_pairs(*args, pair_idx, **kwargs):
+        if pair_idx in failing_pairs:
+            raise JudgeError("judge unavailable for this pair")
+        return await judge(*args, pair_idx=pair_idx, **kwargs)
+
+    monkeypatch.setattr(services.resource, "_run_single_comparison", judge_fails_for_pairs)
+    results = await asyncio.gather(*(run(services, i) for i in range(16)))
+
+    masked = {index for pair in failing_pairs for index in pair}
+    for index, (status, body) in enumerate(results):
+        if index in masked:
+            assert_judge_failure(status, body, f"rollout_index={index} lost a comparison")
+            assert "judge unavailable for this pair" in body["failure_reason"]
+            continue
+        # Every scored rollout keeps both comparisons: 4 as response_1 and 2 as response_2.
+        assert status == 200 and "_ng_failure_class" not in body
+        assert body["reward"] == 3.0
+        assert not body["mask_sample"] and not (body.get("instance_config") or {}).get("mask_sample")
+        assert body.get("failure_kind") is None
+        assert body["genrm_failed_comparison_rate_per_group"] == len(failing_pairs) / 16
+        assert body["genrm_masked_rollout_rate_per_group"] == len(masked) / 16
+    assert services.policy_calls == 16 and services.judge_calls == 16 - len(failing_pairs)
 
 
 async def test_empty_http_200_judge_retries_then_fails_through_run(services):
@@ -721,16 +751,24 @@ async def test_cohort_failure_reports_survive_actual_collection_and_resume(servi
         route_failures_to_sidecar=True,
         disable_health_check=True,
     )
-    if recovers:
-        await collection.RolloutCollectionHelper().run_from_config(config)
-        rows = [json.loads(line) for line in out.read_text().splitlines()]
-        assert len(rows) == 4 and all(row["reward"] == 3 for row in rows)
-        assert services.judge_calls == 5
-    else:
+    if mode == "all_failed":
         with pytest.raises(RuntimeError, match="produced a result"):
             await collection.RolloutCollectionHelper().run_from_config(config)
-        rows = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
-        assert len(rows) == 4 and all("reward" not in row for row in rows)
+    else:
+        await collection.RolloutCollectionHelper().run_from_config(config)
+    scored = [json.loads(line) for line in out.read_text().splitlines()]
+    failures = tmp_path / "output_failures.jsonl"
+    masked = [json.loads(line) for line in failures.read_text().splitlines()] if failures.exists() else []
+    assert all("reward" not in row for row in masked)
+    if recovers:
+        assert len(scored) == 4 and all(row["reward"] == 3 for row in scored)
+        assert services.judge_calls == 5
+    elif mode == "one_failed":
+        # The failed comparison masks its two rollouts; the other two are scored.
+        assert len(scored) == len(masked) == 2
+    else:
+        assert len(masked) == 4
+    rows = masked + scored
     assert services.policy_calls == 4
     assert services.judge_failure_events
     if mode == "one_failed":
@@ -738,14 +776,16 @@ async def test_cohort_failure_reports_survive_actual_collection_and_resume(servi
     verifiers = [row["ng_trajectory"]["verifier_invocations"] for row in rows]
     assert all(len(items) == 1 for items in verifiers)
     assert len({items[0]["invocation_id"] for items in verifiers}) == 4
-    assert all(items[0]["status"] == ("completed" if recovers else "failed") for items in verifiers)
+    assert all(
+        items[0]["status"] == ("completed" if "reward" in row else "failed") for row, items in zip(rows, verifiers)
+    )
     # The detached owner has no member-specific capture context. Preserving failure
     # evidence does not invent judge model-call joins or grading coverage.
     assert all(items[0]["model_calls"] == [] for items in verifiers)
-    reports = [FailureReportRow.report(row) for row in rows]
-    for report in reports:
+    for row in rows:
+        report = FailureReportRow.report(row)
         assert set(services.judge_failure_events) <= set(report.events), report.model_dump()
-        if recovers:
+        if "reward" in row:
             assert report.failure_id is None
         else:
             current = report.failure_id
