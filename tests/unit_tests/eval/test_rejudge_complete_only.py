@@ -130,21 +130,36 @@ def test_completion_files_follow_the_recomputed_metrics_or_are_removed(
     assert complete_dir.exists() is (failing_step is None)
 
 
-def test_a_strict_run_left_incomplete_by_the_pass_removes_its_completion_files(
-    tmp_path, monkeypatch, pass_settles_one_row
+@pytest.mark.parametrize("due", [["alpha-rollout"], RuntimeError("no store")], ids=["read", "unreadable"])
+def test_a_strict_run_left_incomplete_by_the_pass_removes_the_files_it_regraded(
+    tmp_path, monkeypatch, pass_settles_one_row, due
 ) -> None:
-    """No run-wide metrics follow the pass, so files written during collection would keep the scores from before it."""
+    """No run-wide metrics follow the pass, so the files of the agents it graded again would keep their old scores;
+    the other agents' files stand. Rollouts that cannot be read leave no file standing."""
     complete_dir = tmp_path / "rollouts_agent_complete"
     complete_dir.mkdir()
     (complete_dir / "alpha.json").write_text("{}")
+    removed = []
+
+    def due_judge_failures(output):
+        if isinstance(due, Exception):
+            raise due
+        return due
+
     monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda output: False)
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.due_judge_failures", due_judge_failures)
+    monkeypatch.setattr(
+        "nemo_gym.rollouts.rollout_collection.remove_agent_complete_files",
+        lambda output, rollout_ids, global_config_dict: removed.append(rollout_ids),
+    )
 
     eval_cli._rejudge_saved_judge_failures(
         {}, tmp_path / "rollouts.jsonl", SimpleNamespace(disable_aggregation=False), complete_only=True
     )
 
     assert pass_settles_one_row == []
-    assert not complete_dir.exists()
+    assert removed == ([["alpha-rollout"]] if isinstance(due, list) else [])
+    assert complete_dir.exists() is isinstance(due, list)
 
 
 @pytest.mark.parametrize(

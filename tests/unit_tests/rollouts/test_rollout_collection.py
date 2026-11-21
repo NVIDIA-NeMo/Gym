@@ -146,6 +146,7 @@ from nemo_gym.rollouts.rollout_collection import (
     is_terminal_failure,
     loads_jsonl_line,
     refresh_agent_complete_files,
+    remove_agent_complete_files,
 )
 from nemo_gym.rollouts.rollout_health import health_check_run_dir
 from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, DispatchLatencyTracker, _attach_ng_perf, _build_ng_perf
@@ -1892,6 +1893,37 @@ class TestRolloutCollection:
         assert alpha["completed_at"] != "2026-01-01T00:00:00+00:00"
         assert (complete_dir / "beta.json").read_bytes() == beta_before
         assert not (complete_dir / "gamma.json").exists()
+
+    def test_only_the_agents_of_the_given_rollouts_lose_their_completion_files(self, tmp_path: Path) -> None:
+        """A re-judge that leaves a strict run incomplete removes the files of the agents it graded again, not all."""
+        from nemo_gym.rollouts.rollout_records import logical_rollout_id
+        from nemo_gym.rollouts.rollout_recovery import RunManifest
+        from nemo_gym.rollouts.rollout_store import RolloutStore
+
+        rows = [
+            {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": agent}}
+            for task, agent in enumerate(("alpha", "beta"))
+        ]
+        source = tmp_path / "source.jsonl"
+        source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        agents = {name: {"responses_api_agents": {}} for name in ("alpha", "beta")}
+        output = tmp_path / "rollouts.jsonl"
+        with RolloutStore.start_or_resume(
+            output, lambda: (rows, RunManifest.create(source, rows, {}, agents)), resume=False
+        ) as store:
+            for row in store.pending():
+                store.record_dispatch(row)
+                store.record_outcome(row | {"reward": 1.0})
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        complete_dir.mkdir()
+        for agent in ("alpha", "beta"):
+            (complete_dir / f"{agent}.json").write_bytes(
+                orjson.dumps({AGENT_REF_KEY_NAME: {"name": agent}, NG_ENVIRONMENT_SERVER_KEY: agent})
+            )
+
+        remove_agent_complete_files(output, [logical_rollout_id(rows[0])], OmegaConf.create({}))
+
+        assert sorted(path.name for path in complete_dir.iterdir()) == ["beta.json"]
 
     @pytest.mark.parametrize(
         "resume_from_cache, existing_rollouts",
