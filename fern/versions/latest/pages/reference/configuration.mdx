@@ -63,6 +63,8 @@ Gym resolves every relative path — `config_paths`, `env.yaml`, prompt configs,
 
 Earlier roots win, so a component you provide shadows a same-named built-in. Absolute paths are used unchanged.
 
+`--benchmark` and `--environment` take a name from `gym list benchmarks` or `gym list environments`, so they follow the list instead: the first root that lists the name wins. A config at that name's path in an earlier root does not win if the list shows it under another name or leaves it out, as it leaves out an environment's flavor file `<folder>/<flavor>.yaml`. Such a config is selected by its path only when no root lists the name. To run a particular config file, pass `--config <path>` instead. See [Names](/contribute/environments/new-environment#names).
+
 In non-editable installs (including wheels), Python keeps its existing import-path order, so a cwd copy of a built-in can override its files while the installed module still wins. To override both files and modules, explicitly add your project with `--search-dir .` (for example, `gym eval prepare --benchmark aime24 --search-dir .`) or `NEMO_GYM_EXTRA_ROOTS`.
 
 ### External roots (`NEMO_GYM_EXTRA_ROOTS`)

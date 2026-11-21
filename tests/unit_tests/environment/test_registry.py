@@ -22,10 +22,15 @@ from nemo_gym.environment.manifest import dump_manifest
 from nemo_gym.environment.registry import (
     RegistryError,
     _discover_environments_in_dir,
+    _legacy_config_name,
+    _legacy_config_paths,
     discover_environment_catalog,
     discover_environments,
     resolve_catalog_entry,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _make_env(environments_dir: Path, name: str, config_body: str) -> Path:
@@ -53,6 +58,10 @@ _ENV_CONFIG = """{name}:
         type: responses_api_models
         name: policy_model
 """
+
+
+# A config that the benchmark scan lists under its path when no manifest claims it.
+_BENCHMARK_CONFIG = "agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n"
 
 
 def _manifest(name: str, kind: str = "environment", **updates) -> dict:
@@ -133,10 +142,9 @@ class TestDiscoverEnvironments:
         envs_dir = tmp_path / "environments"
         _make_env(envs_dir, "real", _ENV_CONFIG.format(name="real"))
         # A task inside the pulled dataset ships its own manifest.yaml (a Kubernetes task, say) that would
-        # be read as a catalog manifest with the wrong name if the walk descended into the dataset.
+        # be read as a catalog entry if the walk descended into the dataset.
         stray = _write_manifest(tmp_path, "environments", "harbor/terminal-bench-4.0.0/k8s-task", _manifest("k8s"))
-        with pytest.raises(registry_module.RegistryError):
-            _discover_environments_in_dir(envs_dir)
+        assert set(_discover_environments_in_dir(envs_dir)) == {"real", "k8s"}
 
         (envs_dir / "harbor" / "terminal-bench-4.0.0" / registry_module.HARBOR_DATASET_MANIFEST).write_text(
             '[dataset]\nsource = "harbor-package-store"\n', encoding="utf-8"
@@ -337,26 +345,51 @@ class TestEnvironmentCatalog:
 
         assert entry.path == tmp_path / "environments" / "suite" / "alpha"
 
-    @pytest.mark.parametrize(
-        ("tree", "path_name", "manifest"),
-        [
-            ("environments", "path-name", _manifest("declared-name")),
-            ("benchmarks", "wrong-kind", _manifest("wrong-kind", "environment")),
-        ],
-    )
-    def test_rejects_manifest_identity_that_disagrees_with_path(
-        self,
-        tmp_path: Path,
-        monkeypatch,
-        tree: str,
-        path_name: str,
-        manifest: dict,
-    ) -> None:
-        _write_manifest(tmp_path, tree, path_name, manifest)
+    def test_rejects_manifest_whose_kind_disagrees_with_its_tree(self, tmp_path: Path, monkeypatch) -> None:
+        _write_manifest(tmp_path, "benchmarks", "wrong-kind", _manifest("wrong-kind", "environment"))
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
 
-        with pytest.raises(RegistryError, match="catalog path"):
+        with pytest.raises(RegistryError, match="catalog path requires 'benchmark'"):
             discover_environment_catalog()
+
+    def test_manifest_name_is_its_id_wherever_its_folder_sits(self, tmp_path: Path, monkeypatch) -> None:
+        manifest_path = _write_manifest(tmp_path, "environments", "group/moved", _manifest("alpha"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entry = resolve_catalog_entry("alpha")
+
+        assert entry.manifest_path == manifest_path
+        assert entry.path == tmp_path / "environments" / "group" / "moved"
+        assert [entry.name for entry in discover_environment_catalog()] == ["alpha"]
+
+    def test_two_manifests_in_one_tree_cannot_declare_one_name(self, tmp_path: Path, monkeypatch) -> None:
+        _write_manifest(tmp_path, "environments", "alpha", _manifest("alpha"))
+        _write_manifest(tmp_path, "environments", "copy", _manifest("alpha"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        with pytest.raises(RegistryError, match="both declare name 'alpha'"):
+            discover_environment_catalog()
+
+    def test_an_earlier_root_shadows_a_manifest_by_its_name(self, tmp_path: Path, monkeypatch) -> None:
+        high = tmp_path / "high"
+        low = tmp_path / "low"
+        high_manifest = _write_manifest(high, "environments", "elsewhere", _manifest("shared"))
+        _write_manifest(low, "environments", "shared", _manifest("shared"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [high, low])
+
+        entries = [entry for entry in discover_environment_catalog() if entry.name == "shared"]
+
+        assert [entry.manifest_path for entry in entries] == [high_manifest]
+
+    def test_a_shadowed_manifest_still_claims_its_config(self, tmp_path: Path, monkeypatch) -> None:
+        # The later root's `demo` loses to the earlier root's; its config is not listed again under its folder name.
+        high = tmp_path / "high"
+        low = tmp_path / "low"
+        _write_manifest(high, "environments", "demo", _manifest("demo"))
+        _write_manifest(low, "environments", "moved", _manifest("demo"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [high, low])
+
+        assert [entry.name for entry in discover_environment_catalog()] == ["demo"]
 
     def test_manifest_requires_a_sibling_config(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(
@@ -459,22 +492,42 @@ class TestEnvironmentCatalog:
         assert (entries[("benchmark", "suite")].setup_of, entries[("benchmark", "suite")].protocol_of) == (None, None)
         assert len([key for key in entries if key[1].startswith("suite")]) == 4
 
-    def test_rejects_a_listed_name_that_is_not_its_configs_catalog_path(self, tmp_path: Path, monkeypatch) -> None:
-        # Named `other`, the setup would take that name from benchmarks/other/config.yaml, which `--benchmark other`
-        # still runs, and leave its own config out of the catalog under `demo/variant`.
-        listing = {"setups": [{"name": "other", "config_path": "variant.yaml"}]}
-        manifest_path = _write_manifest(tmp_path, "benchmarks", "demo", _manifest("demo", "benchmark", **listing))
-        benchmark_config = "agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n"
-        manifest_path.with_name("variant.yaml").write_text(benchmark_config, encoding="utf-8")
-        other = tmp_path / "benchmarks" / "other" / "config.yaml"
-        other.parent.mkdir()
-        other.write_text(benchmark_config, encoding="utf-8")
+    def test_a_listed_name_is_its_id_wherever_its_config_sits(self, tmp_path: Path, monkeypatch) -> None:
+        listing = {"setups": [{"name": "codex_id", "config_path": "codex.yaml", "agent_server": "codex"}]}
+        manifest_path = _write_manifest(tmp_path, "benchmarks", "suite", _manifest("suite", "benchmark", **listing))
+        manifest_path.with_name("codex.yaml").write_text(_BENCHMARK_CONFIG, encoding="utf-8")
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
 
-        with pytest.raises(
-            RegistryError, match="lists 'other', but the catalog path of its config .* requires 'demo/variant'"
-        ):
+        entries = {entry.name: entry for entry in discover_environment_catalog() if entry.kind == "benchmark"}
+
+        # The config is listed once, under its ID, not again under its path `suite/codex`.
+        assert set(entries) == {"suite", "codex_id"}
+        assert entries["codex_id"].config_path == manifest_path.with_name("codex.yaml").resolve()
+
+    def test_a_listed_name_and_another_manifests_name_cannot_be_the_same(self, tmp_path: Path, monkeypatch) -> None:
+        listing = {"setups": [{"name": "alpha", "config_path": "codex.yaml"}]}
+        _write_manifest(tmp_path, "benchmarks", "suite", _manifest("suite", "benchmark", **listing))
+        _write_manifest(tmp_path, "benchmarks", "alpha", _manifest("alpha", "benchmark"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        with pytest.raises(RegistryError, match="both declare name 'alpha'.*manifest, setup or protocol"):
             discover_environment_catalog()
+
+    @pytest.mark.parametrize("shadowed", ["suite", "codex_id"])
+    def test_a_shadowed_setup_still_claims_its_config(self, shadowed: str, tmp_path: Path, monkeypatch) -> None:
+        # An earlier root shadows the whole manifest by its name, or only the setup by the setup's name. Either way
+        # the later root's setup config is not listed again under its path `suite/codex`.
+        high, low = tmp_path / "high", tmp_path / "low"
+        _write_manifest(high, "benchmarks", "elsewhere", _manifest(shadowed, "benchmark"))
+        listing = {"setups": [{"name": "codex_id", "config_path": "codex.yaml"}]}
+        manifest_path = _write_manifest(low, "benchmarks", "suite", _manifest("suite", "benchmark", **listing))
+        manifest_path.with_name("codex.yaml").write_text(_BENCHMARK_CONFIG, encoding="utf-8")
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [high, low])
+
+        names = [entry.name for entry in discover_environment_catalog() if entry.kind == "benchmark"]
+
+        assert "suite/codex" not in names
+        assert sorted(names) == sorted({shadowed, "suite"})
 
     def test_resolution_requires_kind_only_for_cross_kind_collision(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(tmp_path, "environments", "shared", _manifest("shared"))
@@ -555,6 +608,17 @@ class TestEnvironmentCatalog:
             claimed=frozenset({("environment", "mcqa")}),
         )
         assert set(deduplicated) == {("benchmark", "resources_servers/mcqa/science")}
+
+
+@pytest.mark.parametrize(("subdir", "kind"), [("benchmarks", "benchmark"), ("environments", "environment")])
+def test_one_configs_catalog_name_follows_the_tree_scan(subdir: str, kind: str) -> None:
+    """The selectors check one config by the rules the catalog scans a whole tree with; on this checkout they agree."""
+    tree = REPO_ROOT / subdir
+    scanned = {config_path: name for name, config_path in _legacy_config_paths(tree, kind)}
+    named = {config_path: _legacy_config_name(tree, config_path, kind) for config_path in tree.rglob("*.yaml")}
+
+    assert scanned
+    assert {config_path: name for config_path, name in named.items() if name is not None} == scanned
 
 
 class TestReadEnvironmentDetails:
