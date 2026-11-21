@@ -96,6 +96,8 @@ class VerificationResult:
     test_output: str
     error: str | None = None
     test_patch_failed: bool = False
+    # The eval script hit ``evaluation_timeout``: incomplete, so it is retried, but scored 0 rather than masked.
+    timed_out: bool = False
 
 
 def patch_section_path(section: str) -> str | None:
@@ -271,7 +273,8 @@ async def run_verification(
 
     if result.error_type is not None:
         # The sandbox reported no exit for the eval script (a dropped stream, a timeout, a provider error), so the
-        # partial log cannot grade the run: report it inconclusive so it is retried, never as a zero.
+        # partial log cannot grade the run: report it inconclusive so it is retried. A run that still has no verdict
+        # is masked, except a timeout (``timed_out``): a test the patch made hang scores 0.
         return VerificationResult(
             completed=False,
             resolved=False,
@@ -279,6 +282,7 @@ async def run_verification(
             test_results=None,
             test_output=output,
             error=f"test run did not finish ({result.error_type}): {(result.stderr or '')[-500:]}",
+            timed_out=result.error_type == "timeout",
         )
 
     if result.return_code == EXIT_NO_REPO:

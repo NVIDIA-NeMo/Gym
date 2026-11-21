@@ -299,6 +299,19 @@ async def run_verification(
 
         await asyncio.to_thread(_persist_log)
 
+    error_type = getattr(result, "error_type", None)
+    if error_type not in (None, "timeout"):
+        # The provider ended the eval script without an exit status (a dropped stream, a provider error), so the
+        # partial log cannot grade the run: it is no verdict. A timeout stays a verdict, as before: a test the patch
+        # made hang still scores 0.
+        return VerificationResult(
+            False,
+            False,
+            False,
+            None,
+            output,
+            f"test run did not finish ({error_type}): {(result.stderr or '')[-500:]}",
+        )
     if result.return_code == EXIT_NO_REPO:
         return VerificationResult(False, False, False, None, output, f"{REPO_DIRECTORY} is not present in the image")
     if result.return_code == EXIT_NO_TESTS:

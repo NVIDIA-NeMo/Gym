@@ -10,13 +10,14 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import SESSION_LOST
+from nemo_gym.core import SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSessionConflictError
 from resources_servers.r2e_gym import app as r2e_app
 from resources_servers.r2e_gym.tests import test_sessions as r2e_sessions
 from resources_servers.swe_gym import app as swe_app
 from resources_servers.swe_gym.tests import test_sessions as swe_sessions
+from resources_servers.swebench.patch_capture import CaptureCommandError
 
 
 @pytest.fixture(params=[(swe_app, swe_sessions, "SWEGym"), (r2e_app, r2e_sessions, "R2EGym")], ids=["swe", "r2e"])
@@ -387,7 +388,9 @@ async def test_an_interrupted_grading_after_a_failed_extraction_grades_the_same_
 ):
     module, fixtures, server, sandboxes, _ = consumer
     _, verify_type = _request_types(module)
-    monkeypatch.setattr(module, "capture_model_patch", AsyncMock(side_effect=RuntimeError("git failed")))
+    # Git exiting non-zero on the repository the agent left: graded as an empty patch, not masked.
+    git_failed = CaptureCommandError("git failed", return_code=128, error_type=None)
+    monkeypatch.setattr(module, "capture_model_patch", AsyncMock(side_effect=git_failed))
     graded = module.run_verification.return_value
     grading_started = asyncio.Event()
     calls = 0
@@ -416,3 +419,123 @@ async def test_an_interrupted_grading_after_a_failed_extraction_grades_the_same_
     retried = await server.verify(request, body)
     assert not retried.mask_sample and retried.evaluation_completed
     assert "Failed to extract model patch" in retried.error
+
+
+# --- a verification without a verdict is masked; the patch's own outcomes stay trained ---------------------------
+
+
+def _seed_json(fixtures, episode: bool, **task_data) -> dict:
+    """An episode seed, or the flat row an Agent's /run seeds with."""
+    if not episode:
+        return fixtures._ROW | task_data
+    seed = fixtures._seed().model_dump(mode="json")
+    seed["task_data"] |= task_data
+    return seed
+
+
+@pytest.mark.parametrize(
+    "capture_error",
+    [
+        OSError("exec stream lost"),
+        CaptureCommandError("ended without a status", return_code=125, error_type="sandbox"),
+        CaptureCommandError("timed out", return_code=124, error_type="timeout"),
+    ],
+    ids=["unreachable", "provider_error", "provider_timeout"],
+)
+@pytest.mark.parametrize("episode", [True, False], ids=["episode", "agent_run"])
+def test_a_patch_the_provider_could_not_read_is_masked_without_grading(consumer, capture_error, episode):
+    module, fixtures, server, sandboxes, _ = consumer
+    module.capture_model_patch.side_effect = capture_error
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed_json(fixtures, episode)).status_code == 200
+        verified = client.post("/verify", json=fixtures._VERIFY)
+    assert verified.status_code == 200, verified.text
+    result = verified.json()
+    assert result["mask_sample"] and result["failure_kind"] == VERIFIER_ERROR
+    assert result["failure_reason"] == result["error"] and result["error"].startswith("Failed to extract model patch")
+    assert not result["evaluation_completed"] and result["reward"] == 0
+    # An unread patch is not graded as an empty one.
+    module.run_verification.assert_not_awaited()
+    assert len(sandboxes) == 1
+
+
+@pytest.mark.parametrize("failure", ["no_verdict", "verifier_raised"])
+@pytest.mark.parametrize("episode", [True, False], ids=["episode", "agent_run"])
+def test_a_verification_without_a_verdict_is_masked_after_its_retry(consumer, failure, episode):
+    module, fixtures, server, sandboxes, _ = consumer
+    verification_result = type(module.run_verification.return_value)
+    if failure == "no_verdict":
+        module.run_verification.return_value = verification_result(False, False, False, None, "", "image pull failed")
+        reason = "image pull failed"
+    else:
+        module.run_verification.side_effect = OSError("exec stream lost")
+        reason = "Verification failed: exec stream lost"
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed_json(fixtures, episode)).status_code == 200
+        verified = client.post("/verify", json=fixtures._VERIFY)
+    assert verified.status_code == 200, verified.text
+    result = verified.json()
+    assert result["mask_sample"] and result["failure_kind"] == VERIFIER_ERROR
+    assert result["failure_reason"] == result["error"] == reason
+    assert not result["evaluation_completed"] and result["reward"] == 0
+    assert module.run_verification.await_count == 2, "retried once on a fresh sandbox before it is masked"
+
+
+@pytest.mark.parametrize("episode", [True, False], ids=["episode", "agent_run"])
+def test_a_row_without_its_grading_spec_is_masked_without_grading(consumer, episode):
+    module, fixtures, server, sandboxes, _ = consumer
+    # R2E-Gym grades against the row's expected statuses; SWE-Gym against the SWE-bench spec of its (repo, version).
+    ungradable = {"expected_output_json": ""} if module is r2e_app else {"version": "0.0"}
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed_json(fixtures, episode, **ungradable)).status_code == 200
+        verified = client.post("/verify", json=fixtures._VERIFY | ungradable)
+    assert verified.status_code == 200, verified.text
+    result = verified.json()
+    assert result["mask_sample"] and result["failure_kind"] == VERIFIER_ERROR
+    assert not result["evaluation_completed"] and result["reward"] == 0
+    module.run_verification.assert_not_awaited()
+
+
+@pytest.mark.parametrize("outcome", ["tests_failed", "patch_does_not_apply", "git_failed_on_the_agent_repo"])
+def test_the_patch_s_own_failures_stay_a_trained_zero(consumer, outcome):
+    module, fixtures, server, sandboxes, _ = consumer
+    verification_result = type(module.run_verification.return_value)
+    if outcome == "tests_failed":
+        module.run_verification.return_value = verification_result(True, False, True, {"resolved": False}, "FAILED")
+    elif outcome == "patch_does_not_apply":
+        module.run_verification.return_value = verification_result(
+            True, False, False, None, "", "patch does not apply"
+        )
+    else:
+        # A repository the agent damaged: git itself exits non-zero, so the empty patch is graded.
+        module.capture_model_patch.side_effect = CaptureCommandError(
+            "index.lock exists", return_code=128, error_type=None
+        )
+        module.run_verification.return_value = verification_result(True, False, True, {"resolved": False}, "FAILED")
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=fixtures._seed().model_dump(mode="json")).status_code == 200
+        verified = client.post("/verify", json=fixtures._VERIFY)
+    assert verified.status_code == 200, verified.text
+    result = verified.json()
+    assert not result["mask_sample"] and result["failure_kind"] is None
+    assert result["evaluation_completed"] and result["reward"] == 0
+    module.run_verification.assert_awaited_once()
+
+
+@pytest.mark.parametrize("episode", [True, False], ids=["episode", "agent_run"])
+def test_a_swe_gym_test_run_that_timed_out_stays_a_trained_zero(monkeypatch, episode):
+    """A timed-out test run is retried like any run without a verdict, then scored 0, not masked: the patch can make
+    the held-out tests hang."""
+    server, sandboxes = swe_sessions._server(monkeypatch)
+    swe_app.run_verification.return_value = swe_app.VerificationResult(
+        False, False, False, None, "", "test run did not finish (timeout): ", timed_out=True
+    )
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed_json(swe_sessions, episode)).status_code == 200
+        verified = client.post("/verify", json=swe_sessions._VERIFY)
+    assert verified.status_code == 200, verified.text
+    result = verified.json()
+    assert not result["mask_sample"] and result["failure_kind"] is None
+    assert not result["evaluation_completed"] and result["reward"] == 0
+    assert result["error"].startswith("test run did not finish (timeout)")
+    assert swe_app.run_verification.await_count == 2

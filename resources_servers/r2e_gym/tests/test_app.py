@@ -352,8 +352,8 @@ class TestHiddenTestProtection:
 
 
 class _FakeSandbox:
-    def __init__(self, stdout: str, return_code: int = 0, stderr: str = "") -> None:
-        self.result = SimpleNamespace(stdout=stdout, stderr=stderr, return_code=return_code)
+    def __init__(self, stdout: str, return_code: int = 0, stderr: str = "", error_type: str | None = None) -> None:
+        self.result = SimpleNamespace(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
 
     async def exec(self, command: str, timeout_s=None, cwd=None):
         return self.result
@@ -381,6 +381,21 @@ class TestRunVerification:
     async def test_a_wrong_image_is_incomplete_not_a_zero(self, code) -> None:
         result = await run_verification(_FakeSandbox("", return_code=code), _inputs())
         assert result.completed is False and result.test_results is None
+
+    @pytest.mark.asyncio
+    async def test_a_provider_failure_of_the_test_run_is_incomplete_not_a_zero(self) -> None:
+        """No exit status from the provider: the partial log cannot grade the run, so it has no verdict."""
+        log = f"{TEST_OUTPUT_BEGIN}\nshort test summary info\nPASSED r2e_tests/test_1.py::TestContextHandler::test_fast_save\n"
+        result = await run_verification(_FakeSandbox(log, return_code=125, error_type="sandbox"), _inputs())
+        assert result.completed is False and result.resolved is False and result.test_results is None
+        assert result.error.startswith("test run did not finish (sandbox)")
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_test_run_is_still_a_graded_zero(self) -> None:
+        """A test the patch made hang is the patch's fault, so a timeout keeps grading what the run printed."""
+        result = await run_verification(_FakeSandbox("", return_code=124, error_type="timeout"), _inputs())
+        assert result.completed is True and result.resolved is False
+        assert result.test_results["missing"]
 
     @pytest.mark.asyncio
     async def test_only_the_marked_region_reaches_the_parser(self) -> None:

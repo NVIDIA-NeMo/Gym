@@ -42,7 +42,7 @@ from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import SESSION_LOST
+from nemo_gym.core import SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -78,6 +78,7 @@ from resources_servers.swe_gym.verification import (
 from resources_servers.swebench.agent_network import AgentNetworkConfig
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
+    CaptureCommandError,
     PatchCapture,
     PatchCaptureMode,
     capture_model_patch,
@@ -357,34 +358,32 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
 
-            async def capture_or_fallback() -> tuple[PatchCapture, str | None]:
+            async def capture_or_fallback() -> tuple[PatchCapture, str | None, bool]:
                 try:
-                    return await self._extract_model_patch(session_id, REPO_DIRECTORY, body.base_commit), None
+                    return await self._extract_model_patch(session_id, REPO_DIRECTORY, body.base_commit), None, False
+                except CaptureCommandError as exc:
+                    # Git itself exiting non-zero can reflect a repository the agent damaged, so that keeps its
+                    # empty-patch grading. Execution the provider could not complete is the infrastructure's.
+                    incomplete = exc.error_type is not None or not isinstance(exc.return_code, int)
+                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}", incomplete
                 except Exception as exc:
-                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}"
+                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}", True
 
             # The fallback is saved with the session too, so a retry after the task sandbox stopped grades it again.
-            capture, extraction_error = await self.capture_task_sandbox_patch(session_id, capture_or_fallback)
+            capture, extraction_error, capture_incomplete = await self.capture_task_sandbox_patch(
+                session_id, capture_or_fallback
+            )
             await self.stop_task_sandbox_after_capture(session_id)
+            if capture_incomplete:
+                # An unavailable patch is not evidence that the agent submitted an empty one.
+                return self._incomplete_response(body, extraction_error, capture)
         patch = capture.patch
 
         # Resolve the spec before spending a sandbox: a (repo, version) without one can never be graded.
         try:
             spec_for(body.repo, str(body.version))
         except KeyError as exc:
-            return self._response(
-                body,
-                reward=0.0,
-                evaluation_completed=False,
-                resolved=False,
-                patch_applied=False,
-                test_results=None,
-                test_output="",
-                error=str(exc),
-                eval_sandbox_start_time_taken=0.0,
-                patch_verification_time_taken=0.0,
-                **capture.response_fields(self.config.include_model_patch_in_response),
-            )
+            return self._incomplete_response(body, str(exc), capture)
 
         inputs = self._inputs(body, patch)
         log_dir = Path(__file__).parent / "logs" / body.instance_id
@@ -432,20 +431,48 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
                     flush=True,
                 )
 
+        error = extraction_error or result.error
         return self._response(
             body,
-            # An unresolved-but-completed run is a real 0. An incomplete run is also 0, but
-            # evaluation_completed distinguishes them so a broken row is not read as a hard task.
+            # An unresolved-but-completed run is a real 0. An incomplete run (no verdict) is masked, so a broken row
+            # or a verifier outage is not trained as a hard task. A test run that hit evaluation_timeout stays a
+            # trained 0: a test the patch made hang is the patch's fault.
             reward=1.0 if result.resolved else 0.0,
             evaluation_completed=result.completed,
+            **(
+                {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": error or "No verdict"}
+                if not result.completed and not result.timed_out
+                else {}
+            ),
             resolved=result.resolved,
             patch_applied=result.patch_applied,
             test_results=result.test_results,
             test_output=result.test_output[-100_000:],
-            error=extraction_error or result.error,
+            error=error,
             eval_sandbox_start_time_taken=start_time_taken,
             patch_verification_time_taken=verification_time_taken,
             test_patch_failed=result.test_patch_failed,
+            **capture.response_fields(self.config.include_model_patch_in_response),
+        )
+
+    def _incomplete_response(
+        self, body: SWEGymVerifyRequest, reason: str, capture: PatchCapture
+    ) -> SWEGymVerifyResponse:
+        """A verification that produced no verdict: masked, so it is neither trained nor read as a hard task."""
+        return self._response(
+            body,
+            reward=0.0,
+            evaluation_completed=False,
+            mask_sample=True,
+            failure_kind=VERIFIER_ERROR,
+            failure_reason=reason,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output="",
+            error=reason,
+            eval_sandbox_start_time_taken=0.0,
+            patch_verification_time_taken=0.0,
             **capture.response_fields(self.config.include_model_patch_in_response),
         )
 

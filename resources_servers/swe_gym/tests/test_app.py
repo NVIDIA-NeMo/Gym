@@ -292,6 +292,16 @@ class TestRunVerification:
         assert result.completed is False
         assert result.resolved is False
         assert result.error.startswith("test run did not finish (sandbox)")
+        assert result.timed_out is False, "a provider failure is no verdict, so it is masked"
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_test_run_is_incomplete_but_marked_as_a_timeout(self) -> None:
+        """Retried like any run without a verdict, then scored 0 rather than masked: the patch can make tests hang."""
+        result = await run_verification(
+            sandbox=_FakeSandbox("", return_code=124, error_type="timeout"), inputs=_inputs()
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.timed_out is True
 
     @pytest.mark.asyncio
     async def test_grades_a_passing_run(self) -> None:
