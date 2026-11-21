@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE
+from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -74,6 +76,18 @@ DOCKER_CREATE_TRANSPORT_ERROR_MARKERS = (
     "i/o timeout",
     "client timeout exceeded",
 )
+# `docker cp` refused because the daemon or the container is unavailable, not because of what the file is. Narrower than
+# DOCKER_RUNTIME_ERROR_MARKERS: a missing source file also comes back as "Error response from daemon".
+DOCKER_TRANSFER_UNAVAILABLE_MARKERS = (
+    "cannot connect to the docker daemon",
+    "daemon is not running",
+    "error during connect",
+    "connection refused",
+    "connection reset by peer",
+    "no such container",
+    "is not running",
+)
+DOCKER_TRANSFER_MISSING_FILE_MARKERS = ("could not find the file", "no such file or directory")
 DOCKER_NAME_CONFLICT_MARKERS = (
     "the container name",
     "is already in use by container",
@@ -269,6 +283,13 @@ def _to_sandbox_status(state: str | None) -> SandboxStatus:
 def _is_runtime_failure(stderr: str) -> bool:
     low = stderr.lower()
     return any(marker in low for marker in DOCKER_RUNTIME_ERROR_MARKERS)
+
+
+def _is_transfer_unavailable(stderr: str) -> bool:
+    low = stderr.lower()
+    if any(marker in low for marker in DOCKER_TRANSFER_MISSING_FILE_MARKERS):
+        return False
+    return any(marker in low for marker in DOCKER_TRANSFER_UNAVAILABLE_MARKERS)
 
 
 def _is_missing_container(stderr: str) -> bool:
@@ -888,7 +909,20 @@ class DockerProvider:
             timeout_s=self._exec_config.default_timeout_s,
         )
         if code != 0:
-            raise RuntimeError(f"docker cp download from {source_path!r} failed: {err.strip()}")
+            message = f"docker cp download from {source_path!r} failed: {err.strip()}"
+            if _is_transfer_unavailable(err):
+                # The daemon or the container is gone: infrastructure, not the agent's file. A caller that scores
+                # on what it downloads can tell this from a file that is not there.
+                raise sandbox_failure(
+                    operation="download",
+                    failure_kind=PROVIDER_UNAVAILABLE,
+                    sandbox_id=inst.name,
+                    reason=message,
+                    provider="docker",
+                    provider_status_reason=err.strip(),
+                    exit_code=code,
+                )
+            raise RuntimeError(message)
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Container status via ``docker inspect`` (missing -> STOPPED; error/timeout -> UNKNOWN)."""

@@ -212,5 +212,10 @@
     "override-dependencies": [
       "pathspec"
     ]
+  },
+  "responses_api_models/vllm_model_with_guards": {
+    "override-dependencies": [
+      "pathspec"
+    ]
   }
 }
