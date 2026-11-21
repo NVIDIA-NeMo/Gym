@@ -1,0 +1,44 @@
+gym_v_resources_server:
+  resources_servers:
+    gym_v:
+      entrypoint: app.py
+      allowed_agents: [gymv_agent]
+      domain: games
+      verified: false
+      num_workers: 1
+      description: "Env-id-parametric wrapper around any gym_v.Env."
+      # Deprecated compatibility path. Stateless clients pass the full
+      # GymVTaskRow to /seed_session, so the server no longer needs a task
+      # JSONL at startup. Tests still cover task_idx fallback with explicit
+      # per-test JSONLs.
+      task_jsonl_fpaths: []
+      image_format: "PNG"
+      image_jpeg_quality: 90
+      max_image_wh: null   # cap rendered image max(W,H); null = no cap
+      enforce_horizon_cap: true
+      return_transitions: false
+      disable_text_feedback: true
+      # Gym-V has no universal success flag. These predicates are an exact
+      # allowlist audited against the revision pinned in requirements.txt.
+      require_success_criterion: true
+      success_criteria_by_env_id:
+        Games/FrozenLake-v0:
+          type: terminal_step_reward
+          comparison: equal
+          threshold: 1.0
+        Algorithmic/GameOfLife-v0:
+          type: terminal_step_reward
+          comparison: equal
+          threshold: 1.0
+        Spatial/DoorKey-v0:
+          type: terminal_step_reward
+          comparison: greater_than
+          threshold: 0.0
+        Graphs/GridComponent-v0:
+          type: terminal_step_reward
+          comparison: equal
+          threshold: 1.0
+        Graphs/TreeEvenPartitioning-v0:
+          type: terminal_step_reward
+          comparison: equal
+          threshold: 1.0
