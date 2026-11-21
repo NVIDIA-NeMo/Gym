@@ -63,6 +63,21 @@ python resources_servers/swebench_pro/apply_golden_patch.py \
 The upstream evaluator and bundled task scripts are MIT licensed. NeMo Gym's adapter code is Apache-2.0.
 
 
+### Sandbox telemetry labels
+
+With sandbox trace export enabled, task sandboxes carry
+`nemo.gym.sandbox.role=agent` and fresh grading sandboxes carry
+`nemo.gym.sandbox.role=verifier`. Their logical names are
+`nemo.gym.sandbox.name=<resources server name>/agent` and
+`<resources server name>/verifier`.
+
+These labels accompany request, start, allocation, resource sample (including
+final reads), and owner stop records. Use the existing rollout, request and
+sandbox IDs to distinguish attempts; the logical name is shared by sandboxes
+with the same purpose. Labels are assigned by the resource server, without
+inferring purpose from duration, image or creation order. Benchmark inputs,
+resource requests, networking and scoring are unchanged.
+
 ### Verifier sandbox observations
 
 Fresh verification responses include verifier_sandbox_observation when the resource server observed an

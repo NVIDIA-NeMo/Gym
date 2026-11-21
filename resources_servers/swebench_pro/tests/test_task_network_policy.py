@@ -73,6 +73,7 @@ async def test_task_only_policy_is_present_before_handoff_and_does_not_change_gr
 
     response = await server.seed_session(request, body)
     task_sandbox.start.assert_awaited_once()
+    assert task_sandbox.start.await_args.kwargs["span_attributes"]["nemo.gym.sandbox.role"] == "agent"
     task_spec = task_sandbox.start.await_args.args[0]
     assert task_spec.provider_options == original_options | {
         "network_policy": {
@@ -90,6 +91,7 @@ async def test_task_only_policy_is_present_before_handoff_and_does_not_change_gr
 
     result = await server.verify(request, SWEBenchProVerifyRequest.model_validate(request_body()))
     grading_sandbox.start.assert_awaited_once()
+    assert grading_sandbox.start.await_args.kwargs["span_attributes"]["nemo.gym.sandbox.role"] == "verifier"
     grading_spec = grading_sandbox.start.await_args.args[0]
     assert grading_spec.provider_options == original_options
     assert grading_spec.image == task_spec.image
