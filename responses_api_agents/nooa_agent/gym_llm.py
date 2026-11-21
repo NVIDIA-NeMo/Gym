@@ -407,6 +407,12 @@ class GymResponsesLLM(UnifiedLLM):
         async with self._lock:
             return await self._acall(messages, tools, output_model, **kwargs)
 
+    # NOOA releases after the pinned one make these one-request hooks abstract (labs-OO-Agents e463ea82) and
+    # wrap them in call/acall. This client overrides call/acall whole, so the hooks are the same requests, as
+    # NOOA's own delegating AdmissionControl aliases them. Earlier releases never call them.
+    _call_once = call
+    _acall_once = acall
+
     async def _acall(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
