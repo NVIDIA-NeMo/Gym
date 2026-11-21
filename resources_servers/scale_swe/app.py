@@ -445,24 +445,8 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
             print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
             return frozenset()
 
-    async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
-        """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""
-        original_sandbox = self._session_id_to_sandbox.pop(session_id)
-        pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
-        try:
-            return await capture_model_patch(
-                original_sandbox,
-                workdir,
-                base_commit,
-                mode=self.config.patch_capture_mode,
-                pristine_untracked=pristine_untracked,
-                drop_sections=drop_patch_sections,
-            )
-        finally:
-            await self._stop_sandbox(original_sandbox)
-
     async def _capture_model_patch(self, session_id: str, workdir: str) -> PatchCapture:
-        """Capture an episode session's patch per ``config.patch_capture_mode``, then stop its sandbox.
+        """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox.
 
         Raises ``_UnreadablePatchError`` when git fails on the repository the agent left, and ``_PatchCaptureError``
         when the capture failed for any other reason. The patch is graded in a fresh sandbox, so the agent's sandbox
@@ -733,15 +717,15 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
     ) -> ScaleSWEVerifyResponse:
         """Capture the agent's patch (or take the golden one) and grade it.
 
-        For an episode session (``resources_session``):
+        On both the episode-session path (``resources_session``) and the cookie path (an Agent's ``/run``):
 
         - A patch lost to infrastructure is not graded, since an empty patch would read as a completed 0.
         - A repository git cannot read is the agent's doing and scores a completed 0.
         - A verification without a verdict, including a verifier run that never tested the patch, is masked with a
           registered failure_kind.
-        - Verifier sandbox stops are waited for within ``sandbox_stop_timeout_seconds``.
 
-        The cookie path (an Agent's ``/run``) masks nothing and replays nothing.
+        Only an episode session waits for verifier sandbox stops within ``sandbox_stop_timeout_seconds`` and replays
+        its verdict; the cookie path replays nothing.
         """
         extraction_error = None
         unreadable_patch = None
@@ -749,7 +733,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         mode = self.config.patch_capture_mode
         if self.config.is_verifying_golden_patch:
             capture = PatchCapture.static(body.patch, mode, "golden")
-        elif resources_session:
+        else:
             try:
                 capture = await self._capture_model_patch(session_id, body.workdir)
             except _PatchCaptureError as error:
@@ -758,17 +742,6 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
             except _UnreadablePatchError as error:
                 capture = PatchCapture.static("", mode, "none")
                 unreadable_patch = str(error)
-        else:
-            base_commit = self._session_id_to_base_commit.pop(session_id, "")
-            if not base_commit:
-                capture = PatchCapture.static("", mode, "none")
-                extraction_error = "Failed to extract model patch: no base commit recorded (seed_session did not run for this session)"
-            else:
-                try:
-                    capture = await self._extract_model_patch(session_id, body.workdir, base_commit)
-                except Exception as exc:
-                    capture = PatchCapture.static("", mode, "none")
-                    extraction_error = f"Failed to extract model patch: {exc}"
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
@@ -776,7 +749,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
 
         files = verification_files(inputs)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
-        if resources_session and (extraction_error or unreadable_patch):
+        if extraction_error or unreadable_patch:
             # Nothing was captured, so there is nothing to grade.
             attempts = 0
         start_time_taken = 0.0
@@ -813,7 +786,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                     log_dir=log_dir,
                 )
                 verification_time_taken = time() - verification_started
-                if resources_session and (reason := infrastructure_failure(result)) is not None:
+                if (reason := infrastructure_failure(result)) is not None:
                     # The run never tested the patch, so it is no verdict and is retried on a fresh sandbox.
                     result = replace(result, completed=False, resolved=False, error=reason)
             except Exception as exc:
@@ -845,7 +818,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
 
         error = extraction_error or result.error
         diagnosis = {}
-        if resources_session and not result.completed:
+        if not result.completed:
             diagnosis = {"mask_sample": True, "failure_kind": failure_kind, "failure_reason": error or "No verdict"}
         elif unreadable_patch:
             # A measured 0, so it stays unmasked; the reason says why the patch could not be read.

@@ -430,9 +430,23 @@ async def test_a_completed_zero_is_a_kept_measurement(server, grading):
     grading.run.assert_awaited_once()
 
 
-@pytest.mark.parametrize("case", ["no_verdict", "capture_failed", "exec_error"])
-async def test_cookie_path_verification_neither_masks_nor_replays(server, grading, sandboxes, monkeypatch, case):
-    """An Agent's /run (the cookie path) masks nothing and replays nothing."""
+@pytest.mark.parametrize(
+    ("case", "failure_kind"),
+    [
+        ("no_verdict", "verifier_error"),
+        ("capture_failed", "verifier_error"),
+        ("capture_provider_error", "verifier_error"),
+        ("no_base_commit", "verifier_error"),
+        ("no_task_sandbox", "session_lost"),
+        ("verifier_start", "provider_unavailable"),
+        ("exec_error", "verifier_error"),
+        ("never_reached_the_tests", "verifier_error"),
+    ],
+)
+async def test_cookie_path_masks_a_verification_without_a_verdict(
+    server, grading, sandboxes, monkeypatch, case, failure_kind
+):
+    """An Agent's /run (the cookie path) masks a missing verdict instead of training on a 0 it never measured."""
     request = SimpleNamespace(session={SESSION_ID_KEY: "cookie"})
     await server.seed_session(request, ScaleSWESeedSessionRequest.model_validate(ROW))
     if case == "no_verdict":
@@ -445,32 +459,72 @@ async def test_cookie_path_verification_neither_masks_nor_replays(server, gradin
             error="held-out test patch did not apply",
         )
     elif case == "capture_failed":
-        grading.capture.side_effect = RuntimeError("git diff failed")
-        grading.run.return_value = UNRESOLVED
+        # The capture exec itself raised: the agent's sandbox could not be reached.
+        grading.capture.side_effect = RuntimeError("exec stream lost")
+    elif case == "capture_provider_error":
+        grading.capture.side_effect = CaptureCommandError(
+            "ended without a status", return_code=125, error_type="sandbox"
+        )
+    elif case == "no_base_commit":
+        server._session_id_to_base_commit["cookie"] = ""
+    elif case == "no_task_sandbox":
+        del server._session_id_to_sandbox["cookie"]
+    elif case == "verifier_start":
+        server._create_sandbox.side_effect = OSError("no capacity")
     else:
         use_verifier_exec(
             monkeypatch,
             server,
             sandboxes,
-            SandboxExecResult(stdout=None, stderr="", return_code=125, error_type="sandbox"),
+            SandboxExecResult(stdout=None, stderr="", return_code=125, error_type="sandbox")
+            if case == "exec_error"
+            else SandboxExecResult(stdout="bash: /tmp/nemo_gym_eval.sh: No such file\n", stderr=None, return_code=127),
         )
 
     result = await server.verify(request, verify_body())
 
-    assert result.reward == 0.0
-    assert result.mask_sample is False and result.failure_kind is None
-    if case == "no_verdict":
-        assert result.evaluation_completed is False
+    assert result.reward == 0.0 and result.evaluation_completed is False
+    assert result.mask_sample is True and result.failure_kind == failure_kind
+    assert result.failure_reason and result.failure_reason == result.error
+    if case in ("capture_failed", "capture_provider_error", "no_base_commit", "no_task_sandbox"):
+        # Nothing was captured, so no empty patch was graded as a completed 0.
+        assert result.failure_reason.startswith("Failed to extract model patch")
+        grading.run.assert_not_awaited()
+    elif case == "no_verdict":
         assert result.error == "held-out test patch did not apply"
         assert grading.run.await_count == 2  # One inconclusive retry on a fresh sandbox.
-    elif case == "exec_error":
-        # A provider failure of the eval exec is graded like any other run.
-        assert result.evaluation_completed is True
+
+
+@pytest.mark.parametrize("case", ["unresolved", "empty_patch", "timeout", "broken_repository"])
+async def test_cookie_path_model_fault_stays_a_trained_zero(server, grading, sandboxes, monkeypatch, case):
+    """Tests that ran and failed, an empty patch, a hang and a repository the agent broke are measured 0s."""
+    request = SimpleNamespace(session={SESSION_ID_KEY: "cookie"})
+    await server.seed_session(request, ScaleSWESeedSessionRequest.model_validate(ROW))
+    if case == "unresolved":
+        grading.run.return_value = UNRESOLVED
+    elif case == "empty_patch":
+        grading.capture.return_value = PatchCapture(patch="", mode="worktree", source="worktree")
+        grading.run.return_value = UNRESOLVED
+    elif case == "timeout":
+        use_verifier_exec(
+            monkeypatch,
+            server,
+            sandboxes,
+            SandboxExecResult(stdout=None, stderr=None, return_code=124, error_type="timeout"),
+        )
     else:
-        # The patch that could not be captured is graded as an empty one.
-        assert result.evaluation_completed is True
-        assert result.error == "Failed to extract model patch: git diff failed"
+        grading.capture.side_effect = CaptureCommandError("index.lock exists", return_code=128, error_type=None)
+
+    result = await server.verify(request, verify_body())
+
+    assert result.reward == 0.0 and result.evaluation_completed is True
+    assert result.mask_sample is False and result.failure_kind is None
+    if case == "empty_patch":
+        # The model's own empty patch is graded, not mistaken for a lost capture.
         assert grading.run.await_args.kwargs["inputs"].patch == ""
+    elif case == "broken_repository":
+        assert result.failure_reason == "Failed to extract model patch: git exited 128: index.lock exists"
+        grading.run.assert_not_awaited()
 
 
 @pytest.mark.asyncio
