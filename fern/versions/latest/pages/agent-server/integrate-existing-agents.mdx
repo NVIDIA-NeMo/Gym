@@ -353,6 +353,33 @@ termination receipt fails the activation and skips verification; close releases
 the borrowed connection and returns `cleanup_confirmed: false`. Failures to release
 the connection remain retryable.
 
+## Sessions driven one step at a time
+
+An Environment Server that drives an agent session one step per activation
+(`single_agent_turn` with `max_episode_steps`) sends `x-ng-agent-episode-step-limit`,
+the episode's step limit, with each activation, next to `x-ng-agent-activation`,
+which numbers the steps from 1. Each activation carries the whole conversation so
+far, not only what is new. An agent that supports this takes one step per such
+activation, one model call and the tool calls it makes, whatever its own step limit,
+and reports the step as completed while its index is below the limit, and as
+incomplete at the limit, as its own loop stops at its step limit. It keeps one
+invocation for the episode, which each step extends, instead of one per activation.
+Only the agent types in `STEP_DRIVEN_AGENT_TYPES` (`nemo_gym.config`; today
+`simple_agent`) do this, and the Environment Server refuses at startup to drive any
+other type, since keeping an agent session is not enough.
+
+## Runs stopped when their task ends
+
+`POST /rollouts/{rollout_id}/stop` ends a rollout's harness in its sandbox as at its
+time limit, and the run is graded like a timeout. An Environment Server that ends an
+episode once its task has ended (`single_agent_turn` with `end_on_task_state` and no
+`max_episode_steps`) sends `{"reason": "task_ended", "completed": true}` instead: the
+run then answers as completed, with no incomplete details, and its `ng_rollout_stop`
+metadata says `"completed": true`. An agent supports this by returning its sandbox
+session from `_rollout_sandbox_session` and passing its response through
+`report_rollout_stop`. The Environment Server refuses at startup an agent type that is
+not listed in `ROLLOUT_STOP_AGENT_TYPES` (`nemo_gym.config`).
+
 ## NOOA worker checkpoints
 
 The [NOOA sandbox worker](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/nooa_agent/sandbox_entrypoint.py)
