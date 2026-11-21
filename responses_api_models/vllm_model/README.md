@@ -166,3 +166,19 @@ and 503 responses do not extend the configured HTTP attempt count.
 These settings also apply after endpoint-file rebinding.
 `request_timeout_seconds` bounds each HTTP attempt; it is not an overall
 agent retry budget. Agent-level retries remain separately configured.
+
+## Generation request pacing
+
+`minimum_request_interval_seconds` defaults to zero (no scheduling change).
+A positive value requires explicit `max_http_attempts: 1` and `max_num_tries: 1`.
+Prepared generation calls are serialized, with a conservative cooldown after
+each upstream attempt completes, fails or is cancelled in flight. Preparation
+time cannot consume the cooldown. Endpoint selection and client coroutine
+creation happen after the pacing wait, so queued calls observe endpoint-file
+rotation. Cancellation before dispatch creates no client coroutine and records
+no upstream attempt. With pacing disabled, calls remain concurrent.
+
+Pacing covers Chat Completions, native Responses and Completions, including
+separately issued output-budget-refit calls. It is process-local and requires
+one model-server worker, not a distributed rate limiter. Agent retries are a
+separate policy and must still be configured explicitly.

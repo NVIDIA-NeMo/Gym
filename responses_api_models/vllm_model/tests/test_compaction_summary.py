@@ -90,7 +90,7 @@ async def test_a_retry_quotes_the_intact_history_and_keeps_the_transport_options
     messages = [{"role": "user", "content": "Original task"}, {"role": "tool", "content": "Actual tool result"}]
     body = {"messages": copy.deepcopy(messages), "_resend_after_disconnect": False}
 
-    result = await model._create_compaction_summary(worker, body)
+    result = await model._create_compaction_summary(lambda payload: worker.create_chat_completion(**payload), body)
 
     assert result["choices"][0]["message"]["content"] == GOOD["choices"][0]["message"]["content"]
     assert len(worker.calls) == 2
@@ -109,7 +109,10 @@ async def test_unusable_summaries_fail_with_422_after_the_configured_attempts() 
     model = _model(compaction_summary_max_tokens=8192, compaction_summary_max_attempts=3)
     worker = Worker([BAD, BAD, BAD])
     with pytest.raises(HTTPException) as caught:
-        await model._create_compaction_summary(worker, {"messages": [{"role": "user", "content": "task"}]})
+        await model._create_compaction_summary(
+            lambda payload: worker.create_chat_completion(**payload),
+            {"messages": [{"role": "user", "content": "task"}]},
+        )
     assert caught.value.status_code == 422
     assert caught.value.detail["error"]["code"] == "invalid_compaction_summary"
     assert len(worker.calls) == 3
