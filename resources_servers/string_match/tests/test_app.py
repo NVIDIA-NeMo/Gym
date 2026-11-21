@@ -12,12 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
 from app import (
     StringMatchResourcesServer,
     StringMatchResourcesServerConfig,
+    StringMatchVerifyRequest,
     _answers_match,
     _extract_answer,
     _grade_string_match,
@@ -63,3 +65,50 @@ class TestApp:
     def test_extract_answer_last_line(self) -> None:
         text = "First line of reasoning.\nSecond line.\noven"
         assert _extract_answer(text, "last_line") == "oven"
+
+    def test_verify_preserves_json_schema_alias(self) -> None:
+        config = StringMatchResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+        server = StringMatchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        schema = {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        }
+        body = StringMatchVerifyRequest.model_validate(
+            {
+                "responses_create_params": {"input": "question"},
+                "response": {
+                    "id": "response-1",
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "output": [
+                        {
+                            "id": "message-1",
+                            "content": [{"annotations": [], "text": '{"answer": "yes"}', "type": "output_text"}],
+                            "role": "assistant",
+                            "status": "completed",
+                            "type": "message",
+                        }
+                    ],
+                    "parallel_tool_calls": True,
+                    "text": {
+                        "format": {
+                            "type": "json_schema",
+                            "name": "answer",
+                            "schema": schema,
+                            "strict": True,
+                        }
+                    },
+                    "tool_choice": "auto",
+                    "tools": [],
+                },
+                "expected_answer": "yes",
+            }
+        )
+
+        verified = asyncio.run(server.verify(body))
+        response_format = verified.model_dump(mode="json", by_alias=True)["response"]["text"]["format"]
+
+        assert response_format["schema"] == schema
+        assert "schema_" not in response_format
