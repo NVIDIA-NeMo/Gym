@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "benchmark": "videomme_v1",
+  "dataset_source": "https://huggingface.co/datasets/lmms-lab/Video-MME",
+  "dataset_revision": "0000000000000000000000000000000000000000",
+  "setting": "agentic",
+  "answer_policy": "boxed_only_v1",
+  "task_ids": [
+    "videomme_v1:example-1",
+    "videomme_v1:example-2",
+    "videomme_v1:example-3",
+    "videomme_v1:example-4",
+    "videomme_v1:example-5"
+  ],
+  "task_subsets": {
+    "videomme_v1:example-1": {
+      "duration": [
+        "short"
+      ],
+      "domain": [
+        "Synthetic examples"
+      ],
+      "sub_category": [
+        "Geometric shapes"
+      ],
+      "task_type": [
+        "Object Recognition"
+      ]
+    },
+    "videomme_v1:example-2": {
+      "duration": [
+        "short"
+      ],
+      "domain": [
+        "Synthetic examples"
+      ],
+      "sub_category": [
+        "Geometric shapes"
+      ],
+      "task_type": [
+        "Attribute Perception"
+      ]
+    },
+    "videomme_v1:example-3": {
+      "duration": [
+        "short"
+      ],
+      "domain": [
+        "Synthetic examples"
+      ],
+      "sub_category": [
+        "Geometric shapes"
+      ],
+      "task_type": [
+        "Counting Problem"
+      ]
+    },
+    "videomme_v1:example-4": {
+      "duration": [
+        "short"
+      ],
+      "domain": [
+        "Synthetic examples"
+      ],
+      "sub_category": [
+        "Geometric shapes"
+      ],
+      "task_type": [
+        "Spatial Perception"
+      ]
+    },
+    "videomme_v1:example-5": {
+      "duration": [
+        "short"
+      ],
+      "domain": [
+        "Synthetic examples"
+      ],
+      "sub_category": [
+        "Geometric shapes"
+      ],
+      "task_type": [
+        "OCR Problems"
+      ]
+    }
+  },
+  "num_repeats": 1
+}

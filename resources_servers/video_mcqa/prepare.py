@@ -61,18 +61,23 @@ def prepare_dataset(
     prompt: PromptStyle = "boxed",
     answer_policy: AnswerPolicy = "boxed_only_v1",
     num_repeats: int = 1,
+    sandbox_root: str = "/testbed",
 ) -> tuple[list[dict[str, object]], AccuracyCohort]:
     """Build Gym rows and a frozen cohort for the single-turn or agentic media path.
 
     Single-turn requires an already-prepared VideoAnyRes video_url; it does not
     invent a fixed frame count or resize policy. Agentic requires an original
-    source file and a safe sandbox-relative path. Gold, category labels and
-    temporal evidence never enter responses_create_params.
+    source file and a safe sandbox-relative path; the prompt names the video at
+    sandbox_root/<sandbox_path>, the resources server's sandbox_media_root. Gold,
+    category labels and temporal evidence never enter responses_create_params.
     """
+    root = PurePosixPath(sandbox_root)
+    if not root.is_absolute() or ".." in root.parts or any(char in sandbox_root for char in "\r\n"):
+        raise ValueError("sandbox_root must be an absolute sandbox directory")
     if benchmark not in SOURCES or setting not in ("single_turn", "agentic"):
         raise ValueError("Unknown benchmark or setting")
-    if prompt not in ("boxed", benchmark) or (prompt != "boxed" and setting != "single_turn"):
-        raise ValueError("Single-turn rows take the boxed prompt or their own benchmark's; agentic rows the boxed one")
+    if prompt not in ("boxed", benchmark):
+        raise ValueError("Rows take the boxed prompt or their own benchmark's")
     loader = load_videomme_v1 if benchmark == "videomme_v1" else load_lvbench
     annotations = loader(records, dataset_revision=dataset_revision, media=media)
     rows = []
@@ -88,9 +93,11 @@ def prepare_dataset(
             row = cast(dict[str, object], dict(prepared))
         else:
             path = PurePosixPath(binding.sandbox_path or "")
-            if not binding.source or not path.parts or path.is_absolute() or ".." in path.parts:
+            if not binding.source or not path.parts or path.is_absolute() or ".." in path.parts or "\\" in str(path):
                 raise ValueError("Agentic media needs source and a safe sandbox-relative path")
-            prepared = prepare_agentic(question, expected_answer=annotation.expected_answer, video_path=str(path))
+            prepared = prepare_agentic(
+                question, expected_answer=annotation.expected_answer, video_path=str(root / path), prompt=prompt
+            )
             row = cast(dict[str, object], dict(prepared))
             row["video_binding"] = {"source": binding.source, "sandbox_path": str(path), "sha256": binding.sha256}
         if annotation.annotation_warnings:
@@ -120,6 +127,7 @@ def prepare_files(
     prompt: PromptStyle = "boxed",
     answer_policy: AnswerPolicy = "boxed_only_v1",
     num_repeats: int = 1,
+    sandbox_root: str = "/testbed",
 ) -> dict[str, object]:
     """Validate complete inputs, verify bound source hashes, then write a fresh directory.
 
@@ -142,6 +150,7 @@ def prepare_files(
         prompt=prompt,
         answer_policy=answer_policy,
         num_repeats=num_repeats,
+        sandbox_root=sandbox_root,
     )
     checked: dict[Path, str] = {}
     for row in rows:
@@ -160,6 +169,7 @@ def prepare_files(
         "dataset_source": SOURCES[benchmark],
         "dataset_revision": dataset_revision,
         "setting": setting,
+        **({"sandbox_root": sandbox_root} if setting == "agentic" else {}),
         "questions": len(rows),
         "videos": len({row["verifier_metadata"]["video_id"] for row in rows}),
         "annotations_sha256": sha256_file(annotations),
@@ -197,6 +207,9 @@ def main() -> None:
     parser.add_argument("--prompt", choices=("boxed", "videomme_v1", "lvbench"), default="boxed")
     parser.add_argument("--answer-policy", choices=get_args(AnswerPolicy), default="boxed_only_v1")
     parser.add_argument("--num-repeats", type=int, default=1)
+    parser.add_argument(
+        "--sandbox-root", default="/testbed", help="agentic: the sandbox_media_root that prompts name the video under"
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     print(json.dumps(prepare_files(**vars(parser.parse_args())), ensure_ascii=False))
 

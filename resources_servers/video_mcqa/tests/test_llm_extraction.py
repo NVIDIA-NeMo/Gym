@@ -400,14 +400,30 @@ def test_letter_prompts_are_prepared_for_their_own_benchmark_only() -> None:
     )
     with pytest.raises(ValueError, match="their own benchmark"):
         prepare("lvbench", prompt="videomme_v1")
+    agentic_media = media(source="/data/source.mp4", sandbox_path="video/shapes.mp4")
+    (row,), _ = prepare_dataset(
+        [v1_record()],
+        benchmark="videomme_v1",
+        dataset_revision=REVISION,
+        media=agentic_media,
+        setting="agentic",
+        prompt="videomme_v1",
+    )
+    # An agentic row names the video in the sandbox, then asks as the single-turn letter prompt does.
+    (part,) = row["responses_create_params"]["input"][0]["content"]
+    assert part["text"] == (
+        "Video: /testbed/video/shapes.mp4\nSelect the best answer to the following multiple-choice question based on "
+        "the video. Respond with only the letter (A, B, C, or D) of the correct option.\nWhich invented shape moves?\n"
+        "A. Circle\nB. Square\nC. Triangle\nD. Star\nThe best answer is:"
+    )
     with pytest.raises(ValueError, match="their own benchmark"):
         prepare_dataset(
             [v1_record()],
             benchmark="videomme_v1",
             dataset_revision=REVISION,
-            media=media(source="/data/source.mp4", sandbox_path="video/shapes.mp4"),
+            media=agentic_media,
             setting="agentic",
-            prompt="videomme_v1",
+            prompt="lvbench",
         )
 
 

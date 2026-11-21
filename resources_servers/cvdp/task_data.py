@@ -68,6 +68,11 @@ class TaskData(BaseModel):
         ),
         json_schema_extra={"consumed_by": ["verify"], "legacy_location": "verifier_metadata"},
     )
+    repository_workspace_sha256: str = Field(
+        default="",
+        description="SHA-256 of the prepared starting repository archive for heavy tasks.",
+        json_schema_extra={"consumed_by": ["verify"], "legacy_location": "verifier_metadata"},
+    )
     subjective_reference: Optional[str] = Field(
         default=None,
         description=(

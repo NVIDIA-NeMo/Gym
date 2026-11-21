@@ -5,10 +5,10 @@
 Mirrors the wire: ``VideoMCQAVerifyRequest`` and ``VideoMMEV2VerifyRequest`` read ``task_id`` and ``setting``
 top-level and ``verifier_metadata`` as task.py's ``VerifierMetadata``, whose fields (``task_id`` aside, which both
 places carry) only that container holds. Agentic rows (``prepare.py --setting agentic``) also carry a
-``video_binding`` for a sandboxed video agent, which is not part of this package; its ``source`` is only a path
-here. ``annotation_warnings`` is preparation provenance (``duplicate_option_text``), outside model inputs.
-``VideoMCQATaskData`` is the shared shape that VideoMME-v2 uses; ``TaskData``, the rows of this server (a VideoMME-v1,
-LVBench or question-set cohort), has no VideoMME-v2 level or group. VideoMME-v1 and LVBench add their four choices.
+``video_binding``: the video that the resources server puts into each episode's sandbox. ``annotation_warnings`` is
+preparation provenance (``duplicate_option_text``), outside model inputs. ``VideoMCQATaskData`` is the shared shape
+that VideoMME-v2 uses; ``TaskData``, the rows of this server (a VideoMME-v1, LVBench or question-set cohort), has no
+VideoMME-v2 level or group. VideoMME-v1 and LVBench add their four choices.
 """
 
 from pathlib import PurePosixPath
@@ -32,7 +32,11 @@ NestedText = Annotated[Text, Field(json_schema_extra=_NESTED)]
 
 
 class VideoBinding(BaseModel):
-    """The source video a sandboxed video agent checks and copies into its sandbox."""
+    """The source video the resources server checks and copies into the episode's sandbox (sandbox.py).
+
+    ``source`` is a host path (relative paths start at the Gym repository root), ``sandbox_path`` is relative to the
+    sandbox's media root, and ``sha256`` is the digest the copy in the sandbox must have.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -43,7 +47,12 @@ class VideoBinding(BaseModel):
     @model_validator(mode="after")
     def relative_path(self) -> Self:
         path = PurePosixPath(self.sandbox_path)
-        if path.is_absolute() or ".." in path.parts or any(char in self.sandbox_path for char in "\r\n"):
+        if (
+            not path.parts
+            or path.is_absolute()
+            or ".." in path.parts
+            or any(char in self.sandbox_path for char in "\r\n\\")
+        ):
             raise ValueError("sandbox video binding must be a safe workspace-relative path")
         return self
 
