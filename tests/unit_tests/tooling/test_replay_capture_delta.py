@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""`scripts/replay_capture_delta.py` converts a full-format capture to the delta format and verifies it."""
+"""`scripts/replay_capture_delta.py` converts a capture to the delta format, verifies it, and times merges."""
 
 import base64
 import importlib.util
@@ -78,3 +78,16 @@ def test_convert_refuses_a_capture_already_in_the_delta_format(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="already in the delta format"):
         replay_capture_delta.convert(tmp_path / "delta" / "4-0.capture.jsonl", tmp_path / "again")
+
+
+def test_merge_reports_the_merged_calls(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "source" / "4-0.capture.jsonl"
+    source.parent.mkdir()
+    _full_capture(source, 5)
+
+    assert replay_capture_delta.main(["merge", str(source.parent), "4-0", "--payloads", "reference"]) == 0
+
+    report = orjson.loads(capsys.readouterr().out)
+    assert report["calls"] == 5 and report["gaps"] == [
+        {"code": "model_call_capture_records_unreadable", "detail": "count=1"}
+    ]

@@ -113,6 +113,7 @@ What [model-call capture](/main/model-server/model-call-capture) writes for each
 | --- | --- | --- |
 | **Capture format** | How a capture file stores each exchange, set by `model_call_capture_format`: `full` writes every line whole, `delta` writes only what earlier calls of the rollout did not hold. | capture version, v2 capture, compressed capture |
 | **Blob** | A large base64 `data:` URL stored once per rollout, in a file named by its SHA-256 under `blobs/<rollout_id>/` beside the captures. | attachment, asset |
+| **Payload reference** | The `payload_ref` a rollout row keeps in place of a request it does not copy (`model_call_payloads: reference`): the capture file, call index and model call ID of the line that holds it. | pointer, link, request ID |
 
 ### Evaluation
 
