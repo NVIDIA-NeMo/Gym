@@ -28,6 +28,7 @@ from subprocess import PIPE, Popen, TimeoutExpired
 from threading import Lock, Thread
 from time import monotonic, sleep, time
 from typing import IO, Dict, Iterator, List, NamedTuple, Optional, Tuple
+from uuid import uuid4
 
 import requests
 import uvicorn
@@ -51,6 +52,7 @@ from nemo_gym.config.global_config import (
     SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_TYPE_KEYS,
+    SETUP_VENVS_ON_EVERY_RAY_NODE_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     _find_open_port_using_range,
@@ -465,6 +467,119 @@ def _ray_server_names(configured_servers: List[_ConfiguredServer]) -> List[str]:
     return ray_server_names
 
 
+# Read by venv setup besides UV_*. Passed as a task argument, not in runtime_env, which Ray writes to its logs.
+_FORWARDED_ENV_VAR_NAMES = ("NEMO_GYM_ALLOW_PRERELEASE", "NEMO_GYM_EXTRA_ROOTS", "NEMO_GYM_ALLOWED_COMPONENT_ROOTS")
+
+
+def _setup_server_venvs_on_this_node(
+    servers: List[Tuple[str, Path, Optional[Path]]], global_config_dict: DictConfig, env_vars: Dict[str, str]
+) -> None:
+    """Set up each server's venv on the node this runs on.
+
+    A venv whose shared-storage marker is visible here is on storage shared with the node `gym` runs on, so it is
+    skipped.
+    """
+    import ray
+
+    os.environ.update(env_vars)
+    node_ip = ray.util.get_node_ip_address()
+    for server_name, dir_path, marker_path in servers:
+        if marker_path is not None and marker_path.exists():
+            continue
+        # Per-node name, so nodes sharing a log dir write separate logs
+        label = f"{server_name}@{node_ip}"
+        command = setup_env_command(dir_path, global_config_dict, label)
+        process = run_command(command, dir_path, label, global_config_dict=global_config_dict)
+        if process.wait():
+            raise RuntimeError(f"Setting up the venv of `{label}` failed with exit code {process.returncode}.")
+
+
+def _setup_server_venvs_on_other_nodes(
+    configured_servers: List[_ConfiguredServer],
+    ray_server_names: List[str],
+    global_config_dict: DictConfig,
+    timeout_seconds: float,
+) -> None:
+    """Set up the venvs of servers that use Ray on every other node of the Ray cluster.
+
+    These servers run Ray tasks on other nodes with their venv's interpreter, so the venv must exist there too.
+    Each server's launch command sets it up on the node `gym` runs on.
+    """
+    import ray
+    from ray.exceptions import RayError, TaskUnschedulableError
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    this_node_id = ray.get_runtime_context().get_node_id()
+    node_ips = {
+        node["NodeID"]: node["NodeManagerAddress"]
+        for node in ray.nodes()
+        if node["Alive"] and node["NodeID"] != this_node_id
+    }
+    if not node_ips:
+        return
+
+    # A node that sees a marker written here shares the venv's storage with the node `gym` runs on, so it skips that venv.
+    servers: Dict[Path, Tuple[str, Path, Optional[Path]]] = {}
+    for server in configured_servers:
+        if server.top_level_path in ray_server_names and server.dir_path not in servers:
+            venv_path = get_venv_path(server.dir_path, global_config_dict)
+            marker_path = venv_path.with_name(f"{venv_path.name}.{uuid4().hex}.shared-storage-marker")
+            servers[server.dir_path] = (server.top_level_path, server.dir_path, marker_path)
+    env_vars = {
+        key: value for key, value in os.environ.items() if key.startswith("UV_") or key in _FORWARDED_ENV_VAR_NAMES
+    }
+    server_names = ", ".join(name for name, _, _ in servers.values())
+
+    print(f"Setting up venvs on {len(node_ips)} other Ray node(s) for: {server_names}")
+    refs = {}
+    try:
+        for name, dir_path, marker_path in list(servers.values()):
+            try:
+                marker_path.parent.mkdir(parents=True, exist_ok=True)
+                marker_path.touch()
+            except OSError:
+                # Read-only venv storage, such as a prebuilt image: each node's own setup check decides instead
+                servers[dir_path] = (name, dir_path, None)
+        # num_cpus=0 so a node whose CPUs are all reserved still runs its setup.
+        setup_task = ray.remote(num_cpus=0)(_setup_server_venvs_on_this_node)
+        for node_id in node_ips:
+            ref = setup_task.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id, soft=False),
+                runtime_env={"py_executable": sys.executable},
+            ).remote(list(servers.values()), global_config_dict, env_vars)
+            refs[ref] = node_id
+        done, pending = ray.wait(
+            list(refs), num_returns=len(refs), timeout=timeout_seconds if timeout_seconds > 0 else None
+        )
+        if pending:
+            raise ServerSpinupTimeoutError(
+                f"Timed out after {timeout_seconds:g}s setting up the venvs of {server_names} on Ray node(s) "
+                f"{', '.join(node_ips[refs[ref]] for ref in pending)}.\n"
+                f"Raise the limit with `++{SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}=<seconds>`, "
+                "or set it to 0 to wait without a limit."
+            )
+        for ref in done:
+            try:
+                ray.get(ref)
+            except TaskUnschedulableError:
+                # A node being drained or removed will not run the servers' tasks either
+                print(f"Skipped venv setup on Ray node {node_ips[refs[ref]]}: it can no longer run tasks")
+            except RayError as error:
+                raise ServerStartFailedError(
+                    f"Setting up the venvs of {server_names} failed on Ray node {node_ips[refs[ref]]}: {error}",
+                    server_name=server_names,
+                    errno=None,
+                ) from error
+    except BaseException:
+        for ref in refs:
+            ray.cancel(ref, force=True)
+        raise
+    finally:
+        for _, _, marker_path in servers.values():
+            if marker_path is not None:
+                marker_path.unlink(missing_ok=True)
+
+
 def _server_launch_command(
     dir_path: Path,
     global_config_dict: DictConfig,
@@ -494,7 +609,7 @@ class ServerSpinupTimeoutError(RuntimeError):
 
 
 class ServerStartFailedError(RuntimeError):
-    """A Gym server process (or the head server) exited before it was ready.
+    """A Gym server process (or the head server) exited before it was ready, or its venv setup failed on a Ray node.
 
     ``failure_kind`` is ``server_start_failed``. ``errno`` is the errno of the bind error the server printed, when it
     printed one: ``errno.EADDRINUSE`` means another process took its port between the port check and the bind.
@@ -695,6 +810,7 @@ class ServerSupervisor:  # pragma: no cover
     def _start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         # Each started server's node in the config it is started from, for a retry on a fresh port.
         self._server_configs: Dict[str, DictConfig] = {}
+        self._spinup_seconds_used = 0.0
         self._startup = SupervisorStartup()
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
@@ -729,6 +845,14 @@ class ServerSupervisor:  # pragma: no cover
             print(f"Initializing Ray for servers that use it: {', '.join(ray_server_names)}")
             initialize_ray()
             self._startup.mark("init_ray")
+            if global_config_dict.get(SETUP_VENVS_ON_EVERY_RAY_NODE_KEY_NAME, False):
+                setup_started_at = monotonic()
+                _setup_server_venvs_on_other_nodes(
+                    configured_servers, ray_server_names, global_config_dict, self._server_spinup_timeout_seconds
+                )
+                # Counts against the spin-up budget, so this setup and server readiness share one timeout
+                self._spinup_seconds_used = monotonic() - setup_started_at
+                self._startup.mark("setup_venvs_on_other_ray_nodes")
 
         # Start the HTTP/2 PING sidecar (if `sidecar.enabled`) and point model URLs at it. This
         # must come before the config is serialized below, which is how every server learns its URLs.
@@ -1019,7 +1143,8 @@ Process `{process_name}` stderr:
         successful_servers = []
         total_servers = len(self._server_instance_display_configs)
         timeout_seconds = self._server_spinup_timeout_seconds
-        deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else None
+        seconds_used = getattr(self, "_spinup_seconds_used", 0.0)
+        deadline = monotonic() + timeout_seconds - seconds_used if timeout_seconds > 0 else None
 
         # Until we spin up or error out.
         while True:
@@ -1038,11 +1163,17 @@ Process `{process_name}` stderr:
 
             if len(successful_servers) != total_servers:
                 if deadline is not None and monotonic() >= deadline:
+                    setup_note = (
+                        f"Venv setup on other Ray nodes used {seconds_used:.1f}s of that limit.\n"
+                        if seconds_used >= 0.1
+                        else ""
+                    )
                     raise ServerSpinupTimeoutError(
                         f"Timed out after {timeout_seconds:g}s waiting for Gym servers to become ready: "
                         f"{', '.join(waiting)}\n"
                         "This wait covers dependency installation and any local model download or loading "
                         "that a server does before it opens its port.\n"
+                        f"{setup_note}"
                         f"Raise the limit with `++{SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}=<seconds>`, "
                         "or set it to 0 to wait without a limit."
                     )

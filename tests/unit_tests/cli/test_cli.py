@@ -768,7 +768,13 @@ class TestServerSupervisorRayStartup:
     """ServerSupervisor.start starts or joins Ray only when a configured server may use it."""
 
     def _start(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path, *, ray_enabled: bool | None, ray_installed: bool
+        self,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+        *,
+        ray_enabled: bool | None,
+        ray_installed: bool,
+        setup_venvs_on_every_ray_node: bool | None = None,
     ) -> tuple[MagicMock, MagicMock]:
         declaration = "" if ray_enabled is None else f"    ray_enabled = {ray_enabled}\n"
         (tmp_path / "app.py").write_text(f"class Server:\n{declaration}    pass\nServer.run_webserver()\n")
@@ -784,6 +790,8 @@ class TestServerSupervisorRayStartup:
                 },
             }
         )
+        if setup_venvs_on_every_ray_node is not None:
+            cfg["setup_venvs_on_every_ray_node"] = setup_venvs_on_every_ray_node
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
         monkeypatch.setattr(
             nemo_gym.server_runtime.supervisor.server_supervisor, "get_global_config_dict", lambda **kwargs: cfg
@@ -797,6 +805,12 @@ class TestServerSupervisorRayStartup:
         )
         initialize_ray = MagicMock()
         monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "initialize_ray", initialize_ray)
+        self.setup_on_other_nodes = MagicMock()
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor,
+            "_setup_server_venvs_on_other_nodes",
+            self.setup_on_other_nodes,
+        )
         monkeypatch.setattr(
             nemo_gym.server_runtime.supervisor.server_supervisor.HeadServer,
             "run_webserver",
@@ -851,6 +865,20 @@ class TestServerSupervisorRayStartup:
         # Servers that don't declare Ray can't quietly start a private cluster on their first Ray call.
         auto_connect = run_command.call_args.kwargs["extra_env"].get("RAY_ENABLE_AUTO_CONNECT")
         assert auto_connect == (None if expect_ray else "0")
+
+    @pytest.mark.parametrize("setup_venvs_on_every_ray_node", [None, False, True])
+    def test_per_node_venv_setup_runs_only_when_enabled(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, setup_venvs_on_every_ray_node: bool | None
+    ) -> None:
+        self._start(
+            monkeypatch,
+            tmp_path,
+            ray_enabled=True,
+            ray_installed=True,
+            setup_venvs_on_every_ray_node=setup_venvs_on_every_ray_node,
+        )
+
+        assert self.setup_on_other_nodes.called is bool(setup_venvs_on_every_ray_node)
 
     def test_ray_server_without_ray_installed_fails_before_launching_anything(
         self, monkeypatch: MonkeyPatch, tmp_path: Path
@@ -938,6 +966,19 @@ class TestServerSupervisorServerReadiness:
         assert "`++server_spinup_timeout_seconds=<seconds>`" in str(excinfo.value)
         assert "set it to 0" in str(excinfo.value)
         supervisor.poll.assert_called_once_with()
+
+    def test_server_spinup_timeout_counts_venv_setup_on_other_nodes(self, monkeypatch: MonkeyPatch) -> None:
+        supervisor = ServerSupervisor()
+        supervisor._server_spinup_timeout_seconds = 1.0
+        supervisor._spinup_seconds_used = 0.6
+        supervisor._server_instance_display_configs = [SimpleNamespace(process_name="slow")]
+        supervisor.poll = MagicMock()
+        supervisor.check_http_server_statuses = MagicMock(return_value=[("slow", "connection_error")])
+        monotonic_mock = MagicMock(side_effect=[0.0, 0.5])
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "monotonic", monotonic_mock)
+
+        with raises(RuntimeError, match="Venv setup on other Ray nodes used 0.6s"):
+            supervisor.wait_for_spinup()
 
     def test_server_spinup_deadline_bounds_multiple_stalled_servers(self) -> None:
         """Each probe used to wait its full 5s, so the deadline was checked only after every server had been tried."""
