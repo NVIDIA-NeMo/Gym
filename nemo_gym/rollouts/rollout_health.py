@@ -324,11 +324,17 @@ def evaluate_record(
     )
 
 
-def _observed_upstream_recovery(calls: list[dict[str, Any]]) -> dict[str, int] | None:
-    """Count only observed failed attempts and explicitly completed operations; never certify completeness."""
-    attempts = {}
-    outcomes = {}
-    for call in calls:
+class _UpstreamRecovery:
+    """Failed-attempt and outcome observations, added one model call at a time.
+
+    Only operation and event ids are kept, never the calls, so a run-wide tally does not hold the run's calls.
+    """
+
+    def __init__(self) -> None:
+        self._attempts: dict[str, str] = {}
+        self._outcomes: dict[str, set[str]] = {}
+
+    def add(self, call: Mapping[str, Any]) -> None:
         report = call.get("failure_report")
         operations = call.get("model_operations")
         if isinstance(report, dict):
@@ -340,7 +346,7 @@ def _observed_upstream_recovery(calls: list[dict[str, Any]]) -> dict[str, int] |
                     and event.get("operation_id")
                     and event.get("attempt_id")
                 ):
-                    attempts[event_id] = event["operation_id"]
+                    self._attempts[event_id] = event["operation_id"]
         for observation in operations if isinstance(operations, list) else []:
             if not isinstance(observation, dict) or not observation.get("operation_id"):
                 continue
@@ -353,19 +359,69 @@ def _observed_upstream_recovery(calls: list[dict[str, Any]]) -> dict[str, int] |
                     or _is_failed(call)
                 ):
                     continue
-                outcomes.setdefault(observation["operation_id"], set()).add(outcome)
-    if not attempts:
-        return None  # No failed-attempt observation is not proof that no earlier failure occurred.
-    failed_operations = set(attempts.values())
-    completed = {operation for operation, values in outcomes.items() if values == {"completed"}}
-    ended = {operation for operation, values in outcomes.items() if len(values) == 1}
-    return {
-        "observed_attempt_errors": len(attempts),
-        "observed_failed_operations": len(failed_operations),
-        "recovered_attempt_errors": sum(operation in completed for operation in attempts.values()),
-        "recovered_operations": len(failed_operations & completed),
-        "operations_without_terminal_observation": len(failed_operations - ended),
-    }
+                self._outcomes.setdefault(observation["operation_id"], set()).add(outcome)
+
+    def summary(self) -> dict[str, int] | None:
+        if not self._attempts:
+            return None  # No failed-attempt observation is not proof that no earlier failure occurred.
+        failed_operations = set(self._attempts.values())
+        completed = {operation for operation, values in self._outcomes.items() if values == {"completed"}}
+        ended = {operation for operation, values in self._outcomes.items() if len(values) == 1}
+        return {
+            "observed_attempt_errors": len(self._attempts),
+            "observed_failed_operations": len(failed_operations),
+            "recovered_attempt_errors": sum(operation in completed for operation in self._attempts.values()),
+            "recovered_operations": len(failed_operations & completed),
+            "operations_without_terminal_observation": len(failed_operations - ended),
+        }
+
+
+def _observed_upstream_recovery(calls: Iterable[Mapping[str, Any]]) -> dict[str, int] | None:
+    """Count only observed failed attempts and explicitly completed operations; never certify completeness."""
+    tally = _UpstreamRecovery()
+    for call in calls:
+        tally.add(call)
+    return tally.summary()
+
+
+_EFFORT_KEYS = ("http_attempts", "transport_failures", "retry_wait_s", "request_elapsed_ms")
+# An operation whose observations report different values for one effort key.
+_CONFLICTING = object()
+
+
+class _RequestEffort:
+    """Each model operation's request effort, added one observation at a time: per key, the one value its
+    observations agree on, none, or a conflict. A known value is finite and non-negative."""
+
+    def __init__(self) -> None:
+        self._values: dict[str, list[Any]] = {}
+
+    def add(self, operation: Mapping[str, Any]) -> None:
+        # The producer's opaque ID is the join key, not capture position or retry-label parsing.
+        values = self._values.setdefault(operation["operation_id"], [None] * len(_EFFORT_KEYS))
+        for index, key in enumerate(_EFFORT_KEYS):
+            value = operation.get(key)
+            if not (type(value) in (int, float) and math.isfinite(value) and value >= 0):
+                continue
+            if values[index] is None:
+                values[index] = value
+            elif values[index] is not _CONFLICTING and values[index] != value:
+                values[index] = _CONFLICTING
+
+    def summary(self) -> dict[str, dict[str, Any]]:
+        effort = {}
+        for index, key in enumerate(_EFFORT_KEYS):
+            known = [
+                values[index]
+                for values in self._values.values()
+                if values[index] is not None and values[index] is not _CONFLICTING
+            ]
+            effort[key] = {
+                "sum_observed": sum(known) if known else None,
+                "operations_observed": len(known),
+                "operations_unknown": len(self._values) - len(known),
+            }
+        return effort
 
 
 def _index_jsonl(
@@ -669,16 +725,53 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     }
 
 
-def _jsonl_rows(path: Path) -> Iterator[dict[str, Any]]:
-    """Stream a JSONL file's objects; an inventory can be hundreds of MB."""
+def _jsonl_rows_at(path: Path) -> Iterator[tuple[int, int, dict[str, Any]]]:
+    """Stream a JSONL file's objects, each with its byte offset and length; an inventory can be hundreds of MB."""
     with path.open("rb") as handle:
+        offset = 0
         for line in handle:
+            start, offset = offset, offset + len(line)
             try:
                 row = orjson.loads(line)
             except orjson.JSONDecodeError:
                 continue  # Blank lines, and the truncated last line a killed writer can leave.
             if isinstance(row, dict):
-                yield row
+                yield start, len(line), row
+
+
+def _jsonl_rows(path: Path) -> Iterator[dict[str, Any]]:
+    """Stream a JSONL file's objects."""
+    for _, _, row in _jsonl_rows_at(path):
+        yield row
+
+
+def _without_call_requests(record: dict[str, Any]) -> dict[str, Any]:
+    """``record`` with its trajectory's model-call requests dropped, in place, for a pass that reads only call
+    metadata. A request repeats the conversation so far, so the requests are most of a long rollout's bytes; no
+    trajectory validator reads them."""
+    trajectory = record.get("ng_trajectory")
+    calls = trajectory.get("model_calls") if isinstance(trajectory, dict) else None
+    for call in calls if isinstance(calls, list) else []:
+        if isinstance(call, dict):
+            call.pop("request", None)
+    return record
+
+
+@dataclass(frozen=True)
+class _SidecarRow:
+    """A failure sidecar row: where it is, and the facts the run accounting reads from it. The row itself is read
+    again only when needed, so a sidecar's failed trajectories are never held together."""
+
+    path: Path
+    offset: int
+    length: int
+    final: bool
+    failure_class: str
+
+    def read(self) -> dict[str, Any]:
+        with self.path.open("rb") as handle:
+            handle.seek(self.offset)
+            return orjson.loads(handle.read(self.length))
 
 
 @dataclass(frozen=True)
@@ -686,7 +779,7 @@ class _Failures:
     """The rollouts that failed and never landed, and the rollouts the run owed."""
 
     # Each such rollout's last failed attempt, by (input index, task index, rollout index).
-    rows: dict[tuple[Any, ...], dict[str, Any]]
+    rows: dict[tuple[Any, ...], _SidecarRow]
     # None when an input has no `_materialized_inputs.jsonl` inventory.
     owed: set[tuple[Any, ...]] | None
     any_sidecar: bool
@@ -698,21 +791,38 @@ def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Fail
     The last attempt of a rollout stands, and a rollout that later landed is not failed. With an inventory, only
     owed rollouts count: an unreadable record or a sidecar row outside the inventory is not one.
     """
-    # Lazy: rollout_collection imports this module.
-    from nemo_gym.rollouts.rollout_collection import is_non_superseding_rollout_row, is_omitted_rollout_row
+    # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
+    from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
+    from nemo_gym.rollouts.rollout_collection import (
+        is_non_superseding_rollout_row,
+        is_omitted_rollout_row,
+        is_terminal_failure,
+    )
 
-    failed: dict[tuple[Any, ...], dict[str, Any]] = {}
+    failed: dict[tuple[Any, ...], tuple[_SidecarRow, bool]] = {}
     any_sidecar = False
     owed: set[tuple[Any, ...]] | None = set()
     for source_index, path in enumerate(paths):
-        if failures_path_for(path).is_file():
+        sidecar = failures_path_for(path)
+        if sidecar.is_file():
             any_sidecar = True
-            for row in _jsonl_rows(failures_path_for(path)):
+            for offset, length, row in _jsonl_rows_at(sidecar):
                 # Main's rule: a row the dispatch budget never started is no attempt and selects nothing; nor does
                 # the evidence of a failed /run with routing off.
                 if is_non_superseding_rollout_row(row):
                     continue
-                failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
+                failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = (
+                    _SidecarRow(
+                        path=sidecar,
+                        offset=offset,
+                        length=length,
+                        # An agent deadline that kept its answer is the model's final result, as in the Store's
+                        # coverage.
+                        final=is_terminal_failure(row) or is_answered_agent_deadline(row),
+                        failure_class=row.get(NG_FAILURE_CLASS_KEY) or "unknown",
+                    ),
+                    is_omitted_rollout_row(row),
+                )
         if not materialized_path_for(path).is_file():
             owed = None
         elif owed is not None:
@@ -721,7 +831,7 @@ def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Fail
                 for row in _jsonl_rows(materialized_path_for(path))
             )
     # Main's rule: a rollout whose latest attempt recorded no result is missing, not failed.
-    failed = {key: row for key, row in failed.items() if not is_omitted_rollout_row(row)}
+    failed = {key: row for key, (row, omitted) in failed.items() if not omitted}
     for key in landed:
         failed.pop(key, None)
     if owed is not None:
@@ -739,20 +849,21 @@ def _last_failed_attempts(
     paths: Sequence[Path],
     *,
     histories: Mapping[Path, RolloutStore | None] | None = None,
-) -> list[dict[str, Any]]:
+) -> Iterator[dict[str, Any]]:
     """The selected failed attempt of every rollout that never landed.
 
     A run with a manifest selects it from its run history, as its accounting does; a legacy output's sidecar row
-    that stands last is it.
+    that stands last is it. Rows are read one at a time, as they are consumed: failed rows can hold whole
+    trajectories, so a run's failures together can be most of its bytes.
     """
-    rows: list[dict[str, Any]] = []
     for source_index, path in enumerate(paths):
         history = histories[path] if histories is not None else RolloutStore.read(path, import_legacy=False)
         if history is not None:
-            rows += history.selected("failure")
+            for record in history.selected_records("failure").values():
+                yield record.read()
         else:
-            rows += _read_failures(_landed_in(landed, source_index), [path]).rows.values()
-    return rows
+            for row in _read_failures(_landed_in(landed, source_index), [path]).rows.values():
+                yield row.read()
 
 
 def _rollout_accounting(
@@ -776,10 +887,6 @@ def _rollout_accounting(
     ``scored`` holds the ``landed`` keys whose records are all scored. It is ``None`` when the records were not
     read, which leaves a legacy input's ``scored`` count unknown.
     """
-    # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
-    from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
-    from nemo_gym.rollouts.rollout_collection import is_terminal_failure
-
     expected = missing = not_started = omitted = final = not_final = completed = 0
     scored_count: int | None = 0
     by_class: Counter[str] = Counter()
@@ -819,11 +926,10 @@ def _rollout_accounting(
         else:
             expected += len(legacy.owed)
             missing += len(legacy.owed - landed_here - legacy.rows.keys())
-        # An agent deadline that kept its answer is the model's final result here too, as in the Store's coverage.
-        final_here = sum(is_terminal_failure(row) or is_answered_agent_deadline(row) for row in legacy.rows.values())
+        final_here = sum(row.final for row in legacy.rows.values())
         final += final_here
         not_final += len(legacy.rows) - final_here
-        by_class.update(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for row in legacy.rows.values())
+        by_class.update(row.failure_class for row in legacy.rows.values())
 
     reasons = []
     if inventory_known:
@@ -1158,7 +1264,9 @@ def run_health_checks(
         if source.is_file()
         for row in _jsonl_rows(source)
     )
-    observed_calls = []
+    # Rows are read one at a time and tallied as they go: a run's rows and calls are never held together.
+    upstream_recovery = _UpstreamRecovery()
+    request_effort = _RequestEffort()
     runtime = {
         "invocation_observations": 0,
         "in_session": {"true": 0, "false": 0, "absent": 0},
@@ -1166,22 +1274,24 @@ def run_health_checks(
         "row_elapsed_s": {"sum_observed": 0.0, "absent": 0},
     }
     for record in observed_records:
-        trajectory, _ = _canonical_trajectory(record)
+        trajectory, _ = _canonical_trajectory(_without_call_requests(record))
         if trajectory is not None:
-            # Keep only the bounded metadata needed below, rather than retaining all request/response payloads.
-            observed_calls.extend(
-                {
-                    key: call.get(key)
-                    for key in (
-                        "status_code",
-                        "response_status",
-                        "error_category",
-                        "failure_report",
-                        "model_operations",
-                    )
-                }
-                for call in _normalized_trajectory_calls(trajectory)
-            )
+            for call in _normalized_trajectory_calls(trajectory):
+                # Only this metadata is read here, as the per-rollout tally reads it from its calls.
+                upstream_recovery.add(
+                    {
+                        key: call.get(key)
+                        for key in (
+                            "status_code",
+                            "response_status",
+                            "error_category",
+                            "failure_report",
+                            "model_operations",
+                        )
+                    }
+                )
+                for operation in call.get("model_operations") or []:
+                    request_effort.add(operation)
             for invocation in trajectory.get("invocations") or []:
                 runtime["invocation_observations"] += 1
                 for key in ("in_session", "verification_skipped"):
@@ -1192,30 +1302,9 @@ def run_health_checks(
             runtime["row_elapsed_s"]["sum_observed"] += elapsed
         else:
             runtime["row_elapsed_s"]["absent"] += 1
-    summary["run"]["stats"]["observed_upstream_recovery"] = _observed_upstream_recovery(observed_calls)
+    summary["run"]["stats"]["observed_upstream_recovery"] = upstream_recovery.summary()
     summary["run"]["stats"]["observed_runtime"] = runtime
-    operations = {}
-    for call in observed_calls:
-        for operation in call.get("model_operations") or []:
-            # The producer's opaque ID is the join key, not capture position or retry-label parsing.
-            operations.setdefault(operation["operation_id"], []).append(operation)
-    effort = {}
-    for key in ("http_attempts", "transport_failures", "retry_wait_s", "request_elapsed_ms"):
-        values = []
-        for observations in operations.values():
-            known = {
-                o[key]
-                for o in observations
-                if type(o.get(key)) in (int, float) and math.isfinite(o[key]) and o[key] >= 0
-            }
-            if len(known) == 1:
-                values.append(known.pop())
-        effort[key] = {
-            "sum_observed": sum(values) if values else None,
-            "operations_observed": len(values),
-            "operations_unknown": len(operations) - len(values),
-        }
-    summary["run"]["stats"]["observed_request_effort"] = effort
+    summary["run"]["stats"]["observed_request_effort"] = request_effort.summary()
     run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
     _judge_run(artifacts, run_findings, run_coverage)
     summary["run"]["issues"][_RUN_FAILURES_CHECK] = len(run_findings)
