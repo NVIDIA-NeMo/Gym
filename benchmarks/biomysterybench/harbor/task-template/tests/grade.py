@@ -34,7 +34,9 @@ def judge(prompt: str) -> str:
             return response.choices[0].message.content or ""
         except Exception as error:
             if attempt == attempts - 1:
-                raise
+                print(f"[judge] failed after {attempts} attempts: {error!r}"[:500], file=sys.stderr)
+                # Harbor trusts EX_TEMPFAIL from a separate verifier as an infrastructure failure.
+                raise SystemExit(75) from error
             print(f"[judge] attempt {attempt + 1} failed, retrying: {error!r}"[:500], file=sys.stderr)
             time.sleep(10 * (attempt + 1))
 
