@@ -4187,6 +4187,8 @@ def test_server_config_holds_only_deployment_settings():
         "separate_verifier_for_artifacts",
         "task_mcp_grants",
         "turn_sessions",
+        "stop_on_reward",
+        "turn_feedback",
         "compose_variables",
         "compose_overlay",
     }

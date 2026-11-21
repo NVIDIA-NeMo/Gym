@@ -277,8 +277,10 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     turns: list[HarborTurnResult] | None = None
     turn_reward_strategy: Literal["mean", "final"] | None = None
     turns_without_verifier_result: int | None = None
-    # The turn after which the episode stopped early: a mask, no verifier result, or a missed min_reward.
+    # The turn after which the episode stopped early: a mask, no verifier result, a missed min_reward, or a turn that
+    # met the deployment's `stop_on_reward` (then `stopped_on_reward` is true).
     stopped_after_turn: str | None = None
+    stopped_on_reward: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     # How the turns reached the harness: a session per turn, or one continuation session (see `turn_sessions`).
     turn_sessions: Literal["fresh", "continue"] | None = None
 
@@ -291,6 +293,74 @@ class HarborEpisodeResponse(BaseEpisodeResponse[HarborEpisodeResult]):
     """Response for one Harbor episode: a result, or a staged failure with the agent's evidence."""
 
     failure: SingleAgentTurnFailure | None = None
+
+
+# The default message around a turn's instruction when the previous turn's verifier left feedback: `{feedback}` and
+# `{instruction}` are replaced literally (no format string, so braces in either are kept).
+DEFAULT_TURN_FEEDBACK_TEMPLATE = (
+    "The verifier did not accept your previous attempt. Its output:\n\n"
+    "<verifier_feedback>\n{feedback}\n</verifier_feedback>\n\n{instruction}"
+)
+
+
+class HarborTurnFeedback(BaseModel):
+    """What a multi-step episode passes from one turn's verifier to the next turn's instruction (``turn_feedback``).
+
+    Before each turn after the first, the server reads the first of ``files`` present among the previous turn's
+    verifier logs (everything ``test.sh`` left in ``/logs/verifier``, already copied to this host, so separate
+    verifiers work too), keeps its last ``max_bytes`` bytes and renders ``template`` around the step's instruction.
+    Nothing is added when the previous turn has no verifier logs or none of the files exists. A Gym-only setting of
+    the deployment: the task folders stay plain Harbor tasks.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    files: list[str] = Field(default_factory=lambda: ["feedback.md", "test-stdout.txt"], min_length=1)
+    max_bytes: int = Field(default=65536, gt=0)
+    template: str = DEFAULT_TURN_FEEDBACK_TEMPLATE
+
+    @model_validator(mode="after")
+    def plain_names(self) -> "HarborTurnFeedback":
+        for name in self.files:
+            if not name or "/" in name or "\\" in name or name in (".", ".."):
+                raise ValueError(f"turn_feedback.files entries must be plain file names, got {name!r}")
+        if "{instruction}" not in self.template:
+            raise ValueError("turn_feedback.template must contain {instruction}")
+        return self
+
+    def read(self, logs_dir: str | None) -> str | None:
+        """The feedback text from ``logs_dir``, or ``None``. A file over ``max_bytes`` keeps its tail, where a
+        verifier's verdict usually is, after a note that the start was cut."""
+        if logs_dir is None:
+            return None
+        for name in self.files:
+            path = Path(logs_dir) / name
+            if not path.is_file() or path.is_symlink():
+                continue
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                if size > self.max_bytes:
+                    handle.seek(size - self.max_bytes)
+                data = handle.read(self.max_bytes)
+            text = data.decode("utf-8", errors="replace")
+            if size > self.max_bytes:
+                text = f"[... first {size - self.max_bytes} bytes cut ...]\n" + text
+            return text
+        return None
+
+    def render(self, feedback: str, instruction: str) -> str:
+        # One pass over the template, so a `{instruction}` inside the feedback is not replaced again.
+        head, _, tail = self.template.partition("{instruction}")
+        return head.replace("{feedback}", feedback) + instruction + tail.replace("{feedback}", feedback)
+
+
+def stop_on_reward_met(rewards: dict[str, float] | None, threshold: float | dict[str, float] | None) -> bool:
+    """Whether a turn's rewards meet the deployment's ``stop_on_reward``: the mirror of a step's ``min_reward``. A
+    number gates the ``reward`` key, a mapping every key it names; a turn without a verifier result never meets it."""
+    if threshold is None or rewards is None:
+        return False
+    thresholds = {"reward": float(threshold)} if isinstance(threshold, (int, float)) else threshold
+    return all(rewards.get(key, float("-inf")) >= value for key, value in thresholds.items())
 
 
 class ComposeVariable(BaseModel):
@@ -395,6 +465,13 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # of it, so the agent keeps its conversation across steps (Harbor's `--resume-trajectory`); refused before any
     # sandbox for a harness without multi-turn continuation, as Harbor refuses an agent without SUPPORTS_RESUME.
     turn_sessions: Literal["fresh", "continue"] = "fresh"
+    # Stop a multi-step episode after a turn whose verifier rewards meet this (a number gates `reward`, a mapping each
+    # named key), so steps that are retries of one task end at the first success. The mirror of a step's `min_reward`,
+    # set for the deployment rather than per step; the steps after it do not run. Use the task's
+    # `multi_step_reward_strategy = "final"` for the success to be the episode's reward.
+    stop_on_reward: float | dict[str, float] | None = None
+    # Pass each turn's verifier feedback to the next turn's instruction (see `HarborTurnFeedback`). None: off.
+    turn_feedback: HarborTurnFeedback | None = None
     # Values for the `${NAME}` references a task's Compose file leaves to the deployment, such as a sidecar's
     # model endpoint and key. Resolved at seed; the task and Harbor's own variables take precedence.
     compose_variables: dict[str, ComposeVariable] = Field(default_factory=dict)
@@ -1450,6 +1527,7 @@ class HarborEnvironmentServer(
         handle: _AgentSessionHandle | None = None
         results: list[HarborTurnResult] = []
         stopped_after: str | None = None
+        stopped_on_reward: bool | None = None
         for index, (turn, turn_input) in enumerate(zip(task.turns, inputs), start=1):
             try:
                 # The preparation (the step's workdir, setup.sh and healthcheck) is this turn's, before its agent: a
@@ -1501,6 +1579,9 @@ class HarborEnvironmentServer(
                     agent_observations=handle.observations if handle is not None else None,
                     trajectory=handle.trajectory if handle is not None else None,
                 ) from error
+            params = turn_input.responses_create_params
+            if self.config.turn_feedback is not None and results:
+                params = self._with_turn_feedback(params, results[-1])
             if continued:
                 if handle is None:
                     handle = await self._open_agent_session(
@@ -1512,9 +1593,7 @@ class HarborEnvironmentServer(
                         agent_timeout_sec=task.config.step_agent_timeout_sec(turn.config),
                         continuation=True,
                     )
-                response = await self._activate_agent_session(
-                    request, handle, turn_input.responses_create_params, progress, activation=index
-                )
+                response = await self._activate_agent_session(request, handle, params, progress, activation=index)
                 try:
                     self._route_failed_response(response, handle)
                 except NgFailureEvent as error:
@@ -1535,7 +1614,7 @@ class HarborEnvironmentServer(
                 response, observations, trajectory = await self._agent_turn(
                     request,
                     access,
-                    turn_input.responses_create_params,
+                    params,
                     cleanup,
                     task,
                     progress,
@@ -1547,9 +1626,7 @@ class HarborEnvironmentServer(
                 # the seed's again for the hooks and test.sh (Harbor's `with_default_user` around the shared
                 # verifier), then the step's user is back in place for the next turn's switch to compare with.
                 with self._as_seed_default_user(session):
-                    outcome = await self._verified_outcome(
-                        session, request, response, (turn, turn_input.responses_create_params)
-                    )
+                    outcome = await self._verified_outcome(session, request, response, (turn, params))
             except HTTPException as error:
                 # A continued session's evidence sits on the handle once its close has returned: after the last
                 # step's activation it already has, and a session still open at an earlier step's verifier failure
@@ -1575,6 +1652,11 @@ class HarborEnvironmentServer(
                 or min_reward_failure(result.verifier_rewards, turn.config.min_reward) is not None
             ):
                 stopped_after = turn.name if len(results) < len(task.turns) else None
+                break
+            if stop_on_reward_met(result.verifier_rewards, self.config.stop_on_reward) and len(results) < len(
+                task.turns
+            ):
+                stopped_after, stopped_on_reward = turn.name, True
                 break
 
         if handle is not None and not handle.closed:
@@ -1611,10 +1693,28 @@ class HarborEnvironmentServer(
             turn_reward_strategy=strategy,
             turns_without_verifier_result=sum(1 for result in results if result.verifier_rewards is None),
             stopped_after_turn=stopped_after,
+            stopped_on_reward=stopped_on_reward,
             **roll_up_turns(results, strategy, task_id=request.task.task_id),
         )
         self._trace_score(task.task_id, request.episode_id.capture_key, episode)
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=episode)
+
+    def _with_turn_feedback(self, params: Any, previous: HarborTurnResult) -> Any:
+        """``params`` with the previous turn's verifier feedback rendered around its instruction (``turn_feedback``),
+        or ``params`` unchanged when there is none. The same request then reaches the harness and the turn's exported
+        transcript, so the verifier and the record see what the agent was sent."""
+        feedback_config = self.config.turn_feedback
+        feedback = feedback_config.read(previous.verifier_logs_dir) if feedback_config is not None else None
+        if feedback is None:
+            return params
+
+        def render(instruction: str) -> str:
+            return feedback_config.render(feedback, instruction)
+
+        if isinstance(params, BaseModel):
+            dumped = params.model_dump(mode="json", exclude_unset=True)
+            return type(params).model_validate(wrap_first_instruction(dumped, render))
+        return wrap_first_instruction(params, render)
 
     async def _prepare_turn(self, session: HarborSession, turn: HarborTurn, access: SandboxAccess) -> SandboxAccess:
         """What a turn needs in place before its agent session opens: no grading files from the previous turn, the
