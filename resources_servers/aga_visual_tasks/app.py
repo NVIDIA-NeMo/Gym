@@ -57,6 +57,28 @@ class Result(BaseVerifyResponse):
     pass
 
 
+def scoring_body_for(body: Verify) -> dict[str, Any]:
+    """The request the original grader scores: the saved native response is kept, only its scored text is extracted."""
+    scoring_body = body.model_dump(mode="json")
+    # Exactly the original scoring-only extraction; never replace the saved native response.
+    scoring_body["response"]["output"] = [
+        {
+            "type": "message",
+            "id": "final",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "annotations": [],
+                    "text": final_answer(scoring_body["response"]["output"], strip_reasoning=True),
+                }
+            ],
+        }
+    ]
+    return scoring_body
+
+
 class ResourcesServer(SimpleResourcesServer):
     config: Config
     seed_request_model = Seed
@@ -131,23 +153,7 @@ class ResourcesServer(SimpleResourcesServer):
             verification.retain(None)
             try:
                 resource = self.config.resources_server_by_agent[body.image_tools_base_agent_ref["name"]]
-                scoring_body = body.model_dump(mode="json")
-                # Exactly the original scoring-only extraction; never replace the saved native response.
-                scoring_body["response"]["output"] = [
-                    {
-                        "type": "message",
-                        "id": "final",
-                        "role": "assistant",
-                        "status": "completed",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "annotations": [],
-                                "text": final_answer(scoring_body["response"]["output"], strip_reasoning=True),
-                            }
-                        ],
-                    }
-                ]
+                scoring_body = scoring_body_for(body)
                 reply = await self.server_client.post(server_name=resource, url_path="/verify", json=scoring_body)
                 await raise_for_status(reply)
                 scored = await get_response_json(reply)
@@ -176,6 +182,16 @@ class ResourcesServer(SimpleResourcesServer):
                         }
                     )
                 )
+
+
+def __getattr__(name: str) -> Any:
+    # The offline verifier fixture imports the three original graders, so it loads only when the catalog asks for it
+    # and a serving process does not pay for it.
+    if name == "VERIFIER_FIXTURE":
+        from resources_servers.aga_visual_tasks.verifier_fixture import VERIFIER_FIXTURE
+
+        return VERIFIER_FIXTURE
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":

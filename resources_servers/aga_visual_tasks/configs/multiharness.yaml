@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # The original AGA Code-assisted VQA / Agent-X training task under five native harnesses. Prepare each row with
-# `benchmarks/aga_visual_tasks/prepare.py --harness NAME`. Set AGA_SANDBOX_IMAGE (an image with the harness runtimes,
+# `environments/aga_visual_tasks/prepare.py --harness NAME`. Set AGA_SANDBOX_IMAGE (an image with the harness runtimes,
 # Python3/Pillow/numpy/scipy/OpenCV and a user-writable /images) and AGA_IMAGE_ROOT (the original image root).
 config_paths:
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml

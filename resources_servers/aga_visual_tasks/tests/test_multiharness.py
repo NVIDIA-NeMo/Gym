@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 
-from benchmarks.aga_visual_tasks.prepare import HARNESSES, native_row, prepare
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
+from environments.aga_visual_tasks.prepare import HARNESSES, native_row, prepare
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
