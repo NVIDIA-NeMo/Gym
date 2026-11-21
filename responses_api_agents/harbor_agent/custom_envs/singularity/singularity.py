@@ -258,6 +258,9 @@ class SingularityEnvironment(BaseEnvironment):
         Uses port reservation with retry logic to handle race conditions where
         another process might grab the port between reservation and binding.
         """
+        # A cancelled earlier start() may have left its container running
+        await self._terminate_server_process()
+
         # Create staging directory for file transfers (done once, outside retry loop)
         self._staging_dir = Path(tempfile.mkdtemp(prefix="singularity_staging_"))
         self._staging_dir.chmod(0o755)
@@ -439,7 +442,8 @@ class SingularityEnvironment(BaseEnvironment):
             if server_ready:
                 return
 
-            # Clean up failed attempt before retry
+            # Clean up failed attempt before retry, including its container if it is still starting
+            await self._terminate_server_process()
             if self._http_client:
                 await self._http_client.aclose()
                 self._http_client = None
@@ -638,6 +642,18 @@ class SingularityEnvironment(BaseEnvironment):
             except asyncio.CancelledError:
                 pass
 
+        await self._terminate_server_process()
+
+        # Cleanup staging directory
+        if self._staging_dir and self._staging_dir.exists():
+            shutil.rmtree(self._staging_dir, ignore_errors=True)
+
+        # Note: We don't delete .sif files as they can be reused
+        if delete:
+            self.logger.debug(f"Singularity image preserved at {self._sif_path} for reuse")
+
+    async def _terminate_server_process(self) -> None:
+        """Terminate the server process and its children, and stop streaming its output."""
         # Terminate server process and its children
         # Singularity with --containall should propagate signals to internal processes
         if self._server_process and self._server_process.returncode is None:
@@ -671,14 +687,6 @@ class SingularityEnvironment(BaseEnvironment):
                 await self._stream_task
             except asyncio.CancelledError:
                 pass
-
-        # Cleanup staging directory
-        if self._staging_dir and self._staging_dir.exists():
-            shutil.rmtree(self._staging_dir, ignore_errors=True)
-
-        # Note: We don't delete .sif files as they can be reused
-        if delete:
-            self.logger.debug(f"Singularity image preserved at {self._sif_path} for reuse")
 
     async def exec(
         self,
