@@ -45,6 +45,8 @@ class TerminusJSONParser(TerminusJSONPlainParser):
     def parse_response(self, response: str) -> JSONParseResult:
         result = super().parse_response(response)
         _correct_controls(result)
+        # Kept so the agent can apply its own per-command wait cap (Harbor caps the parsed durations at 60 s).
+        self.last_result = result
         return result
 
 
@@ -52,6 +54,8 @@ class TerminusXMLParser(TerminusXMLPlainParser):
     def parse_response(self, response: str) -> XMLParseResult:
         result = super().parse_response(response)
         _correct_controls(result)
+        # Kept so the agent can apply its own per-command wait cap (Harbor caps the parsed durations at 60 s).
+        self.last_result = result
         return result
 
 
