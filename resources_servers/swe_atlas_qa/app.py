@@ -20,8 +20,8 @@ from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import JUDGE_FAILED, VERIFIER_ERROR
 from nemo_gym.sandbox import (
+    AsyncSandbox,
     ConnectableProvider,
-    SandboxHandle,
     SandboxSpec,
     create_provider,
     resolve_provider_config,
@@ -100,15 +100,15 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
     """Keep task execution and private upstream rubric evaluation in separate sandboxes."""
 
     config: SWEAtlasQAResourcesServerConfig
-    _sessions: dict[str, tuple[str, SandboxHandle]] = PrivateAttr(default_factory=dict)
+    _sessions: dict[str, tuple[str, AsyncSandbox]] = PrivateAttr(default_factory=dict)
     # A close or a verify fences the session once its task sandbox is deleted, so a seed within
     # session_close_retry_window_seconds cannot start another sandbox for it. A fenced session is never in _sessions.
     _fences: ResourcesSessionFences[None] = PrivateAttr()
     # Verified sessions whose task sandbox could not be deleted. Seed and verify refuse them, and a close retries the
-    # delete and fences them when it succeeds. Each handle is also in _sandboxes.
-    _cleanup_pending: dict[str, SandboxHandle] = PrivateAttr(default_factory=dict)
+    # delete and fences them when it succeeds. Each sandbox is also in _sandboxes.
+    _cleanup_pending: dict[str, AsyncSandbox] = PrivateAttr(default_factory=dict)
     _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
-    _sandboxes: dict[str, SandboxHandle] = PrivateAttr(default_factory=dict)
+    _sandboxes: dict[str, AsyncSandbox] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -133,7 +133,7 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
             finally:
                 try:
                     results = await asyncio.gather(
-                        *(self._close(handle) for handle in list(self._sandboxes.values())), return_exceptions=True
+                        *(self._close(sandbox) for sandbox in list(self._sandboxes.values())), return_exceptions=True
                     )
                     for result in results:
                         if isinstance(result, BaseException):
@@ -147,8 +147,8 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
         app.router.lifespan_context = lifespan
         return app
 
-    async def _close(self, handle: SandboxHandle) -> None:
-        close = asyncio.create_task(asyncio.wait_for(self._provider.close(handle), timeout=60))
+    async def _close(self, sandbox: AsyncSandbox) -> None:
+        close = asyncio.create_task(sandbox.stop(timeout_s=60))
         try:
             await asyncio.shield(close)
         except asyncio.CancelledError:
@@ -157,9 +157,9 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
             except Exception as error:
                 LOG.warning("Sandbox cleanup failed during cancellation (%s)", type(error).__name__)
             else:
-                self._sandboxes.pop(handle.sandbox_id, None)
+                self._sandboxes.pop(sandbox.sandbox_id, None)
             raise
-        self._sandboxes.pop(handle.sandbox_id, None)
+        self._sandboxes.pop(sandbox.sandbox_id, None)
 
     async def seed_session(self, request: Request, body: SWEAtlasQARequest) -> SWEAtlasQASeedSessionResponse:
         task = load_task(self.config.tasks_dir, body.task_id)
@@ -169,10 +169,10 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
             if session_id in self._cleanup_pending:
                 raise ResourcesSessionConflictError(f"Resources session is already closed: {session_id}")
             if session_id in self._sessions:
-                task_id, handle = self._sessions[session_id]
+                task_id, sandbox = self._sessions[session_id]
                 if task_id != body.task_id:
                     raise ValueError("The session was seeded for a different task")
-                descriptor = await self._provider.serialize_handle(handle)
+                descriptor = await sandbox.serialize()
                 return SWEAtlasQASeedSessionResponse(sandbox_descriptor=descriptor)
 
             model_url = self.config.sandbox_model_base_url
@@ -208,14 +208,14 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                     }
                 },
             )
-            handle = await self._provider.create(spec)
-            self._sandboxes[handle.sandbox_id] = handle
+            sandbox = await AsyncSandbox(self._provider, spec, owns_provider=False).start()
+            self._sandboxes[sandbox.sandbox_id] = sandbox
             try:
-                descriptor = await self._provider.serialize_handle(handle)
+                descriptor = await sandbox.serialize()
             except BaseException:
-                await self._close(handle)
+                await self._close(sandbox)
                 raise
-            self._sessions[session_id] = (body.task_id, handle)
+            self._sessions[session_id] = (body.task_id, sandbox)
             return SWEAtlasQASeedSessionResponse(sandbox_descriptor=descriptor)
 
     async def close_resources_session(
@@ -226,14 +226,14 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
         if cookie_id != session_id and cookie_id in self._sessions:
             raise ValueError("The session cookie conflicts with resources_session_id")
         async with self._locks.locked(session_id):
-            handle = self._cleanup_pending.get(session_id)
-            if handle is None and session_id in self._sessions:
-                handle = self._sessions[session_id][1]
-            if handle is not None:
+            sandbox = self._cleanup_pending.get(session_id)
+            if sandbox is None and session_id in self._sessions:
+                sandbox = self._sessions[session_id][1]
+            if sandbox is not None:
                 try:
-                    await self._close(handle)
+                    await self._close(sandbox)
                 finally:
-                    if handle.sandbox_id not in self._sandboxes:
+                    if sandbox.sandbox_id not in self._sandboxes:
                         self._sessions.pop(session_id, None)
                         self._cleanup_pending.pop(session_id, None)
                         self._fences.fence(session_id, None)
@@ -243,19 +243,17 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
     async def _grade(self, task_id: str, answer_path: Path, directory: Path) -> dict[str, Any]:
         task = load_task(self.config.tasks_dir, task_id)
         async with self._verifier_slots:
-            verifier = await self._provider.create(
-                SandboxSpec(
-                    image=self.config.verifier_image,
-                    entrypoint=["/bin/sh", "-c", "sleep infinity"],
-                    ttl_s=1800,
-                    resources={"cpu": 2, "memory_mib": 2048, "disk_gib": 5},
-                    metadata=self._metadata | {"benchmark": "swe-atlas-qa-verifier"},
-                )
+            spec = SandboxSpec(
+                image=self.config.verifier_image,
+                entrypoint=["/bin/sh", "-c", "sleep infinity"],
+                ttl_s=1800,
+                resources={"cpu": 2, "memory_mib": 2048, "disk_gib": 5},
+                metadata=self._metadata | {"benchmark": "swe-atlas-qa-verifier"},
             )
+            verifier = await AsyncSandbox(self._provider, spec, owns_provider=False).start()
             self._sandboxes[verifier.sandbox_id] = verifier
             try:
-                setup = await self._provider.exec(
-                    verifier,
+                setup = await verifier.exec(
                     "mkdir -p /tests /logs/agent /logs/verifier && "
                     "python -m pip install --disable-pip-version-check --quiet openai==2.7.2",
                     timeout_s=300,
@@ -270,10 +268,9 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                     "system_prompt.txt",
                     "user_prompt_template.txt",
                 ):
-                    await self._provider.upload_file(verifier, tests_dir / name, f"/tests/{name}")
-                await self._provider.upload_file(verifier, answer_path, "/logs/agent/answer.txt")
-                result = await self._provider.exec(
-                    verifier,
+                    await verifier.upload(tests_dir / name, f"/tests/{name}")
+                await verifier.upload(answer_path, "/logs/agent/answer.txt")
+                result = await verifier.exec(
                     "python /tests/evaluate_answer.py",
                     env={
                         "EVAL_BASE_URL": self.config.judge_base_url,
@@ -285,8 +282,8 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                 if result.return_code != 0:
                     raise RuntimeError("The upstream rubric evaluator failed")
                 results_path, reward_path = directory / "evaluation_results.json", directory / "reward.txt"
-                await self._provider.download_file(verifier, "/logs/verifier/evaluation_results.json", results_path)
-                await self._provider.download_file(verifier, "/logs/verifier/reward.txt", reward_path)
+                await verifier.download("/logs/verifier/evaluation_results.json", results_path)
+                await verifier.download("/logs/verifier/reward.txt", reward_path)
                 results = json.loads(results_path.read_text())
                 reward = float(reward_path.read_text())
                 if reward not in (0.0, 1.0) or reward != results["reward"]:
@@ -327,12 +324,11 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                             evaluation_completed=False, **lost_session_verification("Task sandbox session is missing")
                         )
                         return SWEAtlasQAVerifyResponse.model_validate(body.model_dump() | result)
-                    task_id, handle = session
+                    task_id, sandbox = session
                     try:
                         if task_id != body.task_id:
                             raise ValueError("Verification task does not match the seeded task")
-                        answer_file = await self._provider.exec(
-                            handle,
+                        answer_file = await sandbox.exec(
                             "test -f /logs/agent/answer.txt && test ! -L /logs/agent/answer.txt && "
                             f'test "$(wc -c < /logs/agent/answer.txt)" -le {self.config.max_answer_bytes}',
                             timeout_s=30,
@@ -341,14 +337,14 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                             raise RuntimeError("Agent answer inspection failed")
                         if answer_file.return_code == 0:
                             async with asyncio.timeout(60):
-                                await self._provider.download_file(handle, "/logs/agent/answer.txt", answer_path)
+                                await sandbox.download("/logs/agent/answer.txt", answer_path)
                     finally:
                         # No agent process can run while private rubric files or judge credentials are staged.
                         try:
-                            await self._close(handle)
+                            await self._close(sandbox)
                         finally:
-                            if handle.sandbox_id in self._sandboxes:
-                                self._cleanup_pending[session_id] = handle
+                            if sandbox.sandbox_id in self._sandboxes:
+                                self._cleanup_pending[session_id] = sandbox
                             else:
                                 self._fences.fence(session_id, None)
                 if answer_path.exists():
