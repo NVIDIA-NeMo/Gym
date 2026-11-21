@@ -69,6 +69,13 @@ def snapshots(deployment) -> list[str]:
     return sorted(path.name for path in root.iterdir()) if root.exists() else []
 
 
+def harness_process_state(deployment) -> str:
+    """The state letter in ``/proc/<pid>/stat`` of the one harness process the deployment runs."""
+    [box] = boxes(deployment)
+    [pid_file] = Path(box["path"]).glob("harness/*/harness.pid")
+    return Path(f"/proc/{int(pid_file.read_text())}/stat").read_text().rsplit(")", 1)[1].split()[0]
+
+
 def launches(reply) -> str:
     return result(reply)["response"]["metadata"]["harness_launches"]
 
@@ -113,7 +120,10 @@ async def test_e1_a_checkpoint_pauses_the_harness_in_place_and_the_episode_finis
         run = asyncio.create_task(http.post("/run", json=request_for(topology, "e1")))
         await wait_for_calls(deployment, 3, timeout=120)
         await checkpoint(deployment, tmp_path / "ckpt", ["e1"])
+        # The backend holds the harness's third call, so only the process state tells a pause from a wait.
+        assert harness_process_state(deployment) in {"T", "t"}, "the harness is stopped during the checkpoint"
         await coordination.resume(await deployment.participants(), "c1", deadline_ts=deadline())
+        await wait_until(lambda: harness_process_state(deployment) not in {"T", "t"})  # continued by the resume
         deployment.backend("/_ctl/release", {})
         reply = await run
 
@@ -317,6 +327,9 @@ async def test_e10_a_second_crash_before_the_replacement_starts_still_continues_
         await checkpoint(deployment, tmp_path / "c1", ["e10"])
         await crash_and_restore(deployment, tmp_path / "c1", ["e10"])
         first.cancel()
+        # The restore stops the sandbox it replaced in the background, best effort: a crash before that is done
+        # would leave it running, which is not what this scenario is about.
+        await wait_until(lambda: any(box["state"] == "stopped" for box in boxes(deployment)), timeout=60)
         # The next checkpoint lands before attempt 1 is dispatched: the agent session is restored but not
         # re-bound, and no seed has claimed the fork. Then Gym crashes again.
         await checkpoint(deployment, tmp_path / "c2", ["e10"], attempt=1, checkpoint_id="c2")
