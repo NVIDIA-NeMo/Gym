@@ -4,8 +4,10 @@
 
 import json
 import os
+import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -24,17 +26,19 @@ from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.models import flatten_namespace_tools, synthesize_responses_sse
 from nemo_gym.server_runtime import BaseResourcesServerConfig, SimpleResourcesServer, install_auto_exposure
 from responses_api_agents.codex_agent.app import parse_exec_jsonl, toml_dumps
+from responses_api_agents.codex_agent.tests.test_sandbox_runner import launch
+from responses_api_agents.codex_agent.tests.test_sandbox_runner import result as run_result
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import close_body, seed
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import setup as setup
 
 
-def pinned_cli() -> str:
+def pinned_cli(versions: tuple[str, ...] = ("0.144.4",)) -> str:
     binary = os.environ.get("CODEX_TEST_BIN")
     if not binary or not Path(binary).is_file():
         pytest.skip("Set CODEX_TEST_BIN to an existing Codex 0.144.4 executable; never auto-install for this test")
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, errors="replace", timeout=10)
-    if version.returncode or version.stdout.strip() != "codex-cli 0.144.4":
-        pytest.skip("This boundary regression targets Codex 0.144.4")
+    if version.returncode or version.stdout.strip() not in {f"codex-cli {pinned}" for pinned in versions}:
+        pytest.skip(f"This boundary regression targets Codex {', '.join(versions)}")
     return binary
 
 
@@ -469,3 +473,121 @@ def test_pinned_cli_with_an_unreachable_mcp_server(tmp_path: Path, setup, requir
     assert not started
     assert "required MCP servers failed to initialize" in result.stderr
     assert not requests, "the model must not be called without the required tools"
+
+
+def test_pinned_cli_keeps_gym_routing_when_the_task_sets_openai_variables(tmp_path: Path, setup) -> None:
+    """A task's OPENAI_API_KEY, OPENAI_BASE_URL and proxies reach Codex's shell tools unchanged, and Codex's own model
+    calls still go to the Gym provider with its key, through the real runner and launcher."""
+    # The README states this routing for each of these versions.
+    binary = pinned_cli(("0.144.4", "0.154.0", "0.155.1"))
+    if sys.platform != "linux" or shutil.which("node") is None:
+        pytest.skip("The runner's process supervision needs Linux, and the launcher needs Node")
+    model_calls = []
+    decoy_calls = []
+
+    class Model(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            model_calls.append((self.path, self.headers.get("Authorization"), body))
+            if len(model_calls) == 1:
+                command = (
+                    'printf "key=%s url=%s token=%s proxy=%s" '
+                    '"$OPENAI_API_KEY" "$OPENAI_BASE_URL" "$TASK_ACCESS_TOKEN" "$HTTP_PROXY"'
+                )
+                item = {
+                    "type": "function_call",
+                    "id": "fc_env",
+                    "call_id": "call_env",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": command}),
+                    "status": "completed",
+                }
+            else:
+                item = {
+                    "id": "msg_done",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Done.", "annotations": []}],
+                }
+            response = {
+                "id": f"resp_{len(model_calls)}",
+                "object": "response",
+                "created_at": 1,
+                "model": "gym-policy-model",
+                "status": "completed",
+                "output": [item],
+                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            }
+            wire = "".join(synthesize_responses_sse(response)).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(wire)))
+            self.end_headers()
+            self.wfile.write(wire)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    class Decoy(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            decoy_calls.append(self.path)
+            self.send_response(500)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    servers = [HTTPServer(("127.0.0.1", 0), handler) for handler in (Model, Decoy)]
+    threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
+    for thread in threads:
+        thread.start()
+    model, decoy = servers
+    decoy_url = f"http://127.0.0.1:{decoy.server_port}/v1"
+    # A proxy that would receive Codex's calls to the launcher's loopback forwarder without the launcher's NO_PROXY.
+    proxy_url = f"http://127.0.0.1:{decoy.server_port}"
+    home = tmp_path / "home"
+    codex_home = home / ".codex"
+    codex_home.mkdir(parents=True)
+    agent, sandbox = setup
+    request = seed()
+    request.sandbox_access.env = {
+        "HOME": str(home),
+        "OPENAI_API_KEY": "task-key",  # pragma: allowlist secret
+        "OPENAI_BASE_URL": decoy_url,
+        "TASK_ACCESS_TOKEN": "task-token",
+        "HTTP_PROXY": proxy_url,
+        "http_proxy": proxy_url,
+        "ALL_PROXY": proxy_url,
+    }
+    try:
+        # The configuration and environment the adapter stages for this task.
+        with TestClient(agent.setup_webserver()) as client:
+            session_id = client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).json()[
+                "agent_session_id"
+            ]
+            client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Show the task variables."})
+            config = sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"]
+            payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+            client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        (codex_home / "config.toml").write_text(config)
+        work = tmp_path / "work"
+        work.mkdir()
+        process = launch(
+            tmp_path,
+            [binary, "exec", "--json", "--skip-git-repo-check", "--cd", str(work), "--", "-"],
+            model_base_url=f"http://127.0.0.1:{model.server_port}/v1",
+            task_env=payload["task_env"],
+            env=payload["env"] | {"CODEX_HOME": str(codex_home)},
+        )
+        summary = run_result(tmp_path, process)
+    finally:
+        for server, thread in zip(servers, threads):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+    assert summary["return_code"] == 0, (tmp_path / "stderr.log").read_text()
+    assert decoy_calls == []
+    assert [(path, authorization) for path, authorization, _ in model_calls] == [("/v1/responses", "Bearer gym")] * 2
+    outputs = [item for item in model_calls[1][2]["input"] if item.get("type") == "function_call_output"]
+    assert outputs and f"key=task-key url={decoy_url} token=task-token proxy={proxy_url}" in json.dumps(outputs)
