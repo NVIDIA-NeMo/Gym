@@ -40,16 +40,19 @@ from resources_servers.instruction_following.indicifeval import (
     aggregate_scores,
     score_response,
 )
+from resources_servers.instruction_following.keyword_specific_position import KeywordSpecificPositionChecker
 
 
-# The upstream count:counting_composition and count:count_unique checkers count punctuation tokens as
-# words, so responses that follow their instruction fail (https://github.com/NVIDIA-NeMo/Gym/issues/4613,
-# https://github.com/NVIDIA-NeMo/Gym/issues/5067). Both are replaced by local fixes. Every other
+# The upstream count:counting_composition, count:count_unique and keywords:keyword_specific_position checkers
+# count punctuation tokens as words, so responses that follow their instruction fail
+# (https://github.com/NVIDIA-NeMo/Gym/issues/4613, https://github.com/NVIDIA-NeMo/Gym/issues/5067,
+# https://github.com/NVIDIA-NeMo/Gym/issues/5414). All three are replaced by local fixes. Every other
 # instruction uses the upstream checker unchanged.
 INSTRUCTION_DICT = {
     **instructions_registry.INSTRUCTION_DICT,
     "count:counting_composition": CountingCompositionChecker,
     "count:count_unique": CountUniqueChecker,
+    "keywords:keyword_specific_position": KeywordSpecificPositionChecker,
 }
 
 
