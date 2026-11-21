@@ -254,7 +254,9 @@ EXPORT_STEP_MODULE = "nemo_gym.orchestration.export_step"
 EVAL_SUCCEEDED_MARKER_ENV = "GYM_EVAL_SUCCEEDED_MARKER"
 
 
-def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) -> str:
+def render_export_tail(
+    bench_dir: Path, exports: list[tuple[str, list[str]]], *, archive_wait_seconds: int | None = None
+) -> str:
     """Render the part of the driver script that runs `gym eval run`, then each export of its rollouts.
 
     `exports` pairs an exporter name with its shell-quoted override arguments for `EXPORT_STEP_MODULE`. The run is a child, not
@@ -263,6 +265,8 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
     `<bench_dir>/eval.exit` and is the script's exit code: the exports are reported in their own result files
     and cannot change it. They run only after a successful run, so a partial run is never exported, and an
     export that already succeeded is not repeated (the export step decides that from its result file).
+    With `archive_wait_seconds` (a node-local dir), the exports first wait up to that long for the job to archive the
+    dir into the job dir, which it signals by creating the marker named by `NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV`.
     """
     bench = shlex.quote(str(bench_dir))
     lines = [
@@ -280,6 +284,7 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
         f'echo "$gym_run_rc" > {bench}/{EVAL_EXIT_FILENAME} || true',
         'if [ "$gym_run_rc" -eq 0 ]; then',
         f'    [ -z "${{{EVAL_SUCCEEDED_MARKER_ENV}:-}}" ] || : > "${EVAL_SUCCEEDED_MARKER_ENV}" || true',
+        *(_archive_wait_lines(archive_wait_seconds) if archive_wait_seconds is not None else []),
         *(
             f"    python3 -m {EXPORT_STEP_MODULE} {shlex.quote(name)} {' '.join(args)} || true"
             for name, args in exports
@@ -288,6 +293,23 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
         'exit "$gym_run_rc"',
     ]
     return "\n".join(lines)
+
+
+# The marker the job creates once its node-local archive step has ended; the exports wait for it, so an exporter finds
+# the archive in the job dir.
+NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV = "GYM_NODE_LOCAL_ARCHIVE_DONE_MARKER"
+
+
+def _archive_wait_lines(seconds: int) -> list[str]:
+    marker = f'"${{{NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV}:-}}"'
+    return [
+        f"    if [ -n {marker} ]; then",
+        f"        for ((_gym_i = 0; _gym_i < {seconds}; _gym_i += 5)); do [ ! -e {marker} ] || break; sleep 5; done",
+        # Removed once seen, so the exports never upload it.
+        f"        if [ -e {marker} ]; then rm -f -- {marker} || true; "
+        f'else echo "WARNING: the node-local dir was not archived within {seconds}s; exporting anyway"; fi',
+        "    fi",
+    ]
 
 
 # `uv sync` errors on an extra the checkout does not define. A pin from before `ray` and `mlflow` became extras defines

@@ -1518,6 +1518,22 @@ def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_p
     assert "the chain recorded: Previous job 100 ended FAILED: environment_protocol_violation" in decision.reason
 
 
+def test_inspection_names_a_chain_stopped_on_node_local_archives_that_do_not_restore(tmp_path):
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.orchestration.executors.slurm.resume_script import DRIVER_NODE_LOCAL_RESTORE_FAILED_REASON
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
+
+    job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
+    line = f"Previous job 100 ended FAILED: {DRIVER_NODE_LOCAL_RESTORE_FAILED_REASON}"
+    (job / INCOMPLETE_MARKER_NAME).write_text(line + chr(10))
+    collected = collect(job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    assert collected.chain_continuation_note == line[:500]
+    assert "the chain recorded: Previous job 100 ended FAILED: driver_node_local_restore_failed" in decision.reason
+    assert decision.chain_stop_kind == "driver_node_local_restore_failed"
+
+
 def test_inspection_names_a_chain_stopped_on_an_exhausted_grading_quota(tmp_path):
     from nemo_gym.eval.recovery.planner import decide_from_collected
     from nemo_gym.orchestration.executors.slurm.resume_script import QUOTA_EXHAUSTED_REASON

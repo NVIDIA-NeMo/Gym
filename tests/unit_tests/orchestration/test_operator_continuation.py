@@ -526,6 +526,11 @@ def test_a_missing_results_file_is_no_budget_continuation(tmp_path, slurm_bin):
             "PREPARE_FAILED_REASON",
             "fix the benchmark's preparation, then run `gym eval resubmit gym-job-x gsm8k --recover`",
         ),
+        (
+            "DRIVER_NODE_LOCAL_RESTORE_FAILED_REASON",
+            "repair or remove the node-local archive the stopped job's log names (in node-local/ of the benchmark "
+            "dir), then run `gym eval resubmit gym-job-x gsm8k --recover`",
+        ),
     ],
 )
 def test_a_chain_stopped_on_a_typed_failure_names_its_remedy_before_the_resume(tmp_path, slurm_bin, reason, action):

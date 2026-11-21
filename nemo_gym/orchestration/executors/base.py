@@ -67,6 +67,8 @@ class BaseExecutor(ABC):
     # the scheduler (time limit, preemption, node failure). False means asking
     # for `resumable` on this executor is a config error, not a silent no-op.
     supports_resumable: ClassVar[bool] = False
+    # Whether this executor gives the driver a node-local directory it archives into the job dir (`node_local`).
+    supports_node_local: ClassVar[bool] = False
     # What this executor writes to `SubmissionRecord.executor`, and what a resubmit dispatches on.
     name: ClassVar[str]
 

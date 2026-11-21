@@ -1146,6 +1146,13 @@ def test_with_default_capture_dir_injects_when_observability_on():
     assert out["model_call_capture_dir"] == "/remote/jobs/gym-job-20260729/gsm8k/model-calls"
 
 
+def test_with_default_capture_dir_uses_the_capture_root_when_given():
+    run = {"observability_enabled": True}
+    root = "/tmp/gym-node-local/gym-job-20260729/gsm8k"
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"), capture_root=root)
+    assert out["model_call_capture_dir"] == f"{root}/model-calls"
+
+
 @pytest.mark.parametrize("enabled", [True, False])
 def test_with_default_capture_dir_explicit_value_wins(enabled):
     run = {"observability_enabled": enabled, "model_call_capture_dir": "/custom/path"}

@@ -156,6 +156,7 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
     """
 
     supports_resumable = True
+    supports_node_local = True
     name = "slurm"
 
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:

@@ -472,6 +472,37 @@ class ResumeConfig(_StrictModel):
         return data
 
 
+# A host path that is safe in a pyxis mount list (no comma or colon) and in an unquoted shell word.
+_NODE_LOCAL_BASE_DIR_RE = re.compile(r"/[A-Za-z0-9._/-]+")
+
+
+class NodeLocalConfig(_StrictModel):
+    """A directory on the driver's node for files that should stay off shared storage.
+
+    The driver and the servers it starts find it in `NEMO_GYM_NODE_LOCAL_DIR`. When the driver step ends, the job writes
+    the files it added or changed into the job dir as one archive,
+    `node-local/<SLURM_JOB_ID>.<SLURM_RESTART_COUNT>.tar.gz`, and removes the directory.
+    """
+
+    # The host directory each Slurm job gets its own `gym-node-local-<SLURM_JOB_ID>` under. It must be node-local.
+    base_dir: str = "/tmp"
+    # Extract every earlier archive of the run, in the order its jobs ran, before the driver starts. Off suits files
+    # nothing reads back: each job then starts empty.
+    restore: bool = True
+    # Bound on writing one archive.
+    archive_timeout_seconds: int = Field(default=120, gt=0)
+
+    @field_validator("base_dir")
+    @classmethod
+    def _validate_base_dir(cls, value: str) -> str:
+        # fullmatch: `$` would also match before a trailing newline, which would split the rendered path.
+        if not _NODE_LOCAL_BASE_DIR_RE.fullmatch(value) or "/../" in f"{value}/":
+            raise ValueError(
+                f"node_local.base_dir must be an absolute path of letters, digits, '.', '_', '-' and '/', got {value!r}"
+            )
+        return value.rstrip("/") or "/"
+
+
 _COMMAND_AND_RUN = (
     "sets both `command` and `run`, but `run` only configures `gym eval run`, which `command` replaces. "
     "Fold those settings into the command, or drop it."
@@ -569,6 +600,23 @@ class BenchmarkRunConfig(_StrictModel):
         if self.resumable is False:
             return None
         return ResumeConfig() if self.resumable is True else self.resumable
+
+    # True gives the driver a node-local directory with NodeLocalConfig defaults (see there). Slurm only.
+    node_local: bool | NodeLocalConfig = False
+
+    @property
+    def node_local_config(self) -> NodeLocalConfig | None:
+        if self.node_local is False:
+            return None
+        return NodeLocalConfig() if self.node_local is True else self.node_local
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_node_local(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # A run without it saves the same config as before the setting existed.
+        data = handler(self)
+        if self.node_local is False:
+            data.pop("node_local", None)
+        return data
 
 
 # A query parameter's value in a URL, which may carry a credential (`?api_key=...`).

@@ -32,6 +32,7 @@ import logging
 from nemo_gym.core.failure_kinds import (
     COLLECTION_RESUME_REFUSED,
     DRIVER_INSTALL_FAILED,
+    DRIVER_NODE_LOCAL_RESTORE_FAILED,
     ENVIRONMENT_PREPARE_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
     PROVIDER_CREDENTIALS_REJECTED,
@@ -139,6 +140,11 @@ QUOTA_EXHAUSTED_REASON = (
 PROTOCOL_VIOLATION_REASON = (
     f"{ENVIRONMENT_PROTOCOL_VIOLATION}: an environment server answered with a reply the collector cannot use; "
     "the chain does not retry it; fix the server or the benchmark pairing, then gym eval submit again"
+)
+DRIVER_NODE_LOCAL_RESTORE_FAILED_REASON = (
+    f"{DRIVER_NODE_LOCAL_RESTORE_FAILED}: the run's node-local archives in node-local/ did not restore, and saved "
+    "rows may name files in them; the chain does not retry it; repair or remove the archive the job log names, then "
+    "continue with gym eval resubmit --recover, or submit again with node_local.restore false"
 )
 RESUME_REFUSED_REASON = (
     f"{COLLECTION_RESUME_REFUSED}: the saved rollouts do not verify against this run's inputs and configuration; "
@@ -702,6 +708,8 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {quota_exhausted_reason}" ;;
         {environment_protocol_violation})
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {protocol_violation_reason}" ;;
+        {driver_node_local_restore_failed})
+            _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {driver_node_local_restore_failed_reason}" ;;
         {server_start_failed})
             # A server that did not start (its port taken, for instance) before the run saved anything: there is
             # nothing to resume, and the failure is the infrastructure's, so the segment starts the run again fresh,
@@ -1137,6 +1145,8 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         environment_protocol_violation=ENVIRONMENT_PROTOCOL_VIOLATION,
         protocol_violation_reason=PROTOCOL_VIOLATION_REASON,
         quota_exhausted_reason=QUOTA_EXHAUSTED_REASON,
+        driver_node_local_restore_failed=DRIVER_NODE_LOCAL_RESTORE_FAILED,
+        driver_node_local_restore_failed_reason=DRIVER_NODE_LOCAL_RESTORE_FAILED_REASON,
         export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,
         receipt_artifacts=" ".join(f"{key}:{name}" for key, name in _RECEIPT_ARTIFACTS),
     )

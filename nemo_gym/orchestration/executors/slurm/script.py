@@ -37,6 +37,7 @@ from nemo_gym.orchestration.api import (
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
 )
+from nemo_gym.orchestration.executors import node_local as node_local_script
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_DIR,
     COLLECTOR_FILE_SIGNALS,
@@ -894,7 +895,7 @@ _gym_service_exited() {{
     # A successful run tears its services down as the driver ends: if the driver is already gone, its status stands.
     # Once the evaluation has succeeded (a driver with exports writes the marker then), a service that is lost
     # costs nothing the exports need, so the driver is left to finish and its status stands.
-    if [ -e "${{GYM_EVAL_SUCCEEDED_MARKER:-}}" ] || ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
+    if [ -e "${{GYM_EVAL_SUCCEEDED_MARKER:-}}" ] || ! kill -0 "$_gym_driver_pid" 2>/dev/null; then{settled}
         wait "$_gym_driver_pid"
         return
     fi
@@ -914,8 +915,15 @@ _gym_run_driver() {{
 }}
 _gym_run_driver"""
 
+# The services are no longer watched, but the extra check keeps its poll until the driver ends.
+_SETTLED_EXTRA_CHECK = """
+        while kill -0 "$_gym_driver_pid" 2>/dev/null; do
+            {extra_check}
+            sleep 5
+        done"""
 
-def _render_watched_driver(driver: str, services: list[str]) -> str:
+
+def _render_watched_driver(driver: str, services: list[str], extra_check: str = "") -> str:
     """The driver step, ended with TERM if a service it depends on exits first.
 
     A dead service would otherwise leave the driver retrying it until the walltime. The job exits
@@ -925,14 +933,20 @@ def _render_watched_driver(driver: str, services: list[str]) -> str:
     `GYM_EVAL_SUCCEEDED_MARKER` as soon as the evaluation succeeds, and from then on a lost service no
     longer ends the driver: the exports do not use it, and a requeue would reload the model for nothing.
     The driver's PID is kept in a lowercase variable, which no service's uppercase <NAME>_PID can overwrite.
+    `extra_check` is one more line the loop runs on every poll, also after a service is lost once the evaluation has
+    succeeded.
     """
-    if not services:
+    if not services and not extra_check:
         return driver
     checks = "\n".join(
-        f"        kill -0 ${bash_var(name)}_PID 2>/dev/null || {{ _gym_service_exited {name} ${bash_var(name)}_PID; return; }}"
-        for name in services
+        [
+            f"        kill -0 ${bash_var(name)}_PID 2>/dev/null || {{ _gym_service_exited {name} ${bash_var(name)}_PID; return; }}"
+            for name in services
+        ]
+        + ([f"        {extra_check}"] if extra_check else [])
     )
-    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks)
+    settled = _SETTLED_EXTRA_CHECK.format(extra_check=extra_check) if extra_check else ""
+    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks, settled=settled)
 
 
 def _render_lustre_md_stats_start(compute: SlurmComputeConfig, remote_bench_dir: Path, total_nodes: int) -> str:
@@ -1041,11 +1055,14 @@ def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
     return total_nodes, total_ntasks
 
 
-def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> dict[str, Any]:
+def _with_default_capture_dir(
+    run: dict[str, Any], remote_bench_dir: Path, *, capture_root: str | None = None
+) -> dict[str, Any]:
     """Enable capture for submitted evaluations unless explicitly disabled.
 
     Auto-derive model_call_capture_dir from this benchmark's own real output
-    directory when observability is on and the caller didn't set one.
+    directory, or from ``capture_root`` (the node-local dir) when given, when
+    observability is on and the caller didn't set one.
 
     Hydra interpolation resolves before remote_bench_dir exists (it's computed
     here, in build_sbatch_script, well after SubmitConfig validation), so
@@ -1055,7 +1072,7 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     """
     run = {OBSERVABILITY_ENABLED_KEY_NAME: True, **run}
     if run.get(OBSERVABILITY_ENABLED_KEY_NAME) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
-        return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: str(remote_bench_dir / "model-calls")}
+        return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: f"{capture_root or remote_bench_dir}/model-calls"}
     return run
 
 
@@ -1271,8 +1288,11 @@ def build_sbatch_script(
             ),
             **driver_env,
         }
+    node_local = benchmark.node_local_config
     if benchmark.command is None:
-        run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
+        # With a node-local dir, the per-call capture files stay on the driver's disk and reach the job dir archived.
+        capture_root = node_local_script.container_dir(remote_bench_dir) if node_local is not None else None
+        run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir, capture_root=capture_root)
         run_args.setdefault("require_complete", True)
         run_args = _with_resume_flag(run_args, resume is not None)
         # A task target goes first (`gym eval run` reads its first bare token as TARGET), and its rows live in the
@@ -1323,6 +1343,7 @@ def build_sbatch_script(
                 )
                 for name, settings in exports.items()
             ],
+            archive_wait_seconds=node_local_script.archive_wait_seconds(node_local) if node_local else None,
         )
         if exports
         else None
@@ -1351,11 +1372,8 @@ def build_sbatch_script(
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
     # Where this allocation's driver leaves the kind of a failure the next segment would repeat (see resume_script).
-    failure_file = (
-        f'{DRIVER_FAILURE_ENV}={shlex.quote(str(remote_bench_dir / DRIVER_FAILURE_NAME))}."$SLURM_JOB_ID" '
-        if resume
-        else ""
-    )
+    failure_path = f'{shlex.quote(str(remote_bench_dir / DRIVER_FAILURE_NAME))}."$SLURM_JOB_ID"' if resume else None
+    failure_file = f"{DRIVER_FAILURE_ENV}={failure_path} " if failure_path else ""
     driver_node_flags = (
         f' --nodelist="${{gym_nodes[{driver_node}]}}" --nodes=1 --ntasks=1' if driver_node is not None else ""
     )
@@ -1370,8 +1388,14 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
+    # Empty when the batch shell runs on the driver's node, which is node 0. Its steps carry the account, as the
+    # driver's does.
+    node_local_flags = f"{driver_node_flags} --account={shlex.quote(compute.account)}" if driver_node else ""
     driver_srun = (
-        f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f"{driver_env_prefix}{failure_file}"
+        f"{node_local_script.driver_env_prefix(remote_bench_dir, exports=export_tail is not None) if node_local else ''}"
+        f"srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f"{',' + node_local_script.driver_mount(remote_bench_dir) if node_local else ''}"
         f" --account={shlex.quote(compute.account)} --container-image={shlex.quote(config.driver.container)} "
         f"--output={log_path(DRIVER_STEP, _RUNTIME_JOB_ID)} {entrypoint}"
     )
@@ -1424,9 +1448,22 @@ def build_sbatch_script(
         marker_definition
         + (f"{gym_cmd}\n" if gym_cmd else "")
         + (f"_gym_md_stats {SERVICES_READY}\n" if md_stats else "")
-        + _render_watched_driver(driver_srun, watched)
+        + _render_watched_driver(driver_srun, watched, node_local_script.WATCH_CHECK if node_local else "")
         + (f"\n_gym_md_stats {DRIVER_END}" if md_stats else "")
     )
+    if node_local:
+        # Before the services: a run whose archives do not restore stops without a model start-up.
+        node_local_setup = node_local_script.render_setup(
+            node_local,
+            remote_bench_dir,
+            node_local_flags,
+            exports=export_tail is not None,
+            failure_file=failure_path,
+        )
+        service_commands = f"{node_local_setup}\n\n{service_commands}"
+        driver_command += "\n" + node_local_script.render_after_driver(
+            remote_bench_dir, node_local_flags, exports=export_tail is not None
+        )
     if resume:
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.
         driver_command += "\n" + render_resume_epilogue()
