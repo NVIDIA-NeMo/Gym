@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BIRD-Interact Full in a-Interact with Auto Ontology's interactive pipeline, as auto-ontology-eval runs it: the agent
+# buys the schema, column meanings and knowledge base, then runs the task within its BIRD-COIN budget, and the server
+# charges each query Auto Ontology runs on the database. See README.md, "Auto Ontology".
+#
+#   gym eval run --config benchmarks/bird_interact/full_auto_ontology_a_interact.yaml --model-type vllm_model \
+#     --split benchmark --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+#     --output results/bird_interact_full_a_auto_ontology.jsonl ++auto_ontology_api_key=<key>
+
+config_paths:
+  - benchmarks/bird_interact/full_a_interact.yaml
+  - responses_api_agents/auto_ontology_agent/configs/auto_ontology_agent.yaml
+  - benchmarks/bird_interact/auto_ontology/interactive.yaml
+
+# The image auto_ontology/build_image.sh builds for the release.
+auto_ontology_image: nemo-gym/bird-interact-catalog:${bird_interact_release}
+
+auto_ontology_agent:
+  responses_api_agents:
+    auto_ontology_agent:
+      datasets:
+        - name: bird_interact_full_a_interact
+          type: benchmark
+          jsonl_fpath: benchmarks/bird_interact/data/full/a_interact.jsonl
+          taskset: bird_interact:a_interact
+          prepare_script: benchmarks/bird_interact/prepare.py
+          num_repeats: 1
+          license: CC BY-SA 4.0
+
+# Auto Ontology runs the task in place of simple_agent; no dataset routes to the c-Interact server.
+bird_interact_agent: null
+bird_interact_c_interact: null
+
+bird_interact_a_interact:
+  environment_servers:
+    bird_interact:
+      agent_server:
+        name: auto_ontology_agent
+      # The whole task is one activation, which the agent bounds at its episode timeout (1800 s, as auto-ontology-eval
+      # bounds an a-Interact task); the server waits a little longer so the agent's own bound ends it.
+      activation_timeout_seconds: 1900
