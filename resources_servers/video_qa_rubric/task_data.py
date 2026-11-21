@@ -4,13 +4,16 @@
 
 Mirrors the wire: ``VideoQARubricVerifyRequest`` reads ``task_id`` and ``setting`` top-level and ``question`` and
 ``rubric`` from ``verifier_metadata``. A rubric is checked against ``Rubric`` but kept as the row has it, because the
-judge sees it unchanged; criterion guidance, evidence and an ``answer_policy`` are free-form.
+judge sees it unchanged; criterion guidance, evidence and an ``answer_policy`` are free-form. An agentic row may carry
+a ``video_binding``: the video a lending resources server puts into the episode's sandbox (video_mcqa's shape).
 """
 
 import math
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+
+from resources_servers.video_mcqa.task_data import VideoBinding
 
 
 _NESTED = {"legacy_location": "verifier_metadata"}
@@ -74,3 +77,4 @@ class TaskData(BaseModel):
     setting: Literal["single_turn", "agentic"] = Field(json_schema_extra={"consumed_by": ["verify"]})
     question: Text = Field(json_schema_extra={**_NESTED, "consumed_by": ["verify"]})
     rubric: RubricDict = Field(json_schema_extra={**_NESTED, "consumed_by": ["verify"]})
+    video_binding: VideoBinding | None = None

@@ -6,7 +6,8 @@ rubric score from 0 to 1. The judge sees the question, the rubric and the final 
 policy's reasoning or a reference answer.
 
 `configs/video_qa_rubric.yaml` runs single-turn rows (`simple_agent`, one model call). The same resources server
-grades agentic rows (`setting: agentic`) when an agent harness is bound to it.
+grades agentic rows (`setting: agentic`) when an agent harness is bound to it; `configs/video_qa_rubric_agentic.yaml`
+runs them with OpenCode in a sandbox that holds the video ([agentic setting](#agentic-setting)).
 
 ## Rows
 
@@ -57,8 +58,12 @@ policy.
 | --- | --- | --- | --- |
 | `graded` | The judge's checked score | score / 100 | no |
 | `empty_answer` | No final answer (reasoning only, an unfinished reasoning block, an empty message) | 0, or `empty_answer_reward` | no |
-| `execution_failure` | A tool call in a single-turn row, or an agent run marked as failed | 0 | no |
-| `infrastructure_failure` | The model call or the agent's infrastructure failed | 0 | yes |
+| `execution_failure` | A tool call in a single-turn row, or an agent run whose response is `failed` or `incomplete` | 0 | no |
+| `infrastructure_failure` | The model call of a single-turn row failed | 0 | yes |
+
+Both failures are read from the response's own status with video_mcqa's `response_failure`, so a replayed row scores
+the same. In the agentic setting the Environment Server sends verify only the failed runs that its outcome policy
+scores, so a failed agent run is not masked.
 
 `empty_answer_reward` is a training option (for example `-0.5`), as in video_mcqa: the reward of an attempt that
 produced output but no final answer. The final answer is always the last assistant message, whatever comes after it.
@@ -87,6 +92,27 @@ video_qa_rubric:
 
 A model served with vLLM works through the same `openai_model` server and vLLM's OpenAI-compatible endpoint, as in
 the example rollouts below.
+
+## Agentic setting
+
+`configs/video_qa_rubric_agentic.yaml` runs the stock `opencode_agent` (OpenCode 1.17.11) through a
+`single_agent_turn_legacy` Environment Server, with the agent, sandbox image, video tools and sandbox settings of the
+agentic Video-MME v2, Video-MME and LVBench configs (see video_mcqa's README, "Agentic setting"). Each episode's seed
+lends OpenCode a sandbox that holds the row's video, and the episode's close stops it; the judge then grades the final
+answer as in the single-turn setting. The sandbox reaches only the policy model server's host, so the judge server
+listens on 127.0.0.1.
+
+An agentic row names the video by its path in the sandbox instead of attaching it.
+`task.prepare_agentic(task_id, question, rubric, video_path="/testbed/videos/clip.mp4")` builds the user turn (the
+question and that path, never the rubric), and the row adds the `video_binding` the seed reads:
+
+```json
+"video_binding": {"source": "<host file under video_roots>", "sandbox_path": "videos/clip.mp4", "sha256": "<its SHA-256>"}
+```
+
+The seed refuses a row whose video is not a regular file under `video_roots` or does not have that SHA-256, and puts
+the video at `/testbed/<sandbox_path>`. Set the sandbox image (`VIDEO_MCQA_SANDBOX_IMAGE`), the OpenSandbox provider
+settings (`OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`), the judge, and `video_qa_rubric_agentic_video_roots`.
 
 ## Use in RL training
 

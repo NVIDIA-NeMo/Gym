@@ -28,11 +28,9 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.server_runtime import (
-    BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
-    SimpleResourcesServer,
     observe_llm_judge_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -44,7 +42,9 @@ from nemo_gym.verification import (
     record_parsed_judge_verdict,
     record_rejected_judge_reply,
 )
-from resources_servers.video_mcqa.scoring import EXECUTION_FAILURE_METADATA_KEY, final_answer_text
+from resources_servers.video_mcqa.app import response_failure
+from resources_servers.video_mcqa.sandbox import VideoSandboxServer, VideoSandboxServerConfig
+from resources_servers.video_mcqa.scoring import final_answer_text
 from resources_servers.video_mcqa.task import Setting
 from resources_servers.video_qa_rubric.rubric import (
     JUDGMENT_SCHEMA,
@@ -79,8 +79,9 @@ VERIFICATION_FIELDS = frozenset(
 )
 
 
-class VideoQARubricResourcesServerConfig(BaseResourcesServerConfig):
-    """The judge and its retry budget; ``empty_answer_reward`` is a training option."""
+class VideoQARubricResourcesServerConfig(VideoSandboxServerConfig):
+    """The judge and its retry budget; ``empty_answer_reward`` is a training option. The sandbox settings (video_mcqa's
+    sandbox.py) let the agentic setting lend each episode a sandbox that holds the row's video."""
 
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
@@ -117,8 +118,8 @@ class VideoQARubricVerifyRequest(BaseVerifyRequest):
 
 
 class VideoQARubricVerifyResponse(VideoQARubricVerifyRequest, BaseVerifyResponse):
-    """Reward = the rubric score (0-1); 0, or ``empty_answer_reward``, for an attempt without an answer; a failed model
-    call or agent infrastructure leaves the attempt unmeasured (masked)."""
+    """Reward = the rubric score (0-1); 0, or ``empty_answer_reward``, for an attempt without an answer; a failed
+    single-turn model call leaves the attempt unmeasured (masked)."""
 
     outcome: Outcome
     # The rubric score from 0 to 1; None when the attempt was not measured.
@@ -145,8 +146,9 @@ def _is_retryable(failure: NgFailureEvent) -> bool:
     return status is None or status in RETRYABLE_JUDGE_STATUSES or status >= 500
 
 
-class VideoQARubricResourcesServer(SimpleResourcesServer):
-    """Rubric grading of final answers; no tools or sessions."""
+class VideoQARubricResourcesServer(VideoSandboxServer):
+    """Rubric grading of final answers. With ``sandbox_provider`` set, each agentic episode's seed lends a sandbox that
+    holds the row's video, as for the video MCQA servers; otherwise the server keeps no sessions."""
 
     config: VideoQARubricResourcesServerConfig
     checkpoint_verify: ClassVar[Literal["replay"]] = "replay"
@@ -166,25 +168,15 @@ class VideoQARubricResourcesServer(SimpleResourcesServer):
         judge-only recovery. It is never scored as a wrong answer.
         """
         response = body.response
-        if response.status == "failed" or response.error is not None:
+        # video_mcqa's rules, read from the response's own status so a replayed row scores the same: a failed
+        # single-turn model call is not measured; a single-turn tool call and a failed or incomplete agent run score 0.
+        failure, failure_reason = response_failure(response, setting=body.setting)
+        if failure is not None:
             return self._respond(
                 body,
-                outcome="infrastructure_failure",
-                rubric_score=None,
-                failure_kind="video_qa_rubric:infrastructure_failure",
-                failure_reason="The model endpoint or agent infrastructure failed; no answer was measured.",
-            )
-        failure_reason = None
-        if body.setting == "single_turn" and any(item.type == "function_call" for item in response.output):
-            failure_reason = "A tool call is not a single-turn answer."
-        elif body.setting == "agentic" and (response.metadata or {}).get(EXECUTION_FAILURE_METADATA_KEY) == "true":
-            failure_reason = "The agent run failed; its final answer is not graded."
-        if failure_reason is not None:
-            return self._respond(
-                body,
-                outcome="execution_failure",
-                rubric_score=0.0,
-                failure_kind="video_qa_rubric:execution_failure",
+                outcome=failure,
+                rubric_score=None if failure == "infrastructure_failure" else 0.0,
+                failure_kind=f"video_qa_rubric:{failure}",
                 failure_reason=failure_reason,
             )
         answer = final_answer(response)

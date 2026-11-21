@@ -19,7 +19,6 @@ from nemo_gym.core import NgFailureEvent
 from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 from nemo_gym.verification import JudgeError
-from resources_servers.video_mcqa.scoring import EXECUTION_FAILURE_METADATA_KEY
 from resources_servers.video_mcqa.tests.helpers import grade_failed_run_and_replay, response
 from resources_servers.video_qa_rubric.app import (
     VideoQARubricResourcesServer,
@@ -283,21 +282,45 @@ async def test_a_single_turn_tool_call_is_an_execution_failure_worth_zero(penalt
 
 
 @pytest.mark.parametrize("penalty", [None, -0.5])
-async def test_a_failed_agent_run_scores_zero_when_its_saved_answer_is_replayed(penalty) -> None:
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"status": "failed", "error": {"code": "invalid_prompt", "message": "fixture: the model refused the request"}},
+        {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+    ],
+    ids=["failed_run", "incomplete_run"],
+)
+async def test_a_failed_or_incomplete_agent_run_scores_zero_also_when_replayed(penalty, updates) -> None:
     # Gym's agents verify a failed run (execution_failure_reward_zero) as an empty response and require exactly 0.
     server, calls = make_server(empty_answer_reward=penalty)
     agentic = copy.deepcopy(ROW) | {"setting": "agentic"}
-    failed = response("An orange square moves to the right.", metadata={EXECUTION_FAILURE_METADATA_KEY: "true"})
+    failed = response("An orange square moves to the right.", **updates)
     saved, replayed = await grade_failed_run_and_replay(server, VideoQARubricVerifyRequest, agentic, failed)
+    # The saved row keeps the answer; its status decides the score on replay too.
     for result in (saved, replayed.model_dump()):
         assert (result["outcome"], result["reward"], result["mask_sample"]) == ("execution_failure", 0, False)
+    direct = await server.verify(request(setting="agentic", **updates))
+    assert direct.failure_kind == "video_qa_rubric:execution_failure" and direct.failure_reason
     assert calls == []
-    # An agent without the failure marker gets the same zero for the empty response it verifies (a replay of its
-    # saved row then grades the saved answer, as video_mcqa does).
+    # A completed run that an agent verifies as an empty response gets the same zero (a replay of its saved row then
+    # grades the saved answer, as video_mcqa does).
     server, calls = make_server(judgment(60, 0), empty_answer_reward=penalty)
     saved, replayed = await grade_failed_run_and_replay(server, VideoQARubricVerifyRequest, agentic, response("Red."))
     assert (saved["outcome"], saved["reward"], saved["mask_sample"]) == ("empty_answer", 0, False)
     assert (replayed.outcome, replayed.reward, len(calls)) == ("graded", 0.6, 1)
+
+
+async def test_a_failed_model_call_is_masked_only_in_the_single_turn_setting() -> None:
+    server, calls = make_server()
+    for setting, outcome, masked in (
+        ("single_turn", "infrastructure_failure", True),
+        ("agentic", "execution_failure", False),
+    ):
+        result = await server.verify(
+            request(setting=setting, status="failed", error={"code": "server_error", "message": "fixture"})
+        )
+        assert (result.outcome, result.mask_sample, result.reward) == (outcome, masked, 0)
+    assert calls == []
 
 
 @pytest.mark.parametrize("penalty", [None, -0.5])

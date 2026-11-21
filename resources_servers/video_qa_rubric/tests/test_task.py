@@ -78,9 +78,11 @@ def test_the_schema_declares_the_fields_the_verifier_reads() -> None:
     }
     top_level = set(TaskData.model_fields) - nested
     assert nested == set(VideoQARubricMetadata.model_fields) == {"question", "rubric"}
-    assert top_level == {"task_id", "setting"} <= set(VideoQARubricVerifyRequest.model_fields)
+    assert top_level - {"video_binding"} == {"task_id", "setting"} <= set(VideoQARubricVerifyRequest.model_fields)
     for model in (TaskData, VideoQARubricMetadata):
-        assert all(field.is_required() for field in model.model_fields.values())
+        assert all(field.is_required() for name, field in model.model_fields.items() if name != "video_binding")
+    # An agentic row's video, which a lending server's seed reads (test_agentic.py); the verifier does not.
+    assert not TaskData.model_fields["video_binding"].is_required()
 
 
 def test_rows_the_verifier_refuses_are_invalid_task_data() -> None:
