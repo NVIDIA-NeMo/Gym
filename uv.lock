@@ -3794,7 +3794,7 @@ requires-dist = [
     { name = "boto3", marker = "extra == 'sandbox'", specifier = ">=1.34" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'" },
     { name = "datasets" },
-    { name = "daytona", marker = "extra == 'sandbox'", specifier = ">=0.179.0" },
+    { name = "daytona", marker = "extra == 'sandbox'", specifier = ">=0.179.0,<1" },
     { name = "defusedxml", marker = "extra == 'dev'", specifier = ">=0.7.1" },
     { name = "devtools" },
     { name = "e2b", marker = "extra == 'sandbox'", specifier = ">=2.46.0,<2.51.0" },
