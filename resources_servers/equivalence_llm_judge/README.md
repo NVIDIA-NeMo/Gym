@@ -92,7 +92,7 @@ gym env start \
   "+equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_prompt_template='<|Problem|>\n{question}\n\n<|Gold|>\n{expected_answer}\n\n<|Prediction|>\n{generated_answer}\n'"
 ```
 
-The judge is the policy model (`configs/equivalence_llm_judge.yaml` sets `judge_model_server.name: policy_model`). The command gives the judge 8192 output tokens because a reasoning model can spend thousands of tokens reasoning before it writes the `[[A=B]]`/`[[A!=B]]` verdict, and a judge reply with no verdict scores 0.
+The judge is the policy model (`configs/equivalence_llm_judge.yaml` sets `judge_model_server.name: policy_model`). The command gives the judge 8192 output tokens because a reasoning model can spend thousands of tokens reasoning before it writes the `[[A=B]]`/`[[A!=B]]` verdict, and a judge reply with no verdict, or one cut at this limit, masks the row (`judge_unparseable`) instead of grading it.
 
 Then query via any agent; verification happens with `/verify` on this server when evaluating rollouts.
 
@@ -102,7 +102,8 @@ You should always check the license of your chosen judge model to make sure your
 ### Notes
 - By default (`check_twice_swap=false`), the server performs a single judge pass. If the verdict is equal, reward is 1 and one evaluation is returned; if not equal, reward is 0 and one evaluation is returned.
 - If `check_twice_swap=true` and the first pass is equal, a second pass is performed with expected and generated answers swapped. Reward is 1 only if the second pass is also equal; otherwise `reward_if_swap_fails` is used (default 0.0). In the double-check case, two evaluations are returned.
-- If the judge output doesn't include either label, it defaults to not-equal.
+- If a judge pass's output doesn't include either label, or the judge reply was cut off (`status: incomplete`), the pass gives no grade: verification raises `JudgeError` with `failure_kind` `judge_unparseable`, the shared judge failsafe masks the row (`mask_sample=true`) and routes it to the failures sidecar for re-judging.
+- A row without an `expected_answer` is masked (`failure_kind` `verifier_error`) without calling the judge. An empty final answer, or one longer than `max_answer_chars`, is still scored 0.
 - **OpenQA support (enabled by default)**: The server now enables per-record regex extraction (`use_per_record_regex=true`), full generation rescue (`check_full_generation_on_fail=true`), and length-based thresholds (`extraction_length_threshold=120`) by default. These features only activate when `template_metadata.output_regex` is present, making them safe for all datasets. They reduce false negatives from regex extraction failures while maintaining backward compatibility.
 
 ## Licensing

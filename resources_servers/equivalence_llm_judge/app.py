@@ -32,6 +32,8 @@ from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler
 
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
+    VERIFIER_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -47,7 +49,7 @@ from nemo_gym.server_runtime import (
     observe_llm_judge_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import VerifierFixture, call_judge, record_parsed_judge_verdict
+from nemo_gym.verification import JudgeError, VerifierFixture, call_judge, record_parsed_judge_verdict
 from resources_servers.equivalence_llm_judge.slice_metrics import compute_slice_metrics
 from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
 
@@ -524,7 +526,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             generated_full = _extract_last_assistant_text(
                 body, extract_regex=None, extraction_failure_message=self.config.msg_extraction_failure
             )
-            second_equal, second_eval = await self._generate_judge_evaluation(
+            second_equal, second_eval = await self._judge_verdict(
                 question=question, expected_answer=expected, generated_answer=generated_full
             )
 
@@ -558,7 +560,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             return self._make_response(body, expected, reward=1.0, evaluations=[first_eval])
 
         # Run swap check
-        second_equal, second_eval = await self._generate_judge_evaluation(
+        second_equal, second_eval = await self._judge_verdict(
             question=question, expected_answer=generated, generated_answer=expected
         )
         reward = 1.0 if second_equal else self.config.reward_if_swap_fails
@@ -588,6 +590,13 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                 f"final_answer_too_long: {len(answer)} characters exceeds {self.config.max_answer_chars}"
             )
             return result
+        if not expected:
+            # A row without its expected answer cannot be graded: the zero would measure the task data, not the answer.
+            result = self._make_response(body, expected, reward=0.0, evaluations=[])
+            result.mask_sample = True
+            result.failure_kind = VERIFIER_ERROR
+            result.failure_reason = "missing_expected_answer: the row has no expected_answer to judge against"
+            return result
         question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
 
         # Step 2: Determine extraction regex (None if long answer triggers threshold)
@@ -602,7 +611,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
         async def grade() -> LLMJudgeVerifyResponse:
             # Step 4: Run first judge evaluation
-            first_equal, first_eval = await self._generate_judge_evaluation(
+            first_equal, first_eval = await self._judge_verdict(
                 question=question, expected_answer=expected, generated_answer=generated
             )
 
@@ -613,6 +622,34 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
         # Every judge pass (rescue and swap included) is a dependency of the returned grade.
         return await observe_llm_judge_grading(grade)
+
+    async def _judge_verdict(
+        self, *, question: str, expected_answer: str, generated_answer: str
+    ) -> tuple[bool, JudgeEvaluation]:
+        """Run one judge pass whose verdict the grade uses.
+
+        A reply cut at the judge's own output limit, or one without a verdict, is no grade: the judge failed, not the
+        answer. JudgeError makes judge_failsafe mask the row as judge_unparseable, and recovery re-judges it from the
+        saved answer. A cut reply's label may come from text the judge had not finished, so it is not used either.
+        """
+        equal, evaluation = await self._generate_judge_evaluation(
+            question=question, expected_answer=expected_answer, generated_answer=generated_answer
+        )
+        response = evaluation.response
+        cut = response is not None and (response.status == "incomplete" or response.incomplete_details is not None)
+        if cut or evaluation.verdict_label is None:
+            try:
+                text = response.output[-1].content[-1].text
+            except Exception:
+                text = None
+            reason = getattr(response.incomplete_details, "reason", None) if response is not None else None
+            problem = f"reply was cut off ({reason or 'incomplete'})" if cut else "reply has no verdict"
+            raise JudgeError(
+                f"equivalence judge {problem}, parsing issues {evaluation.judgement_parsing_issues}: "
+                f"{(text if isinstance(text, str) else '')[-500:]!r}",
+                failure_kind=JUDGE_UNPARSEABLE,
+            )
+        return equal, evaluation
 
     async def _generate_judge_evaluation(
         self, *, question: str, expected_answer: str, generated_answer: str
