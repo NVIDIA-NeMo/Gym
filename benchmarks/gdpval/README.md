@@ -565,7 +565,8 @@ Replace `opencode` with `openclaw` for OpenClaw.
   `++gdpval_openclaw_agent.responses_api_agents.openclaw_agent.<key>=<value>`.
 
 `benchmarks/gdpval/nooa.yaml` runs [NOOA](../../responses_api_agents/nooa_agent/README.md) in the task sandbox the
-resources server lends it (`gym eval prepare --benchmark gdpval/nooa`, then `gym eval run --benchmark gdpval/nooa`).
+resources server lends it. Follow the [NOOA GDPval tutorial](../../fern/versions/latest/pages/evaluation-tutorials/nooa-gdpval.mdx)
+to configure the policy model, prepare the data, and run the benchmark.
 NOOA calls the task tools as methods in its Python cell, such as `await self.finish(reason=..., paths=[...])`, through
 the resources server's HTTP routes.
 
