@@ -512,7 +512,13 @@ printf '%s\0' "${VLLM_DECODE_ARGS[@]}" ''
                     self.assertEqual(decode, ["--unrelated", "value with spaces"])
 
     def serving_arguments(
-        self, command: str, *, rank: int, coupled_head: bool = False, env: dict[str, str] | None = None
+        self,
+        command: str,
+        *,
+        rank: int,
+        coupled_head: bool = False,
+        env: dict[str, str] | None = None,
+        extra_stubs: str = "",
     ) -> tuple[str, str, list[str], list[str]]:
         # Record argv separately for vLLM and the router; marker files synchronize startup.
         stubs = r"""
@@ -545,7 +551,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
 """
         with TemporaryDirectory(prefix="gym-serving-args-") as state_dir:
             status, stdout, stderr = self.run_shell(
-                stubs + command,
+                stubs + extra_stubs + command,
                 env=(env or {})
                 | {
                     "SLURM_PROCID": str(rank),
@@ -1296,6 +1302,26 @@ trigger_prefill_profile() {
                                 self.assertEqual(args[-2:], ["--api-server-count", "1"])
                             else:
                                 self.assertIn("--api-server-count=2", args)
+
+    def test_multinode_aggregated_headless_ranks_drop_api_server_count(self) -> None:
+        """Model configs set --api-server-count for the serving rank; the headless ranks of one engine reject it."""
+        with TemporaryDirectory(prefix="gym-aggregated-headless-") as directory:
+            config = Path(directory) / "config with spaces.sh"
+            config.write_text(
+                "VLLM_COMMON_ARGS=(--api-server-count 3 --common-test 'value with spaces')\n"
+                "VLLM_PREFILL_ARGS=(--prefill-test producer --api-server-count=2)\n"
+            )
+            env = self.MULTINODE_ENV | {"VLLM_CONFIG": str(config)}
+            _, command = self.generate_commands(env=env)
+            for rank in (1, 3):  # rank 0 serves the API and keeps its tuning
+                with self.subTest(rank=rank):
+                    _, _, args, _ = self.serving_arguments(
+                        command, rank=rank, env=env, extra_stubs='getent() { echo "127.0.0.1 STREAM node0"; }\n'
+                    )
+                    self.assertIn("--headless", args)
+                    self.assertIn("value with spaces", args)
+                    self.assertIn("producer", args)
+                    self.assertFalse(any(arg.startswith("--api-server-count") for arg in args), args)
 
     def test_coupled_nodes_use_correct_tier_roles_and_ranks(self) -> None:
         """Assign coupled tier roles, ranks, and ports while leaving router balancing thresholds at defaults."""

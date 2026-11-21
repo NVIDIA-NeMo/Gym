@@ -768,25 +768,25 @@ if (( \${#router_extra_args[@]} )); then
     router_common_args+=("\${router_extra_args[@]}")
 fi
 
+set_headless_args() {
+    # Model configs tune API processes for serving ranks. Headless ranks
+    # reject this option, whether supplied as two arguments or with '='.
+    headless_args=()
+    while (( \$# )); do
+        if [[ "\$1" == --api-server-count ]]; then
+            shift 2
+        elif [[ "\$1" == --api-server-count=* ]]; then
+            shift
+        else
+            headless_args+=("\$1")
+            shift
+        fi
+    done
+}
+
 if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
     PREFILL_HEAD=\${nodes[0]}
     DECODE_HEAD=\${nodes[$NUM_PREFILL_NODES]}
-
-    set_headless_args() {
-        # Model configs tune API processes for serving ranks. Headless ranks
-        # reject this option, whether supplied as two arguments or with '='.
-        headless_args=()
-        while (( \$# )); do
-            if [[ "\$1" == --api-server-count ]]; then
-                shift 2
-            elif [[ "\$1" == --api-server-count=* ]]; then
-                shift
-            else
-                headless_args+=("\$1")
-                shift
-            fi
-        done
-    }
 
     if (( SLURM_PROCID == 0 )); then
         # The first prefill rank owns its tier's API server. The remaining
@@ -1070,6 +1070,9 @@ else
                 multinode_args=(--nnodes $NUM_NODES --node-rank \$SLURM_PROCID \
                     --master-addr "\$master_addr" --master-port ${AGGREGATED_MASTER_PORT:-29500})
                 if (( SLURM_PROCID != 0 )); then
+                    # Model configs set --api-server-count for the serving rank; headless ranks reject it.
+                    set_headless_args "\${aggregated_args[@]}"
+                    aggregated_args=("\${headless_args[@]}")
                     multinode_args+=(--headless)
                 fi
             fi
