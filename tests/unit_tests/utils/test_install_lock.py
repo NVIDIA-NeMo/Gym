@@ -149,3 +149,40 @@ async def test_a_read_only_package_directory_runs_the_install_unlocked_and_unrec
             assert any(str(package / name) in message for message in warned), name
     finally:
         package.chmod(0o755)
+
+
+def test_selected_npm_cli_retries_partial_install_and_keeps_releases_separate(monkeypatch, tmp_path):
+    import json
+    import subprocess
+
+    monkeypatch.setenv("NEMO_GYM_SELECTED_NPM_CLI", "example")
+    monkeypatch.setenv("PATH", os.environ["PATH"])
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(install_lock_module.shutil, "which", lambda _: "/usr/bin/npm")
+    installs = []
+
+    def npm(args, *, check):
+        prefix = Path(args[args.index("--prefix") + 1])
+        release = args[-1].split("@")[-1]
+        installs.append(release)
+        node_modules = prefix / "node_modules"
+        (node_modules / ".bin").mkdir(parents=True, exist_ok=True)
+        (node_modules / ".bin/example").touch()
+        (node_modules / "example").mkdir(exist_ok=True)
+        (node_modules / "example/package.json").write_text(json.dumps({"version": release}))
+        if len(installs) == 1:
+            raise subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(install_lock_module.subprocess, "run", npm)
+
+    def select(version):
+        return install_lock_module.ensure_selected_npm_cli(
+            "example", "example", version, install_node=lambda: pytest.fail("npm exists")
+        )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        select("1.0.0")
+    for version in ("1.0.0", "2.0.0", "1.0.0"):
+        assert select(version)
+        assert os.environ["PATH"].split(os.pathsep)[0].endswith(f"/example/{version}/node_modules/.bin")
+    assert installs == ["1.0.0", "1.0.0", "2.0.0"]

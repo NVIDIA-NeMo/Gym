@@ -71,6 +71,7 @@ def aggregate_response_usage(usages: list[NeMoGymResponseUsage | None]) -> NeMoG
 
 
 class LangGraphAgentConfig(BaseResponsesAPIAgentConfig):
+    langgraph_version: str | None = None
     model_server: ModelServerRef
     resources_server: ResourcesServerRef | None = None
 

@@ -92,15 +92,36 @@ def test_bad_release_never_installs_and_removes_temporary_download(tmp_path, rel
 
 
 @pytest.mark.parametrize("failure", ["eula", "version", "os", "arch"])
-def test_rejects_unaccepted_terms_and_unpinned_targets_before_io(tmp_path, monkeypatch, failure):
+def test_rejects_unaccepted_terms_and_invalid_targets_before_io(tmp_path, monkeypatch, failure):
     calls = Mock(side_effect=AssertionError("must not download or execute"))
     monkeypatch.setattr(install_pool.subprocess, "run", calls)
     monkeypatch.setattr(install_pool.platform, "system", lambda: "Windows" if failure == "os" else "Linux")
     monkeypatch.setattr(install_pool.platform, "machine", lambda: "riscv64" if failure == "arch" else "x86_64")
     root = tmp_path / "session"
-    with pytest.raises(ValueError, match="eula|No pinned Pool archive"):
+    with pytest.raises(ValueError, match="eula|Invalid Pool release|No pinned Pool archive"):
         install_pool.install(
-            root, version="v1.0.17" if failure == "version" else "v1.0.16", accept_eula=failure != "eula"
+            root, version="latest" if failure == "version" else "v1.0.16", accept_eula=failure != "eula"
         )
     calls.assert_not_called()
     assert not root.exists()
+
+
+@pytest.mark.parametrize("has_checksum", [True, False])
+def test_release_outside_bundled_pins_requires_matching_checksum(tmp_path, monkeypatch, release, has_checksum):
+    archive, make, calls = release
+    make(version="1.0.17")
+    monkeypatch.setattr(install_pool.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(install_pool.platform, "machine", lambda: "x86_64")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    filename = "pool-linux-amd64.tar.gz" if has_checksum else "pool-linux-arm64.tar.gz"
+    manifest = Mock(return_value=f"{digest}  {filename}\n")
+    monkeypatch.setattr(install_pool.subprocess, "check_output", manifest)
+    root = tmp_path / "session"
+    if has_checksum:
+        install_pool.install(root, version="v1.0.17", accept_eula=True)
+        assert (root / "bin/pool").is_file()
+    else:
+        with pytest.raises(ValueError, match="No pinned Pool archive"):
+            install_pool.install(root, version="v1.0.17", accept_eula=True)
+        calls.assert_not_called()
+    assert manifest.call_args.args[0][-1] == "https://downloads.poolside.ai/pool/v1.0.17/checksums.txt"

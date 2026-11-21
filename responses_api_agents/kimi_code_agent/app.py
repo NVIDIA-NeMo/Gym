@@ -173,8 +173,6 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(
                 "Kimi Code sessions use Kimi's own tools; required tool grants are unsupported"
             )
-        if self.config.kimi_version != KIMI_VERSION:
-            raise AgentSeedRejectedError(f"Kimi Code sessions pin release checksums for kimi_version {KIMI_VERSION}")
         if self.config.subagent_model_server and self._token_id_capture_enabled():
             raise AgentSeedRejectedError("Kimi Code token capture would record subagent_model_server calls as policy")
         access = body.sandbox_access
@@ -251,6 +249,7 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         state = KimiSession(
+            version=self.config.kimi_version or KIMI_VERSION,
             request=body,
             provider_name=provider.name,
             sandbox_id=sandbox.sandbox_id,
@@ -527,7 +526,7 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             metadata={
                 "harness_execution": "sandbox",
-                "kimi_version": KIMI_VERSION,
+                "kimi_version": state.version,
                 "kimi_exit_code": str(return_code),
                 "kimi_num_subagents": str(len(subagents)),
                 "kimi_max_concurrent_subagents": str(max_concurrency(subagents)),

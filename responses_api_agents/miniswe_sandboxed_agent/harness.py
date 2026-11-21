@@ -8,6 +8,7 @@ import base64
 import binascii
 import json
 import logging
+from importlib.metadata import version as installed_version
 from pathlib import Path
 from shlex import quote
 from time import monotonic, time
@@ -251,9 +252,13 @@ class MiniSWEHarness:
         uv, python = await bootstrap_assets(arch, libc)
         await self.sandbox.upload(uv, remote + "/uv.tar.gz")
         await self.sandbox.upload(python, remote + "/python.tar.gz")
-        await self.sandbox.upload(
-            Path(__file__).with_name("runtime") / "requirements.txt", remote + "/requirements.txt"
-        )
+        requirements = Path(__file__).with_name("runtime") / "requirements.txt"
+        selected = installed_version("mini-swe-agent")
+        if selected != "2.4.6":
+            target = self.directory / "runtime-requirements.txt"
+            target.write_text(requirements.read_text().replace("mini-swe-agent==2.4.6", f"mini-swe-agent=={selected}"))
+            requirements = target
+        await self.sandbox.upload(requirements, remote + "/requirements.txt")
         # Extract as the task user: uploads may be root-owned and non-root task
         # users must own both the executable and the new Python environment.
         result = await self.sandbox.exec(

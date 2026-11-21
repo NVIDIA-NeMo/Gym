@@ -140,8 +140,6 @@ class GooseAgent(SimpleResponsesAPIAgent):
         """Connect to (or start) the task sandbox and install Goose before the activation."""
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise AgentSeedRejectedError("Goose sessions use Goose's own tools; required tool grants are unsupported")
-        if self.config.goose_version != GOOSE_VERSION:
-            raise AgentSeedRejectedError(f"Goose sessions pin release checksums for goose_version {GOOSE_VERSION}")
         access = body.sandbox_access
         owns_sandbox = access is None
         if self.config.network_access == "model_and_tools":
@@ -202,6 +200,7 @@ class GooseAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         state = GooseSession(
+            version=self.config.goose_version or GOOSE_VERSION,
             request=body,
             provider_name=provider.name,
             sandbox_id=sandbox.sandbox_id,
@@ -459,7 +458,7 @@ class GooseAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             metadata={
                 "harness_execution": "sandbox",
-                "goose_version": GOOSE_VERSION,
+                "goose_version": state.version,
                 "goose_exit_code": str(return_code),
                 "goose_stop_reason": stop or "",
                 "goose_subagents": str(len(children)),

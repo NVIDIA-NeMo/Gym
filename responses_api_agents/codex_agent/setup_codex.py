@@ -22,7 +22,7 @@ import tarfile
 import urllib.request
 from pathlib import Path
 
-from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
+from nemo_gym.utils.install_lock import adopt_recorded_install, ensure_selected_npm_cli, install_lock, record_install
 
 
 LOG = logging.getLogger(__name__)
@@ -77,6 +77,8 @@ def ensure_node() -> None:
 
 def ensure_codex(version: str | None = None) -> None:
     """Ensure ``codex`` is on PATH, installing it if necessary."""
+    if ensure_selected_npm_cli(_CODEX_PKG, "codex", version, install_node=_install_node_locally):
+        return
     if shutil.which("codex"):
         return
 

@@ -24,7 +24,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
+from nemo_gym.utils.install_lock import adopt_recorded_install, ensure_selected_npm_cli, install_lock, record_install
 
 
 LOG = logging.getLogger(__name__)
@@ -98,6 +98,8 @@ def _install_node_locally() -> Path:
 
 def ensure_cline(version: str | None = None) -> None:
     """Ensure ``cline`` is on PATH at the requested version, installing it if necessary."""
+    if ensure_selected_npm_cli(_CLINE_PKG, "cline", version, install_node=_install_node_locally):
+        return
     # Host calls install lazily in each worker. Serialize both the version check and installation,
     # then let waiting workers discover the installed binary even when its directory was not on PATH.
     with install_lock(_INSTALL_LOCK):

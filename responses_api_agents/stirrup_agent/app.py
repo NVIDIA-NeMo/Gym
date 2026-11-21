@@ -179,6 +179,7 @@ _REMOVED_OPTION_MESSAGE = (
 
 
 class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
+    stirrup_version: str | None = None
     model_server: ModelServerRef
 
     @model_validator(mode="before")

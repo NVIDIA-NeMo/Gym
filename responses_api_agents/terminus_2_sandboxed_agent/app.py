@@ -108,6 +108,7 @@ def _warn_deprecated_once() -> None:
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     # Only the legacy `/run` route seeds and verifies through a resources server. Episode sessions get their
     # sandbox from the environment server that drives them and need none.
+    harbor_version: str | None = None
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     max_turns: int | None

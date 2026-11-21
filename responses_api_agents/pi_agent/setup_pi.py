@@ -26,7 +26,7 @@ import urllib.request
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
+from nemo_gym.utils.install_lock import adopt_recorded_install, ensure_selected_npm_cli, install_lock, record_install
 
 
 LOG = logging.getLogger(__name__)
@@ -93,6 +93,7 @@ def ensure_pi(
     overrides that local runs use, so it sees the Pi that will run. A version that is not exact, such as ``latest``
     or an npm range, is installed as given and not checked.
     """
+    ensure_selected_npm_cli(_PI_PKG, "pi", version, install_node=_install_node_locally)
     local_bin = Path.home() / ".local" / "bin"
     if not shutil.which("pi"):
         if (local_bin / "pi").is_file():

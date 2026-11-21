@@ -134,6 +134,7 @@ class MiniSWEEpisodeSession(AgentSessionState):
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     # The resources server the legacy `/run` path seeds and verifies against. Episode sessions
     # (`/v1/agent_sessions`) receive the sandbox from the environment server and need none.
+    mini_swe_version: str | None = None
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     sandbox_model_base_url: str | None = None

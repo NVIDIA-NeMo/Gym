@@ -162,3 +162,55 @@ def test_native_override_on_a_shipped_preset(preset, pin_path, key, old_pin):
     pins = OmegaConf.select(config, pin_path)
     assert pins[key] == old_pin
     assert "harness_version" not in pins
+
+
+@pytest.mark.parametrize(
+    ("agent", "version", "expected"),
+    [
+        ("pool_agent", "v1.0.16", "v1.0.16"),
+        ("copilot_agent", "1.2.3", "1.2.3"),
+        ("goose_agent", "v1.54.0", "1.54.0"),
+    ],
+)
+def test_published_versions_reach_the_native_installer(agent, version, expected, monkeypatch):
+    lookups = []
+
+    def lookup(url, key):
+        lookups.append(url)
+        return version
+
+    monkeypatch.setattr(versions, "_lookup", lookup)
+    field = {"pool_agent": "pool_version", "copilot_agent": "copilot_version", "goose_agent": "goose_version"}[agent]
+    config = OmegaConf.create({field: "latest", "npm_registry": "https://mirror.example"})
+    versions.resolve_harness_version(agent, config)
+    assert config[field] == expected
+    if agent == "copilot_agent":
+        assert lookups == ["https://mirror.example/@github%2fcopilot/latest"]
+
+
+def test_python_release_overrides_both_openhands_packages_in_a_private_environment(tmp_path):
+    config = OmegaConf.create({"openhands_version": "1.59.1"})
+    versions.resolve_harness_version("openhands_agent", config)
+    base = OmegaConf.create({"uv_venv_dir": str(tmp_path), "head_server_deps": ["parent==1"]})
+    setup = versions.python_harness_setup("openhands_agent", config, base)
+    assert setup.uv_venv_dir != base.uv_venv_dir
+    assert setup.head_server_deps == ["parent==1", "openhands-sdk==1.59.1", "openhands-tools==1.59.1"]
+    assert setup.head_server_constraints == ["openhands-sdk==1.59.1", "openhands-tools==1.59.1"]
+    assert base.head_server_deps == ["parent==1"]
+
+
+def test_nooa_fork_and_sandbox_archive_use_the_same_commit(tmp_path):
+    sha = "a" * 40
+    repo = "https://github.com/example/labs-OO-Agents"
+    cfg = OmegaConf.create({"nooa_version": sha, "harness_repo": repo})
+    versions.resolve_harness_version("nooa_agent", cfg)
+    base = OmegaConf.create({"uv_venv_dir": str(tmp_path)})
+    setup = versions.python_harness_setup("nooa_agent", cfg, base)
+    assert list(setup.head_server_deps) == [
+        f"nooa @ git+{repo}.git@{sha}",
+        f"nooa-cli @ git+{repo}.git@{sha}#subdirectory=packages/nooa-cli",
+        f"nooa-bench @ git+{repo}.git@{sha}#subdirectory=packages/nooa-bench",
+    ]
+    assert versions.harness_environment("nooa_agent", cfg, hermes_source=None) == {
+        "NEMO_GYM_NOOA_SOURCE": f"{repo}/archive/{sha}.tar.gz"
+    }

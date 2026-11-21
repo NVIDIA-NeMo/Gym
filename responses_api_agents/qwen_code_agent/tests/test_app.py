@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from omegaconf import OmegaConf
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -26,6 +27,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
+from nemo_gym.server_runtime.supervisor import harness_version
 from responses_api_agents.qwen_code_agent.app import QwenCodeAgent, QwenCodeAgentConfig
 from responses_api_agents.qwen_code_agent.conversion import parse_stream, summarize_subagents
 from responses_api_agents.qwen_code_agent.sandbox import CLI, QWEN_VERSION, QwenSession
@@ -191,6 +193,34 @@ def body(**fields) -> NeMoGymResponseCreateParamsNonStreaming:
     return NeMoGymResponseCreateParamsNonStreaming(
         input=[{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Compute 6*7"}], **fields
     )
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({}, QWEN_VERSION),
+        ({"qwen_code_version": "0.27.0"}, "0.27.0"),
+        ({"qwen_version": "0.26.0"}, "0.26.0"),
+        ({"qwen_code_version": "latest", "qwen_version": "0.26.0"}, "0.28.0"),
+        ({"qwen_version": "latest"}, "0.28.0"),
+    ],
+)
+def test_cli_pin_on_the_shipped_preset(monkeypatch, override, expected):
+    preset = OmegaConf.load(Path(__file__).resolve().parents[1] / "configs/qwen_code_agent.yaml")
+    config = OmegaConf.merge(
+        preset.qwen_code_agent.responses_api_agents.qwen_code_agent,
+        {"model": "policy", "host": "localhost", "port": 8080, "name": "qwen_code_agent"},
+        override,
+    )
+    lookup = MagicMock(return_value="0.28.0")
+    monkeypatch.setattr(harness_version, "_lookup", lookup)
+    harness_version.resolve_harness_version("qwen_code_agent", config)
+    worker = QwenCodeAgentConfig.model_validate(OmegaConf.to_container(config, resolve=True))
+    assert worker.qwen_code_version == expected
+    if "latest" in override.values():
+        lookup.assert_called_once_with("https://registry.npmjs.org/@qwen-code%2fqwen-code/latest", "version")
+    else:
+        lookup.assert_not_called()
 
 
 def test_parse_stream_keeps_root_trajectory_and_result():

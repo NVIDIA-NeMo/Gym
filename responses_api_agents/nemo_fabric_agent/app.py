@@ -463,6 +463,7 @@ def _turns_used(output: dict[str, Any]) -> int:
 
 
 class NeMoFabricAgentConfig(BaseResponsesAPIAgentConfig):
+    nemo_fabric_version: str | None = None
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     adapter_id: str

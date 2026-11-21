@@ -60,7 +60,11 @@ from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAIL
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
 from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
 from nemo_gym.server_runtime.supervisor.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
-from nemo_gym.server_runtime.supervisor.harness_version import resolve_harness_version
+from nemo_gym.server_runtime.supervisor.harness_version import (
+    harness_environment,
+    python_harness_setup,
+    resolve_harness_version,
+)
 from nemo_gym.server_runtime.supervisor.server_venv import get_venv_path, run_command, setup_env_command
 from nemo_gym.telemetry.config import MemoryProfilingConfig
 from nemo_gym.telemetry.memory import MemoryProfiler, ServerMemoryTarget, process_tree_memory_supported
@@ -765,15 +769,22 @@ class ServerSupervisor:  # pragma: no cover
         ) in configured_servers:
             self._server_configs[top_level_path] = server_config_dict
             # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
-            print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
-            command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
+            setup_config = (
+                python_harness_setup(second_key, server_config_dict, global_config_dict)
+                if first_key == "responses_api_agents"
+                else global_config_dict
+            )
+            print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, setup_config)}")
+            command = _server_launch_command(dir_path, setup_config, top_level_path, entrypoint_fpath)
 
             extra_env = {
                 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
                 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path,
             }
-            if hermes_source := harness_sources.get(top_level_path):
-                extra_env["HERMES_SPEC"] = hermes_source
+            if first_key == "responses_api_agents":
+                extra_env.update(
+                    harness_environment(second_key, server_config_dict, hermes_source=harness_sources[top_level_path])
+                )
             if top_level_path not in ray_server_names:
                 # A server that uses Ray without declaring it then fails on its first Ray call, rather than
                 # starting a private cluster in each of its processes.

@@ -52,6 +52,8 @@ MAX_OUTPUT_BYTES = 1024 * 1024
 
 
 class HermesSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
+    hermes_version: str | None = None
+    hermes_repo: str | None = None
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     model: str
@@ -235,6 +237,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     "chat_template_kwargs",
                 )
             } | {
+                "hermes_version": self.config.hermes_version,
                 "run_dir": remote,
                 "workdir": cwd_result.stdout.strip(),
                 "base_url": self.resolve_model_base_url(self.config.model_server.name, rollout_id),

@@ -21,6 +21,10 @@ import asyncio
 import json
 import logging
 import os
+import re
+import shutil
+import subprocess
+from collections.abc import Callable
 from contextlib import asynccontextmanager, contextmanager, suppress
 from pathlib import Path
 from typing import IO, AsyncIterator, Iterator, Optional
@@ -133,4 +137,34 @@ def adopt_recorded_install(marker: Path, executable: str, *, version: Optional[s
     if not isinstance(bin_dir, str) or not bin_dir or not (Path(bin_dir) / executable).is_file():
         return False
     os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    return True
+
+
+def ensure_selected_npm_cli(
+    package: str, command: str, version: str | None, *, install_node: Callable[[], Path]
+) -> bool:
+    """Select a private npm prefix for a launch that explicitly requested this CLI."""
+    if os.environ.get("NEMO_GYM_SELECTED_NPM_CLI") != command or not version:
+        return False
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", version):
+        raise ValueError(f"Expected an exact {command} release, got {version!r}")
+    prefix = Path.home() / ".cache" / "nemo_gym" / "npm" / command / version
+    binary_dir = prefix / "node_modules/.bin"
+    binary = binary_dir / command
+    manifest = prefix / "node_modules" / package / "package.json"
+    if not shutil.which("npm"):
+        with install_lock(prefix.parent / "node.lock"):
+            os.environ["PATH"] = str(install_node()) + os.pathsep + os.environ.get("PATH", "")
+    ready = prefix / ".gym-install-complete"
+    with install_lock(prefix.parent / f"{version}.lock"):
+        if not ready.is_file() or not binary.is_file():
+            ready.unlink(missing_ok=True)
+            subprocess.run(
+                ["npm", "install", "--prefix", str(prefix), "--no-audit", "--no-fund", f"{package}@{version}"],
+                check=True,
+            )
+            if not binary.is_file() or json.loads(manifest.read_text()).get("version") != version:
+                raise RuntimeError(f"npm did not install {package}@{version} at {prefix}")
+            ready.touch()
+    os.environ["PATH"] = str(binary_dir) + os.pathsep + os.environ.get("PATH", "")
     return True

@@ -3,6 +3,7 @@
 """OpenHands runtime installation and activation artifacts over the shared sandbox lifecycle."""
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 import shlex
@@ -26,7 +27,7 @@ from nemo_gym.trajectory import AgentObservationBundle
 
 LOG = logging.getLogger(__name__)
 
-OPENHANDS_VERSION = "1.59.0"
+OPENHANDS_VERSION = importlib.metadata.version("openhands-sdk")
 # openhands-tools pins func-timeout 4.3.5, which publishes only an sdist. The runtime installs wheels only, and
 # builds a requirement given as a direct URL from source on the Agent Server host; uv checks the URL's sha256.
 _FUNC_TIMEOUT_REQUIREMENT = (

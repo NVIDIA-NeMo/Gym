@@ -69,6 +69,7 @@ _E2B_HEADER_ENV_BY_CONNECTION_FIELD = {
 
 
 class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
+    mini_swe_version: str | None = None
     model_server: ModelServerRef
     env: Literal["sandbox"]
     concurrency: int

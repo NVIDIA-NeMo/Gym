@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import shlex
 import shutil
@@ -148,6 +149,11 @@ def _runtime_archive(root: Path) -> tuple[bytes, str]:
             r"https://github.com/\1/archive/\2.tar.gz",
             line,
         )
+        if source := os.environ.get("NEMO_GYM_NOOA_SOURCE"):
+            package = line.partition(" @ ")[0]
+            if package in ("nooa", "nooa-cli", "nooa-bench"):
+                subdir = "" if package == "nooa" else f"#subdirectory=packages/{package}"
+                line = f"{package} @ {source}{subdir}"
         runtime_requirements.append(line)
     files["runtime-requirements.txt"] = ("\n".join(runtime_requirements) + "\n").encode()
     digest = hashlib.sha256(
