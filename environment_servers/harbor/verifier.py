@@ -725,9 +725,9 @@ class HarborVerificationMixin:
                     f"the previous turn's verifier sandbox could not be stopped: {type(exc).__name__}: {exc}",
                 )
         try:
-            verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
-            names: dict[str, str] = {}
             overlaid = _verifier_gets_overlay(task, True)
+            verifier = await self._start_separate_verifier(session, task, settings, overlaid=overlaid)
+            names: dict[str, str] = {}
             if overlaid:
                 # A shared-mode task verified separately runs in the task's own image, so it needs the same overlay
                 # as the agent did (a declared separate verifier in the task image is a prebuilt image: no overlay).

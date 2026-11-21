@@ -15,7 +15,7 @@ turn loop records as a failed turn.
 import logging
 import shlex
 
-from environment_servers.harbor.entrypoint import HealthcheckFailed
+from environment_servers.harbor.entrypoint import HEALTHCHECK_EXEC_GRACE_S, HealthcheckFailed, healthcheck_bound_s
 from environment_servers.harbor.session import HarborSession
 from nemo_gym.data.tasks.harbor import HarborTask, HarborTurn, is_ignored
 from nemo_gym.sandbox import SandboxExecResult, SandboxProbeError, SandboxTransferError, upload_dir
@@ -29,8 +29,6 @@ STEP_WORKDIR_FAILED_KIND = "harbor:step_workdir_failed"
 STEP_SETUP_FAILED_KIND = "harbor:step_setup_failed"
 # The step's `[steps.healthcheck]` never passed before the turn's agent session.
 STEP_HEALTHCHECK_FAILED_KIND = "harbor:step_healthcheck_failed"
-# Seconds the provider exec waits beyond a healthcheck command's own `timeout_sec`, as the seed's checks do.
-HEALTHCHECK_EXEC_GRACE_S = 5
 
 
 class StepPrepareError(Exception):
@@ -61,24 +59,10 @@ class HarborStepsMixin:
     @staticmethod
     def _step_healthcheck_budget_s(turn: HarborTurn) -> float:
         """The most a step's ``[steps.healthcheck]`` may take before it passes or fails the step, what the episode
-        budget counts for it: the start period, the one attempt that may start just inside it and run past its end,
-        the ``start_interval_sec`` sleep that follows such an attempt (the loop sleeps by when the attempt began,
-        :meth:`HarborEntrypointMixin._poll_healthcheck`), then the counted attempts (``retries`` of them, or the one
-        that fails a check with ``retries = 0``) with an ``interval_sec`` sleep between them and none after the
-        last, each attempt the command's ``timeout_sec`` plus the exec grace (:meth:`_run_step_healthcheck`); 0
-        without a check. A poll that fails ends at most that long after it began, whatever its alignment."""
+        budget counts for it (:func:`healthcheck_bound_s`, as :meth:`_run_step_healthcheck` polls it); 0 without a
+        check."""
         check = turn.config.healthcheck
-        if check is None:
-            return 0.0
-        attempt = check.timeout_sec + HEALTHCHECK_EXEC_GRACE_S
-        counted = max(check.retries, 1)
-        return (
-            check.start_period_sec
-            + attempt
-            + check.start_interval_sec
-            + counted * attempt
-            + (counted - 1) * check.interval_sec
-        )
+        return 0.0 if check is None else healthcheck_bound_s(check)
 
     async def _prepare_step_workdir(self, session: HarborSession, turn: HarborTurn) -> None:
         """Merge ``steps/<name>/workdir/`` into the working directory and run its ``setup.sh``, as Harbor does.

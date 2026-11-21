@@ -71,6 +71,28 @@ class EntrypointLaunch:
     noticed: bool = False
 
 
+# Seconds the provider exec waits beyond a healthcheck command's own `timeout_sec`.
+HEALTHCHECK_EXEC_GRACE_S = 5
+
+
+def healthcheck_bound_s(check: HarborHealthcheck) -> float:
+    """The most one healthcheck may take before it passes or fails, as :meth:`HarborEntrypointMixin._poll_healthcheck`
+    runs it: the start period, the one attempt that may start just inside it and run past its end, the
+    ``start_interval_sec`` sleep that follows such an attempt (the loop sleeps by when the attempt began), then the
+    counted attempts (``retries`` of them, or the one that fails a check with ``retries = 0``) with an
+    ``interval_sec`` sleep between them and none after the last, each attempt the command's ``timeout_sec`` plus
+    the exec grace. A poll that fails ends at most that long after it began, whatever its alignment."""
+    attempt = check.timeout_sec + HEALTHCHECK_EXEC_GRACE_S
+    counted = max(check.retries, 1)
+    return (
+        check.start_period_sec
+        + attempt
+        + check.start_interval_sec
+        + counted * attempt
+        + (counted - 1) * check.interval_sec
+    )
+
+
 _SHELLS = frozenset({"sh", "bash", "dash"})
 _KEEPALIVE_PROGRAMS = frozenset({"sleep", "tail"})
 # A shell script that is one sleep or tail command (``sleep infinity``, ``exec tail -f /dev/null``) or loops
@@ -482,9 +504,11 @@ class HarborEntrypointMixin:
                         configured_user=task.sandbox_user,
                         spec_user=task.user,
                         cwd=cwd,
-                        timeout_s=check.timeout_sec + 5,
+                        timeout_s=check.timeout_sec + HEALTHCHECK_EXEC_GRACE_S,
                     )
-                return await sandbox.exec(check.command, cwd=cwd, timeout_s=check.timeout_sec + 5, user=user)
+                return await sandbox.exec(
+                    check.command, cwd=cwd, timeout_s=check.timeout_sec + HEALTHCHECK_EXEC_GRACE_S, user=user
+                )
 
             await self._poll_healthcheck(sandbox, task, check, attempt, label=label, entrypoint=entrypoint)
 
