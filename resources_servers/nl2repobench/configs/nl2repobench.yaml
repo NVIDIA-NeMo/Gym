@@ -1,0 +1,44 @@
+nl2repobench_resources_server:
+  resources_servers:
+    nl2repobench:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      tasks_dir: resources_servers/nl2repobench/data/cache/tasks
+      expected_task_count: 104
+
+      sandbox_provider: sandbox
+      enforce_agent_no_network: true
+      sandbox_model_server: null
+      # official: reproduces today's behavior exactly (honors enforce_agent_no_network/
+      #   sandbox_model_server above as-is).
+      # no_internet_preinstalled: agent boots from the pinned per-task image (deps pre-installed,
+      #   real tests stripped) with deny-all-except-policy_model egress, regardless of the two
+      #   flags above.
+      # block_target: open egress, but pip/pip3/git are wrapped to refuse installing/cloning the
+      #   specific task's own package/repo.
+      agent_network_mode: official
+      sandbox_config:
+        # Must outlive the agent's whole budget (sandbox_timeout 21600 s + wall_grace_s) plus the export, the workspace
+        # collection and the grading that follow in the same session: 18000 s expired a six-hour agent's sandbox.
+        ttl_s: 25200
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 8192
+          disk_gib: 20
+        metadata:
+          benchmark: nl2repobench-v1
+          istio.io/dataplane-mode: none
+          # On OpenSandbox, an out-of-memory kill takes the whole pod (SANDBOX::ENDED OOMKilled: no export, no workspace)
+          # unless the sandbox is created with this label; with it only the largest process is killed (exit 137) and
+          # the sandbox, the agent and its workspace carry on, as under Docker. Read at creation only. NL2RepoBench lost
+          # rollouts to pod kills on 2026-11-02/03 (stable-baselines3, a PyTorch project, in 8 GiB).
+          nemo.nvidia.com/oom-kill: process
+
+      logs_dir: resources_servers/nl2repobench/logs
+      clear_verifier_logs: true
+      include_workspace_in_response: false
+      workspace_tar_max_bytes: 209715200

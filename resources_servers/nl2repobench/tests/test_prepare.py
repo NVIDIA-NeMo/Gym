@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import json
+from pathlib import Path
+
+from pydantic import TypeAdapter
+
+from nemo_gym.data import validate_jsonl_rows
+from resources_servers.nl2repobench.prepare import FIXED_INSTRUCTION, _copy_task_assets, _write_jsonl
+from resources_servers.nl2repobench.task_data import TaskData
+from resources_servers.nl2repobench.task_store import REQUIRED_TASK_FILES, NL2RepoBenchTaskStore
+
+
+def test_copy_task_assets_copies_only_required_files(task_assets: Path, tmp_path: Path) -> None:
+    source_task_dir = task_assets / "example-task"
+    # Upstream source directories may carry extra files that must not be copied.
+    (source_task_dir / "extra_notes.txt").write_text("do not copy me\n", encoding="utf-8")
+
+    destination = tmp_path / "prepared-tasks"
+    _copy_task_assets(task_assets, destination)
+
+    copied_task_dir = destination / "example-task"
+    assert copied_task_dir.is_dir()
+    for relative_path in REQUIRED_TASK_FILES:
+        assert (copied_task_dir / relative_path).is_file()
+    assert not (copied_task_dir / "extra_notes.txt").exists()
+
+
+def test_write_jsonl_produces_expected_row_shape(task_assets: Path, tmp_path: Path) -> None:
+    store = NL2RepoBenchTaskStore(task_assets, expected_task_count=1)
+    output_path = tmp_path / "benchmark.jsonl"
+
+    _write_jsonl(store, output_path)
+
+    lines = output_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+
+    assert row["task_id"] == "example-task"
+    assert row["image"] == "ghcr.io/multimodal-art-projection/nl2repobench/example-task:1.0"
+    assert row["subset"] == "nl2repobench-v1"
+    assert row["split"] == "test"
+
+    content = row["responses_create_params"]["input"][0]["content"]
+    assert "implement the entire project" in content.lower()
+    # start.md is intentionally NOT embedded here — it's already present in the
+    # task's sandbox at /workspace/start.md (matches the upstream harness's own
+    # design), and inlining the full spec (15KB-375KB for some real tasks) used
+    # to blow past OpenSandbox's remote exec argument-size limit.
+    assert content == FIXED_INSTRUCTION
+    assert "example-task" not in content
+
+    verifier_metadata = row["verifier_metadata"]
+    assert verifier_metadata["task_id"] == "example-task"
+    assert verifier_metadata["test_case_count"] == 5
+    assert verifier_metadata["test_commands"] == [
+        "pip install -e .",
+        "pytest --continue-on-collection-errors -n 0 tests -v -s",
+    ]
+    assert verifier_metadata["test_files"] == ["tests"]
+
+
+def test_the_prepared_prompt_is_mode_neutral_and_says_nothing_about_the_network() -> None:
+    """Rows are shared by every network mode, and only some modes have no network: the notice is the server's."""
+    assert "internet" not in FIXED_INSTRUCTION.lower() and "network" not in FIXED_INSTRUCTION.lower()
+    assert FIXED_INSTRUCTION.endswith("Please complete this task step by step.")
+
+
+def test_generated_rows_pass_the_real_validator_with_a_clean_report(task_assets: Path, tmp_path: Path) -> None:
+    store = NL2RepoBenchTaskStore(task_assets, expected_task_count=1)
+    output_path = tmp_path / "benchmark.jsonl"
+    _write_jsonl(store, output_path)
+
+    with output_path.open() as lines:
+        report = validate_jsonl_rows("nl2repobench", TypeAdapter(TaskData), str(output_path), lines)
+
+    assert report.rows == 1 and report.error_rows == 0
+    assert report.unknown_keys == {} and report.conflicting_keys == {} and report.misplaced_keys == {}

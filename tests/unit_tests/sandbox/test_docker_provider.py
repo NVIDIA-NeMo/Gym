@@ -20,6 +20,8 @@ from typing import Any, Callable
 import anyio
 import pytest
 
+from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
@@ -844,6 +846,45 @@ async def test_download_cp_failure_raises(fake_binary: str, monkeypatch: pytest.
     provider, _rec = _make_provider(monkeypatch, lambda argv: (1, "", "missing"))
     with pytest.raises(RuntimeError, match="docker cp download"):
         await provider.download_file(_make_handle(), "/var/log/app.log", tmp_path / "local.txt")
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+        "Error response from daemon: No such container: nemo-gym-x",
+        "Error response from daemon: container abc is not running",
+        "error during connect: Get http://docker.sock/v1.41/containers: connection refused",
+    ],
+)
+async def test_download_daemon_or_container_unavailable_is_a_typed_provider_failure(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stderr: str
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (1, "", stderr))
+    with pytest.raises(NgFailureEvent) as caught:
+        await provider.download_file(_make_handle(), "/tmp/workspace.tar.gz", tmp_path / "local.tar.gz")
+
+    assert caught.value.failure_kind == PROVIDER_UNAVAILABLE
+    assert caught.value.operation == "download"
+    assert caught.value.details.provider == "docker"
+    assert caught.value.details.sandbox_id == "nemo-gym-x"
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Error response from daemon: Could not find the file /tmp/workspace.tar.gz in container nemo-gym-x",
+        "lstat /tmp/workspace.tar.gz: no such file or directory",
+    ],
+)
+async def test_download_of_a_missing_file_stays_a_plain_error(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stderr: str
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (1, "", stderr))
+    with pytest.raises(RuntimeError, match="docker cp download") as caught:
+        await provider.download_file(_make_handle(), "/tmp/workspace.tar.gz", tmp_path / "local.tar.gz")
+
+    assert not isinstance(caught.value, NgFailureEvent)
 
 
 # --------------------------------------------------------------------------- #
