@@ -275,6 +275,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | VisualWebArena reference evaluator | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/webarena_browser/reference_evaluation/visualwebarena_evaluation.py`; original root license and notices in [SOURCE_LICENSE](resources_servers/webarena_browser/reference_evaluation/SOURCE_LICENSE), pinned revision, hash, file mapping and modifications in [PROVENANCE.md](resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md) | [Immutable original-source provenance](https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md#source-url-license-and-original-notices) |
 | Vision2Code | Apache-2.0 | `resources_servers/vision2code/` (adapted scoring, prompts, and image metrics; see [NOTICE](resources_servers/vision2code/NOTICE)) | https://github.com/image2code/vision2code |
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
+| Harvey Legal Agent Benchmark (LAB) | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/legal_agent_bench/` (runtime adaptation; license and attribution under `vendor/harvey_labs/`) | https://github.com/harveyai/harvey-labs |
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
 | AssayBench reference harness | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/assaybench/gene_parsing.py` (`parse_genes_from_output`, `extract_genes_from_raw_response` from `benchmarking/predictions_generation/collect_llm_predictions.py`; formatting and type hints only) | https://github.com/Genentech/AssayBench |
 | Open ASR Leaderboard English normalizer | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/asr_with_pc/open_asr_normalizer.py` (replacements, name, spelling and compound tables and acronym rule from `normalizer/normalizer.py` and `normalizer/english_abbreviations.py`), at commit `8d338ca0115a18f90d74e67b29efb480210bbd96` | https://github.com/huggingface/open_asr_leaderboard |
@@ -306,6 +307,19 @@ upstream copyright header and adds an NVIDIA modifications block.
 - pycocotools: adapted from upstream revision `8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9` (https://github.com/cocodataset/cocoapi/blob/8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9/common/maskApi.c#L204-L231), so that the verifier reads the dataset's compressed COCO masks without a compiled dependency. Upstream is BSD-2-Clause; its license is reproduced in full in the pycocotools BSD-2-Clause License section below. Both file headers record the same source, revision, license and copyright notice.
 - Molmo2: adapted from upstream revision `f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a` (https://github.com/allenai/molmo2/blob/f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a/olmo/preprocessing/point_formatter.py#L131-L179), so that answers in Molmo2's own point markup parse as that model's code parses them. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. NVIDIA modifications (whitespace after a frame delimiter, the `<tracks>` forms, overflow handling) are noted in-file. The file header records the same source, revision and license.
 - HLE with-tools blocklist: vendored, unmodified, from upstream revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`. Upstream is MIT, Copyright (c) 2025 centerforaisafety. The JSON must stay byte-exact for its digest check, so it carries no notice itself; the upstream `LICENSE` at that revision is reproduced unchanged in `resources_servers/hle_web_tools/LICENSE-HLE`. The server that applies it (`resources_servers/hle_web_tools/app.py`) is NVIDIA code under Apache-2.0.
+
+### Harvey Legal Agent Benchmark (LAB)
+
+The runtime adaptation in `resources_servers/legal_agent_bench/` is based on
+[Harvey LAB revision f46ef86e4788545622db25dcffa3aebb7a139929](https://github.com/harveyai/harvey-labs/tree/f46ef86e4788545622db25dcffa3aebb7a139929).
+Original Harvey AI portions retain their MIT license; NVIDIA-authored code and
+NVIDIA modifications are licensed under Apache-2.0. The original
+[MIT license](resources_servers/legal_agent_bench/vendor/harvey_labs/LICENSE) is
+retained unchanged. Exact upstream source files, affected local modules, and
+modifications are recorded in the
+[local attribution notice](resources_servers/legal_agent_bench/vendor/harvey_labs/README.md).
+Task documents and public skills are downloaded at runtime rather than checked
+into this repository.
 
 ---
 
