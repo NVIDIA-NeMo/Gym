@@ -381,6 +381,27 @@ class TestServerClient:
             headers={"x-existing": "value"},
         )
 
+    async def test_ServerClient_prefixes_systemone_with_the_rollout(self, monkeypatch: MonkeyPatch) -> None:
+        """A decision call made inside a rollout carries its prefix, like the generation routes."""
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=12345),
+            global_config_dict=DictConfig(
+                {
+                    "observability_enabled": True,
+                    "policy_model": {"responses_api_models": {"openai_model": {"host": "model", "port": 8000}}},
+                }
+            ),
+        )
+        request_mock = AsyncMock(return_value="response")
+        client_mock = MagicMock()
+        client_mock.return_value.request = request_mock
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", client_mock)
+
+        with rollout_context("3-0"):
+            await server_client.post(server_name="policy_model", url_path="/v1/systemone", json={})
+
+        assert request_mock.await_args.kwargs["url"] == "http://model:8000/ng-rollout/3-0/v1/systemone"
+
     @mark.parametrize(
         "server_name, url_path, observability, sent_path",
         [

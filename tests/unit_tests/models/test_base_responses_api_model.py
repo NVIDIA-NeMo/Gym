@@ -112,6 +112,32 @@ class TestBaseResponsesAPIModel:
         assert response.status_code == 501
         assert "does not support the embeddings endpoint" in response.json()["detail"]
 
+    def test_systemone_default_not_implemented(self) -> None:
+        # A chat-only server exposes the decision route but rejects it with 501: it has no decision backend.
+        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
+
+        class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
+            async def chat_completions(
+                self, request: NeMoGymResponseCreateParamsNonStreaming
+            ) -> NeMoGymChatCompletion:
+                raise NotImplementedError
+
+            async def responses(self, request: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+                raise NotImplementedError
+
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
+        client = TestClient(model.setup_webserver())
+
+        response = client.post(
+            "/v1/systemone",
+            json={"state": "s", "questions": {"q": {"type": "noul", "instructions": "Is it?"}}},
+        )
+
+        assert response.status_code == 501
+        assert "does not support the decision endpoint" in response.json()["detail"]
+
 
 @pytest.mark.parametrize(
     ("name", "module"),

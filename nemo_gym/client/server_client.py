@@ -237,7 +237,8 @@ class ServerClient(BaseModel):
             and attribute_rollout
             and server_entry is not None
             and "responses_api_models" in server_entry
-            and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
+            and url_path.partition("?")[0]
+            in {"/v1/responses", "/v1/chat/completions", "/v1/messages", "/v1/systemone"}
             and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"

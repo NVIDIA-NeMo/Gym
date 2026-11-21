@@ -140,6 +140,16 @@ class InferenceProvider(SimpleResponsesAPIModel):
         async with self._semaphore:
             return await self._client.create_embeddings(**body_dict)
 
+    async def systemone(self, body: dict = Body()) -> dict:
+        """Pass a decision request through to the provider's ``/systemone``; the configured model replaces the request's model.
+
+        A provider error reaches the caller with the provider's status and body unchanged, as on every route of
+        this server, so a capacity refusal stays recognisable.
+        """
+        body_dict = self.config.extra_body | body | {"model": self.config.model}
+        async with self._semaphore:
+            return await self._client.create_systemone(**body_dict)
+
 
 if __name__ == "__main__":
     InferenceProvider.run_webserver()
