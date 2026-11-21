@@ -260,6 +260,14 @@ class TestParseToolCalls:
             {"name": "api_search", "arguments": {"query": "a"}}
         ]
 
+    @pytest.mark.parametrize("tail", ["", "\nTool result: [", " and then"])
+    def test_a_cut_on_or_after_the_closing_bracket_keeps_the_whole_batch(self, tail):
+        raw = f"[{self.FIRST}, {self.FIRST}]{tail}"
+        assert (
+            BM.parse_tool_calls(raw, self.NAMES, truncated=True)
+            == [{"name": "api_search", "arguments": {"query": "a"}}] * 2
+        )
+
     def test_an_unclosed_array_the_model_stopped_on_is_kept_whole(self):
         # Not truncated: the model stopped, so brackets it left open are closed as before.
         raw = f'[{self.FIRST}, {{"name": "api_search", "arguments": {{"query": "b"}}'

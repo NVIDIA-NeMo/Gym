@@ -237,7 +237,8 @@ def complete_elements_prefix(text: str) -> Optional[str]:
     """The complete elements of the JSON array that opens `text`, closed, or None if there are none.
 
     For a generation cut off inside the array: the elements before the cut are whole, so they are
-    kept, and the element the cut landed in is dropped rather than completed.
+    kept, and the element the cut landed in is dropped rather than completed. An array that closed
+    before the cut (the cut landed on or after its `]`) is returned whole.
     """
     if not text.startswith("["):
         return None
@@ -262,8 +263,8 @@ def complete_elements_prefix(text: str) -> Optional[str]:
             depth -= 1
             if depth == 1:
                 last_end = index
-            elif depth <= 0:
-                return None
+            elif depth == 0:
+                return text[: index + 1]
     return text[: last_end + 1] + "]" if last_end >= 0 else None
 
 

@@ -37,6 +37,13 @@ against a path that does not exist, which scores as a quiet 0.
 | `render_assistant_text` | false | render the text an assistant turn carried alongside its tool calls, as an `Assistant:` line before the calls. Off matches the reference bridge, which dropped it. The primer still opens the candidate's turn on the tool-call line, so the candidate sees narrated turns but cannot narrate its own |
 | `max_tokens`, `temperature`, `top_p` | 1024, 0.6, none | sampling |
 
+**Truncated generations.** When a generation hits `max_tokens` with `tool_names` set, the calls written in full
+before the cut are returned and the call the cut landed in is dropped. The response is still marked truncated: on
+`/v1/responses` it has `status: "incomplete"` with `incomplete_details.reason = "max_output_tokens"`, and Simple Agent
+stops the rollout on `incomplete_details` before executing any of those recovered calls. Only agents that execute the
+calls of an incomplete turn use them, for example on `/v1/chat/completions`, where a turn with calls reports
+`finish_reason: "tool_calls"`.
+
 `configs/base_model.yaml` defines `policy_model`, which reads `policy_base_url` and `policy_model_name` from
 `env.yaml`. The prefix pass@K benchmark (`benchmarks/prefix_pass_k/`) serves checkpoints through this server on both
 wires.
