@@ -34,6 +34,8 @@ from nemo_gym.environment.manifest import (
 
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _TODO = "TODO"
+_SINGLE_AGENT_TURN = "single_agent_turn"
+_SINGLE_AGENT_TURN_CONFIG = f"environment_servers/{_SINGLE_AGENT_TURN}/configs/{_SINGLE_AGENT_TURN}.yaml"
 
 
 class ScaffoldError(ConfigError):
@@ -89,6 +91,9 @@ class _Composition:
     agent_instance: str
     environment_instance: str
     dataset: ManifestDataset
+    # The taskset that routes the dataset's rows to a single_agent_turn Environment Server, or None when the
+    # agent stays behind the server a reused config bundles or behind a legacy_agent relay.
+    taskset: str | None
     reward: Reward
     config_reference: str
     prompt_path: str | None
@@ -253,6 +258,11 @@ def _composition(
             "num_repeats": 1,
         }
     )
+    # An external agent loop runs its episode in the agent's /run, which only a legacy_agent relay calls.
+    runs_single_agent_turn = reused_server is None and profile != IntegrationProfile.EXTERNAL_AGENT_LOOP
+    taskset = None
+    if runs_single_agent_turn:
+        taskset = name if kind == EnvironmentKind.BENCHMARK else f"{name}_example"
     return _Composition(
         kind=kind,
         name=name,
@@ -265,6 +275,7 @@ def _composition(
         agent_instance=agent_instance,
         environment_instance=environment_instance,
         dataset=dataset,
+        taskset=taskset,
         reward=reward,
         config_reference=(
             reused.config_reference if reused else f"resources_servers/{module_name}/configs/{module_name}.yaml"
@@ -301,11 +312,14 @@ def _manifest(composition: _Composition) -> EnvironmentManifest:
 
 def _asset_config(composition: _Composition) -> str:
     # Datasets are declared on the resources server (which defines what the rows mean and how
-    # they are scored), never on the agent — the agent is a run-time choice. The scaffolded
-    # config has exactly one agent referencing the resources server, so benchmark datasets
-    # resolve their harness from that edge; the dataset-level `agent:` key stays reserved for
-    # genuinely ambiguous configs.
+    # they are scored), never on the agent — the agent is a run-time choice. A dataset's taskset
+    # routes its rows to the Environment Server that binds the agent; without one (behind a reused
+    # or relay server), the config's one agent referencing the resources server runs them, and the
+    # dataset-level `agent:` key stays reserved for genuinely ambiguous configs.
     dataset_dict = composition.dataset.model_dump(mode="json", exclude_none=True)
+    if composition.taskset is not None:
+        # Collation turns each row into task_id and task_input; the route below sends the task to the server.
+        dataset_dict["taskset"] = composition.taskset
     agent_config: dict[str, Any] = {
         "resources_server": {"type": "resources_servers", "name": composition.resource_instance},
         "model_server": {"type": "responses_api_models", "name": "policy_model"},
@@ -325,10 +339,11 @@ def _asset_config(composition: _Composition) -> str:
         agent_entry = {
             "responses_api_agents": {composition.agent_implementation: {"entrypoint": "app.py", **agent_config}}
         }
-    config: dict[str, Any] = {
-        "config_paths": [composition.config_reference],
-        composition.agent_instance: agent_entry,
-    }
+    config: dict[str, Any] = {"config_paths": [composition.config_reference]}
+    if composition.taskset is not None:
+        config["config_paths"].append(_SINGLE_AGENT_TURN_CONFIG)
+        config["environment_server_routes"] = {composition.taskset: composition.environment_instance}
+    config[composition.agent_instance] = agent_entry
     if composition.reused_verifier is None:
         config[composition.resource_instance] = {
             "resources_servers": {composition.resource_implementation: {"datasets": [dataset_dict]}}
@@ -347,9 +362,22 @@ def _asset_config(composition: _Composition) -> str:
                 }
             },
         }
+    elif composition.taskset is not None:
+        # Seed the resources and agent sessions, run one agent turn, verify, and close both sessions.
+        environment_entry = {
+            "_inherit_from": _SINGLE_AGENT_TURN,
+            "environment_servers": {
+                _SINGLE_AGENT_TURN: {
+                    "resources_server": {"type": "resources_servers", "name": composition.resource_instance},
+                    "agent_server": {"type": "responses_api_agents", "name": composition.agent_instance},
+                    # Lets the agent call any tools the scaffolded resources server grows.
+                    "resources_tool_transports": ["direct_http"],
+                }
+            },
+        }
     else:
-        # NOTE(martas): for now this builds the legacy config structure
-        # should be migrated once we have any migrated agents
+        # An external agent loop delegates the whole episode from the agent's /run, which agent sessions never
+        # call, so its agent stays behind a legacy_agent relay until that profile serves agent sessions.
         environment_entry = {
             "environment_servers": {
                 "legacy_agent": {
@@ -362,10 +390,9 @@ def _asset_config(composition: _Composition) -> str:
     if composition.rollout_driver:
         config["rollout_collection_driver"] = composition.rollout_driver
 
-    res = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
-    res = f"\n{composition.agent_instance}".join(res.split(composition.agent_instance, maxsplit=1))
-
-    return res
+    # One block per top-level key, separated by blank lines.
+    blocks = (yaml.safe_dump({key: value}, sort_keys=False, allow_unicode=True) for key, value in config.items())
+    return "\n".join(blocks)
 
 
 def _render_manifest_composition(root: Path, composition: _Composition) -> dict[Path, str]:
@@ -552,10 +579,23 @@ def _standalone_resources_server_files(
 def _standalone_resources_server_config(module_name: str) -> str:
     return dedent(
         f"""\
+        # Each episode runs through the single_agent_turn Environment Server: it seeds the resources and agent
+        # sessions, runs one agent turn, verifies, and closes both sessions.
+        config_paths:
+          - {_SINGLE_AGENT_TURN_CONFIG}
+
+        # Each dataset's taskset sends its rows to an Environment Server. Collate the rows first, so each becomes
+        # a task_id and task_input, for example:
+        #   gym dataset collate --resources-server {module_name} --mode example_validation --output-dir <dir>
+        environment_server_routes:
+          {module_name}_train: {module_name}_environment_server
+          {module_name}_validation: {module_name}_environment_server
+          {module_name}_example: {module_name}_environment_server
+
         # Resources server: owns this environment's task verification (verify()) and reward.
         # Datasets are declared here — the resources server defines what the rows mean and how
-        # they are scored. Which agent runs them is chosen at run time.
-        {module_name}_resources_server:          # instance name — how agents/CLI refer to this server
+        # they are scored. The Environment Server below chooses the agent that runs them.
+        {module_name}_resources_server:          # instance name — how servers/CLI refer to this server
           resources_servers:                    # server type: resources_servers | responses_api_agents | responses_api_models
             {module_name}:                      # implementation directory under resources_servers/
               entrypoint: app.py                # server entry module
@@ -564,22 +604,25 @@ def _standalone_resources_server_config(module_name: str) -> str:
               datasets:
               - name: train
                 type: train
+                taskset: {module_name}_train
                 jsonl_fpath: resources_servers/{module_name}/data/train.jsonl
                 num_repeats: 1
                 license: Apache 2.0
                 # To fetch this split from a registry, add a source: block.
               - name: validation
                 type: validation
+                taskset: {module_name}_validation
                 jsonl_fpath: resources_servers/{module_name}/data/validation.jsonl
                 num_repeats: 1
                 license: Apache 2.0
               - name: example
                 type: example
+                taskset: {module_name}_example
                 jsonl_fpath: resources_servers/{module_name}/data/example.jsonl
                 num_repeats: 1
 
-        # Pair the server with the default agent.
-        {module_name}_simple_agent:             # pass this instance as --agent to gym eval run
+        # The default agent, which runs the agent turn.
+        {module_name}_simple_agent:
           responses_api_agents:
             simple_agent:
               entrypoint: app.py
@@ -590,14 +633,20 @@ def _standalone_resources_server_config(module_name: str) -> str:
                 type: responses_api_models
                 name: policy_model
 
-        # Expose the agent through an environment server for rollout collection.
+        # The Environment Server that pairs the resources server with the agent for each episode.
         {module_name}_environment_server:
+          _inherit_from: {_SINGLE_AGENT_TURN}
           environment_servers:
-            legacy_agent:
-              entrypoint: app.py
+            {_SINGLE_AGENT_TURN}:
+              resources_server:
+                type: resources_servers
+                name: {module_name}_resources_server
               agent_server:
                 type: responses_api_agents
                 name: {module_name}_simple_agent
+              # Grants the agent this server's tools; leave it out when the model calls none.
+              resources_tool_transports:
+              - direct_http
         """
     )
 

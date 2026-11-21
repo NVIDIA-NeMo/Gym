@@ -18,6 +18,7 @@ from nemo_gym.config.global_config import (
     ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    resolve_dataset_agent,
 )
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile, load_manifest
 from nemo_gym.environment.scaffold import (
@@ -112,6 +113,60 @@ def test_scaffolds_and_validates_every_kind_and_profile(
     assert (asset / "rollout_driver.py").is_file() is (profile == IntegrationProfile.EXTERNAL_ROLLOUT_DRIVER)
 
 
+@pytest.mark.parametrize("kind", list(EnvironmentKind))
+@pytest.mark.parametrize("profile", list(IntegrationProfile))
+def test_scaffold_routes_its_taskset_through_single_agent_turn(
+    tmp_path: Path, kind: EnvironmentKind, profile: IntegrationProfile
+) -> None:
+    asset = scaffold_environment(root=tmp_path, kind=kind, name="sample", profile=profile).asset_dir
+    config = yaml.safe_load(asset.joinpath("config.yaml").read_text(encoding="utf-8"))
+
+    resolved = _resolve_workloads(tmp_path, asset)
+
+    assert _environment_servers_by_agent(resolved) == {"sample_agent": ["sample_environment_server"]}
+    datasets = resolved.sample_resources_server.resources_servers.sample.datasets
+    servers = resolved.sample_environment_server.environment_servers
+    if profile == IntegrationProfile.EXTERNAL_AGENT_LOOP:
+        # Its episode runs in the agent's /run, which agent sessions never call, so it keeps the relay.
+        assert list(servers) == ["legacy_agent"]
+        assert servers.legacy_agent.agent_server.name == "sample_agent"
+        assert [dataset.get("taskset") for dataset in datasets] == [None]
+        assert "environment_server_routes" not in config
+        return
+
+    taskset = "sample" if kind == EnvironmentKind.BENCHMARK else "sample_example"
+    assert [dataset.taskset for dataset in datasets] == [taskset]
+    assert config["environment_server_routes"] == {taskset: "sample_environment_server"}
+    assert config["sample_environment_server"]["_inherit_from"] == "single_agent_turn"
+    server = servers.single_agent_turn
+    assert server.entrypoint == "app.py"
+    assert server.resources_server == {"type": "resources_servers", "name": "sample_resources_server"}
+    assert server.agent_server == {"type": "responses_api_agents", "name": "sample_agent"}
+    assert list(server.resources_tool_transports) == ["direct_http"]
+    assert "single_agent_turn" not in resolved
+    assert resolve_dataset_agent(resolved, "sample_resources_server", taskset=taskset) == "sample_agent"
+
+
+@pytest.mark.parametrize("name", ["single", "e"])
+def test_scaffold_named_like_part_of_a_config_path_keeps_that_path(tmp_path: Path, name: str) -> None:
+    # `<name>_agent` is a substring of the single_agent_turn config path for these names.
+    asset = scaffold_environment(root=tmp_path, kind="environment", name=name).asset_dir
+
+    config = yaml.safe_load(asset.joinpath("config.yaml").read_text(encoding="utf-8"))
+
+    assert config["config_paths"] == [
+        f"resources_servers/{name}/configs/{name}.yaml",
+        "environment_servers/single_agent_turn/configs/single_agent_turn.yaml",
+    ]
+    assert list(config) == [
+        "config_paths",
+        "environment_server_routes",
+        f"{name}_agent",
+        f"{name}_resources_server",
+        f"{name}_environment_server",
+    ]
+
+
 def test_completed_external_agent_retains_its_profile(tmp_path: Path) -> None:
     asset = scaffold_environment(
         root=tmp_path,
@@ -177,6 +232,14 @@ def test_standalone_resources_server_keeps_its_combined_composition(tmp_path: Pa
     # Datasets are declared on the resources server (dataset-decoupling); the agent block carries none.
     datasets = config["shared_resources_server"]["resources_servers"]["shared"]["datasets"]
     assert [dataset["type"] for dataset in datasets] == ["train", "validation", "example"]
+    # Each split is its own taskset, so positional task ids of different splits never share an identity.
+    assert [dataset["taskset"] for dataset in datasets] == ["shared_train", "shared_validation", "shared_example"]
+    assert config["environment_server_routes"] == {
+        "shared_train": "shared_environment_server",
+        "shared_validation": "shared_environment_server",
+        "shared_example": "shared_environment_server",
+    }
+    assert config["config_paths"] == ["environment_servers/single_agent_turn/configs/single_agent_turn.yaml"]
     assert "datasets" not in config["shared_simple_agent"]["responses_api_agents"]["simple_agent"]
     assert not (tmp_path / "environments").exists()
     assert not (tmp_path / "benchmarks").exists()
@@ -200,13 +263,26 @@ def test_standalone_resources_server_config_resolves_with_model(tmp_path: Path, 
         )
     )
 
-    environment = resolved[f"{name}_environment_server"].environment_servers.legacy_agent
+    environment = resolved[f"{name}_environment_server"].environment_servers.single_agent_turn
+    # The entrypoint and timeouts come from the inherited single_agent_turn block, which moves rather than starts.
     assert environment.entrypoint == "app.py"
-    assert environment.agent_server.type == "responses_api_agents"
-    assert environment.agent_server.name == f"{name}_simple_agent"
+    assert environment.default_episode_timeout_seconds == 21600
+    assert "single_agent_turn" not in resolved
+    assert environment.resources_server == {"type": "resources_servers", "name": f"{name}_resources_server"}
+    assert environment.agent_server == {"type": "responses_api_agents", "name": f"{name}_simple_agent"}
+    assert list(environment.resources_tool_transports) == ["direct_http"]
     agent = resolved[environment.agent_server.name].responses_api_agents.simple_agent
     assert agent.resources_server.name == f"{name}_resources_server"
     assert agent.model_server.name == "policy_model"
+    # Every split's rows reach the agent through the route, as dataset preparation and collection resolve them.
+    datasets = resolved[f"{name}_resources_server"].resources_servers[name].datasets
+    for dataset in datasets:
+        assert resolved.environment_server_routes[dataset.taskset] == f"{name}_environment_server"
+        assert (
+            resolve_dataset_agent(resolved, f"{name}_resources_server", taskset=dataset.taskset)
+            == f"{name}_simple_agent"
+        )
+    assert _environment_servers_by_agent(resolved) == {f"{name}_simple_agent": [f"{name}_environment_server"]}
 
 
 @pytest.mark.parametrize("name", ["a-b", "1sample", "class", "Uppercase"])
@@ -559,9 +635,16 @@ def test_reuse_supports_a_bundled_default_agent(tmp_path: Path) -> None:
     assert "_inherit_from: shared_agent" in result.asset_dir.joinpath("config.yaml").read_text(encoding="utf-8")
     assert load_manifest(result.asset_dir / "manifest.yaml").reward.range == (-1, 1)
     validate_environment(result.asset_dir / "manifest.yaml")
-    # The reused config fronts no agent, so the scaffold declares a fresh server for the renamed one.
+    # The reused config fronts no agent, so the scaffold declares a fresh single_agent_turn server for the renamed
+    # one, bound to the reused resources server, and routes the agent's dataset to it by taskset.
     resolved = _resolve_workloads(tmp_path, result.asset_dir)
     assert _environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
+    server = resolved.reused_environment_server.environment_servers.single_agent_turn
+    assert server.resources_server.name == "shared_resources"
+    assert server.agent_server.name == "reused_agent"
+    [dataset] = resolved.reused_agent.responses_api_agents.simple_agent.datasets
+    assert dataset.taskset == "reused_example"
+    assert resolve_dataset_agent(resolved, "reused_agent", taskset="reused_example") == "reused_agent"
 
 
 @pytest.mark.parametrize(
@@ -590,6 +673,9 @@ def test_reuse_moves_the_bundled_environment_server_with_its_agent(tmp_path: Pat
         "_inherit_from": "shared_environment_server",
         "environment_servers": {"legacy_agent": {"agent_server": {"name": "reused_agent"}}},
     }
+    # The inherited server takes flat rows, so the dataset declares no taskset and the config adds no route.
+    assert "taskset" not in config["reused_agent"]["responses_api_agents"]["simple_agent"]["datasets"][0]
+    assert "environment_server_routes" not in config
     validate_environment(result.asset_dir / "manifest.yaml")
     resolved = _resolve_workloads(tmp_path, result.asset_dir)
     # Rollout collection needs exactly one server per agent; the moved agent and server leave no stale names.
@@ -814,6 +900,14 @@ def test_reuse_supports_every_profile(tmp_path: Path) -> None:
         manifest = load_manifest(result.asset_dir / "manifest.yaml")
         assert manifest.resources_server == "shared"
         assert manifest.integration_profile == profile
+        # The reused config bundles no server, so each workload gets its own; only an external loop keeps a relay.
+        config = yaml.safe_load(result.asset_dir.joinpath("config.yaml").read_text(encoding="utf-8"))
+        external = profile == IntegrationProfile.EXTERNAL_AGENT_LOOP
+        server = config[f"{name}_environment_server"]["environment_servers"]
+        assert list(server) == ["legacy_agent" if external else "single_agent_turn"]
+        if not external:
+            assert server["single_agent_turn"]["resources_server"]["name"] == "shared_resources"
+            assert config["environment_server_routes"] == {f"{name}_example": f"{name}_environment_server"}
 
 
 def test_reuse_rejects_a_bundled_model_server(tmp_path: Path) -> None:
