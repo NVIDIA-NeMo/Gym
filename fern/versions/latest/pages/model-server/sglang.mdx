@@ -1,0 +1,31 @@
+---
+title: "SGLang"
+description: "Connect NeMo Gym to an SGLang server for token-level training."
+---
+
+Start SGLang separately and give NeMo Gym its URL. The model server renders the chat template locally and sends prompt token IDs to SGLang’s `/generate` endpoint. Both Chat Completions and Responses return the sampled IDs and log probabilities when `return_token_id_information` is enabled.
+
+## Configure the model server
+
+Include this model server in your NeMo Gym configuration. This example assumes SGLang serves Qwen3-0.6B on port 30000 with a total context limit of 8192 tokens and authentication disabled.
+
+```yaml
+policy_model:
+  responses_api_models:
+    sglang_model:
+      entrypoint: app.py
+      base_url: http://localhost:30000
+      api_key: unused
+      model: Qwen/Qwen3-0.6B
+      context_length: 8192
+      return_token_id_information: true
+      uses_reasoning_parser: true
+```
+
+Set `context_length` to the endpoint’s configured total sequence length. A prompt that fills the window ends with a length finish reason. The tokenizer vocabulary and chat template must match those used for training and serving. If the deployment overrides the tokenizer’s default template, supply the same template using `sglang_chat_template_path` or `sglang_chat_template`.
+
+## Continue a multi-turn rollout
+
+Preserve the session cookie and replay the assistant output, including any reasoning and tool calls. Route each session to one NeMo Gym worker. Its process-local cache holds the exact sampled IDs for the next turn. Changing the history, tools, or template inputs, or losing a sampled turn from the cache, requires a new session. A first request can include ordinary few-shot messages.
+
+The model server generates one choice per request and supports automatic tool choice. Unsupported generation controls such as a fixed tool choice, disabled parallel tool calls, and JSON-schema output return HTTP 422.
