@@ -151,9 +151,9 @@ from nemo_gym.rollouts.rollout_records import (
     RUN_ID_KEY,
     RolloutRecord,
     coverage_path_for,
+    iter_record_rows,
     journal_path_for,
     logical_rollout_id,
-    read_record_rows,
     resolve_rollout_path,
 )
 from nemo_gym.rollouts.rollout_recovery import (
@@ -1736,8 +1736,11 @@ class SharedRolloutCollectionConfig(
         default=True,
         description=(
             "Retain completed rollout rows and results in driver memory and return the full ordered result list. "
-            "When false, completed results are not retained during collection, are persisted incrementally, and "
-            "run_from_config returns an empty list. Aggregation and upload may still load all applicable results."
+            "When false, each completed row is written once and dropped, and run_from_config returns an empty list; "
+            "aggregation reads saved rows back one at a time, keeping only what /aggregate_metrics receives, so "
+            "memory follows the largest in-flight rows rather than the run. `gym eval run` and `ng_collect_rollouts` "
+            "discard the returned list, so long runs should set this to false. Rollout upload to an exporter still "
+            "loads every uploaded record."
         ),
     )
     responses_create_params: Dict[str, Any] = Field(
@@ -1955,7 +1958,7 @@ class SharedRolloutCollectionConfig(
         return None
 
 
-def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
+def _credentials_rejected_stop(failures: Iterable[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
     """The end of a run whose provider (sandbox, or the grading API) refused its credentials: no attempt succeeds
     until they are fixed."""
     rejected = sum(row.get("failure_kind") == PROVIDER_CREDENTIALS_REJECTED for row in failures)
@@ -1982,7 +1985,7 @@ def _protocol_violation_stop(server: str, answered: int) -> IncompleteEvaluation
     )
 
 
-def _quota_exhausted_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
+def _quota_exhausted_stop(failures: Iterable[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
     """The end of a run whose grading provider's quota is exhausted: nothing can be graded until it resets."""
     exhausted = [row for row in failures if row.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED]
     if not exhausted:
@@ -3137,7 +3140,7 @@ def _matches_failure_class(row: Mapping[str, Any], failure_classes: Collection[s
     return matches_failure_class(row, failure_classes)
 
 
-def _counted_failure_rows(rows: List[Dict], failure_classes: List[str]) -> List[Dict]:
+def _counted_failure_rows(rows: Iterable[Dict], failure_classes: List[str]) -> List[Dict]:
     wanted = set(failure_classes)
     return [_counted_failure_row(row) for row in rows if _counts_as_zero(row, wanted)]
 
@@ -3203,6 +3206,38 @@ def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
     scored["mask_sample"] = False
     scored.setdefault("reward", 0.0)
     return scored
+
+
+# Generated content /aggregate_metrics is never sent. The response's provider metrics are kept: see `_aggregation_entry`.
+_AGGREGATION_DROPPED_KEYS = frozenset(
+    {
+        "response",
+        "responses_create_params",
+        NG_AGENT_OBSERVATIONS_KEY,
+        "ng_model_call_capture",
+        NG_TRAJECTORY_KEY,
+        # Lists places inside the evidence keys above.
+        NG_ROW_MEDIA_KEY,
+    }
+)
+
+
+def _aggregation_entry(result: Mapping[str, Any]) -> Dict[str, Any]:
+    """The part of a result `/aggregate_metrics` receives: the result without its generated content.
+
+    The response keeps the provider metrics a request-level aggregation reads (e.g. SPEED-Bench), with its usage and
+    truncation status. Applying this to an entry it returned gives an equal entry, in the same key order.
+    """
+    entry = {k: v for k, v in result.items() if k not in _AGGREGATION_DROPPED_KEYS}
+    response = result.get("response") or {}
+    response_metadata = {}
+    for key in ("usage", "incomplete_details", "metrics"):
+        value = response.get(key)
+        if value is not None:
+            response_metadata[key] = value
+    if response_metadata:
+        entry["response"] = response_metadata
+    return entry
 
 
 def _rollout_order_key(row: Dict[str, Any]) -> tuple:
@@ -4282,9 +4317,16 @@ class RolloutCollectionHelper(BaseModel):
         self,
         config: RolloutCollectionConfig,
         *,
-        retain_results_in_memory: bool = True,
+        retain_results_in_memory: Optional[bool] = None,
         success_keys: Optional[set] = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[bytes]]]:
+        """The rows a resume would still run, then the saved successes with their inputs and serialized lines.
+
+        The saved successes are loaded only when ``retain_results_in_memory`` is true, which defaults to the
+        config's setting: a caller that keeps no results (one counting what is left, say) reads none back.
+        """
+        if retain_results_in_memory is None:
+            retain_results_in_memory = config.retain_results_in_memory
         output = Path(config.output_jsonl_fpath)
         if manifest_path_for(output).exists():
             store = RolloutStore.read(output)
@@ -4623,7 +4665,7 @@ executions → not run again (left to recovery)
                     _batch_status_row(record.read(), batch_agent_refs)
                     for record in store.selected_records("success").values()
                 ]
-                batch_failure_rows = [_batch_status_row(row, batch_agent_refs) for row in store.failures()]
+                batch_failure_rows = [_batch_status_row(row, batch_agent_refs) for row in store.iter_failures()]
                 written = batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
             except Exception as error:
                 if config.batch_manifest_fpath:
@@ -5285,8 +5327,15 @@ executions → not run again (left to recovery)
         )
         # Explicitly counted failures can provide a score even when no rollout
         # succeeded. Select attempts before applying that scoring policy.
+        # Without retained results, the aggregation is handed only the part of each row it reads, so the saved
+        # failures are read one at a time and only that part of a counted one is kept.
         counted = await asyncio.to_thread(
-            lambda: _counted_failure_rows(store.failures(), config.count_failure_classes_as_zero)
+            lambda: _counted_failure_rows(
+                store.iter_failures()
+                if config.retain_results_in_memory
+                else map(_aggregation_entry, store.iter_failures()),
+                config.count_failure_classes_as_zero,
+            )
         )
         missing = (
             await asyncio.to_thread(
@@ -5307,7 +5356,8 @@ executions → not run again (left to recovery)
                 else ""
             )
             stop = await asyncio.to_thread(
-                lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
+                lambda: _credentials_rejected_stop(store.iter_failures())
+                or _quota_exhausted_stop(store.iter_failures())
             )
             if stop is not None:
                 raise stop
@@ -5336,8 +5386,12 @@ executions → not run again (left to recovery)
                     upload_spool_fpath.unlink(missing_ok=True)
 
         if not config.retain_results_in_memory and not config.disable_aggregation:
-            # Aggregation consumes only successful rows from the main artifact.
-            persisted_results = await asyncio.to_thread(store.selected, "success")
+            # Aggregation consumes only successful rows from the main artifact, and only part of each: read them
+            # back one at a time and keep that part, so memory follows the largest row rather than the run.
+            # `_fill_task_fields` reads these entries' keys; a key they drop is never sent to the aggregation.
+            persisted_results = await asyncio.to_thread(
+                lambda: [_aggregation_entry(row) for row in store.iter_selected("success")]
+            )
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
@@ -5355,7 +5409,8 @@ executions → not run again (left to recovery)
         rejection: Optional[BaseException] = None
         if config.require_complete:
             rejection = await asyncio.to_thread(
-                lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
+                lambda: _credentials_rejected_stop(store.iter_failures())
+                or _quota_exhausted_stop(store.iter_failures())
             )
         if rejection is None:
             rejection = config.completion_rejection(
@@ -5531,38 +5586,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
             nonlocal first_error
-            # Strip generated content, but keep provider metrics for request-level
-            # aggregation (e.g. SPEED-Bench), along with usage and truncation status.
-            stripped = []
-            for r in agent_result_list:
-                entry = {
-                    k: v
-                    for k, v in r.items()
-                    if k
-                    not in (
-                        "response",
-                        "responses_create_params",
-                        NG_AGENT_OBSERVATIONS_KEY,
-                        "ng_model_call_capture",
-                        NG_TRAJECTORY_KEY,
-                        # Lists places inside the evidence keys above.
-                        NG_ROW_MEDIA_KEY,
-                    )
-                }
-                response = r.get("response") or {}
-                response_metadata = {}
-                usage = response.get("usage")
-                if usage is not None:
-                    response_metadata["usage"] = usage
-                incomplete_details = response.get("incomplete_details")
-                if incomplete_details is not None:
-                    response_metadata["incomplete_details"] = incomplete_details
-                metrics = response.get("metrics")
-                if metrics is not None:
-                    response_metadata["metrics"] = metrics
-                if response_metadata:
-                    entry["response"] = response_metadata
-                stripped.append(entry)
+            stripped = [_aggregation_entry(r) for r in agent_result_list]
 
             agg_response = None
             try:
@@ -5761,10 +5785,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     if (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) in keys
                 ]
 
+            # Only the part of each row `/aggregate_metrics` receives is kept, as each is read: the agent's rows can
+            # be all of a run's rows, and the counts below read only identities, rewards and failure fields.
+            def aggregation_entries(records: List[RolloutRecord]) -> List[Dict]:
+                return [_aggregation_entry(row) for row in iter_record_rows(records)]
+
             success_records = agent_records("success")
             other_records = agent_records("failure") + agent_records("omitted")
-            results = await asyncio.to_thread(read_record_rows, success_records)
-            others = await asyncio.to_thread(read_record_rows, other_records)
+            results = await asyncio.to_thread(aggregation_entries, success_records)
+            others = await asyncio.to_thread(aggregation_entries, other_records)
             scored_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in results}
             failed_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in others}
             if scored_keys | failed_keys != keys:

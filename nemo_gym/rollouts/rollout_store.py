@@ -25,7 +25,7 @@ import os
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from pathlib import Path
 from time import perf_counter
@@ -713,13 +713,24 @@ class RolloutStore:
         """Load selected payloads; use selected_records for metadata-only access."""
         return self._state.selected(disposition)
 
+    def iter_selected(self, disposition: str) -> Iterator[dict]:
+        """``selected``, one payload at a time: a reader that keeps only part of each row never holds them all."""
+        return self._state.iter_selected(disposition)
+
     def selected_records(self, disposition: str) -> dict[tuple[str, int], RolloutRecord]:
         """Map selected rollout/attempt identities to their original file slices."""
         return self._state.selected_records(disposition)
 
     def failures(self) -> list[dict]:
         """Latest failure payloads, including terminal skips classified as omitted."""
-        return [row for row in self.selected("failure") + self.selected("omitted") if not row.get("_ng_omitted")]
+        return list(self.iter_failures())
+
+    def iter_failures(self) -> Iterator[dict]:
+        """``failures``, one payload at a time."""
+        for disposition in ("failure", "omitted"):
+            for row in self.iter_selected(disposition):
+                if not row.get("_ng_omitted"):
+                    yield row
 
     def inputs_for(self, results: list[dict]) -> list[dict]:
         return [self._state.expected[logical_rollout_id(result)] for result in results]
