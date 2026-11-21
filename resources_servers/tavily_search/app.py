@@ -22,28 +22,41 @@ from contextlib import asynccontextmanager
 from fnmatch import fnmatchcase
 from pathlib import Path
 from time import time
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Sequence
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Sequence
 from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.client import RETRY_ERROR_CODES, SESSION_ID_KEY, request
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
+    BaseVerifyResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
+from resources_servers.tavily_search.task_data import TaskData
 
 
 logger = logging.getLogger(__name__)
@@ -158,7 +171,7 @@ class TavilySearchMetrics(BaseModel):
     async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
 
 
-class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+class TavilySearchVerifyResponse(TavilySearchVerifyRequest, BaseVerifyResponse, JudgeEvaluation):
     num_tool_calls: int
     metrics: TavilySearchMetrics
 
@@ -302,16 +315,23 @@ def select_provider_domains(
     return ordered[:limit]
 
 
+class TavilyTypedSeedSessionRequest(TaskData, BaseSeedSessionRequest):
+    """Validate typed search tasks without narrowing the cookie seed."""
+
+
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
+    _archived_session_metrics: Dict[str, TavilySearchMetrics] = PrivateAttr(default_factory=dict)
+    seed_request_model = TavilyTypedSeedSessionRequest
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
 
     def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
         tavily_api_keys = self.config.tavily_api_key
         if isinstance(tavily_api_keys, str):
             tavily_api_keys = [tavily_api_keys]
@@ -380,7 +400,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     out_file = out_file.with_name(f"session_id_metrics.{os.getppid()}.{os.getpid()}.json")
                 print(f"Dumping session_id metrics to {out_file}")
 
-                to_dump = {k: v.model_dump(mode="json") for k, v in self._session_id_to_metrics.items()}
+                metrics = self._archived_session_metrics | self._session_id_to_metrics
+                to_dump = {k: v.model_dump(mode="json") for k, v in metrics.items()}
                 with out_file.open("w") as f:
                     json.dump(to_dump, f)
 
@@ -391,13 +412,47 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> list[str]:
         return ["web_search", "find_in_page", "scroll_page"]
 
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Keep the permissive cookie seed; the base validates typed tasks and owns the lifecycle."""
+        return await super().seed_session(body, request=request)
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._session_id_to_metrics
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """Start fresh metrics after construction succeeds, including a cookie reseed of the same ID."""
+        self._session_id_to_metrics[session_id] = TavilySearchMetrics()
+
+    async def release_session_state(self, session_id: str) -> None:
+        """Remove live metrics, retaining an export-only reference when the exit dump is enabled."""
+        metrics = self._session_id_to_metrics.pop(session_id, None)
+        if metrics is not None and self.config.dump_session_id_to_metrics_on_exit:
+            # In-flight calls may still append to this object; verification retains its own deep snapshot.
+            self._archived_session_metrics[session_id] = metrics
+
+    def _session_metrics(self, request: Request) -> TavilySearchMetrics:
+        """The metrics of the calling session.
+
+        The tools keep no task state, so a session nobody seeded, such as an MCP client's, gets its record on first
+        use. A session closed within the fence window does not: a late call would recreate what its close released.
+        """
+        session_id = request.session[SESSION_ID_KEY]
+        if self.session_is_closed(session_id) or self.session_is_verified(session_id):
+            raise ResourcesSessionLostError("This tavily_search session has already ended")
+        return self._session_id_to_metrics[session_id]
+
     def _select_tavily_client(self) -> AsyncTavilyClient:
         client = self._async_tavily_clients[self._num_requests % len(self._async_tavily_clients)]
         self._num_requests += 1
         return client
 
     async def web_search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+        metrics = self._session_metrics(request)
 
         if self.config.debug:
             print("\n\n body.query: ", body.query)
@@ -431,7 +486,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return TavilySearchResponse(results_string="".join(postprocessed_results))
 
     async def find_in_page(self, request: Request, body: FindInPageRequest) -> FindInPageResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+        metrics = self._session_metrics(request)
 
         if self.config.debug:
             print("\n\n find_in_page ")
@@ -486,7 +541,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return FindInPageResponse(results_string=header + numbered + footer)
 
     async def scroll_page(self, request: Request, body: ScrollPageRequest) -> ScrollPageResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+        metrics = self._session_metrics(request)
 
         if self.config.debug:
             print("\n\n scroll_page ")
@@ -561,26 +616,51 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
-        question = body.question
-        ground_truth = body.ground_truth
-        last_assistant_response = body.response.output_text
-
-        judge_error = None
-        if self.config.use_judge:
-            judge_evaluation, judge_error = await self._verify_answer_with_judge(
-                question, ground_truth, last_assistant_response
+        """Score each request while the shared lifecycle retains an isolated metrics snapshot for retries."""
+        session_id = request.session[SESSION_ID_KEY]
+        num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
+        # Tool-service callers can verify without seeding; close still fences them. Holding the session lock across
+        # the judge stops a cookie reseed or close from replacing metrics before this run's release and snapshot.
+        async with self.verifying(session_id, allow_missing=True) as verification:
+            if verification.is_lost:
+                lost = lost_session_verification("This tavily_search session is already closed")
+                return TavilySearchVerifyResponse(
+                    **(body.model_dump() | lost),
+                    reasoning="",
+                    extracted_final_answer="",
+                    num_tool_calls=num_tool_calls,
+                    metrics=TavilySearchMetrics(),
+                )
+            metrics = (
+                verification.retained.model_copy(deep=True)
+                if isinstance(verification.retained, TavilySearchMetrics)
+                else self._session_id_to_metrics.get(session_id) or TavilySearchMetrics()
             )
-        else:
-            judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
-        response = TavilySearchVerifyResponse(
-            **body.model_dump(),
-            **judge_evaluation.model_dump(),
-            num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
-            metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
-        )
-        if judge_error is not None:
-            raise judge_error
-        return response
+            try:
+                question = body.question
+                ground_truth = body.ground_truth
+                last_assistant_response = body.response.output_text
+
+                judge_error = None
+                if self.config.use_judge:
+                    judge_evaluation, judge_error = await self._verify_answer_with_judge(
+                        question, ground_truth, last_assistant_response
+                    )
+                else:
+                    judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
+                response = TavilySearchVerifyResponse(
+                    **body.model_dump(),
+                    **judge_evaluation.model_dump(),
+                    num_tool_calls=num_tool_calls,
+                    metrics=metrics,
+                )
+                if judge_error is not None:
+                    raise judge_error
+                return response
+            finally:
+                # Keep the finished run's metrics separate from the mutable exit-dump archive. The base releases
+                # state and saves this snapshot even when judging fails, without caching the judge's score.
+                verification.retain(metrics.model_copy(deep=True))
 
     ###### UTILITY FUNCTIONS ######
 

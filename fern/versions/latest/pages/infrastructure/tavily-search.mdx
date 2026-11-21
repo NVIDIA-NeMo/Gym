@@ -109,6 +109,22 @@ neither forwarded to models nor logged.
 
 These behaviors apply to all Tavily configurations:
 
+- Each session's Tavily call metrics are returned by `/verify` in `metrics`. Verification
+  releases the live session maps and retains an expiring identity and metrics record for
+  `session_close_retry_window_seconds`, so an HTTP retry keeps its metrics. The judge still
+  evaluates each verify request. Tool calls after verification are refused during that window.
+  Typed seeds for an already verified session return 409; verify retries remain supported.
+  The shared resources lifecycle owns seed identity, locking, close, and checkpoint retirement;
+  Tavily supplies state initialization/release hooks and retains its own verifier metrics snapshot.
+  `/close_session` and checkpoint retirement release unverified sessions. After close, a tool
+  call gets 404 and `/verify` returns a masked sample during the retry window.
+  With `dump_session_id_to_metrics_on_exit: true`, released metrics move to a separate export archive until
+  shutdown and no longer count as live session state. Calls already in flight can finish updating the archive;
+  verification retries use their independent deep snapshot. Keep session IDs unique: reusing an ID replaces
+  its exported record.
+- When Tavily is only a tool server, as in the HLE `opencode_search` and `pi_search` configs,
+  verification goes to the benchmark's own Resources Server and nothing closes Tavily's sessions,
+  so their metrics stay in memory until shutdown unless checkpoint retirement discards the attempt.
 - Search requests disable Tavily's aggregate answer, and returned aggregate answers
   are discarded. The former `Search Answer` output section is removed because its
   sources cannot be checked against the local policy; agents receive source results.
