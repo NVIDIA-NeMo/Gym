@@ -1039,6 +1039,21 @@ async def test_a_session_that_saved_no_store_has_no_conversation_to_inspect(monk
     store.download.assert_not_awaited()
 
 
+async def test_a_conversation_saved_with_the_prompt_quoted_as_one_argv_word_is_reprompted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def download(names: list[str], directory: Path) -> None:
+        _write_store(directory, {**USER, "parts": [{"type": "text", "text": '"fix the bug"\n'}]}, ANSWER)
+
+    agent, state, store = _stopped_session(monkeypatch, download=download)
+    agent.config.argv_prompt_quoting = True
+
+    launch, interrupted = await agent._relaunch_payload(state, _fresh_payload, prompt="fix the bug")
+
+    assert launch["reprompt"]["messageID"] == "msg_1" and interrupted == 0
+    store.aside.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "saved, reason",
     [("unparsable", "the saved conversation cannot be parsed"), ("missing", "no saved OpenCode conversation")],

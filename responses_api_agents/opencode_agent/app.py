@@ -2648,8 +2648,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         ``payload`` is built after the decision: a fresh start sets aside the conversation the command would name.
         """
         timeout = self.config.session_close_timeout_seconds
+        # The saved user turn holds the prompt as the launch sent it.
+        sent = argv_prompt(prompt) if self.config.argv_prompt_quoting else prompt
         try:
-            decision = reprompt_decision(await state.inspect_conversation(timeout=timeout), prompt)
+            decision = reprompt_decision(await state.inspect_conversation(timeout=timeout), sent)
         except UnparsableConversationError as error:
             decision = RepromptDecision(reprompt=False, reason=f"the saved conversation cannot be parsed: {error}")
         if decision.reprompt:
