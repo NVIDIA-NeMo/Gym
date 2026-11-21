@@ -146,6 +146,10 @@ from responses_api_agents.opencode_agent.snapshot import stored_message_ids, sto
 
 
 LOG = logging.getLogger(__name__)
+# How long a run that timed out waits for the rest of OpenCode's output. A process that OpenCode started
+# can outlive it and keep the output pipes open, and an unbounded wait for the end of the output would
+# then hold the request for as long as that process runs.
+_TIMEOUT_DRAIN_SECONDS = 10.0
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _TESTED_OUTCOME_VERSION = "1.17.11"
@@ -912,8 +916,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             try:
                 _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
-                _, stderr = await proc.communicate()
+                # OpenCode can exit on its own as the timeout fires, and killing an exited process raises.
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                try:
+                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_DRAIN_SECONDS)
+                except asyncio.TimeoutError:
+                    # A process that OpenCode started still holds the output pipes open.
+                    stderr = b""
                 timed_out = True
                 LOG.warning("opencode timed out after %ss", timeout)
 

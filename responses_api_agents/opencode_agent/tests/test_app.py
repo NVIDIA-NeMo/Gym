@@ -1089,6 +1089,54 @@ async def test_append_keeps_the_explicit_local_agent_selector(tmp_path) -> None:
     assert run.call_args.args[-3:] == ("--agent", "plan", "user task")
 
 
+@pytest.mark.parametrize("returncode", [None, 0], ids=["exits_during_the_kill", "exited_before_the_kill"])
+async def test_timeout_tolerates_a_process_that_has_already_exited(tmp_path, returncode) -> None:
+    """OpenCode can exit on its own as the timeout fires, and killing an exited process raises ProcessLookupError.
+
+    The run must still end as a timeout instead of failing with that error.
+    """
+    agent = _make_agent(workspace_root=str(tmp_path))
+    process = MagicMock(returncode=returncode)
+    process.communicate = AsyncMock(side_effect=[asyncio.TimeoutError(), (b"", b"")])
+    process.kill.side_effect = ProcessLookupError
+    with patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", return_value=process):
+        output, _, _, observations = await agent._run_opencode("user task", None, collect_observations=False)
+    assert output == []
+    assert [gap.code for gap in observations.gaps] == ["agent_run_timeout"]
+    # A process that has not reported an exit is still killed.
+    assert process.kill.called == (returncode is None)
+
+
+async def test_timeout_does_not_wait_for_output_that_a_surviving_process_keeps_open(tmp_path) -> None:
+    """A process that OpenCode started can outlive it and keep the output pipes open.
+
+    The read of the remaining output then never ends on its own, so it is bounded, and the run ends as a timeout.
+    """
+    agent = _make_agent(workspace_root=str(tmp_path))
+    reads = 0
+
+    async def communicate():
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise asyncio.TimeoutError
+        await asyncio.Event().wait()
+
+    process = MagicMock(returncode=None, communicate=communicate)
+    # A killed process has an exit code, which makes the run log the remaining error output.
+    process.kill.side_effect = lambda: setattr(process, "returncode", -9)
+    with (
+        patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", return_value=process),
+        patch("responses_api_agents.opencode_agent.app._TIMEOUT_DRAIN_SECONDS", 0.05),
+    ):
+        output, _, _, observations = await asyncio.wait_for(
+            agent._run_opencode("user task", None, collect_observations=False), timeout=5
+        )
+    assert reads == 2
+    assert output == []
+    assert [gap.code for gap in observations.gaps] == ["agent_run_timeout"]
+
+
 @pytest.mark.parametrize("model_server", [POLICY_REF, None], ids=["gym_model_server", "direct_endpoint"])
 async def test_local_run_splits_a_reply_only_when_opencode_calls_a_gym_model_server(tmp_path, model_server) -> None:
     reply = "<think>r</think>\n\n4"
