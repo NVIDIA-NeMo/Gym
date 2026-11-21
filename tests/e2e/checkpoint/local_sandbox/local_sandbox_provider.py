@@ -180,11 +180,12 @@ class LocalDirPlainProvider:
         return SandboxStatus.RUNNING if box["state"] == "running" else SandboxStatus.STOPPED
 
     async def close(self, handle: SandboxHandle) -> None:
-        try:
-            box = self._box(handle.sandbox_id)
-        except RuntimeError:
+        if not self._box_file(handle.sandbox_id).exists():
             return
-        kill_sandbox_processes(handle.sandbox_id)
+        # The scan of /proc sleeps between passes: off the event loop, so the server's other requests go on.
+        await asyncio.to_thread(kill_sandbox_processes, handle.sandbox_id)
+        # Read after the scan, with no await before the save: a fork may have moved the sandbox meanwhile.
+        box = self._box(handle.sandbox_id)
         if box["state"] == "running":
             box["state"] = "stopped"
             box["stopped_at"] = time.time()
@@ -217,7 +218,12 @@ class LocalDirProvider(LocalDirPlainProvider):
             box = json.loads(box_file.read_text())
             if box["path"] != str(path):
                 continue
-            kill_sandbox_processes(box["id"])
+            await asyncio.to_thread(kill_sandbox_processes, box["id"])
+            # Read again after the scan, with no await before the save: a close may have stopped it meanwhile,
+            # or another fork set it aside.
+            box = json.loads(box_file.read_text())
+            if box["path"] != str(path):
+                continue
             aside = path.with_name(f"{path.name}.superseded-{uuid.uuid4().hex[:6]}")
             if path.exists():
                 path.rename(aside)
@@ -244,9 +250,12 @@ class LocalDirProvider(LocalDirPlainProvider):
             # A snapshot without meta.json is listed by nothing, so nothing would delete it.
             shutil.rmtree(directory, ignore_errors=True)
             raise
-        (directory / "meta.json").write_text(
+        # Renamed into place, so a listing never reads a half-written meta.json.
+        temporary = directory / "meta.json.tmp"
+        temporary.write_text(
             json.dumps({"name": name or snapshot_id, "path": box["path"], "sandbox_id": handle.sandbox_id})
         )
+        temporary.replace(directory / "meta.json")
         return snapshot_id
 
     async def wait_snapshot_ready(self, snapshot_id: str) -> None:

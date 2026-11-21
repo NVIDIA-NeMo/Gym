@@ -57,6 +57,8 @@ from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint  # noqa
 HARNESS = """import json, os, pathlib, signal, sys, time, urllib.request
 signal.signal(signal.SIGTERM, lambda *_: os._exit(143))
 workdir, steps, delay, base_url, release = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), sys.argv[4], sys.argv[5]
+# Read by the e2e scenarios alone, to see the state of this process during a checkpoint.
+pathlib.Path(__file__).with_name("harness.pid").write_text(str(os.getpid()))
 notes = pathlib.Path(workdir) / "notes"
 done = len(notes.read_text().splitlines()) if notes.exists() else 0
 for index in range(done, steps):
