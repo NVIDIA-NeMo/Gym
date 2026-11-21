@@ -12,6 +12,7 @@ from aiohttp import web
 from pydantic import ValidationError
 
 from nemo_gym.agents.utils.supervisor_client import harness_termination_failure
+from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON, _model_attempt_failure
 from nemo_gym.core.episode_types import BaseEpisodeResponse, EpisodeId, TaskId
 from nemo_gym.core.failure_records import (
     EpisodeFailure,
@@ -118,7 +119,7 @@ def test_merging_keeps_one_copy_per_event_id_and_the_first_reports_failure_id() 
     assert set(merged.events) == set(second.events) and len(merged.events) == 2
 
 
-def test_the_header_codec_omits_an_oversized_report_and_keeps_the_flag_upward() -> None:
+def test_the_header_codec_trims_an_oversized_report_and_keeps_the_flag_upward() -> None:
     small = failure_report_for(_model())
     assert FailureHeader.decode(FailureHeader.encode(small)) == small
     assert FailureHeader.encode(FailureReport()) == {}
@@ -128,11 +129,128 @@ def test_the_header_codec_omits_an_oversized_report_and_keeps_the_flag_upward() 
         event = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="x" * 2000)
         events[event.event_id] = event
     oversized = FailureHeader.encode(FailureReport(events=events))
-    assert FailureHeader.decode(oversized) == FailureReport(omitted=True)
+    decoded = FailureHeader.decode(oversized)
+    assert decoded.omitted and list(decoded.events) == list(events)[:1]
 
-    upward = FailureReport().merged(FailureHeader.decode(oversized))
-    assert upward.omitted and not upward.events
+    upward = FailureReport().merged(decoded)
+    assert upward.omitted and upward.events == decoded.events
     assert FailureHeader.decode({FailureHeader.NAME: "not json"}) == FailureReport(omitted=True)
+
+
+def _transport_failure(operation_id: str, attempt: int) -> NgFailureEvent:
+    # The event the model client records for each recovered transport failure, about 600 bytes on the wire.
+    return _model_attempt_failure(
+        MODEL_RESPONSE_TIMEOUT_REASON,
+        operation_id=operation_id,
+        attempt_id=f"{operation_id}-transport-{attempt}",
+        request_upload_complete=True,
+        foreign_error=sdk_error_details(aiohttp.ServerTimeoutError("Timeout on reading data from socket")),
+    )
+
+
+def test_recovered_transport_failures_never_crowd_out_the_requests_own_failure() -> None:
+    """Eight recovered model transport failures are more than the header holds; the request's own failure and its
+    cause chain still travel, the recovered observations that fit are kept, and the report says events are missing."""
+    recovered = [_transport_failure("call-a", attempt) for attempt in range(1, 9)]
+    last_attempt = _transport_failure("call-b", 1)
+    final = _chained(
+        NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind="test:failure",
+            failure_reason="model call failed",
+            operation="agent.run",
+        ),
+        last_attempt,
+    )
+    with RequestFailureLog.capture() as log:
+        for failure in [*recovered, last_attempt]:
+            observe_failure(failure)
+        report = log.reply_report(final)
+    assert len(report.model_dump_json()) > FailureHeader.MAX_BYTES
+
+    encoded = FailureHeader.encode(report)
+    assert len(encoded[FailureHeader.NAME]) <= FailureHeader.MAX_BYTES
+    decoded = FailureHeader.decode(encoded)
+    assert decoded.failure_id == final.event_id
+    assert decoded.events[final.event_id] == report.events[final.event_id]
+    assert decoded.events[final.event_id].cause_id == last_attempt.event_id
+    assert decoded.events[last_attempt.event_id] == report.events[last_attempt.event_id]
+    assert decoded.omitted
+    # Recovered observations fill the rest of the budget in report order (the log's newest first), each unchanged.
+    newest_first = [failure.event_id for failure in reversed(recovered)]
+    kept = [event_id for event_id in report.events if event_id in decoded.events and event_id in newest_first]
+    assert kept == newest_first[: len(kept)]
+    assert 0 < len(kept) < len(recovered)
+    assert all(decoded.events[key] == report.events[key] for key in kept)
+
+    # The same budget applies to a streamed reply's terminal event.
+    assert (
+        FailureHeader.decode_stream_event({FailureHeader.STREAM_FIELD: FailureHeader.stream_value(report)}) == decoded
+    )
+
+
+def test_a_successful_reply_keeps_the_recovered_failures_that_fit() -> None:
+    recovered = [_transport_failure("call", attempt) for attempt in range(1, 12)]
+    with RequestFailureLog.capture() as log:
+        for failure in recovered:
+            observe_failure(failure)
+        report = log.reply_report(None)
+
+    decoded = FailureHeader.decode(FailureHeader.encode(report))
+    assert decoded.failure_id is None and decoded.omitted
+    assert list(decoded.events) == [failure.event_id for failure in reversed(recovered)][: len(decoded.events)]
+    assert 0 < len(decoded.events) < len(recovered)
+
+
+def test_a_report_one_byte_over_the_budget_still_keeps_its_own_failure() -> None:
+    """``"omitted":true`` is a byte shorter than ``false``; a report one byte over must still lose an event, not
+    fall back to omitting everything."""
+    own = _model("own failure")
+
+    def report(padding: int) -> FailureReport:
+        recovered = [_model("r" * 1800), _model("r" * padding)]
+        with RequestFailureLog.capture() as log:
+            for failure in recovered:
+                observe_failure(failure)
+            return log.reply_report(own)
+
+    def compact(value: FailureReport) -> int:
+        return len(json.dumps(value.model_dump(mode="json"), ensure_ascii=True, separators=(",", ":")))
+
+    padding = 1800
+    padding += FailureHeader.MAX_BYTES + 1 - compact(report(padding))
+    over = report(padding)
+    assert compact(over) == FailureHeader.MAX_BYTES + 1 and not over.omitted
+
+    decoded = FailureHeader.decode(FailureHeader.encode(over))
+    assert decoded.failure_id == own.event_id and decoded.omitted
+    assert 1 < len(decoded.events) < len(over.events)
+
+
+def test_a_newer_event_too_large_to_fit_does_not_crowd_out_a_smaller_older_one() -> None:
+    small, larger, newest = _model("s" * 50), _model("l" * 1990), _model("n" * 1990)
+    own = _model("own failure")
+    with RequestFailureLog.capture() as log:
+        for failure in (small, larger, newest):
+            observe_failure(failure)
+        report = log.reply_report(own)
+    assert [key for key in report.events if key != own.event_id] == [
+        newest.event_id,
+        larger.event_id,
+        small.event_id,
+    ]
+
+    decoded = FailureHeader.decode(FailureHeader.encode(report))
+    assert decoded.failure_id == own.event_id and decoded.omitted
+    assert set(decoded.events) == {own.event_id, newest.event_id, small.event_id}
+
+
+def test_a_report_whose_own_failure_chain_does_not_fit_is_omitted_whole() -> None:
+    cause = _model("c" * 2000)
+    middle = _chained(_model("m" * 2000), cause)
+    final = _chained(_model("f" * 2000), middle)
+    report = failure_report_for(final)
+    assert FailureHeader.decode(FailureHeader.encode(report)) == FailureReport(omitted=True)
 
 
 def _free_port() -> int:
