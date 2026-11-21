@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from inspect import iscoroutinefunction
 from time import monotonic
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Optional, Self, TypedDict, TypeVar, get_args
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import (
@@ -30,7 +30,9 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    FiniteFloat,
     JsonValue,
+    NonNegativeInt,
     PrivateAttr,
     SerializerFunctionWrapHandler,
     StrictBool,
@@ -38,6 +40,7 @@ from pydantic import (
     ValidationError,
     field_validator,
     model_serializer,
+    model_validator,
 )
 from starlette.middleware import Middleware
 
@@ -198,8 +201,39 @@ class BaseVerifyRequest(BaseRunRequest):
     response: NeMoGymResponse
 
 
+class SegmentReward(BaseModel):
+    """A reward for the call-forest segment that one part of a rollout trains in.
+
+    Set exactly one target. ``output_index`` names an item of the scored ``response.output``, and the reward goes
+    to the model call that produced it. ``launched_by`` names the ``call_id`` of a tool call that launched a
+    subagent, and the reward goes to every model call of that subagent and of subagents it launched that have no
+    entry of their own.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reward: FiniteFloat
+    output_index: NonNegativeInt | None = Field(default=None, exclude_if=lambda value: value is None)
+    launched_by: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def _one_target(self) -> Self:
+        if (self.output_index is None) == (self.launched_by is None):
+            raise ValueError("a segment reward names exactly one of output_index and launched_by")
+        return self
+
+
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
+    segment_rewards: list[SegmentReward] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+        description=(
+            "Rewards for parts of the rollout, for a trainer that keeps every captured model call and trains each "
+            "segment of the call forest as its own sequence (see nemo_gym.rollouts.resolve_segment_rewards). "
+            "`reward` stays the rollout's score, and the reward of every segment without an entry."
+        ),
+    )
     failure_outcome_action: OutcomeAction | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
