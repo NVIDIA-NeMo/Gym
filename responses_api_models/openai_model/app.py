@@ -32,7 +32,11 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
 from nemo_gym.telemetry import MeteredSemaphore
-from responses_api_models.openai_model.provider_refusals import provider_refusal, refusal_response
+from responses_api_models.openai_model.provider_refusals import (
+    provider_refusal,
+    refusal_chat_completion,
+    refusal_response,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -456,7 +460,16 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         body_dict = self._upstream_body(body)
 
         async def create_and_validate() -> NeMoGymChatCompletion:
-            response_dict = await self._client.create_chat_completion(**body_dict)
+            try:
+                response_dict = await self._client.create_chat_completion(**body_dict)
+            except ClientResponseError as error:
+                raw_body = getattr(error, "response_content", None)
+                refusal = provider_refusal(error.status, raw_body, self.config.provider_refusal_codes)
+                if refusal is None:
+                    raise
+                return NeMoGymChatCompletion.model_validate(
+                    refusal_chat_completion(self.config.openai_model, refusal, raw_body)
+                )
             return NeMoGymChatCompletion.model_validate(response_dict)
 
         return await self._call_upstream(create_and_validate)
