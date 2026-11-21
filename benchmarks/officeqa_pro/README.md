@@ -60,6 +60,15 @@ gym eval run --benchmark officeqa_pro \
   '++policy_model.responses_api_models.vllm_model.sampling_overrides={temperature: 1.0, top_p: 0.95}'
 ```
 
+Up to 32 questions run at once by default. To change this, set both the
+agent's `concurrency` and the environment server's `max_concurrent_episodes`.
+Size the value to the model server's KV cache and the sandbox capacity:
+
+```bash
+  ++officeqa_pro_opencode_agent.responses_api_agents.opencode_agent.concurrency=128 \
+  ++officeqa_pro_environment_server.environment_servers.single_agent_turn.max_concurrent_episodes=128
+```
+
 The sampling values above are examples. Use the selected model's recommended
 settings and report the effective values with scores. Both harnesses reject
 request-level `--temperature` and `--top-p`; set sampling through the model

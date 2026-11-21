@@ -21,6 +21,7 @@ officeqa_pro_claude_code_agent:
         type: responses_api_models
         name: policy_model
       model: ${policy_model_name}
+      concurrency: 32
       claude_code_version: ${officeqa_claude_version}
       bare: true
       max_turns: 256
