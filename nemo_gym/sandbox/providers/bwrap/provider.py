@@ -39,7 +39,7 @@ import socket
 import stat
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -441,6 +441,11 @@ class BwrapProvider:
         self._network_host_binds = (
             resolve_binds(self._config.network_host_ro_binds) if self._config.network == "host" else []
         )
+        # Trusted image aliases (for example /bin -> /usr/bin) are resolved once, not at exec.
+        # Keep their configured destinations and still no-follow-open the captured sources.
+        self._system_bind_sources = {path: os.path.realpath(path) for path in self._system_binds}
+        self._network_host_bind_sources = {path: os.path.realpath(path) for path in self._network_host_binds}
+        self._borrowed_network_binds: list[tuple[str, str]] | None = None
         self._check_target(self._config.workdir, label="workdir")
         self._check_target(self._config.home_path, label="home_path")
         self._check_own_dirs(self._config.workdir)
@@ -563,12 +568,18 @@ class BwrapProvider:
         if config.allow_nested_userns and os.geteuid() == 0:
             # Only root needs it; a non-root sandbox's nested bwrap refuses to start with capabilities.
             argv += ["--cap-add", "CAP_SETFCAP"]
-        network_binds = self._network_host_binds
+        network_binds = [(source, path) for path, source in self._network_host_bind_sources.items()]
         if inst.network == "host" and config.network != "host":
-            # A sandbox created as host-network by a differently configured provider.
-            network_binds = resolve_binds(config.network_host_ro_binds)
-        for path in [*self._system_binds, *(network_binds if inst.network == "host" else [])]:
-            argv += ["--ro-bind", path, path]
+            # Resolve this provider's host-network configuration only when a borrower needs it,
+            # then retain the captured sources for every subsequent exec of that configuration.
+            if self._borrowed_network_binds is None:
+                self._borrowed_network_binds = [
+                    (os.path.realpath(path), path) for path in resolve_binds(config.network_host_ro_binds)
+                ]
+            network_binds = self._borrowed_network_binds
+        system_binds = [(source, path) for path, source in self._system_bind_sources.items()]
+        for source, target in [*system_binds, *(network_binds if inst.network == "host" else [])]:
+            argv += ["--ro-bind", source, target]
         argv += ["--proc", "/proc", "--dev", "/dev"]
         argv += ["--bind", str(inst.tmp), "/tmp"]
         argv += ["--bind", str(inst.home), config.home_path]
@@ -898,6 +909,54 @@ class BwrapProvider:
                     entry.unlink()
         return live
 
+    @staticmethod
+    def _open_bind_source(path: str | Path) -> int:
+        """Open a bind source without following a symlink in any path component."""
+        parts = Path(path).parts
+        if not parts or parts[0] != "/" or ".." in parts:
+            raise BwrapPathError(f"invalid bwrap mount source {str(path)!r}")
+        fd = os.open("/", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            for index, part in enumerate(parts[1:]):
+                flags = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
+                if index < len(parts) - 2:
+                    flags |= os.O_DIRECTORY
+                next_fd = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            mode = os.fstat(fd).st_mode
+            if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                raise BwrapPathError(f"bwrap mount source {str(path)!r} is a symlink or special file")
+            return fd
+        except BaseException as error:
+            os.close(fd)
+            if isinstance(error, OSError) and error.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise BwrapPathError(f"bwrap mount source {str(path)!r} crosses a symlink or non-directory") from error
+            raise
+
+    @classmethod
+    @contextlib.contextmanager
+    def _bind_sources(cls, argv: list[str]) -> Iterator[tuple[list[str], tuple[int, ...]]]:
+        """Pin sources until bwrap inherits them; no pathname is reopened during mount setup."""
+        with contextlib.ExitStack() as stack:
+            pinned, descriptors = [], []
+            index = 0
+            while index < len(argv):
+                option = argv[index]
+                if option == "--":
+                    pinned.extend(argv[index:])
+                    break
+                if option in ("--bind", "--ro-bind"):
+                    fd = cls._open_bind_source(argv[index + 1])
+                    stack.callback(os.close, fd)
+                    descriptors.append(fd)
+                    pinned.extend((option + "-fd", str(fd), argv[index + 2]))
+                    index += 3
+                else:
+                    pinned.append(option)
+                    index += 1
+            yield pinned, tuple(descriptors)
+
     async def _run(
         self,
         inst: _BwrapSandbox,
@@ -910,18 +969,19 @@ class BwrapProvider:
         # bwrap writes {"child-pid": <host pid of the namespace init>, ...} to --info-fd.
         info_read, info_write = os.pipe()
         try:
-            process = await asyncio.create_subprocess_exec(
-                argv[0],
-                "--info-fd",
-                str(info_write),
-                *argv[1:],
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-                env=env,
-                pass_fds=(info_write,),
-            )
+            with self._bind_sources(argv) as (pinned_argv, source_fds):
+                process = await asyncio.create_subprocess_exec(
+                    pinned_argv[0],
+                    "--info-fd",
+                    str(info_write),
+                    *pinned_argv[1:],
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
+                    env=env,
+                    pass_fds=(info_write, *source_fds),
+                )
         except BaseException as error:
             os.close(info_read)
             if not isinstance(error, OSError):
@@ -1152,7 +1212,7 @@ class BwrapProvider:
         if self._binds_workspace_host_path(inst):
             table.append((str(inst.workspace), inst.workspace, True))
         for mount in [*self._config.mounts, *inst.mounts]:
-            src = Path(os.path.realpath(mount.src)) if os.path.isfile(mount.src) else Path(mount.src)
+            src = Path(mount.src)
             table.append((posixpath.normpath(mount.dst), src, not mount.ro))
         effective: list[tuple[str, Path, bool]] = []
         for entry in table:
@@ -1195,7 +1255,7 @@ class BwrapProvider:
     @staticmethod
     def _open_parent(root: Path, parts: tuple[str, ...], *, create: bool) -> int:
         """Open the directory holding ``parts[-1]`` without following any symlink below ``root``."""
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        fd = BwrapProvider._open_bind_source(root)
         try:
             for part in parts[:-1]:
                 try:

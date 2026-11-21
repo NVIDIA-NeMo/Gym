@@ -330,7 +330,8 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_sca
 
 
 @linux_only
-def test_stop_signals_count_only_once_the_stop_file_exists(tmp_path: Path) -> None:
+@pytest.mark.parametrize("direct", [False, True], ids=["relay", "direct"])
+def test_stop_signals_count_only_once_the_stop_file_exists(tmp_path: Path, direct: bool) -> None:
     """A tool command (`pkill -f ...`, `killall bash`) can signal the supervisor; a controller writes the stop file."""
     stop = tmp_path / "stop.request"
     worker = "touch ready; while :; do sleep 0.05; done"
@@ -340,6 +341,7 @@ def test_stop_signals_count_only_once_the_stop_file_exists(tmp_path: Path) -> No
         cwd=tmp_path,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=direct,
     )
     try:
         deadline = time.monotonic() + 10
