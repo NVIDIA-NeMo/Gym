@@ -128,7 +128,6 @@ from responses_api_agents.opencode_agent.runtime import (
     ASSISTANT_MESSAGE_PLUGIN_SOURCE,
     IMAGE_INPUT_MODEL_OPTIONS,
     OPENCODE_RELEASE_SHA256,
-    OPENCODE_V2_VERSION,
     OPENCODE_VERSION,
     REQUIRED_MCP_PLUGIN_FILE,
     RUNTIME_INSTALLER_FILE,
@@ -148,9 +147,6 @@ from responses_api_agents.opencode_agent.snapshot import stored_message_ids, sto
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
-_TESTED_OUTCOME_VERSION = "1.17.11"
-# Error classification of OpenCode 2 (its errors translated by opencode2.store) is validated on this release.
-_TESTED_OPENCODE2_OUTCOME_VERSION = OPENCODE_V2_VERSION
 _API_ERROR = "APIError"
 _CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
 
@@ -264,10 +260,16 @@ case "$workdir/" in "${export_dir%/}"/*) overlap=1 ;; esac
 """
 
 
-# Built-in agents by OpenCode version. Each sets its own sampling (1.17.11's ``title`` fixes temperature 0.5) and none
-# inherits from ``build``, so request sampling goes to all of them. A name OpenCode does not define would add an
-# agent, so other versions refuse request sampling, as the adapter did before it applied any.
-_OPENCODE_AGENTS = {"1.17.11": ("build", "plan", "general", "explore", "compaction", "title", "summary")}
+# OpenCode 1's built-in agents. Each sets its own sampling (``title`` fixes temperature 0.5) and none inherits from
+# ``build``, so request sampling goes to all of them. A name OpenCode does not define would add an agent, so request
+# sampling is applied only on the releases checked to define exactly these (packages/opencode/src/agent/agent.ts).
+_OPENCODE_BUILTIN_AGENTS = ("build", "plan", "general", "explore", "compaction", "title", "summary")
+_SAMPLING_OPENCODE1_VERSIONS = ("1.17.11", "1.19.6")
+# Releases on which the error reports that `classify_outcome` and `_reported_model_error` read (OpenCode 2's after
+# opencode2.store translates them) were checked: their error types and fields are those of 1.17.11 (OpenCode 1,
+# packages/core/src/v1/session.ts) or 2.2.7 (OpenCode 2, packages/core/src/session/to-session-error.ts). Another
+# release logs a warning at seed.
+_CLASSIFIED_OPENCODE_VERSIONS = ("1.17.11", "1.19.6", "2.2.7", "2.3.2")
 # Isolation shared by every OpenCode process of a session: run, export and import.
 _OPENCODE_ISOLATION = {
     "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
@@ -336,7 +338,7 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
 _SUBAGENT_NAME = re.compile(r"[a-z][a-z0-9-]*")
 # OpenCode's own agents: `build` runs the session, `plan` is its other primary agent, and the rest are the roles
 # OpenCode runs itself. A session may limit `build`, hide a built-in subagent, and define its own subagents.
-_OPENCODE_OWN_AGENTS = frozenset(_OPENCODE_AGENTS["1.17.11"])
+_OPENCODE_OWN_AGENTS = frozenset(_OPENCODE_BUILTIN_AGENTS)
 _OPENCODE_BUILTIN_SUBAGENTS = frozenset({"general", "explore"})
 _SUBAGENT_KEYS = frozenset({"mode", "description", "prompt", "steps", "permission", "tools"})
 
@@ -440,7 +442,7 @@ def _compaction_buffer_name_error(opencode_version: Any, opencode_config: Mappin
 
     OpenCode 1 names the buffer ``compaction.reserved`` and OpenCode 2 ``compaction.buffer``. Each version is given only
     its own name: OpenCode 1.17 drops a compaction key it does not know, so a run given ``buffer`` would compact at the
-    default threshold without an error.
+    default threshold without an error (1.19.6 reads ``buffer`` as ``reserved``).
     """
     compaction = opencode_config.get("compaction")
     if not isinstance(compaction, Mapping):
@@ -668,7 +670,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _reported_model_error(native_result: Mapping[str, Any], cleanup: dict | None) -> bool:
-        """Recognize a completed API error or context limit; tested on OpenCode 1.17.11.
+        """Recognize a completed API error or context limit; checked on ``_CLASSIFIED_OPENCODE_VERSIONS``.
 
         Independent worker failures, cleanup errors and timeouts are not provider reports.
         OpenCode 1.15.x exits 0 when compaction itself overflows, so a context limit accepts exit 0 too.
@@ -686,7 +688,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read native APIError status or transport retry marker; tested on OpenCode 1.17.11.
+        """Read native APIError status or transport retry marker; checked on ``_CLASSIFIED_OPENCODE_VERSIONS``.
 
         OpenCode marks connection resets, header timeouts, decompression failures and
         interrupted streams retryable without an HTTP status. Preserve that evidence;
@@ -816,6 +818,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         calls when capture is on."""
         config = self._build_opencode_config(rollout_id)
         config["permission"] = opencode2_config.code_mode_off(config.get("permission"))
+        opencode2_config.background_compaction_off(config)
         for model in ((config.get("provider") or {}).get("nemo") or {}).get("models", {}).values():
             # OpenCode 2 assumes image input for a model it does not know; OpenCode 1 assumed text only.
             model.setdefault("modalities", {"input": ["text"], "output": ["text"]})
@@ -1171,12 +1174,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             r"\d+\.\d+\.\d+", self.config.opencode_version
         ):
             raise HTTPException(422, "OpenCode sandbox execution requires an exact opencode_version")
-        tested = _TESTED_OPENCODE2_OUTCOME_VERSION if self._opencode2 else _TESTED_OUTCOME_VERSION
-        if self.config.opencode_version != tested:
+        tested = [version for version in _CLASSIFIED_OPENCODE_VERSIONS if _is_opencode2(version) == self._opencode2]
+        if self.config.opencode_version not in tested:
             LOG.warning(
                 "OpenCode %s is untested: error classification is validated on %s",
                 self.config.opencode_version,
-                tested,
+                ", ".join(tested),
             )
         if self._opencode2:
             if self.config.sandbox_plugin_dependencies_path or self.config.sandbox_plugin_dependencies_sha256:
@@ -1344,18 +1347,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     self.config.sandbox_executable_path or "",
                     self.config.sandbox_executable_sha256 or "",
                     ":".join(self.config.sandbox_path_prefix),
-                    # OpenCode 2 downloads are checked against the release's pinned SHA-256 digests.
-                    *(
-                        [
-                            " ".join(
-                                f"{arch}={digest}"
-                                for arch, digest in OPENCODE_RELEASE_SHA256.get(
-                                    self.config.opencode_version, {}
-                                ).items()
-                            )
-                        ]
-                        if self._opencode2
-                        else []
+                    " ".join(
+                        f"{arch}={digest}"
+                        for arch, digest in OPENCODE_RELEASE_SHA256.get(self.config.opencode_version, {}).items()
                     ),
                 )
             )
@@ -1610,11 +1604,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if not math.isfinite(getattr(body, name)):
                 raise HTTPException(422, f"OpenCode sandbox execution requires a finite {name}")
         # OpenCode 2 sessions apply request sampling to every model call through the Gym plugin.
-        if sampled and not self._opencode2 and self.config.opencode_version not in _OPENCODE_AGENTS:
+        if sampled and not self._opencode2 and self.config.opencode_version not in _SAMPLING_OPENCODE1_VERSIONS:
             raise HTTPException(
                 422,
                 f"OpenCode sandbox execution applies request {' and '.join(sampled)} only with OpenCode "
-                f"{', '.join(_OPENCODE_AGENTS)}, whose built-in agents it knows; configure Gym model sampling",
+                f"{', '.join(_SAMPLING_OPENCODE1_VERSIONS)}, whose built-in agents it knows; configure Gym model "
+                "sampling",
             )
         for key, field in type(body).model_fields.items():
             if key in supported:
@@ -1958,7 +1953,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             # Merged into each agent, the session's own subagents included, so a configured agent.build.steps stays.
             agents = config.setdefault("agent", {})
             for agent in (
-                *_OPENCODE_AGENTS[self.config.opencode_version],
+                *_OPENCODE_BUILTIN_AGENTS,
                 *_configured_subagents(self.config.opencode_config),
             ):
                 agents.setdefault(agent, {}).update(sampling)
