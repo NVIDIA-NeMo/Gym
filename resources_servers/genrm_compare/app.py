@@ -705,6 +705,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             raise
         return self._verify_response(body, result, cohort.failure_report)
 
+    def judge_failure_reward(self) -> float:
+        # A cohort the judge could not score carries the neutral default_score, as an unparseable verdict does, so
+        # reward metrics over its masked rows do not read as a scored 0.
+        return self.config.default_score
+
     @staticmethod
     def _raise_cohort_failure(body: GenRMCompareVerifyRequest, cohort: _CohortState) -> None:
         if log := RequestFailureLog.current():

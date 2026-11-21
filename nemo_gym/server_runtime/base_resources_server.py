@@ -926,7 +926,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.post("/verify")(
             traced_verify_endpoint(
                 observe_verifier(
-                    judge_failsafe(self.verify),
+                    judge_failsafe(self.verify, placeholder_reward=self.judge_failure_reward()),
                     enabled=TypeAdapter(bool).validate_python(config.get("observability_enabled", False)),
                     verifier_name=self.config.name,
                     uninstrumented_models=self.grading_may_use_uninstrumented_model,
@@ -934,6 +934,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
         )
+
+    def judge_failure_reward(self) -> float:
+        """The placeholder reward on a row judge_failsafe masks after a judge failure; 0.0 unless overridden."""
+        return 0.0
 
     def checkpoint_mode_in_effect(self) -> CheckpointMode:
         """How this instance takes part in checkpoints; the class's ``checkpoint_mode`` unless an override knows better.
