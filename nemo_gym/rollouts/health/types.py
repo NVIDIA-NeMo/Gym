@@ -151,6 +151,23 @@ class Finding(BaseModel):
     detail: dict[str, Any] = Field(default_factory=dict)
 
 
+class ModelLimitRejection(BaseModel):
+    """One policy request the deployment refused with a 400 for a serving limit the agent's own requests exceeded,
+    such as the images per prompt, in the ``model_limit_rejections`` list of the rollout's row.
+
+    The producer adds it only when that refusal ended the rollout and it scores the rollout like any other answer, so
+    ``rollout_ended_on_failed_model_call`` does not flag a last call refused with a 400.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1)
+    limit: str = Field(min_length=1)
+    enforcer: str = Field(min_length=1)
+    status_code: Literal[400]
+    message: str | None = None
+
+
 class RolloutDigest(BaseModel):
     task_index: int | str
     rollout_index: int | str
@@ -172,6 +189,8 @@ class RolloutDigest(BaseModel):
     model_call_errors_usage_unknown: int = 0
     errors_by_status: dict[str, int] = Field(default_factory=dict)
     ended_on_error: bool = False
+    # Ended on a failed call that a typed model-outcome event on the row accounts for.
+    ended_on_model_outcome: bool = False
     # The row's own `verification_skipped` when written as a boolean, else None (absent is not False).
     verification_skipped: bool | None = None
     # Whether a sub-step of the row's `step_usage` (scicode_agent) has status `context_window_exceeded`, a

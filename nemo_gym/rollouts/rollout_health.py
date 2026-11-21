@@ -38,9 +38,11 @@ from nemo_gym.rollouts.health.checks import (
     _ROLLOUT_SPECS,
     _TASK_SPECS,
     CHECK_REGISTRY,
+    _agent_models,
     _bind_policy_call_views,
     _canonical_trajectory,
     _ended_on_failed_call,
+    _ended_on_model_outcome,
     _is_failed,
     _is_failed_attempt,
     _is_length_refusal,
@@ -309,7 +311,10 @@ def evaluate_record(
             for call in failed
         ),
         errors_by_status=dict(errors_by_status),
-        ended_on_error=model_calls_observed and _ended_on_failed_call(calls),
+        ended_on_error=model_calls_observed
+        and _ended_on_failed_call(calls, record, _agent_models(owned_bindings, calls, record)),
+        ended_on_model_outcome=model_calls_observed
+        and _ended_on_model_outcome(calls, record, _agent_models(owned_bindings, calls, record)),
         context_window_exceeded=_context_window_exceeded(record),
         verification_skipped=(
             record.get("verification_skipped") if isinstance(record.get("verification_skipped"), bool) else None
@@ -629,6 +634,7 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
                     "by_status": dict(sorted(error_statuses.items())),
                     "rollouts_affected": sum(bool(digest.model_call_errors) for digest in digests),
                     "ended_on_error": sum(digest.ended_on_error for digest in digests),
+                    "ended_on_model_outcome": sum(digest.ended_on_model_outcome for digest in digests),
                     # Rows by their own step_usage: a sub-step recorded context_window_exceeded, none, or no step_usage.
                     "context_window_exceeded": {
                         "true": sum(digest.context_window_exceeded is True for digest in digests),

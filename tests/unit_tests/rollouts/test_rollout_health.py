@@ -2181,6 +2181,204 @@ def test_another_models_answer_does_not_excuse_an_overflow(tmp_path):
     assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
 
 
+# Synthetic terminal calls: cancellation when the agent's time budget fires, and a serving rejection
+# when a prompt exceeds the deployment's image limit.
+BUDGET_CUT = {"status_code": 200, "error_category": "cancelled", "response": None, **_NO_GENERATION}
+IMAGE_LIMIT_400 = {
+    "status_code": 400,
+    "upstream_status_code": 400,
+    "upstream_attempted": True,
+    "error_category": "upstream_error",
+    "response": {"error": {"message": "At most 128 image(s) may be provided in one prompt.", "code": 400}},
+    **_NO_GENERATION,
+}
+HTTP_503 = {
+    "status_code": 503,
+    "error_category": "upstream_error",
+    "response": {"error": {"code": 503}},
+    **_NO_GENERATION,
+}
+BUDGET_EVENT = {
+    "event_id": "agent-budget",
+    "limit": "agent.timeout_sec",
+    "enforcer": "harbor",
+    "evidence": "internal",
+    "configured_s": 1800.0,
+    "model_outcome": True,
+}
+IMAGE_LIMIT_EVENT = {
+    "event_id": "image-limit",
+    "limit": "limit_mm_per_prompt.image",
+    "enforcer": "vllm",
+    "status_code": 400,
+}
+
+
+def _ended_on(tmp_path: Path, ending: dict, **typed_events: list[dict]):
+    succeeded = _call(model_call_id="first", started_at=1.0)
+    last = _call(model_call_id="last", started_at=2.0, tokens_in=None, tokens_out=None, **ending)
+    record = _owned_attempts(succeeded, last) | typed_events
+    return run_health_checks(_write_fixture(tmp_path, [(record, [succeeded, last])]), workers=1)
+
+
+@pytest.mark.parametrize(
+    ("ending", "typed_events"),
+    [
+        (BUDGET_CUT, {"timeouts": [BUDGET_EVENT]}),
+        (IMAGE_LIMIT_400, {"model_limit_rejections": [IMAGE_LIMIT_EVENT]}),
+    ],
+    ids=["budget-cut", "image-limit-400"],
+)
+def test_a_typed_model_outcome_ending_is_counted_not_flagged(tmp_path, ending, typed_events):
+    """The producer scored the rollout as the model's own result and said so with a typed event."""
+    result = _ended_on(tmp_path, ending, **typed_events)
+    [digest] = result.rollouts
+
+    assert "rollout_ended_on_failed_model_call" not in {finding.check for finding in digest.findings}
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 0
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_model_outcome"] == 1
+    assert digest.model_call_errors == 1
+
+
+@pytest.mark.parametrize(
+    ("ending", "typed_events"),
+    [
+        (BUDGET_CUT, {}),
+        (IMAGE_LIMIT_400, {}),
+        (BUDGET_CUT, {"timeouts": [BUDGET_EVENT | {"model_outcome": False}]}),
+        (BUDGET_CUT, {"model_limit_rejections": [IMAGE_LIMIT_EVENT]}),
+        (IMAGE_LIMIT_400, {"timeouts": [BUDGET_EVENT]}),
+        (HTTP_503, {"timeouts": [BUDGET_EVENT], "model_limit_rejections": [IMAGE_LIMIT_EVENT]}),
+    ],
+    ids=[
+        "untyped-cut",
+        "untyped-400",
+        "timeout-not-a-model-outcome",
+        "cut-with-only-a-limit-event",
+        "400-with-only-a-timeout-event",
+        "5xx-with-both-events",
+    ],
+)
+def test_a_failed_ending_without_a_matching_typed_event_is_still_flagged(tmp_path, ending, typed_events):
+    result = _ended_on(tmp_path, ending, **typed_events)
+    [digest] = result.rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 1
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_model_outcome"] == 0
+
+
+def test_a_typed_ending_beside_an_untyped_one_counts_once_as_an_error(tmp_path):
+    """Two models end on failed calls and the row's event accounts for one: the rollout is flagged, and the run
+    counts it under ended_on_error only, never under both."""
+    policy = {"model_ref": {"type": "responses_api_models", "name": "policy"}}
+    judge = {"model_ref": {"type": "responses_api_models", "name": "judge"}}
+    calls = [
+        _call(model_call_id="p1", started_at=1.0, **policy),
+        _call(model_call_id="p2", started_at=3.0, tokens_in=None, tokens_out=None, **policy, **BUDGET_CUT),
+        _call(model_call_id="j1", started_at=2.0, response_id="r2", **judge),
+        _call(model_call_id="j2", started_at=4.0, tokens_in=None, tokens_out=None, **judge, **HTTP_503),
+    ]
+    record = _owned_attempts(*calls) | {"timeouts": [BUDGET_EVENT]}
+    result = run_health_checks(_write_fixture(tmp_path, [(record, calls)]), workers=1)
+    [digest] = result.rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 1
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_model_outcome"] == 0
+
+
+def test_an_image_limit_rejection_of_the_first_request_is_still_flagged(tmp_path):
+    """A first request refused for the image limit never fit the deployment: the model had not answered, so the
+    typed rejection does not make its 0 the model's own result."""
+    refused = _call(model_call_id="only", started_at=1.0, tokens_in=None, tokens_out=None, **IMAGE_LIMIT_400)
+    record = _owned_attempts(refused) | {"model_limit_rejections": [IMAGE_LIMIT_EVENT]}
+    result = run_health_checks(_write_fixture(tmp_path, [(record, [refused])]), workers=1)
+    [digest] = result.rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 1
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_model_outcome"] == 0
+
+
+def test_the_agents_typed_event_does_not_excuse_another_models_failed_ending(tmp_path):
+    """The row's image-limit rejection speaks for the agent's own refused call: a judge that the agent's turns never
+    called and that ended on its own 400 is still flagged."""
+    policy = {"model_ref": {"type": "responses_api_models", "name": "policy"}}
+    judge = {"model_ref": {"type": "responses_api_models", "name": "judge"}}
+    agent_calls = [
+        _call(model_call_id="p1", started_at=1.0, **policy),
+        _call(model_call_id="p2", started_at=2.0, tokens_in=None, tokens_out=None, **policy, **IMAGE_LIMIT_400),
+    ]
+    judge_calls = [
+        _call(model_call_id="j1", started_at=3.0, response_id="r2", **judge),
+        _call(model_call_id="j2", started_at=4.0, tokens_in=None, tokens_out=None, **judge, **IMAGE_LIMIT_400),
+    ]
+    record = _owned_attempts(*agent_calls) | {"model_limit_rejections": [IMAGE_LIMIT_EVENT]}
+    result = run_health_checks(_write_fixture(tmp_path, [(record, agent_calls + judge_calls)]), workers=1)
+    [digest] = result.rollouts
+
+    [finding] = [finding for finding in digest.findings if finding.check == "rollout_ended_on_failed_model_call"]
+    assert finding.detail["model_ref"] == "responses_api_models/judge"
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 1
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_model_outcome"] == 0
+
+
+@pytest.mark.parametrize(
+    ("ending", "typed_events"),
+    [
+        (BUDGET_CUT, {"timeouts": [BUDGET_EVENT]}),
+        (IMAGE_LIMIT_400, {"model_limit_rejections": [IMAGE_LIMIT_EVENT]}),
+    ],
+    ids=["budget-cut", "image-limit-400"],
+)
+def test_a_typed_event_speaks_for_the_named_policy_server_when_no_turn_owns_a_call(tmp_path, ending, typed_events):
+    """A Harbor row binds no call to a turn (`model_call_ownership_unavailable`): the policy model server the row
+    names marks its agent's calls, so the typed event excuses the policy's ending and a judge's stays flagged."""
+    policy = {"model_ref": {"type": "responses_api_models", "name": "policy_model"}}
+    judge = {"model_ref": {"type": "responses_api_models", "name": "judge"}}
+    policy_calls = [
+        _call(model_call_id="p1", started_at=1.0, **policy),
+        _call(model_call_id="p2", started_at=2.0, tokens_in=None, tokens_out=None, **policy, **ending),
+    ]
+    judge_calls = [
+        _call(model_call_id="j1", started_at=3.0, response_id="r2", **judge),
+        _call(model_call_id="j2", started_at=4.0, tokens_in=None, tokens_out=None, **judge, **IMAGE_LIMIT_400),
+    ]
+    record = _record(0, 0, refs=[], include_turn=False) | {"ng_policy_model_server": "policy_model"} | typed_events
+    record["ng_trajectory"]["gaps"] = [{"code": "model_call_ownership_unavailable", "detail": "capture:p1"}]
+
+    policy_only = run_health_checks(_write_fixture(tmp_path, [(record, policy_calls)]), workers=1)
+    [digest] = policy_only.rollouts
+    assert "rollout_ended_on_failed_model_call" not in {finding.check for finding in digest.findings}
+    assert policy_only.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 0
+    assert policy_only.summary["run"]["stats"]["model_call_errors"]["ended_on_model_outcome"] == 1
+
+    with_judge = run_health_checks(_write_fixture(tmp_path, [(record, policy_calls + judge_calls)]), workers=1)
+    [digest] = with_judge.rollouts
+    [finding] = [finding for finding in digest.findings if finding.check == "rollout_ended_on_failed_model_call"]
+    assert finding.detail["model_ref"] == "responses_api_models/judge"
+    assert with_judge.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 1
+
+
+def test_the_named_policy_server_does_not_claim_a_chain_without_a_model_ref(tmp_path):
+    """A call without a model_ref names no model: the row's policy server name does not make its chain the agent's."""
+    unnamed = [
+        _call(model_call_id="u1", started_at=1.0),
+        _call(model_call_id="u2", started_at=2.0, tokens_in=None, tokens_out=None, **IMAGE_LIMIT_400),
+    ]
+    record = _record(0, 0, refs=[], include_turn=False) | {
+        "ng_policy_model_server": "policy_model",
+        "model_limit_rejections": [IMAGE_LIMIT_EVENT],
+    }
+    result = run_health_checks(_write_fixture(tmp_path, [(record, unnamed)]), workers=1)
+    [digest] = result.rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 1
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_model_outcome"] == 0
+
+
 def _conversation(dialect: str, opening: str, *messages: str) -> dict:
     """A chat or Responses request whose conversation opens with `opening`."""
     turns = [{"role": "user", "content": message} for message in messages]
