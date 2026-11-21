@@ -123,6 +123,7 @@ LOGGER = logging.getLogger(__name__)
 SUBMISSION_NOT_GRADED_REPLY = "The submission could not be graded."
 USER_SIMULATOR_FAILED = "bird_interact:user_simulator_failed"
 SANDBOX_FAILED = "bird_interact:sandbox_failed"
+SOLUTION_FAILED = "bird_interact:solution_failed"
 # Runs inside the episode's sandbox; see its module docstring.
 _SANDBOX_RUNNER = Path(__file__).with_name("grading.py")
 # Time for a sandbox command beyond its queries: the scratch copies and the round trip.
@@ -209,6 +210,13 @@ class BirdInteractEnvironmentServerConfig(BaseEnvironmentServerWithToolsConfig):
     inconclusive_verification_retries: NonNegativeInt = 1
     # Bounds each statement, as the ADK's 60 seconds do.
     sql_timeout_seconds: PositiveFloat = 60.0
+    mask_solution_errors: bool = Field(
+        default=False,
+        description=(
+            "Mask a sample when a submission was graded against a solution SQL that does not run. Such a phase scores "
+            "0 for every model, as in the ADK; for training, a constant 0 is not a learning signal."
+        ),
+    )
     # Sandbox commands (queries and grading) running at once across episodes.
     max_concurrent_queries: PositiveInt = 16
     # c-Interact: clarifying questions beyond one for each critical and knowledge ambiguity, the ADK's patience.
@@ -257,6 +265,9 @@ class BirdInteractResult(BaseModel):
     failure_reason: str | None = None
     # One entry for each submission graded against a solution SQL that does not run, which fails that submission.
     solution_errors: list[str] = Field(default_factory=list)
+    # One entry for each management submission that a test case failed: the test case's exception, which the agent
+    # does not see. It tells a failing submission from a test case that breaks on Gym's helpers.
+    test_case_errors: list[str] = Field(default_factory=list)
 
 
 class BirdInteractFailure(EpisodeFailure):
@@ -348,6 +359,7 @@ class BirdInteractEpisode:
     failure_reason: str | None = None
     # The task's own solution SQL failed when these submissions were graded, which failed them.
     solution_errors: list[str] = field(default_factory=list)
+    test_case_errors: list[str] = field(default_factory=list)
     toolset: EpisodeToolset | None = None
     # Set when ``run`` ends. A sandbox replaced after that would start during the episode's cleanup, which runs its
     # entries in reverse and would never stop it.
@@ -372,7 +384,7 @@ class BirdInteractEpisode:
 _TEST_CASE_QUERIES = 10
 
 
-def _command_scripts(command: str, request: dict[str, Any]) -> int:
+def _command_query_budget(command: str, request: dict[str, Any]) -> int:
     """How many scripts ``grading.py <command>`` may run for ``request``, each bounded by the SQL timeout: the bound of
     the command's time budget."""
     if command != "grade":
@@ -456,7 +468,7 @@ class CInteractTools:
             return ToolResult(output=SUBMITTED_REPLY, ends_activation=True)
         try:
             output = await run(parsed)
-        except Exception:
+        except SandboxCommandError:
             if name != "submit_sql":
                 raise
             # ``_submit_sql`` recorded why, and the sample is masked. The turn still ends at its submission, as a
@@ -664,7 +676,13 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
         self._queries = asyncio.Semaphore(self.config.max_concurrent_queries)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        return compute_aggregate_metrics(body.verify_responses)
+        metrics = compute_aggregate_metrics(body.verify_responses)
+        # Samples with a submission graded against a solution SQL that does not run: such a phase scores 0 for every
+        # model, so a run shows how many of its samples hold one.
+        metrics.agent_metrics["solution_errors"] = sum(
+            bool(row.get("solution_errors")) for row in body.verify_responses
+        )
+        return metrics
 
     def in_dialect(self, text: str) -> str:
         """The ADK's text, which names PostgreSQL, for this server's database engine."""
@@ -855,6 +873,9 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
         # The current phase has submissions but no result yet: it failed.
         if episode.attempts and all(phase.phase != episode.phase for phase in phases):
             phases.append(PhaseResult(phase=episode.phase, passed=False, attempts=episode.attempts, reward=0.0))
+        if episode.failure_kind is None and episode.solution_errors and self.config.mask_solution_errors:
+            episode.failure_kind = SOLUTION_FAILED
+            episode.failure_reason = episode.solution_errors[0]
         return BirdInteractResponse(
             episode_id=episode.request.episode_id,
             task_id=episode.request.task.task_id,
@@ -873,6 +894,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 failure_kind=episode.failure_kind,
                 failure_reason=episode.failure_reason,
                 solution_errors=list(episode.solution_errors),
+                test_case_errors=list(episode.test_case_errors),
             ),
         )
 
@@ -881,18 +903,13 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
     async def simulate(self, episode: BirdInteractEpisode, question: str) -> str:
         """The simulated user's reply: the action parser picks an action, and the response generator answers by it."""
         task, phase = episode.task, episode.phase
-        try:
-            parsed = await self._user_model(
-                action_parser_prompt(task, question, phase=phase), max_output_tokens=ACTION_PARSER_MAX_TOKENS
-            )
-            prompt = response_generator_prompt(
-                task, question, read_action(parsed), phase=phase, schema_text=episode.files.schema_text
-            )
-            return read_reply(await self._user_model(prompt, max_output_tokens=RESPONSE_GENERATOR_MAX_TOKENS))
-        except asyncio.CancelledError as error:
-            # A tool call cut off by its deadline: the question has no answer, so the sample is masked.
-            episode.record_infrastructure_failure(USER_SIMULATOR_FAILED, "User simulator interrupted", error)
-            raise
+        parsed = await self._user_model(
+            action_parser_prompt(task, question, phase=phase), max_output_tokens=ACTION_PARSER_MAX_TOKENS
+        )
+        prompt = response_generator_prompt(
+            task, question, read_action(parsed), phase=phase, schema_text=episode.files.schema_text
+        )
+        return read_reply(await self._user_model(prompt, max_output_tokens=RESPONSE_GENERATOR_MAX_TOKENS))
 
     async def submit(self, episode: BirdInteractEpisode, sql: str) -> _Submission:
         """Grade a submission for the current phase and move the protocol on, as the ADK's grader does.
@@ -918,6 +935,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 "timeout_seconds": self.config.sql_timeout_seconds,
                 # Phase 2 sees what phase 1 changed.
                 "apply_if_passed": follows,
+                "explore": self.config.mode == "a_interact",
             },
         )
         if "solution_error" in result:
@@ -925,6 +943,10 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
             LOGGER.warning(error)
             episode.solution_errors.append(error)
             result = {"passed": False, "timed_out": False, "execution_error": None}
+        if test_case_error := result.get("test_case_error"):
+            error = f"Task {task.instance_id}, phase {phase}: {test_case_error}"[:2000]
+            LOGGER.info(error)
+            episode.test_case_errors.append(error)
         if not result["passed"]:
             if result["timed_out"]:
                 message = EXECUTION_TIMEOUT
@@ -967,24 +989,20 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
         """Run a command in the episode's sandbox, retrying an infrastructure failure on a fresh sandbox.
 
         Only setup and a passing phase 1 write the episode's database, and a fresh sandbox's setup applies both, so
-        it holds the same state.
+        it holds the same state. A command cut off by the tool call's deadline or the interaction deadline is not a
+        sandbox failure: the call fails, and a submission cut off so counts as a failed attempt, as a slow one does.
         """
-        try:
-            # Each attempt takes one of the server's query slots; starting a fresh sandbox does not, so an outage does
-            # not hold every other episode's queries.
-            for _ in range(self.config.inconclusive_verification_retries):
-                try:
-                    async with self._queries:
-                        return await self._run_command(episode.sandbox, command, request)
-                except SandboxCommandError as error:
-                    LOGGER.warning(f"Retrying {command} on a fresh sandbox for {episode.task.instance_id}: {error}")
-                await self._replace_sandbox(episode)
-            async with self._queries:
-                return await self._run_command(episode.sandbox, command, request)
-        except asyncio.CancelledError as error:
-            # A tool call cut off by its deadline: the command has no result, so the sample is masked.
-            episode.record_infrastructure_failure(SANDBOX_FAILED, f"Sandbox {command} interrupted", error)
-            raise
+        # Each attempt takes one of the server's query slots; starting a fresh sandbox does not, so an outage does
+        # not hold every other episode's queries.
+        for _ in range(self.config.inconclusive_verification_retries):
+            try:
+                async with self._queries:
+                    return await self._run_command(episode.sandbox, command, request)
+            except SandboxCommandError as error:
+                LOGGER.warning(f"Retrying {command} on a fresh sandbox for {episode.task.instance_id}: {error}")
+            await self._replace_sandbox(episode)
+        async with self._queries:
+            return await self._run_command(episode.sandbox, command, request)
 
     async def _start_sandbox(
         self,
@@ -1023,6 +1041,8 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 "preprocess_sql": task.preprocess_sql,
                 "applied_sql": list(applied_sql),
                 "timeout_seconds": self.config.sql_timeout_seconds,
+                # Only a-Interact has the execute tool, which runs on a working copy.
+                "explore": self.config.mode == "a_interact",
             }
             if source is None:
                 handle.database = f"{task.selected_database}_template"
@@ -1047,7 +1067,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                     json.dumps(request | {"engine": self.config.database_engine, "database": handle.database})
                 )
                 await handle.sandbox.upload(local, handle.path(name))
-            queries = _command_scripts(command, request)
+            queries = _command_query_budget(command, request)
             result = await handle.sandbox.exec(
                 shlex.join(["python3", handle.path(_SANDBOX_RUNNER.name), command, handle.path(name)]),
                 timeout_s=queries * self.config.sql_timeout_seconds + _SANDBOX_COMMAND_SLACK_SECONDS,
