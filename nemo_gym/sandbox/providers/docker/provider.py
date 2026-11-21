@@ -865,7 +865,7 @@ class DockerProvider:
             LOGGER.warning("Failed to close PTY session %s of %r", session.session_id, name, exc_info=True)
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
-        """Upload one host file (creates the parent dir; the file lands owned by root)."""
+        """Upload host file contents, following source symlinks (creates parents; owned by root)."""
         inst = handle.raw
         parent = posixpath.dirname(target_path)
         if parent:
@@ -873,7 +873,7 @@ class DockerProvider:
             if mk.return_code != 0:
                 raise RuntimeError(f"docker upload to {target_path!r} failed (mkdir parent): {mk.stderr}")
         code, _out, err = await self._run(
-            [self._binary, "cp", str(source_path), f"{inst.name}:{target_path}"],
+            [self._binary, "cp", "-L", str(source_path), f"{inst.name}:{target_path}"],
             timeout_s=self._exec_config.default_timeout_s,
         )
         if code != 0:
