@@ -1649,7 +1649,9 @@ async def test_a_restored_session_closed_before_its_re_bind_without_evidence_rep
 async def test_a_launch_directory_is_prepared_again_when_the_sandbox_refuses_the_first_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("nemo_gym.agents.utils.setup_retry.asyncio", SimpleNamespace(sleep=AsyncMock(), timeout=asyncio.timeout))
+    monkeypatch.setattr(
+        "nemo_gym.agents.utils.setup_retry.asyncio", SimpleNamespace(sleep=AsyncMock(), timeout=asyncio.timeout)
+    )
     _, state, _ = _stopped_session(monkeypatch)
     made = SandboxExecResult(stdout="", stderr="", return_code=0)
     state.session.begin_activation = AsyncMock()
