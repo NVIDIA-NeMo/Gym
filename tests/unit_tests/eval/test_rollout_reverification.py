@@ -956,7 +956,7 @@ class TestBuildVerifyPayload:
 
     @pytest.mark.parametrize("shape", ["legacy", "flat_task_input", "canonical_task_input"])
     def test_preserves_file_and_reference_context_required_by_verifier(self, shape: str) -> None:
-        fields = {"task": "q1", "deliverables_dir": "/stale"}
+        fields = {"task": "q1", "deliverables_dir": "/stale", "output_files": {"old.txt": "stale"}}
         input_row = fields
         if shape != "legacy":
             input_row = {
@@ -969,6 +969,7 @@ class TestBuildVerifyPayload:
                 "response": {"output": "x"},
                 "deliverables_dir": "/artifacts/task-1/repeat_0",
                 "reference_ids": ["ref-b"],
+                "output_files": {"answer.txt": "saved answer"},
                 "reward": 0.0,
                 NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS,
             },
@@ -978,6 +979,7 @@ class TestBuildVerifyPayload:
 
         assert result["deliverables_dir"] == "/artifacts/task-1/repeat_0"
         assert result["reference_ids"] == ["ref-b"]
+        assert result["output_files"] == {"answer.txt": "saved answer"}
         assert result["task"] == "q1"
         assert "reward" not in result and NG_FAILURE_CLASS_KEY not in result
 

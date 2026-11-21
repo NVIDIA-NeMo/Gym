@@ -784,6 +784,8 @@ def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: boo
         "solutions",
         "token_usage_version",
         "step_usage",
+        # Sandboxed agents can return collected task files outside the model response.
+        "output_files",
         # A verifier that grades a saved source again needs the source, its SHA256 and its binding.
         "source_artifact",
         "source_sha256",
