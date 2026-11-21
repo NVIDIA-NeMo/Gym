@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from nemo_gym.core.failure_kinds import MODEL_CONTEXT_LIMIT
 from nemo_gym.rollouts.health.types import (
     ROLLOUT_INDEX_KEY,
     TASK_INDEX_KEY,
@@ -844,6 +845,25 @@ def _ended_on_failed_call(calls: Sequence[dict[str, Any]]) -> bool:
     return any(_chain_ended_on_failure(chain) for chain in _model_chains(calls).values())
 
 
+def _context_limit_refusals(calls: Sequence[dict[str, Any]]) -> tuple[int, int, int]:
+    """Count upstream context-length refusals as (all, final, recovered).
+
+    A refusal is final when it is its model's last call in time, and recovered when the same model has a later call.
+    A chain that cannot be ordered counts its refusals in the first number only.
+    """
+    total = final = recovered = 0
+    for chain in _model_chains(calls).values():
+        refusals = [call for call in chain if _is_context_overflow_rejection(call)]
+        total += len(refusals)
+        if not refusals or not all(call.get("started_at") is not None for call in chain):
+            continue
+        last = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))[-1]
+        ended_on_refusal = _is_context_overflow_rejection(last)
+        final += ended_on_refusal
+        recovered += len(refusals) - ended_on_refusal
+    return total, final, recovered
+
+
 def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
     """Flag a model whose own last call in the rollout failed.
 
@@ -876,6 +896,7 @@ def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dic
                     "model_ref": "/".join(str(part) for part in key) if key else None,
                     "status": last.get("status_code"),
                     "error_category": last.get("error_category"),
+                    **({"failure_kind": MODEL_CONTEXT_LIMIT} if _is_context_overflow_rejection(last) else {}),
                     "observed_calls": len(chain),
                     "successful_calls": sum(1 for call in chain if _is_successful(call)),
                 },
