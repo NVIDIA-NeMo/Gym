@@ -36,6 +36,16 @@ from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
 
 
+def _is_host_root() -> bool:
+    """Whether this process is root in the host's user namespace, not root mapped inside another one."""
+    if os.geteuid() != 0:
+        return False
+    try:
+        return Path("/proc/self/uid_map").read_text().split()[:3] == ["0", "0", "4294967295"]
+    except OSError:
+        return False
+
+
 class MemoryLimitExceededError(Exception):
     """Raised when a container exceeds its memory limit."""
 
@@ -361,6 +371,12 @@ class SingularityEnvironment(BaseEnvironment):
                 "--workdir",
                 self._workdir,
             ]
+            # Host root skips --fakeroot (with --pid it can't mount /proc on privileged hosts). Its container root is
+            # host root, so isolate the hostname and drop clock, network, reboot and module-loading capabilities.
+            if _is_host_root():
+                privilege_args = ["--uts", "--drop-caps", "CAP_SYS_TIME,CAP_NET_ADMIN,CAP_SYS_BOOT,CAP_SYS_MODULE"]
+            else:
+                privilege_args = ["--fakeroot"]
             cmd = [
                 "singularity",
                 "exec",
@@ -368,7 +384,7 @@ class SingularityEnvironment(BaseEnvironment):
                 "--pwd",
                 self._workdir,
                 "--writable-tmpfs",
-                "--fakeroot",
+                *privilege_args,
                 "--containall",
                 "--pid",
                 *bind_mounts,
