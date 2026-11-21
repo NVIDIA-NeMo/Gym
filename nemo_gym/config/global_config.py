@@ -604,7 +604,18 @@ class GlobalConfigDictParser(BaseModel):
         original_get_args_parser = hydra_main_module.get_args_parser
 
         def new_get_args_parser():
-            parser: ArgumentParser = original_get_args_parser()
+            # Python 3.14's argparse checks each help string in add_argument and rejects hydra-core 1.3.x's
+            # `--shell-completion`, whose help is an object rather than a str ("badly formed help string"). The check
+            # is skipped only while hydra builds its parser; Gym replaces hydra's help, so that string is never shown.
+            # hydra-core 1.4 applies the same workaround itself; remove this once Gym requires hydra-core>=1.4.
+            original_check_help = getattr(ArgumentParser, "_check_help", None)
+            if original_check_help is not None:
+                ArgumentParser._check_help = lambda self, action: None
+            try:
+                parser: ArgumentParser = original_get_args_parser()
+            finally:
+                if original_check_help is not None:
+                    ArgumentParser._check_help = original_check_help
             # Set the conflict handlers to resolve so we can disable the help.
             parser.conflict_handler = "resolve"
             for action_group in parser._action_groups:
