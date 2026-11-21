@@ -1342,3 +1342,346 @@ def test_prepared_benchmark_rejects_non_mapping_task_input_with_row_context(tmp_
     )
     with pytest.raises(EnvironmentValidationError, match="bad-nested-row.*row 1.*task_input"):
         _validate_dataset(dataset, standard_prompt_config=None, prompt_source="prepared")
+
+
+def _listing(
+    tmp_path: Path,
+    *,
+    listed_as: str = "setups",
+    name: str = "demo/variant",
+    config_name: str = "variant.yaml",
+    kind: str = "benchmark",
+    config_edit: tuple[str, str] | None = None,
+    **fields: object,
+) -> Path:
+    """The demo manifest with one more config listed, a copy of the demo config beside it, edited by ``config_edit``."""
+    main_path = tmp_path / ("benchmarks" if kind == "benchmark" else "environments") / "demo/manifest.yaml"
+    if not main_path.is_file():
+        main_path = _asset(tmp_path, kind=kind)
+    config = main_path.with_name("config.yaml").read_text(encoding="utf-8")
+    if config_edit is not None:
+        assert config_edit[0] in config
+        config = config.replace(*config_edit)
+    (main_path.parent / config_name).write_text(config, encoding="utf-8")
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    listed = {"name": name, "config_path": config_name, **fields}
+    if listed_as == "protocols":
+        listed.setdefault("description", "The demo benchmark under another prompt.")
+    raw.setdefault(listed_as, []).append(listed)
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+    return main_path
+
+
+@pytest.mark.parametrize("listed_as", ["setups", "protocols"])
+def test_a_listed_config_validates_by_name_and_the_main_manifest_still_validates(
+    listed_as: str, tmp_path: Path
+) -> None:
+    main_path = _listing(tmp_path, listed_as=listed_as)
+
+    report = validate_environment(main_path, name="demo/variant")
+
+    assert (report.name, Path(report.config_path).name, report.manifest_path) == (
+        "demo/variant",
+        "variant.yaml",
+        str(main_path.resolve()),
+    )
+    assert validate_environment(main_path).name == "demo"
+
+
+def test_a_name_the_manifest_does_not_list_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(EnvironmentValidationError, match="lists no setup or protocol named 'demo/missing'"):
+        validate_environment(_listing(tmp_path), name="demo/missing")
+
+
+def test_a_listed_config_keeps_the_name_the_catalog_gives_its_config(tmp_path: Path) -> None:
+    # Without a manifest the catalog lists benchmarks/demo/variant.yaml as demo/variant, and
+    # `gym eval run --benchmark demo/variant` runs it; a listing under another name would change that name.
+    main_path = _listing(tmp_path, name="demo/renamed")
+
+    with pytest.raises(EnvironmentValidationError, match="'demo/renamed' must be named 'demo/variant'"):
+        validate_environment(main_path)
+    # Selecting the setup by name runs the same check, as `gym env validate demo/renamed` does.
+    with pytest.raises(EnvironmentValidationError, match="'demo/renamed' must be named 'demo/variant'"):
+        validate_environment(main_path, name="demo/renamed")
+
+
+def test_a_listed_config_has_no_manifest_of_its_own(tmp_path: Path) -> None:
+    main_path = _listing(tmp_path)
+    own = main_path.parent / "variant/manifest.yaml"
+    own.parent.mkdir()
+    own.write_text(
+        dump_manifest(load_manifest(main_path).model_copy(update={"name": "demo/variant", "setups": []})),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EnvironmentValidationError, match="also has a manifest of its own"):
+        validate_environment(main_path)
+    with pytest.raises(EnvironmentValidationError, match="also has a manifest of its own"):
+        validate_environment(main_path, name="demo/variant")
+
+
+def test_a_listed_config_must_exist(tmp_path: Path) -> None:
+    main_path = _listing(tmp_path)
+    (main_path.parent / "variant.yaml").unlink()
+
+    with pytest.raises(EnvironmentValidationError, match="config_path 'variant.yaml' was not found"):
+        validate_environment(main_path)
+
+
+def test_sync_writes_a_listed_configs_composition_into_its_entry_and_drops_it_once_it_matches(
+    tmp_path: Path,
+) -> None:
+    # A protocol may score under another grading mode, so this difference is one validation keeps.
+    main_path = _listing(tmp_path, listed_as="protocols", config_edit=("grading_mode: exact", "grading_mode: fuzzy"))
+
+    with pytest.raises(EnvironmentValidationError, match="composition of demo/variant is stale(.|\n)*grading_mode"):
+        validate_environment(main_path, name="demo/variant")
+    report = validate_environment(main_path, name="demo/variant", sync=True)
+
+    assert report.synchronized_fields == ("grading_mode",)
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    assert raw["grading_mode"] == "exact"
+    assert raw["protocols"][0]["grading_mode"] == "fuzzy"
+
+    variant = main_path.with_name("variant.yaml")
+    variant.write_text(variant.read_text(encoding="utf-8").replace("fuzzy", "exact"), encoding="utf-8")
+    validate_environment(main_path, name="demo/variant", sync=True)
+
+    assert "grading_mode" not in yaml.safe_load(main_path.read_text(encoding="utf-8"))["protocols"][0]
+
+
+@pytest.mark.parametrize(
+    ("config_edit", "fields", "message"),
+    [
+        (("grading_mode: exact", "grading_mode: fuzzy"), {"grading_mode": "fuzzy"}, "another resources server or"),
+        (
+            ("data/example.jsonl", "data/other.jsonl"),
+            {
+                "datasets": [
+                    {
+                        "name": "example",
+                        "type": "benchmark",
+                        "jsonl_fpath": "benchmarks/demo/data/other.jsonl",
+                        "prepare_script": "benchmarks/demo/prepare.py",
+                    }
+                ]
+            },
+            "other task datasets",
+        ),
+    ],
+)
+def test_a_setup_runs_the_main_manifests_tasks_and_scoring_and_a_protocol_need_not(
+    config_edit: tuple[str, str], fields: dict, message: str, tmp_path: Path
+) -> None:
+    setup = _listing(tmp_path, config_edit=config_edit, **fields)
+    with pytest.raises(EnvironmentValidationError, match=message):
+        validate_environment(setup, name="demo/variant")
+
+    protocol = _listing(
+        tmp_path, listed_as="protocols", name="demo/other", config_name="other.yaml", config_edit=config_edit, **fields
+    )
+    (tmp_path / "benchmarks/demo/data/other.jsonl").write_text(
+        (tmp_path / "benchmarks/demo/data/example.jsonl").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    assert validate_environment(protocol, name="demo/other").name == "demo/other"
+
+
+def test_a_setup_keeps_the_benchmarks_prompt_template(tmp_path: Path) -> None:
+    # The same tasks, scorer and harness with a system prompt change the benchmark's rules: a protocol, not a setup.
+    with_system = "benchmarks/demo/prompts/with_system.yaml"
+    edit = (
+        "prepare_script: benchmarks/demo/prepare.py",
+        f"prepare_script: benchmarks/demo/prepare.py\n        prompt_config: {with_system}",
+    )
+    dataset = {
+        "name": "example",
+        "type": "benchmark",
+        "jsonl_fpath": "benchmarks/demo/data/example.jsonl",
+        "prepare_script": "benchmarks/demo/prepare.py",
+        "prompt_config": with_system,
+    }
+    main_path = _listing(
+        tmp_path, listed_as="protocols", config_edit=edit, standard_prompt_config=with_system, datasets=[dataset]
+    )
+    (tmp_path / with_system).write_text("system: Answer briefly.\nuser: '{question}'\n", encoding="utf-8")
+    assert validate_environment(main_path, name="demo/variant").name == "demo/variant"
+
+    _listing(tmp_path, name="demo/other", config_name="other.yaml", config_edit=edit, datasets=[dataset])
+    with pytest.raises(EnvironmentValidationError, match="another prompt template"):
+        validate_environment(main_path, name="demo/other")
+
+
+def _setup_with_its_own_template(
+    tmp_path: Path, template: str, template_text: str, *, agent_server: str | None = None, **fields: object
+) -> Path:
+    """The demo benchmark with a setup that names its own prompt template, run by ``agent_server`` when it is set."""
+    edit = (
+        "prepare_script: benchmarks/demo/prepare.py",
+        f"prepare_script: benchmarks/demo/prepare.py\n        prompt_config: {template}",
+    )
+    dataset = {
+        "name": "example",
+        "type": "benchmark",
+        "jsonl_fpath": "benchmarks/demo/data/example.jsonl",
+        "prepare_script": "benchmarks/demo/prepare.py",
+        "prompt_config": template,
+    }
+    if agent_server is not None:
+        fields["agent_server"] = agent_server
+    main_path = _listing(tmp_path, config_edit=edit, standard_prompt_config=template, datasets=[dataset], **fields)
+    if agent_server is not None:
+        variant = main_path.with_name("variant.yaml")
+        variant.write_text(
+            variant.read_text(encoding="utf-8").replace("    simple_agent:\n", f"    {agent_server}:\n"),
+            encoding="utf-8",
+        )
+    (tmp_path / template).write_text(template_text, encoding="utf-8")
+    return main_path
+
+
+def test_a_setup_may_adapt_the_benchmarks_prompt_for_its_harness(tmp_path: Path) -> None:
+    # The harness owns the system prompt, so the setup's template carries the benchmark's prompt in the user message.
+    description = "The demo benchmark with its prompt in the user message, because the harness owns the system prompt."
+    main_path = _setup_with_its_own_template(
+        tmp_path,
+        "benchmarks/demo/prompts/in_user_message.yaml",
+        "user: '{question}'\n",
+        agent_server="custom_agent",
+        description=description,
+    )
+    assert validate_environment(main_path, name="demo/variant").name == "demo/variant"
+
+    # Review checks the adaptation, so the setup has to say what it is.
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    del raw["setups"][0]["description"]
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="names its own prompt template; its description must say"):
+        validate_environment(main_path, name="demo/variant")
+
+
+def test_a_setup_with_its_parents_agent_server_keeps_the_benchmarks_prompt_template(tmp_path: Path) -> None:
+    # A system-prompt variant run by the same agent, such as arxivmath_0626/config_with_system, prompts under other
+    # rules. Listed as a setup with its own template and a description, it is rejected: the same harness needs no
+    # other form of the prompt, so the template comparison runs as usual.
+    main_path = _setup_with_its_own_template(
+        tmp_path,
+        "benchmarks/demo/prompts/with_system.yaml",
+        "system: Answer briefly.\nuser: '{question}'\n",
+        description="The demo benchmark with a system prompt.",
+    )
+    with pytest.raises(EnvironmentValidationError, match="demo/variant uses another prompt template than demo"):
+        validate_environment(main_path, name="demo/variant")
+
+    # The same entry, moved unchanged to protocols, validates.
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    raw["protocols"] = raw.pop("setups")
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+    assert validate_environment(main_path, name="demo/variant").name == "demo/variant"
+
+
+def _protocol_with_a_setup(tmp_path: Path, *, nested_edit: tuple[str, str] | None = None) -> Path:
+    """The demo benchmark with a system-prompt protocol that lists a setup, whose config ``nested_edit`` changes."""
+    with_system = "benchmarks/demo/prompts/with_system.yaml"
+    prompt_line = f"prompt_config: {with_system}"
+    edit = (
+        "prepare_script: benchmarks/demo/prepare.py",
+        f"prepare_script: benchmarks/demo/prepare.py\n        {prompt_line}",
+    )
+    dataset = {
+        "name": "example",
+        "type": "benchmark",
+        "jsonl_fpath": "benchmarks/demo/data/example.jsonl",
+        "prepare_script": "benchmarks/demo/prepare.py",
+        "prompt_config": with_system,
+    }
+    main_path = _listing(
+        tmp_path, listed_as="protocols", config_edit=edit, standard_prompt_config=with_system, datasets=[dataset]
+    )
+    (tmp_path / with_system).write_text("system: Answer briefly.\nuser: '{question}'\n", encoding="utf-8")
+    nested = main_path.with_name("variant.yaml").read_text(encoding="utf-8")
+    if nested_edit is not None:
+        assert nested_edit[0] in nested
+        nested = nested.replace(*nested_edit)
+    main_path.with_name("nested.yaml").write_text(nested, encoding="utf-8")
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    raw["protocols"][0]["setups"] = [{"name": "demo/nested", "config_path": "nested.yaml", "description": "Nested."}]
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+    return main_path
+
+
+def test_a_setup_a_protocol_lists_runs_the_protocols_prompt_not_the_main_manifests(tmp_path: Path) -> None:
+    main_path = _protocol_with_a_setup(tmp_path)
+    report = validate_environment(main_path, name="demo/nested")
+    assert (report.name, Path(report.config_path).name) == ("demo/nested", "nested.yaml")
+    assert validate_environment(main_path).name == "demo"
+
+    # Another config with the main manifest's prompt, listed under the protocol, runs another template than it.
+    main_path.with_name("other.yaml").write_text(
+        main_path.with_name("config.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    main_dataset = {key: value for key, value in raw["datasets"][0].items()}
+    raw["protocols"][0]["setups"].append(
+        {"name": "demo/other", "config_path": "other.yaml", "datasets": [main_dataset]}
+    )
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="demo/other uses another prompt template than demo/variant"):
+        validate_environment(main_path, name="demo/other")
+
+
+def test_sync_writes_a_nested_setups_composition_into_it_and_drops_what_matches_its_protocol(tmp_path: Path) -> None:
+    with_system = "benchmarks/demo/prompts/with_system.yaml"
+    main_path = _protocol_with_a_setup(
+        tmp_path,
+        nested_edit=(f"prompt_config: {with_system}", f"prompt_config: {with_system}\n        num_repeats: 2"),
+    )
+
+    with pytest.raises(EnvironmentValidationError, match="composition of demo/nested is stale"):
+        validate_environment(main_path, name="demo/nested")
+    assert validate_environment(main_path, name="demo/nested", sync=True).synchronized_fields == ("datasets",)
+
+    protocol = yaml.safe_load(main_path.read_text(encoding="utf-8"))["protocols"][0]
+    assert protocol["datasets"][0].get("num_repeats", 1) == 1
+    assert protocol["setups"][0]["datasets"][0]["num_repeats"] == 2
+
+    nested = main_path.with_name("nested.yaml")
+    nested.write_text(nested.read_text(encoding="utf-8").replace("num_repeats: 2", "num_repeats: 1"), encoding="utf-8")
+    validate_environment(main_path, name="demo/nested", sync=True)
+    assert "datasets" not in yaml.safe_load(main_path.read_text(encoding="utf-8"))["protocols"][0]["setups"][0]
+
+
+def test_an_environment_setup_shares_its_example_datasets(tmp_path: Path) -> None:
+    # An environment declares only example datasets, so those are what a setup must share.
+    main_path = _listing(tmp_path, kind="environment")
+    assert validate_environment(main_path, name="demo/variant").name == "demo/variant"
+
+    _listing(
+        tmp_path,
+        kind="environment",
+        name="demo/other",
+        config_name="other.yaml",
+        config_edit=("data/example.jsonl", "data/other.jsonl"),
+        datasets=[{"name": "example", "type": "example", "jsonl_fpath": "environments/demo/data/other.jsonl"}],
+    )
+    with pytest.raises(EnvironmentValidationError, match="other task datasets"):
+        validate_environment(main_path, name="demo/other")
+
+
+@pytest.mark.parametrize(("setup_target", "valid"), [("terminal_bench_4", True), ("terminal_bench_2_1", False)])
+def test_a_setup_of_a_harbor_backed_benchmark_runs_the_same_target(
+    setup_target: str, valid: bool, tmp_path: Path
+) -> None:
+    # Neither declares datasets, so the Harbor target is what says which tasks they run.
+    main_path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    config = yaml.safe_load(main_path.with_name("config.yaml").read_text(encoding="utf-8"))
+    config["harbor_target"] = setup_target
+    main_path.with_name("other.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    raw["setups"] = [{"name": "harbor_demo/other", "config_path": "other.yaml", "harbor_target": setup_target}]
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+
+    if valid:
+        assert validate_environment(main_path, name="harbor_demo/other").name == "harbor_demo/other"
+    else:
+        with pytest.raises(EnvironmentValidationError, match="another Harbor target"):
+            validate_environment(main_path, name="harbor_demo/other")

@@ -29,7 +29,9 @@ from nemo_gym.environment.discovery import iter_server_configs, read_config_meta
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
     ManifestError,
+    ManifestSetup,
     load_manifest,
+    resolve_listed_manifest,
     resolve_manifest_config_path,
 )
 
@@ -76,6 +78,10 @@ class EnvironmentCatalogEntry:
     # The Harbor target a Harbor-backed workload runs (the manifest's `harbor_target`); `gym eval run` composes its
     # environment server, `gym env start` does not.
     harbor_target: Optional[str] = None
+    # What lists this config: `setup_of` names the main manifest or the protocol that lists it as a setup, and
+    # `protocol_of` the main manifest that lists it as a protocol. `manifest_path` is the main manifest's file.
+    setup_of: Optional[str] = None
+    protocol_of: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -98,36 +104,68 @@ def _path_identity(tree_dir: Path, manifest_path: Path) -> str:
     return relative.as_posix()
 
 
-def _manifest_entry(
+def _manifest_entries(
     tree_dir: Path,
     manifest_path: Path,
     expected_kind: CatalogKind,
-) -> EnvironmentCatalogEntry:
+) -> List[EnvironmentCatalogEntry]:
+    """The catalog entry of a main manifest, then one for each setup and protocol it lists."""
     expected_name = _path_identity(tree_dir, manifest_path)
-    manifest: EnvironmentManifest = load_manifest(manifest_path)
-    actual_kind = _enum_value(manifest.kind)
+    main: EnvironmentManifest = load_manifest(manifest_path)
+    actual_kind = _enum_value(main.kind)
     if actual_kind != expected_kind:
         raise RegistryError(
             f"Manifest '{manifest_path}' declares kind '{actual_kind}', "
             f"but its catalog path requires '{expected_kind}'."
         )
-    if manifest.name != expected_name:
+    if main.name != expected_name:
         raise RegistryError(
-            f"Manifest '{manifest_path}' declares name '{manifest.name}', "
-            f"but its catalog path requires '{expected_name}'."
+            f"Manifest '{manifest_path}' declares name '{main.name}', but its catalog path requires '{expected_name}'."
         )
+    entries = [_catalog_entry(manifest_path, main, expected_kind, path=manifest_path.parent)]
+    for listed in main.listed_configs():
+        manifest = resolve_listed_manifest(main, listed)
+        config_path = resolve_manifest_config_path(manifest_path, manifest)
+        # As for the main manifest: under another name, the entry would take that name from the config at its path and
+        # leave its own config out of the catalog.
+        expected_listed_name = _benchmark_config_name(config_path.relative_to(tree_dir.resolve()))
+        if listed.name != expected_listed_name:
+            raise RegistryError(
+                f"Manifest '{manifest_path}' lists '{listed.name}', but the catalog path of its config "
+                f"'{config_path}' requires '{expected_listed_name}'."
+            )
+        protocol = main.listing_protocol(listed)
+        relation = (
+            {"setup_of": main.name if protocol is None else protocol.name}
+            if isinstance(listed, ManifestSetup)
+            else {"protocol_of": main.name}
+        )
+        entries.append(_catalog_entry(manifest_path, manifest, expected_kind, path=config_path.parent, **relation))
+    return entries
 
+
+def _catalog_entry(
+    manifest_path: Path,
+    manifest: EnvironmentManifest,
+    kind: CatalogKind,
+    *,
+    path: Path,
+    setup_of: Optional[str] = None,
+    protocol_of: Optional[str] = None,
+) -> EnvironmentCatalogEntry:
     config_path = resolve_manifest_config_path(manifest_path, manifest)
     if not config_path.is_file():
         expected = (
             "a sibling config.yaml" if manifest.config_path == ENVIRONMENT_CONFIG_FILENAME else manifest.config_path
         )
-        raise RegistryError(f"Manifest '{manifest_path}' requires {expected} (resolved to '{config_path}').")
+        raise RegistryError(
+            f"Manifest '{manifest_path}' requires {expected} for {manifest.name} (resolved to '{config_path}')."
+        )
 
     values = {
         "name": manifest.name,
         "config_path": config_path,
-        "path": manifest_path.parent,
+        "path": path,
         "description": manifest.description,
         "domain": _enum_value(manifest.domain),
         "status": "experimental" if manifest.experimental else None,
@@ -140,8 +178,10 @@ def _manifest_entry(
         "resources_server": manifest.resources_server,
         "agent_server": manifest.agent_server,
         "harbor_target": manifest.harbor_target,
+        "setup_of": setup_of,
+        "protocol_of": protocol_of,
     }
-    if expected_kind == "environment":
+    if kind == "environment":
         return EnvironmentEntry(**values)
     return EnvironmentCatalogEntry(kind="benchmark", **values)
 
@@ -294,15 +334,20 @@ def _discover_registry_tree(
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     manifest_configs: set[Path] = set()
     for manifest_path in _manifest_paths(tree_dir):
-        key = (kind, _path_identity(tree_dir, manifest_path))
-        if key in claimed:
+        if (kind, _path_identity(tree_dir, manifest_path)) in claimed:
             continue
         try:
-            entry = _manifest_entry(tree_dir, manifest_path, kind)
+            discovered = _manifest_entries(tree_dir, manifest_path, kind)
         except ManifestError:
             continue
-        entries[key] = entry
-        manifest_configs.add(entry.config_path.resolve())
+        for entry in discovered:
+            key = (kind, entry.name)
+            # A config with a manifest of its own and a listing in a main manifest is a validation error; the
+            # catalog keeps whichever it reads first rather than failing discovery.
+            if key in claimed or key in entries:
+                continue
+            entries[key] = entry
+            manifest_configs.add(entry.config_path.resolve())
 
     for name, config_path in _legacy_config_paths(tree_dir, kind):
         key = (kind, name)

@@ -12,10 +12,13 @@ from nemo_gym.config.config_types import ConfigError, Domain
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
     IntegrationProfile,
+    IntendedUse,
     ManifestError,
     dump_manifest,
+    load_listed_manifest,
     load_manifest,
     manifest_json_schema,
+    resolve_listed_manifest,
 )
 
 
@@ -515,3 +518,413 @@ def test_an_environment_without_a_target_needs_its_datasets(backend: str) -> Non
     else:
         with pytest.raises(ValidationError, match="datasets"):
             EnvironmentManifest.model_validate(raw)
+
+
+CATALOG_FIELDS = (
+    "maintainers",
+    "intended_use",
+    "capabilities",
+    "domains",
+    "overlaps_with",
+    "primary_metric",
+    "requirements",
+)
+
+
+def test_catalog_fields_are_unknown_by_default_and_left_out_of_dumps() -> None:
+    manifest = EnvironmentManifest.model_validate(_manifest())
+
+    assert all(getattr(manifest, field) is None for field in CATALOG_FIELDS)
+    dumped = yaml.safe_load(dump_manifest(manifest))
+    assert not set(CATALOG_FIELDS) & set(dumped)
+
+
+def test_catalog_fields_round_trip() -> None:
+    raw = _manifest(kind="benchmark")
+    raw.update(
+        maintainers=["alice-nv"],
+        intended_use=["evaluation", "training"],
+        capabilities=["coding/code_generation", "reasoning"],
+        domains=["finance", "law"],
+        overlaps_with=["gpqa"],
+        primary_metric="pass@1",
+        requirements={"gpu": False, "network": "allowlist"},
+    )
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.intended_use == [IntendedUse.EVALUATION, IntendedUse.TRAINING]
+    assert manifest.capabilities == ["coding/code_generation", "reasoning"]
+    # The main domain stays first.
+    assert manifest.domains == ["finance", "law"]
+    assert manifest.requirements is not None and manifest.requirements.network == "allowlist"
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize(("written", "stored"), [("true", True), ("no", False), ("unknown", "unknown")])
+def test_gpu_takes_a_boolean_or_an_explicit_unknown(written: str, stored: object) -> None:
+    # YAML reads a bare `yes` or `no` as a boolean; "unknown" is how an author says that nobody knows.
+    raw = _manifest() | yaml.safe_load(f"requirements: {{gpu: {written}}}\n")
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.requirements is not None
+    assert manifest.requirements.gpu == stored
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize("level", ["no-network", "allowlist", "public", "unknown"])
+def test_network_takes_a_harbor_network_mode_or_unknown(level: str) -> None:
+    raw = _manifest() | {"requirements": {"network": level}}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.requirements is not None and manifest.requirements.network == level
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+def _listing_manifest() -> dict:
+    """A benchmark with one setup that runs it under another harness and one protocol that adds a system prompt."""
+    raw = _manifest(kind="benchmark")
+    raw.update(
+        capabilities=["reasoning"], maintainers=["alice-nv"], requirements={"gpu": False, "network": "allowlist"}
+    )
+    raw["setups"] = [
+        {
+            "name": "my_eval/codex",
+            "config_path": "codex.yaml",
+            "description": "Competition mathematics run by Codex",
+            "integration_profile": "external-agent-loop",
+            "agent_server": "codex_agent",
+            # Codex reaches the model itself; null clears the main manifest's model server.
+            "model_server": None,
+            "requirements": {"gpu": False, "network": "public"},
+        }
+    ]
+    raw["protocols"] = [
+        {
+            "name": "my_eval/config_with_system",
+            "config_path": "config_with_system.yaml",
+            "description": "Competition mathematics with a system prompt",
+            "standard_prompt_config": "prompts/with_system.yaml",
+            "datasets": [{**raw["datasets"][0], "prompt_config": "prompts/with_system.yaml"}],
+        }
+    ]
+    return raw
+
+
+def test_a_listed_config_resolves_to_the_main_manifest_with_the_facts_it_sets() -> None:
+    main = EnvironmentManifest.model_validate(_listing_manifest())
+
+    setup, protocol = (resolve_listed_manifest(main, listed) for listed in main.listed_configs())
+
+    assert (setup.name, setup.config_path, setup.agent_server, setup.model_server) == (
+        "my_eval/codex",
+        "codex.yaml",
+        "codex_agent",
+        None,
+    )
+    assert setup.integration_profile == IntegrationProfile.EXTERNAL_AGENT_LOOP
+    assert setup.requirements is not None and setup.requirements.network == "public"
+    # What it leaves out is the main manifest's.
+    assert (setup.version, setup.capabilities, setup.maintainers, setup.reward) == (
+        main.version,
+        main.capabilities,
+        main.maintainers,
+        main.reward,
+    )
+    assert (protocol.standard_prompt_config, protocol.agent_server) == ("prompts/with_system.yaml", "simple_agent")
+    assert setup.setups == [] and protocol.protocols == []
+
+
+def test_a_listing_dumps_only_what_each_config_sets_and_round_trips() -> None:
+    raw = _listing_manifest()
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    dumped = yaml.safe_load(dump_manifest(manifest))
+
+    assert dumped["setups"] == raw["setups"] and dumped["protocols"] == raw["protocols"]
+    assert EnvironmentManifest.model_validate(dumped) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+    assert "setups" not in yaml.safe_load(dump_manifest(EnvironmentManifest.model_validate(_manifest())))
+
+
+def _nested_listing_manifest() -> dict:
+    """The listing manifest, with a Pi setup that runs its system-prompt protocol under another harness."""
+    raw = _listing_manifest()
+    raw["protocols"][0]["setups"] = [
+        {
+            "name": "my_eval/pi_with_system",
+            "config_path": "pi_with_system.yaml",
+            "description": "Competition mathematics with a system prompt, run by Pi",
+            "agent_server": "pi_agent",
+        }
+    ]
+    return raw
+
+
+def test_a_setup_a_protocol_lists_takes_the_protocols_facts() -> None:
+    main = EnvironmentManifest.model_validate(_nested_listing_manifest())
+    protocol = main.protocols[0]
+    [nested] = protocol.setups
+
+    setup = resolve_listed_manifest(main, nested)
+
+    assert [listed.name for listed in main.listed_configs()] == [
+        "my_eval/codex",
+        "my_eval/config_with_system",
+        "my_eval/pi_with_system",
+    ]
+    assert main.listing_protocol(nested) == protocol and main.listing_protocol(protocol) is None
+    # The protocol's prompt and rows, the setup's own harness, and the main manifest's version.
+    assert (setup.standard_prompt_config, setup.datasets[0].prompt_config) == (
+        "prompts/with_system.yaml",
+        "prompts/with_system.yaml",
+    )
+    assert (setup.agent_server, setup.version, setup.setups, setup.protocols) == ("pi_agent", main.version, [], [])
+    raw = _nested_listing_manifest()
+    assert yaml.safe_load(dump_manifest(main))["protocols"] == raw["protocols"]
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+def test_a_listed_config_combines_requirements_field_by_field() -> None:
+    raw = _nested_listing_manifest()
+    raw["requirements"] = {"gpu": True, "network": "allowlist"}
+    raw["setups"][0]["requirements"] = {"network": "public"}
+    raw["setups"][0]["maintainers"] = ["bob-nv"]
+    raw["protocols"][0]["requirements"] = {"network": "no-network"}
+    raw["protocols"][0]["setups"][0]["requirements"] = {"gpu": False}
+    main = EnvironmentManifest.model_validate(raw)
+
+    setup, protocol, nested = (resolve_listed_manifest(main, listed) for listed in main.listed_configs())
+
+    # Each keeps the GPU need it does not set, from the main manifest or, for the nested setup, its protocol.
+    assert setup.requirements.model_dump() == {"gpu": True, "network": "public"}
+    assert protocol.requirements.model_dump() == {"gpu": True, "network": "no-network"}
+    assert nested.requirements.model_dump() == {"gpu": False, "network": "no-network"}
+    # A list replaces the inherited one whole, and the entry still dumps only what it set.
+    assert (setup.maintainers, protocol.maintainers) == (["bob-nv"], ["alice-nv"])
+    assert yaml.safe_load(dump_manifest(main))["setups"][0]["requirements"] == {"network": "public"}
+
+    # null still clears the whole object.
+    raw["setups"][0]["requirements"] = None
+    cleared = EnvironmentManifest.model_validate(raw)
+    assert resolve_listed_manifest(cleared, cleared.setups[0]).requirements is None
+
+
+@pytest.mark.parametrize("backend", ["pydantic", "schema"])
+def test_a_setup_lists_no_setups_of_its_own(backend: str) -> None:
+    raw = _nested_listing_manifest()
+    nested = raw["protocols"][0]["setups"][0]
+    raw["setups"][0]["setups"] = [{**nested, "name": "my_eval/codex_again", "config_path": "codex_again.yaml"}]
+
+    if backend == "schema":
+        assert list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+    else:
+        with pytest.raises(ValidationError, match="setups"):
+            EnvironmentManifest.model_validate(raw)
+
+
+def test_a_setup_a_protocol_lists_needs_a_name_of_its_own_across_the_manifest() -> None:
+    raw = _nested_listing_manifest()
+    raw["protocols"][0]["setups"][0]["name"] = "my_eval/codex"
+
+    with pytest.raises(ValidationError, match="their own name"):
+        EnvironmentManifest.model_validate(raw)
+
+
+def test_load_listed_manifest_returns_the_main_manifest_or_a_listed_config(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.yaml"
+    path.write_text(dump_manifest(_listing_manifest()), encoding="utf-8")
+
+    assert load_listed_manifest(path, "my_eval") == load_manifest(path)
+    assert load_listed_manifest(path, "my_eval/codex").agent_server == "codex_agent"
+    with pytest.raises(ManifestError, match="lists no setup or protocol named 'my_eval/other'"):
+        load_listed_manifest(path, "my_eval/other")
+    path.write_text(dump_manifest(_nested_listing_manifest()), encoding="utf-8")
+    assert load_listed_manifest(path, "my_eval/pi_with_system").standard_prompt_config == "prompts/with_system.yaml"
+
+
+@pytest.mark.parametrize("backend", ["pydantic", "schema"])
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        # A protocol says how it scores differently, so it describes itself; a setup may keep the description.
+        (lambda raw: raw["protocols"][0].pop("description"), "description"),
+        # Only what can differ may be set: capabilities belong to the benchmark.
+        (lambda raw: raw["setups"][0].update(capabilities=["coding"]), "capabilities"),
+        (lambda raw: raw.update(kind="environment", canonical_split=None, standard_prompt_config=None), "protocols"),
+    ],
+)
+def test_a_listing_rejects_what_a_setup_or_protocol_cannot_say(backend: str, change, message: str) -> None:
+    raw = _listing_manifest()
+    change(raw)
+    raw = {key: value for key, value in raw.items() if value is not None}
+    if raw["kind"] == "environment":
+        raw["datasets"] = [{"name": "validation", "type": "validation", "jsonl_fpath": "data/validation.jsonl"}]
+        raw["protocols"][0].pop("datasets")
+        raw["protocols"][0].pop("standard_prompt_config")
+
+    if backend == "schema":
+        assert list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+    else:
+        with pytest.raises(ValidationError, match=message):
+            EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda raw: raw["setups"][0].update(name="my_eval"), "their own name"),
+        (lambda raw: raw["protocols"][0].update(name="my_eval/codex"), "their own name"),
+        # The same file written another way is still the same config.
+        (lambda raw: raw["setups"][0].update(config_path="./config.yaml"), "their own config_path"),
+        # Each listed config must still make a complete manifest: a harness without an agent server cannot run.
+        (lambda raw: raw["setups"][0].update(agent_server=None), "my_eval/codex, combined with the main manifest: "),
+    ],
+)
+def test_a_listing_names_distinct_configs_that_each_make_a_valid_manifest(change, message: str) -> None:
+    raw = _listing_manifest()
+    raw["config_path"] = "config.yaml"
+    change(raw)
+
+    with pytest.raises(ValidationError, match=message):
+        EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("maintainers", ["alice", "alice"]),
+        ("maintainers", ["Alice Smith"]),
+        ("maintainers", []),
+        ("intended_use", ["serving"]),
+        ("intended_use", ["training", "training"]),
+        ("capabilities", ["reasoning", "reasoning"]),
+        # One value is still a list; only `unknown` stands alone.
+        ("capabilities", "reasoning"),
+        ("domains", ["finance", "finance"]),
+        ("domains", "finance"),
+        ("domains", "Unknown"),
+        ("overlaps_with", ["gpqa", "gpqa"]),
+        ("requirements", {"gpu": True, "vram_gb": 80}),
+        ("requirements", {"network": "sometimes"}),
+        # Network access is a level, not a yes or no, and `internet` is not a field.
+        ("requirements", {"network": True}),
+        ("requirements", {"internet": True}),
+    ],
+)
+def test_catalog_fields_reject_invalid_values(field: str, value: object) -> None:
+    raw = _manifest() | {field: value}
+
+    with pytest.raises(ValidationError):
+        EnvironmentManifest.model_validate(raw)
+
+
+def _schema_errors(raw: dict) -> list[str]:
+    return [error.message for error in Draft202012Validator(manifest_json_schema()).iter_errors(raw)]
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        ["reasoning"],
+        ["coding/code_generation"],
+        ["tool_and_computer_use/mcp_tool_use", "coding"],
+        # None applies, for example a speed benchmark that tests no model skill.
+        [],
+        "unknown",
+    ],
+)
+def test_capabilities_are_a_list_of_capabilities_or_specializations_or_unknown(capabilities: object) -> None:
+    raw = _manifest() | {"capabilities": capabilities}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.capabilities == capabilities
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    ("capability", "message"),
+    [
+        ("codng", "'codng' is not in the capability taxonomy .* Did you mean `coding`\\?"),
+        ("codng/code_generation", "Did you mean `coding/code_generation`\\?"),
+        # A specialization is only valid under its own capability.
+        ("reasoning/code_generation", "'code_generation' is not a specialization of 'reasoning'.* causal_reasoning"),
+        ("coding/code_gen", "Its specializations are: code_understanding, code_generation, code_editing"),
+        ("coding/code_generation/python", "not a specialization of 'coding'"),
+    ],
+)
+def test_an_unknown_capability_is_rejected_with_the_values_it_could_be(capability: str, message: str) -> None:
+    raw = _manifest() | {"capabilities": ["reasoning", capability]}
+
+    with pytest.raises(ValidationError, match=message) as error:
+        EnvironmentManifest.model_validate(raw)
+    # One error for the field, not one per branch of `list | unknown`.
+    assert [issue["loc"] for issue in error.value.errors()] == [("capabilities",)]
+    assert _schema_errors(raw)
+
+
+@pytest.mark.parametrize("domains", [["finance"], ["medicine", "law"], ["general"], ["other"], [], "unknown"])
+def test_domains_are_a_list_from_the_domain_list_or_unknown(domains: object) -> None:
+    raw = _manifest() | {"domains": domains}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.domains == domains
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    ("domain", "message"),
+    [
+        ("financ", "'financ' is not in the domain list .* Did you mean `finance`\\?"),
+        # Gym's own `domain` categories are not in the domain list.
+        ("coding", "'coding' is not in the domain list"),
+    ],
+)
+def test_an_unknown_domain_is_rejected_with_a_suggestion(domain: str, message: str) -> None:
+    raw = _manifest() | {"domains": ["finance", domain]}
+
+    with pytest.raises(ValidationError, match=message) as error:
+        EnvironmentManifest.model_validate(raw)
+    assert [issue["loc"] for issue in error.value.errors()] == [("domains",)]
+    assert "capabilities_and_domains.yaml" in str(error.value)
+    assert _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("capabilities", ["unknown"]),
+        ("capabilities", ["coding", "unknown"]),
+        ("domains", ["unknown"]),
+        ("domains", ["general", "unknown"]),
+    ],
+)
+def test_unknown_is_the_whole_value_never_a_list_item(field: str, value: list[str]) -> None:
+    raw = _manifest() | {field: value}
+
+    with pytest.raises(ValidationError, match=f"as in `{field}: unknown`, not an item in a list") as error:
+        EnvironmentManifest.model_validate(raw)
+    assert [issue["loc"] for issue in error.value.errors()] == [(field,)]
+    assert _schema_errors(raw)
+
+
+def test_the_schema_lists_exactly_the_values_validation_accepts() -> None:
+    properties = manifest_json_schema()["properties"]
+    capabilities = properties["capabilities"]["anyOf"][0]["items"]["enum"]
+    domains = properties["domains"]["anyOf"][0]["items"]["enum"]
+    raw = _manifest() | {"capabilities": capabilities, "domains": domains}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.capabilities == capabilities and manifest.domains == domains
+    assert {"coding", "coding/code_generation", "safety/agentic_action_safety"} <= set(capabilities)
+    # `domains: unknown` is how a manifest says it does not know, so the list has no `unknown` domain.
+    assert {"general", "other"} <= set(domains) and "unknown" not in domains

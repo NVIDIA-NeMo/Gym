@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.environment.manifest import EnvironmentKind, load_manifest
+from nemo_gym.environment.manifest import EnvironmentKind, load_listed_manifest
 from nemo_gym.environment.onboarding import VerifierReport
 from nemo_gym.environment.registry import EnvironmentCatalogEntry, discover_environment_catalog
 from nemo_gym.environment.validation import EnvironmentValidationReport
@@ -36,18 +36,29 @@ class EnvironmentPublicationReport:
 
 
 def _is_placeholder(value: str | None) -> bool:
-    return value is not None and value.strip().casefold().startswith("todo")
+    """A value still set to what the scaffold writes: ``TODO``, or ``TODO:`` followed by an instruction.
+
+    A real value that only starts with "todo", such as the author ``Todorov, E.``, is not one.
+    """
+    if value is None:
+        return False
+    text = value.strip().casefold()
+    return text == "todo" or text.startswith("todo:")
 
 
 def _publication_placeholders(entry: EnvironmentCatalogEntry) -> tuple[str, ...]:
     if entry.manifest_path is None:
         return ("manifest",)
-    manifest = load_manifest(entry.manifest_path)
+    manifest = load_listed_manifest(entry.manifest_path, entry.name)
     placeholders: list[str] = []
     if _is_placeholder(manifest.description):
         placeholders.append("description")
     if any(_is_placeholder(author) for author in manifest.authors):
         placeholders.append("authors")
+    if any(_is_placeholder(maintainer) for maintainer in manifest.maintainers or ()):
+        placeholders.append("maintainers")
+    if _is_placeholder(manifest.primary_metric):
+        placeholders.append("primary_metric")
     if manifest.licensing == "unknown":
         placeholders.append("licensing")
     if manifest.kind == EnvironmentKind.BENCHMARK:

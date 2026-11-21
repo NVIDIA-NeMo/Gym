@@ -87,6 +87,7 @@ async def test_scaffolded_verifier_journey_reaches_published_catalog_entry(
             "description": "A complete local fixture environment.",
             "licensing": "Apache-2.0",
             "authors": ["contributor"],
+            "maintainers": ["contributor"],
         }
     )
     manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
@@ -107,6 +108,8 @@ async def test_scaffolded_verifier_journey_reaches_published_catalog_entry(
         {"description": "TODO: describe this environment"},
         {"authors": ["TODO"]},
         {"licensing": "unknown"},
+        {"maintainers": ["alice-nv", "TODO"]},
+        {"primary_metric": "TODO"},
     ],
 )
 def test_publication_rejects_scaffold_placeholders(tmp_path: Path, updates: dict[str, object]) -> None:
@@ -115,6 +118,21 @@ def test_publication_rejects_scaffold_placeholders(tmp_path: Path, updates: dict
 
     with pytest.raises(EnvironmentPublicationError, match="scaffold placeholders"):
         finalize_publication(entry, validation, verifier, catalog_entries=(entry,))
+
+
+def test_publication_accepts_real_values_that_start_with_todo(tmp_path: Path) -> None:
+    entry = _entry(
+        tmp_path,
+        description="Todo-list tasks for a planning agent.",
+        authors=["Todorov, E."],
+        maintainers=["todorov"],
+        primary_metric="todo_completion_rate",
+    )
+    validation, verifier = _reports()
+
+    report = finalize_publication(entry, validation, verifier, catalog_entries=(entry,))
+
+    assert report.name == "sample"
 
 
 def test_publication_report_serializes() -> None:
@@ -184,4 +202,46 @@ def test_publication_rejects_benchmark_protocol_placeholders(tmp_path: Path) -> 
     validation, verifier = _reports()
 
     with pytest.raises(EnvironmentPublicationError, match="canonical_split, standard_prompt_config"):
+        finalize_publication(entry, validation, verifier, catalog_entries=(entry,))
+
+
+def _listed_setup(tmp_path: Path, setup: dict[str, object], **main_updates: object) -> EnvironmentCatalogEntry:
+    """The catalog entry of ``sample/codex``, a setup that the sample manifest lists with the fields in ``setup``."""
+    main = _entry(
+        tmp_path,
+        maintainers=["alice-nv"],
+        setups=[{"name": "sample/codex", "config_path": "codex.yaml", **setup}],
+        **main_updates,
+    )
+    config_path = main.path / "codex.yaml"
+    config_path.write_text("{}\n", encoding="utf-8")
+    return replace(main, name="sample/codex", config_path=config_path, setup_of="sample")
+
+
+def _setup_reports() -> tuple[SimpleNamespace, SimpleNamespace]:
+    validation, verifier = _reports()
+    validation.name = verifier.name = "sample/codex"
+    return validation, verifier
+
+
+def test_publication_reads_the_facts_a_listed_setup_sets(tmp_path: Path) -> None:
+    # The main manifest still has the scaffold's description; the setup sets its own, so the setup can publish.
+    entry = _listed_setup(
+        tmp_path,
+        {"description": "The sample environment run by Codex.", "maintainers": ["bob-nv"]},
+        description="TODO: describe this environment",
+    )
+    validation, verifier = _setup_reports()
+
+    report = finalize_publication(entry, validation, verifier, catalog_entries=(entry,))
+
+    assert (report.name, report.manifest_path) == ("sample/codex", str(entry.manifest_path.resolve()))
+
+
+def test_publication_rejects_a_placeholder_a_listed_setup_sets(tmp_path: Path) -> None:
+    # The main manifest's maintainers are real; the setup replaces them with the scaffold's placeholder.
+    entry = _listed_setup(tmp_path, {"description": "The sample environment run by Codex.", "maintainers": ["TODO"]})
+    validation, verifier = _setup_reports()
+
+    with pytest.raises(EnvironmentPublicationError, match="placeholders before publishing: maintainers$"):
         finalize_publication(entry, validation, verifier, catalog_entries=(entry,))

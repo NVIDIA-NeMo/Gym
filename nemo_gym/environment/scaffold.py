@@ -26,7 +26,9 @@ from nemo_gym.environment.manifest import (
     EnvironmentKind,
     EnvironmentManifest,
     IntegrationProfile,
+    IntendedUse,
     ManifestDataset,
+    ManifestRequirements,
     Reward,
     dump_manifest,
 )
@@ -286,6 +288,14 @@ def _manifest(composition: _Composition) -> EnvironmentManifest:
         "modality": "text",
         "licensing": "unknown",
         "authors": [_TODO],
+        # Written out so the author sees every selection field; "unknown" stays valid until someone knows.
+        "maintainers": [_TODO],
+        "intended_use": [
+            IntendedUse.EVALUATION if composition.kind == EnvironmentKind.BENCHMARK else IntendedUse.TRAINING
+        ],
+        "capabilities": "unknown",
+        "domains": "unknown",
+        "requirements": dict.fromkeys(ManifestRequirements.model_fields, "unknown"),
         "reward": composition.reward,
         "determinism": Determinism.UNKNOWN,
         "resources_server": composition.resource_implementation,
@@ -295,7 +305,7 @@ def _manifest(composition: _Composition) -> EnvironmentManifest:
         "rollout_driver": composition.rollout_driver,
     }
     if composition.kind == EnvironmentKind.BENCHMARK:
-        data.update(canonical_split=_TODO, standard_prompt_config=composition.prompt_path)
+        data.update(canonical_split=_TODO, standard_prompt_config=composition.prompt_path, primary_metric=_TODO)
     return EnvironmentManifest.model_validate(data)
 
 

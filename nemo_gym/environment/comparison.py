@@ -15,7 +15,7 @@
 """Resolve catalog reward definitions for evaluation comparisons."""
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.environment.manifest import load_manifest
+from nemo_gym.environment.manifest import load_listed_manifest
 from nemo_gym.environment.registry import resolve_catalog_entry
 from nemo_gym.eval.comparison.suite.schema import SuiteMetricResult
 
@@ -25,7 +25,7 @@ def resolve_benchmark_reward_metric(benchmark: str) -> SuiteMetricResult:
     entry = resolve_catalog_entry(benchmark, kind="benchmark")
     if entry.manifest_path is None:
         raise ConfigError(f"Benchmark '{benchmark}' has no reward manifest.")
-    manifest = load_manifest(entry.manifest_path)
+    manifest = load_listed_manifest(entry.manifest_path, entry.name)
     low, high = manifest.reward.range
     return SuiteMetricResult(
         name="mean/reward",

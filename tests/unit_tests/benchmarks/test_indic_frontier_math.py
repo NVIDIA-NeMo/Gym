@@ -15,7 +15,7 @@ from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, valida
 from nemo_gym.data.task_data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.manifest import load_manifest
-from nemo_gym.environment.registry import _manifest_entry
+from nemo_gym.environment.registry import _manifest_entries
 
 
 @pytest.mark.parametrize("rendered", [False, True], ids=["raw", "rendered"])
@@ -54,7 +54,7 @@ def test_manifest_and_committed_requests() -> None:
     benchmark = prep.BENCHMARK_DIR
     manifest = load_manifest(benchmark / "manifest.yaml")
     assert manifest.name == "indic/frontier_math"
-    entry = _manifest_entry(benchmark.parents[1], benchmark / "manifest.yaml", "benchmark")
+    entry = _manifest_entries(benchmark.parents[1], benchmark / "manifest.yaml", "benchmark")[0]
     config_path = Path(asset_config_path("benchmark", entry.name))
     assert config_path == benchmark / "config.yaml"
     assert manifest.canonical_split == "benchmark"
