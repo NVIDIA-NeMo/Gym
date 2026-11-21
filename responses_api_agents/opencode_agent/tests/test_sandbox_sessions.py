@@ -1070,36 +1070,51 @@ def test_instructions_and_text_parts_reach_opencode(setup, mode):
 
 
 @pytest.mark.parametrize("mode", ["append", "replace"])
-def test_compaction_and_build_steps_reach_opencode(setup, mode):
+@pytest.mark.parametrize(
+    "compaction",
+    [
+        {},
+        {"auto": False},
+        {"auto": True},
+        {"prune": False},
+        {"auto": False, "prune": False},
+        {"auto": True, "prune": False},
+    ],
+)
+def test_compaction_and_build_steps_reach_opencode(setup, mode, compaction):
     agent, sandbox = setup
     agent.config.system_prompt_mode = mode
     agent.config.system_prompt = "Answer briefly"
-    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
+    agent.config.opencode_config = {"compaction": dict(compaction), "agent": {"build": {"steps": 8}}}
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         assert result.status_code == 200, result.text
         config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
-    assert config["compaction"] == {"auto": False}
+    assert config["compaction"] == compaction
     if mode == "replace":
         # The replacement prompt joins the configured step limit instead of replacing the agent entry.
         assert config["agent"] == {"build": {"steps": 8, "prompt": "Answer briefly"}}
     else:
         assert config["agent"] == {"build": {"steps": 8}}
     # The session's prompt stays out of the configuration that later sessions copy.
-    assert agent.config.opencode_config == {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
+    assert agent.config.opencode_config == {"compaction": compaction, "agent": {"build": {"steps": 8}}}
 
 
-def test_compaction_reserved_reaches_opencode(setup):
+@pytest.mark.parametrize("prune", [None, False])
+def test_compaction_reserved_reaches_opencode(setup, prune):
     """OpenCode then compacts after a call of 32000 - 8000 tokens, instead of 32000 - min(20000, 4096)."""
     agent, sandbox = setup
-    agent.config.opencode_config = {"compaction": {"auto": True, "reserved": 8000}}
+    compaction = {"auto": True, "reserved": 8000}
+    if prune is not None:
+        compaction["prune"] = prune
+    agent.config.opencode_config = {"compaction": compaction}
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         assert result.status_code == 200, result.text
         config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
-    assert config["compaction"] == {"auto": True, "reserved": 8000}
+    assert config["compaction"] == compaction
     assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"]["input"] == 32000
 
 
@@ -1279,8 +1294,14 @@ def test_either_marker_identifies_a_compaction_summary(setup, marker):
     ("opencode_config", "detail"),
     [
         ({"provider": {"other": {}}}, "unsupported: ['provider']"),
-        ({"compaction": {"auto": False, "prune": True}}, "compaction supports only auto and reserved"),
-        ({"compaction": {"reserved": 8000, "prune": False}}, "compaction supports only auto and reserved"),
+        ({"compaction": {"auto": False, "prune": True}}, "compaction.prune must be false"),
+        ({"compaction": {"prune": 0}}, "compaction.prune must be false"),
+        ({"compaction": {"prune": "false"}}, "compaction.prune must be false"),
+        ({"compaction": {"prune": None}}, "compaction.prune must be false"),
+        (
+            {"compaction": {"reserved": 8000, "prune": False, "other": False}},
+            "compaction supports only auto and reserved",
+        ),
         ({"compaction": {"auto": "false"}}, "compaction.auto must be true or false"),
         ({"compaction": None}, "compaction supports only auto and reserved"),
         ({"compaction": {"reserved": 0}}, "compaction.reserved must be a positive integer"),
@@ -1402,7 +1423,7 @@ def test_with_token_capture_a_seed_accepts_build_steps(setup):
             "token_id_capture": {"enabled": True, "all_agents": True},
         }
     )
-    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
+    agent.config.opencode_config = {"compaction": {"auto": False, "prune": False}, "agent": {"build": {"steps": 8}}}
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
 

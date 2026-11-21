@@ -24,6 +24,11 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.utils.exception_inspection import bounded_text, explicit_causes
     from nemo_gym.utils.gym_commit import installed_gym_commit
+    from nemo_gym.utils.mcp_tool_names import (
+        HERMES_MCP_SERVERS_METADATA_KEY,
+        hermes_mcp_metadata,
+        normalize_hermes_mcp_tool_name,
+    )
     from nemo_gym.utils.network_policy import reachable_host
     from nemo_gym.utils.path_utils import (
         aggregation_sources_path_for,
@@ -42,16 +47,19 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "HERMES_MCP_SERVERS_METADATA_KEY": "mcp_tool_names",
     "IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME": "server_process",
     "IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME": "server_process",
     "aggregation_sources_path_for": "path_utils",
     "bounded_text": "exception_inspection",
     "explicit_causes": "exception_inspection",
     "failures_path_for": "path_utils",
+    "hermes_mcp_metadata": "mcp_tool_names",
     "installed_gym_commit": "gym_commit",
     "is_nemo_gym_fastapi_entrypoint": "server_process",
     "is_nemo_gym_fastapi_worker": "server_process",
     "materialized_path_for": "path_utils",
+    "normalize_hermes_mcp_tool_name": "mcp_tool_names",
     "reachable_host": "network_policy",
     "resubmit_offset_path_for": "path_utils",
 }

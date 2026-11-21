@@ -25,6 +25,7 @@ from math import isfinite
 from pathlib import Path
 from signal import SIGINT, SIGKILL
 from subprocess import PIPE, Popen, TimeoutExpired
+from tempfile import mkstemp
 from threading import Lock, Thread
 from time import monotonic, sleep, time
 from typing import IO, Dict, Iterator, List, NamedTuple, Optional, Tuple
@@ -41,8 +42,10 @@ from nemo_gym.config.global_config import (
     DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
+    MAX_CONFIG_DICT_ENV_BYTES,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
@@ -51,6 +54,7 @@ from nemo_gym.config.global_config import (
     SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_TYPE_KEYS,
+    SKIP_VENV_IF_PRESENT_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     _find_open_port_using_range,
@@ -60,7 +64,12 @@ from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAIL
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
 from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
 from nemo_gym.server_runtime.supervisor.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
-from nemo_gym.server_runtime.supervisor.server_venv import get_venv_path, run_command, setup_env_command
+from nemo_gym.server_runtime.supervisor.server_venv import (
+    _is_complete_venv,
+    get_venv_path,
+    run_command,
+    setup_env_command,
+)
 from nemo_gym.telemetry.config import MemoryProfilingConfig
 from nemo_gym.telemetry.memory import MemoryProfiler, ServerMemoryTarget, process_tree_memory_supported
 from nemo_gym.telemetry.metrics import record_active_servers
@@ -74,6 +83,7 @@ from nemo_gym.telemetry.setup import (
     telemetry_config_from_global_config,
 )
 from nemo_gym.telemetry.startup import STARTUP_SETUP_DONE_NS_ENV, SupervisorStartup
+from nemo_gym.utils.venv_setup import SETUP_COMPLETE_MARKER
 
 
 # Grace period after SIGINT before escalating to SIGKILL. Kept short so Ctrl-C is responsive.
@@ -487,6 +497,66 @@ def _server_launch_command(
     && {shlex.quote(str(venv_python_fpath))} {shlex.quote(str(entrypoint_fpath))}"""
 
 
+def _project_root(dir_path: Path) -> Path | None:
+    """The component root a server gets on PYTHONPATH next to its own directory, or None in a wheel install.
+
+    Server entrypoints are executed as files (``python app.py``). In a source checkout the component root lets
+    package-qualified imports such as ``responses_api_agents.foo.helpers`` resolve from the same checkout instead
+    of an older installed Gym distribution. In a wheel install that root is the parent's site-packages; adding it
+    would shadow each server venv's own dependencies.
+    """
+    return dir_path.parent.parent if (PARENT_DIR / "pyproject.toml").is_file() else None
+
+
+def _reads_config_dict_file(server: _ConfiguredServer, global_config_dict: DictConfig) -> bool:
+    """Whether the Gym a server imports reads the config from the file `NEMO_GYM_CONFIG_DICT_FILE` names.
+
+    A venv set up in this run holds this process's Gym, which does. A complete venv that `skip_venv_if_present`
+    reuses is not set up again and can hold a Gym that reads only `NEMO_GYM_CONFIG_DICT`, so its own interpreter is
+    asked, from the directory and with the import path the server starts with. Nothing is installed or written in
+    the venv. An interpreter that cannot answer counts as one whose Gym does not read the file.
+
+    A server inside this checkout is not asked: its launch puts the checkout before the venv's packages on the
+    import path, so it imports this process's Gym whatever Gym its venv holds.
+    """
+    venv_path = get_venv_path(server.dir_path, global_config_dict)
+    # The marker first: `_is_complete_venv` warns about a venv without it, and the setup command already does.
+    reused = (
+        global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
+        and (venv_path / SETUP_COMPLETE_MARKER).is_file()
+        and _is_complete_venv(venv_path)
+    )
+    project_root = _project_root(server.dir_path)
+    # Resolved on both sides: the server's directory is found under the physical working directory, and
+    # `PARENT_DIR` keeps the path Gym was imported from, which can go through a symlink.
+    if not reused or (project_root is not None and project_root.resolve() == PARENT_DIR.resolve()):
+        return True
+    # The name of the file's variable arrived in Gym together with the code that reads the file.
+    import_file_variable = "from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME"
+    # From the server's directory, like its launch: `python -c` imports from the working directory first.
+    # `-B` writes no bytecode beside the modules it imports.
+    asked = run_command(
+        f"cd {shlex.quote(str(server.dir_path))} && {shlex.quote(str(venv_path / 'bin' / 'python'))} "
+        f"-B -c {shlex.quote(import_file_variable)} > /dev/null 2>&1",
+        server.dir_path,
+        server_name=server.top_level_path,
+        project_root=project_root,
+        global_config_dict=global_config_dict,
+    )
+    return asked.wait() == 0
+
+
+def _process_starts_with(env: dict[str, str]) -> bool:
+    """Whether the operating system starts a process that has these environment variables besides this one's."""
+    try:
+        Popen(["/bin/bash", "-c", ":"], env=os.environ | env).wait()
+    except OSError as error:
+        if error.errno != errno.E2BIG:
+            raise
+        return False
+    return True
+
+
 class ServerSpinupTimeoutError(RuntimeError):
     """Gym servers did not become ready within `server_spinup_timeout_seconds`."""
 
@@ -633,6 +703,8 @@ class ServerSupervisor:  # pragma: no cover
     # Created by `_start`, so its clock starts with the startup it measures.
     _startup: Optional[SupervisorStartup] = None
     _server_shutdown_timeout_seconds: float = _GRACEFUL_SHUTDOWN_TIMEOUT_SEC
+    # The file that holds a config too long for an environment variable, until shutdown.
+    _config_dict_file: Path | None = None
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
@@ -658,7 +730,7 @@ class ServerSupervisor:  # pragma: no cover
                 # The sidecar rewrote the model URLs in the config; a second start would point them at a stopped one.
                 sidecar_started = self._h2_ping_sidecar is not None
                 self.shutdown()
-                if attempt == 2 or sidecar_started or not self._move_to_a_fresh_port(error):
+                if self._processes or attempt == 2 or sidecar_started or not self._move_to_a_fresh_port(error):
                     raise
 
     def _move_to_a_fresh_port(self, error: BaseException) -> bool:
@@ -739,7 +811,9 @@ class ServerSupervisor:  # pragma: no cover
                 self._startup.mark("start_h2_ping_sidecar")
 
         # Assume Nemo Gym Run is for a single agent.
-        config_dict_yaml_str = OmegaConf.to_yaml(global_config_dict)
+        config_dict_env = self._config_dict_env(
+            OmegaConf.to_yaml(global_config_dict), configured_servers, global_config_dict
+        )
 
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
@@ -762,26 +836,17 @@ class ServerSupervisor:  # pragma: no cover
             print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
             command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
 
-            extra_env = {
-                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
-                NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path,
-            }
+            extra_env = config_dict_env | {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path}
             if top_level_path not in ray_server_names:
                 # A server that uses Ray without declaring it then fails on its first Ray call, rather than
                 # starting a private cluster in each of its processes.
                 extra_env[RAY_ENABLE_AUTO_CONNECT_ENV_VAR_NAME] = "0"
             extra_env |= self._startup.server_env(top_level_path, first_key)
-            # Server entrypoints are executed as files (``python app.py``). In a source
-            # checkout, put the component root on PYTHONPATH as well as the server directory
-            # so package-qualified imports such as ``responses_api_agents.foo.helpers``
-            # resolve from the same checkout instead of an older installed Gym distribution.
-            # In a wheel install that root is the parent's site-packages; adding it would
-            # shadow each server venv's own dependencies, so skip it there.
             process = self._spawn_server(
                 top_level_path,
                 command,
                 dir_path,
-                project_root=dir_path.parent.parent if (PARENT_DIR / "pyproject.toml").is_file() else None,
+                project_root=_project_root(dir_path),
                 extra_env=extra_env,
                 start_new_session=True,
             )
@@ -835,6 +900,47 @@ class ServerSupervisor:  # pragma: no cover
             self.wait_for_dry_run_spinup()
         else:
             self.wait_for_server_readiness(global_config_dict)
+
+    def _config_dict_env(
+        self, config_dict_yaml_str: str, configured_servers: list[_ConfiguredServer], global_config_dict: DictConfig
+    ) -> dict[str, str]:
+        """The environment variables that give every server the config: the config itself, or a file that holds it.
+
+        A config can outgrow what the operating system accepts in one environment variable, for example a
+        Harbor taskset's hash for each of tens of thousands of tasks. Both variables are always set, one of them
+        empty, so a server never reads a variable inherited from this process's own environment.
+
+        The file needs a Gym that reads it in every server. When a reused venv holds one that does not, the config
+        stays in the variable as long as the operating system accepts it there.
+        """
+        in_variable = {
+            NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
+            NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME: "",
+        }
+        config_bytes = len(config_dict_yaml_str.encode())
+        if config_bytes <= MAX_CONFIG_DICT_ENV_BYTES:
+            return in_variable
+        variable_only = [
+            server.top_level_path
+            for server in configured_servers
+            if not _reads_config_dict_file(server, global_config_dict)
+        ]
+        if variable_only:
+            if _process_starts_with(in_variable):
+                return in_variable
+            raise ConfigError(
+                f"The config is {config_bytes:,} bytes, more than this host accepts in one environment variable, and "
+                f"the reused venv of these servers has no Gym that reads it from a file: {', '.join(variable_only)}. "
+                "Their interpreter could not import NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME from "
+                "nemo_gym.config.global_config. Upgrade nemo-gym in those venvs, or have them set up again with "
+                f"`++{SKIP_VENV_IF_PRESENT_KEY_NAME}=false`."
+            )
+        # The config holds API keys: mkstemp makes the file readable by this user only.
+        descriptor, path = mkstemp(prefix="nemo-gym-config-", suffix=".yaml")
+        self._config_dict_file = Path(path)
+        with open(descriptor, "w", encoding="utf-8") as file:
+            file.write(config_dict_yaml_str)
+        return {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: "", NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME: path}
 
     def _spawn_server(
         self,
@@ -1063,6 +1169,12 @@ Process `{process_name}` stderr:
                 sleep(max(0.0, min(sleep_interval, deadline - monotonic())))
 
     def shutdown(self) -> None:
+        # First, so that a shutdown cut short while it waits for the servers leaves no file. The config holds API
+        # keys, and nothing that reads the file starts from here on.
+        if self._config_dict_file is not None:
+            self._config_dict_file.unlink(missing_ok=True)
+            self._config_dict_file = None
+
         memory_profiler = getattr(self, "_memory_profiler", None)
         if memory_profiler is not None:
             memory_profiler.stop()
@@ -1120,7 +1232,11 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
                 f"within {_FORCE_KILL_REAP_TIMEOUT_SEC}s after SIGKILL; "
                 "they may remain as zombies until this process exits."
             )
-        self._processes = dict()
+        self._processes = {
+            name: process
+            for name, process in self._processes.items()
+            if name in unreaped_process_names or _server_group_exists(process)
+        }
 
         # After the servers, so requests they were still finishing can drain through it. It gets its
         # own, longer grace period (`sidecar.shutdown_grace`).

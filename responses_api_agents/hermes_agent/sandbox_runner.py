@@ -79,13 +79,16 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     _use_model_server(payload["model_base_url"])
 
     try:
+        from .length_transcript import install_length_transcript_compat
         from .model_kwargs import _model_api_kwargs, install_summary_compat
         from .sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
     except ImportError:
+        from length_transcript import install_length_transcript_compat
         from model_kwargs import _model_api_kwargs, install_summary_compat
         from sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
     from run_agent import AIAgent
 
+    install_length_transcript_compat(AIAgent)
     if payload["mcp_servers"]:
         _connect_mcp_servers(payload["required_mcp_servers"])
 

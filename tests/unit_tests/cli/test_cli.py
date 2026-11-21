@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import os
 import shlex
+import signal
 import sys
+import time
 import tomllib
 from dataclasses import replace
 from importlib import import_module
@@ -74,9 +77,21 @@ from nemo_gym.server_runtime.supervisor.server_supervisor import (
 def mock_server_process_groups(monkeypatch):
     signal_group = nemo_gym.server_runtime.supervisor.server_supervisor._signal_server_group
     group_exists = nemo_gym.server_runtime.supervisor.server_supervisor._server_group_exists
+    live_mock_groups = {}
 
     def send(process, number):
         if isinstance(process, MagicMock):
+            if process not in live_mock_groups:
+                live_mock_groups[process] = True
+                wait = process.wait
+
+                def wait_and_reap(*args, **kwargs):
+                    result = wait(*args, **kwargs)
+                    live_mock_groups[process] = False
+                    return result
+
+                # Keep the configured mock's iterable/callable/None side-effect semantics.
+                process.wait = MagicMock(side_effect=wait_and_reap)
             if number == nemo_gym.server_runtime.supervisor.server_supervisor.SIGINT:
                 process.send_signal(number)
             else:
@@ -88,7 +103,9 @@ def mock_server_process_groups(monkeypatch):
     monkeypatch.setattr(
         nemo_gym.server_runtime.supervisor.server_supervisor,
         "_server_group_exists",
-        lambda process: bool(process.wait.side_effect) if isinstance(process, MagicMock) else group_exists(process),
+        lambda process: live_mock_groups.get(process, False)
+        if isinstance(process, MagicMock)
+        else group_exists(process),
     )
 
 
@@ -2329,6 +2346,80 @@ def test_missing_local_lock_does_not_fall_back_to_installed_component(tmp_path, 
     (installed / "uv.lock").touch()
     monkeypatch.setattr(nemo_gym, "component_search_roots", lambda: [tmp_path / "local", tmp_path / "installed"])
     assert _resolve_server_dir(Path("resources_servers/sample")) == local
+
+
+def _gym_env_start(monkeypatch: MonkeyPatch, supervisor: ServerSupervisor) -> None:
+    """Run `gym env start` with this supervisor, and put the SIGTERM handler back after it."""
+    supervisor.shutdown = MagicMock()
+    monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
+    monkeypatch.setattr(nemo_gym.cli.env, "ServerSupervisor", MagicMock(return_value=supervisor))
+    # If the command sets no handler, a SIGTERM fails the test and does not end pytest.
+    previous = signal.signal(signal.SIGTERM, lambda *_: pytest.fail("gym env start set no SIGTERM handler"))
+    try:
+        run(None)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _sigterm_arrives(*_: object) -> None:
+    os.kill(os.getpid(), signal.SIGTERM)
+    time.sleep(5)
+    raise AssertionError("SIGTERM did not interrupt gym env start")
+
+
+@pytest.mark.parametrize("stopped_while", ["the servers start", "the servers run"])
+def test_gym_env_start_stopped_by_sigterm_shuts_down_and_exits_143(
+    monkeypatch: MonkeyPatch, stopped_while: str
+) -> None:
+    """Slurm ends a job with SIGTERM: the servers and the config file must not outlive `gym env start`."""
+    supervisor = ServerSupervisor()
+    if stopped_while == "the servers start":
+        supervisor._start = _sigterm_arrives
+    else:
+        supervisor._start = MagicMock()
+        supervisor._server_client = MagicMock(global_config_dict={"dry_run": False})
+        supervisor.poll = _sigterm_arrives
+
+    with raises(SystemExit) as stopped:
+        _gym_env_start(monkeypatch, supervisor)
+
+    assert stopped.value.code == 128 + signal.SIGTERM
+    supervisor.shutdown.assert_called_once_with()
+
+
+def test_gym_env_start_exits_143_after_a_start_that_replaced_the_sigterm_handler(monkeypatch: MonkeyPatch) -> None:
+    """Ray's init, which the start runs when a server uses Ray, sets a handler of its own that exits with 15."""
+    supervisor = ServerSupervisor()
+    supervisor._start = lambda *_: signal.signal(signal.SIGTERM, lambda *_: sys.exit(signal.SIGTERM))
+    supervisor._server_client = MagicMock(global_config_dict={"dry_run": False})
+    supervisor.poll = _sigterm_arrives
+
+    with raises(SystemExit) as stopped:
+        _gym_env_start(monkeypatch, supervisor)
+
+    assert stopped.value.code == 128 + signal.SIGTERM
+    supervisor.shutdown.assert_called_once_with()
+
+
+def test_gym_env_start_stopped_by_ctrl_c_while_the_servers_start_still_raises(monkeypatch: MonkeyPatch) -> None:
+    supervisor = ServerSupervisor()
+    supervisor._start = MagicMock(side_effect=KeyboardInterrupt)
+
+    with raises(KeyboardInterrupt):
+        _gym_env_start(monkeypatch, supervisor)
+
+    supervisor.shutdown.assert_called_once_with()
+
+
+def test_gym_env_start_stopped_by_ctrl_c_while_the_servers_run_still_returns(monkeypatch: MonkeyPatch) -> None:
+    supervisor = ServerSupervisor()
+    supervisor._start = MagicMock()
+    supervisor._server_client = MagicMock(global_config_dict={"dry_run": False})
+    supervisor.poll = MagicMock(side_effect=KeyboardInterrupt)
+
+    _gym_env_start(monkeypatch, supervisor)
+
+    supervisor.shutdown.assert_called_once_with()
 
 
 def test_managed_servers_use_sessions_and_the_configured_shutdown_budget(monkeypatch):

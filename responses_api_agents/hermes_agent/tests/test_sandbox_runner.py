@@ -32,6 +32,9 @@ from resources_servers.example_mcp_weather.app import (
 )
 from responses_api_agents.hermes_agent.app import HermesAgent, HermesAgentConfig
 from responses_api_agents.hermes_agent.sandbox_runner import _run, _use_model_server
+from responses_api_agents.hermes_agent.tests.compat_fixtures import (
+    restore_length_transcript_state as restore_length_transcript_state,
+)
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -148,13 +151,26 @@ class _ResourcesServer:
 
 
 @pytest.fixture
-def restore_process_globals(monkeypatch: pytest.MonkeyPatch):
+def restore_process_globals(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """The runner changes process-wide state; restore it so other tests see the originals."""
     monkeypatch.setattr(AIAgent, "__init__", AIAgent.__init__)
     for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "HERMES_HOME", "TERMINAL_ENV", "TERMINAL_TIMEOUT"):
         monkeypatch.delenv(name, raising=False)
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     yield
     shutdown_mcp_servers()
+
+
+@pytest.fixture
+def mock_sandbox_hermes_compat_boundary(monkeypatch, request):
+    """The marked legacy signal-bookkeeping fixture supplies a synthetic runner."""
+    request.node.user_properties.append(("proof_scope", "legacy_mock_bookkeeping_only"))
+    monkeypatch.setattr(
+        "responses_api_agents.hermes_agent.length_transcript.install_length_transcript_compat",
+        lambda _synthetic_runner: None,
+    )
 
 
 def _payload(model_base_url: str, **overrides) -> dict:
@@ -355,6 +371,7 @@ def test_sandbox_rejection_preserves_runtime_token_totals(
 
 
 @pytest.mark.parametrize("marker", ["present", "absent", "omitted"])
+@pytest.mark.usefixtures("mock_sandbox_hermes_compat_boundary")
 def test_interruption_uses_supplied_stop_request_path(tmp_path, monkeypatch, restore_process_globals, marker):
     from responses_api_agents.hermes_agent import sandbox_runner
 
@@ -619,6 +636,7 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
 @pytest.mark.parametrize("cooperative", [True, False])
 @pytest.mark.parametrize("ending", ["deadline", "close"])
+@pytest.mark.usefixtures("mock_sandbox_hermes_compat_boundary")
 def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(
     tmp_path: Path, cooperative: bool, ending: str
 ) -> None:
@@ -645,7 +663,10 @@ class Agent:
     def run_conversation(self, *args, **kwargs):
         self._session_messages = [
             {'role': 'user', 'content': 'fix bug'},
-            {'role': 'assistant', 'content': 'Partial work', 'prompt_token_ids': [1], 'generation_token_ids': [2]},
+            {
+                'role': 'assistant', 'content': 'Partial work',
+                'prompt_token_ids': [1], 'generation_token_ids': [2], 'generation_log_probs': [-0.25],
+            },
         ]
         pathlib.Path('model.patch').write_bytes(b'partial patch\\n')
         while not self.stopping or sys.argv[4] == 'False':
@@ -655,6 +676,9 @@ module = types.ModuleType('run_agent')
 module.AIAgent = Agent
 sys.modules['run_agent'] = module
 import sandbox_runner
+# This pre-existing supervisor fixture injects a synthetic runner, not a Hermes compatibility proof.
+import length_transcript
+length_transcript.install_length_transcript_compat = lambda _synthetic_runner: None
 raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])))
 """
     process = subprocess.Popen(
@@ -725,6 +749,7 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
     assert response.metadata["stop_reason"] == reason
     assert response.output[0].content[0].text == "Partial work"
     assert response.output[0].generation_token_ids == [2]
+    assert response.output[0].generation_log_probs == [-0.25]
     assert output["observations"]["invocations"][0]["status"] == "incomplete"
     with pytest.raises(ProcessLookupError):
         os.kill(output["runtime"]["pid"], 0)

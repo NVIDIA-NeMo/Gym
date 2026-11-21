@@ -98,6 +98,12 @@ ray_version = _installed_version("ray")
 _GLOBAL_CONFIG_DICT = None
 _SCOPED_GLOBAL_CONFIG_LOCK = threading.RLock()
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
+# Names a file that holds the config, for a config too long for an environment variable.
+NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT_FILE"
+# Linux refuses to start a process ("Argument list too long") when one environment variable is longer than 32
+# memory pages, which is 128 KiB with 4 KiB pages, the smallest page size. A config near that length reaches a
+# server in a file.
+MAX_CONFIG_DICT_ENV_BYTES = 120 * 1024
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
 ENTRYPOINT_KEY_NAME = "entrypoint"
@@ -346,28 +352,37 @@ def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
     """Return the agent references in one environment server's config.
 
     An environment server can front several agents, such as a user and an assistant.
-    Any top-level field whose value has `type: responses_api_agents` references an agent.
-    So does `agent_server`, whose type may be left out.
+    A mapping with `type: responses_api_agents` references an agent, including
+    references grouped in a nested mapping. The top-level `agent_server` may omit its type.
     `scripts/add_legacy_agent_environment_servers.py` applies the same rule.
     """
-    return [
-        reference
-        for field, reference in server.items()
-        if isinstance(reference, DictConfig)
-        and (
-            reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
-            or (field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None)
-        )
-    ]
+    references: list[DictConfig] = []
+
+    def visit(config: DictConfig, *, top_level: bool) -> None:
+        items = config.items() if top_level else config.items_ex(resolve=False)
+        for field, reference in items:
+            if not isinstance(reference, DictConfig):
+                continue
+            if reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME or (
+                top_level and field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None
+            ):
+                references.append(reference)
+            else:
+                visit(reference, top_level=False)
+
+    visit(server, top_level=True)
+    return references
 
 
 def environment_server_agent_names(server: DictConfig) -> list[str]:
     """Return the names of the agents one environment server's config references."""
-    return [
-        str(reference["name"])
-        for reference in environment_server_agent_refs(server)
-        if reference.get("name") is not None
-    ]
+    return list(
+        dict.fromkeys(
+            str(reference["name"])
+            for reference in environment_server_agent_refs(server)
+            if reference.get("name") is not None
+        )
+    )
 
 
 def environment_server_attributed_agent(server: DictConfig) -> Optional[str]:
@@ -2170,7 +2185,8 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
     """The global config dict when this process already has one; never triggers a CLI parse.
 
     Returns the cached dict, or the one the parent injected via
-    NEMO_GYM_CONFIG_DICT (caching it), or None in a bare process. Library code
+    NEMO_GYM_CONFIG_DICT or the file NEMO_GYM_CONFIG_DICT_FILE names (caching it),
+    or None in a bare process. Library code
     that only wants to *consult* the config should use this instead of
     `get_global_config_dict`, which falls through to a full CLI/hydra parse.
     """
@@ -2179,6 +2195,9 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
         return _GLOBAL_CONFIG_DICT
 
     nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
+    config_dict_file = getenv(NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME)
+    if not nemo_gym_config_dict_str_from_env and config_dict_file:
+        nemo_gym_config_dict_str_from_env = Path(config_dict_file).read_text(encoding="utf-8")
     if nemo_gym_config_dict_str_from_env:
         global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
 
@@ -2237,7 +2256,7 @@ def get_global_config_dict(
 
     Then, the global config dict will be cached and reused.
 
-    If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME. The config dict will be read directly off this variable, cached, and returned with no additional validation.
+    If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, or with NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME naming a file for a config too long for a variable. The config dict will be read directly off this variable or file, cached, and returned with no additional validation.
     """
     existing_global_config_dict = maybe_get_global_config_dict()
     if existing_global_config_dict is not None:

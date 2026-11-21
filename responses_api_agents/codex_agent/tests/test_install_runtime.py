@@ -28,6 +28,8 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "getconf",
         "mkdir",
         "cp",
+        "mv",
+        "rm",
         "ln",
         "tar",
         "gzip",
@@ -161,6 +163,8 @@ def test_concurrent_installers_populate_runtime_once(sandbox):
     node.write_text("""#!/bin/bash
 if [[ "$1" == *npm-cli.js ]]; then
   echo install >> "$TEST_ROOT/npm.log"
+elif [[ "$1" == - ]]; then
+  : # The fixture models a release with bundled native binaries.
 else
   echo 'codex-cli 0.144.4'
 fi
@@ -168,10 +172,14 @@ fi
     node.chmod(0o755)
     for command, script in {
         "curl": """#!/bin/bash
+for ((i=1; i<=$#; i++)); do
+  if [[ "${!i}" == -o ]]; then ((i++)); output=${!i}; break; fi
+done
 if [[ "$*" == *SHASUMS256* ]]; then
-  echo 'stub node-v22.19.0-linux-x64.tar.gz' > SHASUMS256.txt
+  echo 'stub node-v22.19.0-linux-x64.tar.gz' > "$output"
 else
   echo download >> "$TEST_ROOT/downloads.log"
+  : > "$output"
 fi
 """,
         "tar": """#!/bin/bash
@@ -261,9 +269,13 @@ def test_musl_library_bootstrap_uses_node_probe(
     root, env = sandbox
     _use_musl_platform(root)
     for name, script in {
-        "curl": """for last; do :; done
+        "curl": """for ((i=1; i<=$#; i++)); do
+  if [[ "${!i}" == -o ]]; then ((i++)); output=${!i}; break; fi
+done
 if [[ "$*" == *SHASUMS256* ]]; then
-  echo 'stub  node-v22.19.0-linux-x64-musl.tar.gz' > "$last"
+  echo 'stub  node-v22.19.0-linux-x64-musl.tar.gz' > "$output"
+else
+  : > "$output"
 fi
 """,
         "sha256sum": "while IFS= read -r line; do :; done\n",
@@ -285,6 +297,7 @@ fi
 case "$1" in
   --version) echo v22.19.0;;
   */npm-cli.js) echo install >> "$TEST_ROOT/npm.log";;
+  -) :;; # Bundled native binaries need no optional package installation.
   *) echo 'codex-cli 0.144.4';;
 esac
 """)
@@ -345,6 +358,7 @@ done
 case "$1" in
   --version) [ -f "$TEST_ROOT/patched" ] || exit 1; echo v22.19.0;;
   */npm-cli.js) echo install >> "$TEST_ROOT/npm.log";;
+  -) :;; # Bundled native binaries need no optional package installation.
   *) echo 'codex-cli 0.144.4';;
 esac
 """)

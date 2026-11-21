@@ -67,6 +67,7 @@ from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware  # noqa: E402
 from nemo_gym.server_runtime.request_handling.exception_handling import ExceptionHandlingMiddleware  # noqa: E402
 from nemo_gym.server_runtime.request_handling.session_id import SessionIDMiddleware  # noqa: E402
+from nemo_gym.utils.mcp_tool_names import hermes_mcp_metadata  # noqa: E402
 
 
 RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -1100,6 +1101,49 @@ def test_verify_normalizes_mcp_namespaced_tool_names():
     # verify SAW: this server's prefix stripped, bare names untouched, other servers' prefixes left alone
     assert seen["names"] == ["append", "raw_step", "mcp__other__tool"]
     assert echoed == emitted
+
+
+@pytest.mark.parametrize("server_name", ["store", "store_b", "my-store.v1"])
+def test_verify_normalizes_hermes_names_only_on_scoring_copy(server_name):
+    seen = {}
+
+    class Recorder(Store):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            seen["names"] = [item.name for item in body.response.output if item.type == "function_call"]
+            return BaseVerifyResponse(**body.model_dump(), reward=float(seen["names"].count("append") == 1))
+
+    server = _server(Recorder, name=server_name)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    emitted = ["mcp_store_append", "mcp_store_b_append", "mcp_my_store_v1_append", "mcp_unknown_append"]
+    body = _verify_body(emitted)
+    body["response"]["metadata"] = hermes_mcp_metadata(["store", "store_b", "my-store.v1"])
+    with TestClient(app) as client:
+        response = client.post("/verify", json=body)
+    assert response.status_code == 200, response.text
+    expected = ["mcp__store__append", "mcp__store_b__append", "mcp__my-store.v1__append", "mcp_unknown_append"]
+    expected[["store", "store_b", "my-store.v1"].index(server_name)] = "append"
+    assert seen["names"] == expected
+    assert response.json()["reward"] == 1.0
+    assert [item["name"] for item in response.json()["response"]["output"]] == emitted
+    assert [item["name"] for item in body["response"]["output"]] == emitted
+
+
+def test_verify_without_hermes_provenance_keeps_hermes_looking_names():
+    seen = {}
+
+    class Recorder(Store):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            seen["name"] = body.response.output[0].name
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    server = _server(Recorder, name="store")
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        response = client.post("/verify", json=_verify_body(["mcp_store_append"]))
+    assert response.status_code == 200, response.text
+    assert seen["name"] == "mcp_store_append"
 
 
 def test_litmus_pattern_reregistered_verify_is_still_normalized():

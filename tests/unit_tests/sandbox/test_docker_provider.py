@@ -13,7 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import contextlib
+import os
 import shutil
+import signal
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1048,6 +1053,146 @@ async def test_run_real_timeout(fake_binary: str) -> None:
     provider = docker_provider.DockerProvider()
     with pytest.raises(TimeoutError):
         await provider._run([shutil.which("sleep"), "5"], timeout_s=0.1)
+
+
+@pytest.mark.parametrize("abort", ["timeout", "cancel"])
+async def test_run_reaps_client_after_timeout_or_outer_cancellation(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, abort: str
+) -> None:
+    started = tmp_path / "started"
+    processes = []
+    create = asyncio.create_subprocess_exec
+
+    async def observed_create(*args, **kwargs):
+        process = await create(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observed_create)
+    provider = docker_provider.DockerProvider()
+    task = asyncio.create_task(
+        provider._run(
+            [
+                sys.executable,
+                "-c",
+                "import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); time.sleep(300)",
+                str(started),
+            ],
+            timeout_s=1 if abort == "timeout" else None,
+        )
+    )
+    try:
+        async with asyncio.timeout(5):
+            while not started.exists():
+                await asyncio.sleep(0.01)
+        if abort == "cancel":
+            task.cancel()
+        with pytest.raises(TimeoutError if abort == "timeout" else asyncio.CancelledError):
+            await task
+        assert len(processes) == 1
+        assert processes[0].returncode == -signal.SIGKILL
+    finally:
+        if not task.done():
+            task.cancel()
+        for process in processes:
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(process.communicate(), timeout=2)
+        with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+            await task
+
+
+@pytest.mark.parametrize("output_fd", [1, 2], ids=["stdout", "stderr"])
+async def test_run_outer_cancellation_drains_paused_output(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, output_fd: int
+) -> None:
+    created = asyncio.Event()
+    processes = []
+    create = asyncio.create_subprocess_exec
+
+    async def observed_create(*args, **kwargs):
+        process = await create(*args, **kwargs)
+        processes.append(process)
+        reader = process.stdout if output_fd == 1 else process.stderr
+        # Force real output backpressure before communicate() starts draining.
+        async with asyncio.timeout(5):
+            while not reader._paused:
+                await asyncio.sleep(0.001)
+        created.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observed_create)
+    provider = docker_provider.DockerProvider()
+    task = asyncio.create_task(
+        provider._run(
+            [sys.executable, "-c", f"import os,time;os.write({output_fd},b'x'*(4*1024*1024));time.sleep(300)"],
+            timeout_s=None,
+        )
+    )
+    try:
+        async with asyncio.timeout(5):
+            await created.wait()
+        task.cancel()
+        done, _ = await asyncio.wait([task], timeout=1)
+        assert done, "The killed client's paused pipe must not block cancellation"
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert processes[0].returncode == -signal.SIGKILL
+    finally:
+        for process in processes:
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(process.communicate(), timeout=2)
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_run_cancellation_reaps_group_after_client_exits(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    started = tmp_path / "child-started"
+    processes = []
+    create = asyncio.create_subprocess_exec
+
+    async def observed_create(*args, **kwargs):
+        process = await create(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observed_create)
+    child = "import pathlib,sys,time;pathlib.Path(sys.argv[1]).touch();time.sleep(300)"
+    parent = "import subprocess,sys;subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]])"
+    task = asyncio.create_task(
+        docker_provider.DockerProvider()._run([sys.executable, "-c", parent, child, str(started)], timeout_s=None)
+    )
+    try:
+        async with asyncio.timeout(5):
+            while not started.exists() or not processes or processes[0].returncode is None:
+                await asyncio.sleep(0.01)
+        assert processes[0].returncode == 0
+        task.cancel()
+        done, _ = await asyncio.wait([task], timeout=1)
+        assert done, "A surviving process group must be killed after its client exits"
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert processes[0].stdout.at_eof()
+        assert processes[0].stderr.at_eof()
+    finally:
+        for process in processes:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(process.communicate(), timeout=2)
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 # --------------------------------------------------------------------------- #

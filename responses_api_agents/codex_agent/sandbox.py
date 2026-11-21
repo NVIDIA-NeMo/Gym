@@ -3,8 +3,11 @@
 """Codex artifacts and request state over the shared sandbox lifecycle."""
 
 import asyncio
+import errno
+import hashlib
 import json
 import logging
+import re
 import shlex
 import time
 from collections.abc import Sequence
@@ -23,7 +26,7 @@ from nemo_gym.agents import (
     shell_assignments,
 )
 from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import read_text, stage_media, upload_text
+from nemo_gym.sandbox import SandboxExecResult, read_text, stage_media, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 
 
@@ -62,6 +65,76 @@ else
     echo "oom_score_adj: unchanged" >&2
 fi
 """
+
+
+def _snapshot_failure_details(
+    snapshot: SandboxExecResult | None, error: Exception, *, phase: str
+) -> dict[str, JsonValue]:
+    """Keep provider evidence without logging artifact contents or exception messages.
+
+    A provider return code may be a runtime sentinel. Timeout evidence does not
+    establish that the in-sandbox Node process was killed. Byte counts/hashes
+    describe the available stderr string encoded as UTF-8 with replacement.
+    """
+    return_code = getattr(snapshot, "return_code", None)
+    provider_error = getattr(snapshot, "error_type", None)
+    stderr = getattr(snapshot, "stderr", None)
+    encoded = str.encode(stderr, "utf-8", "replace") if isinstance(stderr, str) else None
+    safe_provider_error = (
+        provider_error
+        if isinstance(provider_error, str) and provider_error in {"timeout", "sandbox", "user_switch_unavailable"}
+        else None
+    )
+    known_codes = {
+        "EACCES",
+        "EIO",
+        "EISDIR",
+        "ELOOP",
+        "EMFILE",
+        "ENAMETOOLONG",
+        "ENFILE",
+        "ENOENT",
+        "ENOMEM",
+        "ENOSPC",
+        "ENOTDIR",
+        "ENOTSUP",
+        "EPERM",
+        "EROFS",
+        "ETIMEDOUT",
+        "EINVAL",
+    }
+    # Only recognized public Node/OS codes leave stderr; never paths or arbitrary text.
+    scan = stderr[:65536] if isinstance(stderr, str) else ""
+    codes = sorted(set(re.findall(r"(?m)^[ \t]+code:[ \t]*['\"]([A-Z0-9_]+)['\"]", scan)) & known_codes)
+    known_numbers = {getattr(errno, code) for code in known_codes if hasattr(errno, code)}
+    errnos = sorted(
+        {
+            int(value)
+            for value in re.findall(r"(?m)^[ \t]+errno:[ \t]*(-?[0-9]{1,4})[ \t]*,?$", scan)
+            if abs(int(value)) in known_numbers
+        }
+    )
+    exception_errno = error.errno if isinstance(error, OSError) else None
+    error_class = type(error).__name__
+    return {
+        "phase": phase if phase in {"exec", "read"} else "unknown",
+        "provider_return_code": return_code if type(return_code) is int else None,
+        "provider_error_type": safe_provider_error,
+        "provider_error_type_sha256": (
+            hashlib.sha256(str.encode(provider_error, "utf-8", "replace")).hexdigest()
+            if isinstance(provider_error, str) and safe_provider_error is None
+            else None
+        ),
+        "timeout_observed": isinstance(error, TimeoutError)
+        or (isinstance(provider_error, str) and provider_error == "timeout"),
+        "exception_class": error_class if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", error_class) else "Exception",
+        "exception_errno": exception_errno if type(exception_errno) is int else None,
+        "stderr_sha256": hashlib.sha256(encoded).hexdigest() if encoded is not None else None,
+        "stderr_utf8_bytes": len(encoded) if encoded is not None else None,
+        "stderr_errno_codes": codes,
+        "stderr_errnos": errnos,
+        "stderr_errno_scan_truncated": isinstance(stderr, str) and len(stderr) > 65536,
+    }
 
 
 class HarnessProcessInfo(BaseModel):
@@ -314,6 +387,8 @@ class CodexSandboxSession(AgentSessionState):
         except ValueError:
             runtime_payload = None
         self.runtime_info = parse_runtime_info(runtime_payload)
+        snapshot = None
+        phase = "exec"
         try:
             snapshot = await self.session.sandbox.exec(
                 "NODE_OPTIONS= "
@@ -329,9 +404,13 @@ class CodexSandboxSession(AgentSessionState):
             )
             if snapshot.return_code != 0 or snapshot.error_type:
                 raise RuntimeError("Codex native session snapshot failed")
+            phase = "read"
             self.native_transcript = await self.read_text("native_session.jsonl")
-        except Exception:
-            LOG.warning("Codex native session transcript unavailable", exc_info=True)
+        except Exception as error:
+            LOG.warning(
+                "Codex native session transcript unavailable: %s",
+                json.dumps(_snapshot_failure_details(snapshot, error, phase=phase), sort_keys=True),
+            )
         try:
             attempts = await self.read_text("model_attempts.jsonl")
             self.model_attempts = [json.loads(line) for line in attempts.splitlines()]

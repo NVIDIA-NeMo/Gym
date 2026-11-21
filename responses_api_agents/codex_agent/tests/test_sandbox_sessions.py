@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -39,16 +40,30 @@ from nemo_gym.agents import (
     raises_agent_failure,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
+from nemo_gym.core import (
+    EpisodeId,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    TaskId,
+    skip_token_capture_context,
+)
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
-from nemo_gym.sandbox import MEDIA_DIRECTORY, SandboxStatus, SandboxTransferError, SandboxUnavailableError
+from nemo_gym.sandbox import (
+    MEDIA_DIRECTORY,
+    SandboxExecResult,
+    SandboxStatus,
+    SandboxTransferError,
+    SandboxUnavailableError,
+)
 from responses_api_agents.codex_agent.app import (
     _SANDBOX_SESSION_KEY,
     CodexAgent,
     CodexAgentConfig,
     _model_endpoint_error,
+    parse_exec_jsonl,
 )
-from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
+from responses_api_agents.codex_agent.observability import parse_codex_observations
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession, _snapshot_failure_details
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -3536,9 +3551,42 @@ def native_transcript(items):
     )
 
 
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("transcript", [None, "not json", '{"type":"session_meta"}'])
+def test_training_response_refuses_execution_items_without_authored_session_output(setup, capture, transcript):
+    agent, sandbox = setup
+    agent.server_client.global_config_dict["token_id_capture"] = {"enabled": True, "all_agents": True}
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        if transcript is not None:
+            sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = transcript
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = '{"status":200}\n'
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        path = "/ng-rollout/codex-smoke-a2/" + ("training-token-capture/" if capture else "") + "v1/responses"
+        response = client.post(path, json={"input": "task"})
+        if capture:
+            assert response.status_code == 502
+            assert "complete session transcript" in response.text
+        else:
+            response.raise_for_status()
+            assert (
+                next(item for item in response.json()["output"] if item["type"] == "function_call")["call_id"]
+                == "tool-1"
+            )
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        closed.raise_for_status()
+        assert closed.json()["agent_observations"] is not None
+
+
 @pytest.mark.parametrize("custom", [False, True])
 def test_session_uses_native_call_identity_arguments_and_results(setup, custom):
     agent, sandbox = setup
+    agent.server_client.global_config_dict["token_id_capture"] = {"enabled": True, "all_agents": True}
     native_output = "Process exited with code 7\nOutput:\noriginal result"
     transcript = native_transcript(
         [
@@ -3562,6 +3610,15 @@ def test_session_uses_native_call_identity_arguments_and_results(setup, custom):
         transcript += "\n" + json.dumps(
             {"type": "event_msg", "payload": {"type": "patch_apply_end", "call_id": "provider-call", "success": False}}
         )
+    cli_output, _ = parse_exec_jsonl(
+        "\n".join(json.dumps(json.loads(line)[1]) for line in sandbox.events.splitlines()),
+        structured_reasoning=True,
+    )
+    parsed = parse_codex_observations(transcript, "test", returncode=0, timed_out=False)
+    with skip_token_capture_context(True):
+        legacy = agent._response_output(cli_output, parsed)
+    assert legacy is cli_output
+    assert next(item.call_id for item in legacy if item.type == "function_call") == "tool-1"
     original_publish = sandbox.publish
 
     def publish():
@@ -3572,12 +3629,27 @@ def test_session_uses_native_call_identity_arguments_and_results(setup, custom):
     sandbox.publish = publish
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
-        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        response = client.post(
+            "/ng-rollout/codex-smoke-a2/training-token-capture/v1/responses", json={"input": "task"}
+        )
         assert response.status_code == 200, response.text
+        ordinary = response.json()["output"]
+        assert [item["type"] for item in ordinary] == [
+            "custom_tool_call" if custom else "function_call",
+            "custom_tool_call_output" if custom else "function_call_output",
+        ]
+        assert ordinary[0]["call_id"] == ordinary[1]["call_id"] == "provider-call"
+        assert ordinary[0]["name"] == ("apply_patch" if custom else "exec_command")
+        assert ordinary[0]["input" if custom else "arguments"] == (
+            "*** Begin Patch\n*** End Patch" if custom else '{"cmd":"exit 7"}'
+        )
+        assert ordinary[1]["output"] == native_output
         payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
         assert "--ephemeral" not in payload["command"]
         assert payload["invocation_id"] == "codex-smoke-a2"
-        assert payload["model_base_url"] == "http://model.example:9000/ng-rollout/codex-smoke-a2/v1"
+        assert payload["model_base_url"] == (
+            "http://model.example:9000/ng-rollout/codex-smoke-a2/training-token-capture/v1"
+        )
         config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
         assert config["model_providers"]["gym"]["http_headers"] == {"x-session-id": "codex-smoke-a2"}
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
@@ -3590,6 +3662,45 @@ def test_session_uses_native_call_identity_arguments_and_results(setup, custom):
     assert invocation["conversation"][2]["output"] == native_output
     assert tool["status"] == "failed" and tool["error_type"] == ("tool_error" if custom else "nonzero_exit")
     assert not any(gap["code"] == "model_call_join_key_unavailable" for gap in bundle["gaps"])
+
+
+def test_session_exports_both_model_turns_once_and_does_not_support_a_second_activation(setup):
+    agent, sandbox = setup
+    agent.server_client.global_config_dict["token_id_capture"] = {"enabled": True, "all_agents": True}
+    original_publish = sandbox.publish
+    transcript = native_transcript(
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]},
+            {"type": "function_call", "call_id": "original-one", "name": "exec_command", "arguments": '{"cmd":"pwd"}'},
+            {"type": "function_call_output", "call_id": "original-one", "output": "/app"},
+            {"type": "function_call", "call_id": "original-two", "name": "exec_command", "arguments": '{"cmd":"ls"}'},
+            {"type": "function_call_output", "call_id": "original-two", "output": "file"},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+        ]
+    )
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = transcript
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = '{"status":200}\n{"status":200}\n'
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        path = "/ng-rollout/codex-smoke-a2/training-token-capture/v1/responses"
+        first = client.post(path, json={"input": "task"})
+        first.raise_for_status()
+        repeated = client.post(path, json={"input": "task"})
+        repeated.raise_for_status()
+        assert repeated.json() == first.json()
+        assert [item["call_id"] for item in first.json()["output"] if item["type"] == "function_call"] == [
+            "original-one",
+            "original-two",
+        ]
+        assert sandbox.launch.call_count == 1
+        assert client.post(path, json={"input": "second user activation"}).status_code == 409
+        assert sandbox.launch.call_count == 1
+        client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
 
 
 @pytest.mark.parametrize(
@@ -3925,14 +4036,22 @@ async def test_activation_failure_takes_precedence_over_recorded_rejection(setup
 
 
 @pytest.mark.asyncio
-async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
+@pytest.mark.parametrize("failure", ["transport", "nonzero", "provider-timeout"])
+async def test_failed_native_snapshot_preserves_collected_cli_events(setup, caplog, failure):
     agent, sandbox = setup
     state = await agent._seed_agent_session_state(seed())
     original_execute = sandbox.execute
 
     async def execute(command, **kwargs):
         if "--snapshot" in command:
-            raise OSError("snapshot transport failed")
+            if failure == "transport":
+                raise OSError(errno.EIO, "DO_NOT_LOG_SNAPSHOT_EXCEPTION")
+            return SandboxExecResult(
+                stdout="DO_NOT_LOG_SNAPSHOT_STDOUT",
+                stderr="DO_NOT_LOG_SNAPSHOT_STDERR\n  errno: -2,\n  code: 'ENOENT',\n",
+                return_code=1 if failure == "nonzero" else -1,
+                error_type="timeout" if failure == "provider-timeout" else None,
+            )
         return await original_execute(command, **kwargs)
 
     sandbox.exec.side_effect = execute
@@ -3943,6 +4062,26 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
         assert response.output[-1].content[0].text == "Fixed"
         assert state.observations.records[0].conversation[-1].content[0].text == "Fixed"
         assert any(gap.code == "model_call_join_key_unavailable" for gap in state.observations.gaps)
+        warnings = [
+            record
+            for record in caplog.records
+            if record.getMessage().startswith("Codex native session transcript unavailable:")
+        ]
+        assert warnings and all(record.exc_info is None for record in warnings)
+        details = json.loads(warnings[-1].getMessage().split(": ", 1)[1])
+        assert details["phase"] == "exec"
+        assert details["timeout_observed"] is (failure == "provider-timeout")
+        if failure == "transport":
+            assert details["provider_return_code"] is None
+            assert (details["exception_class"], details["exception_errno"]) == ("OSError", errno.EIO)
+            assert details["stderr_sha256"] is None
+        else:
+            assert details["provider_return_code"] == (1 if failure == "nonzero" else -1)
+            assert details["provider_error_type"] == ("timeout" if failure == "provider-timeout" else None)
+            assert details["stderr_errno_codes"] == ["ENOENT"]
+            assert details["stderr_errnos"] == [-2]
+            assert details["stderr_sha256"] and details["stderr_utf8_bytes"] > 0
+        assert "DO_NOT_LOG_SNAPSHOT" not in caplog.text
     finally:
         await state.close(1)
 
@@ -4379,3 +4518,36 @@ async def test_image_staging_failure_keeps_sandbox_error(setup, return_code, err
     sandbox.launch.assert_not_awaited()
     assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+@pytest.mark.parametrize("stderr", [None, "", "private-artifact-\ud800"])
+def test_snapshot_failure_details_hash_available_stderr_without_exposing_it(stderr):
+    result = SandboxExecResult(stdout="private-output", stderr=stderr, return_code=0)
+    details = _snapshot_failure_details(result, FileNotFoundError(errno.ENOENT, "private-path"), phase="read")
+    assert (details["phase"], details["provider_return_code"], details["exception_errno"]) == ("read", 0, errno.ENOENT)
+    expected = stderr.encode("utf-8", "replace") if stderr is not None else None
+    assert details["stderr_utf8_bytes"] == (len(expected) if expected is not None else None)
+    assert details["stderr_sha256"] == (hashlib.sha256(expected).hexdigest() if expected is not None else None)
+    assert "private-" not in json.dumps(details)
+    assert details["timeout_observed"] is False
+
+
+def test_snapshot_failure_details_do_not_echo_unknown_provider_values():
+    provider_error = "private_token_never_log_this"
+    result = SandboxExecResult(
+        stdout=None, stderr="  code: 'PRIVATE_SECRET',\n  errno: 9999,\n", return_code=-1, error_type=provider_error
+    )
+    details = _snapshot_failure_details(result, RuntimeError("private-exception"), phase="exec")
+    assert details["provider_error_type"] is None
+    assert details["provider_error_type_sha256"] == hashlib.sha256(provider_error.encode()).hexdigest()
+    assert details["stderr_errno_codes"] == [] and details["stderr_errnos"] == []
+    assert "private" not in json.dumps(details) and "PRIVATE_SECRET" not in json.dumps(details)
+
+
+def test_snapshot_failure_details_record_raised_timeout_without_inventing_process_status():
+    details = _snapshot_failure_details(None, TimeoutError("private-timeout-details"), phase="exec")
+    assert details["timeout_observed"] is True
+    assert details["exception_class"] == "TimeoutError"
+    assert details["provider_return_code"] is None and details["provider_error_type"] is None
+    assert details["stderr_sha256"] is None and details["stderr_utf8_bytes"] is None
+    assert "private" not in json.dumps(details)
