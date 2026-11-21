@@ -377,7 +377,7 @@ benchmark whose Resources server serves its tools over direct HTTP does not pair
 These settings are off by default. They run Claude Code the way a harness started in the task
 container runs it, for benchmarks that grade such a harness.
 
-- `instruction_on_stdin` (sandbox sessions): pass the instruction on the CLI's stdin, as Harbor 0.24's
+- `instruction_on_stdin` (host and sandbox sessions): pass the instruction on the CLI's stdin, as Harbor 0.24's
   claude-code agent pipes it, instead of as an argument. It then never appears on a command line that an
   agent's `pkill -f <word from its task>` could match.
 - `reasoning_effort`: passed to `--effort` (`low`, `medium`, `high`, `xhigh` or `max`), as Harbor passes

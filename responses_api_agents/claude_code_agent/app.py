@@ -182,9 +182,8 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
-    # Sandbox sessions: pass the instruction on the CLI's stdin, as Harbor 0.24's claude-code agent pipes
-    # it, instead of as an argument. It then never appears on a command line that an agent's
-    # `pkill -f <word from its task>` could match.
+    # Host and sandbox sessions: pass the instruction on the CLI's stdin rather than as an argument,
+    # so an agent's `pkill -f <word from its task>` cannot match Claude Code's own command line.
     instruction_on_stdin: bool = False
     # Sandbox sessions: accept a task workdir of "/" (images without a WORKDIR). The runtime and session
     # files then sit under /tmp inside it, as a harness's own files do there.
@@ -459,20 +458,24 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             cmd = self._build_command(
                 model,
-                instruction,
+                None if self.config.instruction_on_stdin else instruction,
                 system_prompt=system_prompt,
                 mcp_config=mcp_config,
                 skills_active=bool(skills_path),
             )
 
             process_started_at = monotonic()
+            prompt_input = instruction.encode() if self.config.instruction_on_stdin else None
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE if prompt_input is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            communication = asyncio.create_task(proc.communicate())
+            communication = asyncio.create_task(
+                proc.communicate() if prompt_input is None else proc.communicate(prompt_input)
+            )
             try:
                 stdout, stderr = await asyncio.wait_for(
                     asyncio.shield(communication),
