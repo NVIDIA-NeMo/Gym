@@ -1,0 +1,109 @@
+# EQ-Bench 4: multi-turn roleplay with a simulated persona, judged pairwise against published transcripts.
+# The eqbench4 environment server runs each conversation: the policy and the persona simulator each answer through an
+# agent session, and this resources server grades the conversation. Model servers for the persona simulator and the
+# judges are in eqbench4_models.yaml.
+environment_server_routes:
+  eqbench4:example: eqbench4_environment_server
+
+eqbench4_resources_server:
+  resources_servers:
+    eqbench4:
+      entrypoint: app.py
+      domain: rlhf
+      verified: true
+      # Harnesses that answer each policy turn of the eqbench4 environment server's conversation and passed a smoke run.
+      allowed_agents: [simple_agent]
+      description: EQ-Bench 4 applied emotional-intelligence roleplay benchmark with a simulated persona
+      value: Measure perception, adaptability and repair in multi-turn conversations with simulated users
+      # The pairwise judge panel; comparison n goes to judge n modulo the panel size, as in EQ-Bench 4.
+      judge_model_servers:
+      - type: responses_api_models
+        name: eqbench4_gemini_judge_model
+      - type: responses_api_models
+        name: eqbench4_gpt_judge_model
+      - type: responses_api_models
+        name: eqbench4_claude_judge_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.3
+        max_output_tokens: 4096
+      judge_max_attempts: 3
+      # Informational behavioural-trait scores; null skips the trait judge.
+      trait_judge_model_server:
+        type: responses_api_models
+        name: eqbench4_trait_judge_model
+      trait_judge_responses_create_params:
+        input: []
+        temperature: 0.7
+        max_output_tokens: 16000
+      trait_judge_system_message: You are an expert evaluator. Follow the instructions precisely.
+      judge_concurrency: 16
+      judge_timeout_secs: 1800
+      reference_comparisons_path: benchmarks/eqbench4/data/reference_comparisons.jsonl
+      # EQ-Bench 4's own rating solver, downloaded by the same prepare (no rating code is stored in Gym).
+      rating_solver_dir: benchmarks/eqbench4/data/rating_solver
+      rating_bootstrap_resamples: 200
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/eqbench4/data/example.jsonl
+        taskset: eqbench4:example
+
+# The policy: each activation answers one turn from the full input the environment server sends, without tools.
+eqbench4_policy_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 1
+      execute_tools: false
+
+# The persona simulator, part of the environment: an agent of the same kind on its own model server, never trained.
+eqbench4_persona_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: eqbench4_persona_model
+      max_steps: 1
+      execute_tools: false
+
+eqbench4_environment_server:
+  environment_servers:
+    eqbench4:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: eqbench4_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: eqbench4_policy_agent
+      persona_agent:
+        type: responses_api_agents
+        name: eqbench4_persona_agent
+      persona_responses_create_params:
+        input: []
+        temperature: 0.7
+        max_output_tokens: 10000
+      persona_max_attempts: 3
+      persona_correction_message: |-
+        Your reply could not be used ({problems}). Reply again as your character, in exactly this format:
+
+        <internal>
+        Your private thoughts and feelings, complete and closed.
+        </internal>
+
+        <dialogue>
+        Only the words you say out loud, with no tags inside.
+        </dialogue>
+
+        <status>
+        active
+        </status>
+      policy_max_attempts: 7
+      # A conversation is bounded by its turns, its attempts and each call's timeout; this bounds one that stalls.
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180
