@@ -57,6 +57,8 @@ from resources_servers.gdp_pdf.app import (
     _criterion_passes,
     _extract_generated_answer,
     _parse_criterion_result,
+    _reasoning_penalty,
+    _reasoning_tokens,
 )
 
 
@@ -1073,3 +1075,92 @@ class TestExampleData:
     def test_referenced_manifests_resolve_once_fetched(self) -> None:
         for row in self._rows():
             assert (DATA_DIR / row["verifier_metadata"]["document_manifest"]).is_file()
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-length penalty (training-only reward shaping)
+# ---------------------------------------------------------------------------
+
+
+def _with_reasoning(answer: str, reasoning_text: str, usage_tokens: Optional[int] = None) -> NeMoGymResponse:
+    reasoning = NeMoGymResponseReasoningItem(
+        id="r", summary=[{"type": "summary_text", "text": reasoning_text}], type="reasoning"
+    )
+    resp = _response([reasoning, _assistant_msg(answer)], response_id="model_resp")
+    if usage_tokens is not None:
+        resp = resp.model_copy(
+            update={
+                "usage": {
+                    "input_tokens": 10,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens": usage_tokens + 5,
+                    "output_tokens_details": {"reasoning_tokens": usage_tokens},
+                    "total_tokens": usage_tokens + 15,
+                }
+            }
+        )
+    return resp
+
+
+def _penalised_server(config: GdpPdfConfig, **kw: Any) -> GdpPdfResourcesServer:
+    cfg = config.model_copy(update=kw)
+    return GdpPdfResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
+
+
+class TestReasoningPenalty:
+    def test_shape(self) -> None:
+        assert _reasoning_penalty(100, 200, 400, 0.1) == 0.0
+        assert _reasoning_penalty(200, 200, 400, 0.1) == 0.0
+        assert _reasoning_penalty(300, 200, 400, 0.1) == approx(0.05)
+        assert _reasoning_penalty(400, 200, 400, 0.1) == approx(0.1)
+        assert _reasoning_penalty(10_000, 200, 400, 0.1) == approx(0.1)
+
+    def test_end_must_exceed_start(self, config: GdpPdfConfig) -> None:
+        with raises(ValueError):
+            GdpPdfConfig(
+                **{**config.model_dump(), "reasoning_penalty_start_tokens": 400, "reasoning_penalty_end_tokens": 400}
+            )
+        with raises(ValueError):
+            GdpPdfConfig(**{**config.model_dump(), "reasoning_penalty_start_tokens": 400})
+
+    def test_counts_from_usage_first_then_text(self) -> None:
+        assert _reasoning_tokens(_with_reasoning("a", "x" * 400, usage_tokens=1234), 4.0) == (1234, "usage")
+        assert _reasoning_tokens(_with_reasoning("a", "x" * 400), 4.0) == (100, "text_estimate")
+
+    @pytest.mark.asyncio
+    async def test_off_by_default(self, server: GdpPdfResourcesServer) -> None:
+        _mock_judge(server, _scored_content("1"))
+        body = _verify_request("The cap is $5M.")
+        body = body.model_copy(update={"response": _with_reasoning("The cap is $5M.", "x", usage_tokens=10**6)})
+        result = await server.verify(body)
+        assert result.reward == 1.0
+        assert result.reasoning_penalty == 0.0
+        assert result.reasoning_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_penalises_long_reasoning_not_the_answer(self, config: GdpPdfConfig) -> None:
+        srv = _penalised_server(
+            config, reasoning_penalty_start_tokens=200, reasoning_penalty_end_tokens=400, reasoning_penalty_max=0.1
+        )
+        _mock_judge(srv, _scored_content("1"))
+        long_answer = "The cap is $5M. " * 500
+        body = _verify_request(long_answer)
+        body = body.model_copy(update={"response": _with_reasoning(long_answer, "x", usage_tokens=300)})
+        result = await srv.verify(body)
+        assert result.reward_before_reasoning_penalty == 1.0
+        assert result.reasoning_tokens == 300
+        assert result.reasoning_tokens_source == "usage"
+        assert result.reasoning_penalty == approx(0.05)
+        assert result.reward == approx(0.95)
+        assert result.all_pass == 1.0
+
+    @pytest.mark.asyncio
+    async def test_failed_attempt_is_penalised_too(self, config: GdpPdfConfig) -> None:
+        srv = _penalised_server(
+            config, reasoning_penalty_start_tokens=200, reasoning_penalty_end_tokens=400, reasoning_penalty_max=0.1
+        )
+        _mock_judge(srv, _scored_content("0"))
+        body = _verify_request("wrong")
+        body = body.model_copy(update={"response": _with_reasoning("wrong", "x", usage_tokens=1000)})
+        result = await srv.verify(body)
+        assert result.reward == approx(-0.1)
