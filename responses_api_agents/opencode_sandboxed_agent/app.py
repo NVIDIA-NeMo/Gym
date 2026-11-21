@@ -602,6 +602,11 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
     artifacts_dir: Optional[str] = None
     opencode_model_call_timeout: Optional[int] = None
+    # Send one random id per rollout in this header on every OpenCode model call (main agent and its subagents share
+    # it), e.g. "X-Session-ID". The model server forwards it to a session-affine gateway (vllm_model.session_id_header).
+    # OpenCode's calls carry no Gym session, and the model server only learns the rollout id when model-call capture
+    # is on, so the agent names the rollout itself. Off by default.
+    opencode_session_header: Optional[str] = None
     # Keep OpenCode's data dir (XDG_DATA_HOME) under /tmp even when observations are off. For task images that run as a
     # user without a writable home (NL2RepoBench more-itertools runs as `appuser`), where the default $HOME/.local/share
     # fails with EACCES before the agent's first turn. Off by default: unchanged command line for everyone else.
@@ -1221,6 +1226,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         "timeout": self.config.opencode_model_call_timeout
                         if self.config.opencode_model_call_timeout is not None
                         else False,  # milliseconds
+                        **(
+                            {"headers": {self.config.opencode_session_header: uuid4().hex}}
+                            if self.config.opencode_session_header
+                            else {}
+                        ),
                     },
                     "models": {
                         self.config.opencode_model_id: {
