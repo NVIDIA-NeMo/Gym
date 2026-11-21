@@ -1,0 +1,5 @@
+-e nemo-gym[dev,sandbox] @ ../../
+numpy
+scipy
+networkx
+pillow

@@ -1,0 +1,35 @@
+# ARC-AGI-2 public evaluation set (120 tasks, 172 test inputs), no tools: the model reasons and writes the test output
+# grid in an <answer> block; the arc_code resources server grades it by exact match. The code-execution harness is
+# configs/arc_agi_2_tools.yaml. Scoring per task (ARC pass@2) is score.py.
+config_paths:
+  - resources_servers/arc_code/configs/arc_code.yaml
+
+# `_inherit_from` keeps this benchmark's servers isolated from the generic configs above.
+arc_agi_2_resources_server:
+  _inherit_from: arc_code_resources_server
+
+arc_agi_2_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: arc_agi_2_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: arc_agi_2
+        type: benchmark
+        jsonl_fpath: benchmarks/arc_agi_2/data/arc_agi_2_no_tools.jsonl
+        prompt_config: benchmarks/arc_agi_2/prompts/no_tools.yaml
+        prepare_script: benchmarks/arc_agi_2/prepare.py
+        num_repeats: 4
+
+arc_agi_2_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: arc_agi_2_simple_agent
