@@ -264,7 +264,7 @@ export async function rateLimitProxy(baseUrl, invocationId, attemptsPath, { time
 /** Start Codex with the adapter's environment and exit with its status, as a shell would. */
 async function run(inputPath) {
     const params = JSON.parse(readFileSync(inputPath, "utf8"));
-    const command = [...params.command];
+    let command = [...params.command];
     if (params.model_base_url) {
         const server = await rateLimitProxy(
             params.model_base_url,
@@ -274,6 +274,12 @@ async function run(inputPath) {
         );
         const baseUrl = `http://127.0.0.1:${server.address().port}`;
         command.splice(2, 0, "-c", `model_providers.gym.base_url=${JSON.stringify(baseUrl)}`);
+        if (params.relay_executable) {
+            command = [
+                params.relay_executable, "--config", join(params.directory, "relay", "config.toml"),
+                "--openai-base-url", baseUrl, "run", "--agent", "codex", "--", ...command.slice(2),
+            ];
+        }
     }
     // By default Codex gets the sandbox's PATH, locale, HOME and XDG directories; inherit_env passes the task's
     // whole environment, as a harness started in the container sees it.

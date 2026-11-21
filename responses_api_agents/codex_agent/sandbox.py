@@ -118,6 +118,7 @@ class CodexSandboxSession(AgentSessionState):
 
     session: SandboxSession[str]
     runtime: str
+    relay_executable: str | None = None
     logs_dir: str | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None

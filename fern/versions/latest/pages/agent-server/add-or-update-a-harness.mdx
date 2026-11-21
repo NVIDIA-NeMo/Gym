@@ -736,6 +736,51 @@ Send back the cookies that the Model Server returns on later calls of the same r
 
 For training, enable `token_id_capture` on an adapter whose responses carry no token IDs, together with the run-level `token_id_capture.enabled` setting. See [Training on External Agent Harnesses](/main/tutorials/training-tutorials/external-agent-harnesses) for the model server configuration and the capture metrics. If the harness cannot route all of its policy-generating calls through the Model Server, mark the adapter as evaluation-only in its README and leave `token_id_capture` disabled.
 
+### Record sandboxed Codex sessions with Relay
+
+The Codex adapter can optionally record its harness and model traffic with
+[NeMo Relay](https://github.com/NVIDIA/NeMo-Relay). Enable recording in the
+Codex Agent Server configuration:
+
+```yaml
+codex_agent:
+  responses_api_agents:
+    codex_agent:
+      relay:
+        enabled: true
+        version: 0.11.0
+        executable: null
+        output_dir: /logs/artifacts/relay
+```
+
+Recording is disabled by default and requires the agent-session sandbox path.
+Enabling it for sessionless host execution returns HTTP 422 before installing
+or launching a harness.
+
+During session setup, Gym installs the pinned standalone Relay CLI outside the
+task repository. It verifies the wheel's SHA-256 checksum before extraction and
+checks the executable's version. Installation supports Linux x86-64 and aarch64,
+with glibc or musl, and requires sandbox access to `files.pythonhosted.org`.
+It uses the Codex installer's `curl` and `sha256sum`, and installs `unzip` with
+`apt-get` or `apk` when necessary and permitted. To avoid downloads or package
+installation, set `executable` to a preinstalled Relay CLI path in the sandbox.
+Gym verifies that this override reports the pinned version as well.
+
+Relay starts beneath Gym's existing process supervisor and forwards model
+requests through Gym's retry and rollout-attribution proxy. Gym still owns
+session close and the sandbox owner still owns sandbox destruction. Relay does
+not replace Gym model-call capture, the native Codex transcript, observations,
+or verification.
+
+Gym writes each agent session to its own subdirectory beneath `output_dir`,
+containing ATOF events with full payloads and Relay's ATIF trajectory. Collect
+this directory recursively through the sandbox owner's artifact collection
+before destroying the sandbox. Per-session directories also keep recordings
+separate when sessions use a shared filesystem.
+These recordings are separate from Gym's strict ATIF exporter and do not change
+its supported fields or the adapter's reported observation gaps. Recording adds
+storage and runtime overhead; model requests can include sensitive task content.
+
 ### Map configuration and request fields explicitly
 
 Handle each configuration and request field in one of three ways: apply it, reject it with a clear error, or document that the adapter ignores it by design. Never drop a field silently. For example, Pi rejects request fields that it does not support with HTTP 422, except `metadata.agent_timeout_sec`, which it applies with `resolve_agent_timeout()`. Codex rejects `max_output_tokens`, `temperature`, `top_p`, and reasoning controls, because it cannot enforce them for a custom Gym provider.
