@@ -1,0 +1,5 @@
+-e nemo-gym[dev] @ ../../
+verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.3.1
+--extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
+# 0.1.4 ships no tasks/, and 0.1.5 needs verifiers v1, which drops the legacy API verifiers_agent uses.
+general-agent==0.1.3
