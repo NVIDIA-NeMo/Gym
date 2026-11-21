@@ -974,11 +974,11 @@ def _rejudge_saved_judge_failures(
         run_config = dict(global_config_dict)
     scored = 0
     raised = False
-    # The rollouts the pass may grade again, read before it settles them: their agents' completion files are the ones
-    # a strict run left incomplete cannot keep. Unreadable, no file can be kept.
+    # Record which rollouts the pass will re-judge before it runs, so a strict run that stays incomplete removes only
+    # those agents' completion files. If they cannot be read, every file is removed.
     try:
         regraded: List[str] | None = due_judge_failures(output)
-    except Exception as error:  # the pass reads the same run and reports its own failure
+    except Exception as error:  # not fatal: the pass reads the same file and reports the failure itself
         print(f"The rollouts to re-judge could not be read: {type(error).__name__}: {error}", flush=True)
         regraded = None
     before = _saved_artifact_state(output)
@@ -1001,8 +1001,8 @@ def _rejudge_saved_judge_failures(
         return complete
     if complete_only and not complete:
         # A strict run that stays incomplete publishes no score, but its quality summary must describe the rows the
-        # pass settled: the aggregation that rewrites it is skipped with the metrics. The completion files of the
-        # agents it graded again cannot follow it either, so they are removed.
+        # pass settled: the aggregation that rewrites it is skipped with the metrics. The completion files of
+        # agents the pass re-judged now hold stale scores, so they are removed; the other agents' files still match.
         if scored or raised or changed:
             _remove_regraded_completion_files(output, regraded, run_config)
             _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
@@ -1041,8 +1041,8 @@ def _refresh_completion_files(output: Path, run_config: Mapping[str, Any]) -> No
 
 
 def _remove_regraded_completion_files(output: Path, regraded: List[str] | None, run_config: Mapping[str, Any]) -> None:
-    """Remove the completion files of the agents whose rollouts the re-judge pass graded again; with those rollouts
-    unknown, or their agents unreadable, remove every file rather than leave one with old scores."""
+    """Remove the completion files of the agents whose rollouts the re-judge pass graded again. If the rollouts or their
+    agents cannot be read, remove every file rather than risk keeping one with stale scores."""
     from nemo_gym.rollouts.rollout_collection import remove_agent_complete_files
 
     if regraded is None:
@@ -1050,9 +1050,9 @@ def _remove_regraded_completion_files(output: Path, regraded: List[str] | None, 
         return
     try:
         remove_agent_complete_files(output, regraded, OmegaConf.create(run_config))
-    except Exception as error:  # the files of the regraded agents cannot be told apart, so none is kept
+    except Exception as error:  # without the agents, any file may be stale, so none is kept
         print(
-            f"The re-judged agents' completion files could not be told apart ({type(error).__name__}: {error}); "
+            f"The re-judged agents could not be identified ({type(error).__name__}: {error}); "
             "all completion files are removed.",
             flush=True,
         )
