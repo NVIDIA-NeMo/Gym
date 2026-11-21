@@ -57,6 +57,15 @@ def aggregate_metrics_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
 
 
+def partial_aggregate_metrics_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_partial_aggregate_metrics.json`.
+
+    A partial score (``max_failed_rollout_fraction``) of an incomplete run. It never takes the aggregate's name, so a
+    reader of the aggregate never takes it for the run's score.
+    """
+    return output_fpath.with_stem(output_fpath.stem + "_partial_aggregate_metrics").with_suffix(".json")
+
+
 def agent_complete_dir_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_agent_complete/`.
 

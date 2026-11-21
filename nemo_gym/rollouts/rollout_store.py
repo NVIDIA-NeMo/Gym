@@ -75,6 +75,7 @@ from nemo_gym.utils.path_utils import (
     aggregation_sources_path_for,
     attempt_extension_path_for,
     failures_path_for,
+    partial_aggregate_metrics_path_for,
     rerun_masked_journal_path_for,
     resubmit_offset_path_for,
     task_selection_path_for,
@@ -287,6 +288,7 @@ class RolloutStore:
             journal_path_for(output),
             coverage_path_for(output),
             aggregate_metrics_path_for(output),
+            partial_aggregate_metrics_path_for(output),
             # A shard list an earlier aggregation into this path left names other rows.
             aggregation_sources_path_for(output),
             # The tasks an earlier run selected by id; a subset run records its own once it starts.

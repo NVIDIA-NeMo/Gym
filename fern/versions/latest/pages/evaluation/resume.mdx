@@ -392,10 +392,13 @@ zeros as `imputed`, separately from measured rewards and counted failures.
 With `require_complete`, a run that ends with unsettled rollouts writes no
 aggregate. `+max_failed_rollout_fraction=<share>` writes a partial score
 instead when the unsettled rollouts are at most that share of the expected
-ones: its failed and missing rollouts are counted as zero, and the aggregate
-and coverage report carry `_ng_partial_score`. The run stays incomplete and
-eligible for resume; the resume that settles every rollout writes the full
-score.
+ones: its failed and missing rollouts are counted as zero, and results masked
+by infrastructure stay out of the score. The partial score goes to
+`<stem>_partial_aggregate_metrics.json`, not to the aggregate, and its entries
+and the coverage report carry `_ng_partial_score`. The run stays incomplete and
+eligible for resume; the resume that settles every rollout writes the aggregate
+and removes the partial score. Use the option only for a benchmark whose every
+metric takes a zero row as the worst result.
 
 
 ## Checkpoint-controller integration

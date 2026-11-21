@@ -955,7 +955,7 @@ RECEIPT_FILES = {"rollouts_jsonl_fpath": "rollouts.jsonl", "resolved_config_yaml
                  "aggregate_metrics_json_fpath": "rollouts_aggregate_metrics.json",
                  "failures_jsonl_fpath": "rollouts_failures.jsonl",
                  "materialized_inputs_jsonl_fpath": "rollouts_materialized_inputs.jsonl"}
-source_files = (*RECEIPT_FILES.values(), "quality_summary.json", "rollouts_manifest.json", "rollouts_attempts.jsonl", "rollouts_resubmit_offset",
+source_files = (*RECEIPT_FILES.values(), "rollouts_partial_aggregate_metrics.json", "quality_summary.json", "rollouts_manifest.json", "rollouts_attempts.jsonl", "rollouts_resubmit_offset",
             "rollouts_coverage.json", "../.gym_infra_retries", "../.gym_accumulated_walltime", "../.gym_job_chain")
 def followup_snapshot():
     # Keep scheduler state outside the installed Store artifact protocol, but bind both the dynamic
@@ -1094,22 +1094,26 @@ except (OSError, ValueError, AttributeError, TypeError):
     pass
 partial_score = None
 try:
-    # A partial score (max_failed_rollout_fraction) marks every aggregate entry with the same record.
-    value = json.load(open(os.path.join(a, "rollouts_aggregate_metrics.json")))
-    marks = [entry.get("_ng_partial_score") for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
-    mark = marks[0] if marks else None
-    if (isinstance(mark, dict) and all(m == mark for m in marks)
-            and all(type(mark.get(k)) is int and mark[k] >= 0 for k in ("accepted_failures", "expected"))
-            and all(type(mark.get(k)) in (int, float) and math.isfinite(mark[k])
-                    for k in ("accepted_failure_fraction", "max_failed_rollout_fraction"))):
-        partial_score = {k: mark[k] for k in ("accepted_failures", "expected", "accepted_failure_fraction",
-                                              "max_failed_rollout_fraction")}
+    # A partial score (max_failed_rollout_fraction) has its own file, every entry marked with the same record. A run
+    # with an aggregate has its score, so a partial score left beside it is not read.
+    if not os.path.exists(os.path.join(a, "rollouts_aggregate_metrics.json")):
+        value = json.load(open(os.path.join(a, "rollouts_partial_aggregate_metrics.json")))
+        marks = [entry.get("_ng_partial_score") for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+        mark = marks[0] if marks else None
+        counts = ("accepted_failures", "counted_as_zero", "masked", "expected")
+        if (isinstance(mark, dict) and all(m == mark for m in marks)
+                and all(type(mark.get(k)) is int and mark[k] >= 0 for k in counts)
+                and mark["counted_as_zero"] + mark["masked"] == mark["accepted_failures"]
+                and all(type(mark.get(k)) in (int, float) and math.isfinite(mark[k])
+                        for k in ("accepted_failure_fraction", "max_failed_rollout_fraction"))):
+            partial_score = {k: mark[k] for k in (*counts, "accepted_failure_fraction", "max_failed_rollout_fraction")}
 except (OSError, ValueError, AttributeError, TypeError):
     pass
 score = None
 if len(sys.argv) > 2:
     try:
-        value = json.load(open(os.path.join(a, "rollouts_aggregate_metrics.json")))
+        value = json.load(open(os.path.join(a, "rollouts_aggregate_metrics.json" if partial_score is None
+                                            else "rollouts_partial_aggregate_metrics.json")))
         selector = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
         if isinstance(value, list):
             if not selector or any(k not in ("agent", "environment") or not isinstance(v, str) or not v
@@ -1420,8 +1424,8 @@ class CollectedEvidence(BaseModel):
     # The aggregate's own (metric_coverage/trials, metric_coverage/expected, metric_coverage/name or None): the trials
     # the benchmark's headline metric covered, as the benchmark declares them.
     benchmark_metric_coverage: tuple[int, int, str | None] | None = None
-    # The aggregate's partial-score record (``_ng_partial_score``): the unsettled rollouts it counted as zero, of
-    # those expected, and the limit that accepted them; None for a full score or no aggregate.
+    # The partial score's record (``_ng_partial_score``) when the run has no aggregate: its unsettled rollouts, how many
+    # were counted as zero or masked, of those expected, and the limit that accepted them; else None.
     partial_score: dict[str, int | float] | None = None
     # rollouts_task_selection.json: the subset the run selected by task id (source, tasks, rows, task_ids_sha256; a
     # field is None when the record was unreadable), or None when the run took every task of its input.
@@ -1583,6 +1587,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
             "rollouts_materialized_inputs.jsonl",
             "rollouts_resolved_config.yaml",
             "rollouts_aggregate_metrics.json",
+            "rollouts_partial_aggregate_metrics.json",
             "quality_summary.json",
             "rollouts_manifest.json",
             "rollouts_attempts.jsonl",

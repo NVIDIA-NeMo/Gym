@@ -161,6 +161,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     IncompleteEvaluationError,
     RunManifest,
     _digest,
+    atomic_output_file,
     atomic_write_json,
     config_identity_path_for,
     has_only_intentional_gaps,
@@ -215,6 +216,7 @@ from nemo_gym.utils.path_utils import (
     batch_status_path_for,
     failures_path_for,
     materialized_path_for,
+    partial_aggregate_metrics_path_for,
     resubmit_offset_path_for,
     task_selection_path_for,
 )
@@ -1643,13 +1645,17 @@ class SharedRolloutCollectionConfig(
             "With require_complete, write a partial score for a run that ends with at most this share of its "
             "expected rollouts unsettled (failed, masked by infrastructure, missing or not started), instead of "
             "no score. Every failed and missing rollout enters the metrics as a zero, whatever its failure class; "
-            "a result masked by infrastructure stays out of the score. Each aggregate entry and the coverage "
-            "report carry _ng_partial_score (accepted_failures, expected, accepted_failure_fraction and the limit), "
-            "so the score is never read as a full one. The run is still rejected as incomplete, so the job chain and recovery go on as before, "
-            "and a later segment that settles the rollouts writes the full score. Above the limit, or when a "
-            "metric hook fails on a zero row, no score is written, as without this option. Unset by default. "
-            "Known limitation, shared with count_failure_classes_as_zero: a metric hook that reads verifier "
-            "fields may score a zero row as a measurement instead of failing."
+            "a result masked by infrastructure stays out of the score. The partial score goes to "
+            "<stem>_partial_aggregate_metrics.json, never to the aggregate, and is not exported to experiment "
+            "trackers; each of its entries and the coverage report carry _ng_partial_score (accepted_failures, "
+            "counted_as_zero, masked, expected, accepted_failure_fraction and the limit). The run is still rejected "
+            "as incomplete, so the job chain and recovery go on as before, and a later segment that settles every "
+            "rollout writes the aggregate and removes the partial score. Above the limit, or when a metric hook "
+            "fails on a zero row, no score is written, as without this option. Unset by default. Use it only for "
+            "a benchmark whose every metric takes a zero row as the worst result: for a lower-is-better metric (an "
+            "attack success or hallucination rate) a zero reads as the best result, and a corpus or rating metric "
+            "gives it no meaning. A metric hook that reads verifier fields may also score a zero row as a "
+            "measurement instead of failing, as with count_failure_classes_as_zero."
         ),
     )
 
@@ -2907,12 +2913,18 @@ def _aggregation_failed_agents(metrics_fpath: Path) -> List[str]:
 def _partial_score(coverage: Mapping[str, Any], limit: float) -> Dict[str, Any]:
     """The partial-score record of a run that is not complete: its unsettled rollouts of those expected.
 
+    An unsettled rollout is a failure that is not a final zero, a missing or never-started rollout (each counted as
+    zero), or a result masked by infrastructure (left out of the score, as the metrics leave out any masked row).
     Rollouts an accepted partial stage omitted are not expected, as in the trial gate's denominator.
     """
     expected = coverage["expected"] - coverage["intentionally_omitted"]
-    unsettled = max(expected - coverage["settled"], 0)
+    counted_as_zero = coverage["failed"] - coverage["final_zeros"] + coverage["not_started"] + coverage["missing"]
+    masked = coverage["masked_retryable"] + coverage["masked_exhausted"]
+    unsettled = counted_as_zero + masked
     return {
         "accepted_failures": unsettled,
+        "counted_as_zero": counted_as_zero,
+        "masked": masked,
         "expected": expected,
         "accepted_failure_fraction": unsettled / expected if expected > 0 else 1.0,
         "max_failed_rollout_fraction": limit,
@@ -2922,7 +2934,8 @@ def _partial_score(coverage: Mapping[str, Any], limit: float) -> Dict[str, Any]:
 def _partial_score_text(partial_score: Mapping[str, Any]) -> str:
     return (
         f"{partial_score['accepted_failures']} of {partial_score['expected']} rollouts unsettled "
-        f"({partial_score['accepted_failure_fraction']:.2%})"
+        f"({partial_score['accepted_failure_fraction']:.2%}: {partial_score['counted_as_zero']} counted as zero, "
+        f"{partial_score['masked']} masked and left out of the score)"
     )
 
 
@@ -2934,14 +2947,6 @@ def _uncounted_failure_rows(rows: Iterable[Mapping[str, Any]], failure_classes: 
         for row in rows
         if not row.get("_ng_omitted") and not _counts_as_zero(row, wanted)
     ]
-
-
-def _mark_partial_score(metrics_fpath: Path, partial_score: Mapping[str, Any]) -> None:
-    """Record the partial-score record on every entry of a written aggregate, so no reader takes it as a full one."""
-    entries = orjson.loads(metrics_fpath.read_bytes())
-    for entry in entries:
-        entry[PARTIAL_SCORE_KEY] = dict(partial_score)
-    metrics_fpath.write_bytes(orjson.dumps(entries, option=orjson.OPT_INDENT_2))
 
 
 def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
@@ -5243,6 +5248,7 @@ executions → not run again (left to recovery)
                     f"{config.max_failed_rollout_fraction}."
                 )
                 partial_score = None
+        partial_metrics_fpath: Optional[Path] = None
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -5297,26 +5303,36 @@ executions → not run again (left to recovery)
             scored_rows = persisted_results + counted
             metadata_rows = persisted_rows + counted if config.retain_results_in_memory else scored_rows
             order = sorted(range(len(scored_rows)), key=lambda i: _rollout_order_key(scored_rows[i]))
-            aggregate_metrics_fpath = await self._call_aggregate_metrics(
-                [scored_rows[i] for i in order],
-                [metadata_rows[i] for i in order],
-                output_fpath,
-                raise_on_error=False,  # Write batch status before reporting aggregation failures below.
-            )
-            if partial_score is not None and aggregate_metrics_fpath is not None:
-                failed_agents = await asyncio.to_thread(_aggregation_failed_agents, aggregate_metrics_fpath)
+            scored_rows = [scored_rows[i] for i in order]
+            metadata_rows = [metadata_rows[i] for i in order]
+            if partial_score is None:
+                aggregate_metrics_fpath = await self._call_aggregate_metrics(
+                    scored_rows,
+                    metadata_rows,
+                    output_fpath,
+                    raise_on_error=False,  # Write batch status before reporting aggregation failures below.
+                )
+            else:
+                # The partial score has its own file; the run itself has no aggregate, and one an earlier segment
+                # left describes a different set of rows.
+                aggregate_metrics_fpath = None
+                await asyncio.to_thread(aggregate_metrics_path_for(output_fpath).unlink, missing_ok=True)
+                partial_metrics_fpath = await self._write_partial_score(
+                    scored_rows, metadata_rows, output_fpath, partial_score
+                )
+                failed_agents = await asyncio.to_thread(_aggregation_failed_agents, partial_metrics_fpath)
                 if failed_agents:
                     # A metric hook that cannot score a zero row gives no partial score; the run is rejected as before.
-                    await asyncio.to_thread(aggregate_metrics_fpath.unlink, missing_ok=True)
                     print(
                         f"No partial score: aggregation failed for agents {', '.join(failed_agents)} on the rows "
                         "counted as zero. Resume the run; the aggregate is written when the run completes."
                     )
-                    aggregate_metrics_fpath = partial_score = None
+                    partial_metrics_fpath = partial_score = None
                     del counted[len(counted) - len(partial_rows) - len(partial_imputed) :]
                     imputed = imputed[: len(imputed) - len(partial_imputed)]
-                else:
-                    await asyncio.to_thread(_mark_partial_score, aggregate_metrics_fpath, partial_score)
+        if partial_metrics_fpath is None:
+            # A partial score an earlier segment left is replaced by this segment's outcome.
+            await asyncio.to_thread(partial_aggregate_metrics_path_for(output_fpath).unlink, missing_ok=True)
 
         if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
             batch_tracker.write_status(
@@ -5383,9 +5399,8 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if partial_score is not None:
             print(
-                f"The aggregate is a partial score ({_partial_score_text(partial_score)}): its failed and missing "
-                "rollouts are counted as zero. The run stays incomplete; a resume that settles them writes the full "
-                "score."
+                f"Partial score: {partial_metrics_fpath} ({_partial_score_text(partial_score)}). It is not the run's "
+                "score: the run stays incomplete, and a resume that settles every rollout writes the aggregate."
             )
 
         if rejection is not None:
@@ -5581,6 +5596,23 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if raise_on_error and first_error is not None:
             raise first_error
 
+        return metrics_fpath
+
+    async def _write_partial_score(
+        self, results: List[Dict], rows: List[Dict], output_fpath: Path, partial_score: Mapping[str, Any]
+    ) -> Path:
+        """Aggregate ``results`` as ``_call_aggregate_metrics`` does, for a partial score (``max_failed_rollout_fraction``).
+
+        Every entry carries ``partial_score`` and the entries go to ``partial_aggregate_metrics_path_for`` in one
+        atomic write. Nothing is exported, so no experiment tracker records a partial score as the run's metrics.
+        A failed request leaves an entry with ``aggregation_error``, as in the aggregate.
+        """
+        entries, _ = await self._aggregate_entries(results, rows)
+        for entry in entries:
+            entry[PARTIAL_SCORE_KEY] = dict(partial_score)
+        metrics_fpath = partial_aggregate_metrics_path_for(output_fpath)
+        with atomic_output_file(metrics_fpath) as file:
+            file.write(orjson.dumps(entries, option=orjson.OPT_INDENT_2))
         return metrics_fpath
 
     def _agent_completion_plan(

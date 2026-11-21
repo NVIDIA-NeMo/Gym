@@ -24,7 +24,7 @@ from nemo_gym.eval.recovery.planner import decide_from_collected
 from tests.unit_tests.eval.recovery.test_eval_recovery_gate import infra_failure, inventory, scored
 
 
-def test_the_gate_names_a_partial_score_and_never_passes_it(tmp_path) -> None:
+def test_the_gate_reads_a_partial_score_from_its_own_file_and_never_passes_it(tmp_path) -> None:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in inventory(4)))
@@ -32,15 +32,19 @@ def test_the_gate_names_a_partial_score_and_never_passes_it(tmp_path) -> None:
     (artifacts / "rollouts_failures.jsonl").write_text(json.dumps(infra_failure(3, attempt=0)) + "\n")
     record = {
         "accepted_failures": 1,
+        "counted_as_zero": 1,
+        "masked": 0,
         "expected": 4,
         "accepted_failure_fraction": 0.25,
         "max_failed_rollout_fraction": 0.3,
     }
 
-    def gate(mark):
+    def gate(mark, *, aggregate=None):
         entry = {"agent_ref": {"name": "a"}, "agent_metrics": {"mean/reward": 0.75}, "key_metrics": {}}
-        aggregate = [entry | ({"_ng_partial_score": mark} if mark is not None else {})]
-        (artifacts / "rollouts_aggregate_metrics.json").write_text(json.dumps(aggregate))
+        partial = [entry | ({"_ng_partial_score": mark} if mark is not None else {})]
+        (artifacts / "rollouts_partial_aggregate_metrics.json").write_text(json.dumps(partial))
+        if aggregate is not None:
+            (artifacts / "rollouts_aggregate_metrics.json").write_text(json.dumps(aggregate))
         raw = subprocess.run(
             [
                 sys.executable,
@@ -62,13 +66,16 @@ def test_the_gate_names_a_partial_score_and_never_passes_it(tmp_path) -> None:
 
     task = gate(record)
     assert task["partial_score"] == record
+    assert task["score"] == 0.75
     assert task["warnings"][0] == (
-        "partial score: 1 of 4 rollouts (25.00%) were unsettled and counted as zero, within "
-        "max_failed_rollout_fraction 0.3; it is not a full score"
+        "partial score: 1 of 4 rollouts (25.00%) were unsettled, within max_failed_rollout_fraction 0.3: "
+        "1 counted as zero and 0 masked and left out of the score; it is not a full score"
     )
     assert task["status"] != "SUCCESS"
-    # A full score carries no record, and a malformed one is not read as a partial score.
-    for mark in (None, record | {"accepted_failures": -1}):
-        task = gate(mark)
+    # An unmarked or malformed file is not a partial score, and neither is one left beside the run's aggregate.
+    full = [{"agent_ref": {"name": "a"}, "agent_metrics": {"mean/reward": 0.5}, "key_metrics": {}}]
+    for mark, aggregate in ((None, None), (record | {"masked": 1}, None), (record, full)):
+        task = gate(mark, aggregate=aggregate)
         assert task["partial_score"] is None
+        assert task["score"] == (0.5 if aggregate else None)
         assert not any(w.startswith("partial score") for w in task["warnings"])

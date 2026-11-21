@@ -1049,11 +1049,12 @@ def subset_note(selection: Mapping[str, Any]) -> str:
 
 
 def partial_score_note(partial: Mapping[str, Any]) -> str:
-    """The label of a score written with unsettled rollouts counted as zero (``max_failed_rollout_fraction``)."""
+    """The label of a partial score (``max_failed_rollout_fraction``): the score of a run with unsettled rollouts."""
     return (
         f"partial score: {partial['accepted_failures']} of {partial['expected']} rollouts "
-        f"({partial['accepted_failure_fraction']:.2%}) were unsettled and counted as zero, within "
-        f"max_failed_rollout_fraction {partial['max_failed_rollout_fraction']}; it is not a full score"
+        f"({partial['accepted_failure_fraction']:.2%}) were unsettled, within max_failed_rollout_fraction "
+        f"{partial['max_failed_rollout_fraction']}: {partial['counted_as_zero']} counted as zero and "
+        f"{partial['masked']} masked and left out of the score; it is not a full score"
     )
 
 
