@@ -89,21 +89,5 @@ class BirdInteractTask(BaseModel):
     # The reference harness resets its shared database with these. Each Gym session has its own sandbox.
     clean_up_sqls: list[str] = Field(default_factory=list, json_schema_extra=_PROVENANCE)
 
-    @property
-    def ambiguity_count(self) -> int:
-        """Critical and knowledge ambiguities: the questions the agent needs to resolve the task."""
-        return len(self.user_query_ambiguity.critical_ambiguity) + len(self.knowledge_ambiguity)
-
-    def needs_custom_test_cases(self) -> bool:
-        """Whether a phase is graded by its custom test cases (see ``custom_test_cases``)."""
-        phases = [self] if self.follow_up is None else [self, self.follow_up]
-        return any(custom_test_cases(phase) for phase in phases)
-
-
-def custom_test_cases(phase: BirdInteractTask | FollowUp) -> list[str]:
-    """The test cases that grade a phase, as BIRD-Interact grades it: a phase that is not a query runs its own. A
-    query, or a phase with none, is graded by comparing its result with the solution's, so it gets an empty list."""
-    return [] if phase.category == QUERY_CATEGORY else phase.test_cases
-
 
 TaskInput = BirdInteractTask
