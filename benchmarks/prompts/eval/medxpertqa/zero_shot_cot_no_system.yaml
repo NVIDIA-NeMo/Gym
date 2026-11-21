@@ -1,0 +1,5 @@
+# MedXpertQA zero-shot CoT, first round, without the system prompt: upstream
+# (TsinghuaC3I/MedXpertQA@5f1db162 eval/model/api_agent.py) drops it for o1, o3 and
+# DeepSeek-R1. Pair it with answer_format: boxed for the DeepSeek-R1 protocol.
+
+user: "Q: {question}\nA: Let's think step by step."
