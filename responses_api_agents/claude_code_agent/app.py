@@ -267,6 +267,19 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if (task.cancelled() or task.exception() is not None) and self._local_setup_task is task:
             self._local_setup_task = None
 
+    def _missing_direct_api_key(self) -> Optional[str]:
+        """Return why a direct Anthropic API call cannot authenticate, or None when it can.
+
+        With no Gym model server and no anthropic_base_url the CLI calls Anthropic's own API, which
+        needs a key. Refuse up front so a missing key is a config error, not a run scored as zero.
+        """
+        if self.config.model_server or self.config.anthropic_base_url or self.config.anthropic_api_key:
+            return None
+        return (
+            "Claude calls the Anthropic API directly when neither model_server nor anthropic_base_url is set; "
+            "set anthropic_api_key (for example ++anthropic_api_key=...) or configure model_server"
+        )
+
     def _resolve_base_url(self) -> str:
         if self.config.model_server:
             cfg = get_first_server_config_dict(
@@ -692,6 +705,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "Claude sandbox execution uses native tools; required remote tools are unsupported"
             )
+        if missing_key := self._missing_direct_api_key():
+            raise AgentSeedRejectedError(missing_key)
         version = self.config.claude_code_version
         if not version or not re.fullmatch(r"\d+\.\d+\.\d+", version):
             raise HTTPException(422, "Claude sandbox execution requires an exact claude_code_version")
@@ -1097,6 +1112,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             raise AgentSessionConflictError("Claude Code sandbox sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(422, "Local Claude Code /run requires resources_server")
+        if missing_key := self._missing_direct_api_key():
+            raise HTTPException(422, missing_key)
         async with self.sem:
             cookies = request.cookies
 

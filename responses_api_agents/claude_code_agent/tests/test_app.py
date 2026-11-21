@@ -71,6 +71,8 @@ def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
 
 def _config(**kwargs) -> ClaudeCodeAgentConfig:
     kwargs.setdefault("resources_server", ResourcesServerRef(type="resources_servers", name=""))
+    # Direct-path agents refuse to run without a key; model_server/anthropic_base_url tests ignore it.
+    kwargs.setdefault("anthropic_api_key", "test-key")  # pragma: allowlist secret
     return ClaudeCodeAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -932,6 +934,25 @@ class TestRolloutCorrelation:
             )
 
         assert captured["base_url"] == base_url
+
+    def test_run_refuses_a_direct_api_call_without_a_key(self) -> None:
+        agent = _make_agent(anthropic_api_key="")
+        agent.server_client.post = AsyncMock(side_effect=AssertionError("must refuse before seeding"))
+        response = TestClient(agent.setup_webserver(), raise_server_exceptions=False).post(
+            "/run", json={"responses_create_params": {"input": "hi"}}
+        )
+        assert response.status_code == 422, response.text
+        assert "anthropic_api_key" in response.json()["detail"]
+
+    @pytest.mark.parametrize(
+        "routing",
+        [
+            {"model_server": ModelServerRef(type="responses_api_models", name="policy_model")},
+            {"anthropic_base_url": "http://localhost:8000"},
+        ],
+    )
+    def test_a_routed_agent_needs_no_key(self, routing: dict) -> None:
+        assert _make_agent(anthropic_api_key="", **routing)._missing_direct_api_key() is None
 
 
 class TestExtractInstruction:

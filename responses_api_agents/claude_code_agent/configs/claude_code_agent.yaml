@@ -6,7 +6,7 @@ claude_code_agent:
       model_server: null  # Gym model-server ref, or use anthropic_base_url directly
       concurrency: 32
       model: claude-sonnet-4-6
-      anthropic_api_key: ${oc.select:anthropic_api_key,""}  # needed only to call the Anthropic API directly
+      anthropic_api_key: ${oc.select:anthropic_api_key,""}  # unused with model_server; the Anthropic key or the anthropic_base_url token
       anthropic_base_url: null
       max_turns: 30
       timeout: 300
