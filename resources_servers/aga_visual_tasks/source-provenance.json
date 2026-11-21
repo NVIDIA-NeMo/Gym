@@ -1,0 +1,70 @@
+{
+  "source_url": "https://github.com/katerynaCh/Gym",
+  "revision": "168e95ee80780737273dda011d31d1d5c58f35ce",
+  "license": "Apache-2.0",
+  "original_files": {
+    "responses_api_agents/opencode_multimodal_agent/media.py": "a131189a4527c873616609302ca0dd59e24a8397734d338a5a0e23b25511a0f6",
+    "responses_api_agents/opencode_multimodal_agent/app.py": "87fd72c7a78509ea95999f14d9f77fa05ef667242f3eff24c8bc63d3e32009f3",
+    "responses_api_agents/opencode_multimodal_agent/prompts/visual_prefix.txt": "289f85a53ac6a652c74645efe04837ab792dda99d7cc874cc271193ad8a5f3c2"
+  },
+  "verification": "Public pinned source is byte-identical to the original Gym snapshot at the pinned revision.",
+  "task_source": "AGA original 4440-row training export; explicit VQA and Agent-X selectors only; public VTC benchmark is not a replacement.",
+  "base_verifier_comparison": {
+    "string_match": "Only public import/module entrypoint changes; scoring identical.",
+    "mcqa": "Existing scoring moved under observation wrapper; evaluation_completed metadata added; score unchanged.",
+    "math_with_judge": "No-judge symbolic path unchanged; metered semaphore/imports and judge verdict provenance added. Engineering config retains should_use_judge=false."
+  },
+  "codex_parallel_field_normalization": {
+    "original_parent_sha256": "0e873cb2410988a133e4d82ee5297d9c104fadd4fad35559dae20ce8ac5a7d37",
+    "original_parent_file": "responses_api_agents/opencode_agent/app.py",
+    "original_parent_lines": [
+      572,
+      1088
+    ],
+    "original_multimodal_lines": [
+      346
+    ],
+    "finding": "Only response serialization references parallel_tool_calls; original CLI did not consume False. Native Codex owns concurrency; prepared request omits this ineffective control, not a promise of serialized tools."
+  },
+  "dataset_audit": {
+    "source_sha256": "e3790f8a48bc6695ee7c4568a1089bff346916b69e8c79ca0f1bbe1c5d183e71",
+    "code_assisted_vqa": {
+      "rows": 400,
+      "image_references": 405,
+      "readable_original_images": 405,
+      "missing_original_images": 0
+    },
+    "agent_x": {
+      "rows": 447,
+      "image_references": 447,
+      "readable_original_images": 419,
+      "missing_original_images": 28,
+      "unique_recovered_assets": 381,
+      "declared_aga_image_root_missing": 447,
+      "recovery": "418 existing original media_path source-byte hashes matched + one previously restored hash-matched original; no replacements",
+      "recovery_manifest": "aga-native-review-v1/agentx-recovered-manifest.json",
+      "original_media_path_sha_audit": "aga-native-review-v1/agentx-original-media-path-sha-audit.json",
+      "remaining_path_audit": "aga-native-review-v1/agentx-remaining-path-audit.json"
+    },
+    "expected_answer_types": {
+      "str": 847
+    },
+    "input_roles": {
+      "single_user": 847
+    }
+  },
+  "image_preprocessing": {
+    "initial_stage": "Original stage_inputs unchanged, preserve_format=False: RGB PNG",
+    "max_source_pixels": 150000000,
+    "max_images": 33,
+    "native_resize_source": "https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/opencode/src/image/image.ts",
+    "native_resize_sha256": "787dc4c77122437a0325c743ed63a699157fde04fa8facc90ee351faf32ffc81",
+    "native_resize_policy": {
+      "max_width": 8000,
+      "max_height": 8000,
+      "max_base64_bytes": 1073741824
+    },
+    "oversized_inputs": "Rejected pending original Photon reuse; no alternate resize implementation",
+    "vqa_archive_sha256": "fc5637e2bdddbb26e8a287ee456882c81e1011777f184a2a9312f012341a71b8"
+  }
+}
