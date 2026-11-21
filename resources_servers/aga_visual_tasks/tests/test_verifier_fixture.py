@@ -4,7 +4,7 @@
 
 import pytest
 
-from nemo_gym.verification.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.aga_visual_tasks.verifier_fixture import VERIFIER_FIXTURE
 
 
