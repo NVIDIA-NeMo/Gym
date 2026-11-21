@@ -202,7 +202,7 @@ async def test_root_workdir_setting_still_rejects_adapter_storage(monkeypatch, w
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("exit_code", [0, 100])
-async def test_harbor_dependency_step_runs_first_and_never_blocks_setup(monkeypatch, enabled, exit_code):
+async def test_harbor_dependency_step_runs_first_and_a_failed_install_fails_setup(monkeypatch, enabled, exit_code):
     script = system_dependencies_command()
 
     async def run(command, **kwargs):
@@ -213,8 +213,18 @@ async def test_harbor_dependency_step_runs_first_and_never_blocks_setup(monkeypa
     monkeypatch.setattr(app, "create_provider", lambda config: object())
     install = AsyncMock()
     monkeypatch.setattr(app, "install_sandbox_runtime", install)
+    close = AsyncMock()
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "close", close)
     instance = agent(harbor_system_dependencies=enabled, system_dependencies_timeout_seconds=900)
-    await instance._seed_agent_session_state(seed())
+    failed = enabled and exit_code != 0
+    if failed:
+        # As in Harbor, the task never runs without the tools the step guarantees: setup fails, the session is
+        # released, and the episode is retried.
+        with pytest.raises(RuntimeError, match=r"system dependency step failed \(exit=100, error=None\)"):
+            await instance._seed_agent_session_state(seed())
+    else:
+        await instance._seed_agent_session_state(seed())
+    assert close.await_count == int(failed)
     calls = remote.exec.await_args_list
     if enabled:
         # Before the session directory and the Claude Code install, with its own time limit.
@@ -222,4 +232,4 @@ async def test_harbor_dependency_step_runs_first_and_never_blocks_setup(monkeypa
         assert calls[0].kwargs["timeout_s"] == 900
     else:
         assert all(call.args[0] != script for call in calls)
-    install.assert_awaited_once()
+    assert install.await_count == int(not failed)

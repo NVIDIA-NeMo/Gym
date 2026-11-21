@@ -392,5 +392,8 @@ container runs it, for benchmarks that grade such a harness.
 - `harbor_system_dependencies` (sandbox sessions): before installing Claude Code, run Harbor 0.24's
   system-dependency step for its claude-code agent: curl, bash, nodejs, npm and procps, each installed with
   the first package manager found (apt-get, dnf, yum, apk) when its commands are missing. Agents under
-  Harbor therefore have `node`, `npm`, `ps` and `pkill` even where the task image lacks them. A failed
-  install is logged and Claude Code runs anyway (`system_dependencies_timeout_seconds`, default 1800).
+  Harbor therefore have `node`, `npm`, `ps` and `pkill` even where the task image lacks them. As in
+  Harbor, a failed install (a nonzero package-manager exit, or the step's time limit,
+  `system_dependencies_timeout_seconds`, default 1800) fails session setup, so the episode is retried rather
+  than graded without those tools. With no supported package manager, Harbor only warns, and so does this
+  step.

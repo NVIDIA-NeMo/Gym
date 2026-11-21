@@ -188,8 +188,8 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # files then sit under /tmp inside it, as a harness's own files do there.
     allow_root_workdir: bool = False
     # Sandbox sessions: run Harbor 0.24's system-dependency step for its claude-code agent (curl, bash,
-    # nodejs, npm and procps, installed when missing) before installing Claude Code. A failed install is
-    # logged and Claude Code runs anyway.
+    # nodejs, npm and procps, installed when missing) before installing Claude Code. As in Harbor, a failed
+    # install (a nonzero package-manager exit) fails session setup, so the episode is retried, never graded.
     harbor_system_dependencies: bool = False
     system_dependencies_timeout_seconds: float = Field(default=1800, gt=0, allow_inf_nan=False)
     # Claude Code's --effort (low, medium, high, xhigh or max), as Harbor passes its reasoning effort.
@@ -796,21 +796,17 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
     async def _run_system_dependencies(self, sandbox: AsyncSandbox) -> str:
         """Harbor's ensure_system_dependencies for Claude Code, as the sandbox's default user (root for
-        Terminal-Bench task sandboxes). Harbor errors the trial when the install fails; here the failure
-        is logged and Claude Code runs without the packages, as it would without this step."""
+        Terminal-Bench task sandboxes). Harbor errors the trial when the install fails; here a failed install
+        fails session setup, so the task never runs without the tools Harbor guarantees."""
         started = monotonic()
         result = await sandbox.exec(
             system_dependencies_command(), timeout_s=self.config.system_dependencies_timeout_seconds
         )
         log = (result.stdout or "") + (result.stderr or "")
         if result.return_code != 0 or result.error_type:
-            LOG.warning(
-                "Harbor's system dependency step failed (exit %s, error_type %s) after %.0fs; Claude Code runs "
-                "without it: %s",
-                result.return_code,
-                result.error_type,
-                monotonic() - started,
-                log[-2000:],
+            raise RuntimeError(
+                f"Harbor's system dependency step failed (exit={result.return_code}, error={result.error_type}) "
+                f"after {monotonic() - started:.0f}s: {log[-16000:]}"
             )
         return log
 
