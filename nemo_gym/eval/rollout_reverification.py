@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Optio
 
 import orjson
 from omegaconf import DictConfig
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, Field, PositiveFloat, TypeAdapter, ValidationError, model_validator
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.artifacts.exporters import export_metrics, export_rollouts, get_exporters
@@ -239,6 +239,14 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
         ),
     )
 
+    verify_timeout_seconds: Optional[PositiveFloat] = Field(
+        default=None,
+        description=(
+            "Time limit, in seconds, for each /verify and /aggregate_metrics call this pass makes, counted from the "
+            "call to the end of its response and including any retries. When a call runs out of time, the pass fails "
+            "as it does for a /verify outcome that was lost, and nothing is resent. None (default) sets no limit."
+        ),
+    )
     retry_terminal_timeouts: bool = Field(
         default=False,
         description=(
@@ -960,6 +968,7 @@ def _prepare_atif_payloads(
 def _run_verification_payloads(
     payloads: List[Dict],
     semaphore: Semaphore | nullcontext[None] | None = None,
+    timeout_s: Optional[float] = None,
 ) -> Iterator[Future]:  # pragma: no cover
     semaphore = semaphore or nullcontext[None]()
     server_client = setup_server_client()
@@ -985,29 +994,38 @@ def _run_verification_payloads(
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
             # settle_into_source the outcomes already answered are settled and its admission is withdrawn, so a
             # later pass grades it again (see _settle_what_a_failed_pass_judged).
-            res = await server_client.post(
-                server_name=rs_name, url_path="/verify", json=request_row, _resend_after_disconnect=False
-            )
             try:
-                await raise_for_status(
-                    res
-                )  # this code works similarly to the rollout collection code, so *_failures.jsonl is empty now
-            # IMO we need another task to unify dealing with failed cases (and writing to the *_failures.jsonl file if needed)
-            except Exception:
-                if is_global_aiohttp_client_request_debug_enabled():
-                    print(
-                        "[rollout_reverification] /verify failed "
-                        f"status={getattr(res, 'status', None)} "
-                        f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
-                        flush=True,
+                async with (deadline := asyncio.timeout(timeout_s)):
+                    res = await server_client.post(
+                        server_name=rs_name, url_path="/verify", json=request_row, _resend_after_disconnect=False
                     )
-                raise
-            result = await get_response_json(res)
-            # As collection saves a dispatch reply's report: failures this /verify observed, such as a judge attempt
-            # a retry recovered from, are kept beside the result; a failed result keeps its own failure_id.
-            report = FailureHeader.decode(getattr(res, "headers", None))
-            if report is not None:
-                result = FailureReportRow.merged_into(result, report)
+                    try:
+                        await raise_for_status(
+                            res
+                        )  # this code works similarly to the rollout collection code, so *_failures.jsonl is empty now
+                    # IMO we need another task to unify dealing with failed cases (and writing to the *_failures.jsonl file if needed)
+                    except Exception:
+                        if is_global_aiohttp_client_request_debug_enabled():
+                            print(
+                                "[rollout_reverification] /verify failed "
+                                f"status={getattr(res, 'status', None)} "
+                                f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
+                                flush=True,
+                            )
+                        raise
+                    result = await get_response_json(res)
+                    # As collection saves a dispatch reply's report: failures this /verify observed, such as a judge attempt
+                    # a retry recovered from, are kept beside the result; a failed result keeps its own failure_id.
+                    report = FailureHeader.decode(getattr(res, "headers", None))
+                    if report is not None:
+                        result = FailureReportRow.merged_into(result, report)
+            except TimeoutError as error:
+                if not deadline.expired():
+                    raise  # Not this limit: a transport error keeps its own type and message.
+                raise TimeoutError(
+                    f"The /verify call to resources server {rs_name!r} did not finish within {timeout_s} s "
+                    f"(task {row.get(TASK_INDEX_KEY_NAME)}, rollout {row.get(ROLLOUT_INDEX_KEY_NAME)})"
+                ) from error
             return row, result
 
     return tqdm.as_completed(
@@ -1113,11 +1131,13 @@ async def _call_aggregate_metrics(
     results: List[Dict],
     rows: List[Dict],
     output_fpath: Path,
+    timeout_s: Optional[float] = None,
 ) -> Optional[Path]:
     """Call /aggregate_metrics on each resource server after rollouts complete.
 
     Writes a single _aggregate_metrics.json with one entry per agent (same shape
-    as the old _agent_metrics.json). Returns the file path.
+    as the old _agent_metrics.json). Returns the file path. Each call may take `timeout_s` seconds, including its
+    retries and the read of its response; None sets no limit.
     """
     if not results:
         return None
@@ -1157,14 +1177,23 @@ async def _call_aggregate_metrics(
             stripped.append(entry)
 
         agg_request = AggregateMetricsRequest(verify_responses=stripped)
-        agg_response = await server_client.post(
-            server_name=rs_name,
-            url_path="/aggregate_metrics",
-            json=agg_request,
-        )
+        try:
+            async with (deadline := asyncio.timeout(timeout_s)):
+                agg_response = await server_client.post(
+                    server_name=rs_name,
+                    url_path="/aggregate_metrics",
+                    json=agg_request,
+                )
 
-        await raise_for_status(agg_response)
-        agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+                await raise_for_status(agg_response)
+                agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+        except TimeoutError as error:
+            if not deadline.expired():
+                raise  # Not this limit: a transport error keeps its own type and message.
+            raise TimeoutError(
+                f"The /aggregate_metrics call to resources server {rs_name!r} for agent {agent_name!r} did not finish "
+                f"within {timeout_s} s"
+            ) from error
 
         agent_entry = {
             AGENT_REF_KEY_NAME: {"name": agent_name},
@@ -2007,7 +2036,9 @@ class RolloutReverificationHelper(BaseModel):
         completed = 0  # number of rows re-verified this run (for progress reporting)
         sources_dropped = False
         try:
-            for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
+            for future in _run_verification_payloads(
+                payloads_to_reverify, semaphore=semaphore, timeout_s=config.verify_timeout_seconds
+            ):
                 row, result = await future
                 if _SOURCE_RUN_ID_KEY in row:
                     _validate_rescored_completion(result)
@@ -2107,7 +2138,9 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await _call_aggregate_metrics(results, agg_rows, output_fpaths.output)
+            aggregate_metrics_fpath = await _call_aggregate_metrics(
+                results, agg_rows, output_fpaths.output, timeout_s=config.verify_timeout_seconds
+            )
 
         expected_rollouts = len(results) + sum(failure_counts.values())
         coverage = _coverage_report(expected_rollouts, len(results), failure_counts, output_fpaths.failures)
