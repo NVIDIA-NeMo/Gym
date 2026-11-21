@@ -794,7 +794,7 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError(f"environment server reply for task {task_id!r} carries a non-object result: {result!r}")
     # judge_failsafe is a built-in producer of these legacy markers and of a diagnostic failure report.
     # Accept them only on its declared failure form: the judge_failed class with a judge kind.
-    # Other collector-owned keys remain forbidden.
+    # Other collector-owned keys are accepted only in the declared forms below.
     kind = result.get("failure_kind")
     judge_markers = (
         {NG_FAILURE_CLASS_KEY, NG_FAILURE_JUDGE_ERROR_KEY, *NG_FAILURE_REPORT_KEYS}
@@ -810,8 +810,21 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         and isinstance(result.get(NG_FAILURE_CLASS_KEY), str)
         else set()
     )
+    # A masked result may name its failure class and whether that failure is final, as a flat /run reply does. The
+    # sample is unscored either way; the class routes it to the failures file, and a final one is not retried.
+    # A judge class marks the answer for judge-only recovery, so it keeps needing the judge form above.
+    failure_class = result.get(NG_FAILURE_CLASS_KEY)
+    masked_failure_markers = (
+        {NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY, *NG_FAILURE_REPORT_KEYS}
+        if result.get("mask_sample") is True
+        and isinstance(failure_class, str)
+        and failure_class not in JUDGE_FAILURE_KINDS
+        else set()
+    )
     reserved = sorted(
-        key for key in result if _is_collector_key(key) and key not in judge_markers | final_zero_markers
+        key
+        for key in result
+        if _is_collector_key(key) and key not in judge_markers | final_zero_markers | masked_failure_markers
     )
     if reserved:
         raise ValueError(
