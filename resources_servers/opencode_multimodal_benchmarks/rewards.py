@@ -270,7 +270,13 @@ def final_answer(output: list[dict], *, strip_reasoning: bool = False, block_sep
 def trajectory_tool_reward(
     response, trajectory, base_reward: float, config: OpenCodeToolRewardConfig, observations=None
 ):
-    """Use the shared harness's canonical execution outcomes, including shell exit failures."""
+    """Use the shared harness's canonical execution outcomes, including shell exit failures.
+
+    A tool left unfinished under a root invocation the harness stopped at its wall-clock deadline
+    (``status="incomplete"``, ``error_type="timeout"``) was cut by the rollout timeout, which is the
+    model's budget: it scores as a failed call, like a tool's own timeout. Any other unfinished or
+    unknown record is missing evidence and still raises ToolEvidenceError so the caller masks the row.
+    """
     output = [item.model_dump(mode="json") for item in response.output]
     wanted = {item["call_id"] for item in output if item.get("type") == "function_call"}
     if not wanted:
@@ -283,6 +289,11 @@ def trajectory_tool_reward(
         invocations = [item for item in observations.records if isinstance(item, AgentInvocation)]
         tools = [item for item in observations.records if isinstance(item, ToolCallObservation)]
     roots = {inv.invocation_id for inv in invocations if inv.parent_invocation_id is None}
+    timed_out_roots = {
+        inv.invocation_id
+        for inv in invocations
+        if inv.parent_invocation_id is None and inv.status == "incomplete" and inv.error_type == "timeout"
+    }
     records = {}
     for tool in tools:
         if tool.invocation_id not in roots:
@@ -292,7 +303,7 @@ def trajectory_tool_reward(
             continue
         if call_id in records:
             raise ToolEvidenceError(f"Ambiguous tool evidence for {call_id}")
-        if tool.status in {"incomplete", "unknown"}:
+        if tool.status == "unknown" or (tool.status == "incomplete" and tool.invocation_id not in timed_out_roots):
             raise ToolEvidenceError(f"Unfinished tool evidence for {call_id}")
         success = tool.status == "completed"
         records[call_id] = (tool.tool_name, "completed" if success else "error", 0 if success else None)
