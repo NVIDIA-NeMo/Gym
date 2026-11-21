@@ -179,7 +179,7 @@ def test_output_cap_must_be_positive():
 @pytest.mark.asyncio
 async def test_root_workdir_is_accepted_when_allowed(monkeypatch):
     # Task images without a WORKDIR start in "/": the runtime and session files stay under /tmp.
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock())
+    remote = SimpleNamespace(sandbox_id="sandbox-actual", exec=AsyncMock(return_value=result()), upload=AsyncMock())
     monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
     monkeypatch.setattr(app, "create_provider", lambda config: object())
     monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
@@ -208,7 +208,7 @@ async def test_harbor_dependency_step_runs_first_and_a_failed_install_fails_setu
     async def run(command, **kwargs):
         return result(code=exit_code) if command == script else result()
 
-    remote = SimpleNamespace(exec=AsyncMock(side_effect=run), upload=AsyncMock())
+    remote = SimpleNamespace(sandbox_id="sandbox-actual", exec=AsyncMock(side_effect=run), upload=AsyncMock())
     monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
     monkeypatch.setattr(app, "create_provider", lambda config: object())
     install = AsyncMock()
