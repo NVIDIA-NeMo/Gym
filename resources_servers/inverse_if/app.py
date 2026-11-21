@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -55,7 +56,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import call_judge
+from nemo_gym.verification import JudgeError, call_judge
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +123,14 @@ class InverseIFConfig(BaseResourcesServerConfig):
     parallel_evaluation: bool = Field(
         default=True,
         description="Whether to evaluate rubric criteria in parallel",
+    )
+
+    fail_on_unparseable_judge_response: bool = Field(
+        default=True,
+        description=(
+            "Raise JudgeError(judge_unparseable) for a judge reply without a verdict, which masks the row: the "
+            "judge's failure is not the policy's. Set to false to score such a reply as FAIL instead."
+        ),
     )
 
 
@@ -202,7 +211,7 @@ def _extract_text_from_response(response: NeMoGymResponse, exclude_thinking: boo
     return ""
 
 
-def _extract_verdict(judge_text: str) -> tuple[str, str]:
+def _extract_verdict(judge_text: str) -> tuple[str | None, str]:
     """
     Extract PASS/FAIL verdict and explanation from judge response.
 
@@ -215,7 +224,7 @@ def _extract_verdict(judge_text: str) -> tuple[str, str]:
     3. Fallback to scanning for PASS/FAIL keywords
 
     Returns:
-        (verdict, explanation) where verdict is "PASS" or "FAIL".
+        (verdict, explanation) where verdict is "PASS", "FAIL", or None when the reply has no verdict.
     """
     # Strategy 1: Extract from fenced code block
     json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", judge_text, re.DOTALL)
@@ -250,8 +259,8 @@ def _extract_verdict(judge_text: str) -> tuple[str, str]:
         if "FAIL" in upper:
             return "FAIL", ""
 
-    # Default to FAIL if we can't determine the verdict
-    return "FAIL", ""
+    # No verdict: the caller decides between masking the row and scoring FAIL.
+    return None, ""
 
 
 # ---------------------------------------------------------------------------
@@ -300,8 +309,11 @@ class InverseIFServer(SimpleResourcesServer):
             if not rubric:
                 rubric = body.metadata.get("rubric", [])
 
-        # Evaluate each criterion
-        if self.config.parallel_evaluation and len(rubric) > 1:
+        # Evaluate each criterion. An empty final answer scores 0 without a judge call: judged, it would pass
+        # criteria that only forbid something.
+        if not generated_response:
+            evaluations = []
+        elif self.config.parallel_evaluation and len(rubric) > 1:
             import asyncio
 
             evaluations = await asyncio.gather(
@@ -397,6 +409,10 @@ class InverseIFServer(SimpleResourcesServer):
 
         # Extract verdict
         verdict, explanation = _extract_verdict(judge_text)
+        if verdict is None:
+            if self.config.fail_on_unparseable_judge_response:
+                raise JudgeError(f"unparseable judge response: {judge_text[:200]!r}", failure_kind=JUDGE_UNPARSEABLE)
+            verdict = "FAIL"
         score = 1.0 if verdict == "PASS" else 0.0
 
         return RubricEvaluation(

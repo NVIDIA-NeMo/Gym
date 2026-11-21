@@ -175,6 +175,14 @@ inverse_if:
 | `any` | Any criterion passes (binary: 0 or 1) |
 | `weighted` | Weighted average (falls back to mean for this dataset) |
 
+### Judge Replies Without a Verdict
+
+| Setting | Default | Behavior |
+|---------|---------|----------|
+| `fail_on_unparseable_judge_response` | `true` | When enabled, a judge reply without a PASS or FAIL verdict raises `JudgeError` with failure kind `judge_unparseable`. The row is masked (`mask_sample: true`) and goes to the failures sidecar, so recovery can judge it again. When disabled, such a reply receives `FAIL`. |
+
+An empty final answer (no text after reasoning is removed) scores 0 without a judge call. The row stays in training.
+
 ## Data Format
 
 ### Raw JSON Format (Input)
