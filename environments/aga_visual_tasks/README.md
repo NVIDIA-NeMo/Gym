@@ -17,11 +17,22 @@ and malformed input for the original math, MCQA and string graders. Code-assiste
 ## Prepare and run
 
 ```bash
-python environments/aga_visual_tasks/prepare.py --source ORIGINAL.jsonl --output OUT_DIR \
+# `--output` is the JSONL file the manifest declares; its provenance is written beside it.
+python environments/aga_visual_tasks/prepare.py --source ORIGINAL.jsonl \
+  --output environments/aga_visual_tasks/data/aga_visual_tasks_train.jsonl \
   --family code_assisted_vqa --image-root ORIGINAL_IMAGES --harness pi
 # Claude Code takes only text in its prompt, so it reads the files:
 python environments/aga_visual_tasks/prepare.py ... --harness claude_code --file-input
+# The same through the registered preparer (the arguments arrive as strings; it needs Pillow in the environment, and no
+# servers run, so `use_absolute_ip` is off):
+gym eval prepare --config environments/aga_visual_tasks/config.yaml +use_absolute_ip=false \
+  +prepare_script_args.source=ORIGINAL.jsonl \
+  +prepare_script_args.output=environments/aga_visual_tasks/data/aga_visual_tasks_train.jsonl \
+  +prepare_script_args.family=code_assisted_vqa +prepare_script_args.image_root=ORIGINAL_IMAGES \
+  +prepare_script_args.harness=pi
 ```
+
+A second run refuses to overwrite an existing output file.
 
 `--harness` is one of `opencode`, `pi`, `codex`, `claude_code`, `openclaw`; each row routes to `aga_<harness>_agent` and
 `aga_<harness>_environment_server`. Set `AGA_IMAGE_ROOT` to the original image root and `AGA_SANDBOX_IMAGE` to an image

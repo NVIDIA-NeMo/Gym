@@ -16,7 +16,7 @@ absolute_ip_server_types: [responses_api_models]
 
 # The original answer graders. Only the resource servers run; rows name the original simple agents in
 # `image_tools_base_agent_ref`, which `aga_visual_tasks` maps to these servers.
-math_with_judge:
+aga_math_with_judge:
   resources_servers:
     math_with_judge:
       entrypoint: app.py
@@ -29,7 +29,7 @@ math_with_judge:
       description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
       value: Improve math capabilities including AIME 24 / 25
 
-mcqa:
+aga_mcqa:
   resources_servers:
     mcqa:
       entrypoint: app.py
@@ -40,7 +40,7 @@ mcqa:
       description: Multi-choice question answering problems
       value: Improve benchmarks like MMLU / GPQA / HLE
 
-string_match:
+aga_string_match:
   resources_servers:
     string_match:
       entrypoint: app.py
@@ -63,9 +63,9 @@ aga_visual_tasks:
       sandbox_image: ${oc.env:AGA_SANDBOX_IMAGE,null}
       image_root: ${oc.env:AGA_IMAGE_ROOT,null}
       resources_server_by_agent:
-        math_with_judge_simple_agent: math_with_judge
-        mcqa_simple_agent: mcqa
-        string_match_simple_agent: string_match
+        math_with_judge_simple_agent: aga_math_with_judge
+        mcqa_simple_agent: aga_mcqa
+        string_match_simple_agent: aga_string_match
 
 # Tool results carry images for the harnesses that read an image file through a tool, so keep them inline for these
 # agents without changing `policy_model`, which other tasks may share.
@@ -98,7 +98,8 @@ aga_opencode_environment_server:
       host: 127.0.0.1
       resources_server: {type: resources_servers, name: aga_visual_tasks}
       agent_server: {type: responses_api_agents, name: aga_opencode_agent}
-      default_episode_timeout_seconds: 1800
+      # The agent's 1800 s timeout plus time for the seed (sandbox start, image upload) and the verify.
+      default_episode_timeout_seconds: 2100
       # Admit episodes at the agent's rate (its concurrency, 32). Each seed lends a sandbox, so an episode admitted
       # beyond it would wait for the harness with its sandbox started and its deadline running.
       max_concurrent_episodes: 32

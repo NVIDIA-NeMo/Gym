@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from environments.aga_visual_tasks.prepare import native_row
+from environments.aga_visual_tasks.prepare import native_row, prepare
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -71,3 +71,37 @@ def test_image_path_note_preserves_public_mapping_and_original_content(tmp_path:
     public_input = json.dumps(prepared["responses_create_params"]) + json.dumps(note)
     assert row["expected_answer"] not in public_input
     assert row["metadata"]["private_grader_detail"] not in public_input
+
+
+def test_prepare_writes_and_returns_the_declared_jsonl_and_refuses_an_existing_one(tmp_path) -> None:
+    root = tmp_path / "images"
+    root.mkdir()
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps(original(root)) + "\n")
+    output = tmp_path / "data" / "train.jsonl"
+    # `gym eval prepare` passes every argument as a string.
+    returned = prepare(str(source), str(output), "code_assisted_vqa", str(root), "pi")
+    assert returned == output and len(output.read_text().splitlines()) == 1
+    assert (tmp_path / "data" / "train.provenance.json").is_file()
+    with pytest.raises(FileExistsError):
+        prepare(source, output, "code_assisted_vqa", root, "pi")
+
+
+@pytest.mark.parametrize(
+    ("harness", "kwargs", "delivery"),
+    [
+        ("claude_code", {"file_input": True}, "original_file_paths"),
+        ("claude_code", {"file_input": True, "include_image_paths": True}, "original_file_paths"),
+        ("pi", {"include_image_paths": True}, "inline_images_with_original_file_paths"),
+        ("pi", {}, None),
+    ],
+)
+def test_provenance_records_how_the_images_reached_the_prompt(tmp_path, harness, kwargs, delivery) -> None:
+    root = tmp_path / "images"
+    root.mkdir()
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps(original(root)) + "\n")
+    output = tmp_path / "out.jsonl"
+    prepare(source, output, "code_assisted_vqa", root, harness, **kwargs)
+    provenance = json.loads((tmp_path / "out.provenance.json").read_text())
+    assert provenance.get("input_delivery") == delivery

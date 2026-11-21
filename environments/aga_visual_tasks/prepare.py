@@ -126,12 +126,17 @@ def prepare(
     include_image_paths: bool = False,
     file_input: bool = False,
 ) -> Path:
-    """Write the original rows, routed to ``aga_<harness>_agent``; ``configs/multiharness.yaml`` holds the servers."""
+    """Write the original rows to the JSONL file ``output``, routed to ``aga_<harness>_agent``.
+
+    ``configs/multiharness.yaml`` holds the servers. ``gym eval prepare`` passes the arguments as strings.
+    """
+    source, output, image_root = Path(source), Path(output), Path(image_root)
     if harness not in HARNESSES:
         raise ValueError("Unknown native harness")
     if harness == "claude_code" and not file_input:
         raise ValueError("Claude Code takes only text in its prompt; use --file-input")
-    output.mkdir(parents=True, exist_ok=False)
+    if output.exists():
+        raise FileExistsError(f"{output} exists; remove it or choose another --output")
     rows = []
     for line in source.read_text().splitlines():
         if not line.strip():
@@ -148,9 +153,9 @@ def prepare(
         rows.append(row)
     if not rows:
         raise ValueError("Original training subset is empty")
-    data = output / "train.jsonl"
-    data.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    (output / "provenance.json").write_text(
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    output.with_name(output.stem + ".provenance.json").write_text(
         json.dumps(
             {
                 "source": str(source.resolve()),
@@ -158,13 +163,19 @@ def prepare(
                 "family": family,
                 "rows": len(rows),
                 "harness": harness,
-                **({"input_delivery": "inline_images_with_original_file_paths"} if include_image_paths else {}),
+                **(
+                    {"input_delivery": "original_file_paths"}
+                    if file_input
+                    else {"input_delivery": "inline_images_with_original_file_paths"}
+                    if include_image_paths
+                    else {}
+                ),
             },
             indent=2,
         )
         + "\n"
     )
-    return data
+    return output
 
 
 if __name__ == "__main__":

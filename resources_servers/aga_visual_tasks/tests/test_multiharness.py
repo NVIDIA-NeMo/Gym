@@ -61,9 +61,9 @@ def _prepared(tmp_path: Path, harness: str) -> dict:
     root.mkdir(exist_ok=True)
     source = tmp_path / "source.jsonl"
     source.write_text(json.dumps(original(root)) + "\n")
-    output = tmp_path / f"out-{harness}"
+    output = tmp_path / f"{harness}.jsonl"
     prepare(source, output, "code_assisted_vqa", root, harness, file_input=harness == "claude_code")
-    return json.loads((output / "train.jsonl").read_text())
+    return json.loads(output.read_text())
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
@@ -126,6 +126,26 @@ def test_each_environment_server_admits_only_as_many_episodes_as_its_agent_runs(
         env = config[f"aga_{harness}_environment_server"].environment_servers.single_agent_turn_legacy
         agent = config[f"aga_{harness}_agent"].responses_api_agents[f"{harness}_agent"]
         assert agent.concurrency == env.max_concurrent_episodes, harness
+
+
+def test_each_episode_deadline_leaves_time_after_its_agent_timeout(monkeypatch) -> None:
+    config = _resolve(monkeypatch)
+    for harness in HARNESSES:
+        env = config[f"aga_{harness}_environment_server"].environment_servers.single_agent_turn_legacy
+        agent = config[f"aga_{harness}_agent"].responses_api_agents[f"{harness}_agent"]
+        # The deadline also covers the seed (sandbox start, image upload) and the verify.
+        assert env.default_episode_timeout_seconds >= agent.timeout + 300, harness
+
+
+@pytest.mark.parametrize("other", ["benchmarks/gpqa/config.yaml", "benchmarks/math-500/config.yaml", None])
+@pytest.mark.parametrize("cad_first", [False, True])
+def test_every_delegated_grader_instance_survives_a_blend_with_another_recipe(monkeypatch, other, cad_first) -> None:
+    recipes = [str(CONFIG)] if other is None else [str(CONFIG), str(ROOT / other)]
+    config = _resolve(monkeypatch, recipes if cad_first else recipes[::-1])
+    graders = config.aga_visual_tasks.resources_servers.aga_visual_tasks.resources_server_by_agent
+    assert set(graders.values()) == {"aga_math_with_judge", "aga_mcqa", "aga_string_match"}
+    for instance in graders.values():
+        assert instance in config, instance
 
 
 def test_the_added_agents_use_an_alias_that_keeps_tool_output_images_inline(monkeypatch) -> None:
