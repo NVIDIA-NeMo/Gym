@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,6 +17,7 @@ from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.verification import is_judge_failure
 from nemo_gym.web import WebBenchmark, WebTask, compact_webvoyager_judge_evidence
+from resources_servers.webvoyager_judge import app
 from resources_servers.webvoyager_judge.app import (
     WebVoyagerJudgeResourcesServer,
     parse_gemini_verdict,
@@ -432,20 +434,37 @@ async def test_unparseable_judge_can_be_masked_without_changing_legacy_default()
 
 
 @pytest.mark.asyncio
-async def test_judge_parse_retries_share_one_overall_deadline():
+@pytest.mark.parametrize("expire_attempt", [1, 2])
+async def test_judge_parse_retries_share_one_overall_deadline(monkeypatch, expire_attempt):
     server = _server()
     server.config.judge_parse_max_retries = 1
-    server.config.judge_call_timeout_secs = 0.05
+    server.config.judge_call_timeout_secs = 60
+    deadlines = []
 
-    async def slow_judge(*_args, **_kwargs):
-        await asyncio.sleep(0.03)
+    def capture_timeout(delay):
+        assert delay == server.config.judge_call_timeout_secs
+        deadline = asyncio.timeout(delay)
+        deadlines.append(deadline)
+        return deadline
+
+    monkeypatch.setattr(app, "asyncio", SimpleNamespace(timeout=capture_timeout))
+
+    async def judge(*_args, **_kwargs):
+        # Expire the real timeout at a known attempt instead of racing two short sleeps.
+        assert len(deadlines) == 1
+        if server.server_client.post.await_count == expire_attempt:
+            deadlines[0].reschedule(asyncio.get_running_loop().time())
+            await asyncio.Future()
         return _FakeHttpResponse(_model_response("unclear"))
 
-    server.server_client.post = AsyncMock(side_effect=slow_judge)
+    server.server_client.post = AsyncMock(side_effect=judge)
     with pytest.raises(Exception) as caught:
         await server._judge_evidence(_request())
     assert is_judge_failure(caught.value)
-    assert server.server_client.post.await_count == 2
+    assert isinstance(caught.value.__cause__, TimeoutError)
+    assert len(deadlines) == 1
+    assert deadlines[0].expired()
+    assert server.server_client.post.await_count == expire_attempt
 
 
 @pytest.mark.asyncio
