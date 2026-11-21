@@ -55,6 +55,13 @@ Take the agent's own concurrency slot with `activation.slot(semaphore, deadline=
 activation as parked, and the slot is given back on every path, including a retire or close while the activation is
 parked.
 
+On a provider whose snapshot keeps the sandbox's processes (`snapshot_keeps_processes`), create the session with
+`pause_mode="hold"`, and pass the same `pause_mode` to `SandboxSession.rebind` after a restore. The supervisor then
+acknowledges a pause without signalling anything: the harness keeps running, its next model call waits at the
+checkpoint (the model server holds calls while a checkpoint is open), and the time the pause is held does not count
+against the harness timeout. Each acknowledgement names the supervisor (`identity`, `PID.START`), and
+`SandboxSession.checkpoint_state()` records it with the pause it holds.
+
 ## Resume after a crash
 
 Per-harness policy stays in the adapter:
