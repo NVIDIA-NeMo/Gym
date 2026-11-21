@@ -95,6 +95,8 @@ from openai.types.responses import (
     ResponseFunctionShellToolCallOutput,
     ResponseFunctionToolCallOutputItem,
     ResponseFunctionWebSearch,
+    ResponseInputFileParam,
+    ResponseInputImageParam,
     ResponseInputTextParam,
     ResponseToolSearchCall,
     ResponseToolSearchOutputItem,
@@ -131,7 +133,6 @@ from openai.types.responses.response_function_call_output_item_list_param import
 )
 from openai.types.responses.response_function_tool_call import Caller as FunctionToolCallCaller
 from openai.types.responses.response_function_web_search import ActionFind, ActionOpenPage, ActionSearch
-from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from openai.types.responses.response_input_item import (
     AdditionalTools as InputAdditionalTools,
 )
@@ -348,6 +349,22 @@ class NeMoGymResponseOutputMessage(BaseModel):
     phase: Optional[Literal["commentary", "final_answer"]] = None
 
 
+VIDEO_FRAME_METADATA_FIELDS = ("_is_video_frame", "_video_frame_index", "_video_fps", "_video_source")
+
+
+class _VideoFrameMetadata(TypedDict, total=False):
+    """Optional per-image metadata identifying ordered, sampled video frames."""
+
+    _is_video_frame: bool
+    _video_frame_index: int
+    _video_fps: float
+    _video_source: str
+
+
+class NeMoGymInputImagePart(ResponseInputImageParam, _VideoFrameMetadata):
+    """Responses image content retaining optional video-frame metadata."""
+
+
 class NeMoGymInputVideoPart(TypedDict, total=False):
     """Video content accepted by the Responses-compatible Gym API."""
 
@@ -374,7 +391,7 @@ def _validate_input_video_part(value: Any) -> Any:
 
 
 NeMoGymResponseInputContentPart: TypeAlias = Annotated[
-    Union[ResponseInputContentParam, NeMoGymInputVideoPart],
+    Union[ResponseInputTextParam, NeMoGymInputImagePart, ResponseInputFileParam, NeMoGymInputVideoPart],
     BeforeValidator(_validate_input_video_part),
 ]
 NeMoGymResponseInputContentList: TypeAlias = List[NeMoGymResponseInputContentPart]
@@ -1350,8 +1367,8 @@ class NeMoGymChatCompletionContentPartTextParam(ChatCompletionContentPartTextPar
     pass
 
 
-class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageParam):
-    pass
+class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageParam, _VideoFrameMetadata):
+    """Chat image content retaining optional video-frame metadata."""
 
 
 class NeMoGymInputAudio(TypedDict, total=False):

@@ -22,6 +22,9 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
+    from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+    from nemo_gym.data.tasks.harbor.build_plan import plan_builds
+    from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
     from nemo_gym.data.tasks.harbor.compose_overlay import (
         ComposeOverlayError,
         HarborComposeOverlay,
@@ -39,6 +42,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.data.tasks.harbor.dockerfile import DEFAULT_SHELL, RECORD_VERSION, OverlayRun, OverlayWorkdir
     from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+    from nemo_gym.data.tasks.harbor.image_build import build_images
     from nemo_gym.data.tasks.harbor.image_configs import (
         check_task_compose_fields,
         check_task_compose_services,
@@ -55,6 +59,7 @@ if TYPE_CHECKING:
         STEP_METADATA_KEY,
         HarborTaskInput,
         materialize_task,
+        taskset_mapping,
     )
     from nemo_gym.data.tasks.harbor.models import (
         HarborArtifact,
@@ -65,7 +70,8 @@ if TYPE_CHECKING:
         HarborTaskStep,
         HarborVerifier,
     )
-    from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT
+    from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT, prepare_target
+    from nemo_gym.data.tasks.harbor.prepare_builds import refused_before_build
     from nemo_gym.data.tasks.harbor.publish import answer_write_command
     from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE, VerifierShim, write_shim
     from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, MAIN_SERVICE
@@ -85,6 +91,8 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "BuildOptions": "build_options",
+    "ImageBuilder": "build_tools",
     "AGENT_TIMEOUT_METADATA_KEY": "materialize",
     "BUILT_IMAGES_FILE": "records",
     "ComposeOverlayError": "compose_overlay",
@@ -120,6 +128,7 @@ _PUBLIC_API = {
     "VERIFIER_FILE": "python_verifier",
     "VerifierShim": "python_verifier",
     "answer_write_command": "publish",
+    "build_images": "image_build",
     "built_service_images": "task",
     "check_row_matches_folder": "task_data",
     "check_task_compose_fields": "image_configs",
@@ -133,11 +142,15 @@ _PUBLIC_API = {
     "load_task": "task",
     "load_task_data_schema": "task_data",
     "materialize_task": "materialize",
+    "taskset_mapping": "materialize",
     "merged_mcp_servers": "compose_overlay",
     "overlay_files": "compose_overlay",
     "plan_task_compose_volumes": "image_configs",
+    "plan_builds": "build_plan",
+    "prepare_target": "prepare",
     "record_compose_images": "image_configs",
     "reusable_record": "image_configs",
+    "refused_before_build": "prepare_builds",
     "task_declares_gpus": "image_configs",
     "without_restated_main_build": "image_configs",
     "wrap_first_instruction": "compose_overlay",

@@ -262,10 +262,12 @@ def test_finds_the_agent_references_gym_finds() -> None:
         "user_agent": {"type": "responses_api_agents", "name": "typed_field"},
         "helper": {"name": "untyped_other_field"},
         "resources_server": {"type": "resources_servers", "name": "not_an_agent"},
+        "harness_agents": {"codex": {"type": "responses_api_agents", "name": "nested_agent"}},
+        "metadata": {"agent_server": {"name": "not_an_agent"}, "secret": "${oc.env:UNRELATED_UNSET_SECRET}"},
     }
 
     expected = [reference["name"] for reference in environment_server_agent_refs(OmegaConf.create(server))]
-    assert expected == ["untyped_agent_server", "typed_field"]
+    assert expected == ["untyped_agent_server", "typed_field", "nested_agent"]
     assert [agent for _, agent in migration.agent_references(server)] == expected
 
 

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from copy import deepcopy
 from types import SimpleNamespace, UnionType
 from typing import (
@@ -49,6 +50,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response import Response
 from openai.types.responses.response_create_params import ResponseCreateParamsBase, ToolChoice, ToolParam
+from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from openai.types.responses.response_input_item import (
     AdditionalTools as InputAdditionalTools,
 )
@@ -2777,3 +2779,66 @@ def test_empty_usage_seed_preserves_later_cache_write_counts() -> None:
     )
     assert seed.input_tokens_details.cache_write_tokens == 0
     assert usage.model_dump() == before
+
+
+@pytest.mark.parametrize("with_status", [False, True])
+def test_video_frame_image_metadata_survives_responses_request_replay(with_status: bool) -> None:
+    content = [
+        {"type": "input_text", "text": "Describe these frames in order."},
+        {
+            "type": "input_image",
+            "image_url": "https://example.com/frame-zero.jpg",
+            "detail": "high",
+            "_is_video_frame": True,
+            "_video_frame_index": 0,
+            "_video_fps": 23.976023976023978,
+            "_video_source": "https://example.com/clip.mp4",
+        },
+        {"type": "input_image", "image_url": "https://example.com/still.jpg", "detail": "auto"},
+        {
+            "type": "input_image",
+            "image_url": "https://example.com/frame-next.jpg",
+            "detail": "high",
+            "_is_video_frame": True,
+            "_video_frame_index": 60,
+            "_video_fps": 23.976023976023978,
+            "_video_source": "https://example.com/clip.mp4",
+        },
+    ]
+    message = {"role": "user", "type": "message", "content": content}
+    if with_status:
+        message["status"] = "completed"
+    payload = {"input": [message]}
+    original = deepcopy(payload)
+    # The agent and model server each validate and serialize this same request.
+    for _ in range(3):
+        request = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload)
+        payload = json.loads(request.model_dump_json(by_alias=True, exclude_none=True))
+        assert payload["input"][0]["content"] == content
+    assert original == {"input": [message]}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("_is_video_frame", "not-a-boolean"),
+        ("_video_frame_index", "not-an-index"),
+        ("_video_fps", "not-a-rate"),
+        ("_video_source", {"not": "a source string"}),
+    ],
+)
+def test_invalid_video_frame_metadata_cannot_fall_back_to_sdk_image(field: str, value: object) -> None:
+    part = {"type": "input_image", "image_url": "https://example.com/frame.jpg", "detail": "auto", field: value}
+    with pytest.raises(ValidationError):
+        NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [{"role": "user", "content": [part]}]})
+
+
+def test_responses_content_union_keeps_all_sdk_members_and_video_support() -> None:
+    content_union = get_args(responses_api_types_module.NeMoGymResponseInputContentPart)[0]
+    actual = get_args(content_union)
+    image_base = responses_api_types_module.ResponseInputImageParam
+    expected = tuple(
+        responses_api_types_module.NeMoGymInputImagePart if member is image_base else member
+        for member in get_args(ResponseInputContentParam)
+    )
+    assert actual == (*expected, responses_api_types_module.NeMoGymInputVideoPart)

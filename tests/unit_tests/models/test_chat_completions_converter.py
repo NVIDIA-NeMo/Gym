@@ -2671,3 +2671,57 @@ def test_preserve_thinking_blocks_creates_item_without_summary() -> None:
     reasoning = [o for o in converter.postprocess_assistant_message_dict(message) if o.type == "reasoning"]
     assert reasoning and reasoning[0].summary == []
     assert ChatCompletionsConverter.decode_thinking_blocks(reasoning[0].encrypted_content) == SIGNED_BLOCKS
+
+
+@pytest.mark.parametrize("is_video_frame", [True, False])
+def test_video_frame_metadata_survives_typed_responses_to_chat_translation(
+    converter: ChatCompletionsConverter,
+    is_video_frame: bool,
+) -> None:
+    frame = {
+        "type": "input_image",
+        "image_url": "https://example.com/frame-zero.jpg",
+        "detail": "high",
+        "_is_video_frame": is_video_frame,
+        "_video_frame_index": 0,
+        "_video_fps": 23.976023976023978,
+        "_video_source": "https://example.com/clip.mp4",
+    }
+    processor_options = {"video_as_images": True, "max_num_tiles": 1}
+    payload = {
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Describe these frames."},
+                    frame,
+                    {"type": "input_image", "image_url": "https://example.com/still.jpg", "detail": "auto"},
+                ],
+            }
+        ],
+        "metadata": {"extra_body": json.dumps({"mm_processor_kwargs": processor_options})},
+    }
+    original = deepcopy(payload)
+    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload)
+    replay = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+        request.model_dump(by_alias=True, exclude_none=True)
+    )
+    converted = converter.responses_to_chat_completion_create_params(replay)
+    # Revalidation exercises the model server's typed Chat Completions boundary.
+    serialized = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+        converted.model_dump(by_alias=True, exclude_none=True)
+    ).model_dump(by_alias=True, exclude_none=True)
+    assert serialized["messages"][0]["content"] == [
+        {"type": "text", "text": "Describe these frames."},
+        {
+            "type": "image_url",
+            "image_url": {"url": frame["image_url"], "detail": "high"},
+            "_is_video_frame": is_video_frame,
+            "_video_frame_index": 0,
+            "_video_fps": frame["_video_fps"],
+            "_video_source": frame["_video_source"],
+        },
+        {"type": "image_url", "image_url": {"url": "https://example.com/still.jpg", "detail": "auto"}},
+    ]
+    assert json.loads(serialized["metadata"]["extra_body"])["mm_processor_kwargs"] == processor_options
+    assert payload == original

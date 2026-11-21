@@ -2723,6 +2723,34 @@ class TestConfigLoadErrors:
         with raises(AgentWithoutEnvironmentServerError, match="participant_b"):
             parser._front_agents_without_environment_server(config)
 
+    def test_nested_harness_references_front_agents_and_follow_renames(self) -> None:
+        config = self._multi_agent_environment_config()
+        config["error_on_agent_without_environment_server"] = True
+        server = config["multi_agent_environment"]["environment_servers"]["multi_agent"]
+        server["harness_agents"] = {
+            "opencode": server.pop("participant_a"),
+            "codex": server.pop("participant_b"),
+        }
+        server["agent_server"] = {"name": "participant_a"}
+        server["metadata"] = {
+            "agent_server": {"name": "not_an_agent"},
+            "secret": "${oc.env:UNRELATED_UNSET_SECRET}",
+        }
+
+        GlobalConfigDictParser()._front_agents_without_environment_server(config)
+
+        assert _environment_servers_by_agent(config) == {
+            "participant_a": ["multi_agent_environment"],
+            "participant_b": ["multi_agent_environment"],
+        }
+        GlobalConfigDictParser._retarget_environment_servers(
+            config, {"participant_a": "renamed_a", "participant_b": "renamed_b"}
+        )
+        assert server["agent_server"]["name"] == "renamed_a"
+        assert server["harness_agents"]["opencode"]["name"] == "renamed_a"
+        assert server["harness_agents"]["codex"]["name"] == "renamed_b"
+        assert server["metadata"]["agent_server"]["name"] == "not_an_agent"
+
     def test_composition_retargets_only_the_swapped_participant(self) -> None:
         config = self._multi_agent_environment_config()
 
