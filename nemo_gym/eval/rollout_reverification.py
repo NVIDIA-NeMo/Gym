@@ -77,6 +77,7 @@ from nemo_gym.rollouts.rollout_records import (
     REJUDGED_FAILURE_ID_KEY,
     RUN_ID_KEY,
     coverage_path_for,
+    is_parsed_judge_abstention,
     journal_path_for,
     logical_rollout_id,
     materialized_path_for,
@@ -1556,7 +1557,7 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
     the binding. A judged identity that the binding does not hold, a changed manifest or materialized input, or a
     failure that is no longer the selected outcome is refused. A bound saved result replaces its grade only with a
     result that binds the same saved answer and attempt (``is_rejudgment_of``); one whose re-verification answered
-    without a grade keeps its saved row, and its admission is withdrawn.
+    without a grade or a parsed abstention keeps its saved row, and its admission is withdrawn.
 
     Each settlement is recorded in ``binding["settled_operations"]`` (this pass's admission operation ids) as soon as
     it is fsynced, and each completed withdrawal in ``binding["withdrawn_operations"]``, so a pass that raises
@@ -1667,11 +1668,11 @@ def _validate_rescored_completion(result: object) -> None:
 
 
 def _ungraded_reverification(result: Dict[str, Any]) -> bool:
-    """Whether a re-verification answered without a usable grade: a failure, a mask or no finite reward."""
+    """Whether the re-verification returned neither a usable grade nor a parsed abstention."""
     reward = result.get("reward")
     return (
         result.get(NG_FAILURE_CLASS_KEY) is not None
-        or bool(result.get("mask_sample"))
+        or (bool(result.get("mask_sample")) and not is_parsed_judge_abstention(result))
         or result.get("evaluation_completed") is False
         or type(reward) not in (int, float)
         or not math.isfinite(reward)

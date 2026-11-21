@@ -466,10 +466,67 @@ async def test_an_invalid_judge_response_inside_the_rubric_facts_is_graded_again
     assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
 
 
-async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_was(tmp_path, verifier) -> None:
+@pytest.mark.parametrize("initial", ["judge_unparsed", "judge_failed"])
+@pytest.mark.parametrize("structured", [False, True], ids=["line", "json"])
+async def test_rejudged_abstention_stops_retries_on_the_saved_attempt(tmp_path, verifier, initial, structured):
+    row = ungraded(0) | {"reward": 0.0, "mask_sample": True, "evaluation_completed": False, "correctness": None}
+    if initial == "judge_failed":
+        row.update(_ng_failure_class="judge_failed", _ng_failure_id="judge-outage", failure_kind="judge_failed")
+    else:
+        row.update(grading_status="judge_unparsed", failure_kind="judge_unparseable")
+    output = _run(tmp_path, [row])
+    (identity,) = due_judge_failures(output)
+    attempts = RolloutStore.read(output).manifest.next_attempt.copy()
+    evaluation = {"verdict_label": "Judgement: unresolved"}
+    if structured:
+        evaluation["judgment"] = {
+            "verdict": "unresolved",
+            "reason_code": "conflicting_reference",
+            "evidence": "The reference contradicts itself.",
+        }
+    verifier["grade"] = lambda request: request | {
+        "reward": 0.0,
+        "mask_sample": True,
+        "evaluation_completed": True,
+        "failure_kind": None,
+        "grading_status": "judge_unresolved",
+        "verdict": "unresolved",
+        "correctness": None,
+        "judge_evaluations": [evaluation],
+    }
+
+    for settled in (1, 0, 0):
+        assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == settled
+
+    selected, store = _selected(output)  # Reopen from the source run.
+    saved = selected[identity]
+    assert saved["response"] == row["response"] and saved["_ng_attempt_index"] == 0
+    assert saved["grading_status"] == "judge_unresolved" and saved["judge_evaluations"] == [evaluation]
+    assert saved["correctness"] is None and saved["mask_sample"] is True and store.settled(saved)
+    assert store.manifest.next_attempt == attempts and not store.manifest.pending_rejudge
+    assert due_judge_failures(output) == [] and verifier["posted"] == [("rs", "/verify")]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {},
+        {
+            "grading_status": "judge_unparsed",
+            "verdict": "unresolved",
+            "correctness": None,
+            "failure_kind": "judge_unparseable",
+            "evaluation_completed": False,
+            "judge_evaluations": [{"verdict_label": None}],
+        },
+    ],
+)
+async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_was(
+    tmp_path, verifier, outcome
+) -> None:
     output = _run(tmp_path, [verify_transport_masked()])
     before = output.read_bytes()
-    verifier["grade"] = lambda json: json | {"reward": 0.0, "mask_sample": True}
+    verifier["grade"] = lambda json: json | {"reward": 0.0, "mask_sample": True} | outcome
 
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
 

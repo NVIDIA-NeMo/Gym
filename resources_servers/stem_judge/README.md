@@ -38,7 +38,9 @@ the reason in `grading_status`.
 | `box_too_long` | The box is longer than `max_box_chars` (off by default). |
 | `answer_too_long` | The judge would see the whole final answer, and it is longer than `max_answer_chars`. |
 
-After the gates, the server makes one judge call:
+After the gates, a match from the optional Math-Verify check earns 1 immediately.
+The base configuration sends all other rows to the judge as follows. The
+[question-bank preset](#question-bank-grading-options) also supports masked abstentions and JSON reasons.
 
 - **Answer rows:** the stem_v11 prompt. The judge's last `Judgement: 'yes'|'no'`
   gives reward 1 or 0.
@@ -154,6 +156,133 @@ to the shipped config's `policy_model`.
 `data/example_rollouts.jsonl` holds one rollout per example row from these
 commands: the policy `nvidia/nemotron-3.5-lightning-30b-a3b` and the judge
 `nvidia/nemotron-3-ultra-550b-a55b`.
+
+## Question-bank grading options
+
+The question-bank preset uses the same resources server, agent and rubric grader.
+Select it with `gym env start --resources-server stem_judge/question_bank` and the
+usual model arguments. It includes the base config and overrides its answer options.
+
+| Answer option | Base config | Question-bank preset |
+| --- | --- | --- |
+| `guideline_scope` | `stem` | `cross_domain` treats v11 examples as guidance for reference comparisons in any subject. |
+| `extra_answer_rules` | `[]` | An inline list or a path to a YAML list of rules for model-judged answer rows. |
+| `verdict_mode` | `binary` | `yes_no_unresolved` adds abstention. An explicit no is a measured zero. An abstention or unparseable verdict has unknown correctness and sets `mask_sample=true`. |
+| `verdict_format` | `line` | `json` saves the verdict, reason code and supporting evidence on model-judged answer rows. |
+| `box_parser` | `exact` | `last_command` recognizes whitespace before the opening brace, skips escaped commands, and rejects a malformed final box even when an earlier one is valid. |
+| `boxed_judge_input` | `final_answer` | `box` grades the extracted answer. Free-answer rows use their full final message. |
+| `math_verify` | Disabled | Disabled. Set `math_verify: {}` on a math environment to check boxed answer comparisons. A match earns 1 immediately. A nonmatch or timeout sends the same extracted box to the LLM judge. |
+
+Set each option independently. The prompt options reuse the sections of the shipped
+`stem_v11.txt` template. Custom templates used with those options must retain its section
+markers. Enable Math-Verify only for sources where symbolic equivalence establishes
+the answer. Route other sources to a STEM instance with `math_verify: null`.
+Free answers, whole-answer comparisons and rubric rows always use the judge. Gym
+marks the individual sample. On NeMo RL branches that provide SingleController's
+`grpo.exclude_failed_judge_groups`, enable it with NeMo Gym, `grpo.use_dynamic_sampling=true`
+and `env.should_mask_flagged_samples=true` to exclude and refill the entire group.
+
+If recovery rejudges a saved answer, a parsed `unresolved` verdict completes the
+regrade once. The saved answer stays masked with unknown correctness. A malformed
+judge reply leaves the original answer eligible for another grading attempt.
+
+With `math_verify: {}`, STEM preserves unit suffixes (`units: false`) and checks
+both comparison directions (`bidirectional: true`). A box containing `12 kJ`
+for a `12 J` reference goes to the judge. To reproduce the standalone library
+settings, set `units: true`, `bidirectional: false`, and `precision: 6`. Unit
+stripping can also remove variables such as the `t` in `3t` and trailing LaTeX
+text. `precision` defaults to six decimal places for float comparisons.
+Gym records the effective `units` and `bidirectional` values when math verification
+is enabled. Start a new run if an earlier manifest omitted either value. A run
+that explicitly set both options can resume with the same grading policy.
+At 6 places, `0.0000001` and `0.0000002` compare equal. At 12 they go to the judge.
+For reference `1`, the library accepts `9=1` in only one direction, so STEM
+sends that box to the judge. It accepts `x=1` in both directions. Only a
+forward match between different strings incurs a second comparison. Both
+comparisons share one worker and timeout. For mathematical sets, STEM also asks
+SymPy to prove that their symmetric difference is empty. An open interval and its endpoint set go to the model judge. Equivalent
+intervals and reordered finite sets can still earn automatic credit. For a chain
+such as `x=2=1`, the reverse check accounts for each equality. A contradiction
+or additional unresolved constraint goes to the judge.
+
+For example, add this override to the question-bank launch command to configure one
+STEM instance for algebra:
+
+```sh
+'++stem_judge.resources_servers.stem_judge.math_verify={units:false,precision:12,bidirectional:true}'
+```
+
+To route a math question through STEM, enable Math-Verify on the question-bank preset and give the
+dataset row the STEM agent reference, as in this JSONL row.
+
+```json
+{"agent_ref":{"type":"responses_api_agents","name":"stem_judge_simple_agent"},"answer_format":"boxed","expected_answer":"1/2","responses_create_params":{"input":[{"role":"user","content":"What is 2 divided by 4? Put only the final answer in \\boxed{}."}]}}
+```
+
+For this row, `\boxed{0.5}` earns 1 through Math-Verify. If the library cannot
+establish equivalence, the configured STEM judge sees the question, reference and
+selected box. The STEM process runs the library check locally.
+
+The question-bank preset requests a structured explanation. Select `verdict_format: line`
+to use the text verdict instead.
+The model returns one JSON object, for example:
+
+```json
+{"verdict":"incorrect","reason_code":"wrong_denominator","evidence":"The submitted 1/3 differs from the reference 1/2."}
+```
+
+The saved rollout keeps that object in `judge_evaluations[0].judgment`, alongside
+the usual `verdict_label`. The optional generation log records it in `judgments`.
+Binary mode accepts `correct` and `incorrect`. Three-way mode also accepts
+`unresolved`. A missing reason, blank evidence, duplicate field, or truncated
+reply produces `judge_unparsed`. Binary mode gives an unparsed reply reward zero.
+Three-way mode masks it as unknown. Symbolic matches produce `math_verified`
+with an empty `judge_evaluations` list.
+
+The solver instruction is a separate generation option. For a dataset of **boxed**
+questions with a raw `question` field, render it once before generating rollouts:
+
+```bash
+gym dataset render --input boxed_questions.jsonl \
+  --prompt-config resources_servers/stem_judge/prompt_templates/boxed_final_answer.yaml \
+  --output boxed_prompts.jsonl
+```
+
+The template asks the solver to put its final answer, and only its final answer,
+inside `\boxed{}`. Use the original prompts for free-response tasks or historical
+rollouts. Gym's renderer rejects already materialized input.
+
+### Adding rules to the answer judge
+
+Point `extra_answer_rules` at a UTF-8 YAML file containing a list of rule strings.
+Gym records the file’s SHA-256 in the resolved run configuration. Each worker checks
+the bytes it reads at startup against that digest. Editing the file changes the
+identity used for the next launch or resume. A worker receiving an older saved
+configuration without the file digest asks for a fresh configuration resolution.
+As with prompt templates, relative paths
+resolve from the STEM resources server directory. Absolute paths also work.
+The shipped [archive example](prompt_templates/archive_rules.yaml) contains one rule.
+
+```yaml
+stem_judge:
+  resources_servers:
+    stem_judge:
+      extra_answer_rules: prompt_templates/archive_rules.yaml
+```
+
+Contents of `archive_rules.yaml`:
+
+```yaml
+- 'For archive classes, accept K-17 as an alias for Blue Ledger.'
+```
+
+You can also put the list directly under `extra_answer_rules` in the server config.
+Each string becomes a `<rule>` block immediately after the last built-in rule,
+before the verdict instructions. Braces in LaTeX, JSON and examples are literal.
+Custom answer templates using this option need a closing `</rule>` marker.
+Additional rules take precedence over the default exact-match shortcut. A STEM
+instance with extra rules sends answer comparisons to the model, including exact
+math matches. Rubric rows use their own criteria.
 
 ## Test
 

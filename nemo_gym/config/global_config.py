@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
+from hashlib import sha256
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
@@ -82,6 +83,33 @@ from nemo_gym.telemetry.setup import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_stem_grading_settings(settings: DictConfig) -> None:
+    """Record the grading policy used by the worker in the configuration saved for resume."""
+    math = settings.get("math_verify")
+    if isinstance(math, DictConfig):
+        # Older STEM workers stripped suffixes and accepted one-way matches when these options were omitted.
+        with open_dict(settings):
+            settings.math_verify = OmegaConf.merge({"units": False, "bidirectional": True}, math)
+    rules = settings.get("extra_answer_rules")
+    if not isinstance(rules, str):
+        return
+    path = Path(rules)
+    if not path.is_absolute():
+        server_dir = _resolve_under_cwd_or_install(
+            "resources_servers/stem_judge",
+            validator=lambda d: (d / "pyproject.toml").is_file() or (d / "requirements.txt").is_file(),
+        )
+        path = server_dir / path
+    try:
+        digest = sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ConfigError(f"Cannot read STEM extra_answer_rules file {path}: {exc}") from exc
+    if settings.get("extra_answer_rules_sha256") not in (None, digest):
+        raise ConfigError(f"STEM extra_answer_rules file {path} differs from its saved SHA-256.")
+    with open_dict(settings):
+        settings.extra_answer_rules_sha256 = digest
 
 
 def _installed_version(distribution: str) -> Optional[str]:
@@ -793,6 +821,12 @@ Duplicate config paths:
 
         for server_instance_config in server_instance_configs:
             run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
+
+            if (
+                server_instance_config.SERVER_TYPE == RESOURCES_SERVER_TYPE_KEY_NAME
+                and "stem_judge" in server_instance_config.resources_servers
+            ):
+                _resolve_stem_grading_settings(run_server_config_dict)
 
             # Check server refs
             for field_name, v in run_server_config_dict.items():

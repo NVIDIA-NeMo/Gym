@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- resources_servers/stem_judge/configs/stem_judge.yaml
+stem_judge:
+  resources_servers:
+    stem_judge:
+      guideline_scope: cross_domain
+      verdict_mode: yes_no_unresolved
+      verdict_format: json
+      box_parser: last_command
+      boxed_judge_input: box
+      math_verify: null  # Set to {} for STEM's unit-preserving, bidirectional precheck.
+      verified: false
