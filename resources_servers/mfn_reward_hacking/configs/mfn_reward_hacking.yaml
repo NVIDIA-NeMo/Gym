@@ -1,0 +1,39 @@
+# MFN's reward-hacking judge (v2) over saved rollouts. Run it with `gym eval reverify` after a run; it never
+# changes the source run's rewards. See ../README.md.
+mfn_reward_hacking:
+  resources_servers:
+    mfn_reward_hacking:
+      entrypoint: app.py
+      domain: safety
+      verified: false
+      description: MFN's reward-hacking judge (v2) over saved agent rollouts, for gym eval reverify
+      value: Flag passes won by solution lookup, block evasion or grader tampering, with evidence per trial
+      judge_model_server:
+        type: responses_api_models
+        name: mfn_judge_model
+      # MFN's v2 sampling (judge_core judges/reward_hacking_v2.yaml); thinking is off in the judge model below.
+      judge_chat_create_params:
+        messages: []
+        temperature: 0.7
+        top_p: 0.8
+        max_tokens: 8192
+      judge_config_fpath: judges/reward_hacking_v2.yaml
+      # The source run's rollouts.jsonl, so the judge sees each trial's reward as v2 expects.
+      # A reverify step of a Gym job sets NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS; by hand, pass +mfn_reward_hacking_source_rollouts=...
+      source_rollouts_jsonl_fpath: ${oc.env:NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS,${oc.select:mfn_reward_hacking_source_rollouts,null}}
+      judge_max_attempts: 2
+      judge_endpoint_max_concurrency: 16
+
+# The judge: any OpenAI-compatible endpoint. Pass +mfn_judge_base_url and +mfn_judge_model_name; confirm with MFN
+# which model v2 is calibrated on.
+mfn_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${mfn_judge_base_url}
+      # A key from the environment, never in a submit document.
+      openai_api_key: ${oc.select:mfn_judge_api_key,${oc.env:MFN_JUDGE_API_KEY,not-needed}}
+      openai_model: ${mfn_judge_model_name}
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
