@@ -237,7 +237,7 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
         "#!/bin/sh\n"
         'echo "$*" >> "$UV_TEST_CALLS"\n'
         'case "$1" in\n'
-        "  --version) echo 'uv 0.13.4' ;;\n"
+        "  --version) echo 'uv 0.13.8' ;;\n"
         "  venv) mkdir -p .venv/bin; : > .venv/bin/activate ;;\n"
         "  sync) ;;\n"
         "  *) exit 2 ;;\n"
@@ -283,7 +283,7 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
         text=True,
     )
     assert later_step.returncode == 0, later_step.stderr
-    assert later_step.stdout.strip() == "uv 0.13.4"
+    assert later_step.stdout.strip() == "uv 0.13.8"
 
 
 def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
@@ -803,7 +803,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "runs-on: ubuntu-latest" in workflow
     assert "UV_VERSION=\"$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)\"" in workflow
     assert 'curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh' in workflow
-    assert "https://astral.sh/uv/0.13.4/install.sh" not in workflow
+    assert "https://astral.sh/uv/0." not in workflow  # no hard-coded uv version; read from docker/Dockerfile
     assert "E2E_MODEL: ${{ matrix.model }}" in workflow
     assert "E2E_PROVIDER_CONFIG: ${{ matrix.config }}" in workflow
     assert "run: bash tests/e2e/run_inference_provider_e2e.sh" in workflow
@@ -1072,7 +1072,7 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
         """#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
-    --version) printf '%s\\n' 'uv 0.13.4' ;;
+    --version) printf '%s\\n' 'uv 0.13.8' ;;
     cache) printf '%s\\n' "${UV_CACHE_DIR:-${HOME}/.cache/uv}" ;;
     venv)
         venv_dir="${@: -1}"
@@ -1209,7 +1209,7 @@ def test_setup_dev_checks_lock_before_sync(tmp_path: Path, container: bool, lock
         """#!/usr/bin/env bash
 set -eu
 case "$1" in
-    --version) echo 'uv 0.13.4' ;;
+    --version) echo 'uv 0.13.8' ;;
     cache) echo "${UV_CACHE_DIR}" ;;
     lock) echo "$*" >> "${GYM_CI_CAPTURE}"; exit "${LOCK_STATUS}" ;;
     sync) echo "$*" >> "${GYM_CI_CAPTURE}" ;;
