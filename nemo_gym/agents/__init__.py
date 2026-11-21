@@ -75,6 +75,7 @@ if TYPE_CHECKING:
         HARNESS_RUNNER_SCRIPT,
         SandboxCommand,
         SandboxSession,
+        prefer_oom_kill_setup,
         shell_assignments,
     )
     from nemo_gym.agents.utils.supervisor_client import (
@@ -150,6 +151,7 @@ _PUBLIC_API = {
     "is_harness_termination_failure": "utils.supervisor_client",
     "lifecycle_observation": "utils.sandbox_observation",
     "parse_cleanup_receipt": "utils.supervisor_client",
+    "prefer_oom_kill_setup": "utils.sandbox_session",
     "probe_sandbox_platform": "utils.sandbox_python",
     "raises_agent_failure": "testing.failure_assertions",
     "resolve_agent_context_artifact": "utils.agent_context",

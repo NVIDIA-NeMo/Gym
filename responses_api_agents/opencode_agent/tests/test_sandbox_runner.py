@@ -32,7 +32,7 @@ class LocalSandbox:
         shutil.copyfile(source, destination)
 
 
-async def stage(tmp_path: Path, command: list[str], *, env: dict[str, str] | None = None) -> list[str]:
+async def stage(tmp_path: Path, command: list[str], *, env: dict[str, str] | None = None, **options) -> list[str]:
     """Stage an activation with the adapter, then return its argv with the runner it uploaded at seed time."""
     shutil.copyfile(HARNESS_RUNNER_SCRIPT, tmp_path / HARNESS_RUNNER_FILE)
     state = SimpleNamespace(
@@ -46,7 +46,7 @@ async def stage(tmp_path: Path, command: list[str], *, env: dict[str, str] | Non
         "command": command,
         "prompt": "task input",
         "env": {key: str(tmp_path / "private" / key) for key in PRIVATE_KEYS} | (env or {}),
-    }
+    } | options
     return (await OpenCodeSandboxSession.stage_activation(state, payload)).argv
 
 
